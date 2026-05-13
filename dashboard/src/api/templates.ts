@@ -249,8 +249,8 @@ export const templatesApi = {
     apiCall<TemplateSyncResult>('/templates/sync', { method: 'POST' }),
 
   /** Read the most recent template sync attempt (background or manual). */
-  syncStatus: () =>
-    apiCall<TemplateSyncStatus>('/templates/sync/status'),
+  syncStatus: (opts?: { signal?: AbortSignal }) =>
+    apiCall<TemplateSyncStatus>('/templates/sync/status', opts?.signal ? { signal: opts.signal } : undefined),
 
   /** Fetch the variable → customer-field mapping for a template. */
   getVarMap: (id: number) =>

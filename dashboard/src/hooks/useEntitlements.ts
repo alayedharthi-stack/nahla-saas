@@ -279,6 +279,7 @@ export function useEntitlements(): UseEntitlementsResult {
   const [loading, setLoading] = useState(!isCacheValid())
   const [error,   setError]   = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const lastFocusFetch = useRef(0)
 
   const fetchEntitlements = useCallback(async () => {
     if (isCacheValid()) {
@@ -339,6 +340,9 @@ export function useEntitlements(): UseEntitlementsResult {
     // TTL expires. The focus listener short-circuits that — when we
     // detect the user came back, we drop the cache and refetch live.
     const onFocus = () => {
+      const now = Date.now()
+      if (now - lastFocusFetch.current < 25_000) return
+      lastFocusFetch.current = now
       _cache = null
       fetchEntitlements()
     }

@@ -1,5 +1,8 @@
 import { apiCall } from './client'
 
+const CONVERSATIONS_LIST_TIMEOUT_MS = 52_000
+const CONVERSATIONS_MESSAGES_TIMEOUT_MS = 48_000
+
 export interface AnalyticsDashboard {
   summary: {
     current_month_revenue_sar: number
@@ -381,11 +384,36 @@ export const featureRealityApi = {
       method: 'DELETE',
     })
   },
-  conversations(): Promise<{ conversations: DashboardConversation[] }> {
-    return apiCall('/conversations')
+  conversations(opts?: {
+    signal?: AbortSignal
+    limit?: number
+    offset?: number
+  }): Promise<{
+    conversations: DashboardConversation[]
+    total_count?: number
+    has_more?: boolean
+  }> {
+    const q = new URLSearchParams()
+    if (opts?.limit != null) q.set('limit', String(opts.limit))
+    if (opts?.offset != null) q.set('offset', String(opts.offset))
+    const qs = q.toString()
+    return apiCall(`/conversations${qs ? `?${qs}` : ''}`, {
+      signal: opts?.signal,
+      timeoutMs: CONVERSATIONS_LIST_TIMEOUT_MS,
+    })
   },
-  conversationMessages(phone: string): Promise<{ messages: DashboardMessage[] }> {
-    return apiCall(`/conversations/messages/${encodeURIComponent(phone)}`)
+  conversationMessages(
+    phone: string,
+    opts?: { signal?: AbortSignal; limit?: number },
+  ): Promise<{ messages: DashboardMessage[] }> {
+    const q = new URLSearchParams()
+    if (opts?.limit != null) q.set('limit', String(opts.limit))
+    const qs = q.toString()
+    const suffix = qs ? `?${qs}` : ''
+    return apiCall(
+      `/conversations/messages/${encodeURIComponent(phone)}${suffix}`,
+      { signal: opts?.signal, timeoutMs: CONVERSATIONS_MESSAGES_TIMEOUT_MS },
+    )
   },
   /** Re-run the inbound-media pipeline (download + AI) for a single
    * `MessageEvent` row. Used by the "إعادة معالجة" button in the

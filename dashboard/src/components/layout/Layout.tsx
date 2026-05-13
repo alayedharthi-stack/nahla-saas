@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
@@ -7,6 +7,7 @@ import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { getApiBase } from '../../auth'
+import { useDashboardPoll } from '../../lib/dashboardPolling'
 import { X } from 'lucide-react'
 
 // ── Countdown hook ────────────────────────────────────────────────────────────
@@ -49,20 +50,22 @@ function SupportAccessWarningBanner() {
   const [dismissed, setDismissed] = useState(false)
   const countdown = useCountdown(access?.enabled ? (access?.expires_at ?? null) : null)
 
-  const load = useCallback(async () => {
-    let tid: ReturnType<typeof setTimeout> | undefined
+  const loadBanner = useCallback(async (signal: AbortSignal) => {
     try {
       const token = localStorage.getItem('nahla_token') ?? ''
       if (!token) return
+      let effectiveSignal: AbortSignal = signal
+      if (typeof AbortSignal.timeout === 'function' && typeof AbortSignal.any === 'function') {
+        effectiveSignal = AbortSignal.any([signal, AbortSignal.timeout(25_000)])
+      }
+
       const base = getApiBase()
       const url = `${base}/merchant/support-access`
-      const ctrl = new AbortController()
-      tid = setTimeout(() => ctrl.abort(), 25_000)
       // eslint-disable-next-line no-console
       console.info('[auth] tenant bootstrap (support-access)', { url })
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
-        signal: ctrl.signal,
+        signal: effectiveSignal,
       })
       if (res.ok) {
         const data = await res.json()
@@ -71,16 +74,28 @@ function SupportAccessWarningBanner() {
         if (!data.enabled) setDismissed(false)
       }
     } catch { /* ignore */ }
-    finally {
-      if (tid !== undefined) clearTimeout(tid)
-    }
   }, [])
 
+  const bootstrap = useCallback(async () => {
+    const ac = new AbortController()
+    const tid = window.setTimeout(() => ac.abort(), 25_000)
+    try {
+      await loadBanner(ac.signal)
+    } finally {
+      clearTimeout(tid)
+    }
+  }, [loadBanner])
+
   useEffect(() => {
-    load()
-    const id = setInterval(load, 30_000)
-    return () => clearInterval(id)
-  }, [load])
+    void bootstrap()
+  }, [bootstrap])
+
+  useDashboardPoll({
+    pollKey: 'GET:/merchant/support-access',
+    intervalMs: 45_000,
+    leading: false,
+    run: signal => loadBanner(signal),
+  })
 
   // Re-show if a new access grant appears after dismissal
   useEffect(() => {

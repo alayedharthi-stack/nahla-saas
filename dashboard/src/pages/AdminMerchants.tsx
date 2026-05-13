@@ -1,7 +1,8 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../api/admin'
 import { API_BASE } from '../api/client'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 import { getToken, startImpersonation } from '../auth'
 import {
   Users, Search, LogIn, ToggleLeft, ToggleRight,
@@ -485,7 +486,6 @@ export default function AdminMerchants() {
   const [requestModal, setRequestModal]   = useState<Merchant | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
   const [deleting, setDeleting]           = useState(false)
-  const pollingRef                        = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadMerchants = () => {
     setLoading(true)
@@ -498,36 +498,48 @@ export default function AdminMerchants() {
   useEffect(() => { loadMerchants() }, [])
 
   // Poll every 15s for merchants in "requested" state to detect approval
-  const checkApprovals = useCallback(async () => {
-    const requested = Object.entries(accessState)
-      .filter(([, s]) => s === 'requested')
-      .map(([id]) => parseInt(id))
-    if (requested.length === 0) return
+  const checkApprovals = useCallback(
+    async (signal: AbortSignal) => {
+      const requested = Object.entries(accessState)
+        .filter(([, s]) => s === 'requested')
+        .map(([id]) => parseInt(id, 10))
+      if (requested.length === 0) return
 
-    for (const userId of requested) {
-      const m = merchants.find(x => x.id === userId)
-      if (!m?.tenant_id) continue
-      try {
-        const res = await fetch(`${API_BASE}/admin/impersonate/${m.tenant_id}`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${getToken()}` },
-        })
-        if (res.ok) {
-          setAccessState(prev => ({ ...prev, [userId]: 'has_access' }))
-          setApprovedAlerts(prev => [...prev, { id: userId, name: m.store_name || m.email }])
-          setTimeout(() => {
-            setApprovedAlerts(prev => prev.filter(a => a.id !== userId))
-          }, 8000)
-        }
-      } catch { /* ignore */ }
-    }
-  }, [accessState, merchants])
+      for (const userId of requested) {
+        if (signal.aborted) return
+        const m = merchants.find(x => x.id === userId)
+        if (!m?.tenant_id) continue
+        try {
+          const res = await fetch(`${API_BASE}/admin/impersonate/${m.tenant_id}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${getToken()}` },
+            signal,
+          })
+          if (res.ok) {
+            setAccessState(prev => ({ ...prev, [userId]: 'has_access' }))
+            setApprovedAlerts(prev => [...prev, { id: userId, name: m.store_name || m.email }])
+            setTimeout(() => {
+              setApprovedAlerts(prev => prev.filter(a => a.id !== userId))
+            }, 8000)
+          }
+        } catch { /* ignore */ }
+      }
+    },
+    [accessState, merchants],
+  )
 
-  useEffect(() => {
-    if (pollingRef.current) clearInterval(pollingRef.current)
-    pollingRef.current = setInterval(checkApprovals, 15_000)
-    return () => { if (pollingRef.current) clearInterval(pollingRef.current) }
-  }, [checkApprovals])
+  const awaitingApprovalProbe = useMemo(
+    () => Object.values(accessState).some(s => s === 'requested'),
+    [accessState],
+  )
+
+  useDashboardPoll({
+    pollKey: 'probe:POST:/admin/impersonate/pending-requests',
+    intervalMs: 15_000,
+    enabled: awaitingApprovalProbe && merchants.length > 0,
+    leading: false,
+    run: async signal => checkApprovals(signal),
+  })
 
   const filtered = merchants.filter(m =>
     !search ||
@@ -656,10 +668,11 @@ export default function AdminMerchants() {
   }>>([])
   const [dismissedHelp, setDismissedHelp] = useState<Set<string>>(new Set())
 
-  const loadHelpRequests = useCallback(async () => {
+  const loadHelpRequests = useCallback(async (signal?: AbortSignal) => {
     try {
       const res = await fetch(`${API_BASE}/admin/support-requests`, {
         headers: { Authorization: `Bearer ${getToken()}` },
+        ...(signal ? { signal } : {}),
       })
       if (res.ok) {
         const d = await res.json()
@@ -669,10 +682,17 @@ export default function AdminMerchants() {
   }, [])
 
   useEffect(() => {
-    loadHelpRequests()
-    const id = setInterval(loadHelpRequests, 30_000)
-    return () => clearInterval(id)
+    const ac = new AbortController()
+    const tid = window.setTimeout(() => ac.abort(), 25_000)
+    loadHelpRequests(ac.signal).finally(() => clearTimeout(tid))
   }, [loadHelpRequests])
+
+  useDashboardPoll({
+    pollKey: 'GET:/admin/support-requests',
+    intervalMs: 30_000,
+    leading: false,
+    run: async signal => loadHelpRequests(signal),
+  })
 
   const visibleHelp = helpRequests.filter(r => !dismissedHelp.has(r.req_id))
 

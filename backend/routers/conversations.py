@@ -322,7 +322,12 @@ def record_outbound_message(
 
 
 @router.get("")
-async def list_conversations(request: Request, db: Session = Depends(get_db), limit: int = 100):
+async def list_conversations(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 80,
+    offset: int = 0,
+):
     """
     Build the conversation list from **all** sources:
     1. ``Conversation`` records (canonical)
@@ -342,6 +347,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    paging_cap_limit = max(1, min(int(limit or 80), 200))
 
     def _norm(p: str) -> str:
         return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
@@ -663,7 +669,7 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
         db.query(ConversationTrace)
         .filter(ConversationTrace.tenant_id == tenant_id)
         .order_by(ConversationTrace.created_at.desc())
-        .limit(limit * 5)
+        .limit(min(500, max(250, paging_cap_limit * 6)))
         .all()
     )
     for row in trace_rows:
@@ -777,7 +783,15 @@ async def list_conversations(request: Request, db: Session = Depends(get_db), li
     result = sorted(phone_info.values(), key=lambda c: c.get("time") or "", reverse=True)
     for c in result:
         c.pop("_conv_id", None)
-    return {"conversations": result[:limit]}
+    total = len(result)
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = paging_cap_limit
+    page = result[safe_offset : safe_offset + safe_limit]
+    return {
+        "conversations": page,
+        "total_count": total,
+        "has_more": (safe_offset + len(page)) < total,
+    }
 
 
 @router.get("/messages/{customer_phone}")

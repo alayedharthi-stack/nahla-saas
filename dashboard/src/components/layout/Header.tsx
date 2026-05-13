@@ -14,6 +14,7 @@ import {
   isPlatformOwner,
 } from '../../auth'
 import { API_BASE } from '../../api/client'
+import { useDashboardPoll } from '../../lib/dashboardPolling'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
@@ -53,11 +54,12 @@ function useAccessRequests(role: string) {
   // Track IDs already handled so polling never re-shows them
   const handledIds = useRef<Set<string>>(new Set())
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     if (role === 'admin' || role === 'super_admin') return
     try {
       const res = await fetch(`${API_BASE}/merchant/access-requests`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+        signal,
       })
       if (res.ok) {
         const d = await res.json()
@@ -67,15 +69,33 @@ function useAccessRequests(role: string) {
           (r: AccessRequest) => !handledIds.current.has(r.id)
         )
         setRequests(incoming)
+        const rawCount = d.count
+        const cnt = typeof rawCount === 'number' ? rawCount : incoming.length
+        window.dispatchEvent(new CustomEvent('nahla:access-requests-sync', { detail: { count: cnt } }))
       }
     } catch { /* ignore */ }
   }, [role])
 
-  useEffect(() => {
-    load()
-    const id = setInterval(load, 30_000)
-    return () => clearInterval(id)
+  const reloadWithTimeout = useCallback(async () => {
+    const ac = new AbortController()
+    const tid = window.setTimeout(() => ac.abort(), 25_000)
+    try {
+      await load(ac.signal)
+    } finally {
+      clearTimeout(tid)
+    }
   }, [load])
+
+  useEffect(() => {
+    void reloadWithTimeout()
+  }, [reloadWithTimeout])
+
+  useDashboardPoll({
+    pollKey: 'GET:/merchant/access-requests',
+    intervalMs: 45_000,
+    leading: false,
+    run: signal => load(signal),
+  })
 
   const respond = async (reqId: string, approve: boolean, ttlHours = 4) => {
     if (responding) return
@@ -111,24 +131,24 @@ function useAccessRequests(role: string) {
           }, 2000)
         }
         // Reload from server after a short delay to sync state
-        setTimeout(load, 1500)
+        setTimeout(() => void reloadWithTimeout(), 1500)
       } else {
         // Server rejected — undo optimistic removal
         handledIds.current.delete(reqId)
         setApproved(null)
-        await load()
+        await reloadWithTimeout()
       }
     } catch {
       // Network error — undo optimistic removal
       handledIds.current.delete(reqId)
       setApproved(null)
-      await load()
+      await reloadWithTimeout()
     } finally {
       setResponding(null)
     }
   }
 
-  return { requests, responding, respond, reload: load, approved }
+  return { requests, responding, respond, reload: reloadWithTimeout, approved }
 }
 
 // ── Admin bell: merchant help requests ────────────────────────────────────────
@@ -141,11 +161,12 @@ function useAdminBell(role: string) {
   const [helpReqs, setHelpReqs] = useState<HelpReq[]>([])
   const navigate = useNavigate()
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     if (role !== 'admin' && role !== 'super_admin') return
     try {
       const res = await fetch(`${API_BASE}/admin/support-requests`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+        signal,
       })
       if (res.ok) {
         const d = await res.json()
@@ -154,14 +175,29 @@ function useAdminBell(role: string) {
     } catch { /* ignore */ }
   }, [role])
 
-  useEffect(() => {
-    load()
-    const id = setInterval(load, 30_000)
-    return () => clearInterval(id)
+  const bootstrap = useCallback(async () => {
+    const ac = new AbortController()
+    const tid = window.setTimeout(() => ac.abort(), 25_000)
+    try {
+      await load(ac.signal)
+    } finally {
+      clearTimeout(tid)
+    }
   }, [load])
 
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+
+  useDashboardPoll({
+    pollKey: 'GET:/admin/support-requests',
+    intervalMs: 45_000,
+    leading: false,
+    run: signal => load(signal),
+  })
+
   const goToMerchant = () => navigate('/admin/merchants')
-  return { helpReqs, goToMerchant, reload: load }
+  return { helpReqs, goToMerchant, reload: bootstrap }
 }
 
 // ── Merchant extra notifications (system notifs) ──────────────────────────────
@@ -173,11 +209,12 @@ interface SysNotif {
 function useMerchantNotifs(role: string) {
   const [notifs, setNotifs] = useState<SysNotif[]>([])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal: AbortSignal) => {
     if (role === 'admin' || role === 'super_admin') return
     try {
       const res = await fetch(`${API_BASE}/merchant/notifications?unread_only=true`, {
         headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+        signal,
       })
       if (res.ok) {
         const d = await res.json()
@@ -186,11 +223,26 @@ function useMerchantNotifs(role: string) {
     } catch { /* ignore */ }
   }, [role])
 
-  useEffect(() => {
-    load()
-    const id = setInterval(load, 60_000)
-    return () => clearInterval(id)
+  const bootstrap = useCallback(async () => {
+    const ac = new AbortController()
+    const tid = window.setTimeout(() => ac.abort(), 25_000)
+    try {
+      await load(ac.signal)
+    } finally {
+      clearTimeout(tid)
+    }
   }, [load])
+
+  useEffect(() => {
+    void bootstrap()
+  }, [bootstrap])
+
+  useDashboardPoll({
+    pollKey: 'GET:/merchant/notifications?unread_only=true',
+    intervalMs: 90_000,
+    leading: false,
+    run: signal => load(signal),
+  })
 
   const markRead = async (notifId: string) => {
     try {

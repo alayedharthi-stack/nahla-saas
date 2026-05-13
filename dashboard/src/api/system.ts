@@ -62,17 +62,23 @@ export interface ConversationTurn {
 import { apiCall } from './client'
 
 export const systemApi = {
-  health: () =>
-    apiCall<SystemHealth>('/system/health'),
+  health: (opts?: { signal?: AbortSignal }) =>
+    apiCall<SystemHealth>('/system/health', opts?.signal ? { signal: opts.signal } : undefined),
 
-  events: (params?: { category?: string; severity?: string; limit?: number; offset?: number }) => {
+  events: (
+    params?: { category?: string; severity?: string; limit?: number; offset?: number },
+    opts?: { signal?: AbortSignal },
+  ) => {
     const qs = new URLSearchParams()
     if (params?.category) qs.set('category', params.category)
     if (params?.severity) qs.set('severity', params.severity)
     if (params?.limit    !== undefined) qs.set('limit',  String(params.limit))
     if (params?.offset   !== undefined) qs.set('offset', String(params.offset))
     const query = qs.toString() ? `?${qs}` : ''
-    return apiCall<SystemEventsResponse>(`/system/events${query}`)
+    return apiCall<SystemEventsResponse>(
+      `/system/events${query}`,
+      opts?.signal ? { signal: opts.signal } : undefined,
+    )
   },
 
   conversationTrace: (phone: string, limit = 50) =>

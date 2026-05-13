@@ -22,6 +22,7 @@ import {
   PreflightStrategyResponse, CampaignWavesResponse, CampaignWaveRow,
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -970,33 +971,37 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const fetchWaves = useCallback(async () => {
-    try {
-      const r = await campaignsApi.waves(campaignId)
-      setData(r)
-      setError(null)
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'تعذر تحميل الدفعات'
-      setError(message)
-    } finally {
-      setLoading(false)
-    }
-  }, [campaignId])
+  const fetchWaves = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const r = await campaignsApi.waves(campaignId, signal ? { signal } : undefined)
+        setData(r)
+        setError(null)
+      } catch (e: unknown) {
+        if (signal?.aborted) return
+        const message = e instanceof Error ? e.message : 'تعذر تحميل الدفعات'
+        setError(message)
+      } finally {
+        setLoading(false)
+      }
+    },
+    [campaignId],
+  )
 
   useEffect(() => {
-    fetchWaves()
+    void fetchWaves()
   }, [fetchWaves])
 
-  // Live refresh while waves are still draining.
-  useEffect(() => {
-    if (!data) return
-    const stillRunning = data.waves.some(
-      (w) => w.status === 'pending' || w.status === 'dispatching',
-    )
-    if (!stillRunning) return
-    const t = setInterval(fetchWaves, 15000)
-    return () => clearInterval(t)
-  }, [data, fetchWaves])
+  const wavesStillRunning =
+    !!data?.waves.some((w) => w.status === 'pending' || w.status === 'dispatching')
+
+  useDashboardPoll({
+    pollKey: `GET:/campaigns/${campaignId}/waves`,
+    intervalMs: 15_000,
+    enabled: wavesStillRunning && data != null,
+    leading: false,
+    run: async (signal) => fetchWaves(signal),
+  })
 
   if (loading) return null
   if (error) {

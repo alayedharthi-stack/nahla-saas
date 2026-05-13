@@ -5,6 +5,7 @@ import {
   AlertTriangle, Info, Clock, Zap,
 } from 'lucide-react'
 import { systemApi, type SystemHealth, type SystemEventEntry } from '../api/system'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,31 +79,40 @@ export default function SystemStatus() {
   const [catFilter, setCatFilter] = useState('')
   const [sevFilter, setSevFilter] = useState('')
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [h, e] = await Promise.all([
-        systemApi.health(),
-        systemApi.events({ category: catFilter, severity: sevFilter, limit: 100 }),
-      ])
-      setHealth(h)
-      setEvents(e.events)
-      setTotal(e.total)
-      setRefreshed(new Date())
-    } catch {
-      // keep stale data
-    } finally {
-      setLoading(false)
-    }
-  }, [catFilter, sevFilter])
+  const loadFromServer = useCallback(
+    async (opts?: { signal?: AbortSignal; quiet?: boolean }) => {
+      if (!opts?.quiet) setLoading(true)
+      try {
+        const [h, e] = await Promise.all([
+          systemApi.health({ signal: opts?.signal }),
+          systemApi.events(
+            { category: catFilter, severity: sevFilter, limit: 100 },
+            { signal: opts?.signal },
+          ),
+        ])
+        setHealth(h)
+        setEvents(e.events)
+        setTotal(e.total)
+        setRefreshed(new Date())
+      } catch {
+        /* keep stale */
+      } finally {
+        if (!opts?.quiet) setLoading(false)
+      }
+    },
+    [catFilter, sevFilter],
+  )
 
-  useEffect(() => { load() }, [load])
-
-  // Auto-refresh every 30s
   useEffect(() => {
-    const id = setInterval(() => load(), 30_000)
-    return () => clearInterval(id)
-  }, [load])
+    void loadFromServer({ quiet: false })
+  }, [loadFromServer])
+
+  useDashboardPoll({
+    pollKey: 'GET:/system/health+/events',
+    intervalMs: 30_000,
+    leading: false,
+    run: async (signal) => loadFromServer({ signal, quiet: true }),
+  })
 
   const overallColor =
     health?.status === 'ok'      ? 'bg-emerald-500' :
@@ -135,7 +145,7 @@ export default function SystemStatus() {
             </span>
           )}
           <button
-            onClick={load}
+            onClick={() => void loadFromServer({ quiet: false })}
             disabled={loading}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm text-slate-700 transition-colors disabled:opacity-50"
           >

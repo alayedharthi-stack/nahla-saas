@@ -8,7 +8,25 @@ import {
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
+import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
+
+import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
+import { useDashboardPoll } from '../lib/dashboardPolling'
+
+const LIST_PAGE_LIMIT = 60
+const LIST_POLL_MS = 32_000
+
+function logConversationsUiFetch(meta: {
+  endpoint: string
+  duration_ms: number
+  error_message: string
+  tenant_id: string | number | null
+  conversation_id?: string | null
+}) {
+  // Structured line for dashboards / copy-paste from Safari devtools console
+  console.warn('[CONV_LIST_FETCH]', JSON.stringify(meta))
+}
 
 const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
   ai:         { label: 'ذكاء اصطناعي', icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
@@ -19,7 +37,6 @@ const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNo
   system:     { label: 'نظام', icon: <MessageSquare className="w-3 h-3" />, cls: 'bg-purple-50 text-purple-600 border-purple-200' },
   customer:   { label: '', icon: null, cls: '' },
 }
-import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 
 interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
@@ -52,69 +69,292 @@ export default function Conversations() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef    = useRef<HTMLTextAreaElement>(null)
 
+  const listCtrlRef         = useRef<AbortController | null>(null)
+  const msgsCtrlRef         = useRef<AbortController | null>(null)
+  const listReqGen          = useRef(0)
+  const nextSliceOffsetRef  = useRef(0)
+  const bannerRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const listBusyRef         = useRef(false)
+
+  const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
+  const [hasMoreServer, setHasMoreServer]      = useState(false)
+  const [loadingMore, setLoadingMore]           = useState(false)
+
   const phonesMatch = (a?: string | null, b?: string | null) => {
     const norm = (p?: string | null) =>
       (p || '').trim().replace(/^\+/, '').replace(/[\s-]/g, '')
     return !!a && !!b && norm(a) === norm(b)
   }
 
-  const loadList = async () => {
-    try {
-      const { conversations: list } = await featureRealityApi.conversations()
-      setConversations((prev) => {
-        return list.map((c) => {
-          const old = prev.find((p) => p.phone === c.phone)
-          return { ...c, messages: old?.messages ?? [] }
-        })
-      })
-      setSelected((prev) => {
-        if (requestedPhone) {
-          const hit = list.find(c => phonesMatch(c.phone, requestedPhone))
-          if (hit) {
-            const old = conversations.find(p => p.phone === hit.phone)
-            return { ...hit, messages: old?.messages ?? prev?.messages ?? [] }
-          }
-        }
-        if (prev) {
-          const fresh = list.find(c => c.phone === prev.phone)
-          if (fresh) return { ...fresh, messages: prev.messages }
-        }
-        return prev
-      })
-    } catch {
-      setConversations([])
+  const mergeRowsKeepMessages = (
+    incoming: DashboardConversation[],
+    prev: Conversation[],
+  ): Conversation[] => {
+    const map = new Map(prev.map((c) => [c.phone, c.messages]))
+    return incoming.map((row) => ({ ...row, messages: map.get(row.phone) ?? [] }))
+  }
+
+  const mergeHeadPreserveTailServerOrder = (
+    headPage: DashboardConversation[],
+    prev: Conversation[],
+  ): Conversation[] => {
+    const head = mergeRowsKeepMessages(headPage, prev)
+    const headPhones = new Set(head.map((c) => c.phone))
+    const tail = prev.filter((c) => !headPhones.has(c.phone))
+    return [...head, ...tail]
+  }
+
+  const logFetchFail = (endpoint: string, t0: number, err: unknown, conversationPhone?: string | null) => {
+    logConversationsUiFetch({
+      endpoint,
+      duration_ms: Math.round(performance.now() - t0),
+      error_message: err instanceof Error ? err.message : String(err ?? ''),
+      tenant_id: getTenantId(),
+      conversation_id: conversationPhone ?? null,
+    })
+  }
+
+  const clearStaleRetryTimer = () => {
+    if (bannerRetryTimerRef.current) {
+      clearTimeout(bannerRetryTimerRef.current)
+      bannerRetryTimerRef.current = null
     }
   }
 
-  const loadMessages = async (phone: string) => {
+  const scheduleListReconnect = () => {
+    clearStaleRetryTimer()
+    bannerRetryTimerRef.current = setTimeout(() => {
+      bannerRetryTimerRef.current = null
+      if (document.visibilityState !== 'hidden' && !listBusyRef.current) {
+        void reloadFirstPagePreserveTail({ silent: true })
+      }
+    }, 8_500)
+  }
+
+  const reloadFirstPagePreserveTail = async (opts?: { silent?: boolean; signal?: AbortSignal }) => {
+    const gen = ++listReqGen.current
+    let signal: AbortSignal
+    if (opts?.signal) {
+      // Background poll tick — do not cancel user-driven list refreshes wired to ``listCtrlRef``.
+      signal = opts.signal
+    } else {
+      listCtrlRef.current?.abort()
+      const ac = new AbortController()
+      listCtrlRef.current = ac
+      signal = ac.signal
+    }
+    const t0 = performance.now()
+    listBusyRef.current = true
     try {
-      const { messages } = await featureRealityApi.conversationMessages(phone)
+      const page = await featureRealityApi.conversations({
+        signal,
+        limit: LIST_PAGE_LIMIT,
+        offset: 0,
+      })
+      if (gen !== listReqGen.current) return
+      const rows = Array.isArray(page.conversations) ? page.conversations : []
+      nextSliceOffsetRef.current = rows.length
+      setHasMoreServer(Boolean(page.has_more))
+      setConversations((prev) => mergeHeadPreserveTailServerOrder(rows, prev))
+      setSelected((prevSel) => {
+        if (!prevSel) return prevSel
+        const hit = rows.find((c: DashboardConversation) => prevSel.phone === c.phone)
+        return hit ? { ...hit, messages: prevSel.messages } : prevSel
+      })
+      clearStaleRetryTimer()
+      setListStaleBanner(null)
+    } catch (err: unknown) {
+      if (
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        signal.aborted ||
+        gen !== listReqGen.current
+      ) {
+        return
+      }
+      logFetchFail(`/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`, t0, err)
+      if (!opts?.silent) {
+        setListStaleBanner('تعذّر تحديث المحادثات مؤقتًا، سنعيد المحاولة تلقائيًا.')
+      }
+      scheduleListReconnect()
+    } finally {
+      if (gen === listReqGen.current) listBusyRef.current = false
+    }
+  }
+
+  const replaceFirstPageFromServer = async (opts?: { signal?: AbortSignal }) => {
+    const gen = ++listReqGen.current
+    listCtrlRef.current?.abort()
+    const ac = opts?.signal ? undefined : new AbortController()
+    if (!opts?.signal && ac) listCtrlRef.current = ac
+    const signal = opts?.signal ?? ac!.signal
+    const t0 = performance.now()
+    listBusyRef.current = true
+    try {
+      const page = await featureRealityApi.conversations({
+        signal,
+        limit: LIST_PAGE_LIMIT,
+        offset: 0,
+      })
+      if (gen !== listReqGen.current) return
+      let rows = Array.isArray(page.conversations)
+        ? (page.conversations as DashboardConversation[])
+        : []
+      nextSliceOffsetRef.current = rows.length
+      setHasMoreServer(Boolean(page.has_more))
+
+      if (
+        requestedPhone &&
+        !rows.some((c) => phonesMatch(c.phone, requestedPhone)) &&
+        !signal.aborted
+      ) {
+        const supplemental = await fetchOutlineForPhoneMaybe(requestedPhone, signal).catch(() => null)
+        if (
+          supplemental &&
+          gen === listReqGen.current &&
+          !rows.some((r) => r.phone === supplemental.phone)
+        ) {
+          rows = [...rows, supplemental]
+        }
+      }
+
+      const rowsSnap = rows
+      setConversations((prev) => mergeRowsKeepMessages(rowsSnap, prev))
+
+      setSelected((prevSel) => {
+        if (!requestedPhone) {
+          if (!prevSel) return prevSel
+          const hitFresh = rowsSnap.find((c) => c.phone === prevSel.phone)
+          return hitFresh ? { ...hitFresh, messages: prevSel.messages } : prevSel
+        }
+        const hit = rowsSnap.find((c) => phonesMatch(c.phone, requestedPhone))
+        if (!hit) return prevSel
+        const msgs =
+          prevSel && phonesMatch(prevSel.phone, requestedPhone)
+            ? prevSel.messages
+            : []
+        return { ...hit, messages: msgs }
+      })
+
+      clearStaleRetryTimer()
+      setListStaleBanner(null)
+    } catch (err: unknown) {
+      if (
+        opts?.signal?.aborted ||
+        signal.aborted ||
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        gen !== listReqGen.current
+      ) {
+        return
+      }
+      logFetchFail(`/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`, t0, err)
+      setListStaleBanner('تعذّر تحديث المحادثات مؤقتًا، سنعيد المحاولة تلقائيًا.')
+      scheduleListReconnect()
+    } finally {
+      if (gen === listReqGen.current) listBusyRef.current = false
+    }
+  }
+
+  /** Broader inbox fetch — only when linked phone misses the newest page snapshot. */
+  async function fetchOutlineForPhoneMaybe(phoneGuess: string, signal: AbortSignal) {
+    const res = await featureRealityApi.conversations({
+      signal,
+      limit: 200,
+      offset: 0,
+    })
+    return res.conversations.find((c) => phonesMatch(c.phone, phoneGuess)) ?? null
+  }
+
+  const appendNextPage = async () => {
+    if (!hasMoreServer || loadingMore || listBusyRef.current) return
+    const gen = ++listReqGen.current
+    setLoadingMore(true)
+    listBusyRef.current = true
+    const ac = new AbortController()
+    listCtrlRef.current = ac
+    const t0 = performance.now()
+    try {
+      const page = await featureRealityApi.conversations({
+        signal: ac.signal,
+        limit: LIST_PAGE_LIMIT,
+        offset: nextSliceOffsetRef.current,
+      })
+      if (gen !== listReqGen.current) return
+      const rows = Array.isArray(page.conversations) ? page.conversations : []
+      nextSliceOffsetRef.current += rows.length
+      setHasMoreServer(Boolean(page.has_more))
+      const newRows = rows as DashboardConversation[]
+      setConversations((prev) => {
+        const have = new Set(prev.map((c) => c.phone))
+        const extra = newRows.filter((row) => !have.has(row.phone)).map((c) => ({
+          ...c,
+          messages: [] as DashboardMessage[],
+        }))
+        return [...prev, ...extra]
+      })
+    } catch (err: unknown) {
+      if (!ac.signal.aborted && gen === listReqGen.current) {
+        logFetchFail(
+          `/conversations?limit=${LIST_PAGE_LIMIT}&offset=${nextSliceOffsetRef.current}`,
+          t0,
+          err,
+        )
+        setListStaleBanner('تعذّر تحميل المزيد مؤقتًا، حاول خلال ثوانٍ.')
+      }
+    } finally {
+      setLoadingMore(false)
+      if (gen === listReqGen.current) listBusyRef.current = false
+    }
+  }
+
+  const loadMessagesForOpenChat = async (phone: string) => {
+    msgsCtrlRef.current?.abort()
+    const ac = new AbortController()
+    msgsCtrlRef.current = ac
+    const t0 = performance.now()
+    try {
+      const { messages } = await featureRealityApi.conversationMessages(phone, {
+        signal: ac.signal,
+        limit: 150,
+      })
       setConversations((prev) =>
         prev.map((c) => (c.phone === phone ? { ...c, messages } : c)),
       )
-      setSelected((prev) =>
-        prev && prev.phone === phone ? { ...prev, messages } : prev,
+      setSelected((prevSel) =>
+        prevSel && prevSel.phone === phone ? { ...prevSel, messages } : prevSel,
       )
-    } catch { /* silent */ }
+    } catch (err: unknown) {
+      if (ac.signal.aborted) return
+      logFetchFail(`/conversations/messages/${encodeURIComponent(phone)}`, t0, err, phone)
+    }
   }
 
-  useEffect(() => {
-    loadList().then(() => {
-      if (requestedPhone) {
-        loadMessages(requestedPhone)
-      }
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requestedPhone])
+  useDashboardPoll({
+    pollKey: `GET:/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`,
+    intervalMs: LIST_POLL_MS,
+    leading: false,
+    run: async (signal) => {
+      if (listBusyRef.current) return
+      await reloadFirstPagePreserveTail({ silent: true, signal })
+    },
+  })
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      loadList()
-      if (selected) loadMessages(selected.phone)
-    }, 15_000)
-    return () => clearInterval(interval)
+    const run = async () => {
+      await replaceFirstPageFromServer()
+      if (requestedPhone) {
+        setMobileView('chat')
+        await loadMessagesForOpenChat(requestedPhone)
+      }
+    }
+    void run()
+
+    return () => {
+      clearStaleRetryTimer()
+      listCtrlRef.current?.abort()
+      msgsCtrlRef.current?.abort()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.phone])
+  }, [requestedPhone])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -132,7 +372,7 @@ export default function Conversations() {
   const selectConversation = (c: Conversation) => {
     setSelected(c)
     setMobileView('chat')
-    loadMessages(c.phone)
+    loadMessagesForOpenChat(c.phone)
     // Zero the unread badge locally the moment we open the
     // conversation, then ask the backend to stamp last_read_at so the
     // count stays at 0 across refetches. Failures are non-fatal — the
@@ -161,8 +401,8 @@ export default function Conversations() {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
       }
-      await loadMessages(selected.phone)
-      await loadList()
+      await loadMessagesForOpenChat(selected.phone)
+      await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إرسال الرد')
     }
@@ -198,29 +438,14 @@ export default function Conversations() {
         aiPaused: true,
         aiPausedReason: 'manual_takeover',
       })
-      await loadList()
+      await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
     }
   }
 
-  const handleClose = async () => {
-    if (!selected) return
-    try {
-      await featureRealityApi.closeConversation({
-        customer_phone: selected.phone,
-      })
-      _optimisticUpdate(selected.phone, { status: 'active', isAI: true, handoffReason: null })
-      await loadList()
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إعادة المحادثة للذكاء')
-    }
-  }
 
-  // Apply server-returned AI state to BOTH the conversations list and
-  // the currently selected conversation. ONLY touches AI columns —
-  // human-takeover state is managed independently via
-  // ``handleHandoff`` and ``handleReturnToAI``.
+
   const _applyAIState = (phone: string, state: {
     aiPaused: boolean
     aiPausedReason: AIPauseReason | null
@@ -237,9 +462,7 @@ export default function Conversations() {
     _optimisticUpdate(phone, patch)
   }
 
-  // Apply the full takeover-cleared state. Used by "إعادة الذكاء"
-  // (return-to-ai) which clears both the AI pause and the human
-  // takeover columns in a single dashboard click.
+  // Apply takeover-cleared dashboard state (`/handoff/return-to-ai`).
   const _applyReturnToAIState = (phone: string) => {
     _optimisticUpdate(phone, {
       aiPaused: false,
@@ -255,7 +478,7 @@ export default function Conversations() {
     })
   }
 
-  const handlePauseAI = async () => {
+  const pauseIntelligenceForSelected = async () => {
     if (!selected) return
     console.log('[AI_PAUSE_UI] request pause phone=', selected.phone, 'reason=manual_pause')
     try {
@@ -269,49 +492,41 @@ export default function Conversations() {
         aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
         aiPausedAt: res.aiPausedAt ?? null,
       })
-      await loadList()
+      await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إيقاف الذكاء')
     }
   }
 
-  const handleResumeAI = async () => {
-    // Only valid path: AI is paused but the conversation is NOT in a
-    // human takeover. The button isn't rendered in the takeover state.
+  const resumeIntelligenceForSelected = async () => {
     if (!selected) return
-    console.log('[AI_PAUSE_UI] request resume phone=', selected.phone)
+    const inTakeover =
+      !!selected.needsHuman ||
+      !!selected.handoffActive ||
+      selected.status === 'human'
+    console.log(
+      `[AI_RESUME_UI] phone=${selected.phone} takeover=${inTakeover}`,
+    )
     try {
-      const res = await featureRealityApi.resumeConversationAI({
-        customer_phone: selected.phone,
-      })
-      console.log('[AI_PAUSE_UI] response', res)
-      _applyAIState(selected.phone, {
-        aiPaused: !!res.aiPaused,
-        aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
-        aiPausedAt: res.aiPausedAt ?? null,
-      })
-      await loadList()
-      await loadMessages(selected.phone)
+      if (inTakeover) {
+        await featureRealityApi.returnHandoffToAI({
+          customer_phone: selected.phone,
+        })
+        _applyReturnToAIState(selected.phone)
+      } else {
+        const res = await featureRealityApi.resumeConversationAI({
+          customer_phone: selected.phone,
+        })
+        _applyAIState(selected.phone, {
+          aiPaused: !!res.aiPaused,
+          aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
+          aiPausedAt: res.aiPausedAt ?? null,
+        })
+      }
+      await reloadFirstPagePreserveTail({ silent: true })
+      await loadMessagesForOpenChat(selected.phone)
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر تشغيل الذكاء')
-    }
-  }
-
-  const handleReturnToAI = async () => {
-    // Only valid path: conversation is currently in a human takeover.
-    // Clears human columns + ai_paused in a single backend call.
-    if (!selected) return
-    console.log('[AI_RETURN_UI] request return-to-ai phone=', selected.phone)
-    try {
-      const res = await featureRealityApi.returnHandoffToAI({
-        customer_phone: selected.phone,
-      })
-      console.log('[AI_RETURN_UI] response', res)
-      _applyReturnToAIState(selected.phone)
-      await loadList()
-      await loadMessages(selected.phone)
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إعادة الذكاء')
     }
   }
 
@@ -334,7 +549,7 @@ export default function Conversations() {
         aiPausedAt: new Date().toISOString(),
       })
       _optimisticUpdate(selected.phone, { isBlocked: true })
-      await loadList()
+      await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر حظر الرقم')
     }
@@ -511,6 +726,25 @@ export default function Conversations() {
           </div>
         )}
 
+        {listStaleBanner && (
+          <div className="mx-3 my-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/95 px-3 py-2 text-xs text-amber-950">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+            <div className="flex-1 leading-relaxed">
+              {listStaleBanner}{' '}
+              <button
+                type="button"
+                className="font-semibold text-brand-700 underline underline-offset-2 decoration-brand-400"
+                onClick={() => {
+                  clearStaleRetryTimer()
+                  void replaceFirstPageFromServer()
+                }}
+              >
+                تحديث الآن
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Conversation list */}
         <ul className="flex-1 overflow-y-auto divide-y divide-slate-100">
           {filtered.length === 0 && (
@@ -583,6 +817,18 @@ export default function Conversations() {
             </li>
           ))}
         </ul>
+        {hasMoreServer && (
+          <div className="border-t border-slate-100 p-2 bg-white shrink-0">
+            <button
+              type="button"
+              disabled={loadingMore}
+              onClick={() => void appendNextPage()}
+              className="w-full py-2 text-xs font-medium text-brand-700 bg-brand-50 rounded-lg hover:bg-brand-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loadingMore ? 'جاري التحميل…' : 'تحميل المزيد من المحادثات'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── PANEL 2: Chat view ────────────────────────────────────────────────── */}
@@ -630,59 +876,45 @@ export default function Conversations() {
                 </p>
               </div>
 
-              {/* Actions — three distinct UX paths:
-                  1) Active AI:        [تولّي] [إيقاف الذكاء مؤقتاً]
-                  2) Human takeover:   [إعادة الذكاء]
-                  3) Manual pause only: [تشغيل الذكاء]
-                  Plus the always-on [حظر الرقم].                       */}
-              <div className="flex items-center gap-1">
-                {(() => {
-                  const inHumanTakeover =
+              {/* تحكم بالذكاء: زر واحد (تشغيل / إيقاف مؤقت) + تولّي اختياري */}
+              <div className="flex items-center gap-1 flex-wrap justify-end">
+                {!_isBlocked(selected) && (() => {
+                  const humanTakeover =
                     !!selected.needsHuman ||
                     !!selected.handoffActive ||
                     selected.status === 'human'
-                  if (inHumanTakeover) {
-                    return (
-                      <button
-                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-brand-600 border-brand-200 bg-brand-50 hover:bg-brand-100"
-                        onClick={handleReturnToAI}
-                        title="إنهاء التولّي البشري وإعادة المحادثة للذكاء"
-                      >
-                        <Bot className="w-3.5 h-3.5" />
-                        إعادة الذكاء
-                      </button>
-                    )
-                  }
-                  if (selected.aiPaused) {
-                    return (
-                      <button
-                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
-                        onClick={handleResumeAI}
-                        title="استئناف الردود الآلية للذكاء (لم تُحوَّل المحادثة لموظف)"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        تشغيل الذكاء
-                      </button>
-                    )
-                  }
+                  const intelligenceOff = humanTakeover || !!selected.aiPaused
                   return (
                     <>
-                      <button
-                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
-                        onClick={handleHandoff}
-                        title="تولّي المحادثة بدلاً من الذكاء (تنتقل لتبويب «بشري»)"
-                      >
-                        <UserCheck className="w-3.5 h-3.5" />
-                        تولّي
-                      </button>
-                      <button
-                        className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
-                        onClick={handlePauseAI}
-                        title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
-                      >
-                        <Pause className="w-3.5 h-3.5" />
-                        إيقاف الذكاء مؤقتاً
-                      </button>
+                      {!humanTakeover && (
+                        <button
+                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
+                          onClick={handleHandoff}
+                          title="تولّي المحادثة بدلاً من الذكاء (تنتقل لتبويب «بشري»)"
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          تولّي
+                        </button>
+                      )}
+                      {intelligenceOff ? (
+                        <button
+                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                          onClick={resumeIntelligenceForSelected}
+                          title="استئناف ردود الذكاء الآلية (يشمل إنهاء التولّي البشري إن وُجد)"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          تشغيل الذكاء
+                        </button>
+                      ) : (
+                        <button
+                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                          onClick={pauseIntelligenceForSelected}
+                          title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
+                        >
+                          <Pause className="w-3.5 h-3.5" />
+                          إيقاف الذكاء مؤقتاً
+                        </button>
+                      )}
                     </>
                   )
                 })()}
@@ -713,7 +945,7 @@ export default function Conversations() {
                 <span>
                   هذه المحادثة <strong>تحت إشراف موظف بشري</strong>
                   {selected.takenOverBy && <> — بواسطة <strong>{selected.takenOverBy}</strong></>}
-                  . لن يرد الذكاء حتى تضغط «إعادة الذكاء».
+                  . لن يرد الذكاء حتى تضغط «تشغيل الذكاء» أعلاه.
                 </span>
               </div>
             )}
@@ -905,24 +1137,52 @@ export default function Conversations() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Reply bar — mobile actions row */}
+            {/* Reply bar — mobile quick actions */}
             <div className="sm:hidden flex items-center gap-2 px-3 py-2 bg-white border-t border-slate-100">
-              {selected.status !== 'human' && (
-                <button
-                  className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-amber-50 text-amber-600 font-medium active:bg-amber-100"
-                  onClick={handleHandoff}
-                >
-                  <UserCheck className="w-3.5 h-3.5" /> تولّ المحادثة
-                </button>
-              )}
-              {selected.status === 'human' && (
-                <button
-                  className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-brand-50 text-brand-600 font-medium active:bg-brand-100"
-                  onClick={handleClose}
-                >
-                  <Bot className="w-3.5 h-3.5" /> إعادة للذكاء الاصطناعي
-                </button>
-              )}
+              {!_isBlocked(selected) &&
+                (() => {
+                  const humanTakeover =
+                    !!selected.needsHuman ||
+                    !!selected.handoffActive ||
+                    selected.status === 'human'
+                  const intelligenceOff = humanTakeover || !!selected.aiPaused
+                  return (
+                    <>
+                      {!humanTakeover && (
+                        <button
+                          className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-amber-50 text-amber-600 font-medium active:bg-amber-100"
+                          type="button"
+                          onClick={handleHandoff}
+                        >
+                          <UserCheck className="w-3.5 h-3.5" /> تولّي
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium active:opacity-90 ${
+                          intelligenceOff
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-amber-50 text-amber-700'
+                        }`}
+                        onClick={
+                          intelligenceOff
+                            ? resumeIntelligenceForSelected
+                            : pauseIntelligenceForSelected
+                        }
+                      >
+                        {intelligenceOff ? (
+                          <>
+                            <Play className="w-3.5 h-3.5" /> تشغيل الذكاء
+                          </>
+                        ) : (
+                          <>
+                            <Pause className="w-3.5 h-3.5" /> إيقاف الذكاء مؤقتاً
+                          </>
+                        )}
+                      </button>
+                    </>
+                  )
+                })()}
             </div>
 
             {/* Reply input */}

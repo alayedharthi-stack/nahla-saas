@@ -6,6 +6,9 @@ import { getToken, getTenantId, logout, getApiBase } from '../auth'
 
 const DEFAULT_FETCH_TIMEOUT_MS = 25_000
 
+/** Optional `timeoutMs` is stripped before `fetch` (not a standard RequestInit field). */
+export type ApiCallOptions = RequestInit & { timeoutMs?: number }
+
 /** Combines timeout + caller AbortSignal (either abort aborts the request). */
 function combinedAbortSignals(timeoutMs: number, userSignal?: AbortSignal | null): AbortSignal {
   const timeoutSig =
@@ -66,30 +69,35 @@ const SOFT_LOGOUT_CODES = new Set([
 // Endpoints whose 401 conclusively means "the session is gone".
 const AUTH_PATH_RE = /\/auth\/(me|session|refresh|verify|whoami|login)\b/i
 
-function classifyNetworkError(error: unknown): string {
+function classifyNetworkError(error: unknown, timeoutMsForAbortMessage: number = DEFAULT_FETCH_TIMEOUT_MS): string {
   const msg = error instanceof Error ? error.message : String(error ?? '')
   const lowered = msg.toLowerCase()
 
   if (lowered.includes('failed to fetch') || lowered.includes('load failed') || lowered.includes('networkerror')) {
     return 'تعذر الوصول إلى الخادم. قد يكون السبب CORS أو انقطاع الشبكة أو خطأ مؤقت في API.'
   }
-  if (lowered.includes('abort') || (error instanceof DOMException && error.name === 'AbortError')) {
-    return `انتهت مهلة الطلب (${DEFAULT_FETCH_TIMEOUT_MS / 1000}s). تحقق من الخادم أو الشبكة.`
+  if (
+    lowered.includes('abort') ||
+    lowered.includes('signal timed out') ||
+    (error instanceof DOMException && error.name === 'AbortError')
+  ) {
+    return `انتهت مهلة الطلب (${timeoutMsForAbortMessage / 1000}s). تحقق من الخادم أو الشبكة.`
   }
   return msg || 'حدث خطأ غير متوقع أثناء الاتصال بالخادم.'
 }
 
-export async function apiCall<T>(path: string, options?: RequestInit): Promise<T> {
+export async function apiCall<T>(path: string, options?: ApiCallOptions): Promise<T> {
   const token    = getToken()
   const tenantId = getTenantId()
   const base     = getApiBase()
   const url      = `${base}${path}`
 
-  const signal = combinedAbortSignals(DEFAULT_FETCH_TIMEOUT_MS, options?.signal)
+  const timeoutApplied = options?.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS
+  const signal = combinedAbortSignals(timeoutApplied, options?.signal)
 
   let res: Response
   try {
-    const { signal: _omit, headers: optHeaders, ...rest } = options ?? {}
+    const { signal: _omit, timeoutMs: __omitT, headers: optHeaders, ...rest } = options ?? {}
     res = await fetch(url, {
       cache: 'no-store',
       mode: 'cors',
@@ -103,7 +111,7 @@ export async function apiCall<T>(path: string, options?: RequestInit): Promise<T
       ...rest,
     })
   } catch (error) {
-    throw new Error(classifyNetworkError(error))
+    throw new Error(classifyNetworkError(error, timeoutApplied))
   }
 
   // ── Structured-error helper ────────────────────────────────────────────────

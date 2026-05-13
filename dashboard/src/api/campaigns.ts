@@ -741,8 +741,8 @@ export const campaignsApi = {
 
   /** Wave timeline for a campaign — used by the detail drawer to
    *  render "wave 2 of 8 — starts at 14:30" + per-wave progress. */
-  waves: (id: number) =>
-    apiCall<CampaignWavesResponse>(`/campaigns/${id}/waves`),
+  waves: (id: number, opts?: { signal?: AbortSignal }) =>
+    apiCall<CampaignWavesResponse>(`/campaigns/${id}/waves`, opts?.signal ? { signal: opts.signal } : undefined),
 
   updateStatus: (id: number, status: string) =>
     apiCall<CampaignRecord>(`/campaigns/${id}/status`, {

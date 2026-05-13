@@ -13,7 +13,6 @@ import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type NotificationSettings } from '../api/settings'
 import { API_BASE } from '../api/client'
 
-// ── Primitives ──────────────────────────────────────────────────────────────
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
@@ -553,11 +552,9 @@ function SupportAccessTab() {
 
   useEffect(() => {
     load()
-    const id = setInterval(() => load(true), 10_000)
     const onApproved = () => load(true)
     window.addEventListener('nahla:support-access-changed', onApproved)
     return () => {
-      clearInterval(id)
       window.removeEventListener('nahla:support-access-changed', onApproved)
     }
   }, [load])
@@ -1283,18 +1280,26 @@ function SupportAccessStatusSection() {
 function SupportTabBadge() {
   const [count, setCount] = useState(0)
 
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/merchant/access-requests`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+      })
+      if (res.ok) setCount((await res.json()).count ?? 0)
+    } catch { /* ignore */ }
+  }, [])
+
   useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/merchant/access-requests`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
-        })
-        if (res.ok) setCount((await res.json()).count ?? 0)
-      } catch { /* ignore */ }
+    void load()
+  }, [load])
+
+  useEffect(() => {
+    const onSync = (e: Event) => {
+      const ev = e as CustomEvent<{ count: number }>
+      if (typeof ev.detail?.count === 'number') setCount(ev.detail.count)
     }
-    load()
-    const id = setInterval(load, 30_000)
-    return () => clearInterval(id)
+    window.addEventListener('nahla:access-requests-sync', onSync)
+    return () => window.removeEventListener('nahla:access-requests-sync', onSync)
   }, [])
 
   if (count === 0) return null

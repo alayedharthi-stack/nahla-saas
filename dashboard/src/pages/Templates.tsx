@@ -23,6 +23,7 @@ import {
   extractVars, renderBody, countVars,
   STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
 } from '../api/templates'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
 
@@ -1804,18 +1805,23 @@ export default function Templates() {
 
   const autoSyncTriggered = useState(false)
 
-  const loadSyncStatus = useCallback(() => {
-    templatesApi.syncStatus()
+  const loadSyncStatus = useCallback((signal?: AbortSignal) => {
+    return templatesApi
+      .syncStatus(signal ? { signal } : undefined)
       .then(setSyncStatus)
       .catch(() => setSyncStatus(null))
   }, [])
 
   useEffect(() => { loadTemplates() }, [loadTemplates])
-  useEffect(() => {
-    loadSyncStatus()
-    const id = setInterval(loadSyncStatus, 60_000)
-    return () => clearInterval(id)
-  }, [loadSyncStatus])
+
+  useDashboardPoll({
+    pollKey: 'GET:/templates/sync/status',
+    intervalMs: 60_000,
+    leading: true,
+    run: async (signal) => {
+      await loadSyncStatus(signal)
+    },
+  })
 
   // Auto-sync on page load when no sync has ever been recorded.
   // This acts as a safety net: even if the background scheduler is

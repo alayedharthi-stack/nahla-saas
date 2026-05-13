@@ -54,9 +54,9 @@ export const storeSyncApi = {
       method: 'POST',
     }),
 
-  getStatus: () =>
-    apiCall<SyncStatus>('/store-sync/status'),
+  getStatus: (opts?: { signal?: AbortSignal }) =>
+    apiCall<SyncStatus>('/store-sync/status', opts?.signal ? { signal: opts.signal } : undefined),
 
-  getKnowledge: () =>
-    apiCall<KnowledgeOverview>('/store-sync/knowledge'),
+  getKnowledge: (opts?: { signal?: AbortSignal }) =>
+    apiCall<KnowledgeOverview>('/store-sync/knowledge', opts?.signal ? { signal: opts.signal } : undefined),
 }

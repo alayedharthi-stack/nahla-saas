@@ -6,10 +6,11 @@
  * - Active paid plan: hidden (returns null)
  * - API error: shows a subtle retry-able fallback
  */
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Clock, AlertTriangle, Zap, X, RefreshCw } from 'lucide-react'
 import { billingApi, type BillingStatus } from '../../api/billing'
+import { throttleFocusRefetch } from '../../lib/focusThrottleRefetch'
 
 export default function TrialBanner() {
   const navigate = useNavigate()
@@ -17,6 +18,7 @@ export default function TrialBanner() {
   const [dismissed, setDismissed] = useState(false)
   const [error, setError]         = useState(false)
   const [retrying, setRetrying]   = useState(false)
+  const lastFocusPollRef          = useRef(0)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -38,7 +40,15 @@ export default function TrialBanner() {
     // server-side but this banner is still rendering its last-known
     // state. Also catches the case where reconcile activated a sub
     // moments ago but the cached status still says trial.
-    const onFocus = () => fetchStatus()
+    const onFocus = () =>
+      throttleFocusRefetch(
+        25_000,
+        () => lastFocusPollRef.current,
+        (t) => {
+          lastFocusPollRef.current = t
+        },
+        fetchStatus,
+      )
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [fetchStatus])

@@ -1,6 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const buildStamp =
+  process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
+  process.env.VERCEL_GIT_COMMIT_REF?.slice(0, 12) ??
+  process.env.GITHUB_SHA?.slice(0, 12) ??
+  `local-${process.env.npm_package_version ?? '0'}-${Date.now()}`
+
 // Headers that allow Salla to embed app.nahlah.ai inside their iframe viewer
 const SALLA_IFRAME_HEADERS = {
   'Content-Security-Policy':
@@ -13,6 +19,9 @@ const SALLA_IFRAME_HEADERS = {
 }
 
 export default defineConfig({
+  define: {
+    __NAHLA_BUILD_STAMP__: JSON.stringify(buildStamp),
+  },
   plugins: [react()],
   server: {
     port: 3000,

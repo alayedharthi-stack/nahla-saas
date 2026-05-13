@@ -9,7 +9,7 @@
  *   - Manual "Sync Now" button
  *   - Error display
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle,
   BarChart3,
@@ -23,6 +23,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { storeSyncApi, type KnowledgeOverview, type SyncStatus } from '../api/storeSync'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -94,85 +95,92 @@ export default function StoreSyncPanel({ isStoreConnected }: StoreSyncPanelProps
   const [loading, setLoading]   = useState(true)
   const [syncing, setSyncing]   = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
-  const [pollTimer, setPollTimer] = useState<ReturnType<typeof setInterval> | null>(null)
-  const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
-  const [pollErrors, setPollErrors]       = useState(0)
 
-  const stopPolling = useCallback((timer: ReturnType<typeof setInterval> | null) => {
-    if (timer) clearInterval(timer)
-    setPollTimer(null)
+  /** Start time for the merchant-initiated burst (frontend watchdog). */
+  const syncBurstStartedAtRef = useRef<number | null>(null)
+  const pollErrorsRef         = useRef(0)
+
+  const applyStorePayload = useCallback((st: SyncStatus, kn: KnowledgeOverview) => {
+    setStatus(st)
+    setKnow(kn)
+
+    if (st.sync_running) {
+      setSyncing(true)
+      const burst0 = syncBurstStartedAtRef.current
+      if (burst0 !== null && Date.now() - burst0 > SYNC_TIMEOUT_MS) {
+        setSyncing(false)
+        syncBurstStartedAtRef.current = null
+        setSyncError('استغرقت المزامنة وقتاً طويلاً وتوقفت. يمكنك إعادة المحاولة.')
+      }
+    } else {
+      setSyncing(false)
+      syncBurstStartedAtRef.current = null
+      if (st.last_job_status === 'failed' || st.last_job_status === 'timed_out') {
+        setSyncError(st.last_job_error ?? 'فشلت المزامنة — يمكنك إعادة المحاولة.')
+      } else {
+        setSyncError(null)
+      }
+    }
   }, [])
 
-  // ── Load ───────────────────────────────────────────────────────────────────
-
-  const loadAll = useCallback(async (currentTimer?: ReturnType<typeof setInterval> | null) => {
-    try {
-      const [st, kn] = await Promise.all([
-        storeSyncApi.getStatus(),
-        storeSyncApi.getKnowledge(),
-      ])
-      setStatus(st)
-      setKnow(kn)
-      setPollErrors(0)   // reset error counter on success
-
-      if (st.sync_running) {
-        setSyncing(true)
-        // Enforce a client-side timeout so the loader never runs forever
-        if (syncStartedAt && Date.now() - syncStartedAt > SYNC_TIMEOUT_MS) {
-          setSyncing(false)
-          setSyncError('استغرقت المزامنة وقتاً طويلاً وتوقفت. يمكنك إعادة المحاولة.')
-          stopPolling(currentTimer ?? pollTimer)
+  const loadAll = useCallback(
+    async (opts?: { signal?: AbortSignal; burst?: boolean }) => {
+      const burst = opts?.burst ?? false
+      const sig = opts?.signal
+      try {
+        const [st, kn] = await Promise.all([
+          storeSyncApi.getStatus(sig ? { signal: sig } : undefined),
+          storeSyncApi.getKnowledge(sig ? { signal: sig } : undefined),
+        ])
+        if (burst) pollErrorsRef.current = 0
+        applyStorePayload(st, kn)
+      } catch {
+        if (burst) {
+          const next = pollErrorsRef.current + 1
+          pollErrorsRef.current = next
+          if (next >= MAX_POLL_ERRORS) {
+            setSyncing(false)
+            syncBurstStartedAtRef.current = null
+            setSyncError('تعذّر الوصول إلى الخادم. تحقق من الاتصال وأعد المحاولة.')
+          }
         }
-      } else {
-        // Sync finished (completed, failed, or timed_out on the backend)
-        setSyncing(false)
-        setSyncStartedAt(null)
-        stopPolling(currentTimer ?? pollTimer)
-        if (st.last_job_status === 'failed' || st.last_job_status === 'timed_out') {
-          setSyncError(st.last_job_error ?? 'فشلت المزامنة — يمكنك إعادة المحاولة.')
-        } else {
-          setSyncError(null)
-        }
+      } finally {
+        setLoading(false)
       }
-    } catch {
-      const next = pollErrors + 1
-      setPollErrors(next)
-      if (next >= MAX_POLL_ERRORS) {
-        setSyncing(false)
-        setSyncStartedAt(null)
-        stopPolling(currentTimer ?? pollTimer)
-        setSyncError('تعذّر الوصول إلى الخادم. تحقق من الاتصال وأعد المحاولة.')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [pollTimer, pollErrors, syncStartedAt, stopPolling])
+    },
+    [applyStorePayload],
+  )
 
-  useEffect(() => { loadAll() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void loadAll()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Trigger sync ───────────────────────────────────────────────────────────
+  useDashboardPoll({
+    pollKey: 'GET:/store-sync/status+knowledge',
+    intervalMs: POLL_INTERVAL_MS,
+    enabled: syncing,
+    leading: true,
+    backoffBaseMs: 1_000,
+    backoffMaxMs: 30_000,
+    run: async (signal) => {
+      await loadAll({ signal, burst: true })
+    },
+  })
 
   const handleSync = useCallback(async () => {
     if (syncing) return
     setSyncing(true)
     setSyncError(null)
-    setSyncStartedAt(Date.now())
-    setPollErrors(0)
+    syncBurstStartedAtRef.current = Date.now()
+    pollErrorsRef.current = 0
     try {
       await storeSyncApi.trigger()
-      // Poll for completion every POLL_INTERVAL_MS
-      const timer = setInterval(() => loadAll(timer), POLL_INTERVAL_MS)
-      setPollTimer(timer)
     } catch (err) {
       setSyncing(false)
-      setSyncStartedAt(null)
+      syncBurstStartedAtRef.current = null
       setSyncError(err instanceof Error ? err.message : 'فشل تشغيل المزامنة')
     }
-  }, [syncing, loadAll])
-
-  // ── Cleanup ────────────────────────────────────────────────────────────────
-
-  useEffect(() => () => { if (pollTimer) clearInterval(pollTimer) }, [pollTimer])
+  }, [syncing])
 
   // ─────────────────────────────────────────────────────────────────────────
 

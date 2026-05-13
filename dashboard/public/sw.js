@@ -1,47 +1,81 @@
-const CACHE_NAME = 'nahlah-v4'
+/* Nahla merchant PWA — v6: network-first for JS/CSS bundles so deployments
+   replace cached hashed chunks immediately when online (fixes «old UI half» bugs). */
 
-// Only pre-cache static binary assets (not the HTML shell)
+const CACHE_NAME = 'nahlah-v6'
+
 const STATIC_ASSETS = ['/logo.png', '/manifest.json']
 
-self.addEventListener('install', event => {
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS))
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)),
   )
   self.skipWaiting()
 })
 
-self.addEventListener('activate', event => {
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    )
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))),
+    ),
   )
   self.clients.claim()
 })
 
-self.addEventListener('fetch', event => {
+self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return
-  // Never cache API calls
-  if (event.request.url.includes('/api/') || event.request.url.includes('api.nahlah')) return
+  const reqUrl = event.request.url
+  if (reqUrl.includes('/api/') || reqUrl.includes('api.nahlah')) return
 
   const url = new URL(event.request.url)
+  const sameOrigin = url.origin === self.location.origin
+  const isHtmlNav =
+    event.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html')
 
-  // HTML navigation requests → always network-first so new deployments take effect immediately
-  if (event.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html')) {
+  /* HTML shells & navigations → network-first */
+  if (isHtmlNav) {
     event.respondWith(
-      fetch(event.request).catch(() => caches.match(event.request))
+      fetch(event.request).catch(() => caches.match(event.request)),
     )
     return
   }
 
-  // Hashed assets (/assets/index-XYZ.js) → cache-first (they never change once deployed)
-  event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request).then(res => {
-      if (res.ok) {
-        const clone = res.clone()
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone))
-      }
-      return res
-    }))
-  )
+  /* Bundles & module CSS — network-first, cache as offline fallback only */
+  const isAppBundle =
+    sameOrigin &&
+    (url.pathname.startsWith('/assets/') ||
+      url.pathname.endsWith('.js') ||
+      url.pathname.endsWith('.css'))
+
+  if (isAppBundle) {
+    event.respondWith(
+      fetch(event.request)
+        .then((networkRes) => {
+          if (networkRes.ok) {
+            const clone = networkRes.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
+          }
+          return networkRes
+        })
+        .catch(() => caches.match(event.request)),
+    )
+    return
+  }
+
+  /* Other same-origin GETs (e.g. fonts copied locally) → stale-while-revalidate lite */
+  if (sameOrigin) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => {
+        const net = fetch(event.request)
+          .then((networkRes) => {
+            if (networkRes.ok) {
+              const clone = networkRes.clone()
+              caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))
+            }
+            return networkRes
+          })
+          .catch(() => cached)
+        return cached ?? net
+      }),
+    )
+  }
 })
