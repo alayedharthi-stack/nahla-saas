@@ -180,6 +180,63 @@ export interface CustomerMarketingPreferences {
   campaign_test_recipient_at: string | null
 }
 
+// ── Bulk customer-name cleanup tool ──────────────────────────────────
+//
+// Backs the "تنظيف أسماء العملاء" button on the customers page.
+// Strictly tenant-scoped on the backend — the JWT decides which
+// store's names get cleaned; no cross-tenant access is possible.
+
+export interface NameCleanupPreviewItem {
+  customer_id: number
+  /** What's currently stored on Customer.name. */
+  current_name: string
+  /** Suggested replacement. ``null`` means "clear the row" — applying
+   *  will set Customer.name to NULL, and campaigns will use the
+   *  static fallback ("عميلنا الغالي") at send time. */
+  suggested_name: string | null
+  /** Arabic explanation of WHY this suggestion exists. */
+  reason: string
+  /** ``"high"`` → safe to bulk-apply; ``"low"`` → needs explicit
+   *  per-row merchant approval. */
+  confidence: 'high' | 'low'
+  /** Phone shown alongside the name in the preview, so the merchant
+   *  has enough context to decide on ambiguous rows. */
+  phone: string
+}
+
+export interface NameCleanupPreviewResponse {
+  tenant_id: number
+  total_scanned: number
+  total_customers: number
+  items: NameCleanupPreviewItem[]
+  high_confidence: number
+  low_confidence: number
+  page: number
+  per_page: number
+  pages: number
+}
+
+export interface NameCleanupApplyResult {
+  customer_id: number
+  old_name: string | null
+  new_name: string | null
+  reason: string
+  confidence: 'high' | 'low'
+}
+
+export interface NameCleanupSkipped {
+  customer_id: number
+  reason: string
+}
+
+export interface NameCleanupApplyResponse {
+  tenant_id: number
+  applied: NameCleanupApplyResult[]
+  skipped: NameCleanupSkipped[]
+  applied_count: number
+  skipped_count: number
+}
+
 export const customersApi = {
   list(filters: CustomersListFilters | string = '', page = 1, perPage = 50, segment = '') {
     // Backwards-compat: old positional signature `list(search, page, perPage, segment)`
@@ -303,5 +360,52 @@ export const customersApi = {
       method: 'POST',
       body: JSON.stringify({ delete_all: true }),
     })
+  },
+
+  // ── Name cleanup ───────────────────────────────────────────────
+  /**
+   * Preview customer names that would be changed by the bulk cleanup
+   * tool for the current tenant. Names already clean are NOT returned —
+   * the result is a list of *exceptions* the merchant needs to review.
+   */
+  nameCleanupPreview(page = 1, perPage = 500) {
+    const params = new URLSearchParams()
+    params.set('page', String(page))
+    params.set('per_page', String(perPage))
+    return apiCall<NameCleanupPreviewResponse>(
+      `/customers/name-cleanup/preview?${params}`,
+    )
+  },
+
+  /**
+   * Apply the cleanup verdicts approved by the merchant.
+   *
+   * Two modes (mutually exclusive — explicit ``items`` win):
+   *   - ``items`` = per-row selection from the preview modal.
+   *     Each item carries customer_id and the new_name to write
+   *     (null = clear the row).
+   *   - ``highConfidenceOnly = true`` = skip the modal entirely and
+   *     apply every high-confidence verdict in one shot. Used by
+   *     the "Apply high-confidence only" shortcut.
+   */
+  nameCleanupApply(payload: {
+    items?: Array<{
+      customer_id: number
+      new_name: string | null
+      reason?: string
+      confidence?: string
+    }>
+    highConfidenceOnly?: boolean
+  }) {
+    return apiCall<NameCleanupApplyResponse>(
+      '/customers/name-cleanup/apply',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          items: payload.items ?? null,
+          high_confidence_only: !!payload.highConfidenceOnly,
+        }),
+      },
+    )
   },
 }

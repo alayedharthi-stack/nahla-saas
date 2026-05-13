@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from core.customer_display import display_name_passthrough_or_fallback
+
 logger = logging.getLogger("nahla.automation_engine")
 
 # Automations older than this are not retried (event was too stale to be relevant)
@@ -1485,7 +1487,11 @@ async def _execute_action(
         "checkout_url", "cart_url", "tracking_url", "payment_url",
         "product_url", "reorder_url", "store_url",
     )
-    _customer_name_for_btn = customer.name or ""
+    # Greeting-name policy (May 2026): use Customer.name verbatim and
+    # only swap in the static fallback when the stored value is empty.
+    # Bad names get cleaned once via the bulk "تنظيف أسماء العملاء"
+    # admin tool — no runtime sanitisation in the template path.
+    _customer_name_for_btn = display_name_passthrough_or_fallback(customer.name)
     _store_name_for_btn    = _store_name_resolved
     _payload_for_btn: Dict[str, Any] = dict(event.payload or {})
     _has_dynamic_url_btn = False
@@ -2790,7 +2796,7 @@ async def _execute_interactive_step(
         or payload.get("checkout_id")
         or getattr(event, "id", None)
     )
-    customer_name = customer.name or "العميل"
+    customer_name = display_name_passthrough_or_fallback(customer.name)
     store_name = _resolve_store_name(db, tenant_id)
     language = (
         active_step.get("language")
@@ -3051,7 +3057,7 @@ async def _execute_ai_recovery_step(
         or payload.get("cart_url")
         or ""
     )
-    customer_name = customer.name or "العميل"
+    customer_name = display_name_passthrough_or_fallback(customer.name)
     store_name = _resolve_store_name(db, tenant_id)
     cart_total = payload.get("cart_total") or payload.get("total") or ""
 

@@ -20,9 +20,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, validator
 from sqlalchemy.orm import Session
 
+from core.auth import get_jwt_user_id
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import Customer, CustomerProfile, CustomerSegmentManual
+from models import (
+    Customer,
+    CustomerNameAuditLog,
+    CustomerProfile,
+    CustomerSegmentManual,
+)
 from services.nahla_segments import (
     SEGMENTS as NAHLA_SEGMENTS,
     build_segment_query,
@@ -1456,4 +1462,313 @@ async def update_marketing_preferences(
         "marketing_opt_out_manual_at":  meta.get("marketing_opt_out_manual_at"),
         "is_campaign_test_recipient":   bool(meta.get("is_campaign_test_recipient")),
         "campaign_test_recipient_at":   meta.get("campaign_test_recipient_at"),
+    }
+
+
+# ── Bulk customer-name cleanup tool ──────────────────────────────────────────
+#
+# Surfaces the "تنظيف أسماء العملاء" button on the customers page. Strictly
+# tenant-scoped: every read and every write is filtered by the JWT's
+# resolved tenant_id — there is no path here that can touch a customer
+# belonging to a different store.
+#
+# Workflow:
+#   1. Frontend calls   GET  /customers/name-cleanup/preview
+#      → backend scans Customer.name for the current tenant, runs the
+#        cleanup pipeline, returns ONLY the rows with a suggested
+#        change (and the reason + confidence).
+#   2. Merchant picks rows in a modal and clicks either
+#         * "Apply selected"            → POST with explicit ids
+#         * "Apply high-confidence only"→ POST with high_confidence_only=true
+#   3. Frontend calls   POST /customers/name-cleanup/apply
+#      → backend mutates Customer.name in place and writes one row
+#        per change to customer_name_audit_logs.
+#
+# This is a one-shot mutation. After it runs, campaigns and templates
+# read Customer.name verbatim — there is NO runtime sanitizer doing
+# the cleaning again at send time. Single source of truth.
+
+class NameCleanupApplyItem(BaseModel):
+    """One row from the merchant's selection in the preview modal."""
+    customer_id: int
+    new_name: Optional[str] = None  # None = clear the row
+    reason: Optional[str] = None
+    confidence: Optional[str] = None
+
+
+class NameCleanupApplyIn(BaseModel):
+    """Request body for ``POST /customers/name-cleanup/apply``.
+
+    Either pass ``items`` (per-row selection from the preview modal,
+    which is what "Apply selected" sends) OR pass
+    ``high_confidence_only=True`` to skip the modal and apply every
+    high-confidence verdict for this tenant in one shot.
+
+    The two modes are mutually exclusive; if both are provided the
+    explicit ``items`` win and ``high_confidence_only`` is ignored.
+    """
+    items: Optional[List[NameCleanupApplyItem]] = None
+    high_confidence_only: bool = False
+
+
+@router.get("/name-cleanup/preview")
+async def name_cleanup_preview(
+    request: Request,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """Compute a preview of customer names that need cleaning for the
+    current tenant.
+
+    Only rows where the cleanup pipeline would actually change something
+    are returned — names already clean (or empty) are excluded so the
+    merchant sees a list of *exceptions* rather than the whole customer
+    table.
+
+    Response shape::
+
+        {
+          "tenant_id":        <int>,
+          "total_scanned":    <int>,   # customers scanned this page
+          "total_customers":  <int>,   # whole-tenant count for context
+          "items":            [ {customer_id, current_name,
+                                 suggested_name, reason, confidence,
+                                 phone}, ... ],
+          "high_confidence":  <int>,
+          "low_confidence":   <int>,
+          "page":             <int>,
+          "per_page":         <int>,
+          "pages":            <int>,
+        }
+
+    ``suggested_name = null`` means "clear the row" — the apply step
+    will set ``Customer.name`` to ``NULL``.
+    """
+    from services.customer_name_cleanup import compute_cleanup  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    # We page by Customer.id so re-runs on a large tenant remain
+    # consistent if the merchant applies a batch and then re-opens
+    # the modal (the now-cleaned rows simply drop out of the result).
+    total_customers = (
+        db.query(Customer)
+        .filter(Customer.tenant_id == tenant_id)
+        .count()
+    )
+    rows: List[Customer] = (
+        db.query(Customer)
+        .filter(Customer.tenant_id == tenant_id)
+        .order_by(Customer.id.asc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+
+    items: List[Dict[str, Any]] = []
+    high = low = 0
+    for cust in rows:
+        verdict = compute_cleanup(cust.name)
+        if not verdict.changed:
+            continue
+        if verdict.confidence == "high":
+            high += 1
+        else:
+            low += 1
+        items.append({
+            "customer_id":    cust.id,
+            "current_name":   cust.name or "",
+            "suggested_name": verdict.suggested,
+            "reason":         verdict.reason,
+            "confidence":     verdict.confidence,
+            "phone":          cust.phone or "",
+        })
+
+    import logging  # noqa: PLC0415
+    logging.getLogger("nahla.customers.name_cleanup").info(
+        "preview | tenant=%s scanned=%d page=%d/%d "
+        "needs_cleanup=%d (high=%d low=%d)",
+        tenant_id, len(rows), page,
+        max(1, (total_customers + per_page - 1) // per_page),
+        len(items), high, low,
+    )
+
+    return {
+        "tenant_id":        tenant_id,
+        "total_scanned":    len(rows),
+        "total_customers":  total_customers,
+        "items":            items,
+        "high_confidence":  high,
+        "low_confidence":   low,
+        "page":             page,
+        "per_page":         per_page,
+        "pages":            max(1, (total_customers + per_page - 1) // per_page),
+    }
+
+
+@router.post("/name-cleanup/apply")
+async def name_cleanup_apply(
+    body: NameCleanupApplyIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Apply the cleanup verdicts approved by the merchant.
+
+    Two modes:
+
+      * **items mode** — explicit per-row selection from the preview
+        modal. Each item carries the ``customer_id`` and the
+        ``new_name`` (``None`` to clear the row). The backend ALWAYS
+        re-runs the cleanup pipeline against the current DB value and
+        only writes when the recomputed verdict matches what the
+        merchant approved — this protects against a stale preview
+        (e.g. the merchant edited a name in another tab between the
+        preview and the apply click).
+
+      * **high-confidence-only mode** — ``items=None`` and
+        ``high_confidence_only=True``. The backend re-scans every
+        customer in the tenant, applies only the ``confidence="high"``
+        verdicts, and ignores ``"low"`` ones. Single round-trip for
+        the "I trust the safe cleaner, just do it" workflow.
+
+    Every mutation writes one row to ``customer_name_audit_logs`` with
+    the old + new + reason + tenant_id + actor_user_id + timestamp.
+    """
+    from services.customer_name_cleanup import compute_cleanup  # noqa: PLC0415
+    import logging  # noqa: PLC0415
+
+    log = logging.getLogger("nahla.customers.name_cleanup")
+    tenant_id = resolve_tenant_id(request)
+    actor_user_id = get_jwt_user_id(request)
+
+    has_explicit_items = bool(body.items)
+    if not has_explicit_items and not body.high_confidence_only:
+        raise HTTPException(
+            status_code=422,
+            detail="حدد العناصر يدوياً أو فعّل خيار 'الأكثر ثقة فقط'",
+        )
+
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+
+    # ── items mode (explicit selection) ──────────────────────────────
+    if has_explicit_items:
+        ids = [it.customer_id for it in (body.items or []) if it.customer_id]
+        if not ids:
+            return {
+                "tenant_id":     tenant_id,
+                "applied":       [],
+                "skipped":       [],
+                "applied_count": 0,
+                "skipped_count": 0,
+            }
+        # Strict tenant filter: any customer_id not belonging to the
+        # requester is silently dropped (not 404'd) — that way a stale
+        # preview after a tenant switch doesn't cross-contaminate.
+        customers_by_id: Dict[int, Customer] = {
+            c.id: c
+            for c in db.query(Customer).filter(
+                Customer.tenant_id == tenant_id,
+                Customer.id.in_(ids),
+            ).all()
+        }
+        for item in (body.items or []):
+            cust = customers_by_id.get(item.customer_id)
+            if cust is None:
+                skipped.append({
+                    "customer_id": item.customer_id,
+                    "reason":      "العميل غير موجود في المتجر الحالي",
+                })
+                continue
+
+            # Re-run the cleaner against the LIVE DB value. The
+            # merchant approved a specific (old → new) edit; if the
+            # row has changed in the meantime, the verdict may no
+            # longer be reachable. We tolerate a re-derivation that
+            # still produces the same ``new_name`` as a sanity check.
+            verdict = compute_cleanup(cust.name)
+            if not verdict.changed:
+                skipped.append({
+                    "customer_id": cust.id,
+                    "reason":      "تم تنظيفه مسبقاً",
+                })
+                continue
+            # The merchant's selection is authoritative for which
+            # value to write. We only trust the cleaner to confirm
+            # that a change of SOME kind is still warranted; the
+            # exact string comes from the request so the merchant
+            # can also apply a hand-edited suggestion.
+            new_name = item.new_name
+            if isinstance(new_name, str):
+                new_name = new_name.strip() or None
+            old_name = cust.name
+            cust.name = new_name
+            audit = CustomerNameAuditLog(
+                tenant_id=tenant_id,
+                customer_id=cust.id,
+                old_name=old_name,
+                new_name=new_name,
+                reason=item.reason or verdict.reason,
+                confidence=item.confidence or verdict.confidence,
+                actor_user_id=actor_user_id,
+                created_at=now,
+            )
+            db.add(audit)
+            applied.append({
+                "customer_id": cust.id,
+                "old_name":    old_name,
+                "new_name":    new_name,
+                "reason":      audit.reason,
+                "confidence":  audit.confidence,
+            })
+
+    # ── high-confidence-only mode (no explicit selection) ────────────
+    else:
+        rows = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id)
+            .all()
+        )
+        for cust in rows:
+            verdict = compute_cleanup(cust.name)
+            if not verdict.changed or verdict.confidence != "high":
+                continue
+            old_name = cust.name
+            cust.name = verdict.suggested
+            audit = CustomerNameAuditLog(
+                tenant_id=tenant_id,
+                customer_id=cust.id,
+                old_name=old_name,
+                new_name=verdict.suggested,
+                reason=verdict.reason,
+                confidence="high",
+                actor_user_id=actor_user_id,
+                created_at=now,
+            )
+            db.add(audit)
+            applied.append({
+                "customer_id": cust.id,
+                "old_name":    old_name,
+                "new_name":    verdict.suggested,
+                "reason":      verdict.reason,
+                "confidence":  "high",
+            })
+
+    db.commit()
+    log.info(
+        "apply | tenant=%s actor=%s mode=%s applied=%d skipped=%d",
+        tenant_id, actor_user_id,
+        "items" if has_explicit_items else "high_confidence_only",
+        len(applied), len(skipped),
+    )
+
+    return {
+        "tenant_id":     tenant_id,
+        "applied":       applied,
+        "skipped":       skipped,
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
     }

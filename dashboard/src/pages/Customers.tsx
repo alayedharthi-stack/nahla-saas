@@ -25,6 +25,9 @@ import {
   RotateCcw,
   ShieldOff,
   Filter,
+  Sparkles,
+  ShieldCheck,
+  Loader2,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -34,6 +37,7 @@ import {
   customersApi,
   type CustomerRecord,
   type CustomerSegmentMeta,
+  type NameCleanupPreviewItem,
 } from '../api/customers'
 
 function segmentVariant(
@@ -107,6 +111,34 @@ export default function Customers() {
   const [deleteModal, setDeleteModal] = useState<'selected' | 'all' | null>(null)
   const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [deleteLoading, setDeleteLoading] = useState(false)
+
+  // Name-cleanup tool (the "تنظيف أسماء العملاء" modal).
+  //
+  // Lives in this component because the preview is opt-in and we don't
+  // want to add cost to the main customers list load. State shape:
+  //   * ``nameCleanupOpen``        — is the modal mounted
+  //   * ``nameCleanupLoading``     — fetching the preview
+  //   * ``nameCleanupApplying``    — POSTing the apply call
+  //   * ``nameCleanupItems``       — the candidate list (only changed rows)
+  //   * ``nameCleanupSelected``    — per-row toggle (default = ON for high
+  //                                  confidence, OFF for low)
+  //   * ``nameCleanupSummary``     — counts from the preview response
+  //   * ``nameCleanupResult``      — success banner after apply
+  const [nameCleanupOpen, setNameCleanupOpen] = useState(false)
+  const [nameCleanupLoading, setNameCleanupLoading] = useState(false)
+  const [nameCleanupApplying, setNameCleanupApplying] = useState(false)
+  const [nameCleanupItems, setNameCleanupItems] = useState<NameCleanupPreviewItem[]>([])
+  const [nameCleanupSelected, setNameCleanupSelected] = useState<Set<number>>(new Set())
+  const [nameCleanupSummary, setNameCleanupSummary] = useState<{
+    totalCustomers: number
+    highConfidence: number
+    lowConfidence: number
+  } | null>(null)
+  const [nameCleanupResult, setNameCleanupResult] = useState<{
+    applied: number
+    skipped: number
+  } | null>(null)
+  const [nameCleanupError, setNameCleanupError] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -232,6 +264,128 @@ export default function Customers() {
     }
   }
 
+  // ── Name-cleanup handlers ─────────────────────────────────────────
+  // Each handler is wrapped in try/finally so the modal never gets
+  // stuck in a loading state on a transient network error.
+  const openNameCleanup = async () => {
+    setNameCleanupOpen(true)
+    setNameCleanupResult(null)
+    setNameCleanupError('')
+    setNameCleanupLoading(true)
+    try {
+      const res = await customersApi.nameCleanupPreview()
+      setNameCleanupItems(res.items)
+      setNameCleanupSummary({
+        totalCustomers: res.total_customers,
+        highConfidence: res.high_confidence,
+        lowConfidence: res.low_confidence,
+      })
+      // Default selection: every high-confidence row pre-checked. Low
+      // confidence rows stay unchecked so the merchant has to opt in.
+      setNameCleanupSelected(
+        new Set(
+          res.items
+            .filter(it => it.confidence === 'high')
+            .map(it => it.customer_id),
+        ),
+      )
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'تعذر تحميل المعاينة'
+      setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      setNameCleanupItems([])
+      setNameCleanupSummary(null)
+    } finally {
+      setNameCleanupLoading(false)
+    }
+  }
+
+  const closeNameCleanup = () => {
+    if (nameCleanupApplying) return
+    setNameCleanupOpen(false)
+    setNameCleanupItems([])
+    setNameCleanupSelected(new Set())
+    setNameCleanupSummary(null)
+    setNameCleanupResult(null)
+    setNameCleanupError('')
+  }
+
+  const toggleCleanupRow = (id: number) => {
+    setNameCleanupSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleCleanupSelectAll = () => {
+    if (nameCleanupSelected.size === nameCleanupItems.length) {
+      setNameCleanupSelected(new Set())
+    } else {
+      setNameCleanupSelected(new Set(nameCleanupItems.map(it => it.customer_id)))
+    }
+  }
+
+  const applyCleanupSelected = async () => {
+    if (nameCleanupSelected.size === 0) return
+    setNameCleanupApplying(true)
+    setNameCleanupError('')
+    try {
+      const items = nameCleanupItems
+        .filter(it => nameCleanupSelected.has(it.customer_id))
+        .map(it => ({
+          customer_id: it.customer_id,
+          new_name: it.suggested_name,
+          reason: it.reason,
+          confidence: it.confidence,
+        }))
+      const res = await customersApi.nameCleanupApply({ items })
+      setNameCleanupResult({
+        applied: res.applied_count,
+        skipped: res.skipped_count,
+      })
+      // Drop the just-applied rows from the preview list so the
+      // merchant can keep working on the leftovers without a fresh
+      // round-trip.
+      const appliedIds = new Set(res.applied.map(a => a.customer_id))
+      setNameCleanupItems(prev => prev.filter(it => !appliedIds.has(it.customer_id)))
+      setNameCleanupSelected(new Set())
+      load()
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'تعذر تطبيق التنظيف'
+      setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    } finally {
+      setNameCleanupApplying(false)
+    }
+  }
+
+  const applyCleanupHighConfidence = async () => {
+    setNameCleanupApplying(true)
+    setNameCleanupError('')
+    try {
+      const res = await customersApi.nameCleanupApply({
+        highConfidenceOnly: true,
+      })
+      setNameCleanupResult({
+        applied: res.applied_count,
+        skipped: res.skipped_count,
+      })
+      const appliedIds = new Set(res.applied.map(a => a.customer_id))
+      setNameCleanupItems(prev => prev.filter(it => !appliedIds.has(it.customer_id)))
+      setNameCleanupSelected(prev => {
+        const next = new Set(prev)
+        appliedIds.forEach(id => next.delete(id))
+        return next
+      })
+      load()
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'تعذر تطبيق التنظيف'
+      setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+    } finally {
+      setNameCleanupApplying(false)
+    }
+  }
+
   const allCurrentSelected = customers.length > 0 && selectedIds.size === customers.length
   const someSelected = selectedIds.size > 0 && !allCurrentSelected
 
@@ -242,6 +396,14 @@ export default function Customers() {
         subtitle="إدارة وتصنيف العملاء"
         action={
           <div className="flex items-center gap-2">
+            <button
+              onClick={openNameCleanup}
+              className="btn-secondary text-sm flex items-center gap-2"
+              title="إزالة الكلمات التجارية ('عميل'، 'customer'...) وأرقام الجوال من حقل الاسم — يعمل على المتجر الحالي فقط"
+            >
+              <Sparkles className="w-4 h-4" />
+              تنظيف أسماء العملاء
+            </button>
             <button
               onClick={() => navigate('/customers/import')}
               className="btn-secondary text-sm flex items-center gap-2"
@@ -559,6 +721,240 @@ export default function Customers() {
           </div>
         )}
       </div>
+
+      {/* Name-cleanup Modal — "تنظيف أسماء العملاء"
+          Shows the preview of customer names that the cleaner thinks
+          need work, with per-row checkboxes and two apply buttons
+          ("Apply selected" / "Apply high-confidence only"). Strictly
+          scoped to the current tenant on the backend; this UI just
+          shows whatever the preview endpoint returned. */}
+      {nameCleanupOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-9 h-9 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">
+                    تنظيف أسماء العملاء
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    معاينة الأسماء المُقترحة قبل التطبيق — يعمل فقط على عملاء المتجر الحالي
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={closeNameCleanup}
+                disabled={nameCleanupApplying}
+                className="text-slate-400 hover:text-slate-600 disabled:opacity-40"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+              {nameCleanupLoading && (
+                <div className="flex flex-col items-center justify-center py-12 text-slate-500 text-sm gap-3">
+                  <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
+                  جاري فحص أسماء العملاء...
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-xs p-3">
+                  {nameCleanupError}
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupResult && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-sm p-3 flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5" />
+                  <span>
+                    تم تطبيق {nameCleanupResult.applied} تغيير
+                    {nameCleanupResult.skipped > 0
+                      ? ` — تخطّينا ${nameCleanupResult.skipped} (تم تنظيفها مسبقاً أو غير موجودة)`
+                      : ''}
+                  </span>
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupSummary && (
+                <div className="grid grid-cols-3 gap-3 text-xs">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-slate-500">إجمالي العملاء</div>
+                    <div className="text-lg font-semibold text-slate-800 mt-1">
+                      {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                    <div className="text-emerald-700">ثقة عالية</div>
+                    <div className="text-lg font-semibold text-emerald-800 mt-1">
+                      {nameCleanupSummary.highConfidence.toLocaleString('ar-EG')}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                    <div className="text-amber-700">تحتاج مراجعة</div>
+                    <div className="text-lg font-semibold text-amber-800 mt-1">
+                      {nameCleanupSummary.lowConfidence.toLocaleString('ar-EG')}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupItems.length === 0 && !nameCleanupError && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 text-slate-600 text-sm p-6 text-center">
+                  {nameCleanupResult
+                    ? 'لا توجد أسماء أخرى تحتاج تنظيفاً.'
+                    : 'جميع أسماء العملاء في هذا المتجر تبدو نظيفة — لا يوجد ما يحتاج إلى تغيير.'}
+                </div>
+              )}
+
+              {!nameCleanupLoading && nameCleanupItems.length > 0 && (
+                <div className="rounded-lg border border-slate-200 overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs">
+                    <button
+                      onClick={toggleCleanupSelectAll}
+                      className="flex items-center gap-2 text-slate-700 hover:text-brand-600"
+                    >
+                      {nameCleanupSelected.size === nameCleanupItems.length ? (
+                        <CheckSquare className="w-4 h-4 text-brand-600" />
+                      ) : (
+                        <Square className="w-4 h-4 text-slate-400" />
+                      )}
+                      <span>
+                        {nameCleanupSelected.size === nameCleanupItems.length
+                          ? 'إلغاء تحديد الكل'
+                          : 'تحديد الكل'}
+                      </span>
+                    </button>
+                    <span className="text-slate-500">
+                      {nameCleanupSelected.size} / {nameCleanupItems.length} محدد
+                    </span>
+                  </div>
+                  <div className="max-h-[40vh] overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-white border-b border-slate-200">
+                        <tr className="text-slate-500 text-[11px]">
+                          <th className="w-10 py-2"></th>
+                          <th className="text-right px-3 py-2">الاسم الحالي</th>
+                          <th className="text-right px-3 py-2">المقترح</th>
+                          <th className="text-right px-3 py-2">السبب</th>
+                          <th className="text-right px-3 py-2 w-20">الثقة</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {nameCleanupItems.map((it) => {
+                          const checked = nameCleanupSelected.has(it.customer_id)
+                          const isHigh = it.confidence === 'high'
+                          return (
+                            <tr
+                              key={it.customer_id}
+                              className="border-b border-slate-100 hover:bg-slate-50/60"
+                            >
+                              <td className="py-2 text-center">
+                                <button
+                                  onClick={() => toggleCleanupRow(it.customer_id)}
+                                  className="text-slate-400 hover:text-brand-600"
+                                >
+                                  {checked ? (
+                                    <CheckSquare className="w-4 h-4 text-brand-600" />
+                                  ) : (
+                                    <Square className="w-4 h-4" />
+                                  )}
+                                </button>
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="font-medium text-slate-800">
+                                  {it.current_name || <span className="text-slate-400">—</span>}
+                                </div>
+                                {it.phone && (
+                                  <div dir="ltr" className="text-[10px] text-slate-400 mt-0.5">
+                                    {it.phone}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                {it.suggested_name ? (
+                                  <span className="font-medium text-slate-800">
+                                    {it.suggested_name}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-rose-600 font-medium">
+                                    <Trash2 className="w-3 h-3" />
+                                    مسح الاسم
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-slate-600 max-w-[260px]">
+                                {it.reason || '—'}
+                              </td>
+                              <td className="px-3 py-2">
+                                <Badge variant={isHigh ? 'green' : 'amber'}>
+                                  {isHigh ? 'عالية' : 'مراجعة'}
+                                </Badge>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {!nameCleanupLoading && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50/60 text-blue-800 text-[11px] p-3 leading-relaxed">
+                  <Info className="w-3.5 h-3.5 inline me-1" />
+                  بعد التطبيق، تستخدم الحملات الاسم المحفوظ مباشرة — إذا أصبح الاسم فارغاً تُستخدم
+                  العبارة الافتراضية &quot;عميلنا الغالي&quot;. كل التغييرات تُحفظ في سجل تدقيق
+                  داخلي قابل للمراجعة.
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-6 py-3 border-t border-slate-100 bg-slate-50/60">
+              <button
+                onClick={closeNameCleanup}
+                disabled={nameCleanupApplying}
+                className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40"
+              >
+                إغلاق
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={applyCleanupHighConfidence}
+                  disabled={
+                    nameCleanupApplying
+                    || nameCleanupLoading
+                    || (nameCleanupSummary?.highConfidence ?? 0) === 0
+                  }
+                  className="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5 disabled:opacity-40"
+                  title="تطبيق كل المقترحات عالية الثقة دون مراجعة فردية"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  تطبيق ذوي الثقة العالية فقط
+                </button>
+                <button
+                  onClick={applyCleanupSelected}
+                  disabled={nameCleanupApplying || nameCleanupSelected.size === 0}
+                  className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5 disabled:opacity-40"
+                >
+                  {nameCleanupApplying ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <CheckSquare className="w-3.5 h-3.5" />
+                  )}
+                  تطبيق المحدد ({nameCleanupSelected.size})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Customer Modal */}
       {showAdd && (

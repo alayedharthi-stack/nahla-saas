@@ -1694,7 +1694,18 @@ async def _dispatch_queued_rows(
 
             phone = row.customer_phone_e164
             customer = customers_by_phone.get(phone)
-            customer_name = (customer.name if customer else None) or "العميل"
+            # Greeting name policy (May 2026):
+            #   * Use Customer.name verbatim — no runtime mutation.
+            #   * The merchant cleans bad names once via the bulk
+            #     "تنظيف أسماء العملاء" tool on the customers page.
+            #   * If the stored name is empty/null, fall back to
+            #     the static greeting (``عميلنا الغالي``).
+            # Anything that survives in the DB at send time is what
+            # the merchant explicitly approved — we trust it.
+            from core.customer_display import display_name_passthrough_or_fallback  # noqa: PLC0415
+            customer_name = display_name_passthrough_or_fallback(
+                customer.name if customer else None
+            )
 
             try:
                 # ── Coupon resolution rule ────────────────────────────

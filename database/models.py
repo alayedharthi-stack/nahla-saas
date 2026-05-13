@@ -744,6 +744,54 @@ class AuditLog(Base):
     tenant = relationship('Tenant')
 
 
+class CustomerNameAuditLog(Base):
+    """Row-level audit trail for the bulk customer-name cleanup tool.
+
+    One row per ``Customer.name`` mutation triggered by the
+    "تنظيف أسماء العملاء" button on the customers page. The cleanup
+    is destructive — once applied, the previous value is overwritten
+    on ``customers.name`` — so this table is the only place to look
+    when a merchant asks "what did my customer's name USED to be?".
+
+    Scope:
+      * Always tenant-scoped: the cleanup endpoint refuses to mutate
+        customers belonging to a different tenant, and rows here
+        always carry the requesting tenant_id.
+      * ``new_name`` is nullable because a high-confidence clean
+        verdict can be "clear the row" (phone-only, pure noise,
+        religious phrase). Empty-string and ``NULL`` mean the same
+        thing on read; we store ``NULL`` for clarity.
+      * ``reason`` is the Arabic explanation shown in the preview
+        modal — kept verbatim so support can quote it back.
+    """
+    __tablename__ = 'customer_name_audit_logs'
+    __table_args__ = (
+        Index(
+            'ix_customer_name_audit_tenant_created',
+            'tenant_id', 'created_at',
+        ),
+        Index(
+            'ix_customer_name_audit_customer',
+            'customer_id',
+        ),
+    )
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    old_name = Column(String, nullable=True)
+    new_name = Column(String, nullable=True)
+    reason = Column(String, nullable=True)
+    confidence = Column(String, nullable=True)   # "high" | "low"
+    actor_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    tenant = relationship('Tenant')
+    customer = relationship('Customer')
+
+
 # ── Customer Intelligence Layer ───────────────────────────────────────────────
 
 class CustomerProfile(Base):

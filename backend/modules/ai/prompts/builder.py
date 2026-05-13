@@ -45,7 +45,13 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
     sections.append(store_section)
 
     # ── 3. Customer profile ───────────────────────────────────────────────────
-    customer_name     = ctx.get("customer_name", "")
+    # Read the name verbatim from context — the merchant-controlled
+    # bulk cleanup tool on the customers page is the single source
+    # of truth (see core/customer_display.py module docstring). If
+    # the name is empty/whitespace we pass an empty string and the
+    # LLM falls back to a tone-appropriate greeting on its own.
+    raw_customer_name = ctx.get("customer_name", "")
+    customer_name     = (raw_customer_name or "").strip() if isinstance(raw_customer_name, str) else ""
     segment           = ctx.get("segment", "new")
     is_returning      = ctx.get("is_returning", False)
     total_orders      = ctx.get("total_orders", 0)
