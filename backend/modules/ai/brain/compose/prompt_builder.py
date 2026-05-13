@@ -3,71 +3,116 @@ brain/compose/prompt_builder.py
 ───────────────────────────────
 Short prompt builder for MerchantBrain LLM fallback.
 
-Unlike the legacy prompt builder, this module does not try to encode business
-logic as dozens of patch rules.  It only defines:
-  - the role
-  - the goal
-  - the tone
-  - one general coupon / discount rule
-  - one anti-repetition rule
-  - the requirement to follow the current customer stage
+Phase 1 of the prompt-pipeline refactor (see the architecture note
+"افصل System Prompt عن Knowledge Base"). The prompt is now assembled
+in four clearly-separated, priority-ordered blocks:
 
-The actual conversational context is injected as structured `BrainReplyState`.
+    1. PERSONA               — who Nahla is (voice, identity)
+    2. ⚠️ HIGH PRIORITY      — STYLE + POLICY + FORBIDDEN
+                                (always rendered, overrides everything else)
+    3. KNOWLEDGE             — facts the assistant can cite (NO behavior)
+    4. TOOLS                 — Product Resolver + Media Library vocabulary
+    5. DECISION CONTEXT      — this-turn intent / stage / goal
+    6. BRAIN STATE JSON      — full structured world model
+
+The behavior contract (length, escalation, contact-release, etc.) lives
+in block #2 only. The knowledge base is reduced to facts. This is the
+architectural fix for the long-standing leak where merchants pasted
+behavior rules into the KB textarea and shifted Nahla's voice.
 """
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
+from typing import Any, Dict
 
 from modules.ai.prompts.nahla_persona import nahla_persona_system_prompt
+from modules.ai.prompts.high_priority_layer import build_high_priority_block
+from modules.ai.prompts.tenant_overlay import build_tenant_overlay_split
 
 from core.store_display import clean_store_name
 
 from ..types import BrainReplyState
 
+_log = logging.getLogger("nahla.ai.prompt")
+
+
+def _approx_tokens(text: str) -> int:
+    """Cheap char/4 token estimator — close enough for log gauges.
+
+    We intentionally don't pull in tiktoken/anthropic-tokenizer here:
+    the goal is to log relative block sizes for visibility, not to
+    enforce a hard limit. Char-per-token ratios are ~3.5-4 for Arabic
+    in BPE tokenizers, so this floors slightly low which is fine.
+    """
+    return max(0, len(text or "") // 4)
+
 
 def build_brain_reply_prompt(state: BrainReplyState) -> str:
     """Compose the LLM prompt for Brain's `compose_reply` fallback.
 
-    Layering (top → bottom):
-      1. Nahla persona — the canonical voice / emoji rules (shared with
-         the legacy WhatsApp AI path so both engines sound identical).
-      2. Tenant overlay — merchant-specific tone / rules, allowed to
-         override the default persona.
-      3. Brain-specific operating rules — stage following, anti-repeat,
-         coupon discipline, no-hallucination guard.
-      4. Structured BrainState JSON — the actual conversation context.
+    Layering (top → bottom) — strict priority order:
+
+      1. Nahla persona            — base identity / voice
+      2. High-Priority Style+Policy banner
+                                  — platform-wide baseline + merchant
+                                    overrides extracted from ai_settings.
+                                    Always present; explicitly outranks
+                                    the knowledge base when they conflict.
+      3. Knowledge base (Facts)   — merchant-typed facts, with the
+                                    Salla-wins-on-price reminder.
+                                    Behavior rules are NOT here anymore;
+                                    they were lifted into block #2.
+      4. Tools (libraries)        — Product Resolver + Media Library
+                                    vocabulary so the LLM emits
+                                    [PRODUCT:...] / [MEDIA_KEY:...]
+                                    markers instead of guessing URLs.
+      5. Brain-this-turn rules    — slim residual operating rules
+                                    (stage discipline, coupon
+                                    discipline, anti-repeat). Most of
+                                    the old block moved up into #2.
+      6. BrainStateJSON           — the structured world model.
     """
     store_name = clean_store_name((state.store_name or "").strip()) or "المتجر"
     tone = _tone_instruction(state.tone)
 
-    # Strip tenant_overlay from the JSON to avoid duplication — it is
-    # rendered separately above the state block for higher priority.
+    # Tenant overlay is now split into structured buckets. The legacy
+    # `state.tenant_overlay` string is parsed via the merchant_context
+    # ai_settings on the way in, so the pipeline doesn't have to change.
+    settings_for_overlay = _extract_ai_settings_from_state(state)
+    overlay_buckets = build_tenant_overlay_split(settings_for_overlay)
+
     state_dict = asdict(state)
-    overlay_text = state_dict.pop("tenant_overlay", "")
+    # Drop the legacy concatenated overlay — it would duplicate the
+    # split buckets below.
+    state_dict.pop("tenant_overlay", None)
     brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
 
-    parts = [nahla_persona_system_prompt(store_name=store_name)]
+    # ── BLOCK 1: Persona ──────────────────────────────────────────────────
+    persona_block = nahla_persona_system_prompt(store_name=store_name)
 
-    if overlay_text:
-        parts.append(overlay_text)
+    # ── BLOCK 2: HIGH PRIORITY (Style + Policy + Forbidden) ───────────────
+    high_priority_block = build_high_priority_block(
+        settings_for_overlay,
+        store_name=store_name,
+    )
 
-    # Surface manual coupons + AI media library as a readable Arabic block
-    # *before* the JSON dump. Even when the same data is present in
-    # ``merchant_context`` lower down, this block keeps the LLM's
-    # attention on title / tags / usage_context so it picks the right
-    # asset by meaning instead of guessing from a numeric id.
+    # Assistant identity (name + role) sits with the persona, not with
+    # behavior rules. It's a fact, not a constraint.
+    identity_block = overlay_buckets.get("identity", "")
+
+    # ── BLOCK 3: Knowledge (Facts only) ───────────────────────────────────
+    kb_block = overlay_buckets.get("facts", "")
+
+    # ── BLOCK 4: Tools — libraries vocabulary ─────────────────────────────
     try:
         from core.ai_libraries import format_libraries_for_prompt  # noqa: PLC0415
-        libraries_block = format_libraries_for_prompt(state.merchant_context or {})
+        tools_block = format_libraries_for_prompt(state.merchant_context or {}) or ""
     except Exception:  # noqa: BLE001 — never let formatting crash the prompt
-        libraries_block = ""
-    if libraries_block:
-        parts.append(libraries_block)
+        tools_block = ""
 
-    # Surface the four "must-have" fields the decision pipeline guarantees
-    # — intent, stage, current product, response goal — so the LLM never
-    # has to guess WHY it's being asked to compose this turn.
+    # ── BLOCK 5: This-turn decision context + slim residual rules ────────
     selected_title = ""
     if isinstance(state.selected_product, dict):
         selected_title = str(state.selected_product.get("title") or "")
@@ -81,9 +126,6 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "تشخيص نية العميل من نص الرسالة وحدها."
     )
 
-    # Autopilot-aware coupon priority guidance. Both modes still ALLOW
-    # manual coupons — the difference is which source GPT reaches for
-    # first when the customer asks for a discount.
     autopilot_on = bool(
         (state.merchant_context or {})
         .get("brain_profile", {})
@@ -96,7 +138,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "إذا لم يقدّم BrainState كوبوناً تلقائياً مناسباً ولزم الأمر، "
             "يمكنك استخدام كود من merchant_context.manual_coupons "
             "(فقط من القائمة، بدون اختراع، وبما يطابق usage_context). "
-            "اختاري الأنسب بحسب usage_context أو الأقل priority.\n"
+            "اختاري الأنسب بحسب usage_context أو الأقل priority."
         )
     else:
         coupon_priority_rule = (
@@ -105,11 +147,13 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "merchant_context.manual_coupons — هذه هي المصدر الوحيد "
             "للكوبونات في هذا الوضع. اختاري الأنسب بحسب usage_context "
             "أو الأقل priority. لا تخترعي كوبونات ولا تعدّلي على الكود "
-            "ولا ترسلي كوبوناً غير موجود في القائمة.\n"
+            "ولا ترسلي كوبوناً غير موجود في القائمة."
         )
 
-    parts.append(
-        decision_block + "\n\n"
+    # The residual rules here are the few that depend on per-turn
+    # context (stage, autopilot mode, BrainStateJSON keys). Everything
+    # else moved up into the High-Priority block.
+    brain_residual_rules = (
         "## قواعد تشغيل Brain لهذه الجولة\n"
         f"- النبرة المطلوبة لهذا المتجر: {tone}.\n"
         "- اتبعي المرحلة (stage) والخطوة المقترحة التالية (recommended_next_step) "
@@ -120,40 +164,110 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         "- لا تعرضي خصماً أو كوبوناً إلا إذا أظهر BrainState أن الوقت "
         "مناسب أو طلب العميل خصماً بوضوح. (عند ذكر الخصم استخدمي 🎁 "
         "بحد أقصى مرة واحدة في الرسالة.)\n"
-        + coupon_priority_rule +
-        "- 📎 مكتبة الوسائط: عند الحاجة لإرفاق صورة/فيديو/ملف من "
-        "merchant_context.ai_media_library (مثل باركود التحويل البنكي، "
-        "صورة منتج، PDF تعريفي) أضيفي في نهاية ردك السطر الخاص "
-        "[MEDIA:<id>] حيث <id> هو الرقم الموجود في قسم \"مكتبة وسائط "
-        "الذكاء\" أعلاه. اختاري الوسيط بناءً على title / tags / "
-        "usage_context وليس بناءً على رقم id فقط. لا تلصقي الرابط "
-        "داخل النص ولا تذكري file_url ولا storage_path ولا أي مسار "
-        "ملف — النظام يرسل الملف عبر واتساب تلقائياً. لا ترفقي وسيطاً "
-        "غير موجود في القائمة، ولا تستخدمي أكثر من ملفين في الرسالة "
-        "الواحدة.\n"
-        "- 🚫 ممنوع تماماً مشاركة روابط ملفات الوسائط الداخلية "
-        "(file_url, storage_path, /api/intelligence-libraries/...) "
-        "مع العميل تحت أي ظرف — هذه روابط داخلية للنظام فقط.\n"
-        "- 💳 إذا سأل العميل عن: حساب البنك، الراجحي، الأهلي، الآيبان، "
-        "IBAN، باركود التحويل، QR، بيانات الدفع، تحويل بنكي، أو طلب صراحة "
-        "أن نرسل له معلومات الدفع — ابحثي **أولاً** في "
-        "merchant_context.ai_media_library عن وسيط له tags مثل "
-        "[تحويل / بنك / دفع / باركود / آيبان / راجحي / qr] ثم استخدمي "
-        "[MEDIA:<id>] لإرفاقه. **لا** ترسلي رد فاضي مثل \"تواصل مع المتجر\" "
-        "أو \"هذه وسائل التواصل\" أو \"سأحوّلك للفريق\" إذا كان الوسيط "
-        "متاحاً — هذا يفقد العميل الثقة. الرد الصحيح: نص قصير ودود "
-        "(\"أكيد 🌷 تفضل باركود التحويل\") + [MEDIA:<id>].\n"
+        f"{coupon_priority_rule}\n"
         "- إذا كانت المعلومة ناقصة، اسألي سؤال متابعة واحداً فقط، قصيراً وواضحاً.\n"
         "- لا تخترعي حقائق غير موجودة في known_facts أو selected_product.\n"
-        "- اجعلي ردك قصيراً ومناسباً لواتساب.\n\n"
-        "BrainStateJSON:\n"
-        f"{brain_state_json}\n\n"
-        "إذا كانت conversation_summary أو customer_memory أو store_knowledge "
-        "موجودة فاستخدميها لفهم السياق واقتراح الخطوة التجارية التالية، "
-        "لكن لا تذكري أي معلومة غير موجودة فيها."
+        "- اجعلي ردك قصيراً ومناسباً لواتساب (راجع HIGH PRIORITY أعلاه)."
     )
 
-    return "\n\n".join(parts)
+    # ── Assemble ──────────────────────────────────────────────────────────
+    parts: list[str] = [persona_block, high_priority_block]
+    if identity_block:
+        parts.append(identity_block)
+    if kb_block:
+        parts.append(kb_block)
+    if tools_block:
+        parts.append(tools_block)
+    parts.append(decision_block)
+    parts.append(brain_residual_rules)
+    parts.append(f"BrainStateJSON:\n{brain_state_json}\n\n"
+                 "إذا كانت conversation_summary أو customer_memory أو store_knowledge "
+                 "موجودة فاستخدميها لفهم السياق واقتراح الخطوة التجارية التالية، "
+                 "لكن لا تذكري أي معلومة غير موجودة فيها.")
+
+    final_prompt = "\n\n".join(parts)
+
+    # ── Structured log ────────────────────────────────────────────────────
+    # Emits per-block sizes so we can see (a) when the KB grows huge,
+    # (b) when style overrides are missing for a merchant, (c) the
+    # rough token budget consumed before the LLM call. Cheap (char
+    # len + division), single INFO line per turn — opt-in to extract
+    # via `[PROMPT_LAYERS]` filter.
+    _emit_prompt_log(
+        state=state,
+        persona=persona_block,
+        high_priority=high_priority_block,
+        identity=identity_block,
+        kb=kb_block,
+        tools=tools_block,
+        decision=decision_block,
+        residual=brain_residual_rules,
+        json_block=brain_state_json,
+        total=final_prompt,
+    )
+
+    return final_prompt
+
+
+def _extract_ai_settings_from_state(state: BrainReplyState) -> Dict[str, Any]:
+    """
+    Pull the merchant's ai_settings out of the BrainReplyState.
+
+    The Brain pipeline already loads ai_settings into merchant_context
+    (see `core.store_knowledge.build_merchant_context`). We re-use that
+    dict here instead of going back to the DB so the prompt builder
+    stays IO-free.
+
+    Falls back to an empty dict — the High-Priority layer still renders
+    the platform-wide baseline rules in that case.
+    """
+    mc = state.merchant_context or {}
+    raw = mc.get("ai_settings") or mc.get("tenant_ai_settings") or {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _emit_prompt_log(
+    *,
+    state: BrainReplyState,
+    persona: str,
+    high_priority: str,
+    identity: str,
+    kb: str,
+    tools: str,
+    decision: str,
+    residual: str,
+    json_block: str,
+    total: str,
+) -> None:
+    """Emit `[PROMPT_LAYERS]` structured log for the assembled prompt."""
+    try:
+        mc = state.merchant_context or {}
+        tenant_id = mc.get("tenant_id") or mc.get("brain_profile", {}).get("tenant_id")
+        payload = {
+            "event":                    "brain_prompt_built",
+            "tenant_id":                tenant_id,
+            "intent":                   state.intent_name or None,
+            "stage":                    state.stage,
+            "persona_chars":            len(persona),
+            "high_priority_chars":      len(high_priority),
+            "identity_chars":           len(identity),
+            "kb_chars":                 len(kb),
+            "tools_chars":              len(tools),
+            "decision_chars":           len(decision),
+            "residual_rules_chars":     len(residual),
+            "brain_state_json_chars":   len(json_block),
+            "total_prompt_chars":       len(total),
+            "approx_tokens_total":      _approx_tokens(total),
+            "approx_tokens_kb":         _approx_tokens(kb),
+            "approx_tokens_high_pri":   _approx_tokens(high_priority),
+            "has_kb":                   bool(kb),
+            "has_tools_block":          bool(tools),
+        }
+        _log.info("[PROMPT_LAYERS] " + json.dumps(payload, ensure_ascii=False))
+    except Exception:  # noqa: BLE001 — logging must never break a turn
+        pass
 
 
 def _tone_instruction(tone: str) -> str:

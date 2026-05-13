@@ -500,12 +500,36 @@ class MerchantBrain:
 
         # Slim merchant_context for the prompt — caps product list and FAQ so
         # the LLM payload stays bounded while still covering key facts.
+        #
+        # Phase 1 prompt-pipeline refactor: we now also surface the raw
+        # ``ai_settings`` dict + ``tenant_id`` on the slim context so the
+        # new prompt builder can derive Style/Policy/Facts buckets via
+        # ``build_tenant_overlay_split``. The legacy ``tenant_overlay``
+        # string is still set (backward-compat), but the new builder
+        # drops it and re-renders from raw settings — that's what lets
+        # the High-Priority banner sit *above* the KB block.
+        _ai_settings_for_prompt: Dict[str, Any] = {}
+        try:
+            from models import TenantSettings  # noqa: PLC0415
+            from core.tenant import merge_ai_defaults  # noqa: PLC0415
+            _ts = (
+                db.query(TenantSettings)
+                .filter(TenantSettings.tenant_id == tenant_id)
+                .first()
+            )
+            if _ts:
+                _ai_settings_for_prompt = merge_ai_defaults(_ts.ai_settings) or {}
+        except Exception:  # noqa: BLE001 — prompt must never break a turn
+            _ai_settings_for_prompt = {}
+
         slim_merchant_ctx: Dict[str, Any] = {}
         if isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
             mc = ctx.merchant_context
             try:
                 _faq_approved = list((mc.get("faq") or {}).get("approved") or [])[:5]
                 slim_merchant_ctx = {
+                    "tenant_id":       tenant_id,
+                    "ai_settings":     _ai_settings_for_prompt,
                     "tenant_profile":  mc.get("tenant_profile") or {},
                     "customer":        mc.get("customer") or {},
                     "conversation":    mc.get("conversation") or {},
@@ -523,7 +547,10 @@ class MerchantBrain:
                     "tenant=%s: %s — sending empty",
                     tenant_id, exc,
                 )
-                slim_merchant_ctx = {}
+                slim_merchant_ctx = {
+                    "tenant_id":   tenant_id,
+                    "ai_settings": _ai_settings_for_prompt,
+                }
 
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
