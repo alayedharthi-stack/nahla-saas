@@ -129,6 +129,15 @@ export default function Customers() {
   const [nameCleanupApplying, setNameCleanupApplying] = useState(false)
   const [nameCleanupItems, setNameCleanupItems] = useState<NameCleanupPreviewItem[]>([])
   const [nameCleanupSelected, setNameCleanupSelected] = useState<Set<number>>(new Set())
+  // Per-row chip-based editing.
+  //   * ``nameCleanupRemoved[id]`` — indices of words (split on whitespace
+  //     of ``current_name``) the merchant chose to drop. The remaining
+  //     words rebuild the suggested name in order.
+  //   * ``nameCleanupCleared`` — explicit "clear the whole row" set; wins
+  //     over per-word removal. Absence means "follow the cleaner's
+  //     original suggestion for this row".
+  const [nameCleanupRemoved, setNameCleanupRemoved] = useState<Record<number, number[]>>({})
+  const [nameCleanupCleared, setNameCleanupCleared] = useState<Set<number>>(new Set())
   const [nameCleanupSummary, setNameCleanupSummary] = useState<{
     totalCustomers: number
     highConfidence: number
@@ -304,10 +313,137 @@ export default function Customers() {
     setNameCleanupOpen(false)
     setNameCleanupItems([])
     setNameCleanupSelected(new Set())
+    setNameCleanupRemoved({})
+    setNameCleanupCleared(new Set())
     setNameCleanupSummary(null)
     setNameCleanupResult(null)
     setNameCleanupError('')
   }
+
+  // Tokenise the raw current_name once per row. We split on whitespace
+  // (the only token boundary that survives Arabic) and KEEP each token
+  // exactly as it appeared so re-joining is lossless. Empty entries
+  // (from collapsed double-spaces) are dropped.
+  const splitCleanupTokens = (raw: string): string[] =>
+    (raw || '').trim().split(/\s+/).filter(Boolean)
+
+  // Compute the effective indices of words REMOVED for one row.
+  // If the merchant hasn't touched it, we infer the cleaner's initial
+  // removal set: words present in current_name but absent from the
+  // suggestion. This gives the merchant a sensible starting point
+  // (the row "looks pre-cleaned") that they can then refine.
+  const cleanupInitialRemoved = (it: NameCleanupPreviewItem): Set<number> => {
+    if (it.customer_id in nameCleanupRemoved) {
+      return new Set(nameCleanupRemoved[it.customer_id])
+    }
+    if (nameCleanupCleared.has(it.customer_id)) {
+      // "Clear the whole row" wins — every word removed.
+      return new Set(splitCleanupTokens(it.current_name).map((_, i) => i))
+    }
+    const tokens = splitCleanupTokens(it.current_name)
+    const suggestedTokens = it.suggested_name
+      ? new Set(splitCleanupTokens(it.suggested_name))
+      : null
+    const removed = new Set<number>()
+    if (!suggestedTokens) {
+      // Suggestion is "clear" — mark everything removed by default.
+      tokens.forEach((_, i) => removed.add(i))
+      return removed
+    }
+    // Build a multiset so duplicate tokens are honoured (rare but cheap).
+    const remaining = new Map<string, number>()
+    suggestedTokens.forEach(t => remaining.set(t, (remaining.get(t) || 0) + 1))
+    tokens.forEach((tok, i) => {
+      const left = remaining.get(tok) || 0
+      if (left > 0) {
+        remaining.set(tok, left - 1)
+      } else {
+        removed.add(i)
+      }
+    })
+    return removed
+  }
+
+  // Toggle one word in/out of the "removed" list for a row. Editing
+  // a row implicitly selects it for apply.
+  const toggleCleanupWord = (it: NameCleanupPreviewItem, idx: number) => {
+    const current = cleanupInitialRemoved(it)
+    if (current.has(idx)) current.delete(idx)
+    else current.add(idx)
+    setNameCleanupRemoved(prev => ({
+      ...prev,
+      [it.customer_id]: Array.from(current),
+    }))
+    // Touching word chips implies the row is "clear-everything" → no
+    // longer true.
+    setNameCleanupCleared(prev => {
+      if (!prev.has(it.customer_id)) return prev
+      const next = new Set(prev)
+      next.delete(it.customer_id)
+      return next
+    })
+    // Auto-select for apply.
+    setNameCleanupSelected(prev => {
+      if (prev.has(it.customer_id)) return prev
+      const next = new Set(prev)
+      next.add(it.customer_id)
+      return next
+    })
+  }
+
+  // "Clear the whole row" — sets the row's resolved value to null
+  // regardless of which individual words were/weren't removed.
+  const clearCleanupRow = (id: number) => {
+    setNameCleanupCleared(prev => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+    setNameCleanupRemoved(prev => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setNameCleanupSelected(prev => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+  }
+
+  // Discard all manual word/clear edits for a row → fall back to the
+  // cleaner's original suggestion.
+  const resetCleanupRow = (id: number) => {
+    setNameCleanupRemoved(prev => {
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setNameCleanupCleared(prev => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  // Build the value we'll send to the backend for this row, given
+  // current chip state. Empty result → null (clear).
+  const resolveCleanupValue = (it: NameCleanupPreviewItem): string | null => {
+    if (nameCleanupCleared.has(it.customer_id)) return null
+    const removed = cleanupInitialRemoved(it)
+    const tokens = splitCleanupTokens(it.current_name)
+    const kept = tokens.filter((_, i) => !removed.has(i))
+    const joined = kept.join(' ').trim()
+    return joined.length > 0 ? joined : null
+  }
+
+  // True iff the merchant has touched the row away from the cleaner's
+  // default — used to render a "reset" affordance.
+  const isCleanupRowEdited = (it: NameCleanupPreviewItem): boolean =>
+    (it.customer_id in nameCleanupRemoved) || nameCleanupCleared.has(it.customer_id)
 
   const toggleCleanupRow = (id: number) => {
     setNameCleanupSelected(prev => {
@@ -333,12 +469,19 @@ export default function Customers() {
     try {
       const items = nameCleanupItems
         .filter(it => nameCleanupSelected.has(it.customer_id))
-        .map(it => ({
-          customer_id: it.customer_id,
-          new_name: it.suggested_name,
-          reason: it.reason,
-          confidence: it.confidence,
-        }))
+        .map(it => {
+          const resolved = resolveCleanupValue(it)
+          const wasEdited = isCleanupRowEdited(it)
+          return {
+            customer_id: it.customer_id,
+            new_name:    resolved,
+            // When the merchant chip-edited the row, mark the reason
+            // so support can tell auto-applied edits apart from manual
+            // overrides in the audit log.
+            reason:      wasEdited ? `تعديل يدوي — ${it.reason}` : it.reason,
+            confidence:  it.confidence,
+          }
+        })
       const res = await customersApi.nameCleanupApply({ items })
       setNameCleanupResult({
         applied: res.applied_count,
@@ -350,6 +493,16 @@ export default function Customers() {
       const appliedIds = new Set(res.applied.map(a => a.customer_id))
       setNameCleanupItems(prev => prev.filter(it => !appliedIds.has(it.customer_id)))
       setNameCleanupSelected(new Set())
+      setNameCleanupRemoved(prev => {
+        const next = { ...prev }
+        appliedIds.forEach(id => delete next[id])
+        return next
+      })
+      setNameCleanupCleared(prev => {
+        const next = new Set(prev)
+        appliedIds.forEach(id => next.delete(id))
+        return next
+      })
       load()
     } catch (err: any) {
       const msg = err?.detail || err?.message || 'تعذر تطبيق التنظيف'
@@ -834,84 +987,151 @@ export default function Customers() {
                       {nameCleanupSelected.size} / {nameCleanupItems.length} محدد
                     </span>
                   </div>
-                  <div className="max-h-[40vh] overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="sticky top-0 bg-white border-b border-slate-200">
-                        <tr className="text-slate-500 text-[11px]">
-                          <th className="w-10 py-2"></th>
-                          <th className="text-right px-3 py-2">الاسم الحالي</th>
-                          <th className="text-right px-3 py-2">المقترح</th>
-                          <th className="text-right px-3 py-2">السبب</th>
-                          <th className="text-right px-3 py-2 w-20">الثقة</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {nameCleanupItems.map((it) => {
-                          const checked = nameCleanupSelected.has(it.customer_id)
-                          const isHigh = it.confidence === 'high'
-                          return (
-                            <tr
-                              key={it.customer_id}
-                              className="border-b border-slate-100 hover:bg-slate-50/60"
-                            >
-                              <td className="py-2 text-center">
-                                <button
-                                  onClick={() => toggleCleanupRow(it.customer_id)}
-                                  className="text-slate-400 hover:text-brand-600"
-                                >
-                                  {checked ? (
-                                    <CheckSquare className="w-4 h-4 text-brand-600" />
-                                  ) : (
-                                    <Square className="w-4 h-4" />
-                                  )}
-                                </button>
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="font-medium text-slate-800">
-                                  {it.current_name || <span className="text-slate-400">—</span>}
-                                </div>
+                  <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
+                    {nameCleanupItems.map((it) => {
+                      const checked = nameCleanupSelected.has(it.customer_id)
+                      const isHigh = it.confidence === 'high'
+                      const tokens = splitCleanupTokens(it.current_name)
+                      const removed = cleanupInitialRemoved(it)
+                      const isCleared = nameCleanupCleared.has(it.customer_id)
+                      const resolved = resolveCleanupValue(it)
+                      const isEdited = isCleanupRowEdited(it)
+                      return (
+                        <div
+                          key={it.customer_id}
+                          className={
+                            'px-3 py-3 flex items-start gap-3 ' +
+                            (checked ? 'bg-brand-50/30' : 'hover:bg-slate-50/60')
+                          }
+                        >
+                          <button
+                            onClick={() => toggleCleanupRow(it.customer_id)}
+                            className="mt-0.5 text-slate-400 hover:text-brand-600"
+                          >
+                            {checked ? (
+                              <CheckSquare className="w-4 h-4 text-brand-600" />
+                            ) : (
+                              <Square className="w-4 h-4" />
+                            )}
+                          </button>
+
+                          <div className="flex-1 min-w-0 space-y-2">
+                            {/* Header row: phone + reason + confidence */}
+                            <div className="flex items-center justify-between gap-2 text-[11px]">
+                              <div className="flex items-center gap-2 min-w-0">
                                 {it.phone && (
-                                  <div dir="ltr" className="text-[10px] text-slate-400 mt-0.5">
+                                  <span dir="ltr" className="text-slate-400 shrink-0">
                                     {it.phone}
-                                  </div>
+                                  </span>
                                 )}
-                              </td>
-                              <td className="px-3 py-2">
-                                {it.suggested_name ? (
+                                <span className="text-slate-500 truncate">
+                                  {it.reason || '—'}
+                                </span>
+                              </div>
+                              <Badge
+                                label={isHigh ? 'ثقة عالية' : 'مراجعة'}
+                                variant={isHigh ? 'green' : 'amber'}
+                              />
+                            </div>
+
+                            {/* Word chips: click to drop / restore each word.
+                                Kept words are solid; dropped words are crossed
+                                out — clicking either toggles state. */}
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {tokens.length === 0 ? (
+                                <span className="text-slate-400 text-xs">
+                                  لا توجد كلمات
+                                </span>
+                              ) : (
+                                tokens.map((tok, idx) => {
+                                  const isDropped = removed.has(idx) || isCleared
+                                  return (
+                                    <button
+                                      key={idx}
+                                      type="button"
+                                      onClick={() => toggleCleanupWord(it, idx)}
+                                      className={
+                                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs border transition ' +
+                                        (isDropped
+                                          ? 'border-slate-200 bg-slate-50 text-slate-400 line-through hover:text-slate-600'
+                                          : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100')
+                                      }
+                                      title={isDropped ? 'إعادة هذه الكلمة' : 'حذف هذه الكلمة'}
+                                    >
+                                      <span>{tok}</span>
+                                      {isDropped ? (
+                                        <RotateCcw className="w-3 h-3" />
+                                      ) : (
+                                        <X className="w-3 h-3" />
+                                      )}
+                                    </button>
+                                  )
+                                })
+                              )}
+                            </div>
+
+                            {/* Resolved value preview + per-row actions */}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs">
+                                <span className="text-slate-500 me-1">الناتج:</span>
+                                {resolved ? (
                                   <span className="font-medium text-slate-800">
-                                    {it.suggested_name}
+                                    {resolved}
                                   </span>
                                 ) : (
                                   <span className="inline-flex items-center gap-1 text-rose-600 font-medium">
                                     <Trash2 className="w-3 h-3" />
-                                    مسح الاسم
+                                    سيُمسح الاسم
                                   </span>
                                 )}
-                              </td>
-                              <td className="px-3 py-2 text-slate-600 max-w-[260px]">
-                                {it.reason || '—'}
-                              </td>
-                              <td className="px-3 py-2">
-                                <Badge
-                                  label={isHigh ? 'عالية' : 'مراجعة'}
-                                  variant={isHigh ? 'green' : 'amber'}
-                                />
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {isEdited && (
+                                  <button
+                                    type="button"
+                                    onClick={() => resetCleanupRow(it.customer_id)}
+                                    className="text-[11px] text-slate-500 hover:text-slate-700 inline-flex items-center gap-1"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    إعادة المقترح
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => clearCleanupRow(it.customer_id)}
+                                  className={
+                                    'text-[11px] inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
+                                    (isCleared
+                                      ? 'border-rose-300 bg-rose-50 text-rose-700'
+                                      : 'border-rose-200 text-rose-600 hover:bg-rose-50')
+                                  }
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  مسح الاسم بالكامل
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
 
               {!nameCleanupLoading && (
-                <div className="rounded-lg border border-blue-100 bg-blue-50/60 text-blue-800 text-[11px] p-3 leading-relaxed">
-                  <Info className="w-3.5 h-3.5 inline me-1" />
-                  بعد التطبيق، تستخدم الحملات الاسم المحفوظ مباشرة — إذا أصبح الاسم فارغاً تُستخدم
-                  العبارة الافتراضية &quot;عميلنا الغالي&quot;. كل التغييرات تُحفظ في سجل تدقيق
-                  داخلي قابل للمراجعة.
+                <div className="rounded-lg border border-blue-100 bg-blue-50/60 text-blue-800 text-[11px] p-3 leading-relaxed space-y-1">
+                  <div>
+                    <Info className="w-3.5 h-3.5 inline me-1" />
+                    اضغط على أي كلمة لحذفها (تظهر مشطوبة) أو لإعادتها — أو استخدم زر
+                    &quot;مسح الاسم بالكامل&quot; لمسح الاسم كلياً وترك الحملات تستخدم
+                    العبارة الافتراضية.
+                  </div>
+                  <div className="ps-5">
+                    بعد التطبيق، تستخدم الحملات الاسم المحفوظ مباشرة — إذا أصبح الاسم فارغاً تُستخدم
+                    العبارة &quot;عميلنا الغالي&quot;. كل التغييرات تُحفظ في سجل تدقيق
+                    داخلي قابل للمراجعة.
+                  </div>
                 </div>
               )}
             </div>
