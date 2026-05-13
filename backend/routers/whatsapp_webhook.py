@@ -3756,6 +3756,28 @@ async def _handle_merchant_message(
         except Exception:
             pass
 
+        # Phase 3 — Marker resolution metrics.
+        # Capture the LLM's reply BEFORE any marker extraction strips
+        # tokens out of it. We pre-scan it for the three marker families
+        # and emit a single ``[MARKER_RESOLUTION]`` structured log at
+        # the end of the marker pipeline (just before payment override).
+        # ``detected`` counts what the LLM emitted, ``resolved`` counts
+        # what the resolvers successfully replaced, ``failed`` counts the
+        # rest (malformed, unknown id/slug, no matching product, etc.).
+        _reply_for_marker_counts = reply or ""
+        _marker_detected: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
+        _marker_resolved: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
+        _marker_failed:   Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
+        try:
+            from core.ai_libraries import _MEDIA_MARKER_RE as _MID_RE  # noqa: PLC0415
+            from services.product_resolver import _PRODUCT_MARKER_RE as _PROD_RE  # noqa: PLC0415
+            from services.media_resolver import _MEDIA_KEY_MARKER_RE as _MKEY_RE  # noqa: PLC0415
+            _marker_detected["media_id"] = len(_MID_RE.findall(_reply_for_marker_counts))
+            _marker_detected["media_key"] = len(_MKEY_RE.findall(_reply_for_marker_counts))
+            _marker_detected["product"]   = len(_PROD_RE.findall(_reply_for_marker_counts))
+        except Exception:  # noqa: BLE001 — counting must never break the turn
+            pass
+
         # ── AI media library attachments ───────────────────────────────
         # Strip [MEDIA:<id>] markers from the reply BEFORE we ship the
         # text. Each id resolves to a row in ai_media_library; matching
@@ -3784,11 +3806,16 @@ async def _handle_merchant_message(
                     # Marker present but didn't resolve — strip it so the
                     # customer never sees the placeholder.
                     reply = _cleaned_reply
+                _marker_resolved["media_id"] = len(_media_attachments)
+                _marker_failed["media_id"] = max(
+                    0, _marker_detected["media_id"] - _marker_resolved["media_id"]
+                )
             except Exception as _media_exc:
                 logger.warning(
                     "[AIMedia.attach] extract failed tenant=%s err=%s",
                     tenant_id, _media_exc,
                 )
+                _marker_failed["media_id"] = _marker_detected["media_id"]
 
         # ── [MEDIA_KEY:<slug>] markers ─────────────────────────────
         # New resolver path (Phase 5). Same shape of extraction as
@@ -3816,6 +3843,8 @@ async def _handle_merchant_message(
                         tenant_id, len(_key_attachments),
                         [a.get("media_key") for a in _key_attachments],
                     )
+                _marker_resolved["media_key"] = len(_key_attachments)
+                _marker_failed["media_key"]   = len(_missing_media_keys)
                 if _cleaned_reply2 != reply:
                     reply = _cleaned_reply2
                 if _missing_media_keys:
@@ -3912,11 +3941,44 @@ async def _handle_merchant_message(
                         "unresolved queries=%s — letting text-only reply pass",
                         tenant_id, _missing_products[:3],
                     )
+                _marker_resolved["product"] = len(_resolutions)
+                _marker_failed["product"]   = len(_missing_products)
             except Exception as _p_exc:  # noqa: BLE001
                 logger.warning(
                     "[ProductResolver] extract failed tenant=%s err=%s",
                     tenant_id, _p_exc,
                 )
+                _marker_failed["product"] = _marker_detected["product"]
+
+        # ── Marker resolution structured log (Phase 3) ─────────────────
+        # Single JSON line per turn summarising what the LLM emitted vs.
+        # what we successfully resolved. This is the metric source for
+        # the Product Resolver / Media Library health dashboards (and a
+        # cheap signal for future regressions: a sudden spike in
+        # `product_markers_failed` means the catalog drifted from what
+        # Claude was told it could cite).
+        if any(_marker_detected.values()) or any(_marker_resolved.values()):
+            try:
+                import json as _json_mr  # noqa: PLC0415
+                _mr_payload = {
+                    "event":                       "marker_resolution",
+                    "tenant_id":                   tenant_id,
+                    "conversation_id":             getattr(convo, "id", None),
+                    "product_markers_detected":    _marker_detected["product"],
+                    "product_markers_resolved":    _marker_resolved["product"],
+                    "product_markers_failed":      _marker_failed["product"],
+                    "media_id_markers_detected":   _marker_detected["media_id"],
+                    "media_id_markers_resolved":   _marker_resolved["media_id"],
+                    "media_id_markers_failed":     _marker_failed["media_id"],
+                    "media_key_markers_detected":  _marker_detected["media_key"],
+                    "media_key_markers_resolved":  _marker_resolved["media_key"],
+                    "media_key_markers_failed":    _marker_failed["media_key"],
+                }
+                logger.info(
+                    "[MARKER_RESOLUTION] " + _json_mr.dumps(_mr_payload, ensure_ascii=False)
+                )
+            except Exception:  # noqa: BLE001 — never let logging break the turn
+                pass
 
         # ── Payment-asset HARD OVERRIDE ─────────────────────────────────
         # If the customer's inbound looks like a bank/IBAN/QR/transfer

@@ -522,22 +522,60 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001 — prompt must never break a turn
             _ai_settings_for_prompt = {}
 
+        # Phase 3 — Product/Media resolver overlay for the Brain prompt.
+        # The legacy webhook path computes this same overlay just before
+        # the LLM call (see whatsapp_webhook.py:3570-3598). We surface
+        # it through slim_merchant_ctx so the Brain LLM also learns the
+        # ``[PRODUCT:<query>]`` + ``[MEDIA_KEY:<slug>]`` vocabulary and
+        # the concrete list of available keys for this tenant. Without
+        # this, the High-Priority block hints at the markers but the
+        # model never sees the explicit protocol or the keys list.
+        _resolver_overlay_text = ""
+        try:
+            from services import media_resolver as _media_res  # noqa: PLC0415
+            from services import media_key_registry as _media_reg  # noqa: PLC0415
+            from core.ai_libraries import (  # noqa: PLC0415
+                format_resolver_overlay_for_prompt as _fmt_resolver,
+            )
+            from models import Product as _Product  # noqa: PLC0415
+
+            _keys_avail = _media_res.available_keys_for_tenant(db, tenant_id)
+            _keys_block = _media_reg.format_keys_for_prompt(_keys_avail)
+            _has_catalog = (
+                db.query(_Product.id)
+                  .filter(_Product.tenant_id == tenant_id)
+                  .limit(1)
+                  .first()
+                is not None
+            )
+            _resolver_overlay_text = _fmt_resolver(
+                available_media_keys_block=_keys_block,
+                catalog_has_products=_has_catalog,
+            ) or ""
+        except Exception as _ovr_exc:  # noqa: BLE001
+            logger.warning(
+                "[BrainPipeline] resolver overlay skipped tenant=%s: %s",
+                tenant_id, _ovr_exc,
+            )
+            _resolver_overlay_text = ""
+
         slim_merchant_ctx: Dict[str, Any] = {}
         if isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
             mc = ctx.merchant_context
             try:
                 _faq_approved = list((mc.get("faq") or {}).get("approved") or [])[:5]
                 slim_merchant_ctx = {
-                    "tenant_id":       tenant_id,
-                    "ai_settings":     _ai_settings_for_prompt,
-                    "tenant_profile":  mc.get("tenant_profile") or {},
-                    "customer":        mc.get("customer") or {},
-                    "conversation":    mc.get("conversation") or {},
-                    "products":        list((mc.get("products") or []))[:8],
-                    "policies":        mc.get("policies") or {},
-                    "policy_presence": mc.get("policy_presence") or {},
-                    "brain_profile":   mc.get("brain_profile") or {},
-                    "retrieval_rules": mc.get("retrieval_rules") or {},
+                    "tenant_id":         tenant_id,
+                    "ai_settings":       _ai_settings_for_prompt,
+                    "resolver_overlay":  _resolver_overlay_text,
+                    "tenant_profile":    mc.get("tenant_profile") or {},
+                    "customer":          mc.get("customer") or {},
+                    "conversation":      mc.get("conversation") or {},
+                    "products":          list((mc.get("products") or []))[:8],
+                    "policies":          mc.get("policies") or {},
+                    "policy_presence":   mc.get("policy_presence") or {},
+                    "brain_profile":     mc.get("brain_profile") or {},
+                    "retrieval_rules":   mc.get("retrieval_rules") or {},
                 }
                 if _faq_approved:
                     slim_merchant_ctx["faq_approved"] = _faq_approved
@@ -548,8 +586,9 @@ class MerchantBrain:
                     tenant_id, exc,
                 )
                 slim_merchant_ctx = {
-                    "tenant_id":   tenant_id,
-                    "ai_settings": _ai_settings_for_prompt,
+                    "tenant_id":         tenant_id,
+                    "ai_settings":       _ai_settings_for_prompt,
+                    "resolver_overlay":  _resolver_overlay_text,
                 }
 
         ctx.reply_state = _build_reply_state(

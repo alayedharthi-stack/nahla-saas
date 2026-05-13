@@ -105,12 +105,36 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # ── BLOCK 3: Knowledge (Facts only) ───────────────────────────────────
     kb_block = overlay_buckets.get("facts", "")
 
-    # ── BLOCK 4: Tools — libraries vocabulary ─────────────────────────────
+    # ── BLOCK 4: Tools — libraries vocabulary + marker protocol ──────────
+    # Two layered sub-blocks:
+    #   (a) format_libraries_for_prompt   — concrete coupons + ai_media items
+    #   (b) resolver_overlay              — the [PRODUCT:...] + [MEDIA_KEY:...]
+    #                                       protocol and the per-tenant list
+    #                                       of available media keys
+    # The resolver overlay is pre-computed in pipeline.py (it needs the DB)
+    # and shipped through slim_merchant_ctx["resolver_overlay"]. The
+    # prompt builder stays IO-free.
+    libraries_text = ""
     try:
         from core.ai_libraries import format_libraries_for_prompt  # noqa: PLC0415
-        tools_block = format_libraries_for_prompt(state.merchant_context or {}) or ""
+        libraries_text = format_libraries_for_prompt(state.merchant_context or {}) or ""
     except Exception:  # noqa: BLE001 — never let formatting crash the prompt
-        tools_block = ""
+        libraries_text = ""
+
+    resolver_overlay = ""
+    try:
+        resolver_overlay = str(
+            (state.merchant_context or {}).get("resolver_overlay") or ""
+        )
+    except Exception:  # noqa: BLE001
+        resolver_overlay = ""
+
+    tools_parts: list[str] = []
+    if libraries_text:
+        tools_parts.append(libraries_text)
+    if resolver_overlay:
+        tools_parts.append(resolver_overlay)
+    tools_block = "\n\n".join(tools_parts)
 
     # ── BLOCK 5: This-turn decision context + slim residual rules ────────
     selected_title = ""
@@ -200,6 +224,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         identity=identity_block,
         kb=kb_block,
         tools=tools_block,
+        libraries=libraries_text,
+        resolver_overlay=resolver_overlay,
         decision=decision_block,
         residual=brain_residual_rules,
         json_block=brain_state_json,
@@ -236,6 +262,8 @@ def _emit_prompt_log(
     identity: str,
     kb: str,
     tools: str,
+    libraries: str,
+    resolver_overlay: str,
     decision: str,
     residual: str,
     json_block: str,
@@ -246,24 +274,28 @@ def _emit_prompt_log(
         mc = state.merchant_context or {}
         tenant_id = mc.get("tenant_id") or mc.get("brain_profile", {}).get("tenant_id")
         payload = {
-            "event":                    "brain_prompt_built",
-            "tenant_id":                tenant_id,
-            "intent":                   state.intent_name or None,
-            "stage":                    state.stage,
-            "persona_chars":            len(persona),
-            "high_priority_chars":      len(high_priority),
-            "identity_chars":           len(identity),
-            "kb_chars":                 len(kb),
-            "tools_chars":              len(tools),
-            "decision_chars":           len(decision),
-            "residual_rules_chars":     len(residual),
-            "brain_state_json_chars":   len(json_block),
-            "total_prompt_chars":       len(total),
-            "approx_tokens_total":      _approx_tokens(total),
-            "approx_tokens_kb":         _approx_tokens(kb),
-            "approx_tokens_high_pri":   _approx_tokens(high_priority),
-            "has_kb":                   bool(kb),
-            "has_tools_block":          bool(tools),
+            "event":                     "brain_prompt_built",
+            "tenant_id":                 tenant_id,
+            "intent":                    state.intent_name or None,
+            "stage":                     state.stage,
+            "persona_chars":             len(persona),
+            "high_priority_chars":       len(high_priority),
+            "identity_chars":            len(identity),
+            "kb_chars":                  len(kb),
+            "tools_chars":               len(tools),
+            "libraries_chars":           len(libraries),
+            "resolver_overlay_chars":    len(resolver_overlay),
+            "decision_chars":            len(decision),
+            "residual_rules_chars":      len(residual),
+            "brain_state_json_chars":    len(json_block),
+            "total_prompt_chars":        len(total),
+            "approx_tokens_total":       _approx_tokens(total),
+            "approx_tokens_kb":          _approx_tokens(kb),
+            "approx_tokens_high_pri":    _approx_tokens(high_priority),
+            "has_kb":                    bool(kb),
+            "has_tools_block":           bool(tools),
+            "has_libraries":             bool(libraries),
+            "has_resolver_overlay":      bool(resolver_overlay),
         }
         _log.info("[PROMPT_LAYERS] " + json.dumps(payload, ensure_ascii=False))
     except Exception:  # noqa: BLE001 — logging must never break a turn
