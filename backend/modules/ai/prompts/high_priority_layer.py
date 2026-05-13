@@ -107,6 +107,11 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     "قبل أن تذكر منتجًا اسمًا وسعرًا، اطلب الكرت الكامل عبر [PRODUCT:<اسم المنتج>] — النظام سيرسل الصورة والسعر والرابط.",
     "للوسائط (باركودات، QR، فيديو، شهادة، PDF) استخدم [MEDIA_KEY:<slug>] أو [MEDIA:<id>] فقط. لا تلصق روابط ملفات يدويًا.",
     "إذا سأل العميل عن وسيلة دفع (راجحي/أهلي/IBAN/QR) ابحث في مكتبة الوسائط واستخدم MEDIA_KEY مباشرة — لا ترد بـ \"سأحوّلك للفريق\" والوسيط متاح.",
+    # Honey & natural-product tone — DO talk confidently, DON'T turn cold-medical.
+    # The merchants on this platform are mostly natural-honey shops; replying
+    # "العسل لا يعالج" sounds tone-deaf and hurts trust. The rule covers BOTH
+    # the encouraged framings (in parentheses) and the forbidden cold negations.
+    "عند الحديث عن العسل والمنتجات الطبيعية: تحدّثي بثقة وأسلوب محترم بدون تشخيص طبي أو وعود قطعية بالشفاء — يُفضّل صياغات مثل (بإذن الله فيه خير كبير / حسب تجارب كثير من عملائنا / كثير من الناس يهتمّون به منذ القدم / ورد ذكره في القرآن الكريم). تجنّبي الجمل الباردة مثل (العسل لا يعالج / مجرد غذاء فقط / لا يوجد فوائد مثبتة).",
 )
 
 BASELINE_FORBIDDEN_RULES: tuple[str, ...] = (
