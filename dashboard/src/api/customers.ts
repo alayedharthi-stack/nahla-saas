@@ -206,14 +206,24 @@ export interface NameCleanupPreviewItem {
 
 export interface NameCleanupPreviewResponse {
   tenant_id: number
-  total_scanned: number
+  /** Whole-tenant customer count. */
   total_customers: number
+  /** How many rows the cleaner actually scanned. ALWAYS equals
+   *  total_customers on success — if they ever drift, something is
+   *  wrong with the backend iteration. */
+  total_scanned: number
+  /** Total rows that need a change (may exceed ``items.length``
+   *  when the response was truncated by the size cap). */
+  match_count: number
   items: NameCleanupPreviewItem[]
   high_confidence: number
   low_confidence: number
-  page: number
-  per_page: number
-  pages: number
+  /** True iff there are more matches than ``items`` carries. The UI
+   *  should tell the merchant to apply this batch and re-open to see
+   *  the rest. */
+  truncated: boolean
+  /** The cap that triggered truncation (max items per response). */
+  max_items: number
 }
 
 export interface NameCleanupApplyResult {
@@ -364,16 +374,21 @@ export const customersApi = {
 
   // ── Name cleanup ───────────────────────────────────────────────
   /**
-   * Preview customer names that would be changed by the bulk cleanup
-   * tool for the current tenant. Names already clean are NOT returned —
-   * the result is a list of *exceptions* the merchant needs to review.
+   * Tenant-wide preview of customer names that need cleaning.
+   *
+   * Scans EVERY customer in the current tenant (no pagination on the
+   * request, no offset/limit on the SQL — the backend streams the
+   * table in batches via ``yield_per``). Names already clean are NOT
+   * returned; the result is a list of *exceptions* for review.
+   *
+   * Response always reports ``total_customers``, ``total_scanned``
+   * (== total_customers), and ``match_count``. When ``truncated`` is
+   * true, more matches exist than the response carries — the merchant
+   * should apply the visible batch first, then re-open the modal.
    */
-  nameCleanupPreview(page = 1, perPage = 500) {
-    const params = new URLSearchParams()
-    params.set('page', String(page))
-    params.set('per_page', String(perPage))
+  nameCleanupPreview() {
     return apiCall<NameCleanupPreviewResponse>(
-      `/customers/name-cleanup/preview?${params}`,
+      '/customers/name-cleanup/preview',
     )
   },
 

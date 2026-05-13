@@ -140,8 +140,12 @@ export default function Customers() {
   const [nameCleanupCleared, setNameCleanupCleared] = useState<Set<number>>(new Set())
   const [nameCleanupSummary, setNameCleanupSummary] = useState<{
     totalCustomers: number
+    totalScanned:   number
+    matchCount:     number
     highConfidence: number
-    lowConfidence: number
+    lowConfidence:  number
+    truncated:      boolean
+    maxItems:       number
   } | null>(null)
   const [nameCleanupResult, setNameCleanupResult] = useState<{
     applied: number
@@ -286,8 +290,12 @@ export default function Customers() {
       setNameCleanupItems(res.items)
       setNameCleanupSummary({
         totalCustomers: res.total_customers,
+        totalScanned:   res.total_scanned,
+        matchCount:     res.match_count,
         highConfidence: res.high_confidence,
-        lowConfidence: res.low_confidence,
+        lowConfidence:  res.low_confidence,
+        truncated:      res.truncated,
+        maxItems:       res.max_items,
       })
       // Default selection: every high-confidence row pre-checked. Low
       // confidence rows stay unchecked so the merchant has to opt in.
@@ -935,26 +943,53 @@ export default function Customers() {
               )}
 
               {!nameCleanupLoading && nameCleanupSummary && (
-                <div className="grid grid-cols-3 gap-3 text-xs">
-                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                    <div className="text-slate-500">إجمالي العملاء</div>
-                    <div className="text-lg font-semibold text-slate-800 mt-1">
-                      {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                <>
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-slate-500">إجمالي العملاء</div>
+                      <div className="text-lg font-semibold text-slate-800 mt-1">
+                        {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        فُحص {nameCleanupSummary.totalScanned.toLocaleString('ar-EG')} عميل
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3">
+                      <div className="text-blue-700">أسماء تحتاج تنظيف</div>
+                      <div className="text-lg font-semibold text-blue-800 mt-1">
+                        {nameCleanupSummary.matchCount.toLocaleString('ar-EG')}
+                      </div>
+                      <div className="text-[10px] text-blue-500 mt-0.5">
+                        من أصل {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
+                      <div className="text-emerald-700">ثقة عالية</div>
+                      <div className="text-lg font-semibold text-emerald-800 mt-1">
+                        {nameCleanupSummary.highConfidence.toLocaleString('ar-EG')}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                      <div className="text-amber-700">تحتاج مراجعة</div>
+                      <div className="text-lg font-semibold text-amber-800 mt-1">
+                        {nameCleanupSummary.lowConfidence.toLocaleString('ar-EG')}
+                      </div>
                     </div>
                   </div>
-                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
-                    <div className="text-emerald-700">ثقة عالية</div>
-                    <div className="text-lg font-semibold text-emerald-800 mt-1">
-                      {nameCleanupSummary.highConfidence.toLocaleString('ar-EG')}
+
+                  {nameCleanupSummary.truncated && (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-xs p-3 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                      <div>
+                        النتائج الكثيرة جداً — نعرض أول {nameCleanupSummary.maxItems.toLocaleString('ar-EG')} اسم فقط
+                        (المجموع {nameCleanupSummary.matchCount.toLocaleString('ar-EG')}).
+                        طبّق هذه الدفعة ثم أعد فتح الأداة لإكمال البقية، أو استخدم
+                        &quot;تطبيق ذوي الثقة العالية فقط&quot; لتنفيذ كل الأسماء عالية الثقة
+                        دفعة واحدة (يعمل على جميع العملاء وليس على المعروضين فقط).
+                      </div>
                     </div>
-                  </div>
-                  <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-                    <div className="text-amber-700">تحتاج مراجعة</div>
-                    <div className="text-lg font-semibold text-amber-800 mt-1">
-                      {nameCleanupSummary.lowConfidence.toLocaleString('ar-EG')}
-                    </div>
-                  </div>
-                </div>
+                  )}
+                </>
               )}
 
               {!nameCleanupLoading && nameCleanupItems.length === 0 && !nameCleanupError && (

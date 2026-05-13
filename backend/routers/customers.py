@@ -1511,100 +1511,129 @@ class NameCleanupApplyIn(BaseModel):
     high_confidence_only: bool = False
 
 
+# Hard cap on items returned in one preview response. The cleaner SCANS
+# every customer in the tenant regardless of this cap — it only bounds
+# how many *match* rows we ship in a single payload so a tenant with
+# 8 000 customers and 4 000 matches doesn't blow past a sensible JSON
+# size (≈ 1 MB at ~250 bytes/row). When matches exceed the cap, the
+# response sets ``truncated=true`` and the UI tells the merchant to
+# apply the visible batch and re-open to see the rest.
+_NAME_CLEANUP_MAX_ITEMS = 3000
+# How many rows to fetch per DB round-trip when streaming the tenant's
+# customer table. 1 000 strikes a good balance between memory residency
+# and round-trip count for the typical 5k–20k merchant.
+_NAME_CLEANUP_BATCH_SIZE = 1000
+
+
 @router.get("/name-cleanup/preview")
 async def name_cleanup_preview(
     request: Request,
-    page: int = Query(1, ge=1),
-    per_page: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
-    """Compute a preview of customer names that need cleaning for the
-    current tenant.
+    """Tenant-wide preview of customer names that need cleaning.
 
-    Only rows where the cleanup pipeline would actually change something
-    are returned — names already clean (or empty) are excluded so the
-    merchant sees a list of *exceptions* rather than the whole customer
-    table.
+    Scans **every** customer in the current tenant — there is no page
+    cursor on the request and no offset/limit on the SQL. We stream
+    the table in batches of :data:`_NAME_CLEANUP_BATCH_SIZE` rows via
+    ``.yield_per()`` so memory stays bounded even for tenants with
+    tens of thousands of customers.
+
+    The response contains only the rows whose cleanup verdict would
+    actually mutate ``Customer.name`` (the merchant doesn't need to
+    confirm names already considered clean). The cleaner ran against
+    100% of the table regardless — ``total_scanned`` reflects that and
+    matches ``total_customers`` exactly.
 
     Response shape::
 
         {
           "tenant_id":        <int>,
-          "total_scanned":    <int>,   # customers scanned this page
-          "total_customers":  <int>,   # whole-tenant count for context
+          "total_customers":  <int>,   # whole-tenant count
+          "total_scanned":    <int>,   # always == total_customers
+          "match_count":      <int>,   # rows that need a change
           "items":            [ {customer_id, current_name,
                                  suggested_name, reason, confidence,
                                  phone}, ... ],
           "high_confidence":  <int>,
           "low_confidence":   <int>,
-          "page":             <int>,
-          "per_page":         <int>,
-          "pages":            <int>,
+          "truncated":        <bool>,  # true → items capped, more exist
+          "max_items":        <int>,   # the cap that triggered truncation
         }
 
     ``suggested_name = null`` means "clear the row" — the apply step
     will set ``Customer.name`` to ``NULL``.
     """
     from services.customer_name_cleanup import compute_cleanup  # noqa: PLC0415
+    import logging  # noqa: PLC0415
 
+    log = logging.getLogger("nahla.customers.name_cleanup")
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    # We page by Customer.id so re-runs on a large tenant remain
-    # consistent if the merchant applies a batch and then re-opens
-    # the modal (the now-cleaned rows simply drop out of the result).
     total_customers = (
         db.query(Customer)
         .filter(Customer.tenant_id == tenant_id)
         .count()
     )
-    rows: List[Customer] = (
+
+    items: List[Dict[str, Any]] = []
+    scanned = 0
+    high = low = match_count = 0
+    truncated = False
+
+    # ``yield_per`` keeps memory flat: SQLAlchemy fetches rows in
+    # batches from the DB cursor instead of loading the whole result
+    # set into Python at once. Ordering by id keeps the scan
+    # deterministic across re-runs so the merchant sees the same
+    # rows in the same order after re-opening the modal.
+    query = (
         db.query(Customer)
         .filter(Customer.tenant_id == tenant_id)
         .order_by(Customer.id.asc())
-        .offset((page - 1) * per_page)
-        .limit(per_page)
-        .all()
+        .yield_per(_NAME_CLEANUP_BATCH_SIZE)
     )
 
-    items: List[Dict[str, Any]] = []
-    high = low = 0
-    for cust in rows:
+    for cust in query:
+        scanned += 1
         verdict = compute_cleanup(cust.name)
         if not verdict.changed:
             continue
+        match_count += 1
         if verdict.confidence == "high":
             high += 1
         else:
             low += 1
-        items.append({
-            "customer_id":    cust.id,
-            "current_name":   cust.name or "",
-            "suggested_name": verdict.suggested,
-            "reason":         verdict.reason,
-            "confidence":     verdict.confidence,
-            "phone":          cust.phone or "",
-        })
+        if len(items) < _NAME_CLEANUP_MAX_ITEMS:
+            items.append({
+                "customer_id":    cust.id,
+                "current_name":   cust.name or "",
+                "suggested_name": verdict.suggested,
+                "reason":         verdict.reason,
+                "confidence":     verdict.confidence,
+                "phone":          cust.phone or "",
+            })
+        else:
+            truncated = True
+            # Keep counting so the UI knows the true total, but stop
+            # appending to the response body.
 
-    import logging  # noqa: PLC0415
-    logging.getLogger("nahla.customers.name_cleanup").info(
-        "preview | tenant=%s scanned=%d page=%d/%d "
-        "needs_cleanup=%d (high=%d low=%d)",
-        tenant_id, len(rows), page,
-        max(1, (total_customers + per_page - 1) // per_page),
-        len(items), high, low,
+    log.info(
+        "preview | tenant=%s scanned=%d/%d matches=%d (high=%d low=%d) "
+        "items_returned=%d truncated=%s",
+        tenant_id, scanned, total_customers, match_count,
+        high, low, len(items), truncated,
     )
 
     return {
         "tenant_id":        tenant_id,
-        "total_scanned":    len(rows),
         "total_customers":  total_customers,
+        "total_scanned":    scanned,
+        "match_count":      match_count,
         "items":            items,
         "high_confidence":  high,
         "low_confidence":   low,
-        "page":             page,
-        "per_page":         per_page,
-        "pages":            max(1, (total_customers + per_page - 1) // per_page),
+        "truncated":        truncated,
+        "max_items":        _NAME_CLEANUP_MAX_ITEMS,
     }
 
 
@@ -1726,13 +1755,20 @@ async def name_cleanup_apply(
             })
 
     # ── high-confidence-only mode (no explicit selection) ────────────
+    # Stream the customer table so a tenant with tens of thousands of
+    # rows doesn't blow memory loading them all at once. Same batch
+    # size + ordering as the preview endpoint so the scan converges
+    # on the same set of mutations.
     else:
-        rows = (
+        query = (
             db.query(Customer)
             .filter(Customer.tenant_id == tenant_id)
-            .all()
+            .order_by(Customer.id.asc())
+            .yield_per(_NAME_CLEANUP_BATCH_SIZE)
         )
-        for cust in rows:
+        scanned = 0
+        for cust in query:
+            scanned += 1
             verdict = compute_cleanup(cust.name)
             if not verdict.changed or verdict.confidence != "high":
                 continue
@@ -1756,6 +1792,10 @@ async def name_cleanup_apply(
                 "reason":      verdict.reason,
                 "confidence":  "high",
             })
+        log.info(
+            "high_confidence_apply scan | tenant=%s scanned=%d applied=%d",
+            tenant_id, scanned, len(applied),
+        )
 
     db.commit()
     log.info(

@@ -59,13 +59,27 @@ from typing import Optional
 # ── Stopword tokens (commercial / descriptive — never a real name) ───────────
 _STOP_TOKENS_AR = frozenset({
     "عميل", "عميلة", "عملاء",
-    "زبون", "زبونة", "زبائن",
-    "ضيف", "ضيفة", "ضيوف",
+    # Common misspelling of عميلة (typed with ه instead of ة). Shows up
+    # often in WhatsApp push-name imports because the keyboard auto-
+    # complete drops the marbouta. Treat as a stopword.
+    "عميله",
+    "زبون", "زبونة", "زبونه", "زبائن",
+    "ضيف", "ضيفة", "ضيفه", "ضيوف",
     "متجر",
     # Descriptive qualifiers commonly used as a placeholder name in imports.
     "جديد", "جديدة",
     "مؤقت", "مؤقتة",
     "تجريبي", "تجريبية",
+    # Edit / revision markers — merchants use "تعديل 238" as a memo
+    # field for a row that needs revisiting. Never a real name.
+    "تعديل", "تعديلات",
+    # Gregorian month names — almost always a date stamp, not a name.
+    # We deliberately do NOT include Hijri months (رمضان is a real
+    # given name; شعبان too) — those stay through.
+    "يناير", "فبراير", "مارس", "أبريل", "ابريل",
+    "مايو", "يونيو", "يونيه", "يوليو", "يوليه",
+    "أغسطس", "اغسطس", "سبتمبر", "أكتوبر", "اكتوبر",
+    "نوفمبر", "ديسمبر",
 })
 
 _STOP_TOKENS_EN = frozenset({
@@ -288,6 +302,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
     kept: list[str] = []
     dropped: list[str] = []
     had_digits_removed = False
+    had_stopword_removed = False
 
     for token in tokens:
         if not token:
@@ -303,9 +318,11 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             continue
         if bare in _STOP_TOKENS_AR:
             dropped.append(token)
+            had_stopword_removed = True
             continue
         if token.lower() in _STOP_TOKENS_EN or bare.lower() in _STOP_TOKENS_EN:
             dropped.append(token)
+            had_stopword_removed = True
             continue
         # Single-char leftovers are almost always punctuation residue.
         if len(token) == 1:
@@ -314,6 +331,34 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         kept.append(token)
 
     cleaned = _MULTISPACE_RE.sub(" ", " ".join(kept)).strip()
+
+    # ── "Noise heuristic" — when BOTH a stopword and a digit were
+    # stripped and only a single weak token survives, treat the row
+    # as a placeholder rather than a real name. Examples this catches:
+    #
+    #   "عميل يونيو 20 88"  → kept=[]               → clear (already)
+    #   "عميل تعديل 238"    → kept=[]               → clear (already)
+    #   "Majed عميل 238"   → kept=["Majed"]        → KEEP — only digits
+    #                                                were stripped, no
+    #                                                fully-noisy context.
+    #   "محمد 2024"        → kept=["محمد"]         → KEEP — no stopword
+    #                                                was stripped, just
+    #                                                a date suffix.
+    #
+    # The rule is: stopwords WERE the structural noise; digits compound
+    # it. If we removed both AND we're left with a single token, the
+    # original input was a placeholder, not a name. Confidence stays
+    # "high" because every signal points the same way.
+    if (
+        had_stopword_removed
+        and had_digits_removed
+        and len(kept) <= 1
+    ):
+        return CleanResult(
+            old=original, suggested=None,
+            reason="عبارة غير اسمية (كلمات وصفية + أرقام)",
+            confidence="high", changed=True,
+        )
 
     # ── Decide the final verdict ──────────────────────────────────
     if not cleaned or not _has_letters(cleaned):
