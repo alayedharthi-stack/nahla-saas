@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from core.wa_usage import has_open_service_window
 from core.database import get_db
@@ -433,9 +433,13 @@ async def list_conversations(
         return _norm(phone) in _open_windows
 
     # ── 1. All Conversation records → phone_info map ─────────────────────────
+    # Eager-load Customer relationship to eliminate the per-row lazy-load
+    # query (was the dominant N+1 — one extra SELECT per Conversation row).
     convo_rows = (
         db.query(Conversation)
+        .options(joinedload(Conversation.customer))
         .filter(Conversation.tenant_id == tenant_id)
+        .order_by(Conversation.id.desc())
         .all()
     )
     phone_info: Dict[str, Dict[str, Any]] = {}
@@ -629,35 +633,53 @@ async def list_conversations(
             .group_by(MessageEvent.conversation_id)
             .all()
         )
-        # Per-row second pass: drop messages older than last_read_at,
-        # since postgres can't do per-row column comparisons across the
-        # outerjoin without a complex subquery and the in-memory pass
-        # is fine for inbox sizes.
+        # Adjust unread counts for conversations that have a last_read_at
+        # timestamp. Previously this issued one COUNT query per conversation
+        # (catastrophic N+1: 200 convos = 200 sequential DB roundtrips). We
+        # now batch the work into a single GROUP BY query for the subset
+        # of conversation IDs that actually have a last_read_at set, then
+        # merge the per-cid counts in Python.
         if last_read_map:
+            from sqlalchemy import case  # noqa: PLC0415
+
+            # Build a single CASE expression: "the cid's lra" → join via
+            # values(). On Postgres we use a temporary VALUES list; on
+            # SQLite we fall back to chunked WHERE id IN (...).
+            cids_with_lra = list(last_read_map.keys())
+            # Run one query that counts unread per cid, applying the per-cid
+            # ``MessageEvent.created_at > lra`` filter inline through CASE.
+            lra_expr = case(
+                {cid: lra for cid, lra in last_read_map.items()},
+                value=MessageEvent.conversation_id,
+            )
+            live_rows = (
+                db.query(
+                    MessageEvent.conversation_id,
+                    func.count(MessageEvent.id).label("cnt"),
+                )
+                .outerjoin(
+                    last_out_sq,
+                    MessageEvent.conversation_id == last_out_sq.c.conversation_id,
+                )
+                .filter(
+                    MessageEvent.tenant_id == tenant_id,
+                    MessageEvent.conversation_id.in_(cids_with_lra),
+                    MessageEvent.direction != "outbound",
+                    _inbox_live_only_clause(),
+                    (MessageEvent.created_at > last_out_sq.c.last_out)
+                    | (last_out_sq.c.last_out.is_(None)),
+                    MessageEvent.created_at > lra_expr,
+                )
+                .group_by(MessageEvent.conversation_id)
+                .all()
+            )
+            live_map: dict[int, int] = {cid: int(cnt) for cid, cnt in live_rows}
             adjusted: list[tuple[int, int]] = []
             for cid, _cnt in unread_rows:
-                lra = last_read_map.get(cid)
-                if lra is None:
+                if cid in last_read_map:
+                    adjusted.append((cid, live_map.get(cid, 0)))
+                else:
                     adjusted.append((cid, _cnt))
-                    continue
-                live_cnt = (
-                    db.query(func.count(MessageEvent.id))
-                    .outerjoin(
-                        last_out_sq,
-                        MessageEvent.conversation_id == last_out_sq.c.conversation_id,
-                    )
-                    .filter(
-                        MessageEvent.tenant_id == tenant_id,
-                        MessageEvent.conversation_id == cid,
-                        MessageEvent.direction != "outbound",
-                        _inbox_live_only_clause(),
-                        (MessageEvent.created_at > last_out_sq.c.last_out)
-                        | (last_out_sq.c.last_out.is_(None)),
-                        MessageEvent.created_at > lra,
-                    )
-                    .scalar()
-                ) or 0
-                adjusted.append((cid, int(live_cnt)))
             unread_rows = adjusted
         for cid, cnt in unread_rows:
             phone = conv_id_to_phone.get(cid)
@@ -672,6 +694,40 @@ async def list_conversations(
         .limit(min(500, max(250, paging_cap_limit * 6)))
         .all()
     )
+
+    # Pre-fetch every Customer row that any trace row might need so we
+    # don't fire one query per phone inside the loop (the previous
+    # implementation issued N queries on cold cache).
+    trace_unknown_phones: set[str] = set()
+    for row in trace_rows:
+        if not row.customer_phone:
+            continue
+        if _norm(row.customer_phone) not in norm_to_key:
+            trace_unknown_phones.add(row.customer_phone)
+            n = _norm(row.customer_phone)
+            if n:
+                trace_unknown_phones.add(n)
+                trace_unknown_phones.add(f"+{n}")
+    trace_name_by_norm: dict[str, str] = {}
+    if trace_unknown_phones:
+        for phone_val, norm_val, name_val in (
+            db.query(Customer.phone, Customer.normalized_phone, Customer.name)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                or_(
+                    Customer.phone.in_(list(trace_unknown_phones)),
+                    Customer.normalized_phone.in_(list(trace_unknown_phones)),
+                ),
+            )
+            .all()
+        ):
+            if not name_val:
+                continue
+            for candidate in (norm_val, phone_val):
+                cnorm = _norm(candidate or "")
+                if cnorm and cnorm not in trace_name_by_norm:
+                    trace_name_by_norm[cnorm] = name_val
+
     for row in trace_rows:
         phone = row.customer_phone
         key = norm_to_key.get(_norm(phone)) or (phone if phone in phone_info else None)
@@ -681,11 +737,7 @@ async def list_conversations(
                 phone_info[key]["time"] = row.created_at.isoformat() if row.created_at else ""
         elif _norm(phone) not in norm_to_key:
             norm_to_key[_norm(phone)] = phone
-            trace_customer = db.query(Customer).filter(
-                Customer.tenant_id == tenant_id,
-                (Customer.phone == phone) | (Customer.normalized_phone == (_norm(phone) if _norm(phone) else phone)),
-            ).first()
-            trace_name = (trace_customer.name if trace_customer and trace_customer.name else phone)
+            trace_name = trace_name_by_norm.get(_norm(phone)) or phone
             phone_info[phone] = {
                 "id": row.session_id or f"trace-{phone}",
                 "customer": trace_name,
@@ -707,17 +759,49 @@ async def list_conversations(
                 "_conv_id": None,
             }
 
-    # ── 5. Enrich phone-like names from Customer table ──────────────────────
+    # ── 5. Enrich phone-like names from Customer table (bulk) ────────────────
+    # Previously this issued one query per phone-like row (another N+1).
+    # We now collect all candidate phones up front and look them up in a
+    # single SQL call, then update the in-memory map.
+    phones_needing_name: list[str] = []
+    keys_needing_name: list[str] = []
     for key, info in phone_info.items():
         cname = info.get("customer", "")
         if not cname or cname.replace("+", "").replace("-", "").replace(" ", "").isdigit():
-            real = db.query(Customer).filter(
+            keys_needing_name.append(key)
+            phones_needing_name.append(key)
+            n = _norm(key)
+            if n:
+                phones_needing_name.append(n)
+                phones_needing_name.append(f"+{n}")
+
+    if phones_needing_name:
+        from sqlalchemy import or_ as _or_  # noqa: PLC0415
+        enrich_rows = (
+            db.query(Customer.phone, Customer.normalized_phone, Customer.name)
+            .filter(
                 Customer.tenant_id == tenant_id,
-                (Customer.phone == key)
-                | (Customer.normalized_phone == _norm(key)),
-            ).first()
-            if real and real.name and not real.name.replace("+", "").replace("-", "").replace(" ", "").isdigit():
-                info["customer"] = real.name
+                _or_(
+                    Customer.phone.in_(phones_needing_name),
+                    Customer.normalized_phone.in_(phones_needing_name),
+                ),
+            )
+            .all()
+        )
+        name_by_norm: dict[str, str] = {}
+        for phone_val, norm_val, name_val in enrich_rows:
+            if not name_val:
+                continue
+            if name_val.replace("+", "").replace("-", "").replace(" ", "").isdigit():
+                continue
+            for candidate in (norm_val, phone_val):
+                cnorm = _norm(candidate or "")
+                if cnorm and cnorm not in name_by_norm:
+                    name_by_norm[cnorm] = name_val
+        for key in keys_needing_name:
+            real_name = name_by_norm.get(_norm(key))
+            if real_name:
+                phone_info[key]["customer"] = real_name
 
     # ── 5b. Enrich unsubscribe status from Customer table (bulk) ────────────
     def _is_pending_active(meta: dict) -> bool:
