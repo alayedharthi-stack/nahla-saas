@@ -4044,6 +4044,165 @@ async def _handle_merchant_message(
                 )
                 _marker_failed["call"] = _marker_detected["call"]
 
+        # ── Post-LLM Safety Nets (Phase 6) ─────────────────────────────
+        # Deterministic backstops for when Claude FORGETS to emit a
+        # marker even though the customer clearly asked for the asset
+        # the marker would resolve. We attach (never delete) — the
+        # marker pipeline above always wins; the nets only fill gaps.
+        #
+        # Why this layer exists: production observations on 2026-05-13
+        # showed three identical failure modes in a single session
+        # (product missing → CTA link only; barcode missing → text
+        # only; staff contact missing → phone-as-text). Tightening
+        # the prompt further had diminishing returns; the durable fix
+        # is to NOT rely on a single layer.
+        #
+        # Each net runs independently (own feature flag, own log),
+        # and increments ``_marker_resolved`` so the
+        # ``[MARKER_RESOLUTION]`` line below reflects post-net state.
+        try:
+            from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
+                apply_product_safety_net as _sn_product,
+                apply_media_key_safety_net as _sn_media_key,
+                apply_staff_contact_safety_net as _sn_staff,
+            )
+            import json as _json_sn  # noqa: PLC0415
+
+            _cust_id_sn = None
+            try:
+                _cust_id_sn = getattr(convo, "customer_id", None) or None
+            except Exception:
+                pass
+
+            # Product safety net
+            try:
+                _pn = _sn_product(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    existing_product_attachments=_product_attachments,
+                    detected_markers=_marker_detected["product"],
+                    customer_id=_cust_id_sn,
+                )
+                if _pn.fired and _pn.extra_attachment:
+                    _product_attachments.append(_pn.extra_attachment)
+                    _marker_resolved["product"] += 1
+                if _pn.fired or _pn.skipped_reason not in {"claude_marker_present", "already_attached", "no_intent_or_class", "empty_msg"}:
+                    # Only log "interesting" outcomes — silence the
+                    # boring "marker already there" case to keep log
+                    # volume sane (those are the common path).
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_pn.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:product] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _spe:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:product] failed tenant=%s err=%s",
+                    tenant_id, _spe,
+                )
+
+            # Media-key safety net
+            try:
+                _mn = _sn_media_key(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    existing_media_attachments=_media_attachments,
+                    detected_media_key_markers=_marker_detected["media_key"],
+                )
+                if _mn.fired and _mn.extra_attachment:
+                    _media_attachments.append(_mn.extra_attachment)
+                    _marker_resolved["media_key"] += 1
+                if _mn.fired or _mn.skipped_reason not in {"claude_marker_present", "already_has_media_key", "empty_msg", "no_trigger_match"}:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_mn.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:media_key] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _sme:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:media_key] failed tenant=%s err=%s",
+                    tenant_id, _sme,
+                )
+
+            # Staff-contact safety net (only when the CALL marker
+            # pipeline itself is enabled; otherwise the merchant has
+            # explicitly disabled vCard dispatch).
+            if _staff_call_marker_enabled():
+                try:
+                    _cn = _sn_staff(
+                        customer_msg=text or "",
+                        reply_text=reply or "",
+                        existing_call_targets=_call_targets,
+                        detected_call_markers=_marker_detected["call"],
+                    )
+                    if _cn.fired and _cn.extra_call_target is not None:
+                        _call_targets.append(_cn.extra_call_target)
+                        _marker_resolved["call"] += 1
+                    if _cn.fired or _cn.skipped_reason not in {"claude_marker_present", "already_attached", "empty_msg", "no_staff_intent"}:
+                        _payload = {
+                            "event":             "safety_net",
+                            "tenant_id":         tenant_id,
+                            "conversation_id":   getattr(convo, "id", None),
+                            **_cn.to_log_dict(),
+                        }
+                        logger.info(
+                            "[SAFETY_NET:staff_contact] "
+                            + _json_sn.dumps(_payload, ensure_ascii=False)
+                        )
+                except Exception as _sse:  # noqa: BLE001
+                    logger.warning(
+                        "[SAFETY_NET:staff_contact] failed tenant=%s err=%s",
+                        tenant_id, _sse,
+                    )
+        except Exception as _sn_exc:  # noqa: BLE001
+            logger.warning(
+                "[SAFETY_NET] module import failed tenant=%s err=%s",
+                tenant_id, _sn_exc,
+            )
+
+        # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
+        # Drops lines that contain leaked reasoning prose (e.g. "بناءً
+        # على السياق", "في قاعدة المعرفة"). Runs AFTER marker
+        # extraction so the customer never sees the meta-text, but
+        # the marker pipeline saw it untouched. Feature-flagged via
+        # ``REASONING_SCRUB_ENABLED`` (default ON).
+        if reply:
+            try:
+                from modules.ai.postprocess.reasoning_scrub import (  # noqa: PLC0415
+                    scrub_reasoning_leaks as _scrub_reasoning,
+                )
+                _scr = _scrub_reasoning(reply)
+                if _scr.any_change:
+                    import json as _json_rs  # noqa: PLC0415
+                    _scr_payload = {
+                        "event":            "reasoning_scrub",
+                        "tenant_id":        tenant_id,
+                        "conversation_id":  getattr(convo, "id", None),
+                        **_scr.to_log_dict(),
+                    }
+                    logger.info(
+                        "[REASONING_SCRUB] "
+                        + _json_rs.dumps(_scr_payload, ensure_ascii=False)
+                    )
+                    reply = _scr.text
+            except Exception as _scr_exc:  # noqa: BLE001
+                logger.warning(
+                    "[REASONING_SCRUB] failed tenant=%s err=%s",
+                    tenant_id, _scr_exc,
+                )
+
         # ── Marker resolution structured log (Phase 3) ─────────────────
         # Single JSON line per turn summarising what the LLM emitted vs.
         # what we successfully resolved. This is the metric source for
