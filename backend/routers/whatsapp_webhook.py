@@ -3823,16 +3823,18 @@ async def _handle_merchant_message(
         # what the resolvers successfully replaced, ``failed`` counts the
         # rest (malformed, unknown id/slug, no matching product, etc.).
         _reply_for_marker_counts = reply or ""
-        _marker_detected: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
-        _marker_resolved: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
-        _marker_failed:   Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0}
+        _marker_detected: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0, "call": 0}
+        _marker_resolved: Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0, "call": 0}
+        _marker_failed:   Dict[str, int] = {"product": 0, "media_id": 0, "media_key": 0, "call": 0}
         try:
             from core.ai_libraries import _MEDIA_MARKER_RE as _MID_RE  # noqa: PLC0415
             from services.product_resolver import _PRODUCT_MARKER_RE as _PROD_RE  # noqa: PLC0415
             from services.media_resolver import _MEDIA_KEY_MARKER_RE as _MKEY_RE  # noqa: PLC0415
+            from services.call_resolver import _CALL_MARKER_RE as _CALL_RE  # noqa: PLC0415
             _marker_detected["media_id"] = len(_MID_RE.findall(_reply_for_marker_counts))
             _marker_detected["media_key"] = len(_MKEY_RE.findall(_reply_for_marker_counts))
             _marker_detected["product"]   = len(_PROD_RE.findall(_reply_for_marker_counts))
+            _marker_detected["call"]      = len(_CALL_RE.findall(_reply_for_marker_counts))
         except Exception:  # noqa: BLE001 — counting must never break the turn
             pass
 
@@ -4008,6 +4010,40 @@ async def _handle_merchant_message(
                 )
                 _marker_failed["product"] = _marker_detected["product"]
 
+        # ── Staff call markers ([CALL:<phone>|<label>]) ────────────────
+        # Resolves to a WhatsApp ``contacts`` message dispatched AFTER
+        # the main reply. Payment-phone numbers stay as plain text
+        # (the LLM is taught to NEVER use [CALL:...] for transfer
+        # accounts). Feature-flagged so an unhealthy production
+        # signal can be killed in seconds without a rollback.
+        _call_targets: List[Any] = []
+        if reply and "[CALL:" in reply.upper() and _staff_call_marker_enabled():
+            try:
+                from services.call_resolver import (  # noqa: PLC0415
+                    extract_call_markers as _extract_calls,
+                )
+                _cleaned_reply_call, _call_targets = _extract_calls(reply)
+                if _cleaned_reply_call != reply:
+                    reply = _cleaned_reply_call
+                _marker_resolved["call"] = len(_call_targets)
+                _marker_failed["call"] = max(
+                    0, _marker_detected["call"] - _marker_resolved["call"]
+                )
+                if _call_targets:
+                    logger.info(
+                        "[CallResolver] tenant=%s conversation_id=%s "
+                        "resolved=%d targets=%s",
+                        tenant_id, getattr(convo, "id", None),
+                        len(_call_targets),
+                        [(c.name, c.phone_display) for c in _call_targets],
+                    )
+            except Exception as _call_exc:  # noqa: BLE001
+                logger.warning(
+                    "[CallResolver] extract failed tenant=%s err=%s",
+                    tenant_id, _call_exc,
+                )
+                _marker_failed["call"] = _marker_detected["call"]
+
         # ── Marker resolution structured log (Phase 3) ─────────────────
         # Single JSON line per turn summarising what the LLM emitted vs.
         # what we successfully resolved. This is the metric source for
@@ -4031,6 +4067,9 @@ async def _handle_merchant_message(
                     "media_key_markers_detected":  _marker_detected["media_key"],
                     "media_key_markers_resolved":  _marker_resolved["media_key"],
                     "media_key_markers_failed":    _marker_failed["media_key"],
+                    "call_markers_detected":       _marker_detected["call"],
+                    "call_markers_resolved":       _marker_resolved["call"],
+                    "call_markers_failed":         _marker_failed["call"],
                 }
                 logger.info(
                     "[MARKER_RESOLUTION] " + _json_mr.dumps(_mr_payload, ensure_ascii=False)
@@ -4191,7 +4230,15 @@ async def _handle_merchant_message(
                 logger.debug("[CTA_BUTTON] extract failed tenant=%s: %s", tenant_id, _cta_exc)
 
             _send_ok = False
-            if _cta_extraction and _cta_extraction.classification.kind != "general":
+            # Policy: lift ANY URL into a CTA button when no other
+            # attachment is being sent. Previously we only lifted
+            # high-value classes (product / payment / tracking /
+            # location) and let "general" URLs stay inline — but
+            # the merchant reported the LLM dumping store URLs as
+            # text. With no attachment in this branch, there's no
+            # double-CTA risk: one CTA always beats a 200-char URL
+            # inline in WhatsApp's UI.
+            if _cta_extraction:
                 _cls = _cta_extraction.classification
                 logger.info(
                     "[CTA_BUTTON] tenant=%s conversation_id=%s url_type=%s "
@@ -4388,6 +4435,55 @@ async def _handle_merchant_message(
                         "[AIMedia.send] tenant=%s id=%s failed: %s",
                         tenant_id, _att.get("id"), _media_send_exc,
                     )
+
+            # ── Staff call contact cards ────────────────────────────
+            # Dispatched LAST so the customer sees: (1) the main
+            # reply text → (2) any product / media images → (3) the
+            # contact card(s) at the bottom. This order matches the
+            # marker placement contract: [PRODUCT/MEDIA_KEY] go at
+            # the top of the reply, [CALL] goes at the bottom.
+            #
+            # We send a SINGLE contacts message containing all
+            # resolved targets (up to MAX_CALLS_PER_REPLY). One
+            # network call, one notification on the customer's
+            # phone — better UX than separate cards.
+            if _call_targets:
+                try:
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _build_contacts,
+                    )
+                    _contacts_payload = _build_contacts(_call_targets, to=to)
+                    _contacts_ok = await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_contacts_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    try:
+                        import json as _json_call  # noqa: PLC0415
+                        _call_log_payload = {
+                            "event":             "call_marker",
+                            "tenant_id":         tenant_id,
+                            "conversation_id":   getattr(convo, "id", None),
+                            "detected":          _marker_detected["call"],
+                            "resolved":          len(_call_targets),
+                            "dispatched":        bool(_contacts_ok),
+                            "targets":           [
+                                {"name": c.name, "wa_id": c.wa_id}
+                                for c in _call_targets
+                            ],
+                        }
+                        logger.info(
+                            "[CALL_MARKER] "
+                            + _json_call.dumps(_call_log_payload, ensure_ascii=False)
+                        )
+                    except Exception:  # noqa: BLE001 — log failures are non-fatal
+                        pass
+                except Exception as _contacts_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[CallResolver] contacts send failed tenant=%s err=%s",
+                        tenant_id, _contacts_exc,
+                    )
+
             # Track this reply for similarity-based loop scoring on the
             # next turn. Never auto-pauses on counts alone.
             try:
@@ -4721,6 +4817,43 @@ async def _send_cta_url(
             "action": {"name": "cta_url", "parameters": {"display_text": btn_label, "url": btn_url}},
         },
     }, _tenant_id=_tenant_id, _db=_db)
+
+
+# ── Staff-call contact card sender ───────────────────────────────────────────
+# WhatsApp Cloud API "contacts" payload renders as a vCard with native
+# Call / Message / Save actions on tap — the closest thing to a "call
+# button" in non-template messages (interactive cta_url forbids tel:
+# URLs). Sends ONE message that can carry multiple cards if the LLM
+# emitted multiple [CALL:...] markers.
+#
+# Feature-flagged via STAFF_CALL_MARKER_ENABLED (default ON). The flag
+# is checked at the resolver call-site, not here — so once we decide
+# to dispatch, we always do. Failure is non-fatal (logged + ignored)
+# so a vCard outage never breaks the main reply path.
+async def _send_contacts_message(
+    phone_id: str, to: str, payload: Dict[str, Any],
+    _tenant_id: Optional[int] = None, _db=None,
+) -> bool:
+    return await _post_wa(
+        phone_id, payload, _tenant_id=_tenant_id, _db=_db
+    )
+
+
+def _staff_call_marker_enabled() -> bool:
+    """Kill-switch for the [CALL:...] → contacts pipeline.
+
+    Default ON for the rollout. Set ``STAFF_CALL_MARKER_ENABLED=false``
+    in the host env to disable the resolver entirely — the LLM may
+    still emit ``[CALL:...]`` but the marker will be scrubbed as a
+    leak (via ``scrub_internal_markers``) and the customer sees only
+    the plain reply text. No restart required, env is re-read on
+    every reply.
+    """
+    import os as _os  # noqa: PLC0415
+    raw = _os.getenv("STAFF_CALL_MARKER_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
 # Map merchant-library media_type → WhatsApp Cloud API outer "type" key.

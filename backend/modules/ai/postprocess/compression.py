@@ -78,7 +78,7 @@ def _compression_enabled() -> bool:
 # enough not to match a marker accidentally, but the freeze pass is the
 # belt-and-suspenders guarantee.
 _MARKER_RE = re.compile(
-    r"\[(?:PRODUCT|MEDIA|MEDIA_KEY|TEMPLATE|TRANSFER|HANDOFF)\s*:[^\]]*\]",
+    r"\[(?:PRODUCT|MEDIA|MEDIA_KEY|TEMPLATE|TRANSFER|HANDOFF|CALL)\s*:[^\]]*\]",
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
