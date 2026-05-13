@@ -436,16 +436,55 @@ async def list_conversations(
     def _has_window(phone: str) -> bool:
         return _norm(phone) in _open_windows
 
-    # ── 1. All Conversation records → phone_info map ─────────────────────────
-    # Eager-load Customer relationship to eliminate the per-row lazy-load
-    # query (was the dominant N+1 — one extra SELECT per Conversation row).
-    convo_rows = (
+    # ── 1. SQL-paginated Conversation records → phone_info map ───────────────
+    # Earlier revisions loaded EVERY Conversation row for the tenant and
+    # then sliced in Python. For a tenant with 2 900+ conversations that
+    # was still ~470ms (after the N+1 fix) and grew linearly with inbox
+    # size. We now order by the latest MessageEvent timestamp per row at
+    # the SQL level and only fetch ``fetch_cap`` rows.
+    #
+    # ``fetch_cap`` is sized so that after sibling-row collapsing (multiple
+    # Conversation rows can map to the same phone) we still have enough
+    # unique phones to fill the requested ``[offset, offset+limit]`` slice.
+    # 200 rows is the floor for offset=0 and is multiplied as the merchant
+    # pages deeper via "load more". The hard ceiling (1500) keeps memory
+    # bounded against pathological deep paging.
+    fetch_cap = max(200, (paging_cap_limit + max(0, int(offset or 0))) * 3)
+    fetch_cap = min(fetch_cap, 1500)
+
+    # MAX(created_at) per conversation — used both for ordering here AND
+    # reused below as the "latest message" source where possible.
+    last_msg_ts_sq = (
+        db.query(
+            MessageEvent.conversation_id.label("conv_id"),
+            func.max(MessageEvent.created_at).label("last_msg_at"),
+        )
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            _inbox_live_only_clause(),
+        )
+        .group_by(MessageEvent.conversation_id)
+        .subquery()
+    )
+    convo_rows_q = (
         db.query(Conversation)
         .options(joinedload(Conversation.customer))
+        .outerjoin(last_msg_ts_sq, last_msg_ts_sq.c.conv_id == Conversation.id)
         .filter(Conversation.tenant_id == tenant_id)
-        .order_by(Conversation.id.desc())
-        .all()
+        .order_by(
+            last_msg_ts_sq.c.last_msg_at.desc().nullslast(),
+            Conversation.id.desc(),
+        )
+        .limit(fetch_cap)
     )
+    convo_rows = convo_rows_q.all()
+
+    # Tenant-wide totals (cheap COUNT — used for has_more / paging math).
+    tenant_convo_count = (
+        db.query(func.count(Conversation.id))
+        .filter(Conversation.tenant_id == tenant_id)
+        .scalar()
+    ) or 0
     phone_info: Dict[str, Dict[str, Any]] = {}
     norm_to_key: Dict[str, str] = {}
     conv_id_to_phone: Dict[int, str] = {}
@@ -871,29 +910,42 @@ async def list_conversations(
     result = sorted(phone_info.values(), key=lambda c: c.get("time") or "", reverse=True)
     for c in result:
         c.pop("_conv_id", None)
-    total = len(result)
+    merged_count = len(result)
     safe_offset = max(0, int(offset or 0))
     safe_limit = paging_cap_limit
     page = result[safe_offset : safe_offset + safe_limit]
 
+    # ``total_count`` is now the cheap COUNT(*) on the Conversation table
+    # rather than ``len(result)``. The two differ when sibling rows
+    # collapse into one phone — the merged count is a (small) lower
+    # bound. For the merchant UX (showing "has more") the conservative
+    # signal is whether we filled the page AND whether we hit fetch_cap.
+    total = max(tenant_convo_count, merged_count)
+    fetch_cap_hit = len(convo_rows) >= fetch_cap
+    has_more = bool(
+        fetch_cap_hit
+        or (safe_offset + len(page)) < merged_count
+    )
+
     # ── 8. Structured perf log ──────────────────────────────────────────────
-    # Always emit at INFO so we get a baseline duration_ms for every request.
-    # Promote to WARNING when the response took longer than 2s — that is
-    # the post-fix expectation; anything above means we need to revisit the
-    # query plan (likely a missing index on message_events) or move to
-    # SQL-level pagination instead of Python slicing.
+    # INFO for fast responses, WARNING when duration_ms >= 2000ms so we
+    # get an automatic alert if we regress past the post-fix expectation.
     duration_ms = int((_time.perf_counter() - _t0) * 1000)
     perf_payload = {
         "event":                     "conversations_list_perf",
         "tenant_id":                 tenant_id,
         "limit":                     safe_limit,
         "offset":                    safe_offset,
-        "conversations_count":       total,
+        "conversations_count":       tenant_convo_count,
+        "merged_phone_count":        merged_count,
+        "fetch_cap":                 fetch_cap,
+        "fetch_cap_hit":             fetch_cap_hit,
         "page_size":                 len(page),
         "duration_ms":               duration_ms,
         "unread_count_strategy":     "grouped",
         "used_joinedload_customer":  True,
-        "pagination":                "python_slice",
+        "pagination":                "sql_limit",
+        "msg_events_index_assumed":  "ix_msg_events_tenant_conv_created",
     }
     log_line = "[CONV_LIST_PERF] " + _json.dumps(perf_payload, ensure_ascii=False)
     if duration_ms >= 2000:
@@ -904,7 +956,7 @@ async def list_conversations(
     return {
         "conversations": page,
         "total_count": total,
-        "has_more": (safe_offset + len(page)) < total,
+        "has_more": has_more,
     }
 
 
