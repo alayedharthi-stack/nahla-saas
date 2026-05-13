@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, validator
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from core.auth import get_jwt_user_id
@@ -30,6 +31,20 @@ from models import (
     CustomerProfile,
     CustomerSegmentManual,
 )
+# ── Additional child models needed for safe customer deletion ─────────────────
+# These tables hold FK references to customers.id without ON DELETE CASCADE,
+# so we must delete them explicitly before removing the parent customer row.
+try:
+    from models import CustomerPreferences           # type: ignore[attr-defined]
+    from models import ProductAffinity              # type: ignore[attr-defined]
+    from models import PriceSensitivityScore        # type: ignore[attr-defined]
+    from models import ConversationHistorySummary   # type: ignore[attr-defined]
+    from models import PredictiveReorderEstimate    # type: ignore[attr-defined]
+    from models import ProductInterest              # type: ignore[attr-defined]
+    from models import GovernorSendLog              # type: ignore[attr-defined]
+    _EXTRA_CUSTOMER_CHILD_MODELS = True
+except ImportError:
+    _EXTRA_CUSTOMER_CHILD_MODELS = False
 from services.nahla_segments import (
     SEGMENTS as NAHLA_SEGMENTS,
     build_segment_query,
@@ -944,13 +959,106 @@ async def delete_customer(customer_id: int, request: Request, db: Session = Depe
     if not cust:
         raise HTTPException(status_code=404, detail="العميل غير موجود")
 
-    db.query(CustomerProfile).filter_by(customer_id=cust.id, tenant_id=tenant_id).delete()
-    db.delete(cust)
+    _delete_customer_children(db, [cust.id], tenant_id)
+    db.query(Customer).filter(
+        Customer.id == cust.id, Customer.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
     db.commit()
     return {"deleted": True}
 
 
-# ── Bulk delete ──────────────────────────────────────────────────────────────
+# ── Customer delete helpers ───────────────────────────────────────────────────
+
+def _delete_customer_children(db: Session, customer_ids: list, tenant_id: int) -> None:
+    """Delete (or nullify) every child table that references customers.id
+    without ON DELETE CASCADE before we remove the parent rows.
+
+    Tables are processed in dependency order so that FK constraints are
+    respected even if Postgres doesn't have CASCADE configured.
+    """
+    if not customer_ids:
+        return
+
+    id_filter = lambda model: (  # noqa: E731
+        model.customer_id.in_(customer_ids),
+        model.tenant_id == tenant_id,
+    )
+    id_filter_no_tenant = lambda model: (  # noqa: E731
+        model.customer_id.in_(customer_ids),
+    )
+
+    # Always-present models (already imported at module level)
+    db.query(CustomerNameCleanupDraft).filter(
+        CustomerNameCleanupDraft.customer_id.in_(customer_ids),
+        CustomerNameCleanupDraft.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    db.query(CustomerNameAuditLog).filter(
+        CustomerNameAuditLog.customer_id.in_(customer_ids),
+        CustomerNameAuditLog.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    db.query(CustomerProfile).filter(
+        CustomerProfile.customer_id.in_(customer_ids),
+        CustomerProfile.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    # CustomerSegmentManual already has ondelete='CASCADE' but delete
+    # explicitly to keep the logic self-contained.
+    db.query(CustomerSegmentManual).filter(
+        CustomerSegmentManual.customer_id.in_(customer_ids),
+        CustomerSegmentManual.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
+    # Optionally-imported child models
+    if _EXTRA_CUSTOMER_CHILD_MODELS:
+        for Model in (
+            CustomerPreferences,
+            ProductAffinity,
+            PriceSensitivityScore,
+            ConversationHistorySummary,
+        ):
+            db.query(Model).filter(
+                Model.customer_id.in_(customer_ids),
+                Model.tenant_id == tenant_id,
+            ).delete(synchronize_session=False)
+
+        db.query(PredictiveReorderEstimate).filter(
+            PredictiveReorderEstimate.customer_id.in_(customer_ids),
+            PredictiveReorderEstimate.tenant_id == tenant_id,
+        ).delete(synchronize_session=False)
+
+        db.query(ProductInterest).filter(
+            ProductInterest.customer_id.in_(customer_ids),
+            ProductInterest.tenant_id == tenant_id,
+        ).delete(synchronize_session=False)
+
+        db.query(GovernorSendLog).filter(
+            GovernorSendLog.customer_id.in_(customer_ids),
+            GovernorSendLog.tenant_id == tenant_id,
+        ).delete(synchronize_session=False)
+
+    # Nullable FK tables — use raw SQL to SET NULL so we preserve the
+    # historical records (orders, conversations, etc.) while unlinking the
+    # deleted customer rows.
+    for table, col in (
+        ("notification_logs",          "customer_id"),
+        ("automation_events",          "customer_id"),
+        ("automation_executions",      "customer_id"),
+        ("ai_action_logs",             "customer_id"),
+        ("delivery_quality_events",    "customer_id"),
+        ("campaign_send_logs",         "customer_id"),
+    ):
+        db.execute(
+            sa.text(
+                f"UPDATE {table} SET {col} = NULL "
+                f"WHERE {col} = ANY(:ids) AND tenant_id = :tid"
+            ),
+            {"ids": list(customer_ids), "tid": tenant_id},
+        )
+
+
+# ── Bulk delete ───────────────────────────────────────────────────────────────
 
 class BulkDeleteIn(BaseModel):
     ids: Optional[List[int]] = None     # specific IDs — empty/omitted = delete ALL
@@ -974,31 +1082,39 @@ async def bulk_delete_customers(
     tenant_id = resolve_tenant_id(request)
 
     if body.delete_all and not body.ids:
-        # Wipe all customers for this tenant
-        profiles_deleted = (
-            db.query(CustomerProfile)
-            .filter(CustomerProfile.tenant_id == tenant_id)
-            .delete(synchronize_session=False)
-        )
+        # Wipe all customers for this tenant — collect IDs first so
+        # _delete_customer_children can use them for the nullable-FK tables.
+        all_ids: list = [
+            row[0]
+            for row in db.query(Customer.id)
+            .filter(Customer.tenant_id == tenant_id)
+            .all()
+        ]
+        _delete_customer_children(db, all_ids, tenant_id)
         customers_deleted = (
             db.query(Customer)
             .filter(Customer.tenant_id == tenant_id)
             .delete(synchronize_session=False)
         )
         db.commit()
-        return {"deleted": customers_deleted, "profiles_deleted": profiles_deleted}
+        return {"deleted": customers_deleted}
 
     if not body.ids:
         raise HTTPException(status_code=400, detail="لم يتم تحديد أي عملاء للحذف")
 
     # Delete only the specified IDs (must belong to this tenant)
-    db.query(CustomerProfile).filter(
-        CustomerProfile.customer_id.in_(body.ids),
-        CustomerProfile.tenant_id == tenant_id,
-    ).delete(synchronize_session=False)
+    owned_ids: list = [
+        row[0]
+        for row in db.query(Customer.id)
+        .filter(Customer.id.in_(body.ids), Customer.tenant_id == tenant_id)
+        .all()
+    ]
+    if not owned_ids:
+        raise HTTPException(status_code=404, detail="لم يُعثر على أي من العملاء المحددين")
 
+    _delete_customer_children(db, owned_ids, tenant_id)
     result = db.query(Customer).filter(
-        Customer.id.in_(body.ids),
+        Customer.id.in_(owned_ids),
         Customer.tenant_id == tenant_id,
     ).delete(synchronize_session=False)
 

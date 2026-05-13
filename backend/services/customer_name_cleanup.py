@@ -129,6 +129,73 @@ _NONHUMAN_PHRASES = (
 )
 
 
+# ── Latin-gibberish detection ─────────────────────────────────────────────────
+# Catches random keyboard-mash names that come from WhatsApp display names
+# or bad imports: "ohguhu/hghjgkv/", "agffsggg88", "xzxqklmnn", etc.
+# Strategy:
+#   1. If the string has NO Arabic characters and is all-Latin (after stripping
+#      punctuation/digits), check for gibberish:
+#      a. Consecutive consonant runs ≥ 4 (e.g. "hghjgkv" → run of 7)
+#      b. Vowel ratio < 0.15 (almost no vowels for its length)
+#      c. No spaces + short length (single token ≤ 12 chars, all consonants)
+# We intentionally allow common short Latin names (Ali, Sam, Sara, Omar …).
+
+_LATIN_VOWELS = frozenset("aeiouAEIOU")
+_LATIN_ALPHA_RE = re.compile(r"[a-zA-Z]")
+_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
+_STRIP_NON_ALPHA_RE = re.compile(r"[^a-zA-Z]")
+
+
+def _looks_latin_gibberish(raw: str) -> bool:
+    """Return True if the name looks like random Latin keyboard mashing
+    and is very unlikely to be a real human name.
+
+    Only fires when the entire string has *no Arabic characters* and
+    consists primarily of Latin letters. Arabic names that happen to
+    contain Latin fragments (e.g. "Salla 3") are left to other checks.
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return False
+    # Must have at least one Latin letter
+    if not _LATIN_ALPHA_RE.search(stripped):
+        return False
+    # Skip if string contains Arabic — this is a mixed name, not Latin gibberish
+    if _ARABIC_RE.search(stripped):
+        return False
+
+    # Isolate only the Latin alpha characters for analysis
+    latin_only = _STRIP_NON_ALPHA_RE.sub("", stripped).lower()
+    if len(latin_only) < 3:
+        return False
+
+    # Heuristic A: vowel ratio too low
+    vowel_count = sum(1 for ch in latin_only if ch in _LATIN_VOWELS)
+    vowel_ratio = vowel_count / len(latin_only)
+    if vowel_ratio < 0.10 and len(latin_only) >= 5:
+        return True
+
+    # Heuristic B: consecutive consonant run ≥ 4
+    max_consonant_run = 0
+    current_run = 0
+    for ch in latin_only:
+        if ch not in _LATIN_VOWELS:
+            current_run += 1
+            if current_run > max_consonant_run:
+                max_consonant_run = current_run
+        else:
+            current_run = 0
+    if max_consonant_run >= 4 and len(latin_only) >= 5:
+        return True
+
+    # Heuristic C: single token (no spaces in original), digits mixed in,
+    # and the digit ratio check already passed — but check extra:
+    # e.g. "agffsggg88" → alpha part "agffsggg" has vowel_ratio = 1/8 = 0.125
+    # → already caught by heuristic A.
+
+    return False
+
+
 # ── Cleanup primitives ────────────────────────────────────────────────────────
 _EMOJI_RE = re.compile(
     "[\U0001F300-\U0001F9FF"  # symbols & pictographs
@@ -268,6 +335,14 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         return CleanResult(
             old=original, suggested=None,
             reason="القيمة رقم جوال وليست اسماً",
+            confidence="high", changed=True,
+        )
+
+    # ── Latin gibberish (keyboard mash / fake names) → clear ──────
+    if _looks_latin_gibberish(stripped):
+        return CleanResult(
+            old=original, suggested=None,
+            reason="اسم عشوائي غير حقيقي (حروف لاتينية بلا معنى)",
             confidence="high", changed=True,
         )
 
