@@ -892,9 +892,10 @@ export default function Customers() {
                                 {it.reason || '—'}
                               </td>
                               <td className="px-3 py-2">
-                                <Badge variant={isHigh ? 'green' : 'amber'}>
-                                  {isHigh ? 'عالية' : 'مراجعة'}
-                                </Badge>
+                                <Badge
+                                  label={isHigh ? 'عالية' : 'مراجعة'}
+                                  variant={isHigh ? 'green' : 'amber'}
+                                />
                               </td>
                             </tr>
                           )
