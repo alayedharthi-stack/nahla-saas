@@ -73,13 +73,15 @@ _STOP_TOKENS_AR = frozenset({
     # Edit / revision markers — merchants use "تعديل 238" as a memo
     # field for a row that needs revisiting. Never a real name.
     "تعديل", "تعديلات",
-    # Gregorian month names — almost always a date stamp, not a name.
-    # We deliberately do NOT include Hijri months (رمضان is a real
-    # given name; شعبان too) — those stay through.
-    "يناير", "فبراير", "مارس", "أبريل", "ابريل",
-    "مايو", "يونيو", "يونيه", "يوليو", "يوليه",
-    "أغسطس", "اغسطس", "سبتمبر", "أكتوبر", "اكتوبر",
-    "نوفمبر", "ديسمبر",
+    # NOTE (May 2026): Gregorian month names used to live here so a
+    # row like ``"أيمن نوفمبر"`` would auto-strip ``نوفمبر``. They've
+    # been MOVED to ``_MONTH_TOKENS_AR`` (further down) so the cleanup
+    # loop can distinguish "merchant typed a date stamp suffix" from
+    # "merchant typed an unrelated stopword" — the former now lands
+    # in ``suspicious_suffix`` at LOW confidence (manual review),
+    # because the same suffix arrives in compound import codes
+    # (``"نوفمبر26"``, ``"اكتوبر_27"``) that should be CLEARED rather
+    # than reduced to the leading first name.
 })
 
 _STOP_TOKENS_EN = frozenset({
@@ -107,6 +109,113 @@ _STOP_TOKENS_AR_EXTRA = frozenset({
     "تجريبي",       # "test" — also exists in _STOP_TOKENS_AR
     "اختبار",       # "test"
 })
+
+
+# ── Month tokens (May 2026) ──────────────────────────────────────────────────
+# Date-stamp suffixes are wildly common in imported CSV rows that
+# came from CRM exports / ad-campaign segmentation. We track them in
+# a DEDICATED set (not in _STOP_TOKENS_AR) so the cleanup loop can:
+#
+#   * Detect single-token month tokens that are alone or paired with
+#     a digit suffix (``"نوفمبر26"``, ``"اكتوبر 27"``) → clear.
+#   * When a real first name precedes the month (``"أيمن نوفمبر"``,
+#     ``"خالد March24"``) → propose stripping just the month, but
+#     route to ``suspicious_suffix`` at LOW confidence so the merchant
+#     reviews each row. The suffix MIGHT have been a campaign tag the
+#     merchant wants to preserve (or the row might be a true junk
+#     import the merchant prefers to clear entirely).
+#
+# Hijri months ``رمضان`` and ``شعبان`` are STILL legitimate Saudi
+# personal names — we deliberately omit them from the bare-token set.
+# They are matched only inside the compound-code regex below (where
+# the digit suffix disambiguates: ``"رمضان1447"`` is a campaign tag,
+# ``"رمضان"`` is a person).
+_MONTH_TOKENS_AR = frozenset({
+    "يناير", "فبراير", "مارس",
+    "ابريل", "أبريل", "أپريل",
+    "مايو",
+    "يونيو", "يونيه",  "يوليو", "يوليه",
+    "اغسطس", "أغسطس",
+    "سبتمبر", "ستمبر",
+    "اكتوبر", "أكتوبر",
+    "نوفمبر", "نوفمبير",
+    "ديسمبر", "ديسمبير",
+})
+
+_MONTH_TOKENS_EN = frozenset({
+    "jan",  "january",
+    "feb",  "february",
+    "mar",  "march",
+    "apr",  "april",
+    "may",
+    "jun",  "june",
+    "jul",  "july",
+    "aug",  "august",
+    "sep",  "sept", "september",
+    "oct",  "october",
+    "nov",  "november",
+    "dec",  "december",
+})
+
+# Hijri months that should match ONLY in compound-code form (e.g.
+# ``"رمضان1447"``) — never as bare tokens. Used by the regex pre-
+# check, not by the per-token loop.
+_HIJRI_MONTH_STEMS_AR = frozenset({
+    "محرم",  "صفر",
+    "ربيع",  "جمادي", "جمادى",
+    "رجب",   "شعبان",
+    "رمضان", "شوال",
+    "ذو",    # "ذو القعدة" / "ذو الحجة" — match the stem only
+    "القعده", "القعدة",
+    "الحجه", "الحجة",
+})
+
+# Pre-built alternation pattern strings — assembled once at import
+# time and reused by the regex matcher below.
+_ALL_MONTHS_AR_RE_PART = "|".join(
+    sorted(_MONTH_TOKENS_AR | _HIJRI_MONTH_STEMS_AR, key=len, reverse=True)
+)
+_ALL_MONTHS_EN_RE_PART = "|".join(
+    sorted(_MONTH_TOKENS_EN, key=len, reverse=True)
+)
+
+# Compound month-code regex (May 2026)
+# ────────────────────────────────────
+# Catches the import-code patterns that arrive in CRM exports / ad
+# imports. All variants are anchored with ``^…$`` against the
+# normalised string, so partial occurrences inside a longer name
+# ("نوفمبر26 خالد") will NOT trip these — they survive as a token
+# pair and route through the per-token loop instead.
+#
+# Patterns (case-insensitive, after Arabic normalisation):
+#   1. ``<arabic_month><digits>``            "نوفمبر26"
+#   2. ``<digits><arabic_month>``            "26نوفمبر"
+#   3. ``<arabic_month><sep><digits>``       "نوفمبر_26"  "نوفمبر-26"
+#   4. ``<latin_month><digits>``             "Jan2025"  "Mar24"
+#   5. ``<digits><latin_month>``             "24Mar"
+#   6. ``<latin_month><sep><digits>``        "aug_26"   "sep-27"
+#   7. ``<arabic_month><space><digits>``     "نوفمبر 26" (whole string)
+#   8. ``<latin_month><space><digits>``      "March 24" (whole string)
+_MONTH_CODE_RE = re.compile(
+    rf"^(?:"
+    rf"(?:{_ALL_MONTHS_AR_RE_PART})[\s_\-./]*\d{{2,4}}"
+    rf"|\d{{2,4}}[\s_\-./]*(?:{_ALL_MONTHS_AR_RE_PART})"
+    rf"|(?:{_ALL_MONTHS_EN_RE_PART})[\s_\-./]*\d{{2,4}}"
+    rf"|\d{{2,4}}[\s_\-./]*(?:{_ALL_MONTHS_EN_RE_PART})"
+    rf")$",
+    flags=re.IGNORECASE,
+)
+
+# Compact ``<month><digits>`` matcher used inside the per-token loop
+# to catch ``"oct2025"`` / ``"نوفمبر26"`` when they appear next to a
+# real first name (whole-string regex above won't fire because the
+# string contains a real name token too).
+_MONTH_TOKEN_COMPACT_RE = re.compile(
+    rf"^(?:"
+    rf"(?:{_ALL_MONTHS_EN_RE_PART})|(?:{_ALL_MONTHS_AR_RE_PART})"
+    rf")[\s_\-./]*\d{{2,4}}$",
+    flags=re.IGNORECASE,
+)
 
 
 # ── Source / channel tokens (May 2026) ───────────────────────────────────────
@@ -538,6 +647,28 @@ def _looks_literal_placeholder(raw: str) -> bool:
             or normalised in _PLACEHOLDER_LITERALS)
 
 
+def _looks_month_code(raw: str) -> bool:
+    """Return True if the entire raw value matches a month-code
+    pattern (``"نوفمبر26"`` / ``"Jan2025"`` / ``"aug_26"`` /
+    ``"رمضان 1447"``). These are CRM/ad-campaign segmentation tags
+    that should NEVER be stored as a customer name.
+
+    Match is regex-anchored against the Arabic-normalised lowercased
+    string — partial occurrences inside a longer name ("خالد
+    نوفمبر26") will not trip this; the per-token loop handles those
+    via ``_MONTH_TOKENS_*`` + suspicious_suffix routing.
+    """
+    if not raw or not isinstance(raw, str):
+        return False
+    candidate = _MULTISPACE_RE.sub(" ", raw).strip()
+    if not candidate:
+        return False
+    normalised = _normalise_arabic(candidate)
+    if not normalised:
+        return False
+    return bool(_MONTH_CODE_RE.match(normalised))
+
+
 def _looks_nonhuman_phrase(raw: str) -> bool:
     """Return True if ``raw`` contains one of the known religious /
     promotional phrases that show up as a fake "name" via WhatsApp push
@@ -592,6 +723,23 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             reason="قيمة عامة (مثل: بدون اسم / unknown)",
             confidence="high", changed=True,
             category=CATEGORY_PLACEHOLDER,
+        )
+
+    # ── Month-code (May 2026) ─────────────────────────────────────
+    # ``"نوفمبر26"`` / ``"Jan2025"`` / ``"aug_26"`` / ``"رمضان1447"``
+    # patterns are CRM-export / ad-campaign segmentation tags. Match
+    # the WHOLE-STRING regex first so we catch the compact compound
+    # forms (no space between month and digits) — the per-token loop
+    # would otherwise miss them because ``"نوفمبر26"`` is a single
+    # token that doesn't equal any stored month token. Names that
+    # contain a month alongside a real first name fall through to the
+    # token loop (``"خالد نوفمبر"`` → suspicious_suffix, low).
+    if _looks_month_code(stripped):
+        return CleanResult(
+            old=original, suggested=None,
+            reason="كود شهري/زمني (تصنيف حملة أو استيراد)",
+            confidence="high", changed=True,
+            category=CATEGORY_GENERIC_BAD,
         )
 
     # ── Phone-only → clear ────────────────────────────────────────
@@ -651,6 +799,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
     had_location_removed = False    # "الرياض" / "من المدينة"
     had_title_removed    = False    # "Eng" / "م."
     had_prep_removed     = False    # "من"
+    had_month_removed    = False    # "نوفمبر" / "March" / Hijri stem
 
     for token in tokens:
         if not token:
@@ -730,6 +879,38 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             had_prep_removed = True
             continue
 
+        # ── Month tokens (May 2026) ───────────────────────────────
+        # Standalone Gregorian month tokens (Arabic + Latin). Hijri
+        # month *stems* are matched ONLY in compound-code form (handled
+        # by the whole-string regex pre-check above), never here — we
+        # don't want ``"رمضان"`` / ``"شعبان"`` (legitimate personal
+        # names) auto-stripped. The dedicated ``had_month_removed``
+        # flag routes the verdict into ``suspicious_suffix`` at LOW
+        # confidence when a real first name survives.
+        if (
+            norm_bare in _MONTH_TOKENS_AR
+            or token_lc in _MONTH_TOKENS_EN
+            or bare.lower() in _MONTH_TOKENS_EN
+        ):
+            dropped.append(token)
+            had_month_removed = True
+            continue
+
+        # ── Latin-alpha + digit-suffix compound token (May 2026) ──
+        # Single tokens like ``"campaign27"`` / ``"order2024"`` /
+        # ``"oct2025"`` that survive splitting because there's no
+        # whitespace separator. We only strip them when the alpha
+        # prefix is a KNOWN month (catching ``"oct2025"``) — generic
+        # alpha+digit tokens (``"campaign27"``) stay as-is to avoid
+        # mangling product SKUs / business names. The whole-string
+        # regex above already catches the case where the entire name
+        # IS a month-code; this branch handles month-code tokens
+        # SIDE-BY-SIDE with a real first name (``"خالد oct2025"``).
+        if _MONTH_TOKEN_COMPACT_RE.match(norm_bare):
+            dropped.append(token)
+            had_month_removed = True
+            continue
+
         # Single-char leftovers are almost always punctuation residue.
         if len(token) == 1:
             dropped.append(token)
@@ -777,6 +958,13 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             return CATEGORY_SOURCE
         if had_location_removed or had_prep_removed:
             return CATEGORY_LOCATION
+        # Month tokens — when the entire name reduces to month bits
+        # (``"نوفمبر 26"`` after the token split, or just ``"March"``
+        # alone) we mark it as a campaign-tag style bad name. The
+        # compact-token case (``"نوفمبر26"``) is already handled by
+        # the whole-string regex which bypasses this path entirely.
+        if had_month_removed:
+            return CATEGORY_GENERIC_BAD
         if had_stopword_removed or had_title_removed:
             return CATEGORY_GENERIC_BAD
         if had_digits_removed:
@@ -795,6 +983,8 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             reason = "الاسم يبدو موقعاً جغرافياً (مدينة / منطقة)"
         elif category == CATEGORY_PLACEHOLDER:
             reason = "قيمة عامة بدون اسم حقيقي"
+        elif category == CATEGORY_GENERIC_BAD and had_month_removed:
+            reason = "كود شهري/زمني (تصنيف حملة أو استيراد)"
         else:
             reason = (
                 "لا يبقى اسم حقيقي بعد إزالة الكلمات التجارية"
@@ -851,6 +1041,16 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         # ``low`` puts the row in the "needs review" lane so the
         # bulk "Apply high-confidence only" shortcut never touches
         # it.
+        confidence = "low"
+    elif had_month_removed:
+        # ``"خالد نوفمبر"`` / ``"محمد March24"`` — a campaign-tag
+        # suffix sits beside what looks like a real first name. Same
+        # policy as source / location suffixes: route to the
+        # suspicious_suffix bucket at LOW confidence so the merchant
+        # decides whether to drop the month, clear the row entirely
+        # (true junk import) or keep the row as-is (the suffix is
+        # actually meaningful for that merchant).
+        category = CATEGORY_SUSPICIOUS_SUFFIX
         confidence = "low"
     elif had_title_removed:
         # Title-only edits ("د. سامي" → "سامي") are also suspicious-

@@ -327,3 +327,99 @@ class TestBulkScale:
         assert elapsed < 2.0, (
             f"compute_cleanup scaling regression: 5 000 calls took {elapsed:.2f}s"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Month / time-code detection (May 2026)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These rows show up in CRM exports and ad-campaign imports: the merchant
+# bulk-uploads a CSV where the "name" column is actually a campaign tag
+# (``"نوفمبر26"``, ``"Jan2025"``, ``"aug_26"``). We want the cleanup tool
+# to flag them aggressively when the ENTIRE name is a code, but never
+# touch a row that contains a real first name PLUS a month suffix without
+# explicit merchant review (force LOW confidence → suspicious_suffix).
+class TestMonthCodeDetection:
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "نوفمبر26", "أكتوبر27", "اكتوبر_27",
+            "Jan2025", "March24", "march 24", "aug_26", "sep27",
+            "jan-2025", "Dec2024", "may 2026",
+            "رمضان1447", "شعبان24",
+            "نوفمبر 26",
+        ],
+    )
+    def test_pure_month_codes_are_cleared_high_confidence(self, raw: str):
+        from services.customer_name_cleanup import (
+            CATEGORY_GENERIC_BAD,
+            compute_cleanup,
+        )
+
+        v = compute_cleanup(raw)
+        assert v.changed is True
+        assert v.suggested is None, (
+            f"{raw!r} should be cleared (no real name component)"
+        )
+        assert v.confidence == "high"
+        assert v.category == CATEGORY_GENERIC_BAD
+
+    @pytest.mark.parametrize(
+        "raw,kept",
+        [
+            ("خالد نوفمبر", "خالد"),
+            ("محمد أكتوبر", "محمد"),
+            ("سامي march24", "سامي"),
+            ("احمد oct2025", "احمد"),
+            # Hijri-month compound only fires through the compact regex,
+            # so it still routes through suspicious_suffix beside a real
+            # first name.
+            ("فهد رمضان1447", "فهد"),
+        ],
+    )
+    def test_real_name_with_month_suffix_is_suspicious_low(
+        self, raw: str, kept: str
+    ):
+        from services.customer_name_cleanup import (
+            CATEGORY_SUSPICIOUS_SUFFIX,
+            compute_cleanup,
+        )
+
+        v = compute_cleanup(raw)
+        assert v.changed is True
+        assert v.suggested == kept
+        # Low confidence is the critical guarantee — bulk
+        # "Apply high-confidence only" must NEVER touch these.
+        assert v.confidence == "low"
+        assert v.category == CATEGORY_SUSPICIOUS_SUFFIX
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            # Bare Hijri months are real Saudi given names — must not
+            # be auto-stripped just because they appear in compound
+            # codes elsewhere.
+            "رمضان", "شعبان",
+            # "رياض" is a personal name; "الرياض" with article is the
+            # city (handled by the location matcher). Locked in here
+            # to make sure the new month logic didn't accidentally
+            # introduce a false positive.
+            "رياض الخالد",
+            # A name with a month-style word but no digit suffix and no
+            # real name — should remain unchanged because we
+            # deliberately don't strip lone Gregorian months from a
+            # multi-token Saudi-name context (the merchant might mean
+            # the literal Arabic word, like "أم مايو" — rare but real).
+            # The single-token Gregorian "نوفمبر" alone is still routed
+            # through the suspicious_suffix bucket (low confidence) so
+            # the merchant decides — see the next test.
+            "محمد علي",
+        ],
+    )
+    def test_real_names_are_not_falsely_flagged(self, raw: str):
+        from services.customer_name_cleanup import compute_cleanup
+
+        v = compute_cleanup(raw)
+        assert v.changed is False, (
+            f"{raw!r} is a real name and must survive the new month-code rules"
+        )
