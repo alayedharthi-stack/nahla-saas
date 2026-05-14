@@ -692,28 +692,44 @@ class CustomerIntelligenceService:
             # Low-trust sources (WhatsApp aliases, widgets) must not overwrite
             # authoritative names already on file from the store or orders.
             if clean_name:
-                existing_name_source = (
-                    (customer.extra_metadata or {}).get("name_source")
-                    or customer.acquisition_channel
-                )
-                if _should_update_name(
-                    existing_name=customer.name,
-                    existing_source=existing_name_source,
-                    new_name=clean_name,
-                    new_source=source,
-                ):
-                    customer.name = clean_name
-                    # Track which source set the current name so future
-                    # updates can make the same trust comparison.
-                    metadata["name_source"] = source or ""
-                else:
+                # ── Manual-name-override short-circuit ────────────
+                # The merchant explicitly curated this name via the
+                # inline pencil in the customers table (or the
+                # card editor). NO upstream source — Salla, Zid,
+                # WhatsApp profile, widget — gets to overwrite it.
+                # This is intentionally stricter than the trust
+                # hierarchy: merchant intent beats every automated
+                # signal. See routers/customers.update_customer
+                # for where the flag is stamped.
+                if (customer.extra_metadata or {}).get("manual_name_override"):
                     logger.debug(
-                        "[CIS] name NOT updated (trust: %s=%d >= existing %s=%d) "
-                        "| tenant=%s id=%s",
-                        source, _name_trust_level(source),
-                        existing_name_source, _name_trust_level(existing_name_source),
-                        self.tenant_id, customer.id,
+                        "[CIS] name NOT updated (manual override) "
+                        "| tenant=%s id=%s new_source=%s",
+                        self.tenant_id, customer.id, source,
                     )
+                else:
+                    existing_name_source = (
+                        (customer.extra_metadata or {}).get("name_source")
+                        or customer.acquisition_channel
+                    )
+                    if _should_update_name(
+                        existing_name=customer.name,
+                        existing_source=existing_name_source,
+                        new_name=clean_name,
+                        new_source=source,
+                    ):
+                        customer.name = clean_name
+                        # Track which source set the current name so future
+                        # updates can make the same trust comparison.
+                        metadata["name_source"] = source or ""
+                    else:
+                        logger.debug(
+                            "[CIS] name NOT updated (trust: %s=%d >= existing %s=%d) "
+                            "| tenant=%s id=%s",
+                            source, _name_trust_level(source),
+                            existing_name_source, _name_trust_level(existing_name_source),
+                            self.tenant_id, customer.id,
+                        )
 
             if clean_email:
                 customer.email = clean_email

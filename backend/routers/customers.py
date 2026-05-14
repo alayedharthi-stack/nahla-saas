@@ -88,6 +88,9 @@ class CustomerCreateIn(BaseModel):
         return normalized
 
 
+CUSTOMER_NAME_MAX_LEN = 80
+
+
 class CustomerPatchIn(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
@@ -101,6 +104,32 @@ class CustomerPatchIn(BaseModel):
         if not normalized or len(normalized) < 8:
             raise ValueError("رقم الهاتف غير صالح")
         return normalized
+
+    @validator("name", pre=True)
+    def validate_name(cls, v):
+        """Trim + length-cap merchant-supplied names. We accept an
+        explicit ``""`` (after trim) only as a "no change" signal —
+        the endpoint rejects empty names below so the UI surfaces a
+        clear error instead of silently wiping the row. Letting the
+        validator pass empty strings through keeps the existing
+        contract for bulk PATCH callers that send all fields as
+        strings."""
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            v = str(v)
+        v = v.strip()
+        # Collapse runs of whitespace inside the name so a merchant
+        # typing "تركي   البلوي" doesn't end up with weird gaps. We
+        # don't normalize Arabic glyphs (kept faithful to merchant
+        # intent — the cleanup pipeline owns Arabic normalization).
+        import re as _re_name  # noqa: PLC0415
+        v = _re_name.sub(r"\s+", " ", v)
+        if len(v) > CUSTOMER_NAME_MAX_LEN:
+            raise ValueError(
+                f"الاسم طويل جداً (الحد الأقصى {CUSTOMER_NAME_MAX_LEN} حرفاً)"
+            )
+        return v
 
 
 SOURCE_LABELS: Dict[str, str] = {
@@ -256,6 +285,7 @@ def _serialize_customer(
     pending_unsubscribe:    bool = bool(meta.get("pending_unsubscribe"))
     marketing_opt_out_manual: bool = bool(meta.get("marketing_opt_out_manual"))
     is_campaign_test_recipient: bool = bool(meta.get("is_campaign_test_recipient"))
+    manual_name_override:   bool = bool(meta.get("manual_name_override"))
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
         or (profile.segment if profile else None)
@@ -285,6 +315,13 @@ def _serialize_customer(
         "is_campaign_test_recipient": is_campaign_test_recipient,
         "manual_segments":            manual_keys,
         "manual_segments_labels":     [_segment_label_for_key(k) for k in manual_keys],
+        # ── Inline-edit override marker ───────────────────────────────
+        # True when the merchant rewrote the name via the table's
+        # pencil icon or the card editor. The dashboard renders a
+        # small "محرّر يدوياً" hint and the bulk cleanup tool skips
+        # the row so the merchant's edit is never undone.
+        "manual_name_override":       manual_name_override,
+        "manual_name_edited_at":      meta.get("manual_name_edited_at"),
         # ── Per-segment source breakdown ──────────────────────────────
         # Shape: { "<segment_key>": { "automatic": bool,
         #                              "manual_include": bool,
@@ -918,6 +955,23 @@ async def create_customer(body: CustomerCreateIn, request: Request, db: Session 
 async def update_customer(
     customer_id: int, body: CustomerPatchIn, request: Request, db: Session = Depends(get_db),
 ):
+    """Update a customer row. Supports partial PATCH — every field is
+    optional; only the keys present in the body are persisted.
+
+    Name edits are special: when the merchant rewrites the name (via
+    the inline edit pencil in the customers table, or via the
+    full-card editor), we stamp two markers so the bulk
+    ``customer_name_cleanup`` tool NEVER undoes the edit:
+
+      * ``extra_metadata.manual_name_override = true``
+      * ``extra_metadata.manual_name_edited_at = <iso8601>``
+
+    The bulk cleanup preview and apply endpoints honour the flag —
+    flagged customers are skipped silently even if their name still
+    matches a stopword heuristic. The flag survives Salla / Zid
+    re-syncs because the syncer only writes new metadata on initial
+    creation; existing rows keep their merchant-curated value.
+    """
     tenant_id = resolve_tenant_id(request)
     service = CustomerIntelligenceService(db, tenant_id)
     cust = db.query(Customer).filter(
@@ -935,10 +989,55 @@ async def update_customer(
             )
         cust.phone = body.phone
 
+    name_changed = False
     if body.name is not None:
-        cust.name = body.name
+        # Empty/whitespace-only names are rejected explicitly so the
+        # UI can surface "الاسم لا يمكن أن يكون فارغاً" instead of
+        # silently wiping the row. The validator already trimmed +
+        # capped length.
+        if not body.name:
+            raise HTTPException(
+                status_code=422,
+                detail="الاسم لا يمكن أن يكون فارغاً",
+            )
+        if body.name != (cust.name or ""):
+            cust.name = body.name
+            name_changed = True
     if body.email is not None:
         cust.email = body.email
+
+    # ── Manual-name override marker ──────────────────────────────
+    # Stamp the override flag whenever the merchant touched the
+    # ``name`` field — even if the new value happens to equal the
+    # old one (the merchant explicitly approved this spelling).
+    # The flag is the single source of truth the bulk cleanup
+    # pipeline reads to decide "skip this row".
+    if body.name is not None:
+        try:
+            meta = dict(cust.extra_metadata or {})
+            meta["manual_name_override"]   = True
+            meta["manual_name_edited_at"]  = datetime.now(timezone.utc).isoformat()
+            # Preserve the previous name for one-step "undo" + audit
+            # diffability. Cap to one snapshot — we don't keep history.
+            if name_changed:
+                meta["manual_name_previous"] = (cust.name or "")
+            cust.extra_metadata = meta
+            try:
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                flag_modified(cust, "extra_metadata")
+            except Exception:
+                pass
+        except Exception as _meta_exc:
+            # Persisting the flag is best-effort — the new name STILL
+            # wins, even if the metadata update fails (we just lose
+            # cleanup-protection on the row, surfaced via the next
+            # bulk-cleanup preview).
+            import logging  # noqa: PLC0415
+            logging.getLogger("nahla.customers").warning(
+                "[customers.update] manual_name_override stamp failed "
+                "tenant=%s customer=%s err=%s",
+                tenant_id, customer_id, _meta_exc,
+            )
 
     service.ensure_profile(cust, seen_at=datetime.now(timezone.utc))
     service.recompute_profile_for_customer(
@@ -947,7 +1046,18 @@ async def update_customer(
         commit=True,
         emit_event=True,
     )
-    return {"updated": True}
+    db.refresh(cust)
+    return {
+        "updated":               True,
+        "id":                    cust.id,
+        "name":                  cust.name or "",
+        "phone":                 cust.phone or "",
+        "email":                 cust.email or "",
+        "manual_name_override":  bool(
+            (cust.extra_metadata or {}).get("manual_name_override")
+        ),
+        "name_changed":          name_changed,
+    }
 
 
 @router.delete("/{customer_id}")
@@ -1772,6 +1882,23 @@ async def name_cleanup_preview(
 
     for cust in query:
         scanned += 1
+
+        # ── Manual-name-override short-circuit ──────────────────
+        # The merchant explicitly approved this name from the inline
+        # edit pencil in the customers table (or the card editor).
+        # Skip cleanup verdict + draft handling entirely so we don't
+        # propose to "fix" something they curated. The bulk cleanup
+        # modal MUST treat these rows as already clean even if the
+        # stopword heuristic would have flagged them.
+        if (cust.extra_metadata or {}).get("manual_name_override"):
+            # Still GC any leftover draft so it doesn't keep
+            # haunting the merchant after they curate the name.
+            d = drafts_by_customer.get(cust.id)
+            if d is not None:
+                stale_draft_ids.append(d.id)
+                drafts_by_customer.pop(cust.id, None)
+            continue
+
         verdict = compute_cleanup(cust.name)
         draft = drafts_by_customer.get(cust.id)
 
@@ -2226,6 +2353,19 @@ async def name_cleanup_apply(
                 })
                 continue
 
+            # ── Manual-name-override short-circuit ─────────────
+            # The merchant curated this name explicitly via the
+            # inline edit pencil. The bulk cleaner MUST NOT
+            # overwrite it. We skip silently with a clear
+            # reason so the merchant understands why the apply
+            # didn't touch this row.
+            if (cust.extra_metadata or {}).get("manual_name_override"):
+                skipped.append({
+                    "customer_id": cust.id,
+                    "reason":      "الاسم محرّر يدوياً — تنظيف المسحاة محمي",
+                })
+                continue
+
             # Re-run the cleaner against the LIVE DB value. The
             # merchant approved a specific (old → new) edit; if the
             # row has changed in the meantime, the verdict may no
@@ -2282,6 +2422,10 @@ async def name_cleanup_apply(
         scanned = 0
         for cust in query:
             scanned += 1
+            # Merchant-curated names are off-limits to the bulk cleaner.
+            # See update_customer() for where this flag is stamped.
+            if (cust.extra_metadata or {}).get("manual_name_override"):
+                continue
             verdict = compute_cleanup(cust.name)
             if not verdict.changed or verdict.confidence != "high":
                 continue

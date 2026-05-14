@@ -32,6 +32,7 @@ import {
   SkipForward,
   UserMinus,
   Check,
+  Pencil,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
@@ -174,6 +175,116 @@ export default function Customers() {
   const [nameCleanupApplying, setNameCleanupApplying] = useState(false)
   const [nameCleanupItems, setNameCleanupItems] = useState<NameCleanupPreviewItem[]>([])
   const [nameCleanupSelected, setNameCleanupSelected] = useState<Set<number>>(new Set())
+
+  // ── Inline-edit state for the name cell on the customers table ────
+  // The merchant clicks the pencil → ``inlineEditId`` is set → the
+  // matching row swaps the name span for an input + Save/Cancel
+  // buttons. We keep all editing state in a single object so the
+  // table re-renders only the row being edited, not the whole list.
+  // ``inlineNameToast`` drives the success / failure banner that
+  // surfaces after each save.
+  const [inlineEditId, setInlineEditId] = useState<number | null>(null)
+  const [inlineEditValue, setInlineEditValue] = useState('')
+  const [inlineEditSaving, setInlineEditSaving] = useState(false)
+  const [inlineEditError, setInlineEditError] = useState('')
+  const [inlineNameToast, setInlineNameToast] = useState<{
+    ok: boolean
+    text: string
+  } | null>(null)
+  // Auto-dismiss the toast after a few seconds so it doesn't pin
+  // forever after a stream of quick edits.
+  useEffect(() => {
+    if (!inlineNameToast) return
+    const timer = setTimeout(() => setInlineNameToast(null), 3000)
+    return () => clearTimeout(timer)
+  }, [inlineNameToast])
+
+  // Hard-coded to mirror the backend ``CUSTOMER_NAME_MAX_LEN`` so the
+  // UI can show a counter + block over-long submissions before the
+  // network round-trip. Keep in sync with backend/routers/customers.py.
+  const INLINE_NAME_MAX_LEN = 80
+
+  const startInlineEdit = useCallback((cust: CustomerRecord) => {
+    setInlineEditId(cust.id)
+    setInlineEditValue(cust.name || '')
+    setInlineEditError('')
+  }, [])
+
+  const cancelInlineEdit = useCallback(() => {
+    setInlineEditId(null)
+    setInlineEditValue('')
+    setInlineEditError('')
+    setInlineEditSaving(false)
+  }, [])
+
+  const saveInlineEdit = useCallback(async (cust: CustomerRecord) => {
+    // Client-side validation — same rules the backend enforces, but
+    // surfaced inline so the merchant gets feedback without a
+    // round-trip. The backend re-validates so any drift between
+    // them still fails closed.
+    const trimmed = (inlineEditValue || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+    if (!trimmed) {
+      setInlineEditError('الاسم لا يمكن أن يكون فارغاً')
+      return
+    }
+    if (trimmed.length > INLINE_NAME_MAX_LEN) {
+      setInlineEditError(`الاسم طويل جداً (الحد ${INLINE_NAME_MAX_LEN} حرفاً)`)
+      return
+    }
+    // No-op shortcut: if the merchant didn't actually change the
+    // value, just close the editor. We still trigger the API call
+    // when they typed the SAME value back — that's the merchant
+    // explicitly approving the spelling, which flips the
+    // ``manual_name_override`` flag so the bulk cleaner stops
+    // proposing changes for this row.
+    setInlineEditSaving(true)
+    setInlineEditError('')
+    try {
+      const res = await customersApi.update(cust.id, { name: trimmed })
+      // Update the row IN-PLACE so the merchant stays inside the
+      // current search / filter / page view. Critical for the
+      // "search for 'تيك توك' → edit row → keep going" workflow.
+      setCustomers(prev =>
+        prev.map(c =>
+          c.id === cust.id
+            ? {
+                ...c,
+                name: res.name ?? trimmed,
+                manual_name_override: res.manual_name_override ?? true,
+                manual_name_edited_at: new Date().toISOString(),
+              }
+            : c,
+        ),
+      )
+      // Also patch the drawer-mounted customer if it happens to be
+      // the same row, so reopening it doesn't flash the stale name.
+      setSelectedCustomer(prev =>
+        prev && prev.id === cust.id
+          ? {
+              ...prev,
+              name: res.name ?? trimmed,
+              manual_name_override: res.manual_name_override ?? true,
+              manual_name_edited_at: new Date().toISOString(),
+            }
+          : prev,
+      )
+      setInlineNameToast({ ok: true, text: 'تم تحديث اسم العميل' })
+      cancelInlineEdit()
+    } catch (err: any) {
+      const msg =
+        err?.detail
+        || err?.message
+        || 'تعذّر تحديث اسم العميل. حاول مرة أخرى.'
+      setInlineEditError(
+        typeof msg === 'string' ? msg : JSON.stringify(msg),
+      )
+    } finally {
+      setInlineEditSaving(false)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inlineEditValue, cancelInlineEdit])
   // Per-row edit state — keyed by customer_id. Initialised from the
   // preview response (which merges in any saved draft) and mutated
   // in-place as the merchant toggles chips. Autosave watches the
@@ -922,6 +1033,26 @@ export default function Customers() {
 
   return (
     <div className="space-y-5">
+      {/* ── Inline name-edit toast ────────────────────────────────────
+          Floating notification rendered at the bottom of the viewport
+          so it never covers the row the merchant just edited. Auto-
+          dismisses after 3s (see the useEffect near the state
+          declaration). Click anywhere to dismiss earlier. */}
+      {inlineNameToast && (
+        <div
+          onClick={() => setInlineNameToast(null)}
+          role="status"
+          aria-live="polite"
+          className={`fixed bottom-6 inset-x-0 mx-auto z-50 max-w-xs px-4 py-2.5 rounded-lg border text-xs text-center shadow-lg cursor-pointer ${
+            inlineNameToast.ok
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-red-50 border-red-200 text-red-800'
+          }`}
+        >
+          {inlineNameToast.ok ? '✓ ' : '⚠️ '}{inlineNameToast.text}
+        </div>
+      )}
+
       <PageHeader
         title="العملاء"
         subtitle="إدارة وتصنيف العملاء"
@@ -1155,25 +1286,110 @@ export default function Customers() {
                           }
                         </button>
                       </td>
-                      <td
-                        className="px-3 py-3 cursor-pointer"
-                        onClick={() => setSelectedCustomer(c)}
-                      >
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-medium text-slate-900">{c.name || '—'}</span>
-                          {c.is_unsubscribed && (
-                            <span className="inline-flex items-center gap-0.5 bg-red-100 text-red-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-red-200">
-                              <BellOff className="w-2.5 h-2.5" />
-                              ألغى الاشتراك
+                      {/* ── Name cell with inline-edit pencil ─────────────
+                          Click the pencil → the name span swaps for an
+                          input + Save/Cancel. While editing we stop
+                          propagation so opening the drawer doesn't
+                          steal focus from the input. The PATCH call
+                          updates the row IN-PLACE so the merchant
+                          stays inside their current search/filter
+                          context (critical for the "search تيك توك →
+                          fix names one by one" workflow). */}
+                      <td className="px-3 py-3 group/name">
+                        {inlineEditId === c.id ? (
+                          <div
+                            className="flex flex-col gap-1 min-w-[200px]"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                autoFocus
+                                value={inlineEditValue}
+                                onChange={(e) => setInlineEditValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault()
+                                    saveInlineEdit(c)
+                                  } else if (e.key === 'Escape') {
+                                    e.preventDefault()
+                                    cancelInlineEdit()
+                                  }
+                                }}
+                                disabled={inlineEditSaving}
+                                maxLength={INLINE_NAME_MAX_LEN}
+                                placeholder="اسم العميل"
+                                className="px-2 py-1 text-sm border border-brand-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-200 disabled:bg-slate-50 disabled:text-slate-400 w-full"
+                                dir="auto"
+                              />
+                              <button
+                                onClick={(e) => { e.stopPropagation(); saveInlineEdit(c) }}
+                                disabled={inlineEditSaving}
+                                title="حفظ (Enter)"
+                                className="p-1 rounded-md bg-brand-500 hover:bg-brand-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {inlineEditSaving
+                                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  : <Check className="w-3.5 h-3.5" />}
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); cancelInlineEdit() }}
+                                disabled={inlineEditSaving}
+                                title="إلغاء (Esc)"
+                                className="p-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            {inlineEditError && (
+                              <span className="text-[11px] text-red-600 leading-tight">
+                                {inlineEditError}
+                              </span>
+                            )}
+                            <span className="text-[10px] text-slate-400 leading-tight">
+                              {inlineEditValue.length}/{INLINE_NAME_MAX_LEN}
                             </span>
-                          )}
-                          {!c.is_unsubscribed && c.pending_unsubscribe && (
-                            <span className="inline-flex items-center gap-0.5 bg-amber-100 text-amber-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-amber-200">
-                              <BellOff className="w-2.5 h-2.5" />
-                              بانتظار تأكيد الإلغاء
-                            </span>
-                          )}
-                        </div>
+                          </div>
+                        ) : (
+                          <div
+                            className="flex items-center gap-1.5 flex-wrap cursor-pointer"
+                            onClick={() => setSelectedCustomer(c)}
+                          >
+                            <span className="font-medium text-slate-900">{c.name || '—'}</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                startInlineEdit(c)
+                              }}
+                              className="opacity-0 group-hover/name:opacity-100 focus:opacity-100 transition-opacity p-1 rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50"
+                              title="تعديل سريع للاسم"
+                              aria-label="تعديل اسم العميل"
+                            >
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                            {c.manual_name_override && (
+                              <span
+                                className="inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-700 text-[10px] font-medium px-1.5 py-0.5 rounded-full border border-emerald-200"
+                                title="الاسم محرّر يدوياً — لن يُعدّله التنظيف التلقائي"
+                              >
+                                <ShieldCheck className="w-2.5 h-2.5" />
+                                محرّر
+                              </span>
+                            )}
+                            {c.is_unsubscribed && (
+                              <span className="inline-flex items-center gap-0.5 bg-red-100 text-red-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-red-200">
+                                <BellOff className="w-2.5 h-2.5" />
+                                ألغى الاشتراك
+                              </span>
+                            )}
+                            {!c.is_unsubscribed && c.pending_unsubscribe && (
+                              <span className="inline-flex items-center gap-0.5 bg-amber-100 text-amber-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-amber-200">
+                                <BellOff className="w-2.5 h-2.5" />
+                                بانتظار تأكيد الإلغاء
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td dir="ltr" className="px-3 py-3 text-slate-600 font-mono cursor-pointer" onClick={() => setSelectedCustomer(c)}>
                         {c.phone || '—'}

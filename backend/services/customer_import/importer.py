@@ -350,8 +350,13 @@ def _apply_non_destructive_merge(
     existing_channel = (getattr(existing, "acquisition_channel", None) or "").lower()
     has_salla_id     = bool(getattr(existing, "salla_customer_id", None))
     is_store_customer = existing_channel in _STORE_SOURCES or has_salla_id
+    # Merchant-curated names (inline pencil in customers table) are
+    # off-limits to bulk import — file rows NEVER overwrite them.
+    manual_name_override = bool(
+        (getattr(existing, "extra_metadata", None) or {}).get("manual_name_override")
+    )
 
-    if incoming_name:
+    if incoming_name and not manual_name_override:
         if not existing_name:
             # Always fill completely empty names.
             existing.name = incoming_name

@@ -66,6 +66,15 @@ export interface CustomerRecord {
    *  surfaced via ``segment_sources`` instead. */
   manual_segments: string[]
   manual_segments_labels: string[]
+  /** True when the merchant rewrote the name from the inline pencil
+   *  in the customers table (or from the card editor). The bulk
+   *  name-cleanup tool skips flagged rows so the merchant's curated
+   *  spelling is never overwritten by the stopword pipeline.
+   *  See backend ``customers.update_customer`` for where this is
+   *  stamped and ``customer_name_cleanup`` preview/apply for where
+   *  it is honoured. */
+  manual_name_override?: boolean
+  manual_name_edited_at?: string | null
   /** Per-segment source breakdown.
    *
    *  Shape: ``{ <segment_key>: { automatic, manual_include, manual_exclude } }``
@@ -403,7 +412,17 @@ export const customersApi = {
   },
 
   update(id: number, data: Partial<CustomerCreatePayload>) {
-    return apiCall<{ updated: boolean }>(`/customers/${id}`, {
+    // Backend returns the persisted name + manual_name_override flag
+    // so the caller can update the in-memory row without a refetch.
+    return apiCall<{
+      updated:               boolean
+      id:                    number
+      name:                  string
+      phone:                 string
+      email:                 string
+      manual_name_override:  boolean
+      name_changed:          boolean
+    }>(`/customers/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     })
