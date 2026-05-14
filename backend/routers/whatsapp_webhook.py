@@ -923,6 +923,12 @@ async def _handle_360dialog_body(
                     # Preserve the historical log key so existing grep /
                     # alerting on [Webhook360] keeps firing.
                     logger.warning("[Webhook360] Missing phone_number_id field=%s scope=%s", field, scope)
+                    logger.info(
+                        "[WEBHOOK_IN] phone_number_id=- waba_id=- channel_id=- "
+                        "tenant_resolved=- connection_id=- provider=dialog360 scope=%s "
+                        "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=missing_phone_id",
+                        scope, field, msgs_count, statuses_cnt, echoes_cnt,
+                    )
                     _safe_record(
                         scope=scope, field=field,
                         phone_number_id_from_payload=phone_number_id or None,
@@ -951,6 +957,12 @@ async def _handle_360dialog_body(
                         field, scope, phone_number_id, display_phone_number, msgs_count,
                     )
                     logger.warning("[Webhook360] Unknown phone_number_id=%s field=%s scope=%s", phone_number_id, field, scope)
+                    logger.info(
+                        "[WEBHOOK_IN] phone_number_id=%s waba_id=- channel_id=- "
+                        "tenant_resolved=- connection_id=- provider=dialog360 scope=%s "
+                        "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=unknown_phone_id",
+                        phone_number_id, scope, field, msgs_count, statuses_cnt, echoes_cnt,
+                    )
                     _safe_record(
                         scope=scope, field=field,
                         phone_number_id_from_payload=phone_number_id,
@@ -977,6 +989,15 @@ async def _handle_360dialog_body(
                         "message dropped to prevent cross-tenant data leak",
                         phone_number_id, tenant_ids,
                     )
+                    logger.info(
+                        "[WEBHOOK_IN] phone_number_id=%s waba_id=- channel_id=- "
+                        "tenant_resolved=ambiguous connection_id=- provider=dialog360 scope=%s "
+                        "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=ambiguous "
+                        "candidate_tenant_ids=%s candidate_connection_ids=%s",
+                        phone_number_id, scope, field,
+                        msgs_count, statuses_cnt, echoes_cnt,
+                        tenant_ids, connection_ids,
+                    )
                     _safe_record(
                         scope=scope, field=field,
                         phone_number_id_from_payload=phone_number_id,
@@ -1001,6 +1022,15 @@ async def _handle_360dialog_body(
                         wa_provider(wa_conn),
                     )
                     logger.warning("[Webhook360] phone_number_id=%s is not dialog360 provider", phone_number_id)
+                    logger.info(
+                        "[WEBHOOK_IN] phone_number_id=%s waba_id=%s channel_id=- "
+                        "tenant_resolved=%s connection_id=%s provider=%s scope=%s "
+                        "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=wrong_provider",
+                        phone_number_id,
+                        getattr(wa_conn, "whatsapp_business_account_id", None) or "-",
+                        wa_conn.tenant_id, wa_conn.id, wa_provider(wa_conn),
+                        scope, field, msgs_count, statuses_cnt, echoes_cnt,
+                    )
                     _safe_record(
                         scope=scope, field=field,
                         phone_number_id_from_payload=phone_number_id,
@@ -1026,6 +1056,15 @@ async def _handle_360dialog_body(
                         wa_conn.tenant_id, wa_conn.id, phone_number_id,
                     )
                     logger.warning("[Webhook360] Invalid internal secret tenant=%s", wa_conn.tenant_id)
+                    logger.info(
+                        "[WEBHOOK_IN] phone_number_id=%s waba_id=%s channel_id=- "
+                        "tenant_resolved=%s connection_id=%s provider=%s scope=%s "
+                        "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=bad_secret",
+                        phone_number_id,
+                        getattr(wa_conn, "whatsapp_business_account_id", None) or "-",
+                        wa_conn.tenant_id, wa_conn.id, wa_provider(wa_conn),
+                        scope, field, msgs_count, statuses_cnt, echoes_cnt,
+                    )
                     _safe_record(
                         scope=scope, field=field,
                         phone_number_id_from_payload=phone_number_id,
@@ -1053,6 +1092,33 @@ async def _handle_360dialog_body(
                     wa_conn.tenant_id, wa_conn.id, field, scope,
                     phone_number_id, stored_phone_id,
                     str(phone_number_id) == str(stored_phone_id),
+                    msgs_count, statuses_cnt, echoes_cnt,
+                )
+
+                # ── Canonical inbound log line ──────────────────────────
+                # Single grep-friendly line that captures every dimension
+                # support needs when a merchant says "I sent a real WhatsApp
+                # message but it didn't arrive in Nahla". Pairs with
+                # [D360_WEBHOOK_VERIFY] so a verify-vs-receive flow can be
+                # reconstructed from log scrape.
+                try:
+                    _coex_meta = wa_conn.extra_metadata or {}
+                    _pd        = (_coex_meta.get("provider_details") or {}) if isinstance(_coex_meta, dict) else {}
+                    _channel_id_local = _pd.get("channel_id") or _pd.get("channel") or "-"
+                except Exception:
+                    _channel_id_local = "-"
+                logger.info(
+                    "[WEBHOOK_IN] phone_number_id=%s waba_id=%s channel_id=%s "
+                    "tenant_resolved=%s connection_id=%s provider=%s scope=%s "
+                    "field=%s msgs=%d statuses=%d echoes=%d reason_if_unresolved=-",
+                    phone_number_id,
+                    getattr(wa_conn, "whatsapp_business_account_id", None) or "-",
+                    _channel_id_local,
+                    wa_conn.tenant_id,
+                    wa_conn.id,
+                    wa_provider(wa_conn),
+                    scope,
+                    field,
                     msgs_count, statuses_cnt, echoes_cnt,
                 )
 

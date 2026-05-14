@@ -90,6 +90,94 @@ export interface CoexistenceAutoConfigureResult {
   webhooks: CoexistenceWebhookBlock
 }
 
+/**
+ * Comprehensive read-only diagnostic snapshot returned by
+ * `GET /whatsapp/admin/coexistence/diagnose`. Decouples the three
+ * independent signals support needs to distinguish "Invalid api token"
+ * from "URL mismatch" from "messages never arrived":
+ *
+ *   1. token_check       — does the api_key on the row authenticate
+ *                          against 360dialog's REST API right now?
+ *   2. registration      — what URL does 360dialog have on file?
+ *   3. inbound_evidence  — has Nahla actually received any webhooks?
+ *
+ * Plus duplicates: every other WhatsAppConnection row that shares the
+ * tenant's phone_number_id / channel_id / display phone — the #1 cause
+ * of "Auto Configure failed but Test Webhook works" symptoms.
+ */
+export interface CoexistenceDiagnoseResult {
+  tenant_id: number
+  request_id: string
+  connection: {
+    found: boolean
+    connection_id: number | null
+    provider: string
+    connection_type: string | null
+    status: string | null
+    phone_number_id: string | null
+    waba_id: string | null
+    phone_number: string | null
+    channel_id: string | null
+    api_key_present: boolean
+    api_key_tail: string
+    webhook_verified: boolean
+    sending_enabled: boolean
+    last_webhook_received_at: string | null
+    last_coexistence_received_at: string | null
+    last_status_received_at: string | null
+    last_error: string | null
+  }
+  token_check: {
+    channel_endpoint_ok: boolean
+    channel_status_code: number | null
+    channel_body_preview: string
+    waba_endpoint_ok: boolean
+    waba_status_code: number | null
+    waba_body_preview: string
+    verdict: 'valid' | 'rejected' | 'transport_error' | 'no_token'
+  }
+  registration: {
+    expected_url: string
+    channel_remote_url: string | null
+    channel_matches: boolean
+    waba_remote_url: string | null
+    waba_matches: boolean
+    waba_id_remote: string | null
+    numbers_on_this_waba: string[]
+    phone_id_drift: boolean
+  }
+  inbound_evidence: {
+    channel_received_recently: boolean
+    coexistence_received_recently: boolean
+    status_received_recently: boolean
+    any_inbound_ever: boolean
+    freshness_seconds: {
+      channel: number | null
+      coexistence: number | null
+      status: number | null
+    }
+  }
+  duplicates: {
+    by_phone_number_id: CoexistenceDuplicateRow[]
+    by_channel_id: CoexistenceDuplicateRow[]
+    by_display_phone: CoexistenceDuplicateRow[]
+    has_duplicates: boolean
+  }
+  webhooks: CoexistenceWebhookBlock
+}
+
+export interface CoexistenceDuplicateRow {
+  tenant_id: number
+  connection_id: number
+  status: string | null
+  provider: string
+  connection_type: string | null
+  phone_number_id: string | null
+  phone_number: string | null
+  channel_id: string | null
+  is_this_tenant: boolean
+}
+
 export interface AdminPlatformStats {
   merchants: { total: number; active: number; trial: number; paid: number; suspended: number }
   tenants: { total: number }
@@ -440,6 +528,20 @@ export const adminApi = {
       method: 'POST',
       body: JSON.stringify({ tenant_id: tenantId }),
     }),
+
+  /**
+   * Comprehensive read-only diagnostic snapshot for the tenant. Surfaces
+   * the three independent signals (token / registration / inbound) plus
+   * duplicate detection across tenants. Use this BEFORE running
+   * Verify / Auto Configure when troubleshooting "Invalid api token" or
+   * "webhook never arrives" reports — the answer is almost always in
+   * one of those three columns, and the existing Verify endpoint only
+   * answers the middle one.
+   */
+  diagnoseCoexistence: (tenantId: number) =>
+    apiCall<CoexistenceDiagnoseResult>(
+      `/whatsapp/admin/coexistence/diagnose?tenant_id=${tenantId}`,
+    ),
 
   /**
    * Sync / Repair Integration Record.

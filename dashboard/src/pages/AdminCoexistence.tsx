@@ -9,6 +9,7 @@ import {
   Check,
   Edit3,
   Hammer,
+  Inbox,
   KeyRound,
   Link,
   MessageSquare,
@@ -16,6 +17,7 @@ import {
   PlugZap,
   RefreshCw,
   Save,
+  Search,
   ShieldCheck,
   Smartphone,
   Store,
@@ -32,6 +34,7 @@ import {
   type CoexistenceTestWebhookResult,
   type CoexistenceVerifyWebhookResult,
   type CoexistenceAutoConfigureResult,
+  type CoexistenceDiagnoseResult,
 } from '../api/admin'
 
 // ── Status badge ─────────────────────────────────────────────────────────────
@@ -126,8 +129,46 @@ function WebhookStatusPill({ status }: { status: string }) {
   )
 }
 
+// Tri-state mini badge: shows a single dimension (reachable / registered /
+// received) with three values: yes / no / unknown. Lets the operator see
+// "the URL is reachable and registered but no real message has arrived"
+// vs "URL registered but Nahla never received anything" at a glance —
+// previously all three were collapsed into a single pill that read
+// "verified" or "failed" without explaining which dimension failed.
+function FacetPill({
+  label, value, tone, hint,
+}: {
+  label: string
+  value: 'yes' | 'no' | 'unknown'
+  tone?: 'positive' | 'caution' | 'negative'
+  hint?: string
+}) {
+  const palette: Record<string, string> = {
+    yes_positive: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    yes_caution:  'bg-amber-100 text-amber-700 border-amber-200',
+    yes_negative: 'bg-red-100 text-red-700 border-red-200',
+    no_positive:  'bg-slate-100 text-slate-500 border-slate-200',
+    no_caution:   'bg-amber-50 text-amber-600 border-amber-200',
+    no_negative:  'bg-red-50 text-red-600 border-red-200',
+    unknown:      'bg-slate-100 text-slate-500 border-slate-200',
+  }
+  const key = value === 'unknown' ? 'unknown' : `${value}_${tone ?? 'positive'}`
+  const cls = palette[key] ?? palette.unknown
+  const valueLabel = value === 'yes' ? 'نعم' : value === 'no' ? 'لا' : '؟'
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-bold ${cls}`}
+      title={hint}
+    >
+      <span className="font-normal text-[9px] opacity-80">{label}</span>
+      <span>{valueLabel}</span>
+    </span>
+  )
+}
+
 function WebhookRow({
   icon, title, hint, url, status, lastReceivedAt,
+  registeredFacet, receivedFacet,
 }: {
   icon: React.ReactNode
   title: string
@@ -135,6 +176,10 @@ function WebhookRow({
   url: string
   status: string
   lastReceivedAt: string | null
+  // New: explicit per-dimension state. When omitted, the row falls back
+  // to the legacy single-pill behaviour for non-channel webhooks.
+  registeredFacet?: 'yes' | 'no' | 'unknown'
+  receivedFacet?: 'yes' | 'no' | 'unknown'
 }) {
   const fmtAgo = (iso: string | null) => {
     if (!iso) return 'لم يصل أي حدث بعد'
@@ -146,6 +191,7 @@ function WebhookRow({
     if (sec < 86_400)    return `منذ ${Math.floor(sec / 3600)} س`
     return `منذ ${Math.floor(sec / 86_400)} يوم`
   }
+  const showFacets = registeredFacet !== undefined || receivedFacet !== undefined
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -164,13 +210,100 @@ function WebhookRow({
       <p className="text-[10px] text-slate-400 flex items-center gap-1">
         <Clock className="w-3 h-3" /> آخر حدث: {fmtAgo(lastReceivedAt)}
       </p>
+      {showFacets && (
+        <div className="flex flex-wrap gap-1 pt-1 border-t border-slate-100">
+          <FacetPill
+            label="مسجَّل لدى 360dialog"
+            value={registeredFacet ?? 'unknown'}
+            tone={registeredFacet === 'yes' ? 'positive' : registeredFacet === 'no' ? 'caution' : undefined}
+            hint="هل URL المسجَّل لدى 360dialog يطابق رابط نحلة الرسمي؟"
+          />
+          <FacetPill
+            label="رسائل حقيقية وصلت"
+            value={receivedFacet ?? 'unknown'}
+            tone={receivedFacet === 'yes' ? 'positive' : receivedFacet === 'no' ? 'caution' : undefined}
+            hint="هل استلمت نحلة فعلاً webhook على هذه القناة خلال آخر أسبوع؟"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Diagnose panel sub-components ────────────────────────────────────────────
+// Surface the three independent signals so an operator never confuses
+// "API key rejected by 360dialog management API" with "URL mismatch" or
+// "real customer message never arrived". Previously these collapsed
+// into a single ambiguous "failed" pill on the channel webhook row.
+
+function DiagnoseSignalCard({
+  icon, label, value, hint, tone,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: string
+  hint?: string
+  tone: 'ok' | 'warn' | 'error' | 'neutral'
+}) {
+  const tones: Record<string, string> = {
+    ok:      'bg-emerald-50 text-emerald-700 border-emerald-200',
+    warn:    'bg-amber-50 text-amber-700 border-amber-200',
+    error:   'bg-red-50 text-red-700 border-red-200',
+    neutral: 'bg-slate-50 text-slate-700 border-slate-200',
+  }
+  return (
+    <div className={`rounded-xl border p-3 ${tones[tone]}`}>
+      <div className="flex items-center gap-2 mb-1">
+        {icon}
+        <p className="text-[10px] font-semibold opacity-80">{label}</p>
+      </div>
+      <p className="text-sm font-bold leading-tight">{value}</p>
+      {hint && <p className="text-[10px] mt-1 opacity-70 leading-snug">{hint}</p>}
+    </div>
+  )
+}
+
+function DuplicatesPanel({
+  rows, label,
+}: {
+  rows: CoexistenceDiagnoseResult['duplicates']['by_phone_number_id']
+  label: string
+}) {
+  if (!rows.length) return null
+  const others = rows.filter(r => !r.is_this_tenant)
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-2 space-y-1">
+      <p className="text-[10px] font-bold text-slate-600">{label}</p>
+      <ul className="space-y-1">
+        {rows.map(r => (
+          <li key={`${r.tenant_id}-${r.connection_id}`}
+              className={`text-[10px] flex items-center gap-2 rounded px-1.5 py-1 ${
+                r.is_this_tenant ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
+              }`}>
+            <span className="font-bold">tenant={r.tenant_id}</span>
+            <span>conn={r.connection_id}</span>
+            <span>status={r.status ?? '—'}</span>
+            <span>phone_id={r.phone_number_id ?? '—'}</span>
+            {r.is_this_tenant
+              ? <span className="ms-auto font-bold">← هذا التاجر</span>
+              : <span className="ms-auto font-bold">⚠ تاجر آخر</span>}
+          </li>
+        ))}
+      </ul>
+      {others.length > 0 && (
+        <p className="text-[10px] text-red-600 font-bold">
+          يوجد {others.length} اتصال آخر يستخدم نفس القيمة — تسرّب محتمل عبر التجار.
+        </p>
+      )}
     </div>
   )
 }
 
 function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
   const [webhooks, setWebhooks] = useState<CoexistenceVerifyWebhookResult['webhooks'] | null>(null)
-  const [busy, setBusy] = useState<'test' | 'verify' | 'configure' | null>(null)
+  const [diag, setDiag] = useState<CoexistenceDiagnoseResult | null>(null)
+  const [reachable, setReachable] = useState<'unknown' | 'yes' | 'no'>('unknown')
+  const [busy, setBusy] = useState<'test' | 'verify' | 'configure' | 'diagnose' | null>(null)
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null)
 
   const fmt = (label: string, payload: unknown): string => {
@@ -182,8 +315,9 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
     try {
       const res: CoexistenceTestWebhookResult = await adminApi.testCoexistenceWebhook(tenantId)
       const failed = Object.entries(res.results).filter(([, v]) => !v.ok).map(([k]) => k)
+      setReachable(res.all_ok ? 'yes' : 'no')
       setFeedback(res.all_ok
-        ? { kind: 'ok',  text: 'جميع روابط Webhook تستجيب بشكل سليم.' }
+        ? { kind: 'ok',  text: 'جميع روابط Webhook تستجيب بشكل سليم (الوصول من الإنترنت يعمل).' }
         : { kind: 'err', text: `فشل بعض الروابط: ${failed.join('، ')}` }
       )
     } catch (e: unknown) {
@@ -225,7 +359,67 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
     } finally { setBusy(null) }
   }
 
+  const runDiagnose = async () => {
+    setBusy('diagnose'); setFeedback(null)
+    try {
+      const res = await adminApi.diagnoseCoexistence(tenantId)
+      setDiag(res)
+      setWebhooks(res.webhooks)
+      // Surface a one-line summary on the feedback strip so the operator
+      // sees the headline finding without scrolling.
+      const tc = res.token_check
+      const reg = res.registration
+      const inb = res.inbound_evidence
+      const tokenStr = tc.verdict === 'valid' ? 'مفتاح API صالح'
+                     : tc.verdict === 'rejected' ? 'مفتاح API مرفوض من 360dialog'
+                     : tc.verdict === 'transport_error' ? 'تعذّر الاتصال بـ 360dialog'
+                     : 'لا يوجد مفتاح API'
+      const regStr = reg.channel_matches || reg.waba_matches
+        ? 'URL مسجَّل في 360dialog'
+        : reg.channel_remote_url || reg.waba_remote_url
+          ? 'URL مختلف لدى 360dialog'
+          : 'URL غير مسجَّل في 360dialog'
+      const inbStr = inb.channel_received_recently || inb.coexistence_received_recently
+        ? 'استلام إنباند فعلي حديث'
+        : inb.any_inbound_ever
+          ? 'استلام إنباند قديم (لم يصل شيء حديث)'
+          : 'لا يوجد إنباند فعلي أبداً'
+      const kind: 'ok' | 'err' | 'info' =
+        tc.verdict === 'rejected' ? 'err'
+        : (!reg.channel_matches && !reg.waba_matches) ? 'info'
+        : (inb.channel_received_recently || inb.coexistence_received_recently) ? 'ok'
+        : 'info'
+      setFeedback({
+        kind,
+        text: `${tokenStr} • ${regStr} • ${inbStr}` + (
+          res.duplicates.has_duplicates ? ' • ⚠ يوجد سجلات مكرّرة' : ''
+        ),
+      })
+    } catch (e: unknown) {
+      setFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل التشخيص' })
+    } finally { setBusy(null) }
+  }
+
   const w = webhooks
+  // Derive the per-row facet states from the diagnose result when we
+  // have it. Falls back to 'unknown' so the row never claims certainty
+  // it does not have.
+  const channelRegistered: 'yes' | 'no' | 'unknown' =
+    diag === null ? 'unknown'
+    : diag.registration.channel_matches ? 'yes' : 'no'
+  const channelReceived: 'yes' | 'no' | 'unknown' =
+    diag === null ? 'unknown'
+    : diag.inbound_evidence.channel_received_recently ? 'yes' : 'no'
+  const coexReceived: 'yes' | 'no' | 'unknown' =
+    diag === null ? 'unknown'
+    : diag.inbound_evidence.coexistence_received_recently ? 'yes' : 'no'
+  const statusReceived: 'yes' | 'no' | 'unknown' =
+    diag === null ? 'unknown'
+    : diag.inbound_evidence.status_received_recently ? 'yes' : 'no'
+  const wabaRegistered: 'yes' | 'no' | 'unknown' =
+    diag === null ? 'unknown'
+    : diag.registration.waba_matches ? 'yes' : 'no'
+
   return (
     <div className="rounded-xl border border-violet-200 bg-violet-50/40 p-4 space-y-3">
       <div className="flex items-center gap-2">
@@ -235,7 +429,8 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
       <p className="text-xs text-slate-500">
         نحلة تدعم ثلاث نقاط Webhook منفصلة: الرسائل العادية (Channel) — أحداث التعايش
         (Coexistence) — حالة القناة (Status). يمكنك تسجيل أي منها يدويًا في 360dialog
-        أو استخدام «الإعداد التلقائي».
+        أو استخدام «الإعداد التلقائي». استخدم «تشخيص شامل» قبل أي إجراء لمعرفة
+        السبب الحقيقي للفشل: مفتاح API مرفوض، أم URL مختلف، أم رسائل العملاء لا تصل.
       </p>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -246,6 +441,8 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
           url={w?.channel_url ?? CHANNEL_WEBHOOK_URL}
           status={w?.channel_status ?? 'unknown'}
           lastReceivedAt={w?.channel_last_received_at ?? null}
+          registeredFacet={channelRegistered}
+          receivedFacet={channelReceived}
         />
         <WebhookRow
           icon={<Smartphone className="w-3.5 h-3.5" />}
@@ -254,6 +451,8 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
           url={w?.coexistence_url ?? COEXISTENCE_WEBHOOK_URL}
           status={w?.coexistence_status ?? 'unknown'}
           lastReceivedAt={w?.coexistence_last_received_at ?? null}
+          registeredFacet={wabaRegistered}
+          receivedFacet={coexReceived}
         />
         <WebhookRow
           icon={<ShieldCheck className="w-3.5 h-3.5" />}
@@ -262,10 +461,118 @@ function WebhookManagementPanel({ tenantId }: { tenantId: number }) {
           url={w?.status_url ?? STATUS_WEBHOOK_URL}
           status={w?.status_status ?? 'unknown'}
           lastReceivedAt={w?.status_last_received_at ?? null}
+          registeredFacet={wabaRegistered}
+          receivedFacet={statusReceived}
         />
       </div>
 
+      {diag && (
+        <div className="space-y-2 rounded-xl bg-white border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold text-slate-700">نتيجة التشخيص الشامل</p>
+            <p className="text-[10px] text-slate-400">request_id={diag.request_id}</p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <DiagnoseSignalCard
+              icon={<KeyRound className="w-3.5 h-3.5" />}
+              label="1) مفتاح API"
+              value={
+                diag.token_check.verdict === 'valid'   ? 'صالح ✓'
+              : diag.token_check.verdict === 'rejected' ? `مرفوض (${diag.token_check.channel_status_code ?? diag.token_check.waba_status_code ?? '—'})`
+              : diag.token_check.verdict === 'transport_error' ? 'تعذّر الاتصال'
+              :                                            'غير موجود'}
+              hint={`API key tail: ${diag.connection.api_key_tail}`}
+              tone={
+                diag.token_check.verdict === 'valid' ? 'ok'
+              : diag.token_check.verdict === 'rejected' ? 'error'
+              : 'warn'}
+            />
+            <DiagnoseSignalCard
+              icon={<Link className="w-3.5 h-3.5" />}
+              label="2) تسجيل URL في 360dialog"
+              value={
+                diag.registration.channel_matches && diag.registration.waba_matches ? 'مسجَّل وصحيح ✓'
+              : diag.registration.channel_matches || diag.registration.waba_matches ? 'مسجَّل جزئيًا'
+              : diag.registration.channel_remote_url || diag.registration.waba_remote_url ? 'مسجَّل لكنه مختلف'
+              :                                            'غير مسجَّل'}
+              hint={diag.registration.channel_remote_url
+                ? `Channel: ${diag.registration.channel_remote_url}`
+                : 'لم يُسترجع URL من 360dialog'}
+              tone={
+                diag.registration.channel_matches && diag.registration.waba_matches ? 'ok'
+              : (diag.registration.channel_remote_url || diag.registration.waba_remote_url) ? 'warn'
+              : 'error'}
+            />
+            <DiagnoseSignalCard
+              icon={<Inbox className="w-3.5 h-3.5" />}
+              label="3) إنباند فعلي"
+              value={
+                diag.inbound_evidence.channel_received_recently ? 'رسائل حقيقية وصلت ✓'
+              : diag.inbound_evidence.any_inbound_ever          ? 'وصول قديم فقط'
+              :                                                   'لم يصل أي webhook'}
+              hint={
+                `channel: ${diag.inbound_evidence.freshness_seconds.channel ?? '∅'} ث، ` +
+                `coex: ${diag.inbound_evidence.freshness_seconds.coexistence ?? '∅'} ث، ` +
+                `status: ${diag.inbound_evidence.freshness_seconds.status ?? '∅'} ث`
+              }
+              tone={
+                diag.inbound_evidence.channel_received_recently ? 'ok'
+              : diag.inbound_evidence.any_inbound_ever          ? 'warn'
+              :                                                   'error'}
+            />
+          </div>
+
+          {reachable !== 'unknown' && (
+            <p className="text-[11px] text-slate-500">
+              <strong>الوصول من الإنترنت:</strong>{' '}
+              {reachable === 'yes' ? '✓ كل عناوين Nahla تستجيب' : '✗ بعض العناوين لا تستجيب'}
+              {' '}— استخدم «Test Coexistence Webhook» في أي وقت لإعادة فحص ذلك.
+            </p>
+          )}
+
+          {diag.token_check.verdict === 'rejected' && (
+            <div className="rounded-lg bg-red-50 border border-red-200 p-2 text-[11px] text-red-700">
+              <strong>تشخيص:</strong> 360dialog يرفض مفتاح API المخزَّن في نحلة
+              ({diag.connection.api_key_tail}) — جواب الـ Management API:{' '}
+              <code className="bg-white/60 px-1">{diag.token_check.channel_body_preview}</code>.
+              السبب الأكثر شيوعًا: تم تجديد المفتاح في 360dialog ولم يُحدَّث هنا.
+              افتح «تعديل الحقول» أعلى وألصق المفتاح الجديد.
+            </div>
+          )}
+
+          {diag.registration.phone_id_drift && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-2 text-[11px] text-amber-700">
+              <strong>انحراف phone_number_id:</strong> الـ phone_number_id لدى نحلة
+              ({diag.connection.phone_number_id}) لا يطابق أي رقم على هذا الـ WABA لدى 360dialog
+              ({diag.registration.numbers_on_this_waba.join(', ') || '—'}). أعد المزامنة
+              عبر «Sync / Repair Integration Record».
+            </div>
+          )}
+
+          {diag.duplicates.has_duplicates && (
+            <details className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-[11px]">
+              <summary className="cursor-pointer font-bold text-amber-800">
+                ⚠ سجلات اتصال مكرّرة — قد تتسبّب في تسرّب الرسائل
+              </summary>
+              <div className="mt-2 space-y-2">
+                <DuplicatesPanel rows={diag.duplicates.by_phone_number_id} label="حسب phone_number_id" />
+                <DuplicatesPanel rows={diag.duplicates.by_channel_id}     label="حسب channel_id" />
+                <DuplicatesPanel rows={diag.duplicates.by_display_phone}  label="حسب رقم العرض" />
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2 pt-1">
+        <button
+          onClick={runDiagnose}
+          disabled={!!busy}
+          className="inline-flex items-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700 disabled:opacity-50"
+        >
+          <Search className="w-3.5 h-3.5" />
+          {busy === 'diagnose' ? 'جارٍ التشخيص…' : 'تشخيص شامل'}
+        </button>
         <button
           onClick={runTest}
           disabled={!!busy}
