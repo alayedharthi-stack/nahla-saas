@@ -321,6 +321,42 @@ export default function Customers() {
   const [nameCleanupCategoryCounts, setNameCleanupCategoryCounts] = useState<
     Record<NameCleanupCategory, number> | null
   >(null)
+
+  // ── Session-stable view (May 2026) ───────────────────────────────
+  // ``nameCleanupPinnedIds`` is the set of customer_ids that are
+  // visible under the CURRENT filter+category chip. It's a SNAPSHOT —
+  // it never changes when the merchant edits a chip / clears a row /
+  // skips a row. The rationale: if a row was visible the moment the
+  // merchant opened a chip, it has to STAY visible until they
+  // explicitly:
+  //   * change the filter / category chip, OR
+  //   * hit the "تحديث المعاينة" rescan link, OR
+  //   * close & re-open the modal, OR
+  //   * apply a batch (which reloads the preview).
+  //
+  // Without this, every chip toggle would yank the row out of the
+  // current chip (because predicates like ``!cleanupRowIsEdited``
+  // flip the moment the merchant touches a chip), making it
+  // physically impossible to remove a SECOND noisy token from the
+  // same name. We tracked it down to the #1 frustration in the
+  // preview-session feedback ("الصف يختفي قبل ما أكمل").
+  //
+  // ``null`` means "no snapshot yet" — visibleCleanupItems falls
+  // back to an empty array until the first useEffect synchronisation
+  // fires (which happens immediately after items load).
+  const [nameCleanupPinnedIds, setNameCleanupPinnedIds] = useState<Set<number> | null>(null)
+  // Bump this counter to force a snapshot rebuild WITHOUT changing
+  // any filter / category — used by the inline "تحديث المعاينة"
+  // button. It's just a monotonically increasing dep for the
+  // pinned-snapshot useEffect.
+  const [nameCleanupViewEpoch, setNameCleanupViewEpoch] = useState(0)
+  // Ref shadow of ``nameCleanupRowState`` so the pinned-snapshot
+  // effect can READ the latest row state without LISTING it as a
+  // dep (which would defeat the entire pinning mechanism).
+  const nameCleanupRowStateRef = useRef(nameCleanupRowState)
+  useEffect(() => {
+    nameCleanupRowStateRef.current = nameCleanupRowState
+  }, [nameCleanupRowState])
   const [nameCleanupSummary, setNameCleanupSummary] = useState<{
     totalCustomers: number
     totalScanned:   number
@@ -589,6 +625,8 @@ export default function Customers() {
     setNameCleanupCategory('any')
     setNameCleanupCategoryCounts(null)
     setNameCleanupSaveState('idle')
+    setNameCleanupPinnedIds(null)
+    setNameCleanupViewEpoch(0)
   }
 
   // ── Autosave loop ────────────────────────────────────────────────
@@ -883,51 +921,119 @@ export default function Customers() {
     }
   }
 
-  // Filtered view derived from current state + filter chip.
-  const visibleCleanupItems = useMemo(() => {
-    // Apply the per-reason category filter first so the existing
-    // confidence/skip chips compose with it. ``'any'`` is the
-    // pass-through for the default "no category selected" state.
-    const byCategory = (it: NameCleanupPreviewItem): boolean =>
-      nameCleanupCategory === 'any'
-        ? true
-        : (it.category || 'other') === nameCleanupCategory
+  // ── Predicate-based "live" filter (NOT used directly for render) ──
+  // This is the rule that says "would this row be visible under the
+  // current filter+category if we re-evaluated everything right now".
+  // It's used in two places:
+  //   1. To compute the pinned snapshot the moment the merchant
+  //      changes a chip (next useEffect below).
+  //   2. To compute the live chip counters in the toolbar so the
+  //      merchant can SEE how many rows have moved buckets since the
+  //      snapshot was taken (e.g. "تم تعديله يدوياً (3)").
+  //
+  // We deliberately do NOT memoize this on ``nameCleanupRowState``
+  // for the render path — that would re-evaluate predicates on every
+  // chip toggle and re-shuffle the visible set, which is the bug we
+  // just removed.
+  const cleanupRowMatchesActiveFilter = useCallback(
+    (
+      it: NameCleanupPreviewItem,
+      rowState: Record<number, CleanupRowState>,
+    ): boolean => {
+      const isSkippedHere = rowState[it.customer_id]?.status === 'skipped'
+      const isEditedHere = (() => {
+        const st = rowState[it.customer_id]
+        if (!st) return false
+        return st.cleared || st.removed !== null || st.status === 'skipped'
+      })()
+      const matchesCategory =
+        nameCleanupCategory === 'any'
+          ? true
+          : (it.category || 'other') === nameCleanupCategory
+      if (!matchesCategory) return false
+      switch (nameCleanupFilter) {
+        case 'opted_out':
+          return !!it.marketing_opt_out_manual && !isSkippedHere
+        case 'all':
+          return !isSkippedHere
+        case 'pending':
+          return !isEditedHere
+        case 'edited':
+          return isEditedHere && !isSkippedHere
+        case 'high':
+          return it.confidence === 'high' && !isSkippedHere
+        case 'low':
+          return it.confidence === 'low' && !isSkippedHere
+        default:
+          return !isSkippedHere
+      }
+    },
+    [nameCleanupFilter, nameCleanupCategory],
+  )
 
-    if (nameCleanupFilter === 'opted_out') {
-      // Show ONLY the customers the merchant has flagged as
-      // "exclude from marketing" inline. Skipped rows are still
-      // hidden unless explicitly included — opt-out and skip are
-      // distinct dimensions.
-      return nameCleanupItems.filter(
-        it => byCategory(it) && it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id),
-      )
+  // ── Snapshot synchronisation ─────────────────────────────────────
+  // Rebuild the pinned-id snapshot WHENEVER the merchant changes
+  // the filter chip, the category chip, hits "تحديث المعاينة" (epoch
+  // bump), or the items list itself changes (e.g. preview reload
+  // after apply). Notably absent from the deps: ``nameCleanupRowState``.
+  // That's the whole point — chip toggles inside a card MUST NOT
+  // trigger a rebuild.
+  useEffect(() => {
+    if (!nameCleanupOpen) return
+    const rowState = nameCleanupRowStateRef.current
+    const ids = new Set<number>()
+    for (const it of nameCleanupItems) {
+      if (cleanupRowMatchesActiveFilter(it, rowState)) {
+        ids.add(it.customer_id)
+      }
     }
-    if (nameCleanupFilter === 'all') {
-      return nameCleanupItems.filter(it => byCategory(it) && !cleanupRowIsSkipped(it.customer_id))
-    }
-    if (nameCleanupFilter === 'pending') {
-      return nameCleanupItems.filter(
-        it => byCategory(it) && !cleanupRowIsEdited(it.customer_id),
-      )
-    }
-    if (nameCleanupFilter === 'edited') {
-      return nameCleanupItems.filter(
-        it =>
-          byCategory(it) &&
-          cleanupRowIsEdited(it.customer_id) &&
-          !cleanupRowIsSkipped(it.customer_id),
-      )
-    }
-    if (nameCleanupFilter === 'high') {
-      return nameCleanupItems.filter(
-        it => byCategory(it) && it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id),
-      )
-    }
-    // 'low'
-    return nameCleanupItems.filter(
-      it => byCategory(it) && it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id),
+    setNameCleanupPinnedIds(ids)
+  }, [
+    nameCleanupOpen,
+    nameCleanupItems,
+    nameCleanupFilter,
+    nameCleanupCategory,
+    nameCleanupViewEpoch,
+    cleanupRowMatchesActiveFilter,
+  ])
+
+  // The render-time visible list is the items array intersected with
+  // the pinned snapshot, preserving the original sort order. Once
+  // pinned, a row stays put until one of the rebuild triggers above
+  // fires — even if its state has drifted (now edited / now skipped).
+  const visibleCleanupItems = useMemo(() => {
+    if (!nameCleanupPinnedIds) return []
+    return nameCleanupItems.filter(it =>
+      nameCleanupPinnedIds.has(it.customer_id),
     )
-  }, [nameCleanupItems, nameCleanupRowState, nameCleanupFilter, nameCleanupCategory])
+  }, [nameCleanupItems, nameCleanupPinnedIds])
+
+  // ── Drift counter ────────────────────────────────────────────────
+  // How many currently-pinned rows have drifted out of the active
+  // filter since the snapshot was taken? Surfaced as a "تحديث
+  // المعاينة (N)" link so the merchant sees there's pending work to
+  // re-bucket. ``0`` means the snapshot is in sync with the live
+  // predicate — link stays grey/disabled.
+  const cleanupDriftedCount = useMemo(() => {
+    if (!nameCleanupPinnedIds) return 0
+    let count = 0
+    for (const it of nameCleanupItems) {
+      if (!nameCleanupPinnedIds.has(it.customer_id)) continue
+      if (!cleanupRowMatchesActiveFilter(it, nameCleanupRowState)) {
+        count += 1
+      }
+    }
+    return count
+  }, [
+    nameCleanupPinnedIds,
+    nameCleanupItems,
+    nameCleanupRowState,
+    cleanupRowMatchesActiveFilter,
+  ])
+
+  const refreshCleanupView = useCallback(() => {
+    setNameCleanupViewEpoch(n => n + 1)
+  }, [])
 
   // Flush the autosave on unmount so the merchant doesn't lose work
   // by navigating away from the customers page mid-review.
@@ -1870,6 +1976,19 @@ export default function Customers() {
                     <span className="text-slate-400 text-[10px] hidden sm:inline">
                       • انقر على الصف لتحديد العميل
                     </span>
+                    {cleanupDriftedCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={refreshCleanupView}
+                        className="ms-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 text-[11px]"
+                        title="بعض الصفوف خرجت من شروط هذا الفلتر بعد التعديل. اضغط لتحديث المعاينة وفلترة من جديد — دون أن يفقد التاجر تعديلاته المحفوظة."
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>
+                          تحديث المعاينة ({cleanupDriftedCount.toLocaleString('ar-EG')})
+                        </span>
+                      </button>
+                    )}
                   </div>
                   <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
                     {visibleCleanupItems.length === 0 ? (
