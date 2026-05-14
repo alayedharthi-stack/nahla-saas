@@ -1295,7 +1295,7 @@ export default function Customers() {
                           stays inside their current search/filter
                           context (critical for the "search تيك توك →
                           fix names one by one" workflow). */}
-                      <td className="px-3 py-3 group/name">
+                      <td className="px-3 py-3">
                         {inlineEditId === c.id ? (
                           <div
                             className="flex flex-col gap-1 min-w-[200px]"
@@ -1351,21 +1351,37 @@ export default function Customers() {
                             </span>
                           </div>
                         ) : (
-                          <div
-                            className="flex items-center gap-1.5 flex-wrap cursor-pointer"
-                            onClick={() => setSelectedCustomer(c)}
-                          >
-                            <span className="font-medium text-slate-900">{c.name || '—'}</span>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {/* The name itself opens the drawer (legacy
+                                behaviour). The pencil — rendered as an
+                                ALWAYS-VISIBLE inline-edit affordance —
+                                stops propagation so it never opens the
+                                drawer. Per merchant feedback, the
+                                pencil must be discoverable at a
+                                glance, not only on hover, so it ships
+                                with a subtle base opacity that lifts
+                                to full on hover/focus. The big trash
+                                icon already lives in its own dedicated
+                                column at the far end of the row, so
+                                the pencil is unambiguously the
+                                "edit name" affordance. */}
+                            <span
+                              className="font-medium text-slate-900 cursor-pointer"
+                              onClick={() => setSelectedCustomer(c)}
+                            >
+                              {c.name || '—'}
+                            </span>
                             <button
+                              type="button"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 startInlineEdit(c)
                               }}
-                              className="opacity-0 group-hover/name:opacity-100 focus:opacity-100 transition-opacity p-1 rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50"
+                              className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50 focus:text-brand-600 focus:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-200 transition-colors shrink-0"
                               title="تعديل سريع للاسم"
                               aria-label="تعديل اسم العميل"
                             >
-                              <Pencil className="w-3 h-3" />
+                              <Pencil className="w-3.5 h-3.5" />
                             </button>
                             {c.manual_name_override && (
                               <span
