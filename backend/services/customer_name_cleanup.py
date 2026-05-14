@@ -91,8 +91,21 @@ _STOP_TOKENS_EN = frozenset({
     "shopper",  "shoppers",
     "anonymous", "anon",
     "unknown",  "unk",
-    "test",     "demo", "sample",
+    "test",     "tests", "testing", "tester",
+    "demo",     "sample",
     "n/a",      "na",   "none", "null",
+})
+
+
+# Single-word Arabic placeholders (single-token equivalent of the
+# multi-word ``_PLACEHOLDER_LITERALS`` further down). Treated like
+# stop-tokens: when the entire name reduces to just these, the row
+# is cleared. Compared against the normalised form.
+_STOP_TOKENS_AR_EXTRA = frozenset({
+    "محتمل",        # placeholder used by some CSV imports
+    "مجهول",        # "unknown" in Arabic
+    "تجريبي",       # "test" — also exists in _STOP_TOKENS_AR
+    "اختبار",       # "test"
 })
 
 
@@ -131,6 +144,12 @@ _SOURCE_TOKENS = frozenset({
     # YouTube
     "يوتيوب",
     "youtube", "yt",
+    # Search / ads platforms (May 2026)
+    "جوجل",
+    "google", "googl", "ggl",
+    "ads",  "adwords",
+    "بنق",  "bing",
+    "yahoo", "ياهو",
     # Generic offline-marketing source labels
     "بنك",         # frequent suffix on Saudi imports — "X بنك"
     "حمله",        # normalised حملة
@@ -142,37 +161,82 @@ _SOURCE_TOKENS = frozenset({
 })
 
 
-# ── Location tokens (May 2026) ────────────────────────────────────────────────
-# Cities, regions, and country-tier markers that show up as a "name"
-# value on bulk imports — usually next to a ``"من"`` preposition.
-# Stored in the normalised form (see _SOURCE_TOKENS above).
-_LOCATION_TOKENS = frozenset({
-    # Major Saudi cities
-    "الرياض", "رياض",
-    "جده", "الجده",        # normalised جدة
-    "مكه", "المكه",        # normalised مكة
-    "المدينه", "مدينه",    # normalised المدينة / مدينة
-    "المنوره", "منوره",    # normalised المنورة — used in "المدينة المنورة"
-    "الطائف", "طائف",
-    "الدمام", "دمام",
-    "الخبر", "خبر",
-    "الاحساء", "احساء",
-    "القصيم", "قصيم",
-    "بريده", "بريدة",      # normalised
+# ── Location tokens (May 2026 — disambiguated) ───────────────────────────────
+# False-positive risk
+# ────────────────────
+# Many Saudi cities collide with COMMON personal names when the
+# definite article is stripped:
+#
+#   ``الرياض``  → city, suspicious
+#   ``رياض``    → personal name (e.g. "محمد رياض" / "رياض أحمد")
+#
+#   ``المكه``   → city
+#   ``مكي``     → personal name — different token, NOT in either set
+#
+#   ``المدينه`` → city
+#   ``مدني``    → personal name / nisba — different token, NOT here
+#
+# Until May 2026 we stripped the leading ``ال`` before matching, which
+# caused ``"محمد رياض"`` to be flagged as containing a city. We now
+# keep TWO disjoint sets and switch off the definite-article strip
+# for location matching:
+#
+#   ``_LOCATION_TOKENS_STRICT``      → city / region forms whose
+#                                       *bare* (no-ال) form is NEVER
+#                                       a personal name. Match the
+#                                       token verbatim after Arabic
+#                                       normalisation — no ``ال``-strip.
+#                                       Includes country-tier markers.
+#   ``_LOCATION_TOKENS_DEFINITE``    → city forms that REQUIRE the
+#                                       definite article (or other
+#                                       unambiguous prefix) before
+#                                       counting as a location. The
+#                                       bare form would shadow a real
+#                                       Saudi name and must not match.
+#
+# All entries are stored in the normalised form produced by
+# ``_normalise_arabic`` (alef variants → ا, ى → ي, ة → ه, diacritics
+# stripped). Matching is exact set membership against the normalised
+# token — no substring / contains check.
+_LOCATION_TOKENS_DEFINITE = frozenset({
+    # Cities whose bare form is a real Saudi given name → match
+    # only when the ``ال`` is present.
+    "الرياض",                  # "رياض"  is a male name
+    "الجده", "جده",            # normalised "جدة" — "جودة"/"جود" stay clean
+    "المكه",                   # "مكه" can be a place; bare keep for safety
+    "المدينه",                 # "مدينة"; "مدني" never matches (different token)
+    "المنوره",                 # "المنورة"
+    "الطائف",                  # bare "طائف" is too generic
+    "الدمام",                  # bare "دمام" rarely a name, but keep strict
+    "الخبر",                   # bare "خبر" = "news" — keep strict
+    "الاحساء",
+    "القصيم",                  # bare "قصيم" could be a name
+    "الجوف",
+    "الباحه",                  # normalised "الباحة"
+    "الخرج",
     "ابها", "أبها",
-    "خميس", "مشيط",        # "خميس مشيط"
-    "حائل",  "نجران", "تبوك", "جازان", "الجوف", "الباحه",
-    "ينبع",  "الخرج",  "عرعر",
-    # Regions / cardinal directions
+    "بريده", "بريدة",
+})
+
+_LOCATION_TOKENS_STRICT = frozenset({
+    # Cities/regions whose bare form is unambiguous — never a
+    # common personal name.
+    "حائل",  "نجران", "تبوك", "جازان",
+    "ينبع",  "عرعر",
+    "خميس", "مشيط",            # "خميس مشيط" — both halves match
+    # Regional / cardinal markers (always preceded by ال in practice).
     "الجنوب", "الشمال",
-    "الشرقيه",             # normalised الشرقية
-    "الغربيه",             # normalised الغربية
+    "الشرقيه",
+    "الغربيه",
     "الوسطى", "الوسطي",
     # Country-tier markers
     "الخارج", "خارج",
-    "السعوديه",            # normalised
+    "السعوديه",
     "الامارات",
-    "الكويت", "البحرين", "قطر", "عمان",
+    "الكويت", "البحرين", "قطر",
+    # NOTE: "عمان" omitted — collides with the Saudi male name عمّان/عُمان
+    # is rare but "عمان" the country is rarely written this way without
+    # context. We skip it to err on the side of keeping real names.
     "مصر",  "اليمن", "العراق", "الاردن", "سوريا", "لبنان",
 })
 
@@ -202,6 +266,7 @@ _TITLE_TOKENS = frozenset({
 # below) and case-insensitive.
 _PLACEHOLDER_LITERALS = frozenset({
     "بدون اسم", "بدون اسم.", "بدون_اسم",
+    "غير معروف", "غير_معروف", "غير معروفه",
     "لا اسم", "لا يوجد اسم", "لا يوجد",
     "no name", "noname", "no_name",
     "anonymous", "anon",
@@ -595,14 +660,33 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             dropped.append(token)
             had_digits_removed = True
             continue
+        # Three normalised forms used by the matchers below:
+        #   ``bare``       — token with the leading definite article
+        #                     stripped (``العميل`` → ``عميل``). Used
+        #                     ONLY for stopword / title / source /
+        #                     preposition matching where ``ال`` is
+        #                     irrelevant.
+        #   ``norm_full``  — full Arabic normalisation WITHOUT
+        #                     stripping ``ال``. This is what the
+        #                     location matcher uses so ``"الرياض"``
+        #                     (city) matches but ``"رياض"`` (the
+        #                     personal name) does NOT.
+        #   ``norm_bare``  — full normalisation + ``ال`` strip. Used
+        #                     for stop / source / title matching where
+        #                     the article is noise.
         bare       = _strip_definite_article(token)
-        normalised = _normalise_arabic(bare).lower()
+        norm_full  = _normalise_arabic(token).lower()
+        norm_bare  = _normalise_arabic(bare).lower()
         token_lc   = token.lower()
 
         if token in _PROTECTED_PREFIXES or bare in _PROTECTED_PREFIXES:
             kept.append(token)
             continue
-        if bare in _STOP_TOKENS_AR:
+        if bare in _STOP_TOKENS_AR or norm_bare in _STOP_TOKENS_AR:
+            dropped.append(token)
+            had_stopword_removed = True
+            continue
+        if norm_bare in _STOP_TOKENS_AR_EXTRA:
             dropped.append(token)
             had_stopword_removed = True
             continue
@@ -616,19 +700,32 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         # the source token correctly. Prepositions are checked last
         # so a name accidentally containing "من" inside doesn't get
         # mangled.
-        if token_lc in _TITLE_TOKENS or normalised in _TITLE_TOKENS:
+        if token_lc in _TITLE_TOKENS or norm_bare in _TITLE_TOKENS:
             dropped.append(token)
             had_title_removed = True
             continue
-        if token_lc in _SOURCE_TOKENS or normalised in _SOURCE_TOKENS:
+        if token_lc in _SOURCE_TOKENS or norm_bare in _SOURCE_TOKENS:
             dropped.append(token)
             had_source_removed = True
             continue
-        if normalised in _LOCATION_TOKENS or bare in _LOCATION_TOKENS:
+        # ── Location matching (May 2026 — disambiguated) ──────────
+        # Strict-form cities (e.g. "تبوك", "خميس", "الجنوب") match
+        # against the full normalisation regardless of the article.
+        # Definite-required cities (e.g. "الرياض", "المدينه") match
+        # ONLY when the article is present in the original token, so
+        # bare "رياض" / "مدينة" — both common given names — never
+        # trip the matcher. Substring / contains matching is NOT used
+        # anywhere: the only criterion is exact set membership of the
+        # normalised token.
+        if norm_full in _LOCATION_TOKENS_STRICT:
             dropped.append(token)
             had_location_removed = True
             continue
-        if normalised in _PREPOSITION_TOKENS or bare in _PREPOSITION_TOKENS:
+        if norm_full in _LOCATION_TOKENS_DEFINITE:
+            dropped.append(token)
+            had_location_removed = True
+            continue
+        if norm_bare in _PREPOSITION_TOKENS or bare in _PREPOSITION_TOKENS:
             dropped.append(token)
             had_prep_removed = True
             continue
@@ -745,10 +842,21 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
     # bucket so they don't crowd the filter chip.
     if had_source_removed or had_location_removed:
         category = CATEGORY_SUSPICIOUS_SUFFIX
+        # Suspicious-suffix edits ALWAYS require manual review (May
+        # 2026 policy). A name like ``"Google Ads خالد"`` would
+        # otherwise auto-strip "Google" / "Ads" at high confidence
+        # and silently store "خالد" — but the merchant might prefer
+        # to clear the row entirely, or to keep the source marker
+        # if it's actually part of a real business name. Forcing
+        # ``low`` puts the row in the "needs review" lane so the
+        # bulk "Apply high-confidence only" shortcut never touches
+        # it.
+        confidence = "low"
     elif had_title_removed:
         # Title-only edits ("د. سامي" → "سامي") are also suspicious-
-        # suffix material — same UX bucket.
+        # suffix material — same UX bucket, same review-required gate.
         category = CATEGORY_SUSPICIOUS_SUFFIX
+        confidence = "low"
     elif had_stopword_removed:
         category = CATEGORY_OTHER
     else:
