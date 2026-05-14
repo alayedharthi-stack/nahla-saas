@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from core.wa_link_buttons import (  # noqa: E402
     classify_url,
     extract_first_cta_url,
+    split_text_for_cta_buttons,
 )
 
 
@@ -135,3 +136,198 @@ def test_extract_strips_trailing_punctuation_in_url():
     assert out is not None
     # The trailing dot must NOT end up appended to the button URL.
     assert not out.classification.url.endswith(".")
+
+
+# ─────────────────── split_text_for_cta_buttons (multi-URL) ──────────────────
+# Production bug 2026-05-14: customer asked for two products
+# ("أبي سمر وطلح") and the bot returned a single message containing
+# both product URLs. WhatsApp only renders the first URL as a CTA
+# button — the second was left as raw flat text. The splitter is the
+# wire-layer defence that turns multi-URL replies into one message
+# per product so every link becomes a proper CTA button.
+
+
+def test_split_no_urls_returns_single_plain_message():
+    out = split_text_for_cta_buttons("ممتاز، أرسل لي رقم جوالك للتأكيد.")
+    assert len(out) == 1
+    assert out[0].cta is None
+    assert out[0].body == "ممتاز، أرسل لي رقم جوالك للتأكيد."
+
+
+def test_split_single_url_matches_legacy_extract_shape():
+    """Single-URL replies must keep the byte-identical shape the
+    legacy ``extract_first_cta_url`` path produced — we do NOT want
+    to perturb existing single-product flows."""
+    text = "هذا منتج العسل: https://store.example.com/products/talh-honey"
+    out = split_text_for_cta_buttons(text)
+    legacy = extract_first_cta_url(text)
+
+    assert len(out) == 1
+    assert legacy is not None
+    assert out[0].cta is not None
+    assert out[0].cta.url == legacy.classification.url
+    assert out[0].cta.button_title == legacy.classification.button_title
+    assert out[0].body == legacy.cleaned_text
+
+
+def test_split_two_products_paragraph_separated_produces_two_ctas():
+    """The exact production-screenshot scenario: customer asked for
+    "سمر وطلح" and the bot replied with two labelled URLs separated
+    by blank lines. Expected: TWO CTA messages (one per product) plus
+    optional intro / follow-up plain-text messages."""
+    text = (
+        "ممتاز يا محيس 👍\n"
+        "\n"
+        "سمر الحجاز:\n"
+        "https://store.example.com/products/sammar-hijaz\n"
+        "\n"
+        "الطلح البلدي:\n"
+        "https://store.example.com/products/talh-baladi\n"
+        "\n"
+        "وش الحجم اللي يناسبك من كل واحد"
+    )
+    out = split_text_for_cta_buttons(text)
+
+    ctas = [m for m in out if m.cta is not None]
+    plains = [m for m in out if m.cta is None]
+
+    # TWO CTAs — one per product, never bundled.
+    assert len(ctas) == 2
+    # Each CTA carries the OWN product URL — neither swallows the other.
+    cta_urls = {m.cta.url for m in ctas}
+    assert any("sammar" in u for u in cta_urls)
+    assert any("talh" in u for u in cta_urls)
+    # Both classifications are products → "عرض المنتج" button title.
+    for m in ctas:
+        assert m.cta.kind == "product"
+        assert m.cta.button_title == "عرض المنتج"
+    # The intro + follow-up survive as separate plain-text messages so
+    # the natural-language framing isn't lost.
+    plain_bodies = [m.body for m in plains]
+    assert any("ممتاز يا محيس" in b for b in plain_bodies)
+    assert any("وش الحجم" in b for b in plain_bodies)
+
+
+def test_split_two_products_one_url_per_label_line():
+    """LLM variant where each label sits on the same line as the URL
+    (no blank line between products). Splitter must still produce one
+    CTA per URL."""
+    text = (
+        "سمر الحجاز: https://store.example.com/products/sammar-hijaz\n"
+        "الطلح البلدي: https://store.example.com/products/talh-baladi"
+    )
+    out = split_text_for_cta_buttons(text)
+    ctas = [m for m in out if m.cta is not None]
+    assert len(ctas) == 2
+    assert any("sammar" in m.cta.url for m in ctas)
+    assert any("talh" in m.cta.url for m in ctas)
+    # Each CTA's body keeps the label so the customer knows which
+    # product the button belongs to.
+    bodies = [m.body for m in ctas]
+    assert any("سمر" in b for b in bodies)
+    assert any("طلح" in b for b in bodies)
+    # No CTA body should still contain the URL — that's the whole
+    # point of lifting it into the button.
+    for m in ctas:
+        assert "https://" not in m.body
+
+
+def test_split_each_cta_body_never_contains_other_url():
+    """Hard invariant: a CTA message body must NEVER contain another
+    product URL. Otherwise WhatsApp renders the extra URL inline next
+    to the button, which is the exact symptom we're fixing."""
+    text = (
+        "سمر الحجاز:\n"
+        "https://store.example.com/products/sammar\n"
+        "\n"
+        "الطلح البلدي:\n"
+        "https://store.example.com/products/talh"
+    )
+    out = split_text_for_cta_buttons(text)
+    for m in out:
+        if m.cta is None:
+            continue
+        own_url = m.cta.url
+        # The body is allowed to be empty/default OR to mention the
+        # product name, but NOT to contain another https:// URL.
+        for char_seq in ("https://", "http://"):
+            if char_seq in m.body:
+                # The only acceptable case is if the body's URL is the
+                # SAME as the CTA's URL — but the splitter strips it.
+                # Any other URL is a regression.
+                assert m.body.count("https://") == 1
+                assert own_url in m.body, (
+                    f"CTA body contained a URL that doesn't match its "
+                    f"own CTA: body={m.body!r}, cta_url={own_url!r}"
+                )
+
+
+def test_split_three_products_produces_three_ctas():
+    """Customer asks for three products at once — every one gets a
+    dedicated CTA, no bundling, no silent drops."""
+    text = (
+        "خياراتنا:\n\n"
+        "سمر: https://store.example.com/products/sammar\n\n"
+        "طلح: https://store.example.com/products/talh\n\n"
+        "سدر: https://store.example.com/products/sidr"
+    )
+    out = split_text_for_cta_buttons(text)
+    ctas = [m for m in out if m.cta is not None]
+    assert len(ctas) == 3
+    urls = {m.cta.url for m in ctas}
+    assert any("sammar" in u for u in urls)
+    assert any("talh" in u for u in urls)
+    assert any("sidr" in u for u in urls)
+
+
+def test_split_mixed_product_and_payment_urls():
+    """A reply that includes both a product link AND a payment link
+    must still produce one CTA per URL with the correct classification
+    + button title."""
+    text = (
+        "تفاصيل المنتج:\n"
+        "https://store.example.com/products/honey-1kg\n"
+        "\n"
+        "للدفع:\n"
+        "https://checkout.tap.company/pay/abc123"
+    )
+    out = split_text_for_cta_buttons(text)
+    ctas = [m for m in out if m.cta is not None]
+    assert len(ctas) == 2
+    kinds = {m.cta.kind for m in ctas}
+    assert kinds == {"product", "payment"}
+
+
+def test_split_empty_string_returns_single_empty_message():
+    out = split_text_for_cta_buttons("")
+    assert len(out) == 1
+    assert out[0].cta is None
+    assert out[0].body == ""
+
+
+def test_split_url_only_text_provides_default_body():
+    """If the body would be empty after stripping the URL, the
+    splitter substitutes a per-kind default body so the WhatsApp
+    interactive payload doesn't reject an empty body field."""
+    out = split_text_for_cta_buttons(
+        "https://store.example.com/products/honey-1kg"
+    )
+    assert len(out) == 1
+    assert out[0].cta is not None
+    assert out[0].body  # non-empty
+
+
+def test_split_preserves_order_of_urls():
+    """When the customer sees the messages in order, the FIRST URL in
+    the source text must arrive as the FIRST CTA — otherwise the
+    label-to-CTA mapping is wrong from the customer's perspective."""
+    text = (
+        "سمر: https://store.example.com/products/A\n"
+        "طلح: https://store.example.com/products/B\n"
+        "سدر: https://store.example.com/products/C"
+    )
+    out = split_text_for_cta_buttons(text)
+    ctas = [m for m in out if m.cta is not None]
+    assert ctas[0].cta.url.endswith("/A")
+    assert ctas[1].cta.url.endswith("/B")
+    assert ctas[2].cta.url.endswith("/C")

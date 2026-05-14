@@ -18,11 +18,22 @@ Public API
     ``None`` when no convertible URL is present, so the caller falls
     back to a plain text send.
 
+``split_text_for_cta_buttons(text, *, store_domain=None)`` →
+    ``list[CtaMessage]`` — split a reply into an ordered sequence of
+    WhatsApp messages where every URL gets its OWN CTA button.
+    Non-URL paragraphs are returned as plain-text messages (cta=None).
+    This is the multi-URL fix for the production bug where the bot
+    dumped two product links in the same reply — WhatsApp can only
+    lift ONE into a CTA, so the second was rendered as a flat
+    non-clickable URL string.
+
 Hard rules
 ----------
-* WhatsApp ``cta_url`` interactive only allows ONE URL button. We
-  therefore lift only the first URL we deem "important". Subsequent
-  URLs stay in the body untouched.
+* WhatsApp ``cta_url`` interactive only allows ONE URL button per
+  message. ``extract_first_cta_url`` keeps the legacy single-CTA
+  shape for callers that don't yet want the split behaviour;
+  ``split_text_for_cta_buttons`` is the new contract for any reply
+  that might carry multiple product URLs.
 * If the body becomes empty after stripping the URL we substitute a
   short context line so WhatsApp doesn't reject the interactive
   payload (``body.text`` is required).
@@ -227,6 +238,19 @@ def _strip_url_from_text(text: str, url: str) -> str:
     return out
 
 
+# Default body text emitted when a URL's surrounding label is empty
+# after stripping. Tuned per CTA kind so the customer sees a coherent
+# one-liner above each WhatsApp button. Used by BOTH the legacy
+# ``extract_first_cta_url`` helper and the new multi-URL splitter.
+_DEFAULT_BODY_BY_KIND: dict[UrlKind, str] = {
+    "product":  "تفاصيل المنتج 👇",
+    "payment":  "إتمام الدفع من هنا 👇",
+    "tracking": "تتبّع طلبك 👇",
+    "location": "موقع المتجر 👇",
+    "store":    "هذا متجرنا 🌷",
+}
+
+
 def extract_first_cta_url(
     text: str,
     *,
@@ -254,19 +278,172 @@ def extract_first_cta_url(
     if not cleaned:
         # Provide a minimal context line so WhatsApp doesn't reject the
         # interactive body. Tailor by kind for a slightly nicer UX.
-        cleaned = {
-            "product":  "تفاصيل المنتج 👇",
-            "payment":  "إتمام الدفع من هنا 👇",
-            "tracking": "تتبّع طلبك 👇",
-            "location": "موقع المتجر 👇",
-            "store":    "هذا متجرنا 🌷",
-        }.get(classification.kind, "اضغط على الزر للمتابعة 👇")
+        cleaned = _DEFAULT_BODY_BY_KIND.get(
+            classification.kind, "اضغط على الزر للمتابعة 👇"
+        )
     return CtaExtraction(cleaned_text=cleaned, classification=classification)
+
+
+# ── Multi-URL splitter ──────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CtaMessage:
+    """One element in the ordered output of ``split_text_for_cta_buttons``.
+
+    * ``body`` — the text WhatsApp will render in the message body.
+                 Always non-empty (we substitute a per-kind default
+                 when the surrounding label is missing).
+    * ``cta``  — the URL classification to lift into a ``cta_url``
+                 interactive button. ``None`` means "send as plain
+                 text" (used for the intro paragraph and any trailing
+                 follow-up question after the last URL).
+    """
+    body: str
+    cta: Optional[UrlClassification]
+
+
+def _strip_url_from_line(line: str, url: str) -> str:
+    """Tighter version of ``_strip_url_from_text`` for a single line.
+
+    Operates on a one-line input (the line that physically contains
+    the URL) and returns the surrounding text with the URL excised
+    plus dangling colons / hyphens cleaned up. Empty string when the
+    line was URL-only.
+    """
+    if not line or not url:
+        return (line or "").strip()
+    stripped = line.replace(url, "").strip()
+    # Trim trailing label punctuation the LLM uses ("سمر الحجاز:" →
+    # "سمر الحجاز"). Keep it lightweight; the heavy cleaner is
+    # ``_strip_url_from_text`` for multi-line bodies.
+    stripped = re.sub(r"[\s\u00A0]*[:\u061B\u061F،,;\-—–]+[\s\u00A0]*$", "", stripped)
+    return stripped
+
+
+def split_text_for_cta_buttons(
+    text: str,
+    *,
+    store_domain: Optional[str] = None,
+) -> list[CtaMessage]:
+    """Split *text* into an ordered list of WhatsApp messages where
+    every URL gets its own CTA button.
+
+    Algorithm (deliberately conservative — when in doubt we keep the
+    original single-message shape):
+
+      1. **No URL** → one ``CtaMessage(body=text, cta=None)``.
+      2. **Single URL** → defer to ``extract_first_cta_url``. Output
+         is one ``CtaMessage`` carrying the cleaned body + CTA. This
+         path is byte-identical to the legacy webhook flow so
+         single-product replies are not perturbed by this change.
+      3. **Multiple URLs** → walk paragraphs (blank-line separated):
+         each paragraph that contains exactly one URL becomes one CTA
+         message; paragraphs with no URL become plain-text messages;
+         paragraphs with multiple URLs are further split per-line.
+         For each URL we attribute the surrounding label (the line
+         the URL sits on, plus any non-URL lines above it within the
+         same paragraph) as the message body.
+
+    Per the merchant UX spec: ONE product = ONE message = ONE CTA.
+    """
+    if not text or not text.strip():
+        return [CtaMessage(body=(text or "").strip(), cta=None)]
+
+    all_urls = list(_URL_RE.finditer(text))
+    if not all_urls:
+        return [CtaMessage(body=text.strip(), cta=None)]
+
+    if len(all_urls) == 1:
+        # Preserve byte-identical behaviour with the legacy single-CTA
+        # path so the existing webhook flow + tests don't move.
+        ext = extract_first_cta_url(text, store_domain=store_domain)
+        if ext is None:
+            return [CtaMessage(body=text.strip(), cta=None)]
+        return [CtaMessage(body=ext.cleaned_text, cta=ext.classification)]
+
+    # Multi-URL: split into paragraphs (blank-line separated), then
+    # further split paragraphs that pack >1 URL on consecutive lines.
+    messages: list[CtaMessage] = []
+    paragraphs = re.split(r"\n\s*\n+", text.strip())
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        urls_in_para = list(_URL_RE.finditer(paragraph))
+        if not urls_in_para:
+            messages.append(CtaMessage(body=paragraph, cta=None))
+            continue
+        if len(urls_in_para) == 1:
+            ext = extract_first_cta_url(paragraph, store_domain=store_domain)
+            if ext is None:
+                messages.append(CtaMessage(body=paragraph, cta=None))
+            else:
+                messages.append(
+                    CtaMessage(body=ext.cleaned_text, cta=ext.classification)
+                )
+            continue
+
+        # Multiple URLs in one paragraph. We attribute each URL to
+        # the line it sits on, prepending any non-URL lines that
+        # appeared just above it within the same paragraph (the LLM's
+        # label like "سمر الحجاز:").
+        lines = paragraph.split("\n")
+        pending_label_parts: list[str] = []
+        for line in lines:
+            line_urls = list(_URL_RE.finditer(line))
+            if not line_urls:
+                # Non-URL line — accumulate as label for the next URL.
+                stripped = line.strip()
+                if stripped:
+                    pending_label_parts.append(stripped)
+                continue
+            # Process every URL on this line. Most lines have at most
+            # one URL but the LLM can also write "name1 URL1 name2 URL2"
+            # — in that case we use the line as-is for the FIRST URL
+            # and emit default-bodies for the rest so each still gets
+            # its own CTA.
+            first_url_raw = line_urls[0].group(0).rstrip(".,:;!?)\u061B\u061F،")
+            first_cls = classify_url(first_url_raw, store_domain=store_domain)
+            first_body_label = _strip_url_from_line(line, first_url_raw)
+            label_parts = [p for p in pending_label_parts if p]
+            if first_body_label:
+                label_parts.append(first_body_label)
+            body = (
+                "\n".join(label_parts).strip()
+                or _DEFAULT_BODY_BY_KIND.get(first_cls.kind, "اضغط على الزر للمتابعة 👇")
+            )
+            messages.append(CtaMessage(body=body, cta=first_cls))
+            pending_label_parts = []
+            for extra_match in line_urls[1:]:
+                extra_url_raw = extra_match.group(0).rstrip(".,:;!?)\u061B\u061F،")
+                extra_cls = classify_url(extra_url_raw, store_domain=store_domain)
+                messages.append(CtaMessage(
+                    body=_DEFAULT_BODY_BY_KIND.get(
+                        extra_cls.kind, "اضغط على الزر للمتابعة 👇"
+                    ),
+                    cta=extra_cls,
+                ))
+        # Any trailing label-only lines without a URL after the last
+        # URL in this paragraph → emit as plain-text follow-up.
+        if pending_label_parts:
+            trailing = "\n".join(pending_label_parts).strip()
+            if trailing:
+                messages.append(CtaMessage(body=trailing, cta=None))
+
+    # Final safety: if every paragraph somehow collapsed to nothing
+    # (shouldn't happen but defend in depth), at least send the
+    # original text so the customer isn't left silent.
+    if not messages:
+        return [CtaMessage(body=text.strip(), cta=None)]
+    return messages
 
 
 __all__ = [
     "UrlClassification",
     "CtaExtraction",
+    "CtaMessage",
     "classify_url",
     "extract_first_cta_url",
+    "split_text_for_cta_buttons",
 ]

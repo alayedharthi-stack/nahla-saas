@@ -4548,43 +4548,99 @@ async def _handle_merchant_message(
             )
         else:
             # ── URL → CTA-button normaliser ─────────────────────────
-            # If the AI reply embeds a long product / payment / tracking
-            # / location URL, lift it into a single ``cta_url`` button.
-            # Brain replies that already attached quick-reply buttons
-            # are skipped (handled above). General URLs (e.g. a wa.me
-            # contact link inside marketing copy) stay inline.
-            _cta_extraction = None
+            # The reply may carry 0, 1 or >1 URLs. WhatsApp's
+            # ``cta_url`` interactive only supports ONE button per
+            # message, so for multi-URL replies we split into a
+            # SEQUENCE of messages — each URL gets its own CTA. This
+            # closes the production bug where "أبي سمر وطلح" replies
+            # contained two product URLs and only the first became a
+            # clickable button; the second was rendered as raw text.
+            # See ``core.wa_link_buttons.split_text_for_cta_buttons``
+            # for the algorithm. Brain replies that already attached
+            # quick-reply buttons are skipped (handled above).
+            _cta_messages: list = []
             try:
-                from core.wa_link_buttons import extract_first_cta_url as _extract_cta  # noqa: PLC0415
+                from core.wa_link_buttons import (  # noqa: PLC0415
+                    split_text_for_cta_buttons as _split_cta,
+                )
                 # We don't pass store_domain here: product detection by
                 # path pattern (/products/, /p/, …) is enough for the
                 # current AI-reply shapes. A future enhancement can plug
                 # the merchant's known domain in for stricter matching.
-                _cta_extraction = _extract_cta(reply or "")
+                _cta_messages = _split_cta(reply or "")
             except Exception as _cta_exc:
-                logger.debug("[CTA_BUTTON] extract failed tenant=%s: %s", tenant_id, _cta_exc)
+                logger.debug("[CTA_BUTTON] split failed tenant=%s: %s", tenant_id, _cta_exc)
+                _cta_messages = []
 
             _send_ok = False
-            # Policy: lift ANY URL into a CTA button when no other
-            # attachment is being sent. Previously we only lifted
-            # high-value classes (product / payment / tracking /
-            # location) and let "general" URLs stay inline — but
-            # the merchant reported the LLM dumping store URLs as
-            # text. With no attachment in this branch, there's no
-            # double-CTA risk: one CTA always beats a 200-char URL
-            # inline in WhatsApp's UI.
-            if _cta_extraction:
-                _cls = _cta_extraction.classification
+            _multi_cta_count = sum(1 for m in _cta_messages if m.cta is not None)
+            if _multi_cta_count >= 2:
+                # Multi-URL path: send each message individually. The
+                # legacy ``reply`` variable stays for the dashboard
+                # transcript (the customer experience is what matters
+                # in production; the transcript already showed the
+                # full text-with-URLs version anyway).
+                logger.info(
+                    "[CTA_BUTTON_SPLIT] tenant=%s conversation_id=%s "
+                    "messages=%d cta_count=%d",
+                    tenant_id, getattr(convo, "id", None),
+                    len(_cta_messages), _multi_cta_count,
+                )
+                _all_ok = True
+                _first_send = True
+                for _idx, _msg in enumerate(_cta_messages):
+                    try:
+                        if _msg.cta is not None:
+                            _ok_one = await _send_cta_url(
+                                phone_id=phone_id, to=to,
+                                body_text=_msg.body or _msg.cta.url,
+                                btn_label=_msg.cta.button_title,
+                                btn_url=_msg.cta.url,
+                                _tenant_id=tenant_id, _db=db,
+                            )
+                        else:
+                            _ok_one = await _send_whatsapp_message(
+                                phone_id=phone_id, to=to, text=_msg.body,
+                                _tenant_id=tenant_id, _db=db,
+                            )
+                    except Exception as _split_send_exc:
+                        logger.warning(
+                            "[CTA_BUTTON_SPLIT_FALLBACK] tenant=%s idx=%d reason=%s",
+                            tenant_id, _idx, _split_send_exc,
+                        )
+                        _ok_one = False
+                    # Treat overall success as "at least the first
+                    # send made it" — partial failures still count as
+                    # a delivered AI reply for the outbound counter
+                    # so the loop guard doesn't retry.
+                    if _first_send:
+                        _send_ok = _ok_one
+                        _first_send = False
+                    if not _ok_one:
+                        _all_ok = False
+                if not _all_ok:
+                    logger.info(
+                        "[CTA_BUTTON_SPLIT_PARTIAL] tenant=%s — one or more "
+                        "split messages failed; customer received the rest",
+                        tenant_id,
+                    )
+            elif _cta_messages and _cta_messages[0].cta is not None and len(_cta_messages) == 1:
+                # Single-CTA path: byte-identical to the legacy
+                # behaviour so existing single-product replies don't
+                # change shape. Lift the URL into a ``cta_url`` button
+                # with the cleaned body.
+                _msg = _cta_messages[0]
+                _cls = _msg.cta
                 logger.info(
                     "[CTA_BUTTON] tenant=%s conversation_id=%s url_type=%s "
                     "button_title=%r url_domain=%s body_len=%d",
                     tenant_id, getattr(convo, "id", None), _cls.kind,
-                    _cls.button_title, _cls.domain, len(_cta_extraction.cleaned_text or ""),
+                    _cls.button_title, _cls.domain, len(_msg.body or ""),
                 )
                 try:
                     _send_ok = await _send_cta_url(
                         phone_id=phone_id, to=to,
-                        body_text=_cta_extraction.cleaned_text or reply,
+                        body_text=_msg.body or reply,
                         btn_label=_cls.button_title,
                         btn_url=_cls.url,
                         _tenant_id=tenant_id, _db=db,
@@ -4599,7 +4655,7 @@ async def _handle_merchant_message(
                     # Replace the persisted reply body with the cleaned
                     # version so the dashboard transcript matches what
                     # the customer saw on WhatsApp.
-                    reply = _cta_extraction.cleaned_text or reply
+                    reply = _msg.body or reply
                 else:
                     # WhatsApp rejected the interactive (e.g. outside the
                     # 24h window): fall back to the original plain text
@@ -4614,6 +4670,9 @@ async def _handle_merchant_message(
                         _tenant_id=tenant_id, _db=db,
                     )
             else:
+                # No URLs in reply → plain text send (also handles the
+                # degenerate case where the splitter returned only
+                # plain-text segments).
                 _send_ok = await _send_whatsapp_message(
                     phone_id=phone_id, to=to, text=reply,
                     _tenant_id=tenant_id, _db=db,

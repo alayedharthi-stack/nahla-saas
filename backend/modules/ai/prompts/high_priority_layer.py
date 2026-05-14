@@ -123,6 +123,16 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     "لا ترسل رقم موظف أو معلومات تواصل بشري في أول رسالة. اسأل أولًا عن طبيعة الاستفسار.",
     "للتصعيد للموظف: استخدم intent التصعيد الرسمي فقط — لا تكتب رقم الموظف في النص.",
     "قبل أن تذكر منتجًا اسمًا وسعرًا، اطلب الكرت الكامل عبر [PRODUCT:<اسم المنتج>] — النظام سيرسل الصورة والسعر والرابط.",
+    # Multi-product rule — production complaint 2026-05-14: when a
+    # customer asks for two products at once (e.g. "أبي سمر وطلح") the
+    # bot dumped TWO URLs inside the same WhatsApp message. WhatsApp's
+    # ``cta_url`` interactive only supports ONE button, so only the
+    # first URL became a clickable CTA and the second was left as raw
+    # text. The wire-layer now defensively splits multi-URL replies,
+    # but the LLM must still own the primary path: emit one
+    # ``[PRODUCT:...]`` marker per product, on its own line, and let
+    # the marker resolver materialise each as a separate product card.
+    "إذا طلب العميل أكثر من منتج (مثل «سمر وطلح») أرسلي ماركر [PRODUCT:<اسم>] واحدًا لكل منتج، كل ماركر في سطر مستقل. ممنوع وضع أكثر من رابط منتج نصّي في نفس الرسالة — واتساب يدعم زر CTA واحدًا فقط لكل رسالة، فيتحوّل الثاني إلى رابط أبيض غير قابل للضغط. القاعدة: منتج واحد = رسالة واحدة = زر CTA واحد.",
     "للوسائط (باركودات، QR، فيديو، شهادة، PDF) استخدم [MEDIA_KEY:<slug>] أو [MEDIA:<id>] فقط. لا تلصق روابط ملفات يدويًا.",
     "إذا سأل العميل عن وسيلة دفع (راجحي/أهلي/IBAN/QR) ابحث في مكتبة الوسائط واستخدم MEDIA_KEY مباشرة — لا ترد بـ \"سأحوّلك للفريق\" والوسيط متاح.",
     # Store-link / coupon CTAs — friction killers reported by the merchant.
