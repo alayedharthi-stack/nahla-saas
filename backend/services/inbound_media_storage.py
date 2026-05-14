@@ -85,6 +85,9 @@ _MIME_TO_EXT = {
     "image/png":        ".png",
     "image/webp":       ".webp",
     "image/gif":        ".gif",
+    # Document (PDF, primarily; receipts from Saudi banks)
+    "application/pdf":  ".pdf",
+    "application/x-pdf": ".pdf",
 }
 
 
@@ -104,7 +107,7 @@ class StoredInboundMedia:
     storage_path: str
     storage_url: str
     tenant_id: int
-    kind: str           # "audio" | "image"
+    kind: str           # "audio" | "image" | "document"
     dedup: bool         # True when the same sha256 already existed on disk
 
 
@@ -145,10 +148,11 @@ def save_inbound_media(
     """Persist a downloaded WhatsApp media blob and return the metadata
     callers stamp onto ``MessageEvent.extra_metadata``.
 
-    ``kind`` must be ``"audio"`` or ``"image"``. Callers are expected
-    to validate this before calling — we don't want a future "document"
-    type to silently start writing PDFs to inbound-media storage
-    without an explicit code path.
+    ``kind`` must be ``"audio"``, ``"image"``, or ``"document"``.
+    The ``"document"`` kind is used by the PDF/receipt branch added
+    in ``modules.ai.media.normalizer._process_document`` so the
+    merchant drawer can re-open inbound bank-transfer receipts long
+    after Meta's 5-minute CDN URL has expired.
 
     Raises ``ValueError`` for empty payloads. Never raises on
     filesystem errors — instead we re-raise the underlying ``OSError``
@@ -156,10 +160,10 @@ def save_inbound_media(
     """
     if not file_bytes:
         raise ValueError("save_inbound_media: empty payload")
-    if kind not in {"audio", "image"}:
+    if kind not in {"audio", "image", "document"}:
         raise ValueError(
-            f"save_inbound_media: kind must be 'audio' or 'image' "
-            f"(got {kind!r})"
+            f"save_inbound_media: kind must be 'audio', 'image' or "
+            f"'document' (got {kind!r})"
         )
 
     sha256 = hashlib.sha256(file_bytes).hexdigest()

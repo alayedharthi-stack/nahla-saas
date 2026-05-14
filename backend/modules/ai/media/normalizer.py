@@ -173,6 +173,169 @@ IMAGE_FALLBACK_REPLY_AR = (
     "وصلتني الصورة، لكن لم أتمكن من قراءة محتواها بوضوح. "
     "ممكن توضح طلبك بنص؟"
 )
+DOCUMENT_FALLBACK_REPLY_AR = (
+    "وصلني الملف، لكن لم أتمكن من قراءة محتواه. "
+    "ممكن توضح غرض الملف بنص؟"
+)
+
+
+# ── PDF / document heuristic classifier ─────────────────────────────
+#
+# Lightweight, dependency-free classifier for inbound WhatsApp
+# documents. We do NOT extract PDF text — that requires shipping a
+# new dependency (``pypdf`` / ``pdfplumber``) and the parsing of
+# Saudi bank receipts is unreliable enough that we'd still need
+# heuristics on top. Instead we lean on:
+#
+#   * The document's ``filename`` (e.g. "Transfer-Receipt.pdf",
+#     "إيصال_التحويل.pdf").
+#   * The document's ``caption`` (text the customer typed alongside).
+#   * The merchant's recent conversation context (passed in by the
+#     webhook): if the bot just asked for an ``إيصال`` or there's an
+#     active product focus with a confirmed price + address, a PDF
+#     in that moment is overwhelmingly a payment receipt.
+#
+# Categories produced:
+#   * ``payment_receipt``  → bank-transfer receipt, deposit slip
+#   * ``invoice``          → tax/sales invoice the customer forwarded
+#   * ``identity``         → ID / passport scan
+#   * ``shipping_label``   → courier waybill
+#   * ``catalog``          → product catalog the customer shared
+#   * ``unknown``          → couldn't decide; treat as generic doc
+#
+# The classifier is deliberately fuzzy-conservative: we accept some
+# false positives on ``payment_receipt`` because the downstream
+# response just says "we received the receipt, the order is under
+# review" — even if the document was actually an invoice, that's a
+# reasonable thing to say after an order confirmation flow.
+
+_PDF_RECEIPT_FILENAME_KEYWORDS = (
+    "receipt", "transfer", "rajhi", "stcpay", "alinma", "alahli",
+    "snb", "ncb", "sabb", "barwa", "albilad", "anb",
+    "إيصال", "ايصال", "تحويل", "حواله", "حوالة", "تحوي",
+    "transferreceipt", "remittance", "payment",
+)
+_PDF_INVOICE_KEYWORDS = (
+    "invoice", "فاتورة", "فاتوره", "tax-invoice", "vat",
+)
+_PDF_IDENTITY_KEYWORDS = (
+    "id-card", "id_", "passport", "هوية", "جواز",
+)
+_PDF_SHIPPING_KEYWORDS = (
+    "waybill", "label", "smsa", "aramex", "dhl", "redbox",
+    "بوليصة", "بوليصه", "شحنة", "شحنه",
+)
+_PDF_CATALOG_KEYWORDS = (
+    "catalog", "catalogue", "كتالوج", "كاتالوج", "كتالوغ",
+)
+
+
+def classify_inbound_document(
+    *,
+    filename: Optional[str],
+    caption: Optional[str],
+    mime_type: Optional[str],
+    order_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Heuristic-classify an inbound PDF/document into one of the
+    enum slots above. ``order_context`` is an optional hint passed
+    in by the webhook so the classifier can boost the
+    ``payment_receipt`` verdict when the conversation is already
+    inside a transfer-payment flow:
+
+        order_context = {
+            "awaiting_payment_receipt": bool,
+            "has_active_order":         bool,  # product + price known
+            "has_address":              bool,
+            "selected_product":         str|None,
+            "price":                    float|None,
+        }
+
+    Return shape::
+
+        {
+          "category":   "payment_receipt" | ... | "unknown",
+          "confidence": "high" | "medium" | "low",
+          "reasons":    [<arabic-or-en label, …>],
+          "signals": {
+              "filename_matched": bool,
+              "caption_matched":  bool,
+              "context_boosted":  bool,
+          },
+        }
+
+    Never raises. Pure-Python — safe to call from any path.
+    """
+    fn = (filename or "").lower()
+    cap = (caption or "").lower()
+    blob = f"{fn}  {cap}"
+
+    reasons: list = []
+    fn_match = False
+    cap_match = False
+
+    # Pass 1 — keyword scan on filename + caption.
+    if any(k in blob for k in _PDF_RECEIPT_FILENAME_KEYWORDS):
+        category = "payment_receipt"
+        # Decide whether the hit was in filename or caption for tracing.
+        fn_match = any(k in fn for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
+        cap_match = any(k in cap for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
+        reasons.append("filename/caption matches receipt keyword")
+        confidence = "high" if (fn_match or cap_match) else "medium"
+    elif any(k in blob for k in _PDF_INVOICE_KEYWORDS):
+        category = "invoice"
+        reasons.append("filename/caption matches invoice keyword")
+        confidence = "medium"
+    elif any(k in blob for k in _PDF_IDENTITY_KEYWORDS):
+        category = "identity"
+        reasons.append("filename/caption matches identity keyword")
+        confidence = "medium"
+    elif any(k in blob for k in _PDF_SHIPPING_KEYWORDS):
+        category = "shipping_label"
+        reasons.append("filename/caption matches shipping keyword")
+        confidence = "medium"
+    elif any(k in blob for k in _PDF_CATALOG_KEYWORDS):
+        category = "catalog"
+        reasons.append("filename/caption matches catalog keyword")
+        confidence = "low"
+    else:
+        category = "unknown"
+        confidence = "low"
+
+    # Pass 2 — context boost. A "no-keyword" PDF arriving during an
+    # active payment-receipt waiting state gets promoted to a
+    # receipt. This is the single most impactful heuristic: most
+    # Saudi banks generate PDF receipts with timestamp-only filenames
+    # like ``document_1778767962508.pdf`` that match none of the
+    # keyword lists.
+    context_boosted = False
+    if order_context:
+        awaiting = bool(order_context.get("awaiting_payment_receipt"))
+        active   = bool(order_context.get("has_active_order"))
+        has_addr = bool(order_context.get("has_address"))
+        if awaiting and category in ("unknown", "payment_receipt"):
+            category = "payment_receipt"
+            confidence = "high"
+            reasons.append("awaiting_payment_receipt context")
+            context_boosted = True
+        elif active and has_addr and category == "unknown":
+            # Product + address are locked in — almost certainly a
+            # payment receipt the customer is sending unprompted.
+            category = "payment_receipt"
+            confidence = "medium"
+            reasons.append("active_order_with_address context")
+            context_boosted = True
+
+    return {
+        "category":   category,
+        "confidence": confidence,
+        "reasons":    reasons,
+        "signals": {
+            "filename_matched": fn_match,
+            "caption_matched":  cap_match,
+            "context_boosted":  context_boosted,
+        },
+    }
 
 
 @dataclass
@@ -211,6 +374,7 @@ async def normalize_whatsapp_inbound(
     wa_conn: Any,
     tenant_id: int,
     message: Dict[str, Any],
+    order_context: Optional[Dict[str, Any]] = None,
 ) -> MediaNormalizationResult:
     msg_type = str(message.get("type") or "").strip()
     ts_raw = message.get("timestamp")
@@ -260,6 +424,28 @@ async def normalize_whatsapp_inbound(
             image_payload=message.get("image") or {},
             ts_raw=ts_raw,
             wa_msg_id=wa_msg_id,
+            order_context=order_context,
+        )
+
+    if msg_type == "document":
+        # PDFs and other document attachments. Before this branch
+        # existed PDFs were silently dropped at the webhook
+        # (``INBOUND_IGNORED_UNSUPPORTED``) — a customer who sent a
+        # bank-transfer receipt got NO acknowledgement and the AI
+        # re-asked product discovery on the next text turn. We now
+        # download the document, persist it for the merchant
+        # drawer, heuristically classify it (payment_receipt /
+        # invoice / identity / shipping / catalog / unknown) and
+        # push a structured "[وثيقة PDF — تصنيف: X]" text into the
+        # brain so downstream rules can react.
+        return await _process_document(
+            db=db,
+            wa_conn=wa_conn,
+            tenant_id=tenant_id,
+            document_payload=message.get("document") or {},
+            ts_raw=ts_raw,
+            wa_msg_id=wa_msg_id,
+            order_context=order_context,
         )
 
     return MediaNormalizationResult(
@@ -500,6 +686,7 @@ async def _process_image(
     image_payload: Dict[str, Any],
     ts_raw: Any,
     wa_msg_id: str,
+    order_context: Optional[Dict[str, Any]] = None,
 ) -> MediaNormalizationResult:
     """Download → persist → describe an inbound image payload."""
     media_id = str(image_payload.get("id") or "").strip()
@@ -603,11 +790,46 @@ async def _process_image(
     base_meta["vision_text"]   = vision_text
     base_meta["ai_used_image"] = True
 
+    # ── Receipt detection from vision text ────────────────────────
+    # The vision system prompt instructs the model to label
+    # "إثبات دفع / إيصال". When that phrase appears in the vision
+    # text AND the conversation is in an active payment-receipt
+    # waiting state, surface a structured ``image_kind`` slot so
+    # the webhook can short-circuit into the deterministic
+    # "receipt-received" acknowledgement instead of running the
+    # generic LLM reply path (which used to lose product context).
+    try:
+        _vision_lc = (vision_text or "").lower()
+        if any(k in _vision_lc for k in (
+            "إيصال", "ايصال", "تحويل", "حواله", "حوالة",
+            "إثبات دفع", "اثبات دفع", "receipt", "transfer",
+            "rajhi", "stcpay", "alinma", "snb", "alahli",
+        )):
+            base_meta["image_kind"] = "payment_receipt"
+            base_meta["image_kind_confidence"] = "high"
+            base_meta["image_kind_reasons"] = ["vision_text_keyword"]
+        elif order_context and bool(
+            order_context.get("awaiting_payment_receipt")
+        ):
+            # No keywords in the vision text but the bot just asked
+            # for a receipt — high-confidence boost based on flow
+            # state. Same logic as the PDF classifier's context
+            # boost.
+            base_meta["image_kind"] = "payment_receipt"
+            base_meta["image_kind_confidence"] = "high"
+            base_meta["image_kind_reasons"] = ["awaiting_payment_receipt"]
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── Combine caption + vision description ────────────────────
     if caption:
         combined = f"{caption}\n\n[وصف الصورة] {vision_text}"
     else:
         combined = f"[وصف الصورة المرسلة] {vision_text}"
+    if base_meta.get("image_kind") == "payment_receipt":
+        # Tag the brain-facing text so downstream rules can detect
+        # without re-parsing the Arabic description.
+        combined = "[تصنيف الصورة: إيصال تحويل بنكي]\n" + combined
     return MediaNormalizationResult(
         normalized_type="image",
         text=combined,
@@ -647,6 +869,179 @@ def _image_with_fallback(
         metadata=base_meta,
         should_process=False,
         fallback_reply_ar=IMAGE_FALLBACK_REPLY_AR,
+    )
+
+
+# ── Document (PDF, etc.) ────────────────────────────────────────────
+
+
+async def _process_document(
+    *,
+    db: Any,
+    wa_conn: Any,
+    tenant_id: int,
+    document_payload: Dict[str, Any],
+    ts_raw: Any,
+    wa_msg_id: str,
+    order_context: Optional[Dict[str, Any]] = None,
+) -> MediaNormalizationResult:
+    """Handle inbound WhatsApp documents (PDFs, primarily).
+
+    We do not OCR or text-extract the PDF — that would add a new
+    dependency and Saudi bank receipts vary too much for reliable
+    parsing. Instead we:
+
+      1. Download the bytes so the merchant can re-open the file
+         from the conversation drawer even after Meta's 5-minute
+         CDN URL expires.
+      2. Persist via :func:`save_inbound_media` for permanent
+         storage.
+      3. Heuristically classify via :func:`classify_inbound_document`
+         using filename + caption + order context.
+      4. Compose a brain-facing text marker like
+         ``"[وثيقة PDF — تصنيف: إيصال تحويل بنكي] {filename}"``
+         so the decision engine can route on it without needing
+         to read the actual PDF.
+
+    The result is ``normalized_type="document"``; the webhook now
+    treats this as a kept type (alongside ``text``/``audio``/``image``).
+    """
+    media_id  = str(document_payload.get("id") or "").strip()
+    mime_type = str(document_payload.get("mime_type") or "").strip()
+    caption   = str(document_payload.get("caption") or "").strip()
+    filename  = str(document_payload.get("filename") or "").strip()
+
+    base_meta: Dict[str, Any] = {
+        "source_type":             "document",
+        "media_id":                media_id or None,
+        "mime_type":               mime_type or None,
+        "caption":                 caption or None,
+        "filename":                filename or None,
+        "wa_timestamp":            ts_raw,
+        "wa_message_id":           wa_msg_id or None,
+        "document_download_status": "pending",
+        "storage_url":             None,
+        "storage_sha256":          None,
+        "byte_size":               None,
+        # Filled in below by the heuristic classifier.
+        "pdf_kind":                "unknown",
+        "pdf_kind_confidence":     "low",
+        "pdf_kind_reasons":        [],
+    }
+
+    if not media_id:
+        base_meta["document_download_status"] = "failed"
+        base_meta["document_error"] = "missing_media_id"
+        return _document_with_fallback(base_meta, caption, filename)
+
+    downloaded = await _download_meta_media(
+        db=db, wa_conn=wa_conn, tenant_id=tenant_id,
+        media_id=media_id, mime_type=mime_type,
+    )
+    if downloaded is None:
+        base_meta["document_download_status"] = "failed"
+        base_meta["document_error"] = "download_failed"
+        return _document_with_fallback(base_meta, caption, filename)
+
+    actual_mime = downloaded["mime_type"] or mime_type or "application/pdf"
+    file_bytes  = downloaded["bytes"]
+
+    stored = _try_persist(
+        tenant_id=tenant_id, file_bytes=file_bytes,
+        mime_type=actual_mime, kind="document", media_id=media_id,
+    )
+    if stored is not None:
+        base_meta["storage_url"]    = stored.storage_url
+        base_meta["storage_sha256"] = stored.sha256
+        base_meta["byte_size"]      = stored.byte_size
+        base_meta["mime_type"]      = stored.mime_type
+    base_meta["document_download_status"] = "ok"
+
+    # ── Heuristic classification ─────────────────────────────────
+    verdict = classify_inbound_document(
+        filename=filename,
+        caption=caption,
+        mime_type=actual_mime,
+        order_context=order_context,
+    )
+    base_meta["pdf_kind"]            = verdict.get("category") or "unknown"
+    base_meta["pdf_kind_confidence"] = verdict.get("confidence") or "low"
+    base_meta["pdf_kind_reasons"]    = verdict.get("reasons") or []
+    base_meta["pdf_kind_signals"]    = verdict.get("signals") or {}
+
+    # ── Compose brain-facing text ────────────────────────────────
+    label_ar = {
+        "payment_receipt": "إيصال تحويل بنكي",
+        "invoice":         "فاتورة",
+        "identity":        "وثيقة هوية",
+        "shipping_label":  "بوليصة شحن",
+        "catalog":         "كتالوج منتجات",
+        "unknown":         "مستند",
+    }.get(base_meta["pdf_kind"], "مستند")
+
+    pieces: list = []
+    pieces.append(f"[وثيقة PDF — تصنيف: {label_ar}]")
+    if filename:
+        pieces.append(f"اسم الملف: {filename}")
+    if caption:
+        pieces.append(f"تعليق العميل: {caption}")
+    if base_meta["pdf_kind"] == "payment_receipt":
+        # Make the receipt arrival impossible to miss in the prompt
+        # so the LLM (when not short-circuited deterministically)
+        # cannot accidentally re-ask product discovery.
+        pieces.append(
+            "ملاحظة للنظام: العميل أرسل إيصال تحويل بنكي. "
+            "لا تعد سؤال العميل عن المنتج، واعتمد على state الطلب الحالي."
+        )
+    combined = "\n".join(pieces)
+
+    logger.info(
+        "[ORDER_FLOW_STATE] inbound_document tenant=%s media_id=%s "
+        "filename=%r pdf_kind=%s confidence=%s reasons=%s "
+        "context_awaiting=%s context_active=%s",
+        tenant_id, media_id, filename,
+        base_meta["pdf_kind"], base_meta["pdf_kind_confidence"],
+        base_meta["pdf_kind_reasons"],
+        bool((order_context or {}).get("awaiting_payment_receipt")),
+        bool((order_context or {}).get("has_active_order")),
+    )
+
+    return MediaNormalizationResult(
+        normalized_type="document",
+        text=combined,
+        metadata=base_meta,
+        should_process=True,
+    )
+
+
+def _document_with_fallback(
+    base_meta: Dict[str, Any],
+    caption: str,
+    filename: str,
+) -> MediaNormalizationResult:
+    """Return a structured fallback when we couldn't download the
+    PDF. We still try to flow through to the brain — the merchant
+    needs to know the customer attempted to send a document even
+    if we couldn't read it."""
+    text_bits: list = ["[وثيقة PDF — لم نستطع تحميل الملف]"]
+    if filename:
+        text_bits.append(f"اسم الملف: {filename}")
+    if caption:
+        text_bits.append(f"تعليق العميل: {caption}")
+    combined = "\n".join(text_bits)
+    if combined and (filename or caption):
+        return MediaNormalizationResult(
+            normalized_type="document",
+            text=combined,
+            metadata=base_meta,
+            should_process=True,
+        )
+    return MediaNormalizationResult(
+        normalized_type="document",
+        text="",
+        metadata=base_meta,
+        should_process=False,
+        fallback_reply_ar=DOCUMENT_FALLBACK_REPLY_AR,
     )
 
 

@@ -123,6 +123,31 @@ class OrderPreparationState:
     prediction_source: str = ""       # last_customer_choice | top_variant | stock_heavy
     prediction_confidence: float = 0.0
     awaiting_option_confirmation: bool = False
+    # ── Payment-receipt funnel (bank-transfer flow) ──────────────────────
+    # When the bot asks the customer to send a transfer receipt
+    # (PDF/image), ``awaiting_payment_receipt`` flips True. The next
+    # inbound PDF/image while this flag is set is short-circuited to
+    # the "receipt-received" deterministic acknowledgement (no LLM,
+    # no product re-discovery). After acknowledgement,
+    # ``payment_receipt_received=True`` and ``order_status``
+    # transitions to ``"under_review"``.
+    #
+    # ``payment_receipt_metadata`` keeps a slim trail of which
+    # inbound message carried the receipt — useful for the merchant
+    # drawer to deep-link back to the source PDF and for audits.
+    #
+    # ``order_status`` is the high-level funnel marker the dashboard
+    # and admin debug endpoints expose. Values follow the natural
+    # order: ``""`` (none) → ``"discovery"`` → ``"awaiting_product"``
+    # → ``"awaiting_address"`` → ``"awaiting_payment"`` →
+    # ``"awaiting_receipt"`` → ``"under_review"`` → ``"complete"`` /
+    # ``"cancelled"``. Free-form so we can refine without a
+    # migration; the brain only reads, never enforces an enum.
+    awaiting_payment_receipt: bool = False
+    payment_receipt_received: bool = False
+    payment_receipt_at:       str = ""
+    payment_receipt_metadata: Dict[str, Any] = field(default_factory=dict)
+    order_status: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -158,6 +183,11 @@ class OrderPreparationState:
             "prediction_source": self.prediction_source,
             "prediction_confidence": self.prediction_confidence,
             "awaiting_option_confirmation": self.awaiting_option_confirmation,
+            "awaiting_payment_receipt": self.awaiting_payment_receipt,
+            "payment_receipt_received": self.payment_receipt_received,
+            "payment_receipt_at":       self.payment_receipt_at,
+            "payment_receipt_metadata": dict(self.payment_receipt_metadata or {}),
+            "order_status":             self.order_status,
         }
 
     @staticmethod
@@ -201,6 +231,11 @@ class OrderPreparationState:
             prediction_source=str(raw.get("prediction_source", "") or ""),
             prediction_confidence=float(raw.get("prediction_confidence") or 0.0),
             awaiting_option_confirmation=bool(raw.get("awaiting_option_confirmation", False)),
+            awaiting_payment_receipt=bool(raw.get("awaiting_payment_receipt", False)),
+            payment_receipt_received=bool(raw.get("payment_receipt_received", False)),
+            payment_receipt_at=str(raw.get("payment_receipt_at", "") or ""),
+            payment_receipt_metadata=dict(raw.get("payment_receipt_metadata") or {}),
+            order_status=str(raw.get("order_status", "") or ""),
         )
 
 

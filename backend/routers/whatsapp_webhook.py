@@ -2306,11 +2306,37 @@ async def _dispatch_message(
             except Exception as exc:
                 logger.debug("[Webhook] emit whatsapp_message_received failed: %s", exc)
 
+        # ── Order-flow context for the media normalizer ───────────────
+        # Load the latest brain_state for this conversation so the
+        # PDF/image classifier can boost a generic "document_*.pdf"
+        # to ``pdf_kind=payment_receipt`` when the bot just asked
+        # for a transfer receipt. Without this hint, Saudi-bank
+        # receipts with timestamp-only filenames look like garbage.
+        # Read is best-effort: if anything fails (missing
+        # conversation row, deserialisation error) we pass an empty
+        # context and the classifier falls back to filename/caption
+        # signals only.
+        _order_context: Dict[str, Any] = {}
+        try:
+            from core.order_flow import build_order_context  # noqa: PLC0415
+            _order_context = build_order_context(
+                db=db,
+                tenant_id=resolved_tenant_id,
+                phone=sender,
+            ) or {}
+        except Exception as _oc_exc:  # noqa: BLE001
+            logger.debug(
+                "[ORDER_FLOW_STATE] build_order_context failed "
+                "tenant=%s phone=%s err=%s",
+                resolved_tenant_id, sender, _oc_exc,
+            )
+
         normalized_inbound = await normalize_whatsapp_inbound(
             db=db,
             wa_conn=wa_conn,
             tenant_id=resolved_tenant_id,
             message=msg,
+            order_context=_order_context,
         )
         logger.info(
             "[TRACE][3/6] INBOUND_NORMALIZED | tenant_id=%s sender=%s normalized_type=%s should_process=%s",
@@ -2419,7 +2445,7 @@ async def _dispatch_message(
                     )
             return
 
-        if normalized_inbound.normalized_type not in {"text", "audio", "image"}:
+        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document"}:
             # ── Button-tap rescue: "button" type = customer tapped a template
             # quick-reply.  The normalizer marks it unsupported, but we have
             # already extracted human-readable text via _extract_wa_message_text.
@@ -2455,7 +2481,7 @@ async def _dispatch_message(
         if (
             not text
             and normalized_inbound.fallback_reply_ar
-            and normalized_inbound.normalized_type in {"audio", "image"}
+            and normalized_inbound.normalized_type in {"audio", "image", "document"}
             and not _is_platform_tenant(db, resolved_tenant_id)
         ):
             logger.info(
@@ -2492,6 +2518,125 @@ async def _dispatch_message(
         # production environment that hasn't explicitly enabled the
         # platform-brain workspace.
         if not _is_platform_tenant(db, resolved_tenant_id):
+            # ── Payment-receipt short-circuit ─────────────────────────
+            # Before calling the brain, check if this inbound is a
+            # payment receipt arriving during an active order. If
+            # so, bypass the brain entirely with a deterministic
+            # acknowledgement that surfaces the product + price +
+            # national address from state. This is the fix for the
+            # critical bug where AI re-asked product discovery after
+            # the customer sent the bank-transfer PDF.
+            try:
+                from core.order_flow import (  # noqa: PLC0415
+                    maybe_handle_receipt_inbound,
+                    apply_state_patch,
+                )
+                _receipt_decision = maybe_handle_receipt_inbound(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    inbound_normalized_type=normalized_inbound.normalized_type,
+                    inbound_metadata=normalized_inbound.metadata or {},
+                )
+            except Exception as _r_exc:  # noqa: BLE001
+                logger.warning(
+                    "[ORDER_FLOW_STATE] receipt short-circuit check "
+                    "failed (non-fatal) tenant=%s phone=%s err=%s",
+                    resolved_tenant_id, sender, _r_exc,
+                )
+                _receipt_decision = None
+
+            if _receipt_decision is not None:
+                logger.info(
+                    "[ORDER_FLOW_STATE] short_circuit=receipt_received "
+                    "tenant=%s phone=*%s next_action=send_ack",
+                    resolved_tenant_id,
+                    sender[-4:] if sender else "",
+                )
+                # 1) Persist the brain_state mutation FIRST so even if
+                #    the WhatsApp POST fails the next inbound still
+                #    sees ``payment_receipt_received=True`` and our
+                #    own context-aware fallback can answer correctly.
+                try:
+                    apply_state_patch(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        state_patch=_receipt_decision["state_patch"],
+                    )
+                except Exception as _patch_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] state_patch apply failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _patch_exc,
+                    )
+
+                # 2) Persist the customer's inbound MessageEvent so the
+                #    drawer shows the PDF / image alongside our ACK.
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="inbound",
+                        body=text or "[إيصال تحويل]",
+                        event_type=(
+                            "whatsapp_document"
+                            if normalized_inbound.normalized_type == "document"
+                            else "whatsapp_image"
+                        ),
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "normalized_inbound": normalized_inbound.metadata,
+                            "wa_message_id": msg_id or None,
+                            "payment_receipt_short_circuit": True,
+                        },
+                    )
+                except Exception as _save_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] inbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _save_exc,
+                    )
+
+                # 3) Send the deterministic ACK. We use the same
+                #    ``_post_wa`` path as the brain so dedup, status
+                #    stamping, and wamid surfacing all work. Persist
+                #    the outbound row with ``is_ai=True`` so it
+                #    surfaces in admin AI metrics.
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="outbound",
+                        body=_receipt_decision["reply_text"],
+                        event_type="whatsapp_message",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "is_ai": True,
+                            "deterministic_path": "payment_receipt_ack",
+                            "order_summary": _receipt_decision.get("summary"),
+                        },
+                    )
+                except Exception as _save_out_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] outbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _save_out_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {
+                            "body": _receipt_decision["reply_text"],
+                        },
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
             logger.info(
                 "[TRACE][4/6] ROUTE_MERCHANT_AI | tenant_id=%s sender=%s text_len=%s",
                 resolved_tenant_id, sender, len(text),
@@ -3836,7 +3981,33 @@ async def _handle_merchant_message(
         # (_brain_handoff replies are intentionally distinct).
         if reply and not _brain_handoff and _is_repeat_reply(reply, history):
             _orig_len = len(reply)
-            reply = _short_followup_instead_of_repeat(history)
+            _default_short = _short_followup_instead_of_repeat(history)
+            # ── Context-aware fallback ────────────────────────────
+            # When the conversation has an active order, the canned
+            # "أنا هنا — قول وش تحتاج وأكمل معك" line lands MID-
+            # FUNNEL and gives the merchant the impression that the
+            # bot forgot the order. We swap in a sentence that
+            # references the live order state (product / price /
+            # awaiting receipt / under review) so the customer
+            # never sees a stale generic prompt while a real funnel
+            # is in flight.
+            try:
+                from core.order_flow import (  # noqa: PLC0415
+                    context_aware_dedup_fallback,
+                )
+                reply = context_aware_dedup_fallback(
+                    db,
+                    tenant_id=tenant_id,
+                    phone=to,
+                    history=history,
+                    default_fallback=_default_short,
+                )
+            except Exception as _ctx_exc:  # noqa: BLE001
+                logger.debug(
+                    "[CHAT_DEDUP] context-aware fallback failed: %s",
+                    _ctx_exc,
+                )
+                reply = _default_short
             logger.info(
                 "[CHAT_DEDUP] tenant=%s to=%s replaced near-duplicate outbound "
                 "(orig_len=%d new_len=%d brain=%s)",
@@ -4885,6 +5056,34 @@ async def _handle_merchant_message(
                 _after_ai_reply(db, convo, tenant_id=tenant_id, reply_text=reply)
             except Exception as _rate_exc:
                 logger.debug("[ai_pause] post-reply tracker failed: %s", _rate_exc)
+
+            # ── Awaiting-receipt detection ────────────────────────
+            # If the bot asked the customer for a transfer receipt
+            # in this very reply, flip ``awaiting_payment_receipt``
+            # on the persisted brain_state so the NEXT inbound PDF
+            # / image is classified with high confidence even when
+            # the bank-generated filename doesn't carry any
+            # receipt keywords. Best-effort; failures are logged
+            # but never block the conversation.
+            try:
+                from core.order_flow import (  # noqa: PLC0415
+                    detect_awaiting_receipt_in_reply,
+                    mark_awaiting_receipt,
+                )
+                if detect_awaiting_receipt_in_reply(reply or ""):
+                    mark_awaiting_receipt(
+                        db, tenant_id=tenant_id, phone=to,
+                    )
+                    logger.info(
+                        "[ORDER_FLOW_STATE] transition=awaiting_receipt "
+                        "tenant=%s phone=*%s source=brain_reply_keyword",
+                        tenant_id, to[-4:] if to else "",
+                    )
+            except Exception as _ar_exc:  # noqa: BLE001
+                logger.debug(
+                    "[ORDER_FLOW_STATE] awaiting-receipt detection "
+                    "failed: %s", _ar_exc,
+                )
         else:
             logger.error(
                 "[TRACE][5/6] MERCHANT_AI_SEND_FAILED | tenant=%s to=%s reply_len=%s",
