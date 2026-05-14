@@ -934,6 +934,40 @@ class StateManager:
             meta: Dict[str, Any] = {"phone": phone}
             if extra_metadata:
                 meta.update(extra_metadata)
+
+            # ── Pre-stamp outbound rows with ``provider_send.status='queued'`` ──
+            # The dashboard reads MessageEvent rows verbatim. Without
+            # this marker the inbox renders every brand-new outbound
+            # bubble as fully delivered (✔✔) before the WhatsApp send
+            # has even fired. We pre-stamp ``queued`` here so the UI
+            # can render a clock icon; the wire layer
+            # (``_post_wa`` → ``stamp_outbound_send_status``) flips
+            # this to ``sent`` / ``failed`` after the provider POST
+            # returns. Skipped for inbound / historical-import rows
+            # (those are never "sends") and for rows that already
+            # carry a final ``provider_send`` block (e.g. campaign
+            # dispatcher writing the row AFTER the send).
+            if direction in ("outbound", "out"):
+                is_historical = bool(meta.get("historical_import")) or (
+                    meta.get("message_origin") == "historical_sync"
+                )
+                existing = meta.get("provider_send")
+                if not is_historical and not (
+                    isinstance(existing, dict)
+                    and existing.get("status") in ("sent", "failed")
+                ):
+                    try:
+                        from core.outbound_send_status import build_queued_block  # noqa: PLC0415
+                        meta.setdefault(
+                            "provider_send",
+                            build_queued_block(operation=event_type or "whatsapp"),
+                        )
+                    except Exception as _q_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[StateManager] queued pre-stamp skipped tenant=%s: %s",
+                            _tid, _q_exc,
+                        )
+
             ts = created_at if created_at is not None else datetime.utcnow()
             db.add(MessageEvent(
                 tenant_id=_tid,

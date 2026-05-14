@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
-  UserCheck, ArrowRight, Check, CheckCheck,
+  UserCheck, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban,
+  Pause, Play, Ban, FileText,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
@@ -55,6 +55,7 @@ const filterLabels: Record<string, string> = {
 
 export default function Conversations() {
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
@@ -1114,16 +1115,64 @@ export default function Conversations() {
                                   <InboundMediaPreview media={inboundMedia} />
                                 </div>
                               ) : (
-                                <div className={`
-                                  relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
-                                  shadow-sm
-                                  ${isOut
-                                    ? `bg-brand-500 text-white ${btnLines.length ? 'rounded-t-2xl rounded-ee-sm' : 'rounded-2xl rounded-ee-sm'}`
-                                    : `bg-white text-slate-800 ${btnLines.length ? 'rounded-t-2xl rounded-es-sm' : 'rounded-2xl rounded-es-sm border border-slate-100'}`
+                                (() => {
+                                  // ── Bubble theming by send status ──────────────
+                                  // Outbound bubbles MUST look different from the
+                                  // "delivered" state when the message never made
+                                  // it (or hasn't been confirmed yet). The merchant
+                                  // should be able to glance at the chat and see
+                                  // failures at a distance.
+                                  //
+                                  //   • sent / null (historical) → full brand
+                                  //   • queued                   → 70% opacity +
+                                  //                                  dashed border
+                                  //                                  + clock cue
+                                  //   • failed                   → red-tinted
+                                  //                                  background +
+                                  //                                  red border +
+                                  //                                  serif italic
+                                  //                                  underline-style
+                                  //                                  to read as
+                                  //                                  "draft, not
+                                  //                                  delivered"
+                                  let outboundTheme = 'bg-brand-500 text-white'
+                                  if (isOut) {
+                                    if (m.sendStatus === 'queued') {
+                                      outboundTheme =
+                                        'bg-brand-400/70 text-white/95 border border-dashed border-white/40'
+                                    } else if (m.sendStatus === 'failed') {
+                                      outboundTheme =
+                                        'bg-red-50 text-red-900 border border-red-300 ring-1 ring-red-100'
+                                    }
                                   }
-                                `}>
-                                  {textPart}
-                                </div>
+                                  const radiusOut = btnLines.length
+                                    ? 'rounded-t-2xl rounded-ee-sm'
+                                    : 'rounded-2xl rounded-ee-sm'
+                                  const radiusIn = btnLines.length
+                                    ? 'rounded-t-2xl rounded-es-sm'
+                                    : 'rounded-2xl rounded-es-sm border border-slate-100'
+                                  return (
+                                    <div className={`
+                                      relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
+                                      shadow-sm
+                                      ${isOut
+                                        ? `${outboundTheme} ${radiusOut}`
+                                        : `bg-white text-slate-800 ${radiusIn}`
+                                      }
+                                    `}>
+                                      {textPart}
+                                      {/* "DRAFT" overlay watermark for failed
+                                          messages — makes the bubble feel like
+                                          something that did NOT leave the
+                                          merchant's outbox. */}
+                                      {isOut && m.sendStatus === 'failed' && (
+                                        <span className="absolute -top-2 start-2 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm">
+                                          لم تُرسَل
+                                        </span>
+                                      )}
+                                    </div>
+                                  )
+                                })()
                               )}
                               {btnLines.length > 0 && (
                                 <div className="flex flex-col gap-[3px] mt-[3px] w-full">
@@ -1164,14 +1213,131 @@ export default function Conversations() {
                           )
                         })()}
 
-                        {/* Time + read status */}
+                        {/* ── Send-status badge (failed only) ──────────────────
+                            Rendered INSIDE the bubble column so the merchant
+                            can immediately read WHY the customer didn't get
+                            the message. Backend stamps this via
+                            `core.outbound_send_status` from the WhatsApp
+                            wire-layer outcome. */}
+                        {isOut && m.sendStatus === 'failed' && m.sendError && (
+                          <div
+                            className="mt-1 px-2 py-1 rounded-md text-[11px] bg-red-50 text-red-700 border border-red-200 flex items-start gap-1.5 max-w-full"
+                            title={
+                              [
+                                m.sendError.labelAr,
+                                m.sendError.adviceAr,
+                                m.sendError.code != null ? `Meta code=${m.sendError.code}` : null,
+                                m.sendError.subcode != null ? `subcode=${m.sendError.subcode}` : null,
+                              ].filter(Boolean).join(' • ')
+                            }
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-[1px]" />
+                            <div className="flex flex-col leading-tight gap-1 min-w-0">
+                              <span className="font-medium">لم تُرسَل: {m.sendError.labelAr}</span>
+                              {m.sendError.adviceAr && (
+                                <span className="text-red-600/80">{m.sendError.adviceAr}</span>
+                              )}
+                              {/* ── 24h-window CTA ─────────────────────────
+                                  Meta forbids free-text replies after 24h
+                                  of customer silence — the only way back
+                                  in is an approved Message Template. We
+                                  surface the deep link inline so the
+                                  merchant doesn't have to translate
+                                  "out_of_24h_window" themselves. */}
+                              {m.sendError.key === 'out_of_24h_window' && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    const target = selected?.phone
+                                      ? `/templates?phone=${encodeURIComponent(selected.phone)}`
+                                      : '/templates'
+                                    navigate(target)
+                                  }}
+                                  className="self-start mt-0.5 inline-flex items-center gap-1 px-2 py-1 rounded-md bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-[11px] font-semibold transition-colors"
+                                >
+                                  <FileText className="w-3 h-3" />
+                                  إرسال قالب واتساب
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Time + send-status icon */}
                         <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>
                           <span className="text-xs text-slate-400">
                             {formatRiyadhTime(m.time)}
                           </span>
-                          {isOut && (
-                            <CheckCheck className="w-3.5 h-3.5 text-brand-400" />
-                          )}
+                          {isOut && (() => {
+                            // ── Per-status icon (replaces the unconditional ✔✔) ──
+                            //
+                            // STRICT safeguard: a ✔✔ ("delivered to WhatsApp
+                            // edge") is shown ONLY when the wire layer
+                            // confirmed BOTH:
+                            //   1. ``sendStatus === 'sent'`` (200 from
+                            //      Meta / 360dialog) AND
+                            //   2. ``wamid`` is a non-empty string
+                            //
+                            // Some providers occasionally return 2xx with a
+                            // missing/null ``messages[0].id`` (transient
+                            // upstream weirdness, or a queue-only ack). We
+                            // refuse to claim "delivered" without the
+                            // wamid — those rows render as a single grey
+                            // check ("سُلّمت للنظام لكن لم يتأكد wamid")
+                            // until the wamid arrives or a webhook
+                            // re-stamps the row.
+                            //
+                            // Historical rows (sendStatus === undefined)
+                            // keep the legacy ✔✔ so old conversations
+                            // don't suddenly look failed after deploy.
+                            switch (m.sendStatus) {
+                              case 'queued':
+                                return (
+                                  <Clock
+                                    className="w-3.5 h-3.5 text-slate-300 animate-pulse"
+                                    aria-label="بانتظار التسليم"
+                                  />
+                                )
+                              case 'failed':
+                                return (
+                                  <AlertCircle
+                                    className="w-3.5 h-3.5 text-red-500"
+                                    aria-label="فشل الإرسال"
+                                  />
+                                )
+                              case 'sent': {
+                                const hasWamid = typeof m.wamid === 'string'
+                                  && m.wamid.trim().length > 0
+                                if (!hasWamid) {
+                                  return (
+                                    <Check
+                                      className="w-3.5 h-3.5 text-slate-400"
+                                      aria-label="استُلمت من المزود لكن بانتظار wamid"
+                                    />
+                                  )
+                                }
+                                return (
+                                  <CheckCheck
+                                    className="w-3.5 h-3.5 text-brand-400"
+                                    aria-label="مُرسَلة"
+                                  />
+                                )
+                              }
+                              default:
+                                // Historical / pre-fix rows: keep the legacy
+                                // appearance so old chats don't visibly
+                                // regress. The merchant only sees the new
+                                // strict signal on rows actually stamped
+                                // by the wire-layer bridge.
+                                return (
+                                  <CheckCheck
+                                    className="w-3.5 h-3.5 text-brand-400"
+                                    aria-label="مُرسَلة"
+                                  />
+                                )
+                            }
+                          })()}
                         </div>
                       </div>
                     </div>

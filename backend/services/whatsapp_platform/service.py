@@ -501,6 +501,28 @@ async def provider_post_with_context(
         connection_type=conn_type,
     )
 
+    # ── Outbound MessageEvent send-status bridge ──────────────────────
+    # Attach the F18 classification + parsed wamid + timing to the
+    # returned dict so the upstream caller (``_post_wa`` in
+    # ``routers.whatsapp_webhook``) can stamp the persisted outbound
+    # ``MessageEvent`` row with the wire-layer outcome without
+    # re-deriving the classification. We use leading-underscore
+    # keys so this metadata cannot collide with any provider field
+    # name (Meta / 360dialog responses never carry ``_nahla_*``).
+    # Caller is free to ignore these fields — non-send paths
+    # (template submit, webhook config) just don't read them.
+    if isinstance(data, dict):
+        try:
+            data["_nahla_classification"] = classification
+            data["_nahla_wamid"]          = wamid
+            data["_nahla_is_send"]        = is_send
+            data["_nahla_duration_ms"]    = duration_ms
+        except Exception:
+            # Some providers occasionally hand back a dict subclass
+            # that rejects new keys; never let bookkeeping break the
+            # actual send.
+            pass
+
     return data
 
 

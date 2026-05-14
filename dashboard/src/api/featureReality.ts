@@ -320,6 +320,38 @@ export type DashboardMessageMedia =
   | DashboardMessageMediaAudio
   | DashboardMessageMediaImage
 
+// ── Outbound send status (Meta / 360dialog wire-layer outcome) ──────
+// Surfaced per outbound MessageEvent so the UI can tell the merchant
+// whether the AI / manual reply ACTUALLY reached the customer. See
+// ``backend/core/outbound_send_status.py`` for how this is stamped
+// onto the row's ``extra_metadata.provider_send`` block.
+//
+// * 'queued'   → row persisted, provider POST hasn't returned yet.
+//                Render with a clock icon. Should flip to 'sent'
+//                or 'failed' within ~1s in steady state.
+// * 'sent'     → Meta / 360dialog returned 2xx + wamid. Render ✔✔.
+// * 'failed'   → non-2xx / provider error envelope / missing wamid
+//                / transport exception / Nahla burst throttle. The
+//                ``sendError`` block carries the Arabic merchant
+//                label + advice + Meta code/subcode. Render a red
+//                × with a tooltip on top of the bubble.
+// * null/absent → historical row from before the stamping fix, or
+//                 a row written from a path that doesn't go through
+//                 ``_post_wa`` (campaign dispatcher has its own
+//                 status surface). Render the previous unconditional
+//                 double-check so old conversations don't suddenly
+//                 show red ×s.
+export type OutboundSendStatus = 'queued' | 'sent' | 'failed' | null
+
+export interface OutboundSendError {
+  labelAr: string
+  adviceAr?: string | null
+  code?: number | string | null
+  subcode?: number | string | null
+  key?: string | null
+  isRecoverable?: boolean
+}
+
 export interface DashboardMessage {
   id: string
   direction: 'in' | 'out'
@@ -328,6 +360,12 @@ export interface DashboardMessage {
   isAI?: boolean
   eventType?: MessageEventType
   media?: DashboardMessageMedia | null
+  /** Wire-layer outcome of the Meta/360dialog POST. Outbound rows only. */
+  sendStatus?: OutboundSendStatus
+  /** Arabic error label + Meta code metadata when sendStatus === 'failed'. */
+  sendError?: OutboundSendError | null
+  /** Meta-issued message id (wamid) when the POST succeeded. */
+  wamid?: string | null
 }
 
 export const featureRealityApi = {

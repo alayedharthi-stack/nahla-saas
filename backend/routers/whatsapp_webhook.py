@@ -5055,16 +5055,120 @@ async def _post_wa(
         from observability.rate_limiter import check_rate_limit  # noqa: PLC0415
         recipient = str(payload.get("to") or "")
         rate_key = f"wa-send:{_tenant_id or 'platform'}:{recipient}"
+
+        def _stamp_throttled(reason: str) -> None:
+            """Mark the persisted outbound row as ``failed`` with a
+            clear ``throttled`` reason so the dashboard tells the
+            merchant the send was blocked by Nahla's burst protection,
+            not silently dropped. Never raises."""
+            try:
+                from core.outbound_send_status import (  # noqa: PLC0415
+                    stamp_outbound_send_status,
+                )
+                stamp_outbound_send_status(
+                    _db,
+                    tenant_id=_tenant_id,
+                    recipient=recipient,
+                    classification="exception",
+                    response_body={
+                        "error": {
+                            "code":    "throttled",
+                            "type":    "RateLimit",
+                            "message": (
+                                "Nahla rate-limited this send to avoid "
+                                f"a burst loop ({reason})."
+                            ),
+                        }
+                    },
+                    wamid=None,
+                    operation="send_message",
+                    error_text=f"throttled:{reason}",
+                )
+            except Exception:
+                pass
+
         if not check_rate_limit(rate_key, max_count=6, window_seconds=10):
             logger.warning(
                 "[WA] throttled burst send | tenant_id=%s to=%s phone_number_id=%s",
                 _tenant_id, recipient, phone_id,
             )
+            _stamp_throttled("burst_10s")
             return False
         if not check_rate_limit(rate_key, max_count=20, window_seconds=60):
             logger.warning(
                 "[WA] throttled minute send | tenant_id=%s to=%s phone_number_id=%s",
                 _tenant_id, recipient, phone_id,
+            )
+            _stamp_throttled("burst_60s")
+            return False
+
+        # ── Outbound idempotency guard ──────────────────────────────────
+        # Stops the same logical AI reply from reaching Meta twice
+        # after webhook redelivery, worker restart, auto-register
+        # retry, or a double-clicked manual reply. Returns:
+        #   * skip=False → first time we've seen this (tenant, to,
+        #     body) within 5 min. Proceed with the POST below; the
+        #     guard has marked the key as in-flight so concurrent
+        #     callers in this process will short-circuit.
+        #   * skip=True, wamid=<prior> → we already POSTed this and
+        #     got a wamid. Treat the call as a no-op success: re-
+        #     stamp the persisted MessageEvent with the existing
+        #     wamid and return True so the upstream caller doesn't
+        #     mark the message as failed.
+        #   * skip=True, wamid=None → another concurrent caller
+        #     OWNS this send. Return False without stamping; the
+        #     primary call will write the row state.
+        try:
+            from core.outbound_dedup import check_outbound_send  # noqa: PLC0415
+            _dedup_res = check_outbound_send(
+                tenant_id=_tenant_id,
+                recipient=recipient,
+                payload=payload,
+            )
+        except Exception as _dedup_exc:  # noqa: BLE001
+            logger.warning(
+                "[WA] outbound dedup check failed (non-fatal): %s",
+                _dedup_exc,
+            )
+            _dedup_res = None
+
+        if _dedup_res is not None and _dedup_res.skip:
+            if _dedup_res.reason == "already_sent":
+                # Re-stamp the most recent queued row for this
+                # recipient with the prior wamid so the dashboard
+                # surfaces the "delivered" state even though we
+                # didn't actually POST again.
+                try:
+                    from core.outbound_send_status import (  # noqa: PLC0415
+                        stamp_outbound_send_status,
+                    )
+                    stamp_outbound_send_status(
+                        _db,
+                        tenant_id=_tenant_id,
+                        recipient=recipient,
+                        classification="ok",
+                        response_body={
+                            "messages": [{"id": _dedup_res.wamid or ""}],
+                            "_nahla_duplicate_suppressed": True,
+                        },
+                        wamid=_dedup_res.wamid,
+                        operation="send_message_dedup",
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    "[WA] duplicate outbound suppressed | tenant=%s to=%s "
+                    "wamid=*%s reason=already_sent",
+                    _tenant_id, recipient,
+                    (_dedup_res.wamid or "")[-6:] or None,
+                )
+                return True
+            # in_flight: another worker is mid-POST. Return False
+            # without stamping to avoid racing the primary caller.
+            logger.info(
+                "[WA] duplicate outbound suppressed (in_flight) | "
+                "tenant=%s to=%s",
+                _tenant_id, recipient,
             )
             return False
 
@@ -5088,6 +5192,63 @@ async def _post_wa(
                 "[SEND_DEBUG] provider response | tenant=%s phone_number_id=%s provider_payload=%s",
                 _tenant_id, phone_id, resp_data,
             )
+            # ── Bridge wire-layer outcome → persisted MessageEvent ─────
+            # The dashboard reads MessageEvent rows verbatim and used to
+            # render every outbound bubble as "delivered" because the
+            # row was persisted BEFORE this POST returned. We now stamp
+            # the row's ``extra_metadata.provider_send`` with the F18
+            # classification (ok / non_2xx / provider_error_field /
+            # missing_wamid / exception) + Meta error key + wamid so
+            # the UI can show a real status (clock / check / red ×)
+            # instead of an optimistic double-check.
+            #
+            # Errors here are intentionally swallowed: a stamping bug
+            # MUST NOT break a successful send. The helper itself never
+            # raises, but the import line could in principle fail.
+            try:
+                from core.outbound_send_status import (  # noqa: PLC0415
+                    stamp_outbound_send_status,
+                )
+                _classification = (resp_data or {}).get("_nahla_classification") or (
+                    "ok" if "error" not in (resp_data or {}) else "provider_error_field"
+                )
+                _wamid = (resp_data or {}).get("_nahla_wamid")
+                _duration = (resp_data or {}).get("_nahla_duration_ms")
+                stamp_outbound_send_status(
+                    _db,
+                    tenant_id=_tenant_id,
+                    recipient=str(payload.get("to") or ""),
+                    classification=_classification,
+                    response_body=resp_data,
+                    wamid=_wamid,
+                    operation="send_message",
+                    duration_ms=_duration,
+                )
+            except Exception as _stamp_exc:  # noqa: BLE001
+                logger.warning(
+                    "[WA] outbound stamp failed (non-fatal) tenant=%s err=%s",
+                    _tenant_id, _stamp_exc,
+                )
+            # Record the outcome so concurrent retries within the
+            # dedup TTL short-circuit. We do this for BOTH ok and
+            # error responses — errors get recorded with
+            # ``succeeded=False`` so the dedup cache allows a retry
+            # to flow through (failures are retryable, successes
+            # are not).
+            try:
+                from core.outbound_dedup import (  # noqa: PLC0415
+                    record_outbound_result,
+                )
+                record_outbound_result(
+                    tenant_id=_tenant_id,
+                    recipient=recipient,
+                    payload=payload,
+                    wamid=_wamid,
+                    succeeded=("error" not in (resp_data or {}))
+                              and bool(_wamid),
+                )
+            except Exception:
+                pass
             if "error" in (resp_data or {}):
                 err = (resp_data.get("error") or {}) if isinstance(resp_data, dict) else {}
                 err_code = err.get("code")
@@ -5149,11 +5310,72 @@ async def _post_wa(
                                 _tenant_id, phone_id,
                                 "ok" if "error" not in (retry_data or {}) else "still_failed",
                             )
+                            # Re-stamp the same row with the retry outcome so
+                            # the dashboard reflects the FINAL state, not the
+                            # initial failure that triggered auto-register.
+                            try:
+                                from core.outbound_send_status import (  # noqa: PLC0415
+                                    stamp_outbound_send_status,
+                                )
+                                _retry_cls = (retry_data or {}).get("_nahla_classification") or (
+                                    "ok" if "error" not in (retry_data or {}) else "provider_error_field"
+                                )
+                                stamp_outbound_send_status(
+                                    _db,
+                                    tenant_id=_tenant_id,
+                                    recipient=str(payload.get("to") or ""),
+                                    classification=_retry_cls,
+                                    response_body=retry_data,
+                                    wamid=(retry_data or {}).get("_nahla_wamid"),
+                                    operation="send_message_retry",
+                                    duration_ms=(retry_data or {}).get("_nahla_duration_ms"),
+                                )
+                            except Exception as _retry_stamp_exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[WA] outbound retry-stamp failed (non-fatal) tenant=%s err=%s",
+                                    _tenant_id, _retry_stamp_exc,
+                                )
+                            # Record the retry outcome in the dedup
+                            # cache so a future redelivery doesn't
+                            # double-send.
+                            try:
+                                from core.outbound_dedup import (  # noqa: PLC0415
+                                    record_outbound_result as _rec_dedup,
+                                )
+                                _retry_wamid = (retry_data or {}).get("_nahla_wamid")
+                                _rec_dedup(
+                                    tenant_id=_tenant_id,
+                                    recipient=recipient,
+                                    payload=payload,
+                                    wamid=_retry_wamid,
+                                    succeeded=("error" not in (retry_data or {}))
+                                              and bool(_retry_wamid),
+                                )
+                            except Exception:
+                                pass
                             return "error" not in (retry_data or {})
                         except Exception as retry_exc:  # noqa: BLE001
                             logger.error(
                                 "[WA] retry-after-register failed: %s", retry_exc,
                             )
+                            # Stamp as exception so the dashboard shows the
+                            # red × even though we caught the raise here.
+                            try:
+                                from core.outbound_send_status import (  # noqa: PLC0415
+                                    stamp_outbound_send_status,
+                                )
+                                stamp_outbound_send_status(
+                                    _db,
+                                    tenant_id=_tenant_id,
+                                    recipient=str(payload.get("to") or ""),
+                                    classification="exception",
+                                    response_body=None,
+                                    wamid=None,
+                                    operation="send_message_retry",
+                                    error_text=f"{type(retry_exc).__name__}: {retry_exc}",
+                                )
+                            except Exception:
+                                pass
                     else:
                         logger.error(
                             "[WA] auto-register FAILED — tenant=%s phone_id=%s err=%r — "
@@ -5165,6 +5387,25 @@ async def _post_wa(
             return True
         except Exception as exc:
             logger.error("[WA] post error: %s", exc)
+            # Transport-level failure (timeout, DNS, TLS, connection reset).
+            # Stamp the row so the merchant sees "تعذّر الاتصال" instead
+            # of an optimistic double-check.
+            try:
+                from core.outbound_send_status import (  # noqa: PLC0415
+                    stamp_outbound_send_status,
+                )
+                stamp_outbound_send_status(
+                    _db,
+                    tenant_id=_tenant_id,
+                    recipient=str(payload.get("to") or ""),
+                    classification="exception",
+                    response_body=None,
+                    wamid=None,
+                    operation="send_message",
+                    error_text=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                pass
             return False
     finally:
         if owns_db and _db is not None:

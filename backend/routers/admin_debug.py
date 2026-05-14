@@ -3110,6 +3110,571 @@ async def admin_debug_last_provider_send(
 
 
 # ════════════════════════════════════════════════════════════════════════
+# F20 — Outbound trace (MessageEvent ↔ wire-layer cross-join)
+# ════════════════════════════════════════════════════════════════════════
+#
+# F18 (``/last-provider-send``) reports what the wire layer SAW.
+# F17 (``/inbound-trace``) reports what the pipeline DID with an inbound.
+# Neither one closes the loop between "this row appeared in the dashboard
+# as an AI reply" and "did the customer actually receive it?".
+#
+# F20 is that bridge. Given a tenant_id (and optional phone), it returns
+# the latest outbound ``MessageEvent`` rows annotated with the
+# wire-layer outcome that ``core.outbound_send_status`` stamped into
+# ``extra_metadata.provider_send``:
+#
+#   * ``queued``  — row persisted, send hasn't returned yet (very brief
+#                   window unless something is hung).
+#   * ``sent``    — Meta / 360dialog returned 2xx + wamid.
+#   * ``failed``  — non-2xx / provider error envelope / missing wamid /
+#                   transport exception. The ``error`` block carries
+#                   the Meta code+subcode and the Arabic merchant
+#                   label from ``services.meta_errors``.
+#   * ``null``    — historical row written before this fix (no stamp).
+#
+# Useful for: "the merchant says the AI replied but the customer never
+# got the message" — call this endpoint with the customer's phone and
+# see the exact failure code per outbound row.
+
+@router.get("/outbound-trace")
+async def admin_debug_outbound_trace(
+    tenant_id: int = Query(..., description="Merchant tenant id to trace."),
+    phone: Optional[str] = Query(
+        None,
+        description=(
+            "Optional customer phone (E.164 or bare digits). When set, "
+            "only outbound rows targeting this phone are returned."
+        ),
+    ),
+    minutes: int = Query(
+        60,
+        ge=1, le=1440,
+        description=(
+            "Sliding time window in minutes (default 1h, max 24h). "
+            "Rows older than the window are excluded so big inboxes "
+            "stay responsive."
+        ),
+    ),
+    limit: int = Query(
+        30,
+        ge=1, le=200,
+        description="Max number of MessageEvent rows to return (newest first).",
+    ),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return the last N outbound MessageEvent rows for a tenant,
+    each annotated with the WhatsApp wire-layer outcome.
+
+    Response shape
+    ──────────────
+      {
+        "ts":          ISO,
+        "tenant_id":   int,
+        "filter":      { "phone": str|null, "minutes": int, "limit": int },
+        "summary": {
+            "rows":          int,
+            "sent":          int,
+            "failed":        int,
+            "queued":        int,
+            "unstamped":     int,        # rows with no provider_send
+            "by_error_key":  { key: count, ... }
+        },
+        "current_connection": {
+            "found":           bool,
+            "provider":        "meta" | "dialog360",
+            "phone_number_id": str|null,
+            "status":          str|null,
+            "sending_enabled": bool|null,
+        },
+        "rows": [
+          {
+            "message_event_id": int,
+            "conversation_id":  int|null,
+            "created_at":       ISO,
+            "event_type":       str|null,
+            "body_preview":     str (≤200 chars),
+            "to":               str (masked),
+            "send_status":      "queued" | "sent" | "failed" | null,
+            "wamid":            str|null,
+            "operation":        str|null,
+            "duration_ms":      number|null,
+            "queued_at":        ISO|null,
+            "completed_at":     ISO|null,
+            "error": {
+                "key":            str,
+                "label_ar":       str,
+                "advice_ar":      str|null,
+                "code":           int|str|null,
+                "subcode":        int|str|null,
+                "is_recoverable": bool,
+            } | null
+          },
+          ...
+        ],
+        "issues":      [arabic strings],
+        "hints":       [arabic strings],
+        "ok":          bool
+      }
+    """
+    from datetime import datetime, timezone, timedelta  # noqa: PLC0415
+    from sqlalchemy import or_, func  # noqa: PLC0415
+    from models import MessageEvent  # noqa: PLC0415
+
+    admin_sub = _admin.get("sub") or "?"
+    logger.info(
+        "[ADMIN/OUTBOUND_TRACE] start admin=%s tenant=%s phone=%s minutes=%s limit=%s",
+        admin_sub, tenant_id, _mask_phone(phone or ""), minutes, limit,
+    )
+
+    issues: List[str] = []
+    hints:  List[str] = []
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_id} not found")
+
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .order_by(WhatsAppConnection.id.desc())
+        .first()
+    )
+    connection_block = {
+        "found":           wa_conn is not None,
+        "provider":        getattr(wa_conn, "provider", None) if wa_conn else None,
+        "phone_number_id": getattr(wa_conn, "phone_number_id", None) if wa_conn else None,
+        "status":          getattr(wa_conn, "status", None) if wa_conn else None,
+        "sending_enabled": (
+            bool(getattr(wa_conn, "sending_enabled", False)) if wa_conn else None
+        ),
+        "connection_type": getattr(wa_conn, "connection_type", None) if wa_conn else None,
+    }
+
+    # Surface obvious mis-configurations up front so the operator
+    # doesn't have to read each row.
+    if wa_conn is None:
+        issues.append(
+            "لا يوجد سجل WhatsApp connection لهذا التاجر — لا يمكن الإرسال أصلاً."
+        )
+    elif not getattr(wa_conn, "sending_enabled", True):
+        issues.append(
+            "sending_enabled=false على سجل الاتصال — كل الإرساليات سترفض. "
+            "تحقق من إعدادات القناة وأعد تشغيل المعالج إن لزم."
+        )
+    elif getattr(wa_conn, "status", None) and str(wa_conn.status).lower() != "connected":
+        issues.append(
+            f"حالة الاتصال = {wa_conn.status!r} (ليست connected) — قد يفسر فشل الإرسال."
+        )
+
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+
+    q = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            func.lower(MessageEvent.direction) == "outbound",
+            MessageEvent.created_at >= cutoff,
+        )
+    )
+
+    if phone:
+        # Match by suffix of either ``phone`` or ``customer_phone`` in
+        # extra_metadata. Same logic the wire-layer stamp uses.
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        suffix = digits[-9:] if len(digits) >= 9 else digits
+        if suffix:
+            phone_text   = MessageEvent.extra_metadata["phone"].astext
+            customer_txt = MessageEvent.extra_metadata["customer_phone"].astext
+            q = q.filter(
+                or_(
+                    func.right(phone_text, len(suffix)) == suffix,
+                    func.right(customer_txt, len(suffix)) == suffix,
+                )
+            )
+
+    me_rows = q.order_by(MessageEvent.id.desc()).limit(limit).all()
+
+    def _preview(s: Optional[str], n: int = 200) -> str:
+        if not s:
+            return ""
+        s2 = str(s)
+        return s2 if len(s2) <= n else s2[:n] + "…"
+
+    counts = {"sent": 0, "failed": 0, "queued": 0, "unstamped": 0}
+    by_error_key: Dict[str, int] = {}
+    rows_out: List[Dict[str, Any]] = []
+    for r in me_rows:
+        meta = r.extra_metadata or {}
+        ps   = meta.get("provider_send") if isinstance(meta.get("provider_send"), dict) else None
+        send_status = (ps or {}).get("status") if ps else None
+        if send_status == "sent":
+            counts["sent"] += 1
+        elif send_status == "failed":
+            counts["failed"] += 1
+            key = ((ps or {}).get("error") or {}).get("key") or "unknown"
+            by_error_key[key] = by_error_key.get(key, 0) + 1
+        elif send_status == "queued":
+            counts["queued"] += 1
+        else:
+            counts["unstamped"] += 1
+
+        to_masked = _mask_phone(meta.get("phone") or meta.get("customer_phone") or "")
+        err = (ps or {}).get("error") if ps else None
+        err_out: Optional[Dict[str, Any]] = None
+        if isinstance(err, dict):
+            err_out = {
+                "key":             err.get("key"),
+                "label_ar":        err.get("label_ar"),
+                "advice_ar":       err.get("advice_ar"),
+                "code":            err.get("code"),
+                "subcode":         err.get("subcode"),
+                "is_recoverable":  bool(err.get("is_recoverable")),
+                "fbtrace_id":      err.get("fbtrace_id"),
+            }
+
+        rows_out.append({
+            "message_event_id": int(r.id),
+            "conversation_id":  int(r.conversation_id) if r.conversation_id else None,
+            "created_at":       r.created_at.isoformat() if r.created_at else None,
+            "event_type":       r.event_type,
+            "body_preview":     _preview(r.body),
+            "to":               to_masked,
+            "send_status":      send_status,
+            "wamid":            (ps or {}).get("wamid"),
+            "operation":        (ps or {}).get("operation"),
+            "duration_ms":      (ps or {}).get("duration_ms"),
+            "queued_at":        (ps or {}).get("queued_at"),
+            "completed_at":     (ps or {}).get("completed_at"),
+            "error":            err_out,
+        })
+
+    summary = {
+        "rows":          len(rows_out),
+        **counts,
+        "by_error_key":  by_error_key,
+    }
+
+    if counts["failed"] > 0:
+        issues.append(
+            f"{counts['failed']} من آخر {len(rows_out)} رسائل صادرة فشلت في الإرسال. "
+            "اقرأ كل صف وعالج كل error.key على حدة."
+        )
+    if counts["queued"] > 0:
+        # Anything still queued after the window cutoff is a leak — either
+        # the wire layer never returned, or the worker died mid-send.
+        issues.append(
+            f"{counts['queued']} رسائل بقيت بحالة 'queued' — الإرسال لم يكتمل. "
+            "تحقق من logs /admin/debug/last-provider-send وأعد تشغيل الـ worker إن لزم."
+        )
+    if counts["unstamped"] > 0:
+        hints.append(
+            f"{counts['unstamped']} صف بدون provider_send — رسائل قديمة من قبل تطبيق "
+            "هذا الإصلاح، أو من مسار لم يمر عبر _post_wa (مثل campaign dispatcher "
+            "الذي يستخدم سجلاته الخاصة)."
+        )
+    if not rows_out:
+        hints.append(
+            "لا توجد رسائل صادرة في الفترة المحددة. جرّب توسيع `minutes` أو "
+            "إزالة فلتر `phone`."
+        )
+
+    response = {
+        "ts":           datetime.now(timezone.utc).isoformat(),
+        "tenant_id":    int(tenant_id),
+        "tenant_name":  tenant.name,
+        "filter": {
+            "phone":   _mask_phone(phone or "") if phone else None,
+            "minutes": int(minutes),
+            "limit":   int(limit),
+        },
+        "current_connection": connection_block,
+        "summary":      summary,
+        "rows":         rows_out,
+        "issues":       issues,
+        "hints":        hints,
+        "ok":           len(issues) == 0,
+    }
+
+    audit(
+        "admin_debug_outbound_trace",
+        admin_sub=admin_sub,
+        tenant_id=int(tenant_id),
+        rows=len(rows_out),
+        failed=counts["failed"],
+        queued=counts["queued"],
+    )
+    logger.info(
+        "[ADMIN/OUTBOUND_TRACE] done admin=%s tenant=%s rows=%d sent=%d failed=%d queued=%d",
+        admin_sub, tenant_id, len(rows_out),
+        counts["sent"], counts["failed"], counts["queued"],
+    )
+    return response
+
+
+# ════════════════════════════════════════════════════════════════════════
+# F21 — AI outbound success rate (regression sentinel)
+# ════════════════════════════════════════════════════════════════════════
+#
+# What this catches
+# -----------------
+# F18 (outbound-trace) is per-tenant + per-row: it answers
+# "did MY merchant's last 30 messages reach Meta?". F21 is the
+# fleet-wide, AI-only version: it answers "across ALL tenants in
+# the last N minutes, what fraction of AI-generated outbound
+# messages actually reached WhatsApp?".
+#
+# Why a separate endpoint
+# -----------------------
+# AI is the only outbound path that's fully automated end-to-end
+# (no merchant click between generate and send). A regression in
+# the send path — a token rotation that left tenants un-registered,
+# a new burst throttle that bites real traffic, a Meta API change
+# we missed — shows up here FIRST as a sudden drop in
+# ``ai.sent_rate`` and a spike in ``failure_reasons``.
+#
+# The endpoint is deliberately read-only and aggregated. It does
+# NOT surface individual customer phones or message bodies — admins
+# get counts, error keys, and merchant-facing labels only.
+@router.get("/ai-outbound-stats")
+async def admin_debug_ai_outbound_stats(
+    minutes: int = Query(
+        60,
+        ge=1, le=10080,
+        description=(
+            "Sliding time window in minutes (default 1h, max 7 days). "
+            "Aggregation is in-memory so larger windows pay a bigger "
+            "scan cost; keep <= 1440 for snappy dashboards."
+        ),
+    ),
+    tenant_id: Optional[int] = Query(
+        None,
+        description=(
+            "Optional tenant filter. Omit to aggregate across the whole "
+            "fleet (regression-sentinel mode). With a value, the stats "
+            "narrow to a single merchant for support investigations."
+        ),
+    ),
+    top_n: int = Query(
+        10,
+        ge=1, le=50,
+        description="How many distinct failure reasons to surface.",
+    ),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+) -> Dict[str, Any]:
+    """AI outbound success-rate funnel + top failure reasons.
+
+    Response shape
+    ──────────────
+      {
+        "ts":          ISO,
+        "window_minutes": int,
+        "tenant_id":   int | null,
+        "funnel": {
+            "generated":  int,   # AI rows persisted (queued+sent+failed+unstamped)
+            "attempted":  int,   # AI rows that left the queued state
+            "sent":       int,   # provider_send.status == sent
+            "failed":     int,   # provider_send.status == failed
+            "queued":     int,   # still queued (in-flight or stuck)
+            "unstamped":  int    # historical / non-_post_wa rows
+        },
+        "rates": {
+            "attempt_rate":  float,   # attempted / generated
+            "sent_rate":     float,   # sent / generated
+            "failure_rate":  float,   # failed / attempted
+            "stuck_rate":    float,   # queued / generated
+        },
+        "failure_reasons": [   # top_n entries, descending
+            {
+                "key":      str,    # e.g. "out_of_24h_window"
+                "label_ar": str,    # merchant-facing label
+                "count":    int,
+                "share":    float,  # count / failed
+                "is_recoverable": bool|null,
+            }, ...
+        ],
+        "alerts": [str, ...]   # heuristic regression flags
+      }
+
+    What "AI" means here
+    --------------------
+    We filter MessageEvent rows to those whose
+    ``extra_metadata.is_ai`` is truthy. ``StateManager.save_message``
+    sets this on every AI-generated outbound. Manual replies from
+    ``/conversations/reply`` and campaign sends are EXCLUDED — they
+    have their own audit trails.
+
+    Heuristic alerts
+    ----------------
+    The endpoint flags suspicious patterns so an admin polling this
+    can spot regressions without staring at the numbers:
+
+      * ``sent_rate < 0.85``        — system-wide send health is bad
+      * ``stuck_rate > 0.05``       — queued rows aren't progressing
+                                      (worker stuck, stamping broken)
+      * single error_key > 30%      — one failure mode is dominant
+                                      (token rotation, Meta outage)
+    """
+    from datetime import datetime, timedelta, timezone as _tz  # noqa: PLC0415
+    from sqlalchemy import func as _func  # noqa: PLC0415
+    from models import MessageEvent  # noqa: PLC0415
+
+    admin_sub = _admin.get("sub") if isinstance(_admin, dict) else None
+    started   = time.time()
+    window    = timedelta(minutes=int(minutes))
+    cutoff    = datetime.utcnow() - window
+
+    # ── Base query ────────────────────────────────────────────────────
+    # Filter to OUTBOUND rows in the window. We then filter by
+    # ``is_ai`` in Python because the JSONB ``->`` operator on
+    # boolean values doesn't index well across the fleet — for
+    # 1-week aggregates we'd want a column, but for the F21 use
+    # case the row count is bounded enough that the post-filter
+    # is cheap (and we keep the SQL portable).
+    q = (
+        db.query(MessageEvent.id, MessageEvent.tenant_id,
+                 MessageEvent.created_at, MessageEvent.extra_metadata)
+        .filter(_func.lower(MessageEvent.direction) == "outbound")
+        .filter(MessageEvent.created_at >= cutoff)
+    )
+    if tenant_id is not None:
+        q = q.filter(MessageEvent.tenant_id == int(tenant_id))
+
+    rows = q.order_by(MessageEvent.id.desc()).limit(50000).all()
+
+    generated = 0
+    attempted = 0
+    sent      = 0
+    failed    = 0
+    queued    = 0
+    unstamped = 0
+
+    # error_key → (count, label_ar, is_recoverable)
+    reasons: Dict[str, Dict[str, Any]] = {}
+
+    for _id, _tid, _created, meta in rows:
+        m = meta or {}
+        # AI filter: only count rows the AI pipeline produced.
+        if not bool(m.get("is_ai")):
+            continue
+        generated += 1
+        ps = m.get("provider_send") if isinstance(m.get("provider_send"), dict) else None
+        if not ps:
+            unstamped += 1
+            continue
+        status = (ps.get("status") or "").lower()
+        if status == "sent":
+            sent += 1
+            attempted += 1
+        elif status == "failed":
+            failed += 1
+            attempted += 1
+            err = ps.get("error") if isinstance(ps.get("error"), dict) else {}
+            key = (err.get("key") or "unknown") or "unknown"
+            entry = reasons.setdefault(key, {
+                "key":            key,
+                "label_ar":       err.get("label_ar") or key,
+                "is_recoverable": err.get("is_recoverable"),
+                "count":          0,
+            })
+            entry["count"] += 1
+            # Prefer a non-empty label if a later row carries one
+            if not entry.get("label_ar") or entry["label_ar"] == key:
+                if err.get("label_ar"):
+                    entry["label_ar"] = err["label_ar"]
+        elif status == "queued":
+            queued += 1
+        else:
+            # Unknown status string — treat as unstamped so the row
+            # still surfaces in the funnel without skewing the
+            # success rate.
+            unstamped += 1
+
+    def _safe_rate(numer: int, denom: int) -> float:
+        return round(numer / denom, 4) if denom > 0 else 0.0
+
+    rates = {
+        "attempt_rate": _safe_rate(attempted, generated),
+        "sent_rate":    _safe_rate(sent,      generated),
+        "failure_rate": _safe_rate(failed,    attempted),
+        "stuck_rate":   _safe_rate(queued,    generated),
+    }
+
+    failure_reasons: List[Dict[str, Any]] = sorted(
+        (
+            {
+                **r,
+                "share": _safe_rate(r["count"], failed),
+            }
+            for r in reasons.values()
+        ),
+        key=lambda e: e["count"],
+        reverse=True,
+    )[: int(top_n)]
+
+    # ── Heuristic alerts ─────────────────────────────────────────────
+    alerts: List[str] = []
+    if generated >= 20 and rates["sent_rate"] < 0.85:
+        alerts.append(
+            f"AI sent_rate={rates['sent_rate']*100:.1f}% < 85% — احتمال "
+            "regression في مسار الإرسال. تحقق من logs أو من "
+            "/admin/debug/last-provider-send."
+        )
+    if generated >= 50 and rates["stuck_rate"] > 0.05:
+        alerts.append(
+            f"AI stuck_rate={rates['stuck_rate']*100:.1f}% > 5% — صفوف "
+            "queued لا تتقدّم. تحقق من worker أو من "
+            "core.outbound_send_status."
+        )
+    if failed >= 10 and failure_reasons:
+        top = failure_reasons[0]
+        if top["share"] >= 0.30:
+            alerts.append(
+                f"سبب فشل مهيمن: {top['label_ar']} ({top['key']}) "
+                f"يمثّل {top['share']*100:.1f}% من حالات الفشل — "
+                "تحقق من تكوين هذا المسار."
+            )
+
+    response = {
+        "ts":              datetime.now(_tz.utc).isoformat(),
+        "window_minutes":  int(minutes),
+        "tenant_id":       int(tenant_id) if tenant_id is not None else None,
+        "funnel": {
+            "generated":  generated,
+            "attempted":  attempted,
+            "sent":       sent,
+            "failed":     failed,
+            "queued":     queued,
+            "unstamped":  unstamped,
+        },
+        "rates":           rates,
+        "failure_reasons": failure_reasons,
+        "alerts":          alerts,
+        "elapsed_ms":      int((time.time() - started) * 1000),
+    }
+    audit(
+        "admin_debug_ai_outbound_stats",
+        admin_sub=admin_sub,
+        tenant_id=int(tenant_id) if tenant_id is not None else None,
+        window_minutes=int(minutes),
+        generated=generated,
+        sent=sent,
+        failed=failed,
+    )
+    logger.info(
+        "[ADMIN/AI_OUTBOUND_STATS] admin=%s tenant=%s window=%dm "
+        "generated=%d sent=%d failed=%d queued=%d stuck=%.1f%% "
+        "sent_rate=%.1f%%",
+        admin_sub, tenant_id, minutes,
+        generated, sent, failed, queued,
+        rates["stuck_rate"] * 100,
+        rates["sent_rate"] * 100,
+    )
+    return response
+
+
+# ════════════════════════════════════════════════════════════════════════
 # F19 — Recent webhook events (inbound routing audit)
 # ════════════════════════════════════════════════════════════════════════
 #

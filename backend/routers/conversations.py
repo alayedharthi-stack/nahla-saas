@@ -1265,6 +1265,54 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             "error":             ni.get("vision_error"),
         }
 
+    def _send_status_block(meta: Dict[str, Any], direction: str) -> Dict[str, Any]:
+        """Surface the wire-layer outcome stamped onto outbound rows by
+        ``core.outbound_send_status``. Returns:
+
+          {
+            "status":     "queued" | "sent" | "failed" | null,
+            "wamid":      str | null,
+            "error": {
+              "labelAr":       Arabic merchant-facing label,
+              "adviceAr":      one-line "what to do" (may be null),
+              "code":          Meta numeric code (or string token),
+              "subcode":       Meta error_subcode,
+              "key":           canonical key from services.meta_errors,
+              "isRecoverable": bool,
+            } | null
+          }
+
+        For inbound rows the block is intentionally absent so the
+        dashboard treats them as plain incoming messages. For
+        outbound rows that pre-date the stamping fix
+        (``provider_send`` is missing) we still return ``status:
+        null`` — the UI then falls back to its historical
+        behaviour (rendering a plain double-check). This keeps
+        old conversations from suddenly showing red ×s after
+        deploy.
+        """
+        if direction != "out":
+            return {}
+        ps = (meta or {}).get("provider_send")
+        if not isinstance(ps, dict):
+            return {"sendStatus": None}
+        status = ps.get("status")
+        err = ps.get("error") if isinstance(ps.get("error"), dict) else None
+        out: Dict[str, Any] = {
+            "sendStatus": status,
+            "wamid":      ps.get("wamid"),
+        }
+        if err:
+            out["sendError"] = {
+                "labelAr":       err.get("label_ar") or "تعذّر تسليم الرسالة",
+                "adviceAr":      err.get("advice_ar"),
+                "code":          err.get("code"),
+                "subcode":       err.get("subcode"),
+                "key":           err.get("key"),
+                "isRecoverable": bool(err.get("is_recoverable")),
+            }
+        return out
+
     messages: List[Dict[str, Any]] = [
         {
             "id": str(r.id),
@@ -1275,6 +1323,10 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             "eventType": _event_type_label(r),
             "media": _media_block(r.id, r.extra_metadata or {}),
             "_ts": r.created_at,
+            **_send_status_block(
+                r.extra_metadata or {},
+                "out" if (r.direction or "").lower() == "outbound" else "in",
+            ),
         }
         for r in me_rows
     ]
@@ -1650,23 +1702,90 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
 
     convo = _get_or_create_conversation(db, tenant_id, customer_phone)
 
-    from routers.whatsapp_webhook import _send_whatsapp_message  # noqa: PLC0415
-    await _send_whatsapp_message(
-        phone_id=wa_conn.phone_number_id,
-        to=customer_phone,
-        text=body.message,
-        _tenant_id=tenant_id,
-        _db=db,
+    # ── Persist BEFORE send so the dashboard always reflects the truth ──
+    # We used to call ``_send_whatsapp_message`` first and then add the
+    # MessageEvent regardless of outcome — that produced the "merchant
+    # sees the message bubble + the API returned sent:true but the
+    # customer never got anything" bug. Now we:
+    #
+    #   1. Persist the row with ``provider_send.status='queued'`` so
+    #      the dashboard shows a clock icon during the send.
+    #   2. Run the send and capture the boolean outcome.
+    #   3. Stamp the SAME row (by id) with the real outcome:
+    #        - ``sent``   → ✔✔ in the UI
+    #        - ``failed`` → red × with Arabic error label
+    #   4. Return ``sent: bool`` reflecting the actual result, plus
+    #      ``error`` so the dashboard can surface the failure inline.
+    from core.outbound_send_status import (  # noqa: PLC0415
+        build_queued_block,
+        stamp_message_event_id,
     )
-
-    db.add(MessageEvent(
+    queued_event = MessageEvent(
         conversation_id=convo.id,
         tenant_id=tenant_id,
         direction="outbound",
         body=body.message,
         event_type="manual_reply",
-        extra_metadata={"customer_phone": customer_phone, "is_ai": False},
-    ))
+        extra_metadata={
+            "customer_phone": customer_phone,
+            "phone":          customer_phone,
+            "is_ai":          False,
+            "provider_send":  build_queued_block(operation="manual_reply"),
+        },
+    )
+    db.add(queued_event)
+    db.flush()
+    message_event_id = int(queued_event.id)
+
+    from routers.whatsapp_webhook import _send_whatsapp_message  # noqa: PLC0415
+    send_ok = False
+    try:
+        send_ok = await _send_whatsapp_message(
+            phone_id=wa_conn.phone_number_id,
+            to=customer_phone,
+            text=body.message,
+            _tenant_id=tenant_id,
+            _db=db,
+        )
+    except Exception as send_exc:
+        _log.error(
+            "[reply_to_conversation] send raised tenant=%s phone=%s err=%s",
+            tenant_id, customer_phone, send_exc,
+        )
+        send_ok = False
+        # ``_post_wa`` swallows transport exceptions, so this branch
+        # only fires for unexpected bugs (e.g. import error). Stamp
+        # the row directly so the dashboard still reflects the
+        # failure.
+        stamp_message_event_id(
+            db,
+            message_event_id=message_event_id,
+            classification="exception",
+            response_body=None,
+            wamid=None,
+            operation="manual_reply",
+            error_text=f"{type(send_exc).__name__}: {send_exc}",
+        )
+
+    # Re-read the row to pull whatever the wire layer just wrote into
+    # ``provider_send`` (stamp_outbound_send_status finds this row by
+    # phone-suffix match and stamps it). If the wire layer somehow
+    # didn't stamp (e.g. dev-time path that bypasses _post_wa) we
+    # backfill a final status here so the queued bubble never sticks.
+    db.refresh(queued_event)
+    ps = (queued_event.extra_metadata or {}).get("provider_send") or {}
+    if ps.get("status") == "queued":
+        stamp_message_event_id(
+            db,
+            message_event_id=message_event_id,
+            classification="ok" if send_ok else "exception",
+            response_body=None,
+            wamid=None,
+            operation="manual_reply",
+            error_text=None if send_ok else "send returned false",
+        )
+        db.refresh(queued_event)
+        ps = (queued_event.extra_metadata or {}).get("provider_send") or {}
 
     raw = (customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
     suffix = raw[-9:] if len(raw) >= 9 else raw
@@ -1694,7 +1813,36 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
     convo.paused_by_human = True
     db.add(convo)
     db.commit()
-    return {"sent": True}
+
+    # ── Real send outcome returned to the dashboard ────────────────────
+    # The frontend previously assumed ``sent: true`` meant "delivered
+    # to the customer". That was a lie when the provider POST failed.
+    # We now return ``sent`` reflecting the wire-layer outcome plus
+    # ``message_event_id`` (so the dashboard can re-fetch state) and
+    # the structured ``error`` block when applicable.
+    err_block = ps.get("error") if isinstance(ps, dict) else None
+    response: Dict[str, Any] = {
+        "sent":             bool(send_ok),
+        "send_status":      ps.get("status") if isinstance(ps, dict) else None,
+        "message_event_id": message_event_id,
+        "wamid":            ps.get("wamid") if isinstance(ps, dict) else None,
+    }
+    if err_block:
+        response["error"] = {
+            "label_ar":       err_block.get("label_ar") or "تعذّر إرسال الرسالة",
+            "advice_ar":      err_block.get("advice_ar"),
+            "code":           err_block.get("code"),
+            "subcode":        err_block.get("subcode"),
+            "key":            err_block.get("key"),
+            "is_recoverable": bool(err_block.get("is_recoverable")),
+        }
+    if not send_ok:
+        _log.warning(
+            "[reply_to_conversation] send failed tenant=%s phone=%s msg_id=%s key=%s",
+            tenant_id, customer_phone, message_event_id,
+            (err_block or {}).get("key"),
+        )
+    return response
 
 
 @router.post("/handoff")
