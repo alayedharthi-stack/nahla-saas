@@ -366,6 +366,153 @@ def _set_coexistence_state(
     flag_modified(conn, "extra_metadata")
 
 
+# ── Canonical state buckets ──────────────────────────────────────────────────
+# A single source of truth used by BOTH:
+#   • _coexistence_integration_complete (owner panel banner)
+#   • live-verify status logic           (merchant page banner)
+# so the two pages cannot disagree (which was the exact symptom seen on
+# tenant=52: owner saw "status_invalid" while merchant page + AI worked).
+#
+#   HEALTHY  — green light, no banner needed.
+#   IN_FLIGHT — onboarding / activation in progress; soft warning OK but
+#               not a hard red banner if operational health is good.
+#   HARD_FAIL — disconnected/error/not_connected — the merchant explicitly
+#               cut the link or the system marked it broken. These NEVER
+#               get auto-healed; the merchant must act.
+
+_HEALTHY_DB_STATUSES = frozenset({"connected"})
+_IN_FLIGHT_DB_STATUSES = frozenset({
+    "pending",
+    "pending_activation",
+    "activation_pending",   # legacy synonym kept for back-compat
+    "review_pending",
+    "request_submitted",
+    "action_required",
+})
+_HARD_FAIL_DB_STATUSES = frozenset({
+    "disconnected",
+    "error",
+    "not_connected",
+})
+
+
+def _is_status_acceptable_for_use(db_status: Optional[str]) -> bool:
+    """A connection can be USED (read inbound, send replies) as long as
+    its DB status is not a hard-fail. In-flight statuses are acceptable
+    when operational health is green — see ``_operational_health_ok``.
+
+    This function answers ONE narrow question: "does this status, by
+    itself, ban the merchant from using the integration?". A `None` /
+    unknown status is treated as in-flight (acceptable) so a brand-new
+    row that hasn't been promoted yet doesn't trigger the red banner
+    while webhooks are arriving."""
+    if not db_status:
+        return True  # unknown → fall through to operational checks
+    return db_status not in _HARD_FAIL_DB_STATUSES
+
+
+def _operational_health_ok(conn: Optional[WhatsAppConnection]) -> bool:
+    """All four operational signals are green:
+
+      * api_key present (so we can talk to the provider for outbound),
+      * phone_number_id present (so inbound can route to this tenant),
+      * waba_id present (so business templates can send),
+      * webhook traffic arrived recently (so the path is proven live).
+
+    Notably we do NOT require ``conn.status == "connected"`` here — the
+    whole point of this helper is to detect when a row's status field
+    has drifted out of sync with reality.
+
+    Used by ``_coexistence_integration_complete`` to soften the
+    ``status_invalid`` verdict, and by ``_reconcile_coexistence_status``
+    to decide whether it is safe to auto-promote the row."""
+    if not conn:
+        return False
+    if not (conn.access_token or "").strip():
+        return False
+    if not (getattr(conn, "phone_number_id", None) or ""):
+        return False
+    if not (getattr(conn, "whatsapp_business_account_id", None) or ""):
+        return False
+    return _has_recent_webhook_traffic(conn)
+
+
+def _reconcile_coexistence_status(
+    conn: Optional[WhatsAppConnection],
+    *,
+    tenant_id: int,
+    source: str,
+    db: Optional[Session] = None,
+) -> bool:
+    """If the row is operationally healthy but its DB status field is
+    stale (e.g. ``action_required`` left over from an earlier failed
+    bootstrap), promote it to ``connected`` + ``sending_enabled=True``
+    so the owner panel and merchant page agree with reality.
+
+    Returns True iff a change was made (so callers can decide whether to
+    commit). The caller owns the transaction: pass ``db`` if you want
+    this helper to commit on your behalf, otherwise commit yourself.
+
+    Safety rails — never auto-heal when:
+      * The merchant explicitly disconnected (status in HARD_FAIL set),
+      * Operational health is not green (some signal is missing),
+      * The row is None (defensive).
+
+    Logs every decision so a state mismatch is recoverable from logs.
+    """
+    if conn is None:
+        return False
+    db_status = (conn.status or "").lower()
+    if db_status in _HARD_FAIL_DB_STATUSES:
+        logger.info(
+            "[coexistence_reconcile] SKIP tenant=%s source=%s reason=hard_fail_status status=%s",
+            tenant_id, source, db_status,
+        )
+        return False
+    if not _operational_health_ok(conn):
+        logger.debug(
+            "[coexistence_reconcile] SKIP tenant=%s source=%s reason=ops_not_green status=%s "
+            "token_present=%s phone_id=%s waba_id=%s webhook_recent=%s",
+            tenant_id, source, db_status,
+            bool((conn.access_token or "").strip()),
+            bool(getattr(conn, "phone_number_id", None)),
+            bool(getattr(conn, "whatsapp_business_account_id", None)),
+            _has_recent_webhook_traffic(conn),
+        )
+        return False
+    if db_status == "connected" and conn.sending_enabled:
+        return False  # already correct, no work to do
+
+    prev_status = conn.status
+    prev_sending = bool(conn.sending_enabled)
+    conn.status = "connected"
+    conn.sending_enabled = True
+    if not conn.connected_at:
+        conn.connected_at = datetime.now(timezone.utc)
+    _set_coexistence_state(conn, status="connected")
+    try:
+        stamp_whatsapp_ai_live_since_if_empty(conn)
+    except Exception:
+        pass
+    conn.last_error = None
+    if db is not None:
+        try:
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.warning(
+                "[coexistence_reconcile] tenant=%s source=%s commit FAILED: %s",
+                tenant_id, source, exc,
+            )
+            return False
+    logger.info(
+        "[coexistence_reconcile] tenant=%s source=%s PROMOTED prev_status=%r prev_sending=%s "
+        "→ status=connected sending_enabled=True (ops health green)",
+        tenant_id, source, prev_status, prev_sending,
+    )
+    return True
+
+
 def _has_recent_webhook_traffic(
     conn: Optional[WhatsAppConnection],
     *,
@@ -428,8 +575,59 @@ def _coexistence_integration_complete(conn: Optional[WhatsAppConnection]) -> Dic
         missing.append("phone_number")
 
     webhook_active = _has_recent_webhook_traffic(conn)
+    db_status = (conn.status or "").lower()
 
-    if conn.status not in ("connected", "pending_activation", "review_pending"):
+    # ── Operational-health override ───────────────────────────────────
+    # If every operational signal is green (token + phone_id + waba_id
+    # + recent inbound), the integration is FUNCTIONING regardless of
+    # whatever the DB status column happens to be. This is the canonical
+    # fix for the "tenant 52 syndrome": owner panel shows red while
+    # the merchant page works, AI replies, and webhooks flow — the only
+    # thing wrong is a stale ``conn.status="action_required"`` left over
+    # from an earlier failed verification.
+    #
+    # Hard-fail statuses (disconnected/error/not_connected) are NEVER
+    # overridden here — the merchant explicitly broke the link, so the
+    # banner SHOULD stay red until they re-onboard.
+    if (
+        not missing
+        and webhook_active
+        and db_status not in _HARD_FAIL_DB_STATUSES
+        and _operational_health_ok(conn)
+    ):
+        if db_status != "connected" or not conn.sending_enabled:
+            # Surface the drift in the response so the owner panel can
+            # show a "إصلاح تلقائي متاح" call-to-action that runs the
+            # reconciliation endpoint. Until the operator clicks it
+            # (or any verify/auto-configure/sync path runs) the row
+            # keeps its stale status, but the banner softens to green.
+            return {
+                "truly_connected": True,
+                "reason_code": "operational_healthy_status_stale",
+                "missing_fields": [],
+                "db_status": conn.status,
+                "webhook_active": True,
+                "soft_warning": False,
+                "needs_status_reconcile": True,
+            }
+        # status is already connected + ops green → fast path
+        return {
+            "truly_connected": True,
+            "reason_code": None,
+            "missing_fields": [],
+            "db_status": conn.status,
+            "webhook_active": True,
+        }
+
+    # Hard fail / not-yet-bootstrapped: keep the original behaviour but
+    # use the unified status set so `pending`, `request_submitted` and
+    # `action_required` are recognised as in-flight (not invalid).
+    acceptable_for_use = (
+        db_status in _HEALTHY_DB_STATUSES
+        or db_status in _IN_FLIGHT_DB_STATUSES
+        or db_status == ""  # brand-new row, no status yet
+    )
+    if not acceptable_for_use:
         return {
             "truly_connected": False,
             "reason_code": "status_invalid",
@@ -2306,6 +2504,12 @@ async def admin_coexistence_verify_webhook(
     flag_modified(conn, "extra_metadata")
     if matches and not verify_error:
         conn.webhook_verified = True
+    # Operational-health auto-heal: when verify confirms the URL matches
+    # AND the row is operationally healthy, promote a stale status to
+    # ``connected`` so the owner banner stops showing status_invalid.
+    reconciled = _reconcile_coexistence_status(
+        conn, tenant_id=body.tenant_id, source="admin_verify_webhook",
+    )
     db.commit()
 
     audit(
@@ -2313,6 +2517,7 @@ async def admin_coexistence_verify_webhook(
         admin=_admin.get("sub") if isinstance(_admin, dict) else None,
         tenant_id=body.tenant_id,
         matches=matches,
+        reconciled=reconciled,
     )
     return {
         "tenant_id":     body.tenant_id,
@@ -2322,6 +2527,66 @@ async def admin_coexistence_verify_webhook(
         "verify_error":  verify_error,
         "raw":           cfg,
         "webhooks":      _coexistence_webhook_block(conn),
+        "status_reconciled": reconciled,
+        "integration_complete": _coexistence_integration_complete(conn),
+    }
+
+
+@router.post("/admin/coexistence/reconcile-status")
+async def admin_coexistence_reconcile_status(
+    body: _TenantOnly,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, object] = Depends(require_admin),
+):
+    """Force the canonical status-reconciliation pass for this tenant.
+
+    Use when the owner panel keeps showing ``status_invalid`` while the
+    merchant page + AI are clearly working. This endpoint:
+
+      1. Re-reads operational health (token / phone_id / waba_id /
+         recent webhook traffic),
+      2. If all four signals are green AND the row is not in a
+         hard-fail state (disconnected / error), promotes it to
+         ``status=connected`` and ``sending_enabled=True``.
+
+    Read-only when nothing needs healing. Returns the before/after
+    snapshot so the operator can confirm what changed.
+    """
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=body.tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="لا يوجد سجل واتساب لهذا المتجر")
+
+    before_status = conn.status
+    before_sending = bool(conn.sending_enabled)
+    before_complete = _coexistence_integration_complete(conn)
+
+    reconciled = _reconcile_coexistence_status(
+        conn, tenant_id=body.tenant_id, source="admin_manual_reconcile", db=db,
+    )
+
+    after_complete = _coexistence_integration_complete(conn)
+    audit(
+        "admin_coexistence_reconcile_status",
+        admin=_admin.get("sub") if isinstance(_admin, dict) else None,
+        tenant_id=body.tenant_id,
+        reconciled=reconciled,
+        before_status=before_status,
+        after_status=conn.status,
+    )
+    return {
+        "tenant_id":     body.tenant_id,
+        "reconciled":    reconciled,
+        "before": {
+            "status":             before_status,
+            "sending_enabled":    before_sending,
+            "integration_complete": before_complete,
+        },
+        "after": {
+            "status":             conn.status,
+            "sending_enabled":    bool(conn.sending_enabled),
+            "integration_complete": after_complete,
+        },
+        "webhooks": _coexistence_webhook_block(conn),
     }
 
 
@@ -2462,6 +2727,12 @@ async def admin_coexistence_auto_configure(
             str((result or {}).get("error"))[:400]
             + " | waba=" + str((waba_result or {}).get("error"))[:100]
         )
+    # Auto-heal: if the configure succeeded AND operational health is
+    # green, promote the row out of any stale ``action_required``
+    # state so the owner panel and merchant page agree.
+    reconciled = _reconcile_coexistence_status(
+        conn, tenant_id=body.tenant_id, source="admin_auto_configure",
+    )
     db.commit()
 
     audit(
@@ -2470,6 +2741,7 @@ async def admin_coexistence_auto_configure(
         tenant_id=body.tenant_id,
         ok=ok,
         waba_ok=waba_ok,
+        reconciled=reconciled,
     )
     return {
         "tenant_id":      body.tenant_id,
@@ -2479,6 +2751,8 @@ async def admin_coexistence_auto_configure(
         "channel_result": result,
         "waba_result":    waba_result,
         "webhooks":       _coexistence_webhook_block(conn),
+        "status_reconciled":     reconciled,
+        "integration_complete":  _coexistence_integration_complete(conn),
     }
 
 
@@ -3002,6 +3276,14 @@ async def admin_coexistence_diagnose(
         "has_duplicates":     has_duplicates,
     }
 
+    # Opportunistic auto-heal: if all operational signals are green but
+    # ``conn.status`` is stale, promote it now. Running diagnose is the
+    # canonical "tell me the truth" action, so it is also the right place
+    # to bring the stored truth into agreement with reality.
+    reconciled = _reconcile_coexistence_status(
+        conn, tenant_id=tenant_id, source="admin_diagnose", db=db,
+    )
+
     audit(
         "admin_coexistence_diagnose",
         admin=_admin.get("sub") if isinstance(_admin, dict) else None,
@@ -3011,17 +3293,25 @@ async def admin_coexistence_diagnose(
         channel_matches=chan_matches,
         waba_matches=waba_matches,
         has_duplicates=has_duplicates,
+        status_reconciled=reconciled,
     )
 
+    # Refresh connection_block.status after possible auto-heal.
+    if reconciled and conn is not None:
+        connection_block["status"] = conn.status
+        connection_block["sending_enabled"] = bool(conn.sending_enabled)
+
     return {
-        "tenant_id":        tenant_id,
-        "request_id":       request_id,
-        "connection":       connection_block,
-        "token_check":      token_check,
-        "registration":     registration_block,
-        "inbound_evidence": inbound_block,
-        "duplicates":       duplicates_block,
-        "webhooks":         _coexistence_webhook_block(conn),
+        "tenant_id":            tenant_id,
+        "request_id":           request_id,
+        "connection":           connection_block,
+        "token_check":          token_check,
+        "registration":         registration_block,
+        "inbound_evidence":     inbound_block,
+        "duplicates":           duplicates_block,
+        "webhooks":             _coexistence_webhook_block(conn),
+        "status_reconciled":    reconciled,
+        "integration_complete": _coexistence_integration_complete(conn),
     }
 
 

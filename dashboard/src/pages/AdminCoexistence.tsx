@@ -862,9 +862,38 @@ const _MISSING_FIELD_LABELS: Record<string, string> = {
   api_key:         'مفتاح API',
 }
 
-function IntegrationIntegrityBanner({ req }: { req: CoexistenceRequest }) {
+function IntegrationIntegrityBanner({
+  req, onReconciled,
+}: {
+  req: CoexistenceRequest
+  onReconciled?: () => void
+}) {
   const ic = req.integration_complete
-  if (ic.truly_connected) {
+  const [healing, setHealing] = useState(false)
+  const [healFeedback, setHealFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+
+  const runReconcile = async () => {
+    setHealing(true); setHealFeedback(null)
+    try {
+      const res = await adminApi.reconcileCoexistenceStatus(req.tenant_id)
+      if (res.reconciled) {
+        setHealFeedback({ kind: 'ok', text: 'تم إصلاح حالة الربط — الآن status=connected' })
+        onReconciled?.()
+      } else {
+        setHealFeedback({
+          kind: 'ok',
+          text: `لا حاجة لإصلاح — الحالة الحالية: ${res.after.status ?? '—'}`,
+        })
+      }
+    } catch (e: unknown) {
+      setHealFeedback({ kind: 'err', text: e instanceof Error ? e.message : 'فشل الإصلاح' })
+    } finally {
+      setHealing(false)
+    }
+  }
+
+  // ── Healthy (true match) ────────────────────────────────────────────
+  if (ic.truly_connected && ic.reason_code !== 'operational_healthy_status_stale') {
     return (
       <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-xs text-emerald-700 flex items-start gap-2">
         <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
@@ -877,11 +906,50 @@ function IntegrationIntegrityBanner({ req }: { req: CoexistenceRequest }) {
       </div>
     )
   }
+
+  // ── Soft path: operational health green but DB status drifted ──────
+  // This is the "tenant 52" case. Show a benign yellow banner with a
+  // one-click auto-heal instead of a red status_invalid scare.
+  if (ic.truly_connected && ic.reason_code === 'operational_healthy_status_stale') {
+    return (
+      <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 flex items-start gap-2">
+        <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+        <div className="flex-1 space-y-1.5">
+          <p className="font-bold">الربط يعمل — لكن حالة DB متأخّرة</p>
+          <p className="text-amber-700">
+            كل الإشارات التشغيلية خضراء (Webhooks، API Key، Inbound حديث)،
+            لكن حقل <span className="font-mono">status</span> في DB ما زال على
+            «<span className="font-mono">{ic.db_status ?? '—'}</span>». لا تأثير
+            على التاجر، لكن لإزالة هذا التنبيه اضغط الزر التالي.
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={runReconcile}
+              disabled={healing}
+              className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-500 disabled:opacity-50"
+            >
+              <Hammer className="w-3 h-3" />
+              {healing ? 'جارٍ الإصلاح…' : 'إصلاح حالة الربط الآن'}
+            </button>
+            {healFeedback && (
+              <span className={`text-[11px] font-semibold ${
+                healFeedback.kind === 'ok' ? 'text-emerald-700' : 'text-red-700'
+              }`}>
+                {healFeedback.text}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Hard fail / genuinely incomplete ───────────────────────────────
   const missingLabels = (ic.missing_fields || []).map(f => _MISSING_FIELD_LABELS[f] || f)
   return (
     <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700 flex items-start gap-2">
       <XCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-      <div className="flex-1">
+      <div className="flex-1 space-y-1.5">
         <p className="font-bold">عدم تطابق بين لوحة المالك وصفحة التاجر</p>
         <p className="text-red-600 mt-0.5">
           سبب: <span className="font-mono">{ic.reason_code || 'incomplete'}</span>
@@ -890,6 +958,29 @@ function IntegrationIntegrityBanner({ req }: { req: CoexistenceRequest }) {
         <p className="text-red-500 mt-1">
           استخدم زر «Sync / Repair Integration Record» أدناه أو افتح «تعديل الحقول» لإكمال السجل يدويًا.
         </p>
+        {/* When the reason is purely `status_invalid` (no missing fields)
+            offer the same auto-heal as the soft-path banner — covers the
+            edge case where ops health is borderline (e.g. webhook arrived
+            but is older than the 14d window). */}
+        {ic.reason_code === 'status_invalid' && !missingLabels.length && (
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={runReconcile}
+              disabled={healing}
+              className="inline-flex items-center gap-1.5 rounded-md bg-red-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              <Hammer className="w-3 h-3" />
+              {healing ? 'جارٍ الإصلاح…' : 'محاولة إصلاح تلقائي'}
+            </button>
+            {healFeedback && (
+              <span className={`text-[11px] font-semibold ${
+                healFeedback.kind === 'ok' ? 'text-emerald-700' : 'text-red-700'
+              }`}>
+                {healFeedback.text}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1291,7 +1382,7 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
           {/* Integrity banner — shows ONLY when the merchant page would
               currently show "غير متصل فعليًا". This is the cure for the
               owner panel and merchant page disagreeing. */}
-          <IntegrationIntegrityBanner req={req} />
+          <IntegrationIntegrityBanner req={req} onReconciled={onRefresh} />
 
           {/* Editable integration record — Sync/Repair button + manual
               field overrides + Save & Recheck. */}

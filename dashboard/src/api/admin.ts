@@ -544,6 +544,33 @@ export const adminApi = {
     ),
 
   /**
+   * Force a status-reconciliation pass. When operational health is green
+   * (token + phone_id + waba_id + recent webhook traffic) but the row's
+   * ``status`` field is stale, this promotes it to ``connected`` so the
+   * owner panel and merchant page agree with reality. A no-op when the
+   * row is already healthy OR when the merchant explicitly disconnected.
+   */
+  reconcileCoexistenceStatus: (tenantId: number) =>
+    apiCall<{
+      tenant_id: number
+      reconciled: boolean
+      before: {
+        status: string | null
+        sending_enabled: boolean
+        integration_complete: CoexistenceIntegrationCompleteness
+      }
+      after: {
+        status: string | null
+        sending_enabled: boolean
+        integration_complete: CoexistenceIntegrationCompleteness
+      }
+      webhooks: CoexistenceWebhookBlock
+    }>('/whatsapp/admin/coexistence/reconcile-status', {
+      method: 'POST',
+      body: JSON.stringify({ tenant_id: tenantId }),
+    }),
+
+  /**
    * Sync / Repair Integration Record.
    * Re-reads channel metadata from 360dialog (Partner API + per-tenant API
    * key) and fills any missing fields on the WhatsApp connection record so

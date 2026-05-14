@@ -1131,6 +1131,12 @@ async def _handle_360dialog_body(
                 # and vice-versa.
                 _stamp_webhook_received(db, wa_conn, family)
 
+                # Opportunistic status auto-heal — throttled to ~5 min/conn.
+                # Fires only when the row's status field has drifted out of
+                # sync with reality (e.g. left over `action_required` while
+                # inbound is clearly flowing). Cheap no-op on healthy rows.
+                _maybe_autoheal_status(wa_conn)
+
                 if not _scope_accepts(scope, family):
                     logger.info(
                         "[Webhook360] field=%s family=%s arrived on scope=%s — recorded but not processed",
@@ -1335,6 +1341,98 @@ def _stamp_webhook_received(db, wa_conn: WhatsAppConnection, family: str) -> Non
         family,
         column,
     )
+
+
+# ── Inbound auto-heal: bring stale status back to "connected" ───────────────
+# Pattern: every N seconds per connection (default 300 s), if a real inbound
+# webhook arrived while ``conn.status`` is still in an in-flight bucket
+# (action_required, pending, request_submitted, ...), promote it to
+# "connected" so the owner panel and merchant page agree with reality.
+# Hard-fail statuses (disconnected/error) are NEVER touched — the merchant
+# explicitly broke that connection and must re-onboard.
+#
+# This is THE fix for "tenant 52 syndrome": webhooks flow, AI replies,
+# everything works, but the owner panel still flashes red because some
+# old bootstrap step left ``status="action_required"`` in the row.
+
+_RECONCILE_THROTTLE_SEC = 300.0  # at most one reconcile attempt per 5 min per conn
+_LAST_RECONCILE_AT: dict[int, float] = {}
+
+
+def _should_reconcile_now(conn_id: int) -> bool:
+    last = _LAST_RECONCILE_AT.get(conn_id)
+    if last is None:
+        return True
+    return (time.monotonic() - last) >= _RECONCILE_THROTTLE_SEC
+
+
+def _mark_reconcile_attempted(conn_id: int) -> None:
+    _LAST_RECONCILE_AT[conn_id] = time.monotonic()
+
+
+def _bg_reconcile_status(conn_id: int, tenant_id: int | None) -> None:
+    """Worker body — runs on the same ``wa-stamp`` thread pool as the
+    receipt stamper. Owns its own session so no row lock here can
+    contaminate the webhook's main transaction.
+
+    Calls the canonical ``_reconcile_coexistence_status`` helper from
+    ``routers/whatsapp_connect`` so the auto-heal rules stay in ONE place.
+    """
+    bg_db = SessionLocal()
+    try:
+        from routers.whatsapp_connect import _reconcile_coexistence_status  # noqa: PLC0415
+        from database.models import WhatsAppConnection as _WC          # noqa: PLC0415
+
+        bg_db.execute(text("SET LOCAL statement_timeout = :ms"), {"ms": 2000})
+        conn = bg_db.query(_WC).filter(_WC.id == conn_id).first()
+        if not conn:
+            return
+        changed = _reconcile_coexistence_status(
+            conn, tenant_id=tenant_id or conn.tenant_id, source="inbound_autoheal", db=bg_db,
+        )
+        if changed:
+            logger.info(
+                "[Webhook360/reconcile_bg] tenant=%s conn=%s status auto-healed → connected",
+                tenant_id or conn.tenant_id, conn_id,
+            )
+    except Exception as exc:
+        try:
+            bg_db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[Webhook360/reconcile_bg] SKIPPED conn=%s tenant=%s err=%s",
+            conn_id, tenant_id, exc,
+        )
+    finally:
+        try:
+            bg_db.close()
+        except Exception:
+            pass
+
+
+def _maybe_autoheal_status(wa_conn: WhatsAppConnection) -> None:
+    """Schedule a fire-and-forget status reconcile when the row's status
+    has drifted out of sync with reality. Throttled to once per 5 minutes
+    per connection — calling this on every webhook is safe and cheap.
+    """
+    try:
+        status = (getattr(wa_conn, "status", "") or "").lower()
+        # Skip the work entirely on healthy/hard-fail rows — neither
+        # needs healing.
+        if status in {"connected", "disconnected", "error", "not_connected"}:
+            return
+        if not _should_reconcile_now(int(wa_conn.id)):
+            return
+        _mark_reconcile_attempted(int(wa_conn.id))
+        submit_stamp_background(
+            _bg_reconcile_status,
+            int(wa_conn.id),
+            getattr(wa_conn, "tenant_id", None),
+        )
+    except Exception as exc:
+        logger.debug("[Webhook360/reconcile_bg] schedule failed conn=%s err=%s",
+                     getattr(wa_conn, "id", None), exc)
 
 
 def _coexistence_category_for(field: str) -> str:
