@@ -117,7 +117,149 @@ class TestSendIn(BaseModel):
 
 # ── Helper functions ───────────────────────────────────────────────────────────
 
-def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
+def _campaign_canonical_stats(
+    db: Session,
+    campaign_ids: List[int],
+) -> Dict[int, Dict[str, int]]:
+    """Batch-aggregate per-campaign send counts from ``CampaignSendLog``.
+
+    This is the **canonical** source of truth for campaign analytics —
+    every Meta status webhook lands here (status='sent' rows + the
+    nullable ``delivered_at`` / ``read_at`` / ``failed_at`` timestamps).
+    The legacy ``Campaign.sent_count`` / ``delivered_count`` /
+    ``read_count`` columns can drift (wave-mode incrementals, restarts,
+    background dispatcher crashes), so every read path that surfaces
+    "how is this campaign doing?" MUST go through this helper instead
+    of trusting the row columns.
+
+    Returned shape per campaign_id::
+
+        {
+          "meta_accepted":        int,   # status='sent' rows
+          "delivered":            int,   # status='sent' AND delivered_at NOT NULL
+          "read":                 int,   # status='sent' AND read_at NOT NULL
+          "failed_after_accept":  int,   # status='sent' AND failed_at NOT NULL
+          "not_delivered_yet":    int,   # meta_accepted - delivered - failed_after_accept
+          "failed":               int,   # status='failed' (pre-accept)
+          "queued":               int,   # status IN ('queued','sending')
+          "skipped":              int,   # status LIKE 'skipped_%'
+          "total_recipients":     int,   # sum of every row
+        }
+
+    Empty entries (``{}``-mapped to defaults) when a campaign has no
+    send-log rows yet — caller decides whether to fall back to the
+    legacy Campaign columns or surface zeros.
+    """
+    from sqlalchemy import func  # noqa: PLC0415
+
+    out: Dict[int, Dict[str, int]] = {}
+    if not campaign_ids:
+        return out
+
+    # One trip to the DB per campaign list — GROUP BY (campaign_id,
+    # status) with three filtered COUNT()s for the nullable timestamps.
+    # The composite index ``ix_campaign_send_log_campaign_status``
+    # serves this query directly.
+    rows = (
+        db.query(
+            CampaignSendLog.campaign_id.label("cid"),
+            CampaignSendLog.status.label("st"),
+            func.count(CampaignSendLog.id).label("cnt"),
+            func.count(CampaignSendLog.delivered_at).label("delivered_cnt"),
+            func.count(CampaignSendLog.read_at).label("read_cnt"),
+            func.count(CampaignSendLog.failed_at).label("failed_after_accept_cnt"),
+        )
+        .filter(CampaignSendLog.campaign_id.in_(campaign_ids))
+        .group_by(CampaignSendLog.campaign_id, CampaignSendLog.status)
+        .all()
+    )
+
+    for r in rows:
+        s = out.setdefault(int(r.cid), {
+            "meta_accepted":       0,
+            "delivered":           0,
+            "read":                0,
+            "failed_after_accept": 0,
+            "not_delivered_yet":   0,
+            "failed":              0,
+            "queued":              0,
+            "skipped":             0,
+            "total_recipients":    0,
+        })
+        st = (r.st or "").lower()
+        cnt = int(r.cnt or 0)
+        s["total_recipients"] += cnt
+        if st == "sent":
+            s["meta_accepted"] += cnt
+            s["delivered"]     += int(r.delivered_cnt or 0)
+            s["read"]          += int(r.read_cnt or 0)
+            s["failed_after_accept"] += int(r.failed_after_accept_cnt or 0)
+        elif st in ("queued", "sending"):
+            s["queued"] += cnt
+        elif st == "failed":
+            s["failed"] += cnt
+        elif st.startswith("skipped_"):
+            s["skipped"] += cnt
+        # Unknown statuses still contribute to total_recipients above
+        # but don't move any specific bucket — they surface via the
+        # ``lifecycle="unknown_status"`` path in the report endpoint.
+
+    # Derived bucket — "Meta accepted but no delivered/failed echo yet".
+    # The screenshot calls this "لم تصل بعد". Negative results are
+    # clamped to 0 (defensive; webhook double-counting could in theory
+    # produce delivered > meta_accepted but we never want a negative
+    # number in the UI).
+    for s in out.values():
+        s["not_delivered_yet"] = max(
+            0,
+            s["meta_accepted"] - s["delivered"] - s["failed_after_accept"],
+        )
+    return out
+
+
+def _stats_with_rates(stats: Dict[str, int]) -> Dict[str, Any]:
+    """Annotate a canonical stats dict with two explicitly-named rates.
+
+    The merchant explicitly asked for transparency on the denominator
+    so the dashboard can't lie via a stale ``sent_count``:
+
+      * ``delivery_rate``           = delivered / meta_accepted
+      * ``read_rate_of_accepted``   = read / meta_accepted
+      * ``read_rate_of_delivered``  = read / delivered
+
+    All three are floats in [0.0, 1.0]; the frontend chooses which to
+    render and labels it accordingly ("معدل القراءة من الواصل" vs
+    "معدل القراءة من المُقبَل"). Rates are ``None`` when the
+    denominator is zero so the UI can show "—" instead of "0%".
+    """
+    meta_accepted = stats.get("meta_accepted", 0) or 0
+    delivered     = stats.get("delivered", 0) or 0
+    read          = stats.get("read", 0) or 0
+
+    def _rate(num: int, den: int) -> Optional[float]:
+        if den <= 0:
+            return None
+        return round(num / den, 4)
+
+    enriched = dict(stats)
+    enriched["delivery_rate"]          = _rate(delivered, meta_accepted)
+    enriched["read_rate_of_accepted"]  = _rate(read, meta_accepted)
+    enriched["read_rate_of_delivered"] = _rate(read, delivered)
+    return enriched
+
+
+def _campaign_to_dict(
+    c: Campaign,
+    *,
+    canonical_stats: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Serialise a Campaign row for the API.
+
+    When ``canonical_stats`` is provided (recommended for the list +
+    detail endpoints), the per-recipient counters are read from
+    CampaignSendLog instead of the Campaign columns so the dashboard
+    cards / table / detail view all share one source of truth.
+    """
     tpl_vars = c.template_variables or {}
     auto_coupon = tpl_vars.get("_auto_coupon") == "true"
     discount_pct_raw = tpl_vars.get("_discount_percent")
@@ -162,7 +304,15 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
     # campaign that died before snapshotting recipients shows up as
     # ``pending_dispatch`` ("ينتظر بدء الإرسال") even though the
     # underlying status is still ``active``.
-    sent = c.sent_count or 0
+    #
+    # Prefer canonical CampaignSendLog counts when supplied — the
+    # Campaign.sent_count column is a best-effort incremental counter
+    # that drifts (wave-mode, restarts). The lifecycle verb must agree
+    # with the numbers the UI actually shows.
+    if canonical_stats is not None:
+        sent = int(canonical_stats.get("meta_accepted", 0) or 0)
+    else:
+        sent = c.sent_count or 0
     total_seen = sent + failed_count + skipped_count
     raw_status = (c.status or "").lower()
     if raw_status == "completed":
@@ -218,17 +368,65 @@ def _campaign_to_dict(c: Campaign) -> Dict[str, Any]:
         "coupon_code": c.coupon_code or "",
         "auto_coupon": auto_coupon,
         "discount_percent": discount_pct,
-        "sent_count": c.sent_count,
-        "failed_count": failed_count,
-        "skipped_count": skipped_count,
+        # Per-recipient counts — prefer canonical CampaignSendLog
+        # numbers when supplied so the table never lies about a
+        # campaign whose dispatcher counter drifted. Legacy field
+        # names are preserved so older clients keep working, but
+        # they now point at the canonical aggregates.
+        "sent_count": (
+            int(canonical_stats.get("meta_accepted", 0) or 0)
+            if canonical_stats is not None else c.sent_count
+        ),
+        "failed_count": (
+            # Surface the canonical "failed" bucket (pre-accept) when
+            # available; fall back to the legacy template_variables
+            # counter for campaigns that never wrote send-log rows.
+            int(canonical_stats.get("failed", 0) or 0)
+            if canonical_stats is not None and canonical_stats.get("total_recipients", 0) > 0
+            else failed_count
+        ),
+        "skipped_count": (
+            int(canonical_stats.get("skipped", 0) or 0)
+            if canonical_stats is not None and canonical_stats.get("total_recipients", 0) > 0
+            else skipped_count
+        ),
         "dispatch_errors": dispatch_errors,
         "last_error": last_error,
         # Arabic-translated equivalent of last_error — UI uses this
         # under the status pill instead of the raw technical line.
         "last_error_ar": last_error_ar,
         "last_error_key": last_error_key,
-        "delivered_count": c.delivered_count,
-        "read_count": c.read_count,
+        "delivered_count": (
+            int(canonical_stats.get("delivered", 0) or 0)
+            if canonical_stats is not None else c.delivered_count
+        ),
+        "read_count": (
+            int(canonical_stats.get("read", 0) or 0)
+            if canonical_stats is not None else c.read_count
+        ),
+        # New canonical ``stats`` object — the UI should prefer this
+        # over the flat ``*_count`` fields. Includes explicit rates
+        # with documented denominators so "معدل القراءة" can never
+        # be ambiguous again.
+        "stats": (
+            _stats_with_rates(canonical_stats)
+            if canonical_stats is not None
+            else _stats_with_rates({
+                "meta_accepted":       c.sent_count or 0,
+                "delivered":           c.delivered_count or 0,
+                "read":                c.read_count or 0,
+                "failed_after_accept": 0,
+                "not_delivered_yet":   max(
+                    0,
+                    (c.sent_count or 0)
+                    - (c.delivered_count or 0),
+                ),
+                "failed":              failed_count,
+                "queued":              0,
+                "skipped":             skipped_count,
+                "total_recipients":    (c.sent_count or 0) + failed_count + skipped_count,
+            })
+        ),
         "clicked_count": c.clicked_count,
         "converted_count": c.converted_count,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -269,7 +467,18 @@ async def list_campaigns(request: Request, db: Session = Depends(get_db)):
         .order_by(Campaign.created_at.desc())
         .all()
     )
-    return {"campaigns": [_campaign_to_dict(c) for c in campaigns]}
+    # One batched aggregator round-trip → every campaign card / table
+    # row / top-of-page summary tile shares one source of truth
+    # (``CampaignSendLog``). The legacy Campaign.{sent,delivered,read}
+    # _count columns can drift after a dispatcher restart in wave
+    # mode; the merchant-visible stats must never lie because of that.
+    stats_by_id = _campaign_canonical_stats(db, [c.id for c in campaigns])
+    return {
+        "campaigns": [
+            _campaign_to_dict(c, canonical_stats=stats_by_id.get(c.id))
+            for c in campaigns
+        ],
+    }
 
 
 @router.post("/campaigns")
@@ -322,7 +531,10 @@ async def create_campaign(
                 "dispatch will be spawned",
                 tenant_id, idem_key, existing.id, existing.status,
             )
-            return _campaign_to_dict(existing)
+            return _campaign_to_dict(
+                existing,
+                canonical_stats=_campaign_canonical_stats(db, [existing.id]).get(existing.id),
+            )
 
     from core.billing import require_outbound_access  # noqa: PLC0415
     require_outbound_access(db, tenant_id)
@@ -563,7 +775,10 @@ async def create_campaign(
         # and trigger the 25s "signal timed out" in the frontend.
         _spawn_dispatch_in_background(campaign.id)
 
-    return _campaign_to_dict(campaign)
+    return _campaign_to_dict(
+        campaign,
+        canonical_stats=_campaign_canonical_stats(db, [campaign.id]).get(campaign.id),
+    )
 
 
 @router.put("/campaigns/{campaign_id}/status")
@@ -592,7 +807,10 @@ async def update_campaign_status(
     if body.status == "active" and was_not_active:
         _spawn_dispatch_in_background(campaign.id)
 
-    return _campaign_to_dict(campaign)
+    return _campaign_to_dict(
+        campaign,
+        canonical_stats=_campaign_canonical_stats(db, [campaign.id]).get(campaign.id),
+    )
 
 
 @router.delete("/campaigns/{campaign_id}")
@@ -818,6 +1036,25 @@ async def get_campaign_report(
         .first()
     )
 
+    # The same canonical aggregator that powers the cards / table —
+    # surfacing it here guarantees that the detail page can never
+    # disagree with the dashboard summary tiles or the campaigns
+    # table. ``stats`` exposes Meta-accepted / delivered / read /
+    # failed_after_accept + the three rates with documented
+    # denominators.
+    canonical = _campaign_canonical_stats(db, [campaign_id]).get(campaign_id) or {
+        "meta_accepted":       0,
+        "delivered":           0,
+        "read":                0,
+        "failed_after_accept": 0,
+        "not_delivered_yet":   0,
+        "failed":              0,
+        "queued":              0,
+        "skipped":             0,
+        "total_recipients":    0,
+    }
+    stats = _stats_with_rates(canonical)
+
     return {
         "campaign_id":           campaign_id,
         "campaign_status":       campaign.status,
@@ -835,6 +1072,10 @@ async def get_campaign_report(
         "stopped_by_limit":      counts.get("skipped_duplicate", 0),
         "last_error_code":       last_error_row.error_code if last_error_row else None,
         "last_error_message":    last_error_row.error_message if last_error_row else None,
+        # Canonical analytics — same shape as the per-row ``stats``
+        # block in the /campaigns list response so the frontend can
+        # share one component for "campaign stats card".
+        "stats":                 stats,
     }
 
 

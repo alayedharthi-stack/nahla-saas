@@ -2855,7 +2855,20 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const lifecycleKey = campaign.lifecycle || campaign.status || 'draft'
   const sm = LIFECYCLE_META[lifecycleKey] ?? STATUS_META[campaign.status] ?? STATUS_META['draft']
   const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
-  const openRate = campaign.sent_count > 0 ? Math.round((campaign.read_count / campaign.sent_count) * 100) : 0
+  // Per-row "معدل القراءة" — prefer the canonical stats object so
+  // we use ``read / delivered`` (same denominator as the summary
+  // tile above). When delivered=0 (e.g. early in the dispatch
+  // before Meta echoed delivery receipts) we fall back to
+  // ``read / meta_accepted`` so the merchant still sees a number
+  // instead of "—" while the campaign is sending. The legacy
+  // sent_count/read_count fields are now also canonical aggregates
+  // (backend override), so the fallback path stays correct too.
+  const _statsCanonical = campaign.stats
+  const _denom = _statsCanonical
+    ? (_statsCanonical.delivered > 0 ? _statsCanonical.delivered : _statsCanonical.meta_accepted)
+    : campaign.sent_count
+  const _readNum = _statsCanonical ? _statsCanonical.read : campaign.read_count
+  const openRate = _denom > 0 ? Math.round((_readNum / _denom) * 100) : 0
   const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
@@ -3526,15 +3539,71 @@ export default function Campaigns() {
   }
 
   const stats = useMemo(() => {
+    // Prefer the canonical ``stats`` object emitted by /campaigns —
+    // that field is derived from CampaignSendLog at read time, so it
+    // never lies because of a drifting Campaign.sent_count counter
+    // (wave-mode restarts, half-finished dispatches, …). The legacy
+    // flat ``*_count`` fields are only used as a fallback for older
+    // backends that didn't ship the canonical aggregator yet.
     const completed = campaigns.filter(c => c.status === 'completed').length
     const failedCampaigns = campaigns.filter(c => c.status === 'failed').length
-    const totalSent = campaigns.reduce((s, c) => s + c.sent_count, 0)
-    const totalFailed = campaigns.reduce((s, c) => s + (c.failed_count ?? 0), 0)
-    const totalRead = campaigns.reduce((s, c) => s + c.read_count, 0)
-    const totalConv = campaigns.reduce((s, c) => s + c.converted_count, 0)
-    const openRate = totalSent > 0 ? Math.round((totalRead / totalSent) * 100) : 0
-    const convRate = totalSent > 0 ? Math.round((totalConv / totalSent) * 100) : 0
-    return { completed, failedCampaigns, totalSent, totalFailed, openRate, convRate }
+
+    let metaAccepted = 0
+    let delivered = 0
+    let totalRead = 0
+    let failedPreAccept = 0
+    let totalConv = 0
+
+    for (const c of campaigns) {
+      if (c.stats) {
+        metaAccepted   += c.stats.meta_accepted
+        delivered      += c.stats.delivered
+        totalRead      += c.stats.read
+        failedPreAccept += c.stats.failed
+      } else {
+        // Legacy fallback — these fields can be stale but at least
+        // we surface something while the backend rolls out.
+        metaAccepted   += c.sent_count ?? 0
+        delivered      += c.delivered_count ?? 0
+        totalRead      += c.read_count ?? 0
+        failedPreAccept += c.failed_count ?? 0
+      }
+      totalConv += c.converted_count ?? 0
+    }
+
+    // "معدل القراءة من الواصل" — read / delivered. We pick this
+    // denominator over `read / meta_accepted` because the merchant
+    // actually wants to know "of the people who got the message, how
+    // many read it?". Showing the denominator in the label keeps it
+    // unambiguous. Falls back to read/meta_accepted only if Meta has
+    // not echoed any delivered events yet (race window during early
+    // sending).
+    const openRateDen = delivered > 0 ? delivered : metaAccepted
+    const openRate = openRateDen > 0
+      ? Math.round((totalRead / openRateDen) * 100)
+      : 0
+    const openRateBasis: 'delivered' | 'accepted' | 'none' =
+      delivered > 0 ? 'delivered'
+        : (metaAccepted > 0 ? 'accepted' : 'none')
+
+    const convRate = metaAccepted > 0
+      ? Math.round((totalConv / metaAccepted) * 100)
+      : 0
+
+    return {
+      completed,
+      failedCampaigns,
+      // Headline ``إجمالي المُرسَل`` = Meta accepted (the canonical
+      // "actually handed to Meta" count). This matches the detail
+      // panel's "قبلتها Meta" row exactly.
+      totalSent: metaAccepted,
+      totalDelivered: delivered,
+      totalRead,
+      totalFailed: failedPreAccept,
+      openRate,
+      openRateBasis,
+      convRate,
+    }
   }, [campaigns])
 
   return (
@@ -3582,10 +3651,48 @@ export default function Campaigns() {
         </>
       )}
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div
+        className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4"
+        // The "إجمالي المُرسَل" + "معدل القراءة" tiles below are
+        // derived from the canonical CampaignSendLog aggregator so
+        // they always agree with the per-campaign detail panel
+        // ("قبلتها Meta" / "وصلت للعميل" / "قرأها العميل"). Hover
+        // tooltips make the denominator explicit so the merchant
+        // never has to guess what 54% means.
+      >
         <StatCard label="حملات مكتملة" value={stats.completed.toString()} icon={CheckCircle} />
-        <StatCard label="إجمالي المُرسَل" value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`} icon={Send} />
-        <StatCard label="معدل القراءة" value={`${stats.openRate}%`} icon={BarChart2} />
+        <div
+          title={
+            stats.totalDelivered > 0
+              ? `قبلتها Meta: ${stats.totalSent.toLocaleString('ar-SA')} · وصلت: ${stats.totalDelivered.toLocaleString('ar-SA')}`
+              : `قبلتها Meta: ${stats.totalSent.toLocaleString('ar-SA')}`
+          }
+        >
+          <StatCard
+            label="إجمالي المُرسَل (قبلتها Meta)"
+            value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`}
+            icon={Send}
+          />
+        </div>
+        <div
+          title={
+            stats.openRateBasis === 'delivered'
+              ? `معدل القراءة من الواصل = ${stats.totalRead.toLocaleString('ar-SA')} / ${stats.totalDelivered.toLocaleString('ar-SA')}`
+              : stats.openRateBasis === 'accepted'
+                ? `معدل القراءة من المُقبَل (Meta) = ${stats.totalRead.toLocaleString('ar-SA')} / ${stats.totalSent.toLocaleString('ar-SA')} — لم تصلنا بعد إيصالات «وصلت للعميل»`
+                : 'لا توجد رسائل مُقبَلة بعد'
+          }
+        >
+          <StatCard
+            label={
+              stats.openRateBasis === 'delivered'
+                ? 'معدل القراءة (من الواصل)'
+                : 'معدل القراءة (من المُقبَل)'
+            }
+            value={`${stats.openRate}%`}
+            icon={BarChart2}
+          />
+        </div>
         <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={TrendingUp} />
       </div>
 

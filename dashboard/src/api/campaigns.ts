@@ -57,6 +57,44 @@ export type CampaignLifecycle =
   | 'completed_empty'
   | 'unknown'
 
+/** Canonical per-campaign analytics derived from ``CampaignSendLog``.
+ *
+ *  These numbers ALWAYS reflect the latest Meta status webhook
+ *  activity (delivered / read / failed-after-accept). The legacy
+ *  ``Campaign.sent_count`` / ``delivered_count`` / ``read_count``
+ *  columns are best-effort incremental counters that drift in
+ *  wave-mode or after dispatcher restarts, so this object is the
+ *  single source of truth for every analytics surface
+ *  (table column, top summary cards, detail drawer). */
+export interface CampaignStats {
+  /** ``CampaignSendLog.status='sent'`` — Meta accepted the message. */
+  meta_accepted: number
+  /** Subset of meta_accepted where ``delivered_at`` is non-null. */
+  delivered: number
+  /** Subset of meta_accepted where ``read_at`` is non-null. */
+  read: number
+  /** Subset of meta_accepted where ``failed_at`` is non-null
+   *  (i.e. Meta later rejected the already-accepted message). */
+  failed_after_accept: number
+  /** ``max(0, meta_accepted - delivered - failed_after_accept)`` —
+   *  "in flight / no webhook echo yet". */
+  not_delivered_yet: number
+  /** Pre-accept failures — Meta rejected the send request outright. */
+  failed: number
+  /** ``status IN ('queued', 'sending')``. */
+  queued: number
+  /** ``status LIKE 'skipped_%'`` — frequency cap, opt-out, etc. */
+  skipped: number
+  /** Sum of every send-log row for this campaign. */
+  total_recipients: number
+  /** ``delivered / meta_accepted``. Null when meta_accepted == 0. */
+  delivery_rate: number | null
+  /** ``read / meta_accepted``. Null when meta_accepted == 0. */
+  read_rate_of_accepted: number | null
+  /** ``read / delivered``. Null when delivered == 0. */
+  read_rate_of_delivered: number | null
+}
+
 export interface CampaignRecord {
   id: number
   name: string
@@ -92,6 +130,12 @@ export interface CampaignRecord {
   read_count: number
   clicked_count: number
   converted_count: number
+  /** Canonical per-campaign analytics, computed at read time from
+   *  ``CampaignSendLog`` (not the drifting Campaign columns). The
+   *  cards / table / detail panel MUST prefer these numbers — the
+   *  flat ``*_count`` fields above are kept for backwards-compat
+   *  only and point at the same canonical aggregates. */
+  stats?: CampaignStats
   created_at: string | null
   launched_at: string | null
   /** Wave/Batch — `immediate` for legacy / small campaigns,
@@ -695,6 +739,10 @@ export interface CampaignReport {
   stopped_by_limit: number
   last_error_code: string | null
   last_error_message: string | null
+  /** Canonical analytics — same shape as the per-row stats block on
+   *  the /campaigns list response, so the detail page can share one
+   *  component with the dashboard summary cards. */
+  stats?: CampaignStats
 }
 
 export const campaignsApi = {
