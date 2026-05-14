@@ -218,17 +218,19 @@ export default function Customers() {
   }, [])
 
   const saveInlineEdit = useCallback(async (cust: CustomerRecord) => {
-    // Client-side validation — same rules the backend enforces, but
-    // surfaced inline so the merchant gets feedback without a
-    // round-trip. The backend re-validates so any drift between
-    // them still fails closed.
+    // Client-side validation — same rules the backend enforces.
+    //
+    // EMPTY NAMES ARE NOW ALLOWED (May 2026 policy). The merchant
+    // can wipe a garbage import name, and the dashboard renders the
+    // empty cell as a grey "بدون اسم" placeholder while campaigns
+    // and templates fall back to "عميلنا الغالي". A high-confidence
+    // AI-detected name from a later conversation may refill it
+    // automatically. See ``backend/routers/customers.update_customer``
+    // for the contract: empty body.name → Customer.name=None +
+    // manual_name_override=true + manual_name_cleared=true.
     const trimmed = (inlineEditValue || '')
       .trim()
       .replace(/\s+/g, ' ')
-    if (!trimmed) {
-      setInlineEditError('الاسم لا يمكن أن يكون فارغاً')
-      return
-    }
     if (trimmed.length > INLINE_NAME_MAX_LEN) {
       setInlineEditError(`الاسم طويل جداً (الحد ${INLINE_NAME_MAX_LEN} حرفاً)`)
       return
@@ -243,9 +245,14 @@ export default function Customers() {
     setInlineEditError('')
     try {
       const res = await customersApi.update(cust.id, { name: trimmed })
+      const _wasCleared = !trimmed
       // Update the row IN-PLACE so the merchant stays inside the
       // current search / filter / page view. Critical for the
       // "search for 'تيك توك' → edit row → keep going" workflow.
+      //
+      // ``res.name`` comes back as ``""`` when the merchant cleared
+      // it; we store it as ``""`` so the renderer below shows the
+      // grey "بدون اسم" placeholder.
       setCustomers(prev =>
         prev.map(c =>
           c.id === cust.id
@@ -253,6 +260,7 @@ export default function Customers() {
                 ...c,
                 name: res.name ?? trimmed,
                 manual_name_override: res.manual_name_override ?? true,
+                manual_name_cleared: (res as any).manual_name_cleared ?? _wasCleared,
                 manual_name_edited_at: new Date().toISOString(),
               }
             : c,
@@ -266,11 +274,17 @@ export default function Customers() {
               ...prev,
               name: res.name ?? trimmed,
               manual_name_override: res.manual_name_override ?? true,
+              manual_name_cleared: (res as any).manual_name_cleared ?? _wasCleared,
               manual_name_edited_at: new Date().toISOString(),
             }
           : prev,
       )
-      setInlineNameToast({ ok: true, text: 'تم تحديث اسم العميل' })
+      setInlineNameToast({
+        ok: true,
+        text: _wasCleared
+          ? 'تم حذف اسم العميل (سيظهر "بدون اسم")'
+          : 'تم تحديث اسم العميل',
+      })
       cancelInlineEdit()
     } catch (err: any) {
       const msg =
@@ -1365,12 +1379,32 @@ export default function Customers() {
                                 column at the far end of the row, so
                                 the pencil is unambiguously the
                                 "edit name" affordance. */}
-                            <span
-                              className="font-medium text-slate-900 cursor-pointer"
-                              onClick={() => setSelectedCustomer(c)}
-                            >
-                              {c.name || '—'}
-                            </span>
+                            {/* Empty / NULL names render as a soft
+                                "بدون اسم" placeholder (May 2026 policy).
+                                The placeholder is NOT a real value — the
+                                merchant deliberately wiped a garbage
+                                name, templates fall back to
+                                "عميلنا الغالي", and the AI may refill
+                                from a future "اسمي ..." turn. The
+                                placeholder is rendered in lighter
+                                slate-400 italic so it reads as
+                                "missing data" not "real value". */}
+                            {c.name ? (
+                              <span
+                                className="font-medium text-slate-900 cursor-pointer"
+                                onClick={() => setSelectedCustomer(c)}
+                              >
+                                {c.name}
+                              </span>
+                            ) : (
+                              <span
+                                className="font-normal italic text-slate-400 cursor-pointer"
+                                onClick={() => setSelectedCustomer(c)}
+                                title="هذا العميل بلا اسم — استخدم القلم لإضافة اسم"
+                              >
+                                بدون اسم
+                              </span>
+                            )}
                             <button
                               type="button"
                               onClick={(e) => {

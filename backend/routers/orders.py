@@ -523,9 +523,15 @@ def _build_payment_reminder_text(
     references the payment link when the merchant actually has one. Kept
     short so it fits cleanly in WhatsApp's free-text body.
     """
-    name = (customer_name or "عميلنا الكريم").strip() or "عميلنا الكريم"
-    if name == "—":
-        name = "عميلنا الكريم"
+    # Use the central greeting fallback so reminders speak the same
+    # voice as campaigns and templates (``"عميلنا الغالي"``).
+    from core.customer_display import (  # noqa: PLC0415
+        DEFAULT_FALLBACK_NAME as _FALLBACK_GREETING,
+        display_name_passthrough_or_fallback as _greet_name,
+    )
+    name = _greet_name(customer_name)
+    if name == "—" or not name.strip():
+        name = _FALLBACK_GREETING
 
     lines = [
         f"مرحباً {name} 👋",

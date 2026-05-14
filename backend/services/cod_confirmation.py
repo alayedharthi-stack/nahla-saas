@@ -47,6 +47,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.orm.attributes import flag_modified
 
+from core.customer_display import (
+    display_name_passthrough_or_fallback as _customer_display_passthrough,
+)
+
 logger = logging.getLogger("nahla.cod_confirmation")
 
 
@@ -156,7 +160,13 @@ async def send_cod_confirmation_template(
 
     to = normalize_phone(customer_phone) or customer_phone
     body_params = [
-        {"type": "text", "text": str(customer_name or "عميلنا الكريم")},
+        # Use the central fallback (``"عميلنا الغالي"``) so every
+        # template / campaign / automation uses the same greeting.
+        # See ``core.customer_display.DEFAULT_FALLBACK_NAME``.
+        {
+            "type": "text",
+            "text": _customer_display_passthrough(customer_name),
+        },
         {"type": "text", "text": str(product_name or "طلبك")},
         {"type": "text", "text": str(total_amount or "—")},
     ]

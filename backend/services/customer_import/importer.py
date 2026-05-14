@@ -352,9 +352,14 @@ def _apply_non_destructive_merge(
     is_store_customer = existing_channel in _STORE_SOURCES or has_salla_id
     # Merchant-curated names (inline pencil in customers table) are
     # off-limits to bulk import — file rows NEVER overwrite them.
-    manual_name_override = bool(
-        (getattr(existing, "extra_metadata", None) or {}).get("manual_name_override")
-    )
+    # ``manual_name_cleared`` rows (override=True, name=None) are
+    # ALSO off-limits to file imports; we only let high-trust
+    # in-conversation AI detection refill them. See
+    # ``customer_intelligence._handle_existing_customer`` for the
+    # full source-hierarchy.
+    _meta_for_override = (getattr(existing, "extra_metadata", None) or {})
+    manual_name_override = bool(_meta_for_override.get("manual_name_override"))
+    manual_name_cleared  = bool(_meta_for_override.get("manual_name_cleared"))
 
     if incoming_name and not manual_name_override:
         if not existing_name:

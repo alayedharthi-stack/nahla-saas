@@ -107,15 +107,28 @@ class CustomerPatchIn(BaseModel):
 
     @validator("name", pre=True)
     def validate_name(cls, v):
-        """Trim + length-cap merchant-supplied names. We accept an
-        explicit ``""`` (after trim) only as a "no change" signal —
-        the endpoint rejects empty names below so the UI surfaces a
-        clear error instead of silently wiping the row. Letting the
-        validator pass empty strings through keeps the existing
-        contract for bulk PATCH callers that send all fields as
-        strings."""
+        """Trim + length-cap merchant-supplied names.
+
+        Accepts:
+          * ``None``         — explicit "clear the name" (May 2026
+                                policy: merchants may delete garbage
+                                names entirely; templates fall back
+                                to ``DEFAULT_FALLBACK_NAME``).
+          * ``""``           — same as ``None`` after trim.
+          * ``"  "``         — same as ``None`` after trim.
+          * Real name string — trimmed, whitespace-collapsed, length-
+                                capped at ``CUSTOMER_NAME_MAX_LEN``.
+
+        The endpoint persists a cleared name as ``Customer.name=None``
+        + sets ``manual_name_override=true`` AND
+        ``manual_name_cleared=true``. The cleared flag is what the
+        AI-driven name detector reads to decide "the merchant
+        intentionally emptied this — a high-confidence detected
+        name CAN refill it" (vs. a non-empty merchant name which
+        must NEVER be overwritten).
+        """
         if v is None:
-            return v
+            return None
         if not isinstance(v, str):
             v = str(v)
         v = v.strip()
@@ -286,6 +299,7 @@ def _serialize_customer(
     marketing_opt_out_manual: bool = bool(meta.get("marketing_opt_out_manual"))
     is_campaign_test_recipient: bool = bool(meta.get("is_campaign_test_recipient"))
     manual_name_override:   bool = bool(meta.get("manual_name_override"))
+    manual_name_cleared:    bool = bool(meta.get("manual_name_cleared"))
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
         or (profile.segment if profile else None)
@@ -321,6 +335,7 @@ def _serialize_customer(
         # small "محرّر يدوياً" hint and the bulk cleanup tool skips
         # the row so the merchant's edit is never undone.
         "manual_name_override":       manual_name_override,
+        "manual_name_cleared":        manual_name_cleared,
         "manual_name_edited_at":      meta.get("manual_name_edited_at"),
         # ── Per-segment source breakdown ──────────────────────────────
         # Shape: { "<segment_key>": { "automatic": bool,
@@ -989,20 +1004,30 @@ async def update_customer(
             )
         cust.phone = body.phone
 
+    # ``name`` handling — three distinct cases:
+    #   * Field omitted from request body       → leave name alone.
+    #   * Field present, non-empty after trim   → set the name.
+    #   * Field present, empty/null/whitespace  → CLEAR the name
+    #     (``Customer.name = None``). Dashboard renders "بدون اسم"
+    #     and templates fall back to "عميلنا الغالي".
+    #
+    # We use Pydantic v2's ``model_fields_set`` to distinguish
+    # "not sent" from "explicitly null" — the JSON body
+    # ``{"name": null}`` MUST clear, while ``{}`` (or any body
+    # without a ``name`` key) MUST be a no-op.
     name_changed = False
-    if body.name is not None:
-        # Empty/whitespace-only names are rejected explicitly so the
-        # UI can surface "الاسم لا يمكن أن يكون فارغاً" instead of
-        # silently wiping the row. The validator already trimmed +
-        # capped length.
-        if not body.name:
-            raise HTTPException(
-                status_code=422,
-                detail="الاسم لا يمكن أن يكون فارغاً",
-            )
-        if body.name != (cust.name or ""):
-            cust.name = body.name
+    name_cleared = False
+    _name_field_sent = "name" in getattr(body, "model_fields_set", set())
+    if _name_field_sent:
+        # The validator already trimmed + collapsed whitespace and
+        # may have turned ``""`` into ``""`` (still empty). Treat
+        # any falsy value as "clear".
+        new_value: Optional[str] = body.name if (body.name or "").strip() else None
+        if new_value != (cust.name or None):
+            cust.name = new_value
             name_changed = True
+        if new_value is None:
+            name_cleared = True
     if body.email is not None:
         cust.email = body.email
 
@@ -1012,11 +1037,25 @@ async def update_customer(
     # old one (the merchant explicitly approved this spelling).
     # The flag is the single source of truth the bulk cleanup
     # pipeline reads to decide "skip this row".
-    if body.name is not None:
+    #
+    # ``manual_name_cleared`` is a SECOND, weaker flag that lives
+    # alongside ``manual_name_override``:
+    #   * Both flags True  → merchant intentionally emptied the name.
+    #                        Bulk cleanup still skips this row, but
+    #                        a high-confidence AI-detected name
+    #                        (e.g. "اسمي محمد") IS allowed to refill
+    #                        it — because keeping the row at
+    #                        "عميلنا الغالي" forever is worse than
+    #                        using the real name the customer
+    #                        volunteered.
+    #   * Override True, cleared False → merchant has a real curated
+    #                        name. NOTHING overwrites it.
+    if _name_field_sent:
         try:
             meta = dict(cust.extra_metadata or {})
-            meta["manual_name_override"]   = True
-            meta["manual_name_edited_at"]  = datetime.now(timezone.utc).isoformat()
+            meta["manual_name_override"]  = True
+            meta["manual_name_cleared"]   = bool(name_cleared)
+            meta["manual_name_edited_at"] = datetime.now(timezone.utc).isoformat()
             # Preserve the previous name for one-step "undo" + audit
             # diffability. Cap to one snapshot — we don't keep history.
             if name_changed:
@@ -1055,6 +1094,9 @@ async def update_customer(
         "email":                 cust.email or "",
         "manual_name_override":  bool(
             (cust.extra_metadata or {}).get("manual_name_override")
+        ),
+        "manual_name_cleared":   bool(
+            (cust.extra_metadata or {}).get("manual_name_cleared")
         ),
         "name_changed":          name_changed,
     }

@@ -3073,6 +3073,65 @@ async def _handle_merchant_message(
         )
         return
 
+    # ── Customer self-introduction capture (May 2026) ────────────────────────
+    # If the inbound text is an UNAMBIGUOUS self-intro ("اسمي محمد",
+    # "أنا دخيل الله", "معك فهد", "my name is …") and the customer row
+    # is either nameless OR was cleared by the merchant via the inline
+    # pencil (manual_name_cleared=true), adopt the volunteered name as
+    # the canonical ``Customer.name``. Side-effects are bounded:
+    #   * NEVER overwrites a non-empty merchant-curated name.
+    #   * NEVER fires on incidental name mentions inside a longer
+    #     sentence — only on the conservative anchors in
+    #     ``core.customer_name_extractor``.
+    #   * Failure is logged and ignored — the rest of the inbound
+    #     pipeline runs as before.
+    try:
+        from core.customer_name_extractor import (  # noqa: PLC0415
+            extract_high_confidence_name,
+        )
+        from services.customer_intelligence import (  # noqa: PLC0415
+            CustomerIntelligenceService as _NameCIS,
+        )
+
+        _name_hit = extract_high_confidence_name(text)
+        if _name_hit:
+            try:
+                _name_svc = _NameCIS(db, tenant_id)
+                _name_cust = _name_svc.upsert_customer_identity(
+                    phone=to,
+                    name=_name_hit.value,
+                    source="ai_detected_name",
+                )
+                # If the row was previously CLEARED by the merchant
+                # we now flip ``manual_name_cleared`` back to false
+                # because we successfully refilled it. The override
+                # flag stays true so future low-trust sources (CSV
+                # imports, WhatsApp profile syncs) still cannot touch
+                # this name.
+                if _name_cust is not None:
+                    _meta = dict(_name_cust.extra_metadata or {})
+                    if _meta.get("manual_name_cleared"):
+                        _meta["manual_name_cleared"] = False
+                        from datetime import timezone as _tz_name  # noqa: PLC0415
+                        _meta["manual_name_refilled_by_ai_at"] = (
+                            datetime.now(_tz_name.utc).isoformat()
+                        )
+                        _name_cust.extra_metadata = _meta
+                        db.add(_name_cust)
+                db.flush()
+                logger.info(
+                    "[NAME_EXTRACTOR] adopted | tenant=%s phone=%s "
+                    "pattern=%s name=%r",
+                    tenant_id, to, _name_hit.pattern, _name_hit.value,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[NAME_EXTRACTOR] adopt failed | tenant=%s phone=%s err=%s",
+                    tenant_id, to, exc,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[NAME_EXTRACTOR] skipped (init err): %s", exc)
+
     # ── COD reply interception ────────────────────────────────────────────────
     # Some WhatsApp clients render QUICK_REPLY taps as plain text rather
     # than interactive button payloads. We pattern-match the message

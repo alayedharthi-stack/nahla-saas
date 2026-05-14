@@ -1394,8 +1394,13 @@ async def _execute_action(
     # order_number, store_name, amount, payment_url, coupon_code.
     _payload_rich = dict(event.payload or {})
     _rich_fallback_values = [
-        # slot 0 → customer_name (always available)
-        (getattr(customer, "name", None) or "عميلنا الكريم"),
+        # slot 0 → customer_name (always available). Use the central
+        # fallback ``"عميلنا الغالي"`` so every automation/template
+        # speaks with the same voice — see ``core.customer_display``.
+        (
+            (getattr(customer, "name", None) or "").strip()
+            or "عميلنا الغالي"
+        ),
         # slot 1 → order number (very common in payment/COD templates)
         str(
             _payload_rich.get("order_number")

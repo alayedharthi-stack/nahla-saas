@@ -75,6 +75,23 @@ export interface CustomerRecord {
    *  it is honoured. */
   manual_name_override?: boolean
   manual_name_edited_at?: string | null
+  /** True when the merchant intentionally CLEARED the name via the
+   *  inline pencil (left the input empty and pressed save). Distinct
+   *  from "name was never set":
+   *    * ``manual_name_override=true, manual_name_cleared=true,  name=''``
+   *      → merchant wiped a garbage import; show "بدون اسم" placeholder,
+   *        templates fall back to "عميلنا الغالي".
+   *    * ``manual_name_override=true, manual_name_cleared=false, name='X'``
+   *      → merchant curated a real name; the bulk cleaner skips this
+   *        row entirely.
+   *    * ``manual_name_override=undefined`` → never touched manually.
+   *
+   *  ``manual_name_cleared`` rows are the ONLY rows where a high-
+   *  confidence AI-detected name (e.g. "اسمي محمد") is allowed to
+   *  refill ``Customer.name`` from a future conversation. See
+   *  ``backend/services/customer_intelligence`` for the trust
+   *  hierarchy. */
+  manual_name_cleared?: boolean
   /** Per-segment source breakdown.
    *
    *  Shape: ``{ <segment_key>: { automatic, manual_include, manual_exclude } }``

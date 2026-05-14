@@ -24,18 +24,25 @@ logger = logging.getLogger("nahla.customer_intelligence")
 #
 # Scale: 10 = most authoritative, 0 = least.
 _NAME_SOURCE_TRUST: Dict[str, int] = {
-    "salla_sync":       10,  # Official store registry — highest authority
-    "customer_webhook": 10,  # Salla customer.created/updated webhook
-    "zid_sync":         10,  # Zid store sync (when integrated)
-    "order_webhook":     8,  # Name extracted from a real placed order
-    "order_sync":        8,
-    "order":             8,
-    "manual":            5,  # Merchant typed the name themselves
-    "manual_import":     4,  # Uploaded CSV / XLSX
-    "bulk_retry":        2,
-    "whatsapp_inbound":  1,  # WhatsApp contact name — unreliable alias
-    "whatsapp_lead":     1,
-    "widget":            1,
+    "salla_sync":          10,  # Official store registry — highest authority
+    "customer_webhook":    10,  # Salla customer.created/updated webhook
+    "zid_sync":            10,  # Zid store sync (when integrated)
+    "order_webhook":        8,  # Name extracted from a real placed order
+    "order_sync":           8,
+    "order":                8,
+    # ``ai_detected_name`` — the customer explicitly said their name in
+    # chat ("اسمي محمد"). Ranked between merchant typing (5) and order-
+    # derived names (8): higher than a casual import row, lower than a
+    # confirmed Salla order — because the AI extractor is conservative
+    # but not infallible.
+    "ai_detected_name":     6,
+    "merchant_correction":  6,  # Merchant fixed it via the inline pencil
+    "manual":               5,  # Merchant typed the name themselves
+    "manual_import":        4,  # Uploaded CSV / XLSX
+    "bulk_retry":           2,
+    "whatsapp_inbound":     1,  # WhatsApp contact name — unreliable alias
+    "whatsapp_lead":        1,
+    "widget":               1,
 }
 
 
@@ -692,6 +699,13 @@ class CustomerIntelligenceService:
             # Low-trust sources (WhatsApp aliases, widgets) must not overwrite
             # authoritative names already on file from the store or orders.
             if clean_name:
+                _override_flag = bool(
+                    (customer.extra_metadata or {}).get("manual_name_override")
+                )
+                _cleared_flag = bool(
+                    (customer.extra_metadata or {}).get("manual_name_cleared")
+                )
+                _current_name = (customer.name or "").strip()
                 # ── Manual-name-override short-circuit ────────────
                 # The merchant explicitly curated this name via the
                 # inline pencil in the customers table (or the
@@ -701,10 +715,47 @@ class CustomerIntelligenceService:
                 # hierarchy: merchant intent beats every automated
                 # signal. See routers/customers.update_customer
                 # for where the flag is stamped.
-                if (customer.extra_metadata or {}).get("manual_name_override"):
+                #
+                # EXCEPTION (May 2026): when the merchant CLEARED
+                # the name (override=True, cleared=True, name=NULL),
+                # we still allow a HIGH-TRUST update — specifically
+                # an AI-detected name from the conversation
+                # ("اسمي محمد"). Keeping the row at the static
+                # fallback "عميلنا الغالي" forever is worse than
+                # adopting the name the customer just volunteered.
+                # Low-trust sources (whatsapp profile, widget) remain
+                # blocked even on cleared rows so a stray profile-
+                # name update doesn't re-fill a row the merchant
+                # deliberately emptied.
+                if (
+                    _override_flag
+                    and _current_name
+                ):
                     logger.debug(
-                        "[CIS] name NOT updated (manual override) "
+                        "[CIS] name NOT updated (manual override, non-empty) "
                         "| tenant=%s id=%s new_source=%s",
+                        self.tenant_id, customer.id, source,
+                    )
+                elif (
+                    _override_flag
+                    and _cleared_flag
+                    and not _current_name
+                    and (source or "").lower() not in {
+                        "ai_detected_name",
+                        "merchant_correction",
+                        "store_sync",
+                        "salla",
+                        "zid",
+                        "order",
+                    }
+                ):
+                    # Cleared row + low-trust source → still block.
+                    # The customer can refill it later by saying
+                    # their name in chat (source="ai_detected_name").
+                    logger.debug(
+                        "[CIS] name NOT updated (cleared by merchant, "
+                        "low-trust source) | tenant=%s id=%s "
+                        "new_source=%s",
                         self.tenant_id, customer.id, source,
                     )
                 else:
