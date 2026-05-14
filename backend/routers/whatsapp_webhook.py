@@ -2546,6 +2546,124 @@ async def _dispatch_message(
                 )
                 _receipt_decision = None
 
+            # ── Text-only payment-claim short-circuit (May 2026) ──────
+            # When the customer SAYS they paid without attaching a
+            # receipt ("تم التحويل" / "حولت" / "دفعت"), the brain
+            # used to ship a generic "أنا هنا — قول وش تحتاج" line
+            # because two-token Arabic inbounds rarely hit any
+            # high-confidence intent. We handle the claim
+            # deterministically here so the customer always sees a
+            # payment-aware acknowledgement that asks for the proof.
+            #
+            # The brain is bypassed only when:
+            #   * inbound is a recognised payment-confirmation phrase,
+            #   * NO media is attached (real receipts go through the
+            #     ``maybe_handle_receipt_inbound`` branch above),
+            #   * the conversation has an active order / awaiting-
+            #     receipt / under-review state.
+            # On any failure we silently fall through to the brain.
+            _payment_claim_decision = None
+            if _receipt_decision is None:
+                try:
+                    from core.payment_intent import (  # noqa: PLC0415
+                        maybe_handle_payment_claim,
+                    )
+                    _payment_claim_decision = maybe_handle_payment_claim(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_text=text or "",
+                        has_attached_media=(
+                            normalized_inbound.normalized_type
+                            in ("document", "image", "audio")
+                        ),
+                    )
+                except Exception as _pc_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PAYMENT_INTENT] short-circuit check failed "
+                        "(non-fatal) tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _pc_exc,
+                    )
+                    _payment_claim_decision = None
+
+            if _payment_claim_decision is not None:
+                logger.info(
+                    "[ORDER_FLOW_STATE] short_circuit=payment_claim "
+                    "tenant=%s phone=*%s next_action=send_ack",
+                    resolved_tenant_id,
+                    sender[-4:] if sender else "",
+                )
+                # Persist the state patch first so subsequent inbounds
+                # see the awaiting-receipt flag even if the send fails.
+                try:
+                    apply_state_patch(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        state_patch=_payment_claim_decision["state_patch"],
+                    )
+                except Exception as _pp_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_claim state_patch "
+                        "apply failed tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _pp_exc,
+                    )
+                # Persist the inbound + outbound + send via _post_wa
+                # so dedup, status stamping, and admin metrics work
+                # exactly the same way as the brain path.
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="inbound",
+                        body=text or "[payment_claim]",
+                        event_type="whatsapp_message",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "wa_message_id": msg_id or None,
+                            "payment_claim_short_circuit": True,
+                        },
+                    )
+                except Exception as _sc_inb_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_claim inbound save "
+                        "failed tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _sc_inb_exc,
+                    )
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="outbound",
+                        body=_payment_claim_decision["reply_text"],
+                        event_type="whatsapp_message",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "is_ai": True,
+                            "deterministic_path": "payment_claim_ack",
+                        },
+                    )
+                except Exception as _sc_out_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_claim outbound save "
+                        "failed tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _sc_out_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {
+                            "body": _payment_claim_decision["reply_text"],
+                        },
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
             if _receipt_decision is not None:
                 logger.info(
                     "[ORDER_FLOW_STATE] short_circuit=receipt_received "
@@ -4072,6 +4190,46 @@ async def _handle_merchant_message(
                 "(orig_len=%d new_len=%d brain=%s)",
                 tenant_id, to, _orig_len, len(reply), _brain_active,
             )
+
+        # ── Payment-context safety net (May 2026) ─────────────────────
+        # Last defence against the screenshot bug: even if the brain
+        # somehow shipped a generic "أنا هنا — قول وش تحتاج" line
+        # after the customer said "تم التحويل" / "حولت" / "دفعت",
+        # rewrite that line to a payment-aware acknowledgement. This
+        # also catches replies that bypassed the dedup guard (e.g.
+        # first-ever message of a session is structurally identical
+        # to the fallback). The rewriter is a no-op unless BOTH the
+        # inbound is a payment-confirmation claim AND the outbound
+        # matches a known generic fallback marker — so legitimate
+        # replies never get touched.
+        if reply and not _brain_handoff:
+            try:
+                from core.payment_intent import (  # noqa: PLC0415
+                    rewrite_generic_reply_for_payment_context,
+                )
+                from core.order_flow import (  # noqa: PLC0415
+                    _focus_summary as _pi_focus,
+                    _load_brain_state as _pi_load,
+                )
+                _pi_conv, _pi_bs = _pi_load(db, tenant_id=tenant_id, phone=to)
+                _pi_summary = _pi_focus(_pi_bs)
+                _rewritten = rewrite_generic_reply_for_payment_context(
+                    inbound_text=text or "",
+                    brain_reply=reply,
+                    state_summary=_pi_summary,
+                )
+                if _rewritten:
+                    logger.info(
+                        "[PAYMENT_INTENT] rewrote_generic_fallback "
+                        "tenant=%s to=%s orig_len=%d new_len=%d",
+                        tenant_id, to, len(reply), len(_rewritten),
+                    )
+                    reply = _rewritten
+            except Exception as _pi_exc:  # noqa: BLE001
+                logger.debug(
+                    "[PAYMENT_INTENT] post-brain rewrite failed: %s",
+                    _pi_exc,
+                )
 
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
