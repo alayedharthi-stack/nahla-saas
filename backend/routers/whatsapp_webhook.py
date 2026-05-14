@@ -3493,11 +3493,23 @@ async def _handle_merchant_message(
                                 tenant_id, to,
                             )
                         else:
+                            # Set the FULL canonical human-takeover signal,
+                            # not just the legacy `is_human_handoff` flag.
+                            # The dashboard "طلب موظف" filter and the
+                            # conversations list router both prefer the
+                            # newer `needs_human` / `handoff_active`
+                            # columns. Skipping them was leaving the
+                            # inbox row without a reliable red pill in
+                            # some merchant tenants (per production UX
+                            # feedback).
                             convo.status = "human"
                             convo.is_human_handoff = True
+                            convo.needs_human = True
+                            convo.handoff_active = True
                             db.flush()
                             logger.info(
-                                "[Merchant/Brain] handoff session created for tenant=%s to=%s",
+                                "[Merchant/Brain] handoff session created for tenant=%s to=%s "
+                                "needs_human=True handoff_active=True",
                                 tenant_id, to,
                             )
                             # Pause AI so subsequent inbounds don't keep

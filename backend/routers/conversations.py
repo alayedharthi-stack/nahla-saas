@@ -327,12 +327,38 @@ async def list_conversations(
     db: Session = Depends(get_db),
     limit: int = 80,
     offset: int = 0,
+    filter: str = "all",
 ):
     """
     Build the conversation list from **all** sources:
     1. ``Conversation`` records (canonical)
     2. Latest ``MessageEvent`` per conversation (actual last message)
     3. ``ConversationTrace`` fallback for phones without MessageEvent
+
+    Optional ``filter`` param narrows the SQL fetch BEFORE pagination,
+    so deep merchants (>1500 conversations) can still page reliably
+    within a single filter:
+
+      - ``human`` / ``agent_req``   → conversations flagged by any of
+                                      ``is_human_handoff`` / ``needs_human`` /
+                                      ``handoff_active`` / ``taken_over_at`` /
+                                      ``status='human'``, or with an active
+                                      ``HandoffSession`` row.
+      - ``closed``                  → ``status='closed'`` (server-stamped) —
+                                      the client also surfaces 24h-window
+                                      expiry as closed when ``status`` is not
+                                      explicitly set.
+      - ``paused``                  → ``ai_paused=True`` AND not human-takeover.
+      - ``blocked``                 → phone in the tenant blocklist.
+      - ``active`` / ``unsubscribed`` / ``all`` → no SQL narrowing; the
+                                      client filter is enough (cheap to do
+                                      because the SQL cap already trims the
+                                      tail by recency).
+
+    ``total_count`` and ``has_more`` are recomputed against the SAME
+    filter so the merchant can keep pressing "load more" until the
+    filtered tail is exhausted — closing the regression that bit the
+    inbox after the SQL-limit pagination rollout.
     """
     from sqlalchemy import and_, func, or_  # noqa: PLC0415
     import json as _json  # noqa: PLC0415
@@ -352,6 +378,16 @@ async def list_conversations(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
     paging_cap_limit = max(1, min(int(limit or 80), 200))
+
+    # Canonical filter slug. Unknown / empty values fall back to ``all``
+    # so an old dashboard that doesn't send the param keeps working.
+    _allowed_filters = {
+        "all", "active", "human", "agent_req",
+        "paused", "blocked", "unsubscribed", "closed",
+    }
+    filter_slug = (filter or "all").strip().lower()
+    if filter_slug not in _allowed_filters:
+        filter_slug = "all"
 
     def _norm(p: str) -> str:
         return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
@@ -466,11 +502,100 @@ async def list_conversations(
         .group_by(MessageEvent.conversation_id)
         .subquery()
     )
+    # ── SQL-level filter narrowing ───────────────────────────────────────────
+    # We build a list of additional WHERE clauses that BOTH the row
+    # query and the COUNT(*) query share so ``has_more`` math stays
+    # consistent with the slice we return. For filters that need data
+    # outside the Conversation row (HandoffSession, blocklist, …) we
+    # still pre-resolve here so the SQL stays a single roundtrip.
+    extra_clauses: list = []
+    if filter_slug in ("human", "agent_req"):
+        # Canonical "this conversation needs human attention" check.
+        # Mirrors `_is_human_takeover()` + active handoff-session lookup.
+        handoff_session_phones = list(active_handoffs.keys())  # already normalised
+        handoff_or = [
+            Conversation.is_human_handoff.is_(True),
+            Conversation.needs_human.is_(True),
+            Conversation.handoff_active.is_(True),
+            Conversation.taken_over_at.isnot(None),
+            func.lower(Conversation.status) == "human",
+        ]
+        if handoff_session_phones:
+            # Pre-loaded set of normalised customer phones with an
+            # active HandoffSession. The Customer rows may store the
+            # phone with or without a leading '+'; cover both.
+            phone_variants: set[str] = set()
+            for p in handoff_session_phones:
+                if not p:
+                    continue
+                phone_variants.add(p)
+                phone_variants.add(f"+{p}")
+            handoff_or.append(
+                Conversation.customer.has(
+                    or_(
+                        Customer.normalized_phone.in_(list(phone_variants)),
+                        Customer.phone.in_(list(phone_variants)),
+                    )
+                )
+            )
+        extra_clauses.append(or_(*handoff_or))
+    elif filter_slug == "closed":
+        # Only conversations the merchant (or an automation) explicitly
+        # marked as closed. 24h-window expiry is a client-only signal
+        # because the WhatsApp window can re-open the moment the
+        # customer sends a new message — we don't want the row to
+        # vanish from the filter just because the API was hit a few
+        # seconds later than the timer.
+        extra_clauses.append(func.lower(Conversation.status) == "closed")
+    elif filter_slug == "paused":
+        # AI paused AND NOT a human takeover. The "blocked" and
+        # "human" filters are kept disjoint at the SQL level too so
+        # the badge counts add up to <= the tenant total.
+        extra_clauses.extend([
+            Conversation.ai_paused.is_(True),
+            Conversation.is_human_handoff.is_(False),
+            Conversation.needs_human.is_(False),
+            Conversation.handoff_active.is_(False),
+            or_(
+                Conversation.ai_paused_reason.is_(None),
+                func.lower(Conversation.ai_paused_reason) != "internal_number",
+            ),
+        ])
+    elif filter_slug == "blocked":
+        # The tenant blocklist is the source of truth (`_blocked_digits`
+        # — already loaded). We also accept the legacy
+        # ``ai_paused_reason='internal_number'`` row as blocked. The
+        # blocklist join uses the normalised phone via Customer.
+        blocked_clauses = []
+        if _blocked_digits:
+            blocked_variants: set[str] = set()
+            for d in _blocked_digits:
+                if not d:
+                    continue
+                blocked_variants.add(d)
+                blocked_variants.add(f"+{d}")
+            blocked_clauses.append(
+                Conversation.customer.has(
+                    or_(
+                        Customer.normalized_phone.in_(list(blocked_variants)),
+                        Customer.phone.in_(list(blocked_variants)),
+                    )
+                )
+            )
+        blocked_clauses.append(
+            and_(
+                Conversation.ai_paused.is_(True),
+                func.lower(Conversation.ai_paused_reason) == "internal_number",
+            )
+        )
+        extra_clauses.append(or_(*blocked_clauses))
+    # ``all`` / ``active`` / ``unsubscribed`` → no SQL narrowing.
+
     convo_rows_q = (
         db.query(Conversation)
         .options(joinedload(Conversation.customer))
         .outerjoin(last_msg_ts_sq, last_msg_ts_sq.c.conv_id == Conversation.id)
-        .filter(Conversation.tenant_id == tenant_id)
+        .filter(Conversation.tenant_id == tenant_id, *extra_clauses)
         .order_by(
             last_msg_ts_sq.c.last_msg_at.desc().nullslast(),
             Conversation.id.desc(),
@@ -480,9 +605,10 @@ async def list_conversations(
     convo_rows = convo_rows_q.all()
 
     # Tenant-wide totals (cheap COUNT — used for has_more / paging math).
+    # Recomputed against the SAME filter so the slice math is honest.
     tenant_convo_count = (
         db.query(func.count(Conversation.id))
-        .filter(Conversation.tenant_id == tenant_id)
+        .filter(Conversation.tenant_id == tenant_id, *extra_clauses)
         .scalar()
     ) or 0
     phone_info: Dict[str, Dict[str, Any]] = {}
@@ -778,6 +904,14 @@ async def list_conversations(
             if not phone_info[key]["lastMsg"] and not phone_info[key]["time"]:
                 phone_info[key]["lastMsg"] = row.message or ""
                 phone_info[key]["time"] = row.created_at.isoformat() if row.created_at else ""
+        elif filter_slug != "all":
+            # When a filter is active, the SQL query above already
+            # narrowed to the canonical matching set. ConversationTrace
+            # rows have no human-takeover/closed columns, so adding
+            # them here would pollute the filtered slice (e.g. an
+            # ``agent_req`` page silently showing trace-only phones).
+            # The trace fallback is purely for the unfiltered inbox.
+            continue
         elif _norm(phone) not in norm_to_key:
             norm_to_key[_norm(phone)] = phone
             trace_name = trace_name_by_norm.get(_norm(phone)) or phone
@@ -934,6 +1068,7 @@ async def list_conversations(
     perf_payload = {
         "event":                     "conversations_list_perf",
         "tenant_id":                 tenant_id,
+        "filter":                    filter_slug,
         "limit":                     safe_limit,
         "offset":                    safe_offset,
         "conversations_count":       tenant_convo_count,

@@ -388,6 +388,16 @@ export const featureRealityApi = {
     signal?: AbortSignal
     limit?: number
     offset?: number
+    /**
+     * Server-side filter slug. Matches the tab the merchant has
+     * selected so the SQL ``LIMIT`` window narrows BEFORE pagination,
+     * not after — critical for large inboxes where the human / closed
+     * tail can sit beyond the first 200-1500 SQL rows. Backend
+     * accepts: ``all`` | ``active`` | ``human`` | ``agent_req`` |
+     * ``paused`` | ``blocked`` | ``unsubscribed`` | ``closed``.
+     * Unknown values fall back to ``all`` server-side.
+     */
+    filter?: string
   }): Promise<{
     conversations: DashboardConversation[]
     total_count?: number
@@ -396,6 +406,7 @@ export const featureRealityApi = {
     const q = new URLSearchParams()
     if (opts?.limit != null) q.set('limit', String(opts.limit))
     if (opts?.offset != null) q.set('offset', String(opts.offset))
+    if (opts?.filter && opts.filter !== 'all') q.set('filter', opts.filter)
     const qs = q.toString()
     return apiCall(`/conversations${qs ? `?${qs}` : ''}`, {
       signal: opts?.signal,

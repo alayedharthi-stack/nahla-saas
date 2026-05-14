@@ -75,6 +75,14 @@ export default function Conversations() {
   const nextSliceOffsetRef  = useRef(0)
   const bannerRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const listBusyRef         = useRef(false)
+  // The filter the merchant has selected, mirrored in a ref so the
+  // async fetch helpers always read the LATEST value rather than the
+  // value captured at definition time. Without this, switching tabs
+  // mid-fetch would still hit the API with the previous filter and
+  // the new tab would render the wrong slice. Server-side SQL
+  // narrowing depends on this — that's the post-pagination fix for
+  // "بعض الفلاتر تأثرت بعد إصلاحات SQL".
+  const filterRef = useRef<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'unsubscribed' | 'closed'>('all')
 
   const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
   const [hasMoreServer, setHasMoreServer]      = useState(false)
@@ -150,6 +158,7 @@ export default function Conversations() {
         signal,
         limit: LIST_PAGE_LIMIT,
         offset: 0,
+        filter: filterRef.current,
       })
       if (gen !== listReqGen.current) return
       const rows = Array.isArray(page.conversations) ? page.conversations : []
@@ -194,6 +203,7 @@ export default function Conversations() {
         signal,
         limit: LIST_PAGE_LIMIT,
         offset: 0,
+        filter: filterRef.current,
       })
       if (gen !== listReqGen.current) return
       let rows = Array.isArray(page.conversations)
@@ -256,6 +266,10 @@ export default function Conversations() {
 
   /** Broader inbox fetch — only when linked phone misses the newest page snapshot. */
   async function fetchOutlineForPhoneMaybe(phoneGuess: string, signal: AbortSignal) {
+    // Intentionally NOT filtered — when a deep-link arrives for a
+    // specific phone and it isn't in the current filter's slice, we
+    // want to surface the row anyway. The router returns the full
+    // (unfiltered) inbox so the search lands across categories.
     const res = await featureRealityApi.conversations({
       signal,
       limit: 200,
@@ -277,6 +291,7 @@ export default function Conversations() {
         signal: ac.signal,
         limit: LIST_PAGE_LIMIT,
         offset: nextSliceOffsetRef.current,
+        filter: filterRef.current,
       })
       if (gen !== listReqGen.current) return
       const rows = Array.isArray(page.conversations) ? page.conversations : []
@@ -355,6 +370,25 @@ export default function Conversations() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedPhone])
+
+  // ── Filter change → refetch first page narrowed server-side ──────────────
+  // When the merchant switches tabs (e.g. "كل" → "طلب موظف") we
+  // refetch with the new ?filter= param so the SQL window narrows
+  // BEFORE pagination. Without this, large inboxes would show empty
+  // tabs (the human/closed tail can live beyond the first 200-1500
+  // rows). The very first render is handled by the mount effect
+  // above so we skip this on the initial pass when filter is still
+  // its default ``all`` — otherwise we'd fire two parallel fetches.
+  const filterChangedOnceRef = useRef(false)
+  useEffect(() => {
+    filterRef.current = filter
+    if (!filterChangedOnceRef.current) {
+      filterChangedOnceRef.current = true
+      return
+    }
+    void replaceFirstPageFromServer()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter])
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -596,6 +630,16 @@ export default function Conversations() {
   const _isUnsubscribed = (c: DashboardConversation) =>
     !!(c.isUnsubscribed || c.pendingUnsubscribe)
 
+  // "مغلقة": server-stamped ``status='closed'`` is the canonical
+  // signal (set by /conversations/close or by automations). The
+  // 24h WhatsApp window expiry is included as a secondary signal so
+  // dormant conversations the merchant has stopped engaging with
+  // still surface here even before they're explicitly closed. This
+  // mirrors the merchant mental model: "any conversation that's no
+  // longer a live thread".
+  const _isClosed = (c: DashboardConversation) =>
+    c.status === 'closed' || c.windowOpen === false
+
   const filtered = conversations.filter(c => {
     let matchFilter = false
     if (filter === 'all') matchFilter = true
@@ -605,7 +649,7 @@ export default function Conversations() {
     else if (filter === 'paused') matchFilter = _isAIPausedOnly(c)
     else if (filter === 'blocked') matchFilter = _isBlocked(c)
     else if (filter === 'unsubscribed') matchFilter = _isUnsubscribed(c)
-    else if (filter === 'closed') matchFilter = c.windowOpen === false
+    else if (filter === 'closed') matchFilter = _isClosed(c)
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
     return matchFilter && matchSearch
   })
@@ -671,7 +715,7 @@ export default function Conversations() {
               : f === 'paused' ? conversations.filter(c => _isAIPausedOnly(c)).length
               : f === 'blocked' ? conversations.filter(c => _isBlocked(c)).length
               : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
-              : conversations.filter(c => c.windowOpen === false).length
+              : conversations.filter(c => _isClosed(c)).length
 
             const activeClass =
               f === 'agent_req'    ? 'bg-red-500 text-white shadow-sm' :

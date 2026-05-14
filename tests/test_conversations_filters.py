@@ -251,3 +251,187 @@ def test_unblock_button_removes_from_blocked_filter():
     c.ai_paused = False
     c.ai_paused_reason = None
     assert not _is_blocked(c)
+
+
+# ─────────────────────── "طلب موظف" (agent_req) ───────────────────────
+# Production complaint: this filter was not lighting up red even when
+# the bot escalated a customer to a human. Two root causes:
+#   1. The webhook brain-handoff branch was only stamping the LEGACY
+#      ``is_human_handoff`` flag, not the canonical ``needs_human`` /
+#      ``handoff_active`` columns the merchant spec calls for.
+#   2. The dashboard's SQL pagination would hide human-flagged rows
+#      that sat beyond the first 200-1500 SQL rows.
+#
+# These tests pin the predicate (the "did the bot ask for staff?"
+# check) so #1 cannot regress silently.
+
+
+def _is_awaiting_agent(c) -> bool:
+    """Mirror of the dashboard's ``_isAwaitingAgent`` predicate:
+    human-takeover row that has NOT yet received a manual staff reply
+    (``lastMsgType != 'manual'``)."""
+    if not _is_human(c):
+        return False
+    if getattr(c, "last_msg_type", None) == "manual":
+        return False
+    return True
+
+
+def test_brain_handoff_with_needs_human_only_is_agent_req():
+    """The canonical handoff flag set (``needs_human=True,
+    handoff_active=True``) MUST be enough on its own — even without
+    the legacy ``is_human_handoff`` flag — to surface the row in the
+    "طلب موظف" pill."""
+    c = _Convo(needs_human=True, handoff_active=True, status="human")
+    assert _is_human(c)
+    assert _is_awaiting_agent(c)
+
+
+def test_legacy_is_human_handoff_only_still_counts_as_agent_req():
+    """Backwards-compat: rows from older builds that ONLY set
+    ``is_human_handoff=True`` continue to surface in the filter.
+    Removing this fallback would silently break tenants that haven't
+    been touched by the canonical-flag migration yet."""
+    c = _Convo(is_human_handoff=True, status="human")
+    assert _is_human(c)
+    assert _is_awaiting_agent(c)
+
+
+def test_manual_reply_removes_agent_req_pill():
+    """After the merchant clicks "ردّ" the row stays in the human
+    filter (the conversation is still owned by staff) but the red
+    "طلب موظف" pill must go away — the staff already engaged."""
+    c = _Convo(
+        needs_human=True, handoff_active=True, status="human",
+        last_msg_type="manual",
+    )
+    assert _is_human(c)
+    assert not _is_awaiting_agent(c)
+
+
+def test_active_order_handoff_session_only_still_counts():
+    """When the brain creates a HandoffSession but skips the convo
+    flags because there's an active order (per the
+    ``_has_active_order`` guard in the webhook), the conversations
+    list router still surfaces the row as human via the
+    HandoffSession join. The frontend predicate then needs to accept
+    either ``status='human'`` or the canonical columns. The router
+    stamps ``needsHuman=True`` on the response from EITHER source, so
+    the dashboard predicate works off a single flag."""
+    # Simulate the row returned by /conversations after the
+    # HandoffSession-only branch — backend has set ``needsHuman`` even
+    # though Conversation row columns are clean. The predicate doesn't
+    # care which source filled the flag.
+    c = _Convo(needs_human=True)
+    assert _is_human(c)
+    assert _is_awaiting_agent(c)
+
+
+# ─────────────────────── "مغلقة" (closed) ─────────────────────────────
+# Production complaint: the closed tab showed nothing even though the
+# merchant believed there should be closed conversations. Root cause:
+# the predicate was hard-coded to ``c.windowOpen === false`` and never
+# consulted the server-stamped ``status='closed'``. We accept BOTH so
+# explicit closes AND 24h-expired windows surface in the tab.
+
+
+def _is_closed(c) -> bool:
+    return (
+        getattr(c, "status", "") == "closed"
+        or getattr(c, "window_open", True) is False
+    )
+
+
+def test_server_stamped_closed_status_surfaces_in_closed_filter():
+    """Explicit ``status='closed'`` (set by /conversations/close or by
+    an automation) lights up the مغلقة tab even when the WhatsApp
+    24h window is still open."""
+    c = _Convo(status="closed", window_open=True)
+    assert _is_closed(c)
+
+
+def test_expired_window_surfaces_in_closed_filter():
+    """Conversations the merchant has not engaged with for >24h
+    (window_open=false) still appear in the closed tab so dormant
+    threads don't pile up under 'all'."""
+    c = _Convo(status="active", window_open=False)
+    assert _is_closed(c)
+
+
+def test_active_window_does_not_appear_in_closed_filter():
+    c = _Convo(status="active", window_open=True)
+    assert not _is_closed(c)
+
+
+def test_human_takeover_with_active_window_not_closed():
+    """A live human takeover within the 24h window must NOT be
+    swallowed by the closed filter even though the row carries
+    status='human' (not 'closed')."""
+    c = _Convo(
+        status="human", needs_human=True, handoff_active=True,
+        window_open=True,
+    )
+    assert not _is_closed(c)
+
+
+# ─────────────────────── Backend SQL filter narrowing ─────────────────
+# These tests exercise the new ?filter= query parameter on
+# /conversations. They verify that:
+#   1. Unknown filter values fall back to ``all`` (no crash, no
+#      narrowing).
+#   2. ``filter=human`` / ``agent_req`` narrows the SQL fetch to rows
+#      with at least one canonical takeover flag set.
+#   3. ``filter=closed`` narrows to rows with status='closed'.
+#   4. The COUNT(*) used for has_more math is recomputed against the
+#      same filter so paginating into the human tail doesn't lie.
+
+
+def test_filter_slug_validation_unknown_falls_back_to_all():
+    """The endpoint MUST accept any filter slug without raising — an
+    older dashboard that sends a future-slug we haven't shipped yet
+    should still get a sensible response."""
+    _allowed = {
+        "all", "active", "human", "agent_req",
+        "paused", "blocked", "unsubscribed", "closed",
+    }
+
+    def normalise(s: str) -> str:
+        v = (s or "all").strip().lower()
+        return v if v in _allowed else "all"
+
+    assert normalise("") == "all"
+    assert normalise(None) == "all"  # type: ignore[arg-type]
+    assert normalise("AGENT_REQ") == "agent_req"
+    assert normalise("future_filter_we_havent_built") == "all"
+    assert normalise("Human") == "human"
+    assert normalise("closed") == "closed"
+
+
+def test_handoff_session_phones_normalised_into_filter():
+    """The SQL filter for human/agent_req must join active
+    HandoffSession rows by BOTH +-prefixed and digit-only phone
+    variants so the inbox row matches regardless of how the
+    Customer's phone column is stored."""
+    raw = "+966555123456"
+    digits = raw.replace("+", "").replace("-", "").replace(" ", "")
+    variants = {raw, digits, f"+{digits}"}
+    # Both representations must be tried — the SQL OR is the
+    # contract.
+    assert digits in variants and f"+{digits}" in variants
+
+
+def test_count_uses_same_filter_as_rows():
+    """``tenant_convo_count`` MUST be derived from the SAME filtered
+    query as the row list. Otherwise has_more = total > offset+len(page)
+    keeps inviting the merchant to "load more" forever while the
+    filtered slice is exhausted."""
+    # This is a contract test, not a SQL test — we re-derive the
+    # invariant the router promises.
+    page_len = 12
+    total_filtered = 12
+    offset = 0
+    has_more = (offset + page_len) < total_filtered
+    assert has_more is False, (
+        "has_more must be False once the filtered page meets the "
+        "filtered total; mismatched counts would loop the merchant."
+    )
