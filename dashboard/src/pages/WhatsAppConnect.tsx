@@ -272,6 +272,13 @@ function EmbeddedSignupFlow({
   const embeddedStatusChecked   = useRef(false)
 
   const [configId, setConfigId] = useState('')
+  // Whether the merchant's Meta app actually has the FB Login for
+  // Business / WhatsApp Embedded Signup entitlement. Read from the
+  // backend ``/embedded/config`` payload. When false we render a
+  // "قريباً" state and DO NOT open the FB.login popup (Meta would
+  // reject it with the BSP/TP entitlement error anyway).
+  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null)
+  const [disabledReason, setDisabledReason] = useState('')
 
   // Add-phone form state
   const [newPhone, setNewPhone]         = useState('')
@@ -287,12 +294,31 @@ function EmbeddedSignupFlow({
     async function loadSdk() {
       setStage('loading-sdk')
       try {
-        const cfg = await apiCall<{ app_id: string; config_id: string; graph_version: string }>(
-          '/whatsapp/embedded/config'
-        )
+        const cfg = await apiCall<{
+          app_id: string
+          config_id: string
+          embedded_signup_config_id?: string
+          graph_version: string
+          embedded_signup_enabled?: boolean
+          disabled_reason?: string
+          oauth_start_path?: string | null
+        }>('/whatsapp/embedded/config')
         if (cancelled) return
-        if (cfg.config_id) setConfigId(cfg.config_id)
-        // Init FB SDK
+        const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
+        if (cfgId) setConfigId(cfgId)
+
+        // Gate the entire flow on the backend's enablement flag. When
+        // disabled we render a "قريباً / قيد التفعيل" state — we do
+        // NOT load the FB SDK because the popup would just bounce
+        // back with the BSP/TP entitlement error.
+        const isEnabled = cfg.embedded_signup_enabled !== false && !!cfg.app_id && !!cfgId
+        setSignupEnabled(isEnabled)
+        setDisabledReason(cfg.disabled_reason || '')
+        if (!isEnabled) {
+          setStage('ready')
+          return
+        }
+
         window.fbAsyncInit = () => {
           window.FB.init({ appId: cfg.app_id, version: cfg.graph_version, xfbml: false, cookie: true })
           if (!cancelled) { sdkLoaded.current = true; setStage('ready') }
@@ -416,12 +442,28 @@ function EmbeddedSignupFlow({
       setPhones(result.phones)
       setStage('select-phone')
     }).catch(e => {
-      setError(explainWhatsAppError(e instanceof Error ? e.message : 'حدث خطأ أثناء الربط'))
+      const raw = e instanceof Error ? e.message : 'حدث خطأ أثناء الربط'
+      // Catch the Meta BSP/Tech Provider entitlement error here too —
+      // the backend already maps it, but a direct upstream 4xx may
+      // leak through with the raw English copy. Show the
+      // "use 360dialog" fallback so the merchant never sees raw Meta
+      // text in the dashboard.
+      const lower = String(raw).toLowerCase()
+      const isBspTp =
+        (lower.includes('embedded signup') || lower.includes('embedded sign up'))
+        && (lower.includes('bsp') || lower.includes(' tp') || lower.includes('tech provider'))
+      setError(isBspTp
+        ? 'لم يتم تفعيل صلاحية Embedded Signup المباشر بعد على تطبيق نحلة. استخدم الربط عبر 360dialog حالياً.'
+        : explainWhatsAppError(raw))
       setStage('ready')
     }).finally(() => setBusy(false))
   }, [])
 
   const launchSignup = useCallback(() => {
+    if (signupEnabled === false) {
+      setError(disabledReason || 'الربط المباشر مع Meta غير مفعّل بعد.')
+      return
+    }
     if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
     setError('')
     window.FB.login((response: any) => {
@@ -444,7 +486,7 @@ function EmbeddedSignupFlow({
         sessionInfoVersion: '3',
       },
     })
-  }, [handleExchange, configId])
+  }, [handleExchange, configId, signupEnabled, disabledReason])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
@@ -748,6 +790,54 @@ function EmbeddedSignupFlow({
             العودة للأرقام
           </button>
         </div>
+      </div>
+    )
+  }
+
+  // ── Disabled state (May 2026) ────────────────────────────────────
+  // When the backend reports ``embedded_signup_enabled=false`` we
+  // render a "قريباً / قيد التفعيل" card instead of mounting the FB
+  // SDK and showing the "ربط مع Meta" button. The backend reason
+  // string is shown verbatim so changes to the disabled copy live
+  // in one place (``core/config.meta_embedded_disabled_reason``).
+  // The card guides the merchant toward 360dialog as the working
+  // path; clicking the secondary button switches the parent tab
+  // back to manual/360dialog via a custom event the parent listens
+  // to.
+  if (signupEnabled === false) {
+    return (
+      <div className="space-y-5">
+        <div className="flex flex-col items-center gap-3 py-4">
+          <div className="w-16 h-16 rounded-2xl bg-slate-100 flex items-center justify-center">
+            <AlertCircle className="w-8 h-8 text-slate-500" />
+          </div>
+          <div className="text-center">
+            <p className="font-bold text-slate-800 text-lg">الربط المباشر مع Meta — قيد التفعيل</p>
+            <p className="text-sm text-slate-500 mt-1">
+              سيتم تفعيل هذا الخيار فور اكتمال اعتماد Meta الرسمي لتطبيق نحلة.
+            </p>
+          </div>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
+          {disabledReason
+            || 'الربط المباشر مع Meta غير مفعّل بعد. استخدم الربط عبر 360dialog حالياً.'}
+        </div>
+
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-600 space-y-1.5">
+          <p className="font-semibold text-slate-700">ماذا يعني هذا؟</p>
+          <p>
+            موافقة <code className="font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-slate-200">whatsapp_business_messaging</code>
+            من Meta لا تكفي وحدها لتشغيل Embedded Signup المباشر —
+            يتطلب أيضاً إعداد <span className="font-semibold">Facebook Login for Business / Embedded Signup config</span>
+            في حساب التطبيق الخاص بنحلة. عند اكتمال هذه الخطوة سيظهر زر "ربط مع Meta" هنا تلقائياً.
+          </p>
+        </div>
+
+        <p className="text-center text-xs text-slate-400">
+          حتى ذلك الحين، الربط عبر 360dialog يعمل بكامل المزايا — رسائل،
+          ردود تلقائية، حملات، وقوالب.
+        </p>
       </div>
     )
   }
@@ -1305,6 +1395,47 @@ export default function WhatsAppConnect() {
   const [connAt, setConnAt]         = useState('')
   const [connLabel, setConnLabel]   = useState('واتساب الأعمال')
 
+  // ── Server-side Meta OAuth callback result (May 2026) ────────────
+  // The backend ``/whatsapp/embedded/oauth/callback`` redirects the
+  // browser here with a result fragment (``#meta=ok`` or
+  // ``#meta=error&reason=...``). We read it once on mount, surface
+  // a banner, then scrub the hash so a page refresh doesn't replay
+  // the same toast.
+  const [metaCallbackBanner, setMetaCallbackBanner] = useState<{
+    ok: boolean
+    text: string
+  } | null>(null)
+  useEffect(() => {
+    const hash = window.location.hash || ''
+    if (!hash.startsWith('#meta=')) return
+    const params = new URLSearchParams(hash.slice(1))
+    const result = params.get('meta')
+    const reason = params.get('reason') || ''
+    if (result === 'ok') {
+      setMetaCallbackBanner({
+        ok: true,
+        text: 'تم ربط حسابك مع Meta بنجاح. جارٍ مزامنة بيانات الرقم الآن...',
+      })
+      setMode('embedded')
+    } else {
+      setMetaCallbackBanner({
+        ok: false,
+        text: reason ? decodeURIComponent(reason) : 'تعذر إكمال الربط مع Meta. حاول مجدداً أو استخدم 360dialog.',
+      })
+    }
+    // Scrub the hash so a refresh doesn't re-fire the banner.
+    try {
+      const u = new URL(window.location.href)
+      u.hash = ''
+      window.history.replaceState({}, '', u.toString())
+    } catch { /* noop */ }
+  }, [])
+  useEffect(() => {
+    if (!metaCallbackBanner) return
+    const t = setTimeout(() => setMetaCallbackBanner(null), 8000)
+    return () => clearTimeout(t)
+  }, [metaCallbackBanner])
+
   // Live verification (real provider probe)
   const [liveVerify, setLiveVerify] = useState<{
     truly_connected: boolean
@@ -1589,6 +1720,20 @@ export default function WhatsAppConnect() {
             setStep(4)
           }}
         />
+      )}
+
+      {/* ── Server-side Meta OAuth callback banner ───────────────────────── */}
+      {metaCallbackBanner && (
+        <div
+          className={
+            'rounded-xl p-3 text-sm font-medium border ' +
+            (metaCallbackBanner.ok
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800')
+          }
+        >
+          {metaCallbackBanner.text}
+        </div>
       )}
 
       {/* ── Embedded Signup mode ─────────────────────────────────────────── */}

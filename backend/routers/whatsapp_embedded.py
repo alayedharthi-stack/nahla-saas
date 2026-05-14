@@ -18,20 +18,31 @@ Flow:
 
 from __future__ import annotations
 
+import base64 as _b64
+import hashlib as _hashlib
+import hmac as _hmac
 import logging
+import os
+import secrets as _secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.config import (
+    JWT_SECRET,
     META_APP_ID,
     META_APP_SECRET,
+    META_EMBEDDED_SIGNUP_CONFIG_ID,
     META_GRAPH_API_VERSION,
+    META_REDIRECT_URI,
     META_WA_CONFIG_ID,
+    is_meta_embedded_signup_enabled,
+    meta_embedded_disabled_reason,
 )
 from core.database import get_db
 from database.models import WhatsAppConnection
@@ -313,12 +324,55 @@ def _meta_has_token(value: str, *tokens: str) -> bool:
     return any(token in value for token in tokens)
 
 
+def _is_bsp_tp_entitlement_error(error: Dict[str, Any]) -> bool:
+    """Return True iff Meta is rejecting our app because it's not
+    onboarded as a BSP/Tech Provider with the WhatsApp Embedded
+    Signup entitlement.
+
+    The error surfaces as a generic ``"Embedded signup is only
+    available for BSPs or TPs"`` string with no stable numeric code,
+    so we sniff the message text. We're deliberately lenient: any
+    one of the BSP/TP keywords + the phrase "embedded signup" or the
+    explicit URL Meta links to in the popup matches.
+    """
+    message = str(error.get("message") or "").lower()
+    if not message:
+        return False
+    has_bsp_or_tp = (
+        " bsp" in message
+        or " tp" in message
+        or "bsps" in message
+        or " tps" in message
+        or "tech provider" in message
+        or "solution partner" in message
+    )
+    talks_about_embedded = (
+        "embedded signup" in message
+        or "embedded sign up" in message
+    )
+    return has_bsp_or_tp and talks_about_embedded
+
+
+_BSP_TP_FRIENDLY = (
+    "لم يتم تفعيل صلاحية Embedded Signup المباشر بعد على تطبيق نحلة. "
+    "استخدم الربط عبر 360dialog حالياً، وسنُعلمك فور اكتمال اعتماد Meta."
+)
+
+
 def _meta_embedded_error_message(error: Dict[str, Any], fallback: str) -> str:
     """Map raw Meta embedded-signup errors to merchant-friendly Arabic text."""
     code = int(error.get("code") or 0)
     subcode = int(error.get("error_subcode") or 0)
     message = str(error.get("message") or "")
     raw = f"{code}:{subcode}:{message}".lower()
+
+    # The BSP/TP entitlement error is the most common cause of the
+    # "ربط مع Meta" popup failing in apps that have whatsapp_business_
+    # messaging approved but were never onboarded as a Tech Provider.
+    # It's NOT actionable by the merchant — surface the 360dialog
+    # fallback so they know what to do next.
+    if _is_bsp_tp_entitlement_error(error):
+        return _BSP_TP_FRIENDLY
 
     if code == 131000 or "something went wrong" in raw:
         return (
@@ -820,14 +874,334 @@ class VerifyPhoneRequest(BaseModel):
 
 @router.get("/config")
 async def get_config():
-    """Return public config needed by the frontend FB SDK."""
+    """Return public config needed by the frontend FB SDK.
+
+    Even when the embedded-signup entitlement is missing we return
+    200 with ``embedded_signup_enabled=False`` so the dashboard can
+    render the "قريباً / قيد التفعيل" state cleanly instead of
+    erroring out. A 503 is reserved for the case where ``META_APP_ID``
+    itself isn't configured (no Meta integration at all).
+    """
     if not META_APP_ID:
-        raise HTTPException(status_code=503, detail="META_APP_ID غير مُهيَّأ في البيئة.")
+        # No Meta integration whatsoever. The dashboard should never
+        # try to mount the FB SDK — surface that explicitly.
+        return {
+            "app_id": "",
+            "config_id": "",
+            "graph_version": META_GRAPH_API_VERSION,
+            "embedded_signup_enabled": False,
+            "disabled_reason": (
+                "إعدادات تطبيق Meta غير مكتملة على الخادم. "
+                "الربط المباشر مع Meta غير مفعّل بعد."
+            ),
+            "oauth_start_path": None,
+            "redirect_uri_configured": bool(META_REDIRECT_URI and "://" in META_REDIRECT_URI),
+        }
+    enabled = is_meta_embedded_signup_enabled()
     return {
         "app_id": META_APP_ID,
-        "config_id": META_WA_CONFIG_ID,
+        # We expose the config_id under BOTH names so older dashboard
+        # builds (which only read ``config_id``) keep working while
+        # newer builds can opt into the explicit name.
+        "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
+        "embedded_signup_config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
         "graph_version": META_GRAPH_API_VERSION,
+        "embedded_signup_enabled": enabled,
+        "disabled_reason": "" if enabled else meta_embedded_disabled_reason(),
+        # FE can use this to navigate to the server-side OAuth flow
+        # (an alternative to the JS SDK popup, useful for headless /
+        # embedded environments where window.open is blocked).
+        "oauth_start_path": "/whatsapp/embedded/oauth/start" if enabled else None,
+        "redirect_uri_configured": bool(META_REDIRECT_URI and "://" in META_REDIRECT_URI),
     }
+
+
+# ── Server-side OAuth flow (May 2026) ─────────────────────────────────────────
+#
+# A parallel path to the FB JS SDK popup. The dashboard navigates the
+# browser to ``GET /whatsapp/embedded/oauth/start``, we sign an
+# ``state`` payload containing the tenant_id, build the proper
+# Embedded-Signup OAuth URL with ``client_id`` + ``config_id``, and
+# 302-redirect to Meta. Meta sends the merchant back to
+# ``GET /whatsapp/embedded/oauth/callback?code=…&state=…``, where we
+# verify the state HMAC, exchange the short-lived code for a user
+# token, and run the same WABA discovery as the JS-SDK path.
+#
+# Why have BOTH paths? The FB SDK popup is the official Meta flow,
+# but on some merchant browsers (in-app webviews, strict cookie
+# policies, hostile ad blockers) the popup is blocked or never
+# returns. The server-side flow falls back to a normal top-level
+# navigation, which always works.
+
+# OAuth state TTL — the merchant has 10 minutes to complete the
+# Meta dialog before we reject the callback. Plenty for the human
+# but short enough that a stolen state value isn't useful.
+_OAUTH_STATE_TTL_SECONDS = 600
+
+
+def _sign_oauth_state(tenant_id: int, nonce: str, issued_at: int) -> str:
+    """Return a compact, URL-safe HMAC-signed state token.
+
+    Format: ``b64(tenant_id:nonce:issued_at).b64(hmac_sha256)``. Uses
+    JWT_SECRET as the signing key because it's already required to be
+    present in production and rotating it invalidates all open
+    OAuth sessions (which is the correct security behaviour).
+    """
+    body = f"{tenant_id}:{nonce}:{issued_at}".encode("utf-8")
+    sig = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
+    return f"{_b64.urlsafe_b64encode(body).rstrip(b'=').decode()}." \
+           f"{_b64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+
+
+def _verify_oauth_state(state: str) -> int:
+    """Verify the signed state and return the tenant_id.
+
+    Raises HTTPException(400) on malformed input, tampered signature,
+    or expired token. We log the failure mode so ops can distinguish
+    "expired link / merchant took too long" from "someone is replaying
+    a captured state value".
+    """
+    try:
+        body_b64, sig_b64 = state.split(".", 1)
+        body = _b64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4))
+        sig = _b64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
+        expected = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
+        if not _hmac.compare_digest(sig, expected):
+            raise ValueError("state signature mismatch")
+        parts = body.decode("utf-8").split(":")
+        tenant_id = int(parts[0])
+        issued_at = int(parts[2])
+    except Exception as exc:
+        logger.warning("[EmbeddedSignup] oauth/callback rejected — bad state: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="رابط ربط Meta غير صالح أو منتهي الصلاحية. أعد المحاولة من نحلة.",
+        ) from exc
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    if now - issued_at > _OAUTH_STATE_TTL_SECONDS:
+        logger.info(
+            "[EmbeddedSignup] oauth/callback rejected — state expired (age=%ds, max=%ds)",
+            now - issued_at, _OAUTH_STATE_TTL_SECONDS,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "انتهت صلاحية رابط الربط مع Meta. "
+                "أعد فتح صفحة ربط واتساب في نحلة وأعد المحاولة."
+            ),
+        )
+    return tenant_id
+
+
+def _build_meta_oauth_authorize_url(state: str) -> str:
+    """Build the canonical FB Login for Business / WhatsApp Embedded
+    Signup authorize URL.
+
+    NOTE the param choices — this is the difference between "works"
+    and "Embedded signup is only available for BSPs or TPs":
+      * ``client_id``  — modern OAuth2 name (Meta also accepts the
+                          legacy ``app_id`` but Embedded Signup
+                          config_id binding requires the canonical
+                          name).
+      * ``config_id``  — REQUIRED. This is what tells Meta to run
+                          the WhatsApp Embedded Signup flow instead
+                          of a generic FB Login dialog. Without it,
+                          Meta uses your app's default OAuth scope
+                          which doesn't include WABA management →
+                          BSP/TP entitlement error.
+      * ``response_type=code`` — server-side exchange path.
+      * ``redirect_uri`` — must exactly match the value in Meta's
+                          "Valid OAuth Redirect URIs" list.
+      * ``state``      — HMAC-signed tenant_id (see _sign_oauth_state).
+      * ``scope``      — explicit list; Meta will still apply the
+                          config_id's allowed scopes on top.
+    """
+    from urllib.parse import urlencode  # noqa: PLC0415
+
+    params = {
+        "client_id": META_APP_ID,
+        "redirect_uri": META_REDIRECT_URI,
+        "response_type": "code",
+        "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
+        "scope": ",".join([
+            "business_management",
+            "whatsapp_business_management",
+            "whatsapp_business_messaging",
+        ]),
+        "state": state,
+    }
+    base = f"https://www.facebook.com/{META_GRAPH_API_VERSION}/dialog/oauth"
+    return f"{base}?{urlencode(params)}"
+
+
+@router.get("/oauth/start")
+async def oauth_start(request: Request):
+    """Server-side entry point for the Embedded Signup flow.
+
+    The dashboard navigates the merchant's browser to this URL; we
+    verify the tenant session, sign a state token, and 302 to Meta.
+    """
+    if not is_meta_embedded_signup_enabled():
+        # The dashboard should never link here when the FF is off,
+        # but a defensive 503 keeps us honest if it does.
+        raise HTTPException(
+            status_code=503,
+            detail=meta_embedded_disabled_reason()
+                   or "الربط المباشر مع Meta غير مفعّل بعد.",
+        )
+    tenant_id = resolve_tenant_id(request)
+    nonce = _secrets.token_urlsafe(16)
+    issued_at = int(datetime.now(timezone.utc).timestamp())
+    state = _sign_oauth_state(tenant_id, nonce, issued_at)
+    url = _build_meta_oauth_authorize_url(state)
+    logger.info(
+        "[EmbeddedSignup] oauth/start tenant=%s redirect_uri=%s",
+        tenant_id, META_REDIRECT_URI,
+    )
+    return RedirectResponse(url=url, status_code=302)
+
+
+@router.get("/oauth/callback")
+async def oauth_callback(
+    request: Request,
+    db: Session = Depends(get_db),
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_reason: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    """Receive Meta's redirect after the user approves the dialog.
+
+    Steps:
+      1. Verify the HMAC state and resolve the tenant_id.
+      2. Surface BSP/TP entitlement errors gracefully (no raw Meta
+         English copy reaches the merchant).
+      3. Exchange ``code`` for a user token using the SAME redirect_uri
+         that started the flow (Meta requires byte-for-byte match).
+      4. Discover the merchant's WABA + persist credentials via the
+         shared service path used by the JS-SDK ``/exchange`` endpoint.
+      5. Redirect the browser back to the dashboard with a result
+         hash (``#meta=ok`` / ``#meta=error&reason=…``) so the SPA
+         can render a final-step toast.
+    """
+    if not state:
+        raise HTTPException(status_code=400, detail="رابط الربط مع Meta ناقص (state).")
+    tenant_id = _verify_oauth_state(state)
+
+    # Meta sometimes redirects back with error= when the merchant
+    # cancels or our app lacks the right entitlement. Translate
+    # before bouncing the merchant to the dashboard.
+    if error:
+        friendly = _meta_embedded_error_message(
+            {"message": error_description or error_reason or error},
+            "تم إلغاء الربط مع Meta أو رفضته. يمكنك المحاولة لاحقاً أو استخدام الربط عبر 360dialog.",
+        )
+        logger.warning(
+            "[EmbeddedSignup] oauth/callback Meta returned error tenant=%s "
+            "error=%s reason=%s desc=%s",
+            tenant_id, error, error_reason, error_description,
+        )
+        return _oauth_callback_finish(ok=False, reason=friendly)
+
+    if not code:
+        return _oauth_callback_finish(
+            ok=False,
+            reason="لم يرجع Meta رمز التفويض. أعد محاولة الربط من نحلة.",
+        )
+
+    try:
+        token_data = await _exchange_code_for_token(code, META_REDIRECT_URI)
+    except HTTPException as exc:
+        # Catch the BSP/TP variant explicitly so the merchant lands
+        # on the "use 360dialog" message instead of a raw Meta error.
+        return _oauth_callback_finish(ok=False, reason=str(exc.detail))
+
+    short_token = token_data["access_token"]
+    long_data = await _exchange_for_long_lived_token(short_token)
+    user_token = long_data.get("access_token") or short_token
+    debug_info = await _debug_token(user_token)
+
+    try:
+        waba_id = await _get_waba_id_from_token(user_token)
+    except HTTPException as exc:
+        return _oauth_callback_finish(ok=False, reason=str(exc.detail))
+
+    from database.models import Tenant as _Tenant  # noqa: PLC0415
+    if not db.query(_Tenant).filter(_Tenant.id == tenant_id).first():
+        logger.error(
+            "[EmbeddedSignup] oauth/callback REJECTED — tenant_id=%s has no DB row",
+            tenant_id,
+        )
+        return _oauth_callback_finish(ok=False, reason="المتجر غير موجود — أعد تسجيل الدخول.")
+
+    from services.whatsapp_connection_service import (  # noqa: PLC0415
+        begin_waba_session,
+        WhatsAppConnectionConflict,
+        WhatsAppConnectionError,
+    )
+    try:
+        begin_waba_session(
+            db,
+            tenant_id       = tenant_id,
+            waba_id         = waba_id,
+            access_token    = user_token,
+            connection_type = "embedded",
+            actor           = "embedded_oauth_callback",
+        )
+    except WhatsAppConnectionConflict as exc:
+        return _oauth_callback_finish(ok=False, reason=str(exc))
+    except WhatsAppConnectionError as exc:
+        return _oauth_callback_finish(ok=False, reason=str(exc))
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if conn is not None:
+        conn.token_type = long_data.get("token_type") or token_data.get("token_type", "user")
+        expires_in = long_data.get("expires_in") or token_data.get("expires_in")
+        expires_at = None
+        if expires_in:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+        else:
+            expires_at = _token_expiry_from_debug(debug_info)
+        _update_oauth_state(
+            conn,
+            status="healthy" if debug_info.get("is_valid", True) else "invalid",
+            token_source="merchant_oauth",
+            debug_info=debug_info,
+            expires_at=expires_at,
+        )
+        db.commit()
+
+    logger.info(
+        "[EmbeddedSignup] oauth/callback OK tenant=%s waba=%s", tenant_id, waba_id,
+    )
+    return _oauth_callback_finish(ok=True, reason=None)
+
+
+def _oauth_callback_finish(*, ok: bool, reason: Optional[str]) -> RedirectResponse:
+    """Send the merchant back to the dashboard with a result hash.
+
+    We use a fragment (``#``) instead of a query string so the result
+    code never lands in server access logs and isn't reflected back
+    in any subsequent same-origin requests. The frontend reads
+    ``window.location.hash`` on mount and renders an appropriate
+    toast / banner.
+    """
+    from urllib.parse import quote  # noqa: PLC0415
+    from core.config import BACKEND_URL  # noqa: PLC0415
+
+    # Default to the same origin that hosts the backend; the dashboard
+    # SPA is typically served by the same host in production. If you
+    # run a separate dashboard origin, set ``DASHBOARD_URL`` env to
+    # override.
+    base = os.environ.get("DASHBOARD_URL") or BACKEND_URL or ""
+    base = base.rstrip("/")
+    path = "/dashboard/whatsapp/connect"
+    if ok:
+        return RedirectResponse(f"{base}{path}#meta=ok", status_code=302)
+    reason_q = quote(reason or "تعذر إكمال الربط مع Meta.", safe="")
+    return RedirectResponse(f"{base}{path}#meta=error&reason={reason_q}", status_code=302)
 
 
 @router.post("/exchange")

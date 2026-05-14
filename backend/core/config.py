@@ -179,8 +179,94 @@ META_APP_ID              = os.environ.get("META_APP_ID", "")
 META_APP_SECRET          = os.environ.get("META_APP_SECRET", "")
 META_GRAPH_API_VERSION   = os.environ.get("META_GRAPH_API_VERSION", "v20.0")
 # Configuration ID from Meta Business Manager → WhatsApp → Embedded Signup
-# (Optional but recommended — ensures correct permissions/features are requested)
-META_WA_CONFIG_ID        = os.environ.get("META_WA_CONFIG_ID", "")
+# (Required for FB Login for Business / WhatsApp Embedded Signup).
+#
+# May 2026 — we accept TWO env names for the same value so existing
+# Railway deployments don't break when teams rename their secrets:
+#   * ``META_EMBEDDED_SIGNUP_CONFIG_ID``  → preferred name (matches
+#     Meta's own documentation for FB Login for Business config IDs).
+#   * ``META_WA_CONFIG_ID``               → legacy name kept for
+#     backwards compatibility.
+# The first non-empty value wins; both are exported as the same Python
+# symbol so call sites don't have to choose.
+META_EMBEDDED_SIGNUP_CONFIG_ID = (
+    os.environ.get("META_EMBEDDED_SIGNUP_CONFIG_ID", "")
+    or os.environ.get("META_WA_CONFIG_ID", "")
+)
+META_WA_CONFIG_ID        = META_EMBEDDED_SIGNUP_CONFIG_ID  # legacy alias
+
+# Where Meta redirects after the user approves the OAuth dialog in
+# the SERVER-SIDE embedded-signup flow (``GET /whatsapp/embedded/
+# oauth/callback``). Must be present in the "Valid OAuth Redirect
+# URIs" list under FB Login for Business settings, otherwise Meta
+# rejects the redirect with ``redirect_uri mismatch``. Defaults to
+# the Nahla backend public URL with the callback path appended; can
+# be overridden when running in a non-prod tunnel.
+META_REDIRECT_URI        = (
+    os.environ.get("META_REDIRECT_URI")
+    or f"{os.environ.get('BACKEND_URL', '').rstrip('/')}/whatsapp/embedded/oauth/callback"
+)
+
+# Feature flag — when ``False`` (or when ``META_EMBEDDED_SIGNUP_CONFIG_ID``
+# is empty) the dashboard hides the "ربط مع Meta" tab and the
+# ``/embedded/config`` endpoint returns ``embedded_signup_enabled=False``
+# along with a merchant-friendly Arabic disabled-reason string.
+#
+# Read by ``is_meta_embedded_signup_enabled()`` below — call sites
+# should use that helper rather than reading the env var directly so
+# the config-id presence check stays consistent in one place.
+_META_DIRECT_SIGNUP_FORCE_ENV = os.environ.get("META_EMBEDDED_SIGNUP_ENABLED", "")
+
+
+def is_meta_embedded_signup_enabled() -> bool:
+    """Return True iff the dashboard should expose the FB-Login /
+    Embedded Signup tab.
+
+    Rules:
+      * If the merchant did NOT set ``META_EMBEDDED_SIGNUP_CONFIG_ID``
+        (or the legacy ``META_WA_CONFIG_ID``) → always disabled. We
+        will not open a Meta OAuth popup that we know Meta is going
+        to reject with the generic ``BSPs or TPs`` entitlement error.
+      * If they DID set the config id AND ``META_APP_ID`` /
+        ``META_APP_SECRET`` are present → enabled by default.
+      * If ``META_EMBEDDED_SIGNUP_ENABLED`` is explicitly set to
+        ``false`` (or ``0``, ``no``, ``off``) → force-disabled even
+        when the config id is present. Used by ops as a kill switch
+        while the Meta entitlement is still under review.
+    """
+    if not META_EMBEDDED_SIGNUP_CONFIG_ID:
+        return False
+    if not META_APP_ID or not META_APP_SECRET:
+        return False
+    forced = (_META_DIRECT_SIGNUP_FORCE_ENV or "").strip().lower()
+    if forced in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return True
+
+
+def meta_embedded_disabled_reason() -> str:
+    """Arabic merchant-facing message explaining WHY the Meta tab is
+    hidden / disabled. Returned alongside the config payload so the
+    dashboard can render the same wording everywhere.
+    """
+    if not META_APP_ID or not META_APP_SECRET:
+        return (
+            "إعدادات تطبيق Meta غير مكتملة على الخادم. "
+            "الربط المباشر مع Meta غير مفعّل بعد."
+        )
+    if not META_EMBEDDED_SIGNUP_CONFIG_ID:
+        return (
+            "الربط المباشر مع Meta غير مفعّل بعد. "
+            "الرجاء ضبط META_EMBEDDED_SIGNUP_CONFIG_ID على الخادم. "
+            "حتى ذلك الحين، استخدم الربط عبر 360dialog."
+        )
+    forced = (_META_DIRECT_SIGNUP_FORCE_ENV or "").strip().lower()
+    if forced in {"0", "false", "no", "off", "disabled"}:
+        return (
+            "الربط المباشر مع Meta قيد التفعيل من قِبل فريق نحلة. "
+            "استخدم الربط عبر 360dialog حالياً."
+        )
+    return ""
 
 # ── 360dialog / WhatsApp Coexistence ───────────────────────────────────────────
 # Internal / platform-managed provider configuration. Never expose these values
