@@ -545,15 +545,15 @@ export default function Customers() {
         draftEdited:    res.draft_edited,
         draftSkipped:   res.draft_skipped,
       })
-      // Pre-tick every high-confidence row so the default "Apply
-      // selected" run wipes the easy wins out in one click.
-      setNameCleanupSelected(
-        new Set(
-          res.items
-            .filter(it => it.confidence === 'high')
-            .map(it => it.customer_id),
-        ),
-      )
+      // ── Default: NO rows pre-selected (May 2026 policy) ──────
+      // Earlier behaviour ticked every high-confidence row by
+      // default, which made it dangerously easy to bulk-clear
+      // 1,800+ names with a single click before the merchant
+      // could review them. We now open the modal with an empty
+      // selection — the merchant must explicitly tick each row
+      // (or use the "تحديد الكل في الصفحة الحالية" header chip)
+      // before the "تطبيق المحدد" button activates.
+      setNameCleanupSelected(new Set())
       setNameCleanupSaveState('saved')
       setNameCleanupLastSavedAt(new Date().toISOString())
     } catch (err: any) {
@@ -1825,28 +1825,45 @@ export default function Customers() {
               {!nameCleanupLoading && nameCleanupItems.length > 0 && (
                 <div className="rounded-lg border border-slate-200 overflow-hidden">
                   <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs">
-                    <button
-                      onClick={toggleCleanupSelectAll}
-                      className="flex items-center gap-2 text-slate-700 hover:text-brand-600"
-                    >
-                      {visibleCleanupItems.length > 0
-                        && visibleCleanupItems.every(it => nameCleanupSelected.has(it.customer_id)) ? (
-                        <CheckSquare className="w-4 h-4 text-brand-600" />
-                      ) : (
-                        <Square className="w-4 h-4 text-slate-400" />
-                      )}
-                      <span>
-                        {visibleCleanupItems.length > 0
-                          && visibleCleanupItems.every(it => nameCleanupSelected.has(it.customer_id))
-                          ? 'إلغاء تحديد الكل (المعروض)'
-                          : 'تحديد الكل (المعروض)'}
-                      </span>
-                    </button>
+                    {(() => {
+                      // The select-all button operates ONLY on the
+                      // rows currently visible (post-filter). We
+                      // deliberately do NOT offer a "select all
+                      // matches across categories" shortcut — with
+                      // 1,800+ candidates a single click could
+                      // mass-clear the entire customer table. The
+                      // merchant must navigate by category chip,
+                      // tick the visible rows, apply, then move on.
+                      const allVisibleSelected = visibleCleanupItems.length > 0
+                        && visibleCleanupItems.every(it => nameCleanupSelected.has(it.customer_id))
+                      return (
+                        <button
+                          onClick={toggleCleanupSelectAll}
+                          disabled={visibleCleanupItems.length === 0}
+                          className="flex items-center gap-2 text-slate-700 hover:text-brand-600 disabled:opacity-40"
+                        >
+                          {allVisibleSelected ? (
+                            <CheckSquare className="w-4 h-4 text-brand-600" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-400" />
+                          )}
+                          <span>
+                            {allVisibleSelected
+                              ? 'إلغاء تحديد المعروض'
+                              : `تحديد الكل في الصفحة الحالية${
+                                  visibleCleanupItems.length
+                                    ? ` (${visibleCleanupItems.length.toLocaleString('ar-EG')})`
+                                    : ''
+                                }`}
+                          </span>
+                        </button>
+                      )
+                    })()}
                     <span className="text-slate-500">
-                      {nameCleanupSelected.size} / {visibleCleanupItems.length} محدد
+                      {nameCleanupSelected.size.toLocaleString('ar-EG')} / {visibleCleanupItems.length.toLocaleString('ar-EG')} محدد
                       {visibleCleanupItems.length !== nameCleanupItems.length && (
                         <span className="text-slate-400 ms-1">
-                          (من {nameCleanupItems.length})
+                          (من {nameCleanupItems.length.toLocaleString('ar-EG')})
                         </span>
                       )}
                     </span>
@@ -2176,13 +2193,25 @@ export default function Customers() {
                   onClick={applyCleanupSelected}
                   disabled={nameCleanupApplying || nameCleanupSelected.size === 0}
                   className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5 disabled:opacity-40"
+                  title={
+                    nameCleanupSelected.size === 0
+                      ? 'حدد الصفوف التي تريد تطبيق التنظيف عليها أولاً'
+                      : `سيتم تطبيق التنظيف على ${nameCleanupSelected.size} عميل`
+                  }
                 >
                   {nameCleanupApplying ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
                     <CheckSquare className="w-3.5 h-3.5" />
                   )}
-                  تطبيق المحدد ({nameCleanupSelected.size})
+                  {/* Hide the trailing count when no rows are
+                      selected so the disabled state doesn't read
+                      as "تطبيق المحدد (0)" which looks like a
+                      legitimate target — the label stays neutral
+                      until the merchant ticks something. */}
+                  {nameCleanupSelected.size === 0
+                    ? 'تطبيق المحدد'
+                    : `تطبيق المحدد (${nameCleanupSelected.size.toLocaleString('ar-EG')})`}
                 </button>
               </div>
             </div>
