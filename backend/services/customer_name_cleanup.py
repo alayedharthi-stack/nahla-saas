@@ -95,6 +95,172 @@ _STOP_TOKENS_EN = frozenset({
     "n/a",      "na",   "none", "null",
 })
 
+
+# ── Source / channel tokens (May 2026) ───────────────────────────────────────
+# Names that are actually a marketing-source label, not a person.
+# Imports from offline campaigns frequently end up with rows like
+# "تيك", "تيك توك", "TikTok", "سامي تيك", "بنك". These tokens are
+# stripped out the same way stopwords are — and if the entire name
+# consists of nothing but source tokens, the row is classified as
+# ``source_label_name`` and cleared.
+#
+# Tokens are stored in the *normalised* form (alef variants collapsed
+# to ``ا``, ta-marbuta to ``ه``, yeh-with-dots to ``ي``) so a single
+# entry catches the obvious orthographic variants. Latin entries are
+# lower-cased for comparison.
+_SOURCE_TOKENS = frozenset({
+    # TikTok family
+    "تيك", "توك", "تيكتوك",
+    "tik", "tok", "tiktok",
+    "tt",
+    # Snapchat family
+    "سناب", "سنابشات",
+    "snap", "snapchat",
+    # Instagram family
+    "انستا", "انستقرام", "انستجرام",
+    "insta", "instagram", "instagrm", "ig",
+    # Facebook / X / Telegram
+    "فيس", "فيسبوك",
+    "facebook", "fb",
+    "twitter", "tweet",
+    "تلجرام", "تلقرام",
+    "telegram", "tg",
+    # WhatsApp itself appearing as a source label on imports
+    "واتس", "واتساب", "الواتس",
+    "whatsapp", "whatsap", "wa", "wts", "wapp",
+    # YouTube
+    "يوتيوب",
+    "youtube", "yt",
+    # Generic offline-marketing source labels
+    "بنك",         # frequent suffix on Saudi imports — "X بنك"
+    "حمله",        # normalised حملة
+    "قناه",        # normalised قناة
+    "موقع",
+    "مصدر",
+    "اعلان",       # normalised إعلان
+    "شركه",        # normalised شركة (when used as a marketing label)
+})
+
+
+# ── Location tokens (May 2026) ────────────────────────────────────────────────
+# Cities, regions, and country-tier markers that show up as a "name"
+# value on bulk imports — usually next to a ``"من"`` preposition.
+# Stored in the normalised form (see _SOURCE_TOKENS above).
+_LOCATION_TOKENS = frozenset({
+    # Major Saudi cities
+    "الرياض", "رياض",
+    "جده", "الجده",        # normalised جدة
+    "مكه", "المكه",        # normalised مكة
+    "المدينه", "مدينه",    # normalised المدينة / مدينة
+    "المنوره", "منوره",    # normalised المنورة — used in "المدينة المنورة"
+    "الطائف", "طائف",
+    "الدمام", "دمام",
+    "الخبر", "خبر",
+    "الاحساء", "احساء",
+    "القصيم", "قصيم",
+    "بريده", "بريدة",      # normalised
+    "ابها", "أبها",
+    "خميس", "مشيط",        # "خميس مشيط"
+    "حائل",  "نجران", "تبوك", "جازان", "الجوف", "الباحه",
+    "ينبع",  "الخرج",  "عرعر",
+    # Regions / cardinal directions
+    "الجنوب", "الشمال",
+    "الشرقيه",             # normalised الشرقية
+    "الغربيه",             # normalised الغربية
+    "الوسطى", "الوسطي",
+    # Country-tier markers
+    "الخارج", "خارج",
+    "السعوديه",            # normalised
+    "الامارات",
+    "الكويت", "البحرين", "قطر", "عمان",
+    "مصر",  "اليمن", "العراق", "الاردن", "سوريا", "لبنان",
+})
+
+
+# ── Title / honorific tokens (May 2026) ──────────────────────────────────────
+# Professional titles that are NEVER a name on their own. We drop
+# these before classifying so "Eng تيك" → both tokens stripped →
+# ``source_label_name`` instead of accidentally proposing "Eng" as
+# the cleaned name. Real names with a title prefix (e.g. "د. سامي")
+# survive because we still keep the non-title tokens.
+_TITLE_TOKENS = frozenset({
+    # Latin titles
+    "eng", "engr", "engineer",
+    "mr", "mrs", "ms", "miss",
+    "dr", "prof", "prf",
+    # Arabic titles (full words)
+    "مهندس", "مهندسه",
+    "دكتور", "دكتوره",
+    "استاذ",  "استاذه",
+    "شيخ",    "شيخه",
+})
+
+
+# ── Literal placeholder phrases (May 2026) ───────────────────────────────────
+# Whole-string matches that immediately clear the row regardless of
+# tokenisation. Compared on the *normalised* form (see _normalise_arabic
+# below) and case-insensitive.
+_PLACEHOLDER_LITERALS = frozenset({
+    "بدون اسم", "بدون اسم.", "بدون_اسم",
+    "لا اسم", "لا يوجد اسم", "لا يوجد",
+    "no name", "noname", "no_name",
+    "anonymous", "anon",
+    "unknown", "unk",
+    "n/a", "na", "none", "null",
+})
+
+
+# ── Preposition tokens (May 2026) ────────────────────────────────────────────
+# Tokens that anchor a non-name expression. "من" + city → location.
+# Dropping the preposition lets the location check fire on the rest
+# of the string.
+_PREPOSITION_TOKENS = frozenset({
+    "من", "في", "الى",
+})
+
+
+# Categories surfaced to the dashboard for the per-reason filter.
+# These strings are stable contract — the dashboard renders filter
+# chips keyed by these literals (see ``dashboard/src/api/customers``).
+CATEGORY_SOURCE             = "source_label_name"
+CATEGORY_LOCATION           = "location_label_name"
+CATEGORY_PLACEHOLDER        = "placeholder_name"
+CATEGORY_GENERIC_BAD        = "generic_bad_name"
+CATEGORY_SUSPICIOUS_SUFFIX  = "suspicious_suffix"
+CATEGORY_OTHER              = "other"
+CATEGORY_NONE               = ""    # changed=False, no category
+
+ALL_CATEGORIES = (
+    CATEGORY_SOURCE,
+    CATEGORY_LOCATION,
+    CATEGORY_PLACEHOLDER,
+    CATEGORY_GENERIC_BAD,
+    CATEGORY_SUSPICIOUS_SUFFIX,
+    CATEGORY_OTHER,
+)
+
+
+# Arabic-letter normalisation used ONLY for stopword/token matching.
+# The *original* spelling is preserved in the verdict — we never
+# mutate the stored value here.
+_ARABIC_NORMALISE_RE = re.compile(r"[\u064B-\u065F\u0670]")  # diacritics
+
+
+def _normalise_arabic(token: str) -> str:
+    """Collapse common Arabic orthographic variants so the token
+    set stays small."""
+    t = token
+    t = _ARABIC_NORMALISE_RE.sub("", t)
+    t = t.replace("ـ", "")  # tatweel
+    t = (
+        t.replace("أ", "ا")
+         .replace("إ", "ا")
+         .replace("آ", "ا")
+         .replace("ى", "ي")
+         .replace("ة", "ه")
+    )
+    return t
+
 # Patronymic + honorific prefixes — MUST be preserved as part of a compound
 # name. ``أبو خالد`` and ``عبد الرحمن`` would otherwise be wrecked by token
 # filters that strip "single-name leftovers".
@@ -245,12 +411,17 @@ class CleanResult:
     changed:
         ``True`` iff ``suggested != old``. Names with ``changed=False``
         are excluded from the preview entirely.
+    category:
+        Coarse-grained reason bucket, drives the per-reason filter
+        chips in the dashboard. One of the ``CATEGORY_*`` literals at
+        the top of this module. ``""`` when ``changed=False``.
     """
     old:        Optional[str]
     suggested:  Optional[str]
     reason:     str
     confidence: str   # "high" | "low"
     changed:    bool
+    category:   str = CATEGORY_NONE
 
 
 def _strip_definite_article(token: str) -> str:
@@ -289,6 +460,19 @@ def _looks_phone_only(raw: str) -> bool:
     return False
 
 
+def _looks_literal_placeholder(raw: str) -> bool:
+    """Return True if the entire raw value (after normalisation) is
+    one of the canonical "no real name here" placeholders."""
+    if not raw:
+        return False
+    candidate = _MULTISPACE_RE.sub(" ", raw).strip().lower()
+    if not candidate:
+        return False
+    normalised = _normalise_arabic(candidate)
+    return (candidate in _PLACEHOLDER_LITERALS
+            or normalised in _PLACEHOLDER_LITERALS)
+
+
 def _looks_nonhuman_phrase(raw: str) -> bool:
     """Return True if ``raw`` contains one of the known religious /
     promotional phrases that show up as a fake "name" via WhatsApp push
@@ -313,11 +497,13 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         return CleanResult(
             old=None, suggested=None, reason="",
             confidence="high", changed=False,
+            category=CATEGORY_NONE,
         )
     if not isinstance(raw, str):
         return CleanResult(
             old=str(raw), suggested=None, reason="قيمة غير نصية",
             confidence="high", changed=True,
+            category=CATEGORY_GENERIC_BAD,
         )
 
     original = raw
@@ -328,6 +514,19 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         return CleanResult(
             old=original, suggested=None, reason="",
             confidence="high", changed=False,
+            category=CATEGORY_NONE,
+        )
+
+    # ── Literal placeholder ("بدون اسم" / "unknown" / …) → clear ──
+    # This must run BEFORE the phone-only check so something like
+    # ``"بدون اسم"`` gets the placeholder category instead of falling
+    # through to the digit / stopword path.
+    if _looks_literal_placeholder(stripped):
+        return CleanResult(
+            old=original, suggested=None,
+            reason="قيمة عامة (مثل: بدون اسم / unknown)",
+            confidence="high", changed=True,
+            category=CATEGORY_PLACEHOLDER,
         )
 
     # ── Phone-only → clear ────────────────────────────────────────
@@ -336,6 +535,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="القيمة رقم جوال وليست اسماً",
             confidence="high", changed=True,
+            category=CATEGORY_PLACEHOLDER,
         )
 
     # ── Latin gibberish (keyboard mash / fake names) → clear ──────
@@ -344,6 +544,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="اسم عشوائي غير حقيقي (حروف لاتينية بلا معنى)",
             confidence="high", changed=True,
+            category=CATEGORY_GENERIC_BAD,
         )
 
     # ── Religious / promotional phrase → clear ────────────────────
@@ -352,6 +553,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="عبارة غير اسمية",
             confidence="low", changed=True,
+            category=CATEGORY_GENERIC_BAD,
         )
 
     # ── Heavy-digit ratio (e.g. "عميل 238") → clear ───────────────
@@ -360,6 +562,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="نسبة كبيرة من الأرقام داخل الاسم",
             confidence="high", changed=True,
+            category=CATEGORY_PLACEHOLDER,
         )
 
     # ── Tokenised stopword stripping ──────────────────────────────
@@ -371,13 +574,18 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="لا يحتوي حروف بعد إزالة الرموز",
             confidence="high", changed=True,
+            category=CATEGORY_GENERIC_BAD,
         )
 
     tokens = s.split(" ")
     kept: list[str] = []
     dropped: list[str] = []
-    had_digits_removed = False
+    had_digits_removed   = False
     had_stopword_removed = False
+    had_source_removed   = False    # "تيك" / "TikTok"
+    had_location_removed = False    # "الرياض" / "من المدينة"
+    had_title_removed    = False    # "Eng" / "م."
+    had_prep_removed     = False    # "من"
 
     for token in tokens:
         if not token:
@@ -387,7 +595,10 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             dropped.append(token)
             had_digits_removed = True
             continue
-        bare = _strip_definite_article(token)
+        bare       = _strip_definite_article(token)
+        normalised = _normalise_arabic(bare).lower()
+        token_lc   = token.lower()
+
         if token in _PROTECTED_PREFIXES or bare in _PROTECTED_PREFIXES:
             kept.append(token)
             continue
@@ -395,10 +606,33 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             dropped.append(token)
             had_stopword_removed = True
             continue
-        if token.lower() in _STOP_TOKENS_EN or bare.lower() in _STOP_TOKENS_EN:
+        if token_lc in _STOP_TOKENS_EN or bare.lower() in _STOP_TOKENS_EN:
             dropped.append(token)
             had_stopword_removed = True
             continue
+
+        # ── New token classes (May 2026) ──────────────────────────
+        # Order matters: titles before source so "Eng تيك" classifies
+        # the source token correctly. Prepositions are checked last
+        # so a name accidentally containing "من" inside doesn't get
+        # mangled.
+        if token_lc in _TITLE_TOKENS or normalised in _TITLE_TOKENS:
+            dropped.append(token)
+            had_title_removed = True
+            continue
+        if token_lc in _SOURCE_TOKENS or normalised in _SOURCE_TOKENS:
+            dropped.append(token)
+            had_source_removed = True
+            continue
+        if normalised in _LOCATION_TOKENS or bare in _LOCATION_TOKENS:
+            dropped.append(token)
+            had_location_removed = True
+            continue
+        if normalised in _PREPOSITION_TOKENS or bare in _PREPOSITION_TOKENS:
+            dropped.append(token)
+            had_prep_removed = True
+            continue
+
         # Single-char leftovers are almost always punctuation residue.
         if len(token) == 1:
             dropped.append(token)
@@ -433,23 +667,54 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
             old=original, suggested=None,
             reason="عبارة غير اسمية (كلمات وصفية + أرقام)",
             confidence="high", changed=True,
+            category=CATEGORY_PLACEHOLDER,
         )
+
+    # ── Choose a coarse category for the dashboard filter ─────────
+    # Priority order matters: we want the *most informative* bucket
+    # to win — if BOTH a source token AND a location token were
+    # stripped we surface the source because that's what the merchant
+    # is most likely searching for ("delete all 'تيك توك' rows").
+    def _classify_dropped() -> str:
+        if had_source_removed:
+            return CATEGORY_SOURCE
+        if had_location_removed or had_prep_removed:
+            return CATEGORY_LOCATION
+        if had_stopword_removed or had_title_removed:
+            return CATEGORY_GENERIC_BAD
+        if had_digits_removed:
+            return CATEGORY_PLACEHOLDER
+        return CATEGORY_OTHER
 
     # ── Decide the final verdict ──────────────────────────────────
     if not cleaned or not _has_letters(cleaned):
-        return CleanResult(
-            old=original, suggested=None,
-            reason=(
+        # Everything got dropped → clear the row, pick the category
+        # based on what was dropped. "تيك" alone → source_label_name;
+        # "من الرياض" → location_label_name; "Eng" → generic_bad_name.
+        category = _classify_dropped() if dropped else CATEGORY_GENERIC_BAD
+        if category == CATEGORY_SOURCE:
+            reason = "الاسم يبدو مصدراً تسويقياً (مثل: تيك توك / TikTok)"
+        elif category == CATEGORY_LOCATION:
+            reason = "الاسم يبدو موقعاً جغرافياً (مدينة / منطقة)"
+        elif category == CATEGORY_PLACEHOLDER:
+            reason = "قيمة عامة بدون اسم حقيقي"
+        else:
+            reason = (
                 "لا يبقى اسم حقيقي بعد إزالة الكلمات التجارية"
                 if dropped else "لا يحتوي حروف"
-            ),
+            )
+        return CleanResult(
+            old=original, suggested=None,
+            reason=reason,
             confidence="high", changed=True,
+            category=category,
         )
 
     if cleaned == stripped:
         return CleanResult(
             old=original, suggested=cleaned,
             reason="", confidence="high", changed=False,
+            category=CATEGORY_NONE,
         )
 
     # The change was a stopword-strip — high confidence.
@@ -460,7 +725,7 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
         descriptive = [d for d in dropped if not d.isdigit()]
         if descriptive:
             reason_bits.append(
-                "إزالة كلمات تجارية: " + ", ".join(sorted(set(descriptive)))
+                "إزالة كلمات زائدة: " + ", ".join(sorted(set(descriptive)))
             )
         if had_digits_removed:
             reason_bits.append("إزالة أرقام داخلية")
@@ -472,10 +737,33 @@ def compute_cleanup(raw: Optional[str]) -> CleanResult:
     if len(cleaned.split(" ")) == 1 and len(cleaned) <= 2:
         confidence = "low"
 
+    # If we stripped a source/location/title token but a real name
+    # survived ("سامي الزهراني تيك" → "سامي الزهراني"), the row
+    # belongs in the ``suspicious_suffix`` bucket — that's exactly
+    # the case the merchant searches for when they want to mass-fix
+    # "X تيك" → "X". Stopword-only edits keep the generic ``other``
+    # bucket so they don't crowd the filter chip.
+    if had_source_removed or had_location_removed:
+        category = CATEGORY_SUSPICIOUS_SUFFIX
+    elif had_title_removed:
+        # Title-only edits ("د. سامي" → "سامي") are also suspicious-
+        # suffix material — same UX bucket.
+        category = CATEGORY_SUSPICIOUS_SUFFIX
+    elif had_stopword_removed:
+        category = CATEGORY_OTHER
+    else:
+        category = CATEGORY_OTHER
+
     return CleanResult(
         old=original, suggested=cleaned, reason=reason,
         confidence=confidence, changed=True,
+        category=category,
     )
 
 
-__all__ = ["CleanResult", "compute_cleanup"]
+__all__ = [
+    "CleanResult", "compute_cleanup",
+    "CATEGORY_SOURCE", "CATEGORY_LOCATION", "CATEGORY_PLACEHOLDER",
+    "CATEGORY_GENERIC_BAD", "CATEGORY_SUSPICIOUS_SUFFIX",
+    "CATEGORY_OTHER", "CATEGORY_NONE", "ALL_CATEGORIES",
+]

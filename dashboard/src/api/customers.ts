@@ -226,6 +226,20 @@ export interface NameCleanupDraftState {
   updated_at: string | null
 }
 
+/** Coarse-grained reason bucket for the per-reason filter chips.
+ *  Mirrors ``CATEGORY_*`` literals in
+ *  ``backend/services/customer_name_cleanup``. The strings are
+ *  contract — they MUST match exactly so the chip badge counts
+ *  in ``NameCleanupPreviewResponse.category_counts`` line up. */
+export type NameCleanupCategory =
+  | 'source_label_name'
+  | 'location_label_name'
+  | 'placeholder_name'
+  | 'generic_bad_name'
+  | 'suspicious_suffix'
+  | 'other'
+  | ''
+
 export interface NameCleanupPreviewItem {
   customer_id: number
   /** What's currently stored on Customer.name. */
@@ -239,6 +253,11 @@ export interface NameCleanupPreviewItem {
   /** ``"high"`` → safe to bulk-apply; ``"low"`` → needs explicit
    *  per-row merchant approval. */
   confidence: 'high' | 'low'
+  /** Coarse reason bucket — drives the chip filter at the top of
+   *  the modal. ``""`` only on the "changed=False" path which is
+   *  filtered out server-side, so live items always carry a real
+   *  category. */
+  category?: NameCleanupCategory
   /** Phone shown alongside the name in the preview, so the merchant
    *  has enough context to decide on ambiguous rows. */
   phone: string
@@ -279,6 +298,14 @@ export interface NameCleanupPreviewResponse {
   draft_edited: number
   /** How many draft rows are in the "skipped" state. */
   draft_skipped: number
+  /** Per-category histogram of the FULL match population (counts are
+   *  computed BEFORE the optional ``?category=`` filter is applied,
+   *  so chip badges always show "rows that would appear if I clicked
+   *  this chip"). */
+  category_counts?: Record<NameCleanupCategory, number>
+  /** Echo of the active filter, normalised + sorted by the backend.
+   *  Empty array → "all categories". */
+  category_filter?: NameCleanupCategory[]
 }
 
 export interface NameCleanupDraftSaveItem {
@@ -479,9 +506,15 @@ export const customersApi = {
    * true, more matches exist than the response carries — the merchant
    * should apply the visible batch first, then re-open the modal.
    */
-  nameCleanupPreview() {
+  nameCleanupPreview(opts?: { categories?: NameCleanupCategory[] }) {
+    // Comma-separated list — backend dedupes + ignores unknown
+    // values so the frontend can keep sending stale categories
+    // without breaking older deployments.
+    const q = opts?.categories?.length
+      ? `?category=${encodeURIComponent(opts.categories.join(','))}`
+      : ''
     return apiCall<NameCleanupPreviewResponse>(
-      '/customers/name-cleanup/preview',
+      `/customers/name-cleanup/preview${q}`,
     )
   },
 

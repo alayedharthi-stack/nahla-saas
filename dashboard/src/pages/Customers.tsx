@@ -42,6 +42,7 @@ import {
   customersApi,
   type CustomerRecord,
   type CustomerSegmentMeta,
+  type NameCleanupCategory,
   type NameCleanupPreviewItem,
 } from '../api/customers'
 
@@ -307,6 +308,19 @@ export default function Customers() {
     Record<number, CleanupRowState>
   >({})
   const [nameCleanupFilter, setNameCleanupFilter] = useState<CleanupFilter>('all')
+  // Per-reason chip filter (May 2026) — orthogonal to the existing
+  // confidence/skip chips. ``'any'`` shows all categories. Filter is
+  // applied client-side using each item's ``category`` field so we
+  // don't need extra round-trips on chip toggle.
+  const [nameCleanupCategory, setNameCleanupCategory] = useState<
+    'any' | NameCleanupCategory
+  >('any')
+  // Histogram surfaced by the preview endpoint — used to render
+  // chip badges with the FULL match population. ``null`` until the
+  // first preview fetch resolves.
+  const [nameCleanupCategoryCounts, setNameCleanupCategoryCounts] = useState<
+    Record<NameCleanupCategory, number> | null
+  >(null)
   const [nameCleanupSummary, setNameCleanupSummary] = useState<{
     totalCustomers: number
     totalScanned:   number
@@ -519,6 +533,7 @@ export default function Customers() {
       const res = await customersApi.nameCleanupPreview()
       setNameCleanupItems(res.items)
       setNameCleanupRowState(buildInitialRowState(res.items))
+      setNameCleanupCategoryCounts(res.category_counts ?? null)
       setNameCleanupSummary({
         totalCustomers: res.total_customers,
         totalScanned:   res.total_scanned,
@@ -571,6 +586,8 @@ export default function Customers() {
     setNameCleanupResult(null)
     setNameCleanupError('')
     setNameCleanupFilter('all')
+    setNameCleanupCategory('any')
+    setNameCleanupCategoryCounts(null)
     setNameCleanupSaveState('idle')
   }
 
@@ -868,40 +885,49 @@ export default function Customers() {
 
   // Filtered view derived from current state + filter chip.
   const visibleCleanupItems = useMemo(() => {
+    // Apply the per-reason category filter first so the existing
+    // confidence/skip chips compose with it. ``'any'`` is the
+    // pass-through for the default "no category selected" state.
+    const byCategory = (it: NameCleanupPreviewItem): boolean =>
+      nameCleanupCategory === 'any'
+        ? true
+        : (it.category || 'other') === nameCleanupCategory
+
     if (nameCleanupFilter === 'opted_out') {
       // Show ONLY the customers the merchant has flagged as
       // "exclude from marketing" inline. Skipped rows are still
       // hidden unless explicitly included — opt-out and skip are
       // distinct dimensions.
       return nameCleanupItems.filter(
-        it => it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id),
+        it => byCategory(it) && it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id),
       )
     }
     if (nameCleanupFilter === 'all') {
-      return nameCleanupItems.filter(it => !cleanupRowIsSkipped(it.customer_id))
+      return nameCleanupItems.filter(it => byCategory(it) && !cleanupRowIsSkipped(it.customer_id))
     }
     if (nameCleanupFilter === 'pending') {
       return nameCleanupItems.filter(
-        it => !cleanupRowIsEdited(it.customer_id),
+        it => byCategory(it) && !cleanupRowIsEdited(it.customer_id),
       )
     }
     if (nameCleanupFilter === 'edited') {
       return nameCleanupItems.filter(
         it =>
+          byCategory(it) &&
           cleanupRowIsEdited(it.customer_id) &&
           !cleanupRowIsSkipped(it.customer_id),
       )
     }
     if (nameCleanupFilter === 'high') {
       return nameCleanupItems.filter(
-        it => it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id),
+        it => byCategory(it) && it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id),
       )
     }
     // 'low'
     return nameCleanupItems.filter(
-      it => it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id),
+      it => byCategory(it) && it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id),
     )
-  }, [nameCleanupItems, nameCleanupRowState, nameCleanupFilter])
+  }, [nameCleanupItems, nameCleanupRowState, nameCleanupFilter, nameCleanupCategory])
 
   // Flush the autosave on unmount so the merchant doesn't lose work
   // by navigating away from the customers page mid-review.
@@ -1701,6 +1727,59 @@ export default function Customers() {
                 </div>
               )}
 
+              {/* Per-reason category chips (May 2026) — sit ABOVE
+                  the existing confidence chip row so the merchant
+                  can drill down by reason first (مصدر / مدينة /
+                  بدون اسم / كلمة زائدة) and then narrow further by
+                  confidence. Counts come from the FULL match
+                  population so badges don't collapse to zero on the
+                  first selection. */}
+              {!nameCleanupLoading && nameCleanupItems.length > 0 && nameCleanupCategoryCounts && (
+                <div className="flex items-center gap-1.5 flex-wrap pb-1 border-b border-slate-100">
+                  <Filter className="w-3 h-3 text-slate-400" />
+                  <span className="text-[11px] text-slate-500">حسب السبب:</span>
+                  {([
+                    { key: 'any',                   label: 'الكل' },
+                    { key: 'source_label_name',     label: 'مصدر تسويقي' },
+                    { key: 'location_label_name',   label: 'مدينة / موقع' },
+                    { key: 'placeholder_name',      label: 'بدون اسم / عام' },
+                    { key: 'suspicious_suffix',     label: 'كلمة زائدة' },
+                    { key: 'generic_bad_name',      label: 'اسم غير حقيقي' },
+                    { key: 'other',                 label: 'أخرى' },
+                  ] as { key: 'any' | NameCleanupCategory; label: string }[]).map(c => {
+                    const count = c.key === 'any'
+                      ? Object.values(nameCleanupCategoryCounts).reduce((a, b) => a + b, 0)
+                      : (nameCleanupCategoryCounts[c.key as NameCleanupCategory] ?? 0)
+                    // Don't render zero-count category chips except
+                    // ``any`` (always available) — keeps the chip row
+                    // short on clean tenants.
+                    if (count === 0 && c.key !== 'any') return null
+                    const active = nameCleanupCategory === c.key
+                    return (
+                      <button
+                        key={c.key}
+                        type="button"
+                        onClick={() => setNameCleanupCategory(c.key)}
+                        className={
+                          'text-[11px] px-2 py-0.5 rounded-full border transition ' +
+                          (active
+                            ? 'bg-rose-600 text-white border-rose-600'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')
+                        }
+                      >
+                        {c.label}
+                        <span className={
+                          'ms-1 text-[10px] ' +
+                          (active ? 'text-rose-50' : 'text-slate-400')
+                        }>
+                          ({count.toLocaleString('ar-EG')})
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+
               {!nameCleanupLoading && nameCleanupSummary && nameCleanupItems.length > 0 && (
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Filter className="w-3 h-3 text-slate-400" />
@@ -1868,6 +1947,25 @@ export default function Customers() {
                                 </span>
                               </div>
                               <div className="flex items-center gap-1.5 shrink-0">
+                                {/* Category badge — coarse reason
+                                    bucket from the cleaner verdict.
+                                    Surfaced INLINE on every row so
+                                    the merchant immediately sees
+                                    "this is a TikTok suffix" vs
+                                    "this is a city name" without
+                                    parsing the Arabic reason text. */}
+                                {it.category && (() => {
+                                  const map: Record<string, { label: string; variant: 'amber' | 'purple' | 'blue' | 'green' | 'slate' }> = {
+                                    source_label_name:    { label: 'مصدر',         variant: 'amber'  },
+                                    location_label_name:  { label: 'مدينة',        variant: 'blue'   },
+                                    placeholder_name:     { label: 'بدون اسم',     variant: 'slate'  },
+                                    suspicious_suffix:    { label: 'كلمة زائدة',   variant: 'purple' },
+                                    generic_bad_name:     { label: 'غير حقيقي',    variant: 'slate'  },
+                                    other:                { label: 'تنظيف',        variant: 'slate'  },
+                                  }
+                                  const m = map[it.category]
+                                  return m ? <Badge label={m.label} variant={m.variant} /> : null
+                                })()}
                                 {it.marketing_opt_out_manual && (
                                   // Distinct badge — three states never
                                   // conflate: "مستبعد من الحملات"

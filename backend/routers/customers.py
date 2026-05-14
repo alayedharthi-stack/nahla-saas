@@ -1843,6 +1843,17 @@ async def name_cleanup_preview(
             "marked as 'skipped' in earlier sessions."
         ),
     ),
+    category: Optional[str] = Query(
+        None,
+        description=(
+            "Optional comma-separated category filter. Returns only "
+            "rows whose verdict matches one of the requested buckets. "
+            "Unknown / empty values are ignored. Valid: "
+            "``source_label_name``, ``location_label_name``, "
+            "``placeholder_name``, ``generic_bad_name``, "
+            "``suspicious_suffix``, ``other``."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """Tenant-wide preview of customer names that need cleaning, merged
@@ -1885,12 +1896,27 @@ async def name_cleanup_preview(
           "max_items":        <int>,
         }
     """
-    from services.customer_name_cleanup import compute_cleanup  # noqa: PLC0415
+    from services.customer_name_cleanup import (  # noqa: PLC0415
+        compute_cleanup, ALL_CATEGORIES,
+    )
     import logging  # noqa: PLC0415
 
     log = logging.getLogger("nahla.customers.name_cleanup")
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+
+    # ── Normalise the category filter ────────────────────────────
+    # Accepts a comma-separated list ("source_label_name,location_…")
+    # or a single value. Unknown buckets are silently dropped so the
+    # frontend can keep adding new categories without breaking older
+    # clients. An empty / missing filter means "all categories".
+    _category_set: Optional[set[str]] = None
+    if category:
+        _category_set = {
+            tok.strip() for tok in str(category).split(",") if tok.strip()
+        } & set(ALL_CATEGORIES)
+        if not _category_set:
+            _category_set = None    # nothing valid → show everything
 
     total_customers = (
         db.query(Customer)
@@ -1914,6 +1940,11 @@ async def name_cleanup_preview(
     draft_edited = draft_skipped = 0
     truncated = False
     stale_draft_ids: List[int] = []
+    # Category histogram for the dashboard filter chips. We always
+    # count the FULL match population (before the optional category
+    # filter) so the chip badges show "how many rows would appear if
+    # I clicked this chip" rather than the post-filter intersection.
+    category_counts: Dict[str, int] = {c: 0 for c in ALL_CATEGORIES}
 
     query = (
         db.query(Customer)
@@ -1972,11 +2003,20 @@ async def name_cleanup_preview(
             high += 1
         else:
             low += 1
+        if verdict.category in category_counts:
+            category_counts[verdict.category] += 1
         if draft is not None:
             if draft.status == "skipped":
                 draft_skipped += 1
             else:
                 draft_edited += 1
+
+        # Apply the per-reason filter AFTER counting so the chip
+        # badges still reflect the full match population. Without
+        # this the filter would render its own count to zero on the
+        # first selection.
+        if _category_set is not None and verdict.category not in _category_set:
+            continue
 
         if len(items) < _NAME_CLEANUP_MAX_ITEMS:
             # Surface the merchant-driven opt-out flag so the modal
@@ -1993,6 +2033,7 @@ async def name_cleanup_preview(
                 "suggested_name": verdict.suggested,
                 "reason":         verdict.reason,
                 "confidence":     verdict.confidence,
+                "category":       verdict.category,
                 "phone":          cust.phone or "",
                 "draft":          _serialise_draft(draft),
                 "marketing_opt_out_manual":
@@ -2029,6 +2070,8 @@ async def name_cleanup_preview(
         "draft_skipped":    draft_skipped,
         "high_confidence":  high,
         "low_confidence":   low,
+        "category_counts":  category_counts,
+        "category_filter":  sorted(_category_set) if _category_set else [],
         "truncated":        truncated,
         "max_items":        _NAME_CLEANUP_MAX_ITEMS,
     }
@@ -2430,6 +2473,39 @@ async def name_cleanup_apply(
                 new_name = new_name.strip() or None
             old_name = cust.name
             cust.name = new_name
+            # ── Manual-override stamps (May 2026) ─────────────────
+            # The merchant explicitly approved this verdict from the
+            # bulk preview UI. Mark the row as merchant-curated so:
+            #   * future bulk-cleanup runs skip this customer (we
+            #     can't propose to "fix" a row the merchant just
+            #     hand-confirmed),
+            #   * CSV / Salla / Zid imports refuse to overwrite
+            #     the curated value,
+            #   * the WhatsApp inbound profile alias is blocked too.
+            #
+            # ``manual_name_cleared`` mirrors what happens inside
+            # ``PATCH /customers/{id}`` when the merchant wipes a
+            # name from the inline pencil — true when the row was
+            # CLEARED, false when a real replacement was written.
+            # The cleared flag is the gate that allows a high-trust
+            # AI-detected name from a future conversation to refill
+            # an empty row.
+            try:
+                _meta_apply = dict(cust.extra_metadata or {})
+                _meta_apply["manual_name_override"]  = True
+                _meta_apply["manual_name_cleared"]   = bool(new_name is None)
+                _meta_apply["manual_name_edited_at"] = (
+                    now.isoformat()
+                )
+                _meta_apply["manual_name_previous"]  = old_name or ""
+                _meta_apply["manual_name_source"]    = "bulk_cleanup_apply"
+                cust.extra_metadata = _meta_apply
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[name-cleanup.apply] override stamp failed "
+                    "tenant=%s id=%s err=%s",
+                    tenant_id, cust.id, exc,
+                )
             audit = CustomerNameAuditLog(
                 tenant_id=tenant_id,
                 customer_id=cust.id,
@@ -2473,6 +2549,24 @@ async def name_cleanup_apply(
                 continue
             old_name = cust.name
             cust.name = verdict.suggested
+            # Stamp the same manual-override metadata as the per-row
+            # apply path above so this fast-track behaves identically
+            # to "tick every high-confidence box and apply" from the
+            # UI. See the per-row branch for the rationale.
+            try:
+                _meta_hc = dict(cust.extra_metadata or {})
+                _meta_hc["manual_name_override"]  = True
+                _meta_hc["manual_name_cleared"]   = bool(verdict.suggested is None)
+                _meta_hc["manual_name_edited_at"] = now.isoformat()
+                _meta_hc["manual_name_previous"]  = old_name or ""
+                _meta_hc["manual_name_source"]    = "bulk_cleanup_high_confidence"
+                cust.extra_metadata = _meta_hc
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "[name-cleanup.apply/hc] override stamp failed "
+                    "tenant=%s id=%s err=%s",
+                    tenant_id, cust.id, exc,
+                )
             audit = CustomerNameAuditLog(
                 tenant_id=tenant_id,
                 customer_id=cust.id,
