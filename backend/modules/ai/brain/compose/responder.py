@@ -58,6 +58,7 @@ from ..decision.actions import (
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
+    ACTION_OUT_OF_SCOPE,
 )
 from ..execution.faq import (
     TOPIC_IDENTITY,
@@ -391,6 +392,15 @@ class DefaultComposer:
                 summary=data.get("summary", ""),
                 citations=data.get("citations", []),
             )
+
+        # ── Out-of-scope deflection (May 2026) ─────────────────────────────
+        # Short, polite, on-brand Arabic reply that keeps the
+        # customer inside the merchant's domain WITHOUT calling the
+        # LLM (no hallucination risk) and WITHOUT hitting any web
+        # tool (no search-dump leakage). Variant rotation keeps the
+        # reply natural across repeat off-topic questions.
+        if action == ACTION_OUT_OF_SCOPE:
+            return T.out_of_scope_reply(variant=self._variant_idx(ctx))
 
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:

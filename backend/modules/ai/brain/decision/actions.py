@@ -46,6 +46,16 @@ ACTION_NARROW              = "narrow_choices"
 # the next turn so we never re-ask for the address.
 ACTION_STASH_ADDRESS_PRE_PRODUCT = "stash_address_pre_product"
 
+# ── Out-of-scope hard guard (May 2026) ────────────────────────────────────────
+# Returned by the decision engine when a customer asks something that
+# clearly has nothing to do with the merchant's catalogue / orders /
+# shipping / payment / store knowledge — e.g. "ايهما حساب كهرباء
+# الشقة". The responder emits a fixed, short Arabic deflection and
+# the executor never reaches the LLM or any web tool. This is the
+# replacement for the old "INTENT_GENERAL → ACTION_WEB_SEARCH" path
+# that used to leak DuckDuckGo dumps into customer threads.
+ACTION_OUT_OF_SCOPE        = "out_of_scope_reply"
+
 ALL_ACTIONS = [
     ACTION_GREET,
     ACTION_FAQ_REPLY,
@@ -58,6 +68,7 @@ ALL_ACTIONS = [
     ACTION_LLM_REPLY,
     ACTION_RECOMMEND_ADDON,
     ACTION_WEB_SEARCH,
+    ACTION_OUT_OF_SCOPE,
     ACTION_CLARIFY,
     ACTION_NARROW,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,

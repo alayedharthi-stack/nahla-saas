@@ -5429,6 +5429,37 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
 ) -> bool:
+    # ── External-research leakage guard (May 2026) ────────────────
+    # Final scrubber for the May 2026 DuckDuckGo-leak incident: if any
+    # subsystem (brain, LLM, legacy code path) produced an outbound
+    # reply containing search-dump fingerprints, replace the body
+    # with a safe fallback and log [EXTERNAL_RESEARCH_BLOCKED]. The
+    # sanitiser is fail-open by design — if it crashes the payload
+    # still goes through, but we ALWAYS log the crash for diagnosis.
+    # See core/outbound_sanitizer.py for the leakage fingerprints.
+    try:
+        from core.outbound_sanitizer import sanitize_outbound_payload  # noqa: PLC0415
+        _recipient = str((payload or {}).get("to") or "") if isinstance(payload, dict) else ""
+        payload, _sanitised = sanitize_outbound_payload(
+            payload if isinstance(payload, dict) else {},
+            tenant_id=_tenant_id,
+            recipient=_recipient,
+        )
+        if _sanitised:
+            # Mark the payload so callers/observers can tell at a
+            # glance that this message was rewritten. Stored under
+            # an internal underscore-prefixed key that 360dialog /
+            # Meta ignore (we strip it before serialisation if any
+            # downstream module re-serialises the dict).
+            try:
+                payload["_nahla_sanitised"] = "external_research_blocked"
+            except Exception:
+                pass
+    except Exception:
+        # Sanitiser bug must never block a send. We log inside the
+        # sanitiser; here we just continue with the original payload.
+        pass
+
     owns_db = False
     wa_conn = None
     if _tenant_id and _db:

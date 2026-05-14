@@ -160,8 +160,24 @@ class DefaultSalesContextLoader:
             tenant_id=tenant_id,
             customer_id=customer_id,
         )
+        # ── External-research policy (May 2026 — default OFF) ─────────
+        #
+        # Was hard-coded ``enabled=True`` for every tenant, which
+        # routed any out-of-scope question through the DuckDuckGo
+        # bridge and shipped raw search dumps into customer WhatsApp
+        # threads. We now source the flag from
+        # ``modules.ai.tools.web_search.external_research_enabled()``
+        # which reads ``MERCHANT_EXTERNAL_RESEARCH_ENABLED`` from the
+        # env on every call. Default: OFF. Ops can flip it on without
+        # a redeploy. See ``core/outbound_sanitizer.py`` for the
+        # final-line-of-defence scrubber.
+        try:
+            from modules.ai.tools.web_search import external_research_enabled
+            _research_on = external_research_enabled()
+        except Exception:
+            _research_on = False
         snapshot.web_search_policy = {
-            "enabled": True,
+            "enabled": _research_on,
             "use_only_when_store_knowledge_missing": True,
             "require_citations_for_claims": True,
             "blocked_topics": ["medical_diagnosis", "legal_advice", "financial_advice"],

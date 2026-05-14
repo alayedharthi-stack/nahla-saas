@@ -679,6 +679,30 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
     return text
 
 
+# ── Out-of-scope deflection variants (May 2026) ──────────────────────────────
+# Replaces the old "general LLM expansion + web search" path for
+# off-domain customer questions. Kept short, polite, and explicitly
+# redirects the customer back to the merchant's domain. No URLs, no
+# citations, no LLM round-trip — emitted directly by the composer
+# when ``ACTION_OUT_OF_SCOPE`` fires.
+#
+# IMPORTANT: do NOT add any URL, "see also", or "you can search…"
+# phrasing here. The whole point of this template is that the AI
+# stops pretending to know things outside the merchant's catalogue.
+_OUT_OF_SCOPE_VARIANTS = [
+    "هذا خارج نطاق متجرنا 🌷 أقدر أساعدك بمنتجات المتجر أو الطلبات أو الشحن — وش تحب تسأل عنه؟",
+    "ما أقدر أجاوبك بهذا الموضوع 🙏 — لكن أقدر أساعدك بمنتجاتنا أو طلبك الحالي إذا تحب.",
+    "خارج اختصاصي 🌷 أنا مساعد متجر فقط، تقدر تسألني عن المنتجات أو السعر أو حالة الطلب.",
+]
+
+
+def out_of_scope_reply(variant: int = 0, **_: Any) -> str:
+    """Return one of the canned out-of-scope deflections. Rotated by
+    variant index so a repeat off-topic question doesn't feel like
+    a copy-paste bot."""
+    return _OUT_OF_SCOPE_VARIANTS[variant % len(_OUT_OF_SCOPE_VARIANTS)]
+
+
 # ── Handoff ───────────────────────────────────────────────────────────────────
 
 # IMPORTANT: never start a variant with phrases that sound like an
