@@ -564,13 +564,34 @@ class DefaultDecisionEngine:
         # DO: stash it in `state.pending_*` and tell the customer to
         # pick a product. The DraftOrderHandler consumes the pending
         # values as soon as a product is selected on the next turn.
+        #
+        # ANTI-REGRESSION — Conversation Commerce State Tracking:
+        # If the customer is mid-order (we have a product_id / city /
+        # name already on order_prep), an address signal here is the
+        # NEXT slot in the funnel — NOT a pre-product stash. We MUST
+        # NOT send "قبل ما نكمّل، اختر المنتج اللي تبغاه" in that case;
+        # the merchant flagged that exact regression. Fall through and
+        # let the continuation block (section 3.7 / safety net) handle
+        # it as ACTION_PROPOSE_DRAFT_ORDER.
         _has_address_signal = any(
             (intent.slots.get(k) or "").strip()
             for k in ("short_address_code", "google_maps_url", "location_url")
         )
+        _op_active = getattr(state, "order_prep", None)
+        _mid_order_funnel = bool(
+            _op_active
+            and (
+                getattr(_op_active, "product_id", "")
+                or getattr(_op_active, "city", "")
+                or getattr(_op_active, "customer_first_name", "")
+                or getattr(_op_active, "short_address_code", "")
+                or getattr(_op_active, "google_maps_url", "")
+            )
+        )
         if (
             _has_address_signal
             and not state.current_product_focus
+            and not _mid_order_funnel
             and intent.name not in (INTENT_TALK_HUMAN,)
         ):
             _sc = (intent.slots.get("short_address_code") or "").strip()
@@ -1105,8 +1126,79 @@ class DefaultDecisionEngine:
                     reason=f"ordering_stage_safety_net: intent={intent.name} fell through all rules — force checkout continuation",
                     confidence=0.80,
                 )
-            # Product focus was lost (unsyncable product cleared it) but
-            # customer is still in ordering stage → search for a replacement.
+            # Product focus was lost but order_prep still remembers which
+            # product the customer was buying — recover it from cached
+            # candidates / recommendations so the funnel never resets.
+            # This closes the merchant-reported regression where a customer
+            # who already sent name/city/address heard "اختر المنتج اللي
+            # تبغاه" because focus had been wiped by a side-effect.
+            _op = getattr(state, "order_prep", None)
+            _prep_product_id = str(getattr(_op, "product_id", "") or "").strip()
+            _prep_has_progress = bool(
+                _op
+                and (
+                    getattr(_op, "city", "")
+                    or getattr(_op, "customer_first_name", "")
+                    or getattr(_op, "short_address_code", "")
+                    or getattr(_op, "google_maps_url", "")
+                    or _prep_product_id
+                )
+            )
+            if (
+                not state.current_product_focus
+                and _prep_has_progress
+                and facts.orderable
+            ):
+                _recovered = _find_product_by_external_id(
+                    _prep_product_id,
+                    state.last_search_candidates or [],
+                    state.last_recommended_products or [],
+                )
+                logger.warning(
+                    "[ORDER FLOW] recovering lost product focus from order_prep | "
+                    "tenant=%s prep_product_id=%r recovered=%r intent=%s",
+                    ctx.tenant_id, _prep_product_id,
+                    (_recovered or {}).get("title") if _recovered else None,
+                    intent.name,
+                )
+                if _recovered:
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={
+                            "product": _recovered,
+                            "forced_product": _recovered,
+                            "source": "order_prep_recovery",
+                        },
+                        reason=(
+                            "ordering_stage_safety_net: focus was wiped but "
+                            f"order_prep.product_id={_prep_product_id!r} — "
+                            "recovered focus from candidate cache"
+                        ),
+                        confidence=0.88,
+                    )
+                # Even without a candidate match, the customer is mid-funnel.
+                # Let the LLM compose a "we still have your details — which
+                # product was it again?" reply WITH order_prep state visible,
+                # rather than the cold "ما المنتج؟" template.
+                logger.info(
+                    "[ORDER FLOW] focus lost + prep present, no cached candidate to "
+                    "recover from → routing to LLM with full order_prep context "
+                    "tenant=%s prep_city=%r prep_short_code=%r",
+                    ctx.tenant_id,
+                    getattr(_op, "city", ""),
+                    getattr(_op, "short_address_code", ""),
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "order_recovery"},
+                    reason=(
+                        "ordering_stage_safety_net: focus lost but order_prep "
+                        "has live progress — let LLM keep the funnel alive"
+                    ),
+                    confidence=0.70,
+                )
+            # Product focus was lost (unsyncable product cleared it) and
+            # NO order progress exists → fall back to searching.
             if not state.current_product_focus and facts.has_products:
                 _query = (
                     intent.slots.get("product_query")
@@ -1138,6 +1230,30 @@ class DefaultDecisionEngine:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _find_product_by_external_id(
+    external_id: str,
+    *candidate_lists: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return the first product across *candidate_lists* whose external_id
+    matches ``external_id`` (case-insensitive), or ``None``.
+
+    Used by the ordering-stage safety net to recover ``current_product_focus``
+    from cached search / recommendation candidates when a side-effect in the
+    pipeline wiped the focus mid-funnel. Without this recovery the customer
+    would hear the cold "ما المنتج الذي تودّ طلبه؟" template even though we
+    still hold their city / name / address in ``order_prep``.
+    """
+    needle = str(external_id or "").strip().lower()
+    if not needle:
+        return None
+    for cands in candidate_lists:
+        for prod in (cands or []):
+            ext = str((prod or {}).get("external_id") or "").strip().lower()
+            if ext and ext == needle:
+                return prod
+    return None
+
 
 def _normalize_ar(text: str) -> str:
     """Lightweight Arabic normalization for product title matching."""

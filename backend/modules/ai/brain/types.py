@@ -212,6 +212,14 @@ class MerchantConversationState:
     """
     stage: str = "discovery"
     greeted: bool = False
+    # Set to True the first time the bot introduces itself by name /
+    # role / "I am AI" inside this conversation. Once set, the LLM
+    # prompt and the deterministic templates BOTH must avoid repeating
+    # "أنا نحلة" / "أنا مستشارة" / "أنا ذكاء اصطناعي" — they only
+    # surface again if the customer explicitly asks the identity FAQ
+    # (which the brain detects via INTENT_WHO_ARE_YOU). This is what
+    # closes the "البوت يعرّف نفسه في كل رسالة" production complaint.
+    assistant_identity_introduced: bool = False
     last_intent: str = INTENT_GENERAL
     current_product_focus: Optional[Dict[str, Any]] = None   # {id, title, price, external_id}
     draft_order_id: Optional[str] = None
@@ -268,6 +276,7 @@ class MerchantConversationState:
         return {
             "stage": self.stage,
             "greeted": self.greeted,
+            "assistant_identity_introduced": self.assistant_identity_introduced,
             "last_intent": self.last_intent,
             "current_product_focus": self.current_product_focus,
             "draft_order_id": self.draft_order_id,
@@ -302,6 +311,7 @@ class MerchantConversationState:
         return MerchantConversationState(
             stage=d.get("stage", "discovery"),
             greeted=bool(d.get("greeted", False)),
+            assistant_identity_introduced=bool(d.get("assistant_identity_introduced", False)),
             last_intent=d.get("last_intent", INTENT_GENERAL),
             current_product_focus=d.get("current_product_focus"),
             draft_order_id=d.get("draft_order_id"),
@@ -492,6 +502,13 @@ class BrainReplyState:
     # intent + state + current product + response goal in one struct.
     intent_name: str = ""
     response_goal: str = ""
+    # True after the bot has introduced itself ("أنا نحلة" / "أنا
+    # مساعدتك الذكية") once in this conversation. The HIGH PRIORITY
+    # block reads this field and FORBIDS the LLM from re-introducing
+    # in subsequent turns. Mirrors ``MerchantConversationState.
+    # assistant_identity_introduced`` and is the production fix for
+    # the "البوت يعرّف نفسه في كل رسالة" complaint.
+    identity_already_introduced: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -49,6 +49,36 @@ def test_classify_general_fallback():
     assert c.kind == "general"
 
 
+def test_classify_store_homepage_salla():
+    # Salla storefront root URL — should lift into "افتح المتجر" CTA so the
+    # FAQ store_info template never leaks a 200-char URL inline. Customers
+    # who ask "رابط المتجر" must see a button, not raw text.
+    c = classify_url("https://nahlah.salla.sa/")
+    assert c.kind == "store"
+    assert c.button_title == "افتح المتجر"
+
+
+def test_classify_store_homepage_matches_configured_domain():
+    c = classify_url("https://shop.example.com", store_domain="shop.example.com")
+    assert c.kind == "store"
+    assert c.button_title == "افتح المتجر"
+
+
+def test_classify_product_path_beats_store_classification():
+    # Deep links to a product page must keep the product CTA so we don't
+    # downgrade "/products/talh-honey" to a generic "open store" button.
+    c = classify_url("https://nahlah.salla.sa/products/talh-honey")
+    assert c.kind == "product"
+
+
+def test_extract_store_homepage_provides_friendly_fallback_body():
+    out = extract_first_cta_url("https://nahlah.salla.sa/")
+    assert out is not None
+    assert out.classification.kind == "store"
+    assert out.cleaned_text  # WhatsApp requires non-empty body
+    assert "متجر" in out.cleaned_text
+
+
 def test_button_title_clamped_to_20_chars():
     c = classify_url("https://store.example.com/products/x")
     assert len(c.button_title) <= 20

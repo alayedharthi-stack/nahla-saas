@@ -129,28 +129,17 @@ def greeting(
     return _GREETING_GENERIC_VARIANTS[v](store)
 
 
+# Re-greeting templates intentionally OMIT the persona name and any
+# "أنا مساعدتك / مستشارة المتجر" framing — once the customer has been
+# greeted, repeating the identity ("معك نحلة من المتجر") makes the
+# conversation feel robotic. The merchant flagged this in production
+# ("الذكاء يعيد تعريف نفسه بشكل متكرر"). After ``assistant_identity_
+# introduced=True`` only the explicit identity FAQ (faq_identity) is
+# allowed to re-state who the bot is.
 _REGREET_VARIANTS = [
-    # variant 0
-    lambda persona, store: (
-        f"أهلاً مرة ثانية 👋 — معك {persona} من {store}.\n"
-        "وش أقدر أخدمك فيه الحين؟"
-    ),
-    # variant 1
-    lambda persona, store: (
-        f"مرحباً بك مجدّداً! 🌟\n"
-        f"أنا {persona} هنا — قول وش تحتاج وأكمل معك."
-    ),
-    # variant 2
-    lambda persona, store: (
-        f"حياك الله من جديد 💛\n"
-        f"أنا {persona}، أكمّل معك من وين توقّفنا — أو نبدأ شي جديد؟"
-    ),
-]
-
-_REGREET_GENERIC_VARIANTS = [
-    "أهلاً مرة ثانية 👋 وش أقدر أخدمك فيه الحين؟",
-    "مرحباً بك مجدّداً! 🌟 قول وش تحتاج وأكمل معك.",
-    "حياك الله من جديد — أكمّل معك. وش الخطوة الجاية؟",
+    "ياهلا 🌷 وش أقدر أخدمك فيه؟",
+    "حياك الله 💛 تحت أمرك.",
+    "أهلاً 🌷 قول وش تحتاج وأكمل معك.",
 ]
 
 
@@ -161,20 +150,24 @@ def re_greeting(
     **_: Any,
 ) -> str:
     """Short, warm re-greeting for explicit "السلام عليكم" / "هلا" /
-    "مرحبا" arriving AFTER the customer has already been greeted (e.g.
-    they're returning to the conversation after an automation message).
+    "مرحبا" arriving AFTER the customer has already been greeted.
 
-    Deliberately shorter than `greeting()` — we are not re-onboarding
-    them, just acknowledging the new salutation politely so they don't
-    feel ignored. Sending the full bullet-list greeting again is what
-    triggered the "البوت يكرّر التحية في كل رسالة" complaint.
+    Three rules baked in:
+      1. NEVER mention the assistant's name (e.g. "نحلة") — that's a
+         re-introduction the customer didn't ask for.
+      2. NEVER mention "ذكاء اصطناعي / مساعدة / مستشارة" — those
+         belong to the identity FAQ which the brain routes to only
+         when the customer EXPLICITLY asks (``INTENT_WHO_ARE_YOU``).
+      3. Stay one line so WhatsApp keeps the texture of a normal chat.
+
+    Parameters are kept for backwards-compat with the responder call
+    site (``T.re_greeting(store_name=..., assistant_name=...)``) but
+    are no longer interpolated — we deliberately drop them here to
+    enforce the discipline at the template boundary, not just in the
+    LLM prompt.
     """
-    store = store_name or "متجرنا"
-    persona = (assistant_name or "").strip()
-    v = variant % 3
-    if persona:
-        return _REGREET_VARIANTS[v](persona, store)
-    return _REGREET_GENERIC_VARIANTS[v]
+    del store_name, assistant_name  # intentionally unused — see docstring
+    return _REGREET_VARIANTS[variant % 3]
 
 
 # ── Product search ────────────────────────────────────────────────────────────
@@ -574,27 +567,24 @@ def faq_identity(
     assistant_name: str = "",
     **_: Any,
 ) -> str:
-    """Reply for "من أنت؟" / "أنت بوت؟" / "مين معي؟" intents.
+    """Reply for "من أنت؟" / "أنت بوت؟" / "هل أنت ذكاء اصطناعي؟" / "مين معي؟".
 
-    Mirrors the persona logic of ``greeting()``: when the merchant
-    configured an ``assistant_name`` in tenant settings, the bot
-    introduces itself by that name and frames itself as "مساعدة
-    {store_name}". Otherwise falls back to the generic phrasing so an
-    explicit empty setting still produces a polite identity reply.
+    Kept deliberately short (one or two sentences, no bullet list)
+    per merchant UX spec:
+
+      > "نعم 🌷 أنا نظام ذكي بالذكاء الاصطناعي يساعد في خدمة العملاء
+      >  والطلبات."
+
+    Long identity replies ("أنا نحلة، مساعدتك الذكية، أقدر أساعدك في
+    المنتجات والأسعار والطلبات والشحن…") made the conversation feel
+    robotic; the merchant flagged this in production. The template
+    now obeys WhatsApp shape — short, natural, one emoji max.
     """
     store = store_name or "متجرنا"
     persona = (assistant_name or "").strip()
     if persona:
-        return (
-            f"أنا *{persona}*، مساعدة {store} الذكية 🤖\n"
-            "أقدر أساعدك في المنتجات والأسعار والطلبات والشحن بشكل مباشر.\n"
-            "وش أقدر أخدمك فيه اليوم؟"
-        )
-    return (
-        f"أنا مساعد {store} الذكي.\n"
-        "أساعدك في المنتجات والأسعار والطلبات والشحن بشكل مباشر.\n"
-        "وش أقدر أخدمك فيه اليوم؟"
-    )
+        return f"نعم 🌷 أنا *{persona}*، مساعدة {store} الذكية. تحت أمرك."
+    return f"نعم 🌷 أنا مساعد {store} الذكي. تحت أمرك."
 
 
 def faq_store_info(
@@ -603,13 +593,17 @@ def faq_store_info(
     store_description: str = "",
     **_: Any,
 ) -> str:
-    lines = [f"هذا {store_name or 'متجرنا'}."]
-    if store_description:
-        lines.append(store_description)
+    # Direct CTA: short header line then the URL alone so the WhatsApp
+    # CTA-button normaliser in the webhook lifts it into "افتح المتجر".
+    # We deliberately DROP the trailing "أرسل اسم المنتج" follow-up
+    # the merchant flagged as bad UX — when the customer asked for the
+    # store link they want the link, not a sales nudge.
+    name = store_name or "متجرنا"
     if store_url:
-        lines.append(f"رابط المتجر: {store_url}")
-    lines.append("إذا تحب أساعدك في منتج معيّن أرسل اسمه أو وصفه.")
-    return "\n".join(lines)
+        return f"هذا {name} 🌷\n{store_url}"
+    if store_description:
+        return f"هذا {name} 🌷\n{store_description}"
+    return f"هذا {name} 🌷"
 
 
 def faq_shipping(

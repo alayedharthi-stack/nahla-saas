@@ -140,12 +140,21 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     selected_title = ""
     if isinstance(state.selected_product, dict):
         selected_title = str(state.selected_product.get("title") or "")
+    identity_line = (
+        "- ✅ identity_already_introduced=TRUE — ممنوع تكرار "
+        "«أنا نحلة / أنا مساعدة / أنا ذكاء اصطناعي» في هذا الرد. "
+        "الترحيب يكون قصيراً وبدون تعريف."
+        if state.identity_already_introduced
+        else "- identity_already_introduced=false — يمكن تعريف النفس "
+             "مرة واحدة فقط (مرة في هذه الجولة)."
+    )
     decision_block = (
         "## سياق القرار لهذه الجولة (مصدر واحد فقط)\n"
         f"- الـ intent الحالي: {state.intent_name or 'unknown'}\n"
         f"- المرحلة (stage): {state.stage}\n"
         f"- المنتج الحالي: {selected_title or '—'}\n"
         f"- هدف الرد (response_goal): {state.response_goal or '—'}\n"
+        f"{identity_line}\n"
         "هذا السياق هو الحقيقة الرسمية للجولة — لا تتجاوزيه ولا تعيدي "
         "تشخيص نية العميل من نص الرسالة وحدها."
     )

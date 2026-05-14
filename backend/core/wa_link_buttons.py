@@ -74,8 +74,21 @@ _DEFAULT_TITLES: dict[UrlKind, str] = {
     "payment":  "إتمام الدفع",
     "tracking": "تتبع الطلب",
     "location": "موقع المتجر",
+    # ``store`` is reserved for store homepages (e.g. "https://shop.com/"
+    # or "https://x.salla.sa") — the FAQ store_info template ships
+    # ONLY the bare URL so this title is what the customer sees on
+    # the WhatsApp CTA button after the wire-layer normaliser lifts it.
+    "store":    "افتح المتجر",
     "general":  "فتح الرابط",
 }
+
+# Known storefront platforms — used to detect "this is a store homepage"
+# when the URL has no product / payment / tracking path. Order doesn't
+# matter; we only need ONE match to flip to the ``store`` classification.
+_STOREFRONT_HOST_HINTS = (
+    "salla.sa", "salla.com", "zid.sa", "zid.store",
+    "shopify.com", "myshopify.com",
+)
 
 
 @dataclass(frozen=True)
@@ -142,9 +155,39 @@ def classify_url(url: str, *, store_domain: Optional[str] = None) -> UrlClassifi
         kind = "tracking"
     elif _looks_like_store_product(url, store_domain):
         kind = "product"
+    elif _looks_like_store_home(url, store_domain):
+        # Store homepage (no product path, hostname matches the merchant
+        # domain or a known storefront platform). Lifts into a clean
+        # "افتح المتجر" CTA button instead of the generic "فتح الرابط".
+        kind = "store"
 
     title = _truncate_title(_DEFAULT_TITLES.get(kind, "فتح الرابط"))
     return UrlClassification(kind=kind, button_title=title, url=url, domain=domain)
+
+
+def _looks_like_store_home(url: str, store_domain: Optional[str]) -> bool:
+    """Heuristic for "this URL is the store homepage, not a deep link".
+
+    Trigger when ANY of the following hold:
+      * the path is empty or just ``/`` (true homepage), and
+      * the hostname matches either the merchant-configured store domain
+        or a known storefront platform (Salla / Zid / Shopify).
+
+    Deep links (``/products/...``, ``/checkout``, ``/track``) are already
+    handled earlier in ``classify_url`` and never reach this helper.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").strip().rstrip("/")
+    if path and path not in ("", "/"):
+        return False
+    if not host:
+        return False
+    if store_domain:
+        sd = store_domain.lower().lstrip(".")
+        if host == sd or host.endswith("." + sd):
+            return True
+    return any(h in host for h in _STOREFRONT_HOST_HINTS)
 
 
 def _strip_url_from_text(text: str, url: str) -> str:
@@ -216,6 +259,7 @@ def extract_first_cta_url(
             "payment":  "إتمام الدفع من هنا 👇",
             "tracking": "تتبّع طلبك 👇",
             "location": "موقع المتجر 👇",
+            "store":    "هذا متجرنا 🌷",
         }.get(classification.kind, "اضغط على الزر للمتابعة 👇")
     return CtaExtraction(cleaned_text=cleaned, classification=classification)
 

@@ -741,6 +741,81 @@ class TestStateDrivenSimplification:
         d = eng.decide(ctx)
         assert d.action == ACTION_PROPOSE_DRAFT_ORDER
 
+    # --- Conversation Commerce State Tracking (merchant feedback round 2) ---
+    #
+    # The merchant reported that after the customer typed their national
+    # address mid-funnel the bot replied "قبل ما نكمّل، اختر المنتج اللي
+    # تبغاه". Three regression locks below cover the three known root
+    # causes: the pre-product stash block hijacking address signals from
+    # a live funnel, the safety net forcing a search when focus is gone,
+    # and the safety net asking "ما المنتج؟" when order_prep already
+    # holds a valid product_id we can recover from cache.
+
+    def test_address_signal_with_live_order_prep_does_not_stash(self):
+        """short_address_code arrives without current_product_focus BUT
+        order_prep carries a name + product_id. That's not a pre-product
+        stash — it's the next slot in an active funnel."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import ACTION_STASH_ADDRESS_PRE_PRODUCT
+        eng = DefaultDecisionEngine()
+        state = _make_state(
+            greeted=True,
+            stage="ordering",
+            current_product_focus=None,
+            order_prep=OrderPreparationState(
+                product_id="ext-1",
+                customer_first_name="محمد",
+                city="الرياض",
+            ),
+            last_search_candidates=[
+                {"id": 1, "external_id": "ext-1", "title": "عسل سمر",
+                 "can_checkout": True, "orderable": True},
+            ],
+        )
+        ctx = self._ctx(
+            INTENT_GENERAL, state, _make_facts(),
+            message="ABCD1234",
+            slots={"short_address_code": "ABCD1234"},
+        )
+        d = eng.decide(ctx)
+        assert d.action != ACTION_STASH_ADDRESS_PRE_PRODUCT, (
+            "address signal mid-funnel must not be routed to stash-pre-product"
+        )
+
+    def test_safety_net_recovers_focus_from_order_prep_product_id(self):
+        """Focus was wiped but order_prep still remembers the product_id
+        and cached candidates contain it → safety net must rehydrate the
+        focus and continue the order, NOT show 'ما المنتج؟'."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        state = _make_state(
+            greeted=True,
+            stage="ordering",
+            current_product_focus=None,
+            order_prep=OrderPreparationState(
+                product_id="ext-7",
+                customer_first_name="نورة",
+                city="جدة",
+                short_address_code="JEDD9988",
+            ),
+            last_search_candidates=[
+                {"id": 7, "external_id": "ext-7", "title": "عسل السدر",
+                 "can_checkout": True, "orderable": True},
+            ],
+        )
+        ctx = self._ctx(
+            INTENT_GENERAL, state, _make_facts(),
+            message="تمام، أرسل الطلب",
+        )
+        d = eng.decide(ctx)
+        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        recovered = d.args.get("forced_product") or d.args.get("product") or {}
+        assert recovered.get("external_id") == "ext-7"
+        assert d.args.get("source") == "order_prep_recovery"
+        # The reason string MUST explicitly call out the recovery so it's
+        # easy to grep in production Railway logs.
+        assert "order_prep" in (d.reason or "").lower()
+
     # --- Composer: defense-in-depth greet guard ---
 
     def test_composer_downgrades_greet_when_already_greeted(self):

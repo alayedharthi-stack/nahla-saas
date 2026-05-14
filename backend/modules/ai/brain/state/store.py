@@ -412,6 +412,7 @@ class DefaultStateStore:
         """Return a NEW state (immutable transition)."""
         from ..decision.actions import (
             ACTION_GREET,
+            ACTION_FAQ_REPLY,
             ACTION_SEARCH_PRODUCTS,
             ACTION_PROPOSE_DRAFT_ORDER,
             ACTION_SEND_PAYMENT_LINK,
@@ -425,6 +426,9 @@ class DefaultStateStore:
         s = MerchantConversationState(
             stage=state.stage,
             greeted=state.greeted,
+            assistant_identity_introduced=getattr(
+                state, "assistant_identity_introduced", False
+            ),
             last_intent=intent.name,
             current_product_focus=state.current_product_focus,
             draft_order_id=state.draft_order_id,
@@ -470,12 +474,32 @@ class DefaultStateStore:
 
         if action == ACTION_GREET:
             s.greeted = True
+            # Identity is introduced ONLY on the first full greeting
+            # (variant 0/1/2 of greeting() — each one says "أنا نحلة"
+            # or "أنا مساعد {store}"). A re-greeting (``re_greet=True``)
+            # is a short "ياهلا 🌷" and does NOT touch identity, so we
+            # must not flip the flag for those.
+            re_greet = bool((decision.args or {}).get("re_greet"))
+            if not re_greet:
+                s.assistant_identity_introduced = True
             # Preserve any in-progress sales stage. The greeting itself is
             # also gated upstream in the decision engine, so reaching this
             # branch with a progress stage should be very rare — but if it
             # happens we MUST NOT downgrade the funnel.
             if state.stage not in _PROGRESS_STAGES:
                 s.stage = STAGE_DISCOVERY
+
+        elif action == ACTION_FAQ_REPLY:
+            # When the customer explicitly asked the identity FAQ
+            # (INTENT_WHO_ARE_YOU → topic="identity"), the bot just
+            # said "أنا نحلة / أنا مساعد المتجر الذكي" — stamp the
+            # flag so subsequent turns can stop re-introducing. We
+            # look at the decision.args topic AND fall back to intent
+            # so this still fires even if the topic wasn't passed
+            # through explicitly (e.g. an LLM-routed identity reply).
+            topic = str((decision.args or {}).get("topic") or "")
+            if topic == "identity" or intent.name == "who_are_you":
+                s.assistant_identity_introduced = True
 
         elif action == ACTION_SEARCH_PRODUCTS:
             if intent.name == INTENT_ASK_PRODUCT:

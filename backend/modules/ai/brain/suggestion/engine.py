@@ -54,14 +54,23 @@ class DefaultSuggestionEngine:
         if decision.action == ACTION_FAQ_REPLY:
             topic = str(result.data.get("topic") or "")
             if topic == "identity":
+                # Identity FAQ replies stay SHORT (one sentence).
+                # The merchant flagged identity replies that bolted on
+                # a "وش أقدر أخدمك فيه اليوم؟" follow-up as feeling
+                # robotic. The template already ends with "تحت أمرك."
+                # which is enough — let the customer drive the next
+                # turn instead of nudging them.
                 suggestion.suggested_next_step = "discover_customer_need"
-                suggestion.needs_follow_up_question = True
-                suggestion.follow_up_question = "وش أقدر أخدمك فيه اليوم؟"
+                suggestion.needs_follow_up_question = False
                 return suggestion
             if topic == "store_info":
-                suggestion.suggested_next_step = "continue_browsing_store"
-                suggestion.needs_follow_up_question = True
-                suggestion.follow_up_question = "إذا عندك منتج معيّن في بالك أرسل اسمه وسأبحث لك عنه."
+                # No follow-up question: the customer asked for the store link,
+                # not for a product suggestion. The composer emits a one-line
+                # answer with the URL alone so the WhatsApp wire layer turns
+                # it into a single "افتح المتجر" CTA button.
+                suggestion.suggested_next_step = "store_link_delivered"
+                suggestion.needs_follow_up_question = False
+                suggestion.route_to_checkout = False
                 return suggestion
             if topic == "shipping":
                 suggestion.suggested_next_step = "select_product_before_shipping_details"

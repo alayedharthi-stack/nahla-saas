@@ -939,3 +939,249 @@ def test_state_manager_save_does_not_drop_unrelated_keys(monkeypatch):
     assert conv.extra_metadata["ai_handoff_token"] == "abc123"
     assert conv.extra_metadata["experimental_flag"] == {"variant": "B"}
     assert conv.extra_metadata["turn"] == 5
+
+
+# ── Identity discipline (no repeated "أنا نحلة") ──────────────────────────────
+#
+# Production complaint: the bot leaked "أنا نحلة / أنا مستشارة المبيعات /
+# أنا ذكاء اصطناعي" into almost every reply, including short ack-ish ones
+# ("أها", "حياكم"). Fix has three layers:
+#
+#   1. ``MerchantConversationState.assistant_identity_introduced`` —
+#      stamped True the first time the bot greets OR answers the identity
+#      FAQ. Persisted to brain_state.
+#   2. ``re_greeting`` template — no longer mentions persona name or role;
+#      it's a one-liner ("ياهلا 🌷 وش أقدر أخدمك فيه؟").
+#   3. ``faq_identity`` template — short single-sentence reply.
+#   4. ``build_brain_reply_prompt`` — surfaces the flag to the LLM so the
+#      LLM fallback also doesn't re-introduce.
+
+
+def test_transition_sets_identity_introduced_on_first_greet():
+    """First-turn ACTION_GREET (full greeting variant) MUST stamp
+    ``assistant_identity_introduced=True`` so subsequent turns don't
+    re-introduce the bot."""
+    from modules.ai.brain.decision.actions import ACTION_GREET
+    from modules.ai.brain.state.store import DefaultStateStore
+    from modules.ai.brain.state.stages import STAGE_DISCOVERY
+    from modules.ai.brain.types import Decision, INTENT_GREETING, Intent
+
+    store = DefaultStateStore()
+    state = _make_state(STAGE_DISCOVERY, greeted=False, product=None)
+    assert state.assistant_identity_introduced is False
+
+    new_state = store.transition(
+        state=state,
+        intent=Intent(name=INTENT_GREETING, confidence=0.9),
+        decision=Decision(action=ACTION_GREET, reason="first greeting"),
+    )
+
+    assert new_state.greeted is True
+    assert new_state.assistant_identity_introduced is True
+
+
+def test_transition_re_greet_does_not_flip_identity_flag_if_already_false():
+    """A re-greeting (short "ياهلا 🌷") is NOT a self-introduction, so it
+    must not flip the identity flag — that flag should only land when a
+    full greeting or the identity FAQ ran."""
+    from modules.ai.brain.decision.actions import ACTION_GREET
+    from modules.ai.brain.state.store import DefaultStateStore
+    from modules.ai.brain.state.stages import STAGE_DISCOVERY
+    from modules.ai.brain.types import Decision, INTENT_GREETING, Intent
+
+    store = DefaultStateStore()
+    state = _make_state(STAGE_DISCOVERY, greeted=True, product=None)
+    state.assistant_identity_introduced = False
+
+    new_state = store.transition(
+        state=state,
+        intent=Intent(name=INTENT_GREETING, confidence=0.9),
+        decision=Decision(
+            action=ACTION_GREET,
+            args={"re_greet": True},
+            reason="re-greeting after greeted=True",
+        ),
+    )
+
+    # greeted stays True (idempotent), but the identity flag MUST NOT flip
+    # because re_greeting doesn't say "أنا نحلة".
+    assert new_state.greeted is True
+    assert new_state.assistant_identity_introduced is False
+
+
+def test_transition_preserves_identity_flag_across_turns():
+    """Once stamped, the identity flag is sticky for the lifetime of the
+    conversation — every subsequent transition (search, faq, propose
+    draft, …) must carry it forward."""
+    from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS
+    from modules.ai.brain.state.store import DefaultStateStore
+    from modules.ai.brain.state.stages import STAGE_DISCOVERY
+    from modules.ai.brain.types import Decision, INTENT_ASK_PRODUCT, Intent
+
+    store = DefaultStateStore()
+    state = _make_state(STAGE_DISCOVERY, greeted=True, product=None)
+    state.assistant_identity_introduced = True
+
+    new_state = store.transition(
+        state=state,
+        intent=Intent(name=INTENT_ASK_PRODUCT, confidence=0.8),
+        decision=Decision(action=ACTION_SEARCH_PRODUCTS, args={"query": "عسل"}),
+    )
+
+    assert new_state.assistant_identity_introduced is True
+
+
+def test_transition_sets_identity_introduced_on_who_are_you_faq():
+    """When the customer explicitly asks "هل أنت بوت؟" the brain routes to
+    ACTION_FAQ_REPLY with topic=identity. The transition MUST stamp the
+    flag so the bot stops re-introducing in later turns."""
+    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.state.store import DefaultStateStore
+    from modules.ai.brain.state.stages import STAGE_DISCOVERY
+    from modules.ai.brain.types import Decision, Intent, INTENT_WHO_ARE_YOU
+
+    store = DefaultStateStore()
+    state = _make_state(STAGE_DISCOVERY, greeted=False, product=None)
+    state.assistant_identity_introduced = False
+
+    new_state = store.transition(
+        state=state,
+        intent=Intent(name=INTENT_WHO_ARE_YOU, confidence=0.95),
+        decision=Decision(
+            action=ACTION_FAQ_REPLY,
+            args={"topic": "identity"},
+            reason="customer asked who the assistant is",
+        ),
+    )
+
+    assert new_state.assistant_identity_introduced is True
+
+
+def test_state_dict_roundtrip_persists_identity_flag():
+    """The flag must survive serialisation to / from extra_metadata —
+    otherwise the next webhook turn would load it as False and the bot
+    would re-introduce."""
+    from modules.ai.brain.types import MerchantConversationState
+
+    state = MerchantConversationState()
+    state.greeted = True
+    state.assistant_identity_introduced = True
+
+    blob = state.to_dict()
+    assert blob["assistant_identity_introduced"] is True
+
+    restored = MerchantConversationState.from_dict(blob)
+    assert restored.assistant_identity_introduced is True
+
+
+def test_re_greeting_template_does_not_mention_persona_name():
+    """The short re-greeting template MUST NOT mention "نحلة" / "مساعدة" /
+    "ذكاء اصطناعي" — that's the production complaint we are closing."""
+    from modules.ai.brain.compose import templates as T
+
+    for variant in (0, 1, 2):
+        reply = T.re_greeting(
+            store_name="متجر العسل",
+            assistant_name="نحلة",
+            variant=variant,
+        )
+        assert "نحلة" not in reply
+        assert "مساعدة" not in reply
+        assert "مساعد متجر" not in reply
+        assert "ذكاء اصطناعي" not in reply
+        assert "مستشارة" not in reply
+        # And short — one line, no bullet list.
+        assert reply.count("\n") <= 1
+        assert "•" not in reply
+
+
+def test_faq_identity_template_stays_short_and_natural():
+    """Identity FAQ replies must stay one sentence per the merchant UX
+    spec ("نعم 🌷 أنا نظام ذكي يساعد في خدمة العملاء والطلبات.")."""
+    from modules.ai.brain.compose import templates as T
+
+    reply = T.faq_identity(store_name="متجر العسل", assistant_name="نحلة")
+
+    assert "نحلة" in reply
+    assert "نعم" in reply
+    # NO bullet list, NO multi-line brochure.
+    assert "•" not in reply
+    assert reply.count("\n") <= 1
+
+
+def test_suggestion_engine_does_not_append_followup_to_identity_reply():
+    """The suggestion engine used to append "وش أقدر أخدمك فيه اليوم؟"
+    after the identity FAQ — that's the very kind of robotic preamble
+    the merchant flagged. Identity replies stay short, no follow-up."""
+    from modules.ai.brain.suggestion.engine import DefaultSuggestionEngine
+    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.types import (
+        ActionResult,
+        BrainContext,
+        Decision,
+        Intent,
+        INTENT_WHO_ARE_YOU,
+    )
+
+    state = _make_state("discovery", greeted=True, product=None)
+    intent = Intent(name=INTENT_WHO_ARE_YOU, confidence=0.95)
+    ctx = BrainContext(
+        tenant_id=7,
+        customer_phone="+966500000000",
+        customer_id=1,
+        message="هل أنت بوت؟",
+        history=[],
+        profile={},
+        intent=intent,
+        state=state,
+        facts=_facts(),
+    )
+    decision = Decision(
+        action=ACTION_FAQ_REPLY,
+        args={"topic": "identity"},
+        reason="identity FAQ",
+    )
+    result = ActionResult(success=True, data={"topic": "identity"})
+
+    engine = DefaultSuggestionEngine()
+    suggestion = engine.suggest(ctx, decision, result)
+
+    assert suggestion.needs_follow_up_question is False
+
+
+def test_brain_reply_prompt_surfaces_identity_flag_to_llm():
+    """When ``assistant_identity_introduced=True``, the prompt MUST tell
+    the LLM explicitly not to repeat the introduction. This is the LLM-
+    fallback half of the fix — deterministic templates handle the rest."""
+    from modules.ai.brain.compose.prompt_builder import build_brain_reply_prompt
+    from modules.ai.brain.types import BrainReplyState
+
+    state = BrainReplyState(
+        store_name="متجر العسل",
+        tone="neutral",
+        stage="discovery",
+        identity_already_introduced=True,
+    )
+
+    prompt = build_brain_reply_prompt(state)
+
+    # The decision-context block flips the line based on the flag.
+    assert "identity_already_introduced=TRUE" in prompt
+    # And the HIGH PRIORITY block carries the persistent rule.
+    assert "ممنوع تكرار" in prompt or "تعريف النفس مرة واحدة" in prompt
+
+
+def test_brain_reply_prompt_marks_flag_false_when_not_introduced():
+    """First-turn case: the prompt tells the LLM it MAY introduce once."""
+    from modules.ai.brain.compose.prompt_builder import build_brain_reply_prompt
+    from modules.ai.brain.types import BrainReplyState
+
+    state = BrainReplyState(
+        store_name="متجر العسل",
+        tone="neutral",
+        stage="discovery",
+        identity_already_introduced=False,
+    )
+
+    prompt = build_brain_reply_prompt(state)
+    assert "identity_already_introduced=false" in prompt

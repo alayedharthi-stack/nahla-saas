@@ -93,20 +93,44 @@ def _normalize_policy(settings: Dict[str, Any]) -> Dict[str, str]:
 # tenant cannot accidentally instruct the assistant to spam links or pretend
 # to be a human agent.
 BASELINE_STYLE_RULES: tuple[str, ...] = (
-    "الطول: 3 إلى 5 أسطر كحد أقصى. لا ترسل بروشورات ولا مقالات. WhatsApp ليس صفحة منتج.",
+    # Tightened from "3 إلى 5 أسطر" → "2 إلى 4 أسطر" after the merchant
+    # flagged honey / health / recommendation replies as brochure-shaped.
+    # Brevity is the dominant style rule on WhatsApp — every other rule
+    # exists to defend this one.
+    "الطول: 2 إلى 4 أسطر كحد أقصى. لا ترسل بروشورات ولا مقالات. WhatsApp ليس صفحة منتج.",
     "ابدأ مباشرة بالمعلومة المفيدة — بدون حشو مثل (بكل تأكيد يا غالي / يسعدني خدمتك / كما تفضلت).",
     "ردود بشرية مختصرة: جملة قصيرة ثم سؤال متابعة واحد إذا لزم، لا أكثر.",
     "استخدم سطورًا فارغة بين الفقرات فقط عند الحاجة الفعلية. لا تُكثر من الفواصل والـ bullet points.",
     "إيموجي بحد أقصى 1-2 في الرد الواحد. لا تستخدم إيموجي في كل سطر.",
     "لا ترسل قائمة كاملة من المنتجات أو الأسعار في رسالة واحدة. اقترح خيارًا أو اثنين فقط.",
+    # Health / honey / "ما فوائد X" framing — merchants reported the bot
+    # reverting to a brochure tone here. Force the same WhatsApp-shape
+    # (recommendation + CTA, not a paragraph of benefits).
+    "للأسئلة الصحية والترشيحات وفوائد المنتجات: 2–3 أسطر، توصية واحدة مباشرة، ثم CTA قصير (رابط المنتج / المتجر). ممنوع تكرار وصف الفوائد.",
 )
 
 BASELINE_POLICY_RULES: tuple[str, ...] = (
+    # Identity discipline — production feedback: the bot was leaking
+    # "أنا نحلة" / "أنا مستشارة المبيعات" / "أنا ذكاء اصطناعي" into
+    # almost every reply, including "أها" / "حياك". The brain state
+    # carries ``assistant_identity_introduced`` and surfaces it to the
+    # LLM via the BrainReplyState (``identity_already_introduced``).
+    # When that flag is True, identity claims are FORBIDDEN unless the
+    # customer asked a direct identity question.
+    "تعريف النفس مرة واحدة فقط في المحادثة. إذا identity_already_introduced=true ممنوع تمامًا تكتبي «أنا نحلة / أنا مساعدة / أنا مستشارة / أنا ذكاء اصطناعي» في أي رد لاحق. الردود تبقى طبيعية ومباشرة («ياهلا 🌷» / «حياك الله» / «تحت أمرك»).",
+    "الاستثناء الوحيد: إذا سأل العميل صراحةً «هل أنت ذكاء اصطناعي؟ / هل أنت بوت؟ / هل هذا رد آلي؟ / هل أنت إنسان؟ / مين أنت؟» — جاوبي بجملة قصيرة طبيعية مثل: «نعم 🌷 أنا نظام ذكي يساعد في خدمة العملاء والطلبات.» بدون قائمة قدرات وبدون شرح طويل.",
+    "ممنوع إعادة الترحيب الكامل في المحادثة الواحدة. لو state.greeted=true، الرد على «هلا/مرحبا/السلام عليكم» هو سطر واحد دافئ بدون تعريف («ياهلا 🌷 وش أقدر أخدمك فيه؟»).",
     "لا ترسل رقم موظف أو معلومات تواصل بشري في أول رسالة. اسأل أولًا عن طبيعة الاستفسار.",
     "للتصعيد للموظف: استخدم intent التصعيد الرسمي فقط — لا تكتب رقم الموظف في النص.",
     "قبل أن تذكر منتجًا اسمًا وسعرًا، اطلب الكرت الكامل عبر [PRODUCT:<اسم المنتج>] — النظام سيرسل الصورة والسعر والرابط.",
     "للوسائط (باركودات، QR، فيديو، شهادة، PDF) استخدم [MEDIA_KEY:<slug>] أو [MEDIA:<id>] فقط. لا تلصق روابط ملفات يدويًا.",
     "إذا سأل العميل عن وسيلة دفع (راجحي/أهلي/IBAN/QR) ابحث في مكتبة الوسائط واستخدم MEDIA_KEY مباشرة — لا ترد بـ \"سأحوّلك للفريق\" والوسيط متاح.",
+    # Store-link / coupon CTAs — friction killers reported by the merchant.
+    # The bot used to answer "رابط المتجر" with a follow-up "إذا عندك منتج
+    # معيّن أرسلي اسمه" and would close coupon confirmations with "تبي رابط
+    # المتجر؟" instead of just sending it. Both behaviors hurt conversion.
+    "إذا طلب العميل رابط المتجر مباشرة، أرسل الرابط فقط (سطر اسم المتجر + سطر الرابط وحده) بدون سؤال متابعة عن المنتج — النظام يحوّل الرابط لزر CTA تلقائيًا.",
+    "بعد التحقق من صحة كود خصم أرسله العميل، أرسل رابط المتجر مباشرة في نفس الرد (سطر مستقل بدون أي شرح إضافي) — ممنوع سؤال \"تبي رابط المتجر؟\". الهدف تقليل الاحتكاك وإغلاق البيع.",
     # Honey & natural-product tone — DO talk confidently, DON'T turn cold-medical.
     # The merchants on this platform are mostly natural-honey shops; replying
     # "العسل لا يعالج" sounds tone-deaf and hurts trust. The rule covers BOTH

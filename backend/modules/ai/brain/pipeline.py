@@ -434,7 +434,29 @@ class MerchantBrain:
             # the customer sends a number like "1" that should resolve from the
             # NEW candidate list.  Without this, "1" is routed as INTENT_GENERAL
             # + old focus → ACTION_PROPOSE_DRAFT_ORDER with wrong product.
-            if new_state.current_product_focus:
+            #
+            # EXCEPTION — Conversation Commerce State Tracking:
+            # When the customer is in the middle of an active order
+            # (stage=ORDERING and order_prep already captured ANY of
+            # product_id / city / customer name / short address code /
+            # maps link), wiping focus here breaks the funnel.  The
+            # merchant reported: "customer sent national address, bot
+            # said 'اختر المنتج اللي تبغاه'" — that's exactly this race.
+            # Keep the focus, ignore the list-display side-effect.
+            _op = getattr(new_state, "order_prep", None)
+            _has_live_order = (
+                new_state.stage in ("ordering", "deciding")
+                and _op is not None
+                and any((
+                    getattr(_op, "product_id", "") or "",
+                    getattr(_op, "city", "") or "",
+                    getattr(_op, "customer_first_name", "") or "",
+                    getattr(_op, "short_address_code", "") or "",
+                    getattr(_op, "google_maps_url", "") or "",
+                    getattr(_op, "address_line", "") or "",
+                ))
+            )
+            if new_state.current_product_focus and not _has_live_order:
                 logger.info(
                     "[ORDER FLOW] reset stale current_product_focus after product list display | "
                     "old_focus=%r new_candidates=%d action=%s",
@@ -443,6 +465,17 @@ class MerchantBrain:
                     decision.action,
                 )
                 new_state.current_product_focus = None
+            elif new_state.current_product_focus and _has_live_order:
+                logger.info(
+                    "[ORDER FLOW] preserving current_product_focus during active order | "
+                    "focus=%r stage=%s has_product_id=%s has_address=%s has_name=%s "
+                    "— order funnel takes priority over list display",
+                    _old_focus_title,
+                    new_state.stage,
+                    bool(getattr(_op, "product_id", "")),
+                    bool(getattr(_op, "short_address_code", "") or getattr(_op, "google_maps_url", "")),
+                    bool(getattr(_op, "customer_first_name", "")),
+                )
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         ctx.state = new_state
@@ -890,6 +923,9 @@ def _build_reply_state(
         tone=effective_tone,
         stage=current_state.stage,
         customer_goal=current_state.customer_goal,
+        identity_already_introduced=bool(
+            getattr(current_state, "assistant_identity_introduced", False)
+        ),
         selected_product=selected_product,
         price_sensitivity=_price_sensitivity_label(sensitivity_score),
         known_facts=known_facts,
