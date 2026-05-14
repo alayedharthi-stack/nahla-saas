@@ -1092,49 +1092,47 @@ class DefaultDecisionEngine:
                 confidence=0.68,
             )
 
-        # ── 8.6 Out-of-scope guard (May 2026 — replaces web_search) ───────
+        # ── 8.6 Out-of-scope guard (May 2026 — three-tier classifier) ─────
         #
         # The previous version of this rule routed every long
         # ``INTENT_GENERAL`` message to ``ACTION_WEB_SEARCH`` whenever
         # the merchant happened to have no products in catalogue at
         # decision time. In production this leaked DuckDuckGo result
-        # dumps (encoded URLs, ``uddg=…&rut=…``, Wikipedia citations)
-        # into customer threads after questions like
-        # "ايهما حساب كهرباء الشقة" — a catastrophic trust failure.
+        # dumps into customer threads — a catastrophic trust failure.
         #
-        # New behaviour: ``INTENT_GENERAL`` ALWAYS routes to the
-        # canned out-of-scope deflection unless the host explicitly
-        # opted into external research via the env kill switch. Even
-        # then we only honour the route when the merchant has SOME
-        # catalogue (gives the responder enough context to keep the
-        # reply on-brand) AND the question is non-trivial. Default
-        # behaviour for every tenant is "short polite deflection,
-        # no LLM expansion, no web call".
+        # The first hotfix replaced that route with a single canned
+        # "هذا خارج نطاق متجرنا" reply. Merchant feedback: too
+        # corporate, broke the warm/playful tone Nahla is supposed
+        # to have.
+        #
+        # New behaviour: every ``INTENT_GENERAL`` decision carries a
+        # ``tier`` arg in {chitchat, safe_fact, hard} chosen by
+        # ``scope_tiers.classify_out_of_scope_tier``:
+        #
+        #   * chitchat  → deterministic playful template (no LLM, no web).
+        #   * safe_fact → tight LLM call gated by the responder (no
+        #                 web, sanitiser scrubs any URL leak).
+        #   * hard      → deterministic polite apology (no LLM, no web).
+        #
+        # The legacy ``ACTION_WEB_SEARCH`` path is still wired but
+        # only fires when ops explicitly set
+        # ``MERCHANT_EXTERNAL_RESEARCH_ENABLED=true`` AND the merchant
+        # has no catalogue context. Every other tenant gets the
+        # three-tier router by default.
         if intent.name == INTENT_GENERAL:
             from modules.ai.tools.web_search import external_research_enabled  # noqa: PLC0415
+            from .scope_tiers import classify_out_of_scope_tier, chitchat_topic  # noqa: PLC0415
 
             research_on = external_research_enabled()
-            if not research_on:
-                logger.info(
-                    "[OUT_OF_SCOPE_BLOCK] tenant=%s intent=%s reason=research_disabled "
-                    "preview=%r",
-                    getattr(ctx, "tenant_id", None),
-                    intent.name,
-                    (ctx.message or "")[:60],
-                )
-                return Decision(
-                    action=ACTION_OUT_OF_SCOPE,
-                    reason="general question — external research disabled (default)",
-                    confidence=0.95,
-                )
-            if (
+            if research_on and (
                 ctx.sales_context
                 and not ctx.facts.has_products
                 and len(ctx.message.split()) >= 4
             ):
-                # Research is explicitly enabled by ops AND the
-                # merchant has no catalogue context — historical
-                # behaviour preserved behind the opt-in flag.
+                # Legacy opt-in path — research explicitly enabled
+                # by ops AND no catalogue context. Preserved for the
+                # one beta tenant that originally needed it; default
+                # tenants never see this branch.
                 logger.info(
                     "[GENERAL_WEB_ALLOWED] tenant=%s reason=research_enabled_no_catalogue",
                     getattr(ctx, "tenant_id", None),
@@ -1145,18 +1143,19 @@ class DefaultDecisionEngine:
                     reason="general knowledge question with weak store context",
                     confidence=0.55,
                 )
-            # Has catalogue context — still treat as out-of-scope so
-            # the AI doesn't blurt unsolicited general knowledge into
-            # a shopping conversation.
+
+            tier = classify_out_of_scope_tier(ctx.message or "")
+            topic = chitchat_topic(ctx.message or "") or ""
             logger.info(
-                "[OUT_OF_SCOPE_BLOCK] tenant=%s intent=%s reason=has_catalogue_no_general_search",
+                "[OUT_OF_SCOPE_BLOCK] tenant=%s intent=%s tier=%s topic=%s preview=%r",
                 getattr(ctx, "tenant_id", None),
-                intent.name,
+                intent.name, tier, topic, (ctx.message or "")[:60],
             )
             return Decision(
                 action=ACTION_OUT_OF_SCOPE,
-                reason="general question while catalogue available — stay on-domain",
-                confidence=0.9,
+                args={"tier": tier, "topic": topic, "message": ctx.message or ""},
+                reason=f"out_of_scope tier={tier} topic={topic or '-'}",
+                confidence=0.95 if tier == "hard" else 0.9,
             )
 
         # ── 9.5 Ordering-stage safety net ────────────────────────────────

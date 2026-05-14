@@ -393,14 +393,33 @@ class DefaultComposer:
                 citations=data.get("citations", []),
             )
 
-        # ── Out-of-scope deflection (May 2026) ─────────────────────────────
-        # Short, polite, on-brand Arabic reply that keeps the
-        # customer inside the merchant's domain WITHOUT calling the
-        # LLM (no hallucination risk) and WITHOUT hitting any web
-        # tool (no search-dump leakage). Variant rotation keeps the
-        # reply natural across repeat off-topic questions.
+        # ── Out-of-scope deflection (May 2026 — three-tier) ────────────────
+        # The decision engine attaches ``tier`` (chitchat / safe_fact /
+        # hard) and an optional ``topic`` slug. Behaviour:
+        #
+        #   chitchat  → deterministic playful template, NO LLM, NO web.
+        #   safe_fact → tight LLM compose with strict guardrails; if
+        #               the LLM fails / times out / leaks URLs we
+        #               drop to ``safe_fact_dodge`` (still playful).
+        #   hard      → deterministic polite apology, NO LLM, NO web.
+        #
+        # The outbound sanitiser (core/outbound_sanitizer.py) is the
+        # last line of defence: even if the LLM emits a URL during a
+        # safe_fact reply, it gets scrubbed before send.
         if action == ACTION_OUT_OF_SCOPE:
-            return T.out_of_scope_reply(variant=self._variant_idx(ctx))
+            args = decision.args or {}
+            tier = str(args.get("tier") or "hard").strip().lower()
+            topic = str(args.get("topic") or "").strip().lower()
+            variant = self._variant_idx(ctx)
+            if tier == "chitchat":
+                return T.chitchat_reply(topic=topic, variant=variant)
+            if tier == "safe_fact":
+                reply = await self._safe_fact_compose(ctx, args)
+                if reply:
+                    return reply
+                return T.safe_fact_dodge(variant=variant)
+            # default: hard
+            return T.hard_out_of_scope_reply(variant=variant)
 
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:
@@ -646,6 +665,134 @@ class DefaultComposer:
         except Exception as exc:
             logger.error("[Composer._llm_compose] thin path error: %s", exc)
             return await self._legacy_llm_compose(ctx, result, timeout_seconds=15)
+
+    async def _safe_fact_compose(
+        self,
+        ctx: BrainContext,
+        args: Dict[str, Any],
+    ) -> str:
+        """Tightly-constrained LLM call for the SAFE_FACT tier.
+
+        Used when the customer asks a public, well-known factoid that
+        doesn't change frequently and isn't medically / legally /
+        financially / politically sensitive (e.g. "من رئيس أمريكا؟").
+        We allow the LLM to answer in ONE short Arabic line that
+        bridges back to honey/orders. The prompt mandates:
+
+          * one playful sentence (max ~2 short lines)
+          * include a honey / 🍯 / orders bridge
+          * NO URLs, NO sources, NO citations, NO markdown links
+          * if uncertain, joke about not knowing — DO NOT guess
+
+        Post-processing:
+          * reject any reply containing ``http`` / ``www.`` / ``://`` —
+            falls through to ``safe_fact_dodge`` so the customer still
+            gets a human reply.
+          * outbound sanitiser (core/outbound_sanitizer.py) is the
+            absolute last line of defence at the WhatsApp send path.
+
+        Returns ``""`` on any failure so the caller falls through to
+        the dodge template. Never raises.
+        """
+        import asyncio  # noqa: PLC0415
+        import re as _re_safe  # noqa: PLC0415
+
+        message = str(args.get("message") or ctx.message or "").strip()
+        if not message:
+            return ""
+
+        store_name = getattr(ctx.facts, "store_name", "") or "متجرنا"
+        system_prompt = (
+            "أنت نحلة، مساعدة مبيعات لطيفة وذكية لمتجر عسل اسمه "
+            f"\"{store_name}\". العميل سأل سؤالاً عاماً ليس عن منتجات "
+            "المتجر مباشرة. القواعد الصارمة:\n"
+            "1. أجب بسطر عربي قصير واحد (٢ أسطر كحد أقصى).\n"
+            "2. اجعل الرد ودوداً وفيه روح خفيفة وابتسامة 😄، "
+            "وأضف رابط لطيف بالعسل أو الطلبات في نهاية الجواب.\n"
+            "3. ممنوع تماماً وضع أي رابط، URL، مصدر، اقتباس مرجع، "
+            "أو إشارة إلى البحث في الإنترنت.\n"
+            "4. ممنوع استخدام أي عبارة من النوع:\n"
+            "   - \"هذا خارج نطاق متجرنا\"\n"
+            "   - \"أنا هنا — قول وش تحتاج\"\n"
+            "   - \"وأكمل معك\"\n"
+            "5. لو لست متأكدة من الإجابة بثقة عالية، لا تخمّن — "
+            "علّق بمزحة لطيفة عن أنك لا تعرفين، ثم رجّعي الحديث "
+            "للعسل أو الطلب.\n"
+            "6. لا تكتبي قوائم ولا عناوين فرعية. سطر واحد فقط."
+        )
+
+        _TIMEOUT = 12  # seconds — safe_fact must be fast, not deep.
+
+        try:
+            _BACKEND = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "../../../../..")
+            )
+            if _BACKEND not in sys.path:
+                sys.path.insert(0, _BACKEND)
+            from modules.ai.orchestrator.adapter import generate_ai_reply  # noqa: PLC0415
+
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(
+                    generate_ai_reply,
+                    tenant_id=ctx.tenant_id,
+                    customer_phone=ctx.customer_phone,
+                    message=message,
+                    store_name=store_name,
+                    channel="whatsapp",
+                    locale="ar",
+                    history=[],   # safe_fact is a 1-shot, no history.
+                    context_metadata={"safe_fact_tier": True},
+                    prompt_overrides={"__full_system_prompt": system_prompt},
+                    provider_hint="anthropic",
+                ),
+                timeout=_TIMEOUT,
+            )
+            text = (payload.reply_text or "").strip()
+        except asyncio.TimeoutError:
+            logger.info(
+                "[SAFE_FACT] timed out after %ds tenant=%s — falling through to dodge",
+                _TIMEOUT, ctx.tenant_id,
+            )
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SAFE_FACT] LLM call failed tenant=%s err=%s — falling through to dodge",
+                ctx.tenant_id, exc,
+            )
+            return ""
+
+        if not text:
+            return ""
+
+        # Local URL guard — fail-closed before the outbound sanitiser
+        # gets a chance, so we drop to the dodge template (still
+        # playful) instead of the generic fallback the sanitiser would
+        # emit. Catches the obvious shapes; the outbound sanitiser
+        # catches the encoded ones.
+        if _re_safe.search(r"https?://|www\.|://|duckduckgo|uddg=", text, _re_safe.IGNORECASE):
+            logger.info(
+                "[SAFE_FACT] dropping reply with URL leak tenant=%s preview=%r",
+                ctx.tenant_id, text[:120],
+            )
+            return ""
+
+        banned = (
+            "هذا خارج نطاق متجرنا",
+            "أنا هنا — قول وش تحتاج",
+            "أنا هنا - قول وش تحتاج",
+            "وأكمل معك",
+        )
+        if any(b in text for b in banned):
+            logger.info(
+                "[SAFE_FACT] dropping reply with banned phrase tenant=%s",
+                ctx.tenant_id,
+            )
+            return ""
+
+        # Trim to keep the reply tight (≤2 short lines, ≤280 chars).
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        text = "\n".join(lines[:2])[:280].strip()
+        return text
 
     def _minimal_reply_state(self, ctx: BrainContext):
         """Build a degraded BrainReplyState from ctx alone.

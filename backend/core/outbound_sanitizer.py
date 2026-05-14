@@ -90,12 +90,14 @@ _URL_RE = re.compile(r"https?://\S+|(?<![A-Za-z0-9])//\S+", re.IGNORECASE)
 
 # ── Safe fallback ────────────────────────────────────────────────────────────
 #
-# Returned to the customer when we drop a leaky reply. Short, polite,
-# explicitly Arabic, and routes the conversation back into the
-# merchant's domain. We avoid any phrasing that sounds like an order
-# confirmation ("استلمنا طلبك" / "وصل") for the same reason the
-# handoff template avoids it — customers read those literally.
-SAFE_FALLBACK_TEXT = "ما فهمت الطلب بشكل مرتبط بمنتجات المتجر 🌷"
+# Returned to the customer when we drop a leaky reply. Kept playful
+# and on-brand per the May 2026 merchant feedback ("don't sound
+# corporate") — the dry "هذا خارج نطاق متجرنا" wording was banned in
+# that round and must not be reintroduced here. We avoid any phrasing
+# that sounds like an order confirmation ("استلمنا طلبك" / "وصل")
+# for the same reason the handoff template avoids it — customers
+# read those literally.
+SAFE_FALLBACK_TEXT = "معليش 🌷 خلّينا في العسل والطلبات — وش تحب نشوف لك اليوم؟ 😄🍯"
 
 
 def contains_leakage_markers(text: str) -> Optional[str]:

@@ -219,10 +219,15 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
     return False
 
 
+# NOTE — May 2026: the old "أنا هنا — قول وش تحتاج وأكمّل معك." line
+# was banned by merchant feedback alongside the dry "هذا خارج نطاق
+# متجرنا" deflection. Replacements below stay short and human; the
+# customer never sees the same line back-to-back thanks to the
+# outbound-turn rotation in ``_short_followup_instead_of_repeat``.
 _DEDUP_FALLBACK_REPLIES = [
     "وش أقدر أخدمك فيه الحين؟ 🌸",
-    "أنا هنا — قول وش تحتاج وأكمّل معك.",
-    "تأمر بشيء أكمّل لك؟",
+    "خبرني وش يجي على بالك من العسل أو طلب، وأنا معاك 😄🍯",
+    "تأمر بشي أكمّل لك؟ 🌷",
 ]
 
 
