@@ -682,6 +682,263 @@ def catalog_audit(
     }
 
 
+# ── Catalog-state diagnostic (Phase 4 — May 2026) ─────────────────────────────
+#
+# Why this endpoint exists
+# ────────────────────────
+# Phase 4 wired the Meta WhatsApp Catalog send path into
+# ``_try_send_catalog_product`` in ``whatsapp_webhook.py``. The wire-up
+# is intentionally silent on eligibility miss: when a tenant's
+# ``catalog_enabled`` is False, ``meta_catalog_id`` is empty, or a
+# product has no resolvable retailer id, the helper returns ``False``
+# and the legacy image + CTA URL path renders the product. That keeps
+# the customer experience stable, but it also makes the failure mode
+# invisible from outside the box — operators can't tell whether the
+# catalog actually fired or fell back without grepping Railway logs.
+#
+# This endpoint replaces the log-grep step with a single readonly
+# call that mirrors EXACTLY the same checks ``_try_send_catalog_product``
+# performs:
+#
+#   1. Look up the ``WhatsAppConnection`` for the tenant.
+#   2. Call :func:`core.catalog.is_catalog_eligible` on it.
+#   3. Sample N products from the tenant and run
+#      :func:`core.catalog.effective_retailer_id` on each.
+#   4. Probe ``information_schema`` for the four columns added by
+#      migration 0061 so a missing migration shows up as a precise
+#      ``"column X on table Y is missing"`` verdict alongside the
+#      eligibility check.
+#
+# Output is intentionally flat JSON so it can be eyeballed in a
+# browser. We deliberately do NOT expose any access tokens, phone
+# numbers, or any field that could be considered customer PII; the
+# catalog-state diagnostic is operational metadata only.
+
+@router.get("/catalog-state")
+async def admin_debug_catalog_state(
+    tenant_id: int = Query(..., ge=1, description="Tenant whose catalog state to inspect."),
+    sample: int = Query(5, ge=1, le=25, description="Number of products to sample."),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Readonly diagnostic for Phase 4 catalog wire-up.
+
+    Returns the exact eligibility decision the webhook makes when
+    a ``[PRODUCT:...]`` marker resolves for *tenant_id*, plus a
+    sample of products with their resolved retailer ids, plus a
+    column-presence probe for migration 0061. No writes, no DDL.
+
+    Auth: ``require_admin`` JWT — same gate as
+    ``GET /admin/debug/db-schema-health``. No env flag required.
+
+    Response shape (top-level keys, all stable):
+
+    * ``tenant_id``
+    * ``connection``    — basic non-secret fields of the
+                          ``WhatsAppConnection`` row, plus a
+                          ``found: bool``.
+    * ``eligibility``   — ``{ok, reason}`` from
+                          :func:`core.catalog.is_catalog_eligible`
+                          (no product context).
+    * ``schema``        — ``{column_name → "present"|"missing"}`` for
+                          every column added by migration 0061.
+    * ``products_sample`` — list of up to ``sample`` products with
+                            their resolved retailer ids.
+    * ``products_sample_retailer_id_coverage`` — counters
+                                                 ``{with_retailer_id, without_retailer_id}``.
+    * ``advice``        — short human-readable recommendation derived
+                          from the eligibility reason. Operators get a
+                          one-line fix to copy into the relevant env
+                          var, migration, or Salla resync command.
+    """
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    from core.catalog import (  # noqa: PLC0415
+        catalog_summary, effective_retailer_id, is_catalog_eligible,
+    )
+
+    # ── Connection lookup ─────────────────────────────────────────
+    # We pull the row with .first() because some installs historically
+    # allowed multiple connection rows per tenant. The webhook reads
+    # the same way, so we mirror its semantics exactly.
+    conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == tenant_id)
+        .first()
+    )
+    summary = catalog_summary(conn)
+    # ``WhatsAppConnection`` uses ``phone_number_id`` (Meta's
+    # phone-number identifier — separate from the human phone number)
+    # and ``status`` (state-machine string). Neither is customer PII,
+    # but we still MASK the phone_number_id to its last 4 digits so
+    # screenshots of this endpoint stay safe to share. ``status`` is
+    # surfaced verbatim because it's already a closed enum.
+    phone_number_id = str(getattr(conn, "phone_number_id", "") or "") if conn else ""
+    conn_block: Dict[str, Any] = {
+        "found":                conn is not None,
+        "phone_id_tail":        phone_number_id[-4:] if phone_number_id else None,
+        "status":               getattr(conn, "status", None) if conn else None,
+        "catalog_enabled":      summary["catalog_enabled"],
+        "meta_catalog_id":      summary["meta_catalog_id"],
+    }
+
+    # ── Eligibility check (without product context) ───────────────
+    # We deliberately pass ``products=None`` so the answer reflects
+    # the CONNECTION's readiness, not a particular product. The
+    # per-product readiness is captured by ``products_sample`` below.
+    elig = is_catalog_eligible(conn, products=None)
+    eligibility_block = {"ok": elig.ok, "reason": elig.reason}
+
+    # ── Migration-0061 column probe ───────────────────────────────
+    # Mirrors the approach in ``db-schema-health`` but scoped to the
+    # exact four columns Phase 4 needs. Each probe is wrapped so a
+    # transient error on one column doesn't poison the others.
+    schema_probes = [
+        ("whatsapp_connections", "meta_catalog_id"),
+        ("whatsapp_connections", "catalog_enabled"),
+        ("products",             "meta_retailer_id"),
+        ("products",             "meta_catalog_published_at"),
+    ]
+    schema_block: Dict[str, str] = {}
+    schema_missing: List[str] = []
+    for table_name, column_name in schema_probes:
+        try:
+            row = db.execute(
+                _text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = :t AND column_name = :c"
+                ),
+                {"t": table_name, "c": column_name},
+            ).first()
+            present = row is not None
+        except Exception:  # noqa: BLE001
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            present = False
+        key = f"{table_name}.{column_name}"
+        schema_block[key] = "present" if present else "missing"
+        if not present:
+            schema_missing.append(key)
+
+    # ── Product sample with retailer-id resolution ────────────────
+    # We only fetch the columns we actually need so this stays fast
+    # even on tenants with 50k products. The query is index-perfect
+    # on ``products.tenant_id``.
+    products_sample: List[Dict[str, Any]] = []
+    coverage = {"with_retailer_id": 0, "without_retailer_id": 0}
+    try:
+        from models import Product as _Product  # noqa: PLC0415
+
+        rows = (
+            db.query(_Product)
+            .filter(_Product.tenant_id == tenant_id)
+            .order_by(_Product.id)
+            .limit(int(sample))
+            .all()
+        )
+        for p in rows:
+            rid = effective_retailer_id(p)
+            products_sample.append({
+                "id":                   p.id,
+                "title":                p.title,
+                "external_id":          getattr(p, "external_id", None),
+                "meta_retailer_id":     getattr(p, "meta_retailer_id", None),
+                "effective_retailer_id": rid or None,
+            })
+            if rid:
+                coverage["with_retailer_id"] += 1
+            else:
+                coverage["without_retailer_id"] += 1
+    except Exception as p_exc:  # noqa: BLE001
+        # Don't fail the whole endpoint if the product probe errors.
+        # The schema block above already exposes a likely root cause
+        # (missing column on ``products`` table).
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[catalog-state] product sample failed for tenant=%s: %s",
+            tenant_id, p_exc,
+        )
+
+    # ── Advice synthesizer ────────────────────────────────────────
+    # Deterministic mapping from (eligibility.reason, schema_missing,
+    # product coverage) → a single actionable sentence. Operators
+    # screenshot this and act on it.
+    advice = _catalog_state_advice(
+        eligibility=elig,
+        schema_missing=schema_missing,
+        coverage=coverage,
+        connection_found=conn is not None,
+    )
+
+    return {
+        "tenant_id":                              tenant_id,
+        "connection":                             conn_block,
+        "eligibility":                            eligibility_block,
+        "schema":                                 schema_block,
+        "products_sample":                        products_sample,
+        "products_sample_retailer_id_coverage":   coverage,
+        "advice":                                 advice,
+    }
+
+
+def _catalog_state_advice(
+    *,
+    eligibility,
+    schema_missing: List[str],
+    coverage: Dict[str, int],
+    connection_found: bool,
+) -> str:
+    """Translate the structured diagnostic into one actionable line."""
+    if schema_missing:
+        return (
+            "migration 0061_meta_catalog has NOT applied — missing columns: "
+            + ", ".join(schema_missing)
+            + ". Call POST /admin/debug/run-migrations or check that "
+            "NAHLA_SKIP_DB_BOOTSTRAP is not set, then redeploy."
+        )
+    if not connection_found:
+        return (
+            "no WhatsAppConnection row for this tenant. The bot can't "
+            "send anything until the merchant completes the WhatsApp "
+            "Business onboarding."
+        )
+    reason = eligibility.reason
+    if reason == "catalog_disabled":
+        return (
+            "catalog_enabled=false on whatsapp_connections. Set it to "
+            "true once the Meta catalog is published and the bound "
+            "phone number is approved for Commerce."
+        )
+    if reason == "catalog_id_missing":
+        return (
+            "meta_catalog_id is empty on whatsapp_connections. Fetch the "
+            "catalog id from Meta Commerce Manager and persist it on "
+            "this row, then set catalog_enabled=true."
+        )
+    if coverage.get("without_retailer_id", 0) > 0 and coverage.get("with_retailer_id", 0) == 0:
+        return (
+            "no product in the sampled batch has a resolvable retailer "
+            "id (neither meta_retailer_id nor external_id). Run "
+            "POST /admin/debug/salla/resync-products so each product gets "
+            "an external_id, then test again."
+        )
+    if reason == "ok":
+        return (
+            "eligibility is OK. If you still see a fallback in WhatsApp, "
+            "grep Railway logs for [CATALOG_SEND_FAILED] — the failure "
+            "is at the Graph payload level (most likely the "
+            "product_retailer_id is not present in the Meta catalog "
+            "yet, or the bound access token lacks catalog_management)."
+        )
+    return f"eligibility={reason}. See logs for [CATALOG_NOT_ELIGIBLE] for context."
+
+
 # ── Resync products from Salla ─────────────────────────────────────────────────
 
 @router.post("/salla/resync-products")
@@ -1899,6 +2156,16 @@ _CRITICAL_COLUMNS: List[Dict[str, str]] = [
     {"table": "customer_segments_manual", "column": "mode", "added_by": "0053"},
     # 0051_campaign_send_logs
     {"table": "campaign_send_logs", "column": "provider_message_id", "added_by": "0051"},
+    # 0061_meta_catalog — Phase 4 catalog wire-up depends on all four.
+    # When any of these are missing the catalog send is silently
+    # short-circuited at eligibility check and the legacy image+CTA
+    # path renders the product instead. Probing them here lets a
+    # schema-health call diagnose the regression without grepping
+    # logs.
+    {"table": "whatsapp_connections", "column": "meta_catalog_id",           "added_by": "0061"},
+    {"table": "whatsapp_connections", "column": "catalog_enabled",           "added_by": "0061"},
+    {"table": "products",             "column": "meta_retailer_id",          "added_by": "0061"},
+    {"table": "products",             "column": "meta_catalog_published_at", "added_by": "0061"},
 ]
 
 

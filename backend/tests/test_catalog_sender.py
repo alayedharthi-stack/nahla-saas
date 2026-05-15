@@ -66,7 +66,11 @@ class _Product:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # ``asyncio.get_event_loop()`` is deprecated in 3.12+ and closing
+    # another loop in the same process (e.g. another test that used
+    # ``asyncio.run``) leaves the implicit loop in an unusable state.
+    # ``asyncio.run`` is the modern, isolation-friendly entry point.
+    return asyncio.run(coro)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
