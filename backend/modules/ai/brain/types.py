@@ -346,6 +346,16 @@ class MerchantConversationState:
     # a row. Updated by the responder after each successful outbound.
     last_link_sent: str = ""
     last_link_sent_turn: int = 0
+    # ── Customer gender (May 2026 — light personalisation layer) ──────────
+    # Sticky classification from the gender detector
+    # (modules/ai/gender/detector.py). Used ONLY by the
+    # ACTION_SOCIAL_REPLY branch of the composer to pick a
+    # female-coded conjugation when confidence is high enough. Empty
+    # string means "unknown / never classified" — Arabic's masculine
+    # default applies. Confidence is decayed mildly each turn until a
+    # fresh signal reinforces it; see detector.py for the cascade.
+    customer_gender_hint: str = ""
+    customer_gender_confidence: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -383,6 +393,8 @@ class MerchantConversationState:
             "pending_confirmation": self.pending_confirmation,
             "last_link_sent": self.last_link_sent,
             "last_link_sent_turn": self.last_link_sent_turn,
+            "customer_gender_hint": self.customer_gender_hint,
+            "customer_gender_confidence": self.customer_gender_confidence,
         }
 
     @staticmethod
@@ -424,6 +436,10 @@ class MerchantConversationState:
             pending_confirmation=str(d.get("pending_confirmation", "") or ""),
             last_link_sent=str(d.get("last_link_sent", "") or ""),
             last_link_sent_turn=int(d.get("last_link_sent_turn") or 0),
+            customer_gender_hint=str(d.get("customer_gender_hint", "") or ""),
+            customer_gender_confidence=float(
+                d.get("customer_gender_confidence") or 0.0
+            ),
         )
 
 

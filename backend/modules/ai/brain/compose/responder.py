@@ -413,11 +413,22 @@ class DefaultComposer:
             # Two rotation axes: turn index × category → more variety without drift.
             v_main = self._variant_idx(ctx)
             v_secondary = (len(ctx.history or []) // 3) % 5
-            return T.social_reply(
+            reply = T.social_reply(
                 category=category,
                 variant=v_main,
                 sub_variant=v_secondary,
             )
+            # Light gender-awareness layer (May 2026 — surgical add-on).
+            # The default template is masculine (Arabic's unmarked
+            # default) and reads naturally to either gender. When we
+            # have HIGH confidence (>=0.70) that the customer is
+            # female — derived from verb suffixes, name whitelist,
+            # or a sticky prior hint — we conjugate a closed set of
+            # phrases to the female form. Any uncertainty or
+            # missing data is a NO-OP: the masculine template
+            # passes through unchanged. We never modify any other
+            # action's reply.
+            return self._apply_gender_hint(reply, ctx)
 
         # ── Platform / SaaS inquiry ────────────────────────────────────────
         # Gateway: if onboarding docs exist in manual_knowledge_base, we
@@ -480,6 +491,82 @@ class DefaultComposer:
         if not last:
             return False
         return text[:70].strip() == last[:70].strip()
+
+    # ── Gender-awareness layer (May 2026 — light add-on) ─────────────────────
+    #
+    # Wired into ACTION_SOCIAL_REPLY only. Intentionally a thin method
+    # on the composer (not a standalone util) so logs and tests can
+    # observe the input/output via the existing composer surface, and
+    # any future call site needs to opt in by name. Three rules:
+    #
+    #   1. Detect the gender hint from the CURRENT inbound message
+    #      and the customer's profile name (when available), seeded
+    #      with the sticky prior hint persisted on state.
+    #   2. Mutate the state IN PLACE only when the new hint is at
+    #      least as confident as the prior — never downgrade a
+    #      strong classification with a noisy turn.
+    #   3. Apply the conjugator with the hint. The conjugator is a
+    #      no-op for male / unknown / low-confidence hints, so the
+    #      masculine template (Arabic's unmarked default) passes
+    #      through unchanged.
+    #
+    # Errors anywhere here are swallowed and the original reply is
+    # returned. A gender misclassification must NEVER produce a
+    # silent reply or a 500.
+
+    def _apply_gender_hint(self, reply: str, ctx: BrainContext) -> str:
+        if not reply:
+            return reply
+        try:
+            from ...gender import (  # noqa: PLC0415
+                GenderHint, apply_gender_to_social_reply, detect_gender,
+            )
+        except Exception:  # noqa: BLE001
+            return reply
+
+        try:
+            state = ctx.state
+            prior = GenderHint(
+                value=(state.customer_gender_hint or "unknown"),
+                confidence=float(state.customer_gender_confidence or 0.0),
+                source="context",
+            )
+            # Customer name resolution — best-effort. The profile
+            # dict shape varies by loader; try the two most common
+            # keys.
+            customer_name = ""
+            if isinstance(ctx.profile, dict):
+                customer_name = str(
+                    ctx.profile.get("name")
+                    or ctx.profile.get("customer_name")
+                    or ctx.profile.get("display_name")
+                    or ""
+                )
+
+            hint = detect_gender(
+                message=ctx.message or "",
+                customer_name=customer_name or None,
+                prior_hint=prior,
+            )
+
+            # Sticky update: persist on state only when the new hint
+            # carries equal-or-better confidence than what we had.
+            # This prevents a low-signal turn from erasing a strong
+            # prior classification.
+            if (
+                hint.value in ("male", "female")
+                and hint.confidence >= prior.confidence
+            ):
+                state.customer_gender_hint = hint.value
+                state.customer_gender_confidence = float(hint.confidence)
+
+            return apply_gender_to_social_reply(reply, hint)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[GenderHint] swallowed exception (returning unmodified "
+                "reply): %s", exc,
+            )
+            return reply
 
     def _should_skip_greet(self, ctx: BrainContext) -> bool:
         """True when sending the greeting template would be wrong.
