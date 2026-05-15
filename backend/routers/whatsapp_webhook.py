@@ -5242,8 +5242,69 @@ async def _handle_merchant_message(
                 _product_attachments  # may be empty
             )
 
+            # Phase 4: cache the WhatsAppConnection once per turn so
+            # the catalog send helper doesn't re-query for every
+            # product attachment. We only look this up when there is
+            # actually a product card to render — otherwise the
+            # legacy media path runs unchanged. The lookup is
+            # best-effort: a None result simply means catalog sends
+            # are skipped and the legacy image+CTA path runs as
+            # before.
+            _cached_wa_conn = None
+            if _product_attachments:
+                try:
+                    from database.models import (  # noqa: PLC0415
+                        WhatsAppConnection as _WAConn,
+                    )
+                    _cached_wa_conn = (
+                        db.query(_WAConn)
+                        .filter(_WAConn.tenant_id == tenant_id)
+                        .first()
+                    )
+                except Exception as _conn_lookup_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[CATALOG] tenant=%s connection lookup failed "
+                        "(catalog send will be skipped, legacy path "
+                        "will run): %s",
+                        tenant_id, _conn_lookup_exc,
+                    )
+
             for _att in _all_attachments:
                 _is_product = (_att.get("kind") == "product_card")
+
+                # Phase 4 — Meta WhatsApp Catalog attempt BEFORE the
+                # legacy image+CTA path. _try_send_catalog_product
+                # short-circuits on any miss (catalog disabled, no
+                # retailer id, provider error) and we fall through
+                # to the legacy path so the customer always gets a
+                # reply. Success → skip the legacy path entirely.
+                if _is_product:
+                    try:
+                        _catalog_sent = await _try_send_catalog_product(
+                            db=db,
+                            connection=_cached_wa_conn,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            attachment=_att,
+                        )
+                    except Exception as _cat_exc:  # noqa: BLE001
+                        # _try_send_catalog_product is documented to
+                        # never raise, but treat any escape as a
+                        # bug-grade fallback so the conversation
+                        # still gets a reply.
+                        logger.error(
+                            "[CATALOG_FALLBACK_TEXT] tenant=%s "
+                            "product_id=%s reason=helper_exception "
+                            "err=%s",
+                            tenant_id, _att.get("id"), _cat_exc,
+                        )
+                        _catalog_sent = False
+                    if _catalog_sent:
+                        # Catalog rendered the product card natively
+                        # — no need to send a separate image+CTA.
+                        # Continue to the next attachment.
+                        continue
 
                 # Library media goes through the full validation
                 # gate (tenant scope, MIME, size, HTTPS). Product
@@ -5993,6 +6054,162 @@ async def _post_wa(
                 _db.close()
             except Exception:
                 pass
+
+
+async def _try_send_catalog_product(
+    *,
+    db,
+    connection,
+    tenant_id: Optional[int],
+    phone_id: str,
+    to: str,
+    attachment: Dict[str, Any],
+) -> bool:
+    """Phase 4 — attempt a Meta WhatsApp Catalog send for one product
+    attachment. Returns ``True`` iff the catalog message landed at
+    the provider AND a wamid came back; the caller treats that as
+    "skip the legacy image+CTA path". Returns ``False`` for every
+    other outcome — eligibility miss, provider error, transport
+    exception — so the caller falls back to the legacy path. We
+    NEVER raise: silence is never acceptable, the legacy path must
+    always be reachable.
+
+    Three resolution lookups happen here, in order:
+
+    1. The :class:`WhatsAppConnection` is read from the caller's
+       cache (passed in as ``connection`` — looking it up once per
+       turn is the caller's job, not ours).
+    2. The Meta retailer id is resolved by
+       :func:`core.catalog.effective_retailer_id`. We attempt a
+       small DB lookup on ``Product`` first so a merchant who set
+       ``meta_retailer_id`` explicitly gets it honoured; if that
+       lookup fails for any reason we fall back to the attachment's
+       ``external_id`` (the Salla auto-publish convention covers
+       this for 95% of merchants without DB cost).
+    3. :func:`core.catalog.is_catalog_eligible` short-circuits the
+       send when ``catalog_enabled`` is False, the catalog id is
+       empty, or no retailer id resolves.
+
+    Logging convention:
+      * ``[CATALOG_MATCH]`` — emitted exactly once when the product
+        matches AND the connection is eligible. Followed by either a
+        ``[CATALOG_SEND_SUCCESS]`` (from the sender module) or a
+        ``[CATALOG_FALLBACK_TEXT]`` line here.
+      * ``[CATALOG_FALLBACK_TEXT]`` — emitted whenever this helper
+        returns False AFTER attempting catalog (i.e. eligibility
+        passed but the provider rejected the payload). Eligibility-
+        miss cases log ``[CATALOG_NOT_ELIGIBLE]`` inside the sender
+        module and we stay silent here to avoid double-logging.
+    """
+    if not attachment or attachment.get("kind") != "product_card":
+        return False
+    try:
+        from core.catalog import (  # noqa: PLC0415
+            effective_retailer_id, is_catalog_eligible,
+        )
+        from services.whatsapp_platform.catalog_sender import (  # noqa: PLC0415
+            send_single_product_message,
+        )
+    except Exception as imp_exc:  # noqa: BLE001
+        logger.debug(
+            "[CATALOG] tenant=%s helpers unavailable, skipping catalog send: %s",
+            tenant_id, imp_exc,
+        )
+        return False
+
+    # Honour an explicit `meta_retailer_id` override when set. One
+    # cheap SELECT keyed on (id, tenant_id) — we already have both
+    # ids in scope, so this is index-perfect on the products PK.
+    retailer_id = ""
+    product_row = None
+    if db is not None and attachment.get("id") and tenant_id is not None:
+        try:
+            from database.models import Product  # noqa: PLC0415
+            product_row = (
+                db.query(Product)
+                .filter(Product.id == attachment.get("id"),
+                        Product.tenant_id == tenant_id)
+                .first()
+            )
+        except Exception as q_exc:  # noqa: BLE001
+            logger.debug(
+                "[CATALOG] tenant=%s product lookup failed (will fall "
+                "back to attachment external_id): %s",
+                tenant_id, q_exc,
+            )
+
+    if product_row is not None:
+        retailer_id = effective_retailer_id(product_row)
+    if not retailer_id:
+        # Fallback path: the attachment dict carries external_id from
+        # the resolver. effective_retailer_id treats it as the
+        # default retailer id when no explicit override exists.
+        retailer_id = effective_retailer_id(attachment)
+
+    elig = is_catalog_eligible(
+        connection,
+        products=[product_row] if product_row is not None else [attachment],
+    )
+    if not elig.ok:
+        # Eligibility miss — silent here; sender module already logs
+        # [CATALOG_NOT_ELIGIBLE] when invoked. We bail out so the
+        # caller routes to the legacy image+CTA path immediately.
+        return False
+    if not retailer_id:
+        # Shouldn't happen given the eligibility check above also
+        # validates retailer_id presence, but defensive.
+        return False
+
+    logger.info(
+        "[CATALOG_MATCH] tenant=%s product_id=%s ext_id=%s "
+        "retailer_id=%s catalog_id=%s confidence=%s",
+        tenant_id, attachment.get("id"), attachment.get("external_id"),
+        retailer_id, getattr(connection, "meta_catalog_id", None),
+        attachment.get("confidence"),
+    )
+
+    # Build the body text. Prefer the resolver's caption (already
+    # contains title + price + short description in Arabic). Cap at
+    # the sender's body limit — the sender will truncate again
+    # defensively but we save bytes when the caption is huge.
+    body_text = (
+        attachment.get("caption")
+        or attachment.get("title")
+        or "تفضّل المنتج 👇"
+    )
+
+    try:
+        result = await send_single_product_message(
+            db=db,
+            connection=connection,
+            tenant_id=tenant_id,
+            to=to,
+            phone_id=phone_id,
+            retailer_id=retailer_id,
+            body_text=body_text,
+            footer_text=None,
+        )
+    except Exception as send_exc:  # noqa: BLE001
+        # The sender module is documented to NEVER raise for routine
+        # failures — only programmer errors raise. Treat this as a
+        # bug-grade issue and route to fallback so the conversation
+        # still gets a reply.
+        logger.error(
+            "[CATALOG_FALLBACK_TEXT] tenant=%s product_id=%s "
+            "reason=sender_exception err=%s",
+            tenant_id, attachment.get("id"), send_exc,
+        )
+        return False
+
+    if result.success:
+        return True
+
+    logger.info(
+        "[CATALOG_FALLBACK_TEXT] tenant=%s product_id=%s reason=%s "
+        "err=%s — routing to legacy image+CTA path",
+        tenant_id, attachment.get("id"), result.reason, result.error,
+    )
+    return False
 
 
 async def _send_whatsapp_message(
