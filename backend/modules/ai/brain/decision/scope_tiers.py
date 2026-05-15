@@ -1,64 +1,62 @@
 """
 brain/decision/scope_tiers.py
 ─────────────────────────────
-Three-tier classifier for out-of-scope customer questions.
+Hard-only out-of-scope classifier (May 2026 — third revision).
 
-Motivation
-──────────
-A May 2026 incident leaked DuckDuckGo result dumps into customer
-threads after the AI mishandled "ايهما حساب كهرباء الشقة". The first
-fix gated external research behind an env switch and routed every
-off-domain question to a single canned "هذا خارج نطاق متجرنا" reply.
-
-That made the AI safe but lifeless. The merchant pushed back: Nahla
-should still feel HUMAN. A customer asking "وش أخبارك؟" deserves a
-short playful reply, not a corporate deflection. Likewise a casual
-"كم الساعة؟" should land a joke about coffee + honey, not a refusal.
-
-The tradeoff: keep the no-hallucination / no-web-search guarantee,
-but allow a small set of safe, deterministic playful replies for
-clearly benign questions.
-
-Three tiers
-───────────
-* ``TIER_CHITCHAT``  — Casual conversational filler that ANYONE can
-                       answer without doing research: greetings (that
-                       slipped past INTENT_GREETING), how-are-you,
-                       weather small talk, time, mood, polite jokes.
-                       Reply: deterministic playful template.
-                       Risk: zero (no specific facts asserted).
-
-* ``TIER_SAFE_FACT`` — Simple, public, well-known factoid that does
-                       not change frequently and is not politically
-                       / medically / legally sensitive. Reply: gated
-                       LLM call with a TIGHT prompt that mandates one
-                       playful Arabic sentence + honey tie-in + zero
-                       URLs / citations. If the LLM is uncertain it
-                       MUST joke about not knowing instead of guessing.
-                       Risk: bounded (outbound sanitizer scrubs any
-                       URL leak; sensitive-topic keywords are
-                       already excluded by this classifier).
-
-* ``TIER_HARD``      — Sensitive (medical, legal, financial, deep
-                       political), genuinely requires research, or
-                       just clearly off-Nahla-scope (electricity
-                       bills, apartment construction). Reply:
-                       deterministic polite apology that explicitly
-                       redirects to honey/orders.
-                       Risk: zero.
-
-Public contract
+Why this exists
 ───────────────
-* ``classify_out_of_scope_tier(message: str) -> str``
-    Returns one of the three TIER_* constants. Always safe — falls
-    back to ``TIER_HARD`` on unknown input (conservative default).
+* May 2026 #1 incident — the AI leaked DuckDuckGo result dumps into
+  customer threads after mishandling "ايهما حساب كهرباء الشقة". We
+  gated external research behind an env switch (the real fix) and
+  bolted on a 3-tier classifier that intercepted INTENT_GENERAL
+  before the merchant brain saw it.
+
+* May 2026 #2 regression — the 3-tier router over-corrected: a
+  significant chunk of legitimate honey-adjacent questions ("حبة
+  البركة"، "السعال"، "كيف أسوق للعسل"، "إيش الخدمات") were getting
+  matched as chitchat / hard tier and never reached the merchant
+  brain, which means the KB + catalogue + sales_context for those
+  questions was being ignored. Nahla turned into a clownish
+  emoji-throwing deflector instead of the smart, KB-aware assistant
+  it was the day before.
+
+* This revision — the classifier now has ONE job: detect questions
+  that are unambiguously OFF-DOMAIN (electricity bills, real estate,
+  programming, legal cases, financial investing, drug dosages, deep
+  political topics, war) and return ``TIER_HARD``. EVERYTHING ELSE
+  returns ``TIER_PASSTHROUGH`` — the engine falls through to
+  ``ACTION_LLM_REPLY`` which runs the full merchant brain with KB,
+  catalogue, and sales_context. The brain is the right place to
+  answer "حبة البركة معكم؟" or "كيف أسوّق للعسل؟" because it has the
+  merchant's real product list and knowledge base in scope.
+
+Honey-relevance principle
+─────────────────────────
+A keyword that COULD legitimately relate to honey use cases must
+NOT live in the HARD list:
+  * cough / immunity / colds → traditional honey remedies
+  * halal / haram / prophetic medicine → cultural context for honey
+  * pregnancy / childbirth → honey + recipes context
+  * tea / coffee → honey pairings
+We deliberately keep those off the HARD list so the merchant brain
+can answer naturally using the KB.
+
+Tier surface (kept stable for downstream callers)
+─────────────────────────────────────────────────
+* ``TIER_HARD``        — clearly off-domain. Engine emits a polite
+                          short deflection via the responder.
+* ``TIER_PASSTHROUGH`` — NEW (May 2026 #2). Engine should NOT
+                          intercept; the merchant brain handles it.
+* ``TIER_CHITCHAT`` / ``TIER_SAFE_FACT`` — preserved as constants
+                          for backward import compatibility with
+                          earlier callers, but the classifier no
+                          longer returns them. The composer keeps a
+                          template variant for the HARD case only.
 
 Banned reply phrases (forbidden by merchant feedback May 2026):
     - "هذا خارج نطاق متجرنا"
     - "أنا هنا — قول وش تحتاج"
     - "وأكمل معك"
-These come from the OLD out-of-scope and dedup fallbacks and must
-never appear in any new template added here.
 """
 from __future__ import annotations
 
@@ -71,9 +69,14 @@ logger = logging.getLogger("nahla.brain.scope_tiers")
 
 # Tier constants — surfaced as ``Decision.args["tier"]`` so the
 # responder can pick the right template path without re-classifying.
+TIER_HARD        = "hard"
+TIER_PASSTHROUGH = "passthrough"
+
+# Legacy constants — kept for backward import compatibility with
+# downstream callers. ``classify_out_of_scope_tier`` no longer
+# returns these values; the merchant brain handles those flows.
 TIER_CHITCHAT  = "chitchat"
 TIER_SAFE_FACT = "safe_fact"
-TIER_HARD      = "hard"
 
 
 # ── Arabic normaliser ────────────────────────────────────────────────────────
@@ -109,59 +112,69 @@ def _any_keyword(text: str, keywords: Iterable[str]) -> bool:
 
 # ── Hard / sensitive topic vocabulary ────────────────────────────────────────
 # When ANY of these keywords appear the classifier returns
-# ``TIER_HARD`` regardless of other signals. Keep the lists tight but
-# inclusive — bias toward false-positives. A polite apology is
-# always safer than a playful but uncertain reply on a medical /
-# legal / financial / political question.
+# ``TIER_HARD``. The vocab is INTENTIONALLY narrow — bias toward
+# false-NEGATIVES, not false-positives. Better to let a borderline
+# question reach the merchant brain (which has KB + catalogue +
+# sales_context to handle it intelligently) than to short-circuit
+# into a deflection that ignores the merchant's actual store.
+#
+# Honey-adjacent terms that USED to live here and were REMOVED in
+# May 2026 #2 because they trigger legitimate KB-driven answers:
+#   * cough / immunity / colds / allergy / pregnancy / childbirth
+#     → honey is the classic remedy for several of these
+#   * halal / haram / fatwa / prophetic medicine
+#     → cultural context for honey + traditional recipes
+#   * insurance / inheritance / zakat
+#     → too broad; "زكاة العسل" is a real merchant question
+# If you're tempted to add a keyword to this list, ask yourself:
+# "could a honey-shop merchant's KB legitimately answer this?".
+# If yes → DON'T add it. Let the brain handle it.
+
 _HARD_MEDICAL_KW = frozenset({
-    # diagnosis / symptoms
-    "مرض", "اعراض", "تشخيص", "الم", "وجع", "سرطان", "ضغط", "سكر",
-    "قلب", "ربو", "حساسيه", "حمل", "ولاده", "تطعيم", "لقاح",
-    # treatment / drugs
-    "دواء", "ادويه", "علاج", "وصفه", "روشته", "جرعه", "حبوب", "مضاد",
-    "مسكن", "كبسوله", "حقنه", "ابره", "مستشفي", "طبيب", "دكتور", "صيدليه",
+    # Strict diagnosis / prescription / professional-care signals
+    # that DO require a real doctor. Casual mentions of symptoms
+    # ("التهاب حلق") are intentionally NOT here — those can be
+    # honey-relevant ("ملعقة عسل دافي").
+    "تشخيص", "روشته", "جرعه", "جرعات", "وصفه طبيه",
+    "حبوب",       # specifically pharmaceutical pills, not honey caps
+    "كبسوله", "حقنه", "ابره طبيه",
+    "مضاد حيوي", "مسكن", "تخدير", "تطعيم", "لقاح",
+    "صيدليه", "روشته طبيه",
+    "تحاليل", "اشعه",
 })
 _HARD_LEGAL_KW = frozenset({
-    "قانون", "قضيه", "محكمه", "محامي", "محاميه", "نزاع", "دعوي",
-    "حكم", "تقاضي", "شكوي", "بلاغ", "نيابه", "تحقيق", "وكاله شرعيه",
+    "قانون", "قضيه قانونيه", "محكمه", "محامي", "محاميه",
+    "دعوي", "تقاضي", "نيابه عامه", "تحقيق جنائي",
+    "وكاله شرعيه", "كاتب عدل",
 })
 _HARD_FINANCIAL_KW = frozenset({
-    "استثمار", "اسهم", "سهم", "بورصه", "تداول", "عمله", "كريبتو",
-    "عمله رقميه", "بتكوين", "ايثيريوم", "فوركس", "تمويل", "قرض",
-    "تسهيلات", "بنك", "فائده", "ربا", "تأمين", "تامين", "ضريبه",
-    "زكاه", "ميراث", "ارث",
+    "استثمار", "اسهم", "بورصه", "تداول", "كريبتو",
+    "عمله رقميه", "بتكوين", "ايثيريوم", "فوركس",
+    "قرض", "تسهيلات بنكيه", "تمويل عقاري",
 })
 _HARD_POLITICAL_DEEP_KW = frozenset({
-    # Deep / opinionated political — note ``من رئيس`` is HANDLED
-    # below as a SAFE_FACT pattern, NOT here.
+    # ONLY deep / opinionated political. Casual factoid questions
+    # ("من رئيس امريكا") fall through to the brain — it's a small
+    # well-known fact a sales assistant can deflect gracefully.
     "حرب", "حروب", "نزاع سياسي", "انتخابات",
-    "مظاهرات", "ثوره", "احتلال", "صراع", "اسرائيل", "غزه",
+    "مظاهرات", "ثوره", "احتلال", "صراع",
     "حزب", "احزاب", "ديمقراطيه", "ديكتاتور", "نظام الحكم",
 })
-_HARD_RELIGIOUS_FATWA_KW = frozenset({
-    # Fatwa-level questions — Nahla is NOT a religious authority.
-    # Polite simple greetings ("السلام عليكم") are caught by
-    # INTENT_GREETING upstream and never reach this classifier.
-    "حلال", "حرام", "فتوي", "حكم شرعي", "هل يجوز", "يجوز",
-    "كفاره", "زنا", "ربا",
-})
 _HARD_OFF_NAHLA_KW = frozenset({
-    # Clear "this is not a sales conversation" topics from the live
-    # incident report and the merchant's pushback feedback. Kept
-    # short — most of these are not in scope for any honey shop.
+    # Topics that no honey-shop KB will ever cover. Keep tight.
     "كهرباء", "كهربا", "فاتوره الكهرباء", "تكييف", "مكيف",
-    "شقه", "فيلا", "ايجار", "تأجير", "تاجير", "عقار",
+    "شقه", "فيلا", "ايجار", "تأجير", "عقار", "عقارات",
     "تشطيب", "بناء", "دهان", "ديكور",
-    "سياره", "سيارات", "قيادة", "رخصه",
+    "سياره", "سيارات", "قياده", "رخصه قياده",
     "وظيفه", "توظيف", "راتب", "سيره ذاتيه",
-    "برمجه", "كود", "بايثون", "جافا", "html",
+    "برمجه", "بايثون", "جافا سكربت", "html", "كود برمجي",
+    "ويندوز", "لينكس", "اندرويد", "ايفون اصلاح",
 })
 _HARD_KEYWORDS = (
     _HARD_MEDICAL_KW
     | _HARD_LEGAL_KW
     | _HARD_FINANCIAL_KW
     | _HARD_POLITICAL_DEEP_KW
-    | _HARD_RELIGIOUS_FATWA_KW
     | _HARD_OFF_NAHLA_KW
 )
 
@@ -257,44 +270,43 @@ def _matches_safe_fact(message: str) -> bool:
 
 # ── Classifier entry point ──────────────────────────────────────────────────
 def classify_out_of_scope_tier(message: str) -> str:
-    """Classify an out-of-scope message into one of three tiers.
+    """Decide whether a message is unambiguously off-domain.
 
-    Order of checks (first match wins):
-      1. HARD vocab — sensitive topics OR clear off-Nahla domain.
-      2. CHITCHAT vocab — casual filler that has a playful canned reply.
-      3. SAFE_FACT patterns — well-known factoid the LLM can answer.
-      4. Default → HARD (conservative: polite apology beats a guess).
+    Returns:
+      * ``TIER_HARD``        — the message contains a strict
+                               off-domain keyword (electricity bill,
+                               apartment construction, legal case,
+                               stock investment, drug dosage, war,
+                               etc.). The engine emits a polite
+                               canned deflection.
+      * ``TIER_PASSTHROUGH`` — everything else, INCLUDING honey-
+                               adjacent questions ("حبة البركة"،
+                               "السعال"، "كيف أسوّق للعسل")، casual
+                               chitchat ("كم الساعة"، "وش أخبارك"),
+                               safe factoids ("من رئيس أمريكا")، and
+                               anything that COULD be answered using
+                               the merchant's KB / catalogue / sales
+                               context. The engine falls through to
+                               ``ACTION_LLM_REPLY`` so the merchant
+                               brain (which has all that context) can
+                               compose a natural, KB-aware reply.
 
-    Always returns a tier constant. Never raises.
+    Never raises.
     """
     if not message or not isinstance(message, str):
-        return TIER_HARD
+        return TIER_PASSTHROUGH
 
     if _any_keyword(message, _HARD_KEYWORDS):
         return TIER_HARD
 
-    topic = chitchat_topic(message)
-    if topic is not None:
-        return TIER_CHITCHAT
-
-    if _matches_safe_fact(message):
-        return TIER_SAFE_FACT
-
-    # Very short messages (<= 3 words, no question mark, no
-    # keywords) — treat as chitchat so a casual "تمام" / "اوكي"
-    # / "ههههه" / "زين" lands a friendly playful reply instead of
-    # a wall-of-text apology.
-    word_count = len([w for w in re.split(r"\s+", message.strip()) if w])
-    if word_count <= 3 and "؟" not in message and "?" not in message:
-        return TIER_CHITCHAT
-
-    return TIER_HARD
+    return TIER_PASSTHROUGH
 
 
 __all__ = [
-    "TIER_CHITCHAT",
-    "TIER_SAFE_FACT",
     "TIER_HARD",
+    "TIER_PASSTHROUGH",
+    "TIER_CHITCHAT",    # legacy alias kept for downstream imports
+    "TIER_SAFE_FACT",   # legacy alias kept for downstream imports
     "classify_out_of_scope_tier",
     "chitchat_topic",
 ]

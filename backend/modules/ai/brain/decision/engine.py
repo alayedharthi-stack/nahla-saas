@@ -1092,47 +1092,65 @@ class DefaultDecisionEngine:
                 confidence=0.68,
             )
 
-        # ── 8.6 Out-of-scope guard (May 2026 — three-tier classifier) ─────
+        # ── 8.6 Hard-only out-of-scope guard (May 2026 #3 — KB-first) ─────
         #
-        # The previous version of this rule routed every long
-        # ``INTENT_GENERAL`` message to ``ACTION_WEB_SEARCH`` whenever
-        # the merchant happened to have no products in catalogue at
-        # decision time. In production this leaked DuckDuckGo result
-        # dumps into customer threads — a catastrophic trust failure.
+        # History of this rule (three revisions, each fixing the
+        # previous one):
         #
-        # The first hotfix replaced that route with a single canned
-        # "هذا خارج نطاق متجرنا" reply. Merchant feedback: too
-        # corporate, broke the warm/playful tone Nahla is supposed
-        # to have.
+        #   #1  Routed long INTENT_GENERAL to ACTION_WEB_SEARCH when
+        #       the catalogue was empty. Leaked DuckDuckGo result
+        #       dumps into customer threads after "ايهما حساب كهرباء
+        #       الشقة". Catastrophic.
         #
-        # New behaviour: every ``INTENT_GENERAL`` decision carries a
-        # ``tier`` arg in {chitchat, safe_fact, hard} chosen by
-        # ``scope_tiers.classify_out_of_scope_tier``:
+        #   #2  Replaced web_search with a 3-tier classifier
+        #       (chitchat / safe_fact / hard) that ALWAYS intercepted
+        #       INTENT_GENERAL and emitted a canned playful template.
+        #       Over-corrected — short-circuited the merchant brain
+        #       for legitimate honey-adjacent questions ("حبة البركة"،
+        #       "السعال"، "كيف أسوّق للعسل")، ignored the KB and the
+        #       catalogue, and made Nahla feel like a clownish
+        #       guardrail bot instead of a smart sales assistant.
         #
-        #   * chitchat  → deterministic playful template (no LLM, no web).
-        #   * safe_fact → tight LLM call gated by the responder (no
-        #                 web, sanitiser scrubs any URL leak).
-        #   * hard      → deterministic polite apology (no LLM, no web).
+        #   #3  (this revision) — Only TIER_HARD intercepts. Everything
+        #       else falls through to ACTION_LLM_REPLY (the default tail
+        #       at the bottom of decide()), where the merchant brain
+        #       composes a natural reply WITH access to:
+        #         * the merchant's product catalogue
+        #         * the merchant's KB / knowledge base
+        #         * the sales_context (recommendations, policies,
+        #           pricing rules, FAQ topics)
+        #         * the customer history
+        #       The web_search tool is still gated off at the tool
+        #       level (MERCHANT_EXTERNAL_RESEARCH_ENABLED=false by
+        #       default) and the outbound sanitizer still scrubs any
+        #       URL leak, so this is safe.
         #
-        # The legacy ``ACTION_WEB_SEARCH`` path is still wired but
-        # only fires when ops explicitly set
-        # ``MERCHANT_EXTERNAL_RESEARCH_ENABLED=true`` AND the merchant
-        # has no catalogue context. Every other tenant gets the
-        # three-tier router by default.
+        # The classifier ``classify_out_of_scope_tier`` is now hard-
+        # biased: TIER_HARD only fires for unambiguous off-domain
+        # keywords (electricity bills, real estate, programming,
+        # legal cases, financial investing, drug dosages, war). For
+        # ALL other INTENT_GENERAL inputs it returns TIER_PASSTHROUGH
+        # and we do NOT short-circuit here — we let the rule chain
+        # continue and the LLM fallback at the bottom of decide()
+        # handle the reply.
         if intent.name == INTENT_GENERAL:
             from modules.ai.tools.web_search import external_research_enabled  # noqa: PLC0415
-            from .scope_tiers import classify_out_of_scope_tier, chitchat_topic  # noqa: PLC0415
+            from .scope_tiers import (  # noqa: PLC0415
+                TIER_HARD,
+                classify_out_of_scope_tier,
+            )
 
-            research_on = external_research_enabled()
-            if research_on and (
-                ctx.sales_context
+            # Legacy opt-in research path — preserved behind the env
+            # switch for the one beta tenant that needed it. Default
+            # tenants never see this branch because
+            # external_research_enabled() returns False unless ops
+            # explicitly set MERCHANT_EXTERNAL_RESEARCH_ENABLED=true.
+            if (
+                external_research_enabled()
+                and ctx.sales_context
                 and not ctx.facts.has_products
                 and len(ctx.message.split()) >= 4
             ):
-                # Legacy opt-in path — research explicitly enabled
-                # by ops AND no catalogue context. Preserved for the
-                # one beta tenant that originally needed it; default
-                # tenants never see this branch.
                 logger.info(
                     "[GENERAL_WEB_ALLOWED] tenant=%s reason=research_enabled_no_catalogue",
                     getattr(ctx, "tenant_id", None),
@@ -1145,17 +1163,26 @@ class DefaultDecisionEngine:
                 )
 
             tier = classify_out_of_scope_tier(ctx.message or "")
-            topic = chitchat_topic(ctx.message or "") or ""
+            if tier == TIER_HARD:
+                logger.info(
+                    "[OUT_OF_SCOPE_BLOCK] tenant=%s intent=%s tier=hard preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_OUT_OF_SCOPE,
+                    args={"tier": "hard", "message": ctx.message or ""},
+                    reason="hard out_of_scope keyword match",
+                    confidence=0.95,
+                )
+            # PASSTHROUGH — let the merchant brain handle it with full
+            # KB + catalogue + sales_context. We deliberately do NOT
+            # return here.
             logger.info(
-                "[OUT_OF_SCOPE_BLOCK] tenant=%s intent=%s tier=%s topic=%s preview=%r",
+                "[OUT_OF_SCOPE_PASSTHROUGH] tenant=%s intent=%s preview=%r — "
+                "deferring to LLM brain with full KB context",
                 getattr(ctx, "tenant_id", None),
-                intent.name, tier, topic, (ctx.message or "")[:60],
-            )
-            return Decision(
-                action=ACTION_OUT_OF_SCOPE,
-                args={"tier": tier, "topic": topic, "message": ctx.message or ""},
-                reason=f"out_of_scope tier={tier} topic={topic or '-'}",
-                confidence=0.95 if tier == "hard" else 0.9,
+                (ctx.message or "")[:60],
             )
 
         # ── 9.5 Ordering-stage safety net ────────────────────────────────

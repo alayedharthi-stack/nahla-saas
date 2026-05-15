@@ -679,25 +679,28 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
     return text
 
 
-# ── Out-of-scope reply system (May 2026, three tiers) ────────────────────────
+# ── Out-of-scope deflection (May 2026 #3 — hard-only) ────────────────────────
 #
-# A merchant pushback report on the May 2026 "DDG leak" fix said the
-# canned reply "هذا خارج نطاق متجرنا" felt corporate and lifeless.
-# The new philosophy: keep the no-hallucination / no-web-search
-# guarantee, but allow Nahla to be HUMAN — playful, light, with a
-# bit of personality — for clearly benign off-topic questions.
+# Three revisions later, the final design is simple:
 #
-# Three reply families, each with multiple variants for rotation:
+#   * The decision engine only emits ACTION_OUT_OF_SCOPE for the HARD
+#     tier (clearly off-domain — electricity bills, real estate,
+#     programming, legal cases, financial investing, drug dosages,
+#     war). All other INTENT_GENERAL messages — including honey-
+#     adjacent KB questions, casual chitchat, weather, safe factoids
+#     — fall through to ACTION_LLM_REPLY where the merchant brain
+#     composes a natural reply with full KB + catalogue + sales
+#     context.
 #
-#   chitchat_*   — casual filler ("وش أخبارك؟" / "كم الساعة؟").
-#                  Deterministic, playful, includes a honey tie-in.
-#   safe_fact_*  — public well-known factoids ("من رئيس أمريكا؟").
-#                  We CAN'T answer the factoid here without an LLM,
-#                  but we can deliver a charming "let me dodge that"
-#                  line that still feels human. The actual LLM answer
-#                  is composed elsewhere (see responder._safe_fact_compose).
-#   hard_*       — sensitive / risky topics (medical, legal, deep
-#                  political). Polite apology, never a guess.
+#   * This file therefore only needs ONE template family: a polite,
+#     short, honey-redirecting line for the HARD case. No clown
+#     emoji, no rotating jokes, no "ههه" filler. Calm.
+#
+#   * ``chitchat_reply`` / ``safe_fact_dodge`` / ``out_of_scope_reply``
+#     dispatcher functions are kept as no-op pass-throughs to
+#     ``hard_out_of_scope_reply`` so downstream imports / tests that
+#     still call them keep working. They are NOT used by the
+#     responder pipeline anymore.
 #
 # BANNED phrasing (per merchant feedback May 2026):
 #   - "هذا خارج نطاق متجرنا"
@@ -708,107 +711,55 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
 # These wording-bans are enforced by code review; the outbound
 # sanitiser handles URL leakage as a defence in depth.
 
-# Topic-specific chitchat replies — picked by ``chitchat_topic``
-# from ``brain/decision/scope_tiers.py``. Each topic has 2–3 variants
-# rotated by the responder's variant index.
-_CHITCHAT_MOOD_VARIANTS = [
-    "الحمدلله بخير 🌷 جاهزة أخدمك بالعسل والطلبات 😄",
-    "بخير وعافية 🌷 وش حابب نسوي اليوم؟ عسل ولا طلب جاهز؟ 😄",
-    "تمام والحمدلله 🌷 وأنت كيفك؟ تجي معاي نشوف لك أحلى عسل؟ 😄🍯",
-]
-_CHITCHAT_WEATHER_VARIANTS = [
-    "الطقس طيب اليوم 🌤️ لكن أكيد بيصير أحلى مع ملعقة عسل 😄🍯",
-    "ما عندي محطة أرصاد، بس عندي عسل يخلي أي جو حلو 😄🍯",
-    "أيًا كان الجو 🌤️ ملعقة عسل تفرّق كثير — تحب أرشّح لك نوع؟ 🍯",
-]
-_CHITCHAT_TIME_VARIANTS = [
-    "واضح إنه وقت قهوة وعسل 😄☕🍯",
-    "أكيد وقت ملعقة عسل صباحية تفتح النهار 🍯😄",
-    "ما لي بالساعة، بس عندي توقيت ثابت: وقت العسل دايم 😄🍯",
-]
-_CHITCHAT_BANTER_VARIANTS = [
-    "ههه 🌷 أنا نحلة — مساعدة عسل وطلبات، وحاضرة لأي شي تحبه من المتجر 😄",
-    "أنا مع المتجر يا الغالي 🌷 خبرني وش تبحث عنه من العسل، ما يطول وقت 😄",
-    "أنا هنا بالعسل 🍯 بس قل لي تبي تطلب ولا تستفسر عن منتج، وأنا معاك 😄",
-]
-_CHITCHAT_GENERIC_VARIANTS = [
-    "هههه 🌷 يا هلا فيك — تحب أرشّح لك عسل اليوم؟ 😄🍯",
-    "تمام 🌷 وش أقدر أسوي لك من ناحية العسل أو الطلب؟ 😄",
-    "حلوه 😄 خبرني عن العسل اللي تبحث عنه أو طلبك، وأنا جاهزة 🍯",
-]
-_CHITCHAT_VARIANTS_BY_TOPIC: Dict[str, List[str]] = {
-    "mood":    _CHITCHAT_MOOD_VARIANTS,
-    "weather": _CHITCHAT_WEATHER_VARIANTS,
-    "time":    _CHITCHAT_TIME_VARIANTS,
-    "banter":  _CHITCHAT_BANTER_VARIANTS,
-}
-
-
-def chitchat_reply(topic: str = "", variant: int = 0, **_: Any) -> str:
-    """Pick a playful canned reply for casual off-topic chatter.
-
-    ``topic`` is one of: ``mood`` / ``weather`` / ``time`` / ``banter``
-    / anything else (falls through to generic). ``variant`` rotates
-    inside the topic bucket so a customer who pings twice doesn't see
-    the same exact line.
-    """
-    bucket = _CHITCHAT_VARIANTS_BY_TOPIC.get(topic or "", _CHITCHAT_GENERIC_VARIANTS)
-    return bucket[variant % len(bucket)]
-
-
-# Used by the responder when the safe-fact LLM path is unavailable
-# (timeout, empty reply, sanitiser rejected output). The line stays
-# playful so the customer doesn't feel stonewalled — we just dodge
-# the specific fact gracefully.
-_SAFE_FACT_DODGE_VARIANTS = [
-    "ههه 🌷 خلّيني عند تخصصي — العسل والطلبات 😄 وش حابب نشوف لك اليوم؟",
-    "هذا سؤال أكبر مني 🙈 بس بالعسل أنا خبيرة — تبي أرشّح لك نوع يعجبك؟ 🍯",
-    "ما أحب أخوض في هذا 🌷 خلّينا في العسل، عندي شي يعجبك أكيد 😄",
-]
-
-
-def safe_fact_dodge(variant: int = 0, **_: Any) -> str:
-    """Used when we wanted a safe-fact LLM answer but couldn't get
-    one — keeps the human tone without making up a fact."""
-    return _SAFE_FACT_DODGE_VARIANTS[variant % len(_SAFE_FACT_DODGE_VARIANTS)]
-
-
-# Hard-tier replies — for sensitive (medical / legal / financial /
-# deep political / fatwa) or clearly off-Nahla-domain questions.
-# Polite, short, ALWAYS bridges back to honey/orders.
+# Hard-tier replies — clearly off-domain topics (electricity, real
+# estate, programming, legal cases, financial investing, drug
+# dosages, war). Calm, short, no clown emoji, no rotating jokes.
+# A single soft redirect to honey/orders. The customer can take it
+# from there or move on.
 _HARD_OUT_OF_SCOPE_VARIANTS = [
-    "أعتذر منك 🌷 هذا خارج تخصصي شوي، لكن أبشر بالعسل والطلبات 😄",
-    "ما أقدر أساعدك في هذا 🙏 لكني هنا لأي شي يخص العسل أو طلبك — خبرني وش تحب 🍯",
-    "هالموضوع أكبر مني 🌷 خلّيني أكون عند العسل وأخدمك فيه — تحب أرشّح لك نوع؟ 😄",
+    "أعتذر، هذا خارج تخصصي. لو تحب أساعدك في شي يخص العسل أو الطلب، أنا جاهزة 🌷",
+    "ما أقدر أساعدك في هذا الموضوع، لكني معك في كل ما يخص العسل والطلبات 🌷",
+    "هالأمر يحتاج جهة مختصة، أما من ناحية العسل والطلبات فأنا في الخدمة 🌷",
 ]
 
 
 def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
-    """Polite apology + honey redirect for sensitive / risky topics."""
+    """Polite, calm redirect for clearly off-domain topics. One 🌷
+    emoji max, no laughter, no rotating gimmicks."""
     return _HARD_OUT_OF_SCOPE_VARIANTS[variant % len(_HARD_OUT_OF_SCOPE_VARIANTS)]
+
+
+# ── Legacy no-op shims ───────────────────────────────────────────────────────
+# These three functions are no longer reached by the responder
+# pipeline (the engine no longer emits chitchat / safe_fact tiers),
+# but downstream tests and a couple of older callers still import
+# them. We collapse all three onto ``hard_out_of_scope_reply`` so the
+# imports keep working and any stray call site lands on the calm
+# hard reply instead of the noisy old playful templates.
+
+def chitchat_reply(topic: str = "", variant: int = 0, **_: Any) -> str:  # noqa: ARG001
+    """Deprecated — kept for import compatibility. Returns the calm
+    hard-tier redirect."""
+    return hard_out_of_scope_reply(variant=variant)
+
+
+def safe_fact_dodge(variant: int = 0, **_: Any) -> str:
+    """Deprecated — kept for import compatibility."""
+    return hard_out_of_scope_reply(variant=variant)
 
 
 def out_of_scope_reply(
     tier: str = "hard",
-    topic: str = "",
+    topic: str = "",          # noqa: ARG001
     variant: int = 0,
     **_: Any,
 ) -> str:
-    """Tier-aware dispatcher. Used by the composer when the LLM path
-    is not available (or fails) for the SAFE_FACT tier — for the
-    other two tiers this is the primary entry point.
-
-    Tier values:
-      * ``"chitchat"``  → ``chitchat_reply``
-      * ``"safe_fact"`` → ``safe_fact_dodge`` (LLM path handles
-                          the real-fact case in the responder)
-      * ``"hard"``      → ``hard_out_of_scope_reply`` (default)
+    """Deprecated dispatcher — kept for import compatibility. The
+    engine now only emits the ``hard`` tier; everything else falls
+    through to the merchant brain (ACTION_LLM_REPLY) instead of
+    landing here. Any tier value passes through to the calm hard
+    redirect.
     """
-    t = (tier or "hard").strip().lower()
-    if t == "chitchat":
-        return chitchat_reply(topic=topic, variant=variant)
-    if t == "safe_fact":
-        return safe_fact_dodge(variant=variant)
     return hard_out_of_scope_reply(variant=variant)
 
 

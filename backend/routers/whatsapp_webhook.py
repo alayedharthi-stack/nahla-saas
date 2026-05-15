@@ -219,15 +219,17 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
     return False
 
 
-# NOTE — May 2026: the old "أنا هنا — قول وش تحتاج وأكمّل معك." line
-# was banned by merchant feedback alongside the dry "هذا خارج نطاق
-# متجرنا" deflection. Replacements below stay short and human; the
-# customer never sees the same line back-to-back thanks to the
-# outbound-turn rotation in ``_short_followup_instead_of_repeat``.
+# Replacement set after the May 2026 #2 merchant feedback ("no loops,
+# no clown tone"). The dedup fallback runs ONLY when the brain
+# produces a near-duplicate of its previous outbound, and the
+# customer would otherwise see the same line twice. We keep the lines
+# short, calm, no laughter, no "أرشح لك عسل؟" funnel-opener. Rotated
+# by outbound-turn count so the customer doesn't see the same line
+# back-to-back either.
 _DEDUP_FALLBACK_REPLIES = [
-    "وش أقدر أخدمك فيه الحين؟ 🌸",
-    "خبرني وش يجي على بالك من العسل أو طلب، وأنا معاك 😄🍯",
-    "تأمر بشي أكمّل لك؟ 🌷",
+    "تأمر بشي ثاني؟",
+    "إذا في شي ثاني تحتاجه أنا معك.",
+    "خبرني لو احتجت شي ثاني.",
 ]
 
 
