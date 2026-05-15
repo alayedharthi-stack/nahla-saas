@@ -3840,6 +3840,68 @@ async def _handle_merchant_message(
                     _brain_buttons = []
                     _brain_handoff = False
 
+                # ── No-silent-reply guard ─────────────────────────────────
+                # Production regression (May 2026): "السلام عليكم أبي سعر
+                # العسل" arrived from a real merchant and got NO outbound
+                # at all — brain produced an empty reply for reasons we
+                # could not reconstruct from logs (greet locked +
+                # downstream search returned an empty composer string).
+                # Either the brain returns text OR we send a safe ack.
+                # Silence is never acceptable inside the 24-hour window.
+                #
+                # We also emit a structured trace so the next regression is
+                # debuggable. The trace is one log line per silent turn so
+                # we can grep [BRAIN_SILENT_REPLY] in production logs.
+                if not _billing_denied and not (reply or "").strip():
+                    try:
+                        _matched_intent = ""
+                        _matched_action = ""
+                        try:
+                            from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+                                match as _rules_match,
+                            )
+                            _mi = _rules_match(text or "")
+                            if _mi is not None:
+                                _matched_intent = _mi.name
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            _bs_dbg = (
+                                (convo.extra_metadata or {}).get("brain_state") or {}
+                            )
+                            _matched_action = str(_bs_dbg.get("last_action") or "")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        _wamid_dbg = ""
+                        try:
+                            _wamid_dbg = str(
+                                ((value or {}).get("messages") or [{}])[0].get("id")
+                                or ""
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.error(
+                            "[BRAIN_SILENT_REPLY] tenant=%s phone=*%s "
+                            "inbound_text=%r matched_intent=%r "
+                            "selected_action=%r final_reply_empty=true "
+                            "webhook_event_id=%r",
+                            tenant_id,
+                            (to or "")[-4:],
+                            (text or "")[:120],
+                            _matched_intent,
+                            _matched_action,
+                            _wamid_dbg,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Substitute a polite, fact-free ack so the customer
+                    # gets a reply within the 24h window even when the
+                    # brain produced nothing. Deliberately non-committal
+                    # so we don't promise a product/price/policy fact.
+                    reply = (
+                        "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
+                    )
+
                 # ── BRAIN_RESULT trace ───────────────────────────────────────
                 # Pull the just-saved brain_state out of the conversation row
                 # so the log line tells us what the brain decided AND what

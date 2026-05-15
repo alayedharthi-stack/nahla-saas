@@ -128,6 +128,54 @@ class DefaultDecisionEngine:
                 confidence=0.99,
             )
 
+        # ── 0z. Reference resolution: bare confirmation inherits last topic ──
+        # A short "نعم" / "طيب" / "أرسل" / "اي" / "okay" on its own carries
+        # no commercial signal by itself, but in conversation it almost
+        # always means "yes, do what you just offered". When the previous
+        # turn left ``state.last_platform_topic`` set (the customer asked
+        # about subscription / API / Meta-link etc.), an isolated "نعم"
+        # MUST inherit that topic so we re-emit the platform-aware reply
+        # instead of falling into a generic greet / OOS branch.
+        #
+        # We are deliberately conservative: only fires when the message
+        # is ≤ 4 short tokens AND contains nothing but a confirmation
+        # word. Anything longer carries its own signal and follows the
+        # normal intent ladder.
+        _conf_msg = (ctx.message or "").strip().lower()
+        _CONFIRM_WORDS = {
+            "نعم", "ايوه", "ايوة", "أيوه", "أيوة", "ايو", "اي", "أي",
+            "طيب", "تمام", "اوكي", "أوكي", "اوك", "اوكيه", "موافق",
+            "ارسل", "أرسل", "ابعث", "ابعثه", "ابعثها", "ابعثلي",
+            "ابغى", "أبغى", "ابي", "أبي", "ودي",
+            "yes", "yep", "ok", "okay", "sure", "go", "send", "send it",
+        }
+        _conf_tokens = [t for t in re.split(r"\s+", _conf_msg) if t]
+        _is_bare_confirmation = (
+            1 <= len(_conf_tokens) <= 4
+            and all(t in _CONFIRM_WORDS for t in _conf_tokens)
+        )
+        if (
+            _is_bare_confirmation
+            and not state.checkout_url
+            and not state.current_product_focus
+            and getattr(state, "last_platform_topic", "")
+        ):
+            _last_topic = str(getattr(state, "last_platform_topic", "") or "general_platform")
+            logger.info(
+                "[CTX_INHERIT] bare confirmation inherits platform topic | "
+                "tenant=%s topic=%s preview=%r",
+                getattr(ctx, "tenant_id", None), _last_topic, _conf_msg[:40],
+            )
+            return Decision(
+                action=ACTION_PLATFORM_REPLY,
+                args={
+                    "platform_topic": _last_topic,
+                    "inherited_from_context": True,
+                },
+                reason=f"bare-confirmation inherits last_platform_topic={_last_topic}",
+                confidence=0.85,
+            )
+
         # ── 0a. Social / courtesy / religious (May 2026 #4) ─────────────────
         # The intent classifier set INTENT_SOCIAL when the customer's
         # message is a deterministic social ACK — thanks, blessing,

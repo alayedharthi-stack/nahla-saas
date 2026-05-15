@@ -469,5 +469,218 @@ def test_welcome_gate_embedded_slot_present_for_platform() -> None:
     assert (result.slots or {}).get("embedded_greeting") is True
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Conversation-context inheritance (May 2026 — UX follow-up)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A real merchant reported: "السلام عليكم أبي سعر العسل" produced no
+# outbound at all in production. The fix has two halves:
+#
+#   * intent.match() routes the message to ASK_PRICE with
+#     ``embedded_greeting=True`` — verified above by
+#     ``test_welcome_gate_routes_to_actionable``.
+#   * the decision engine's branch 0z resolves a bare follow-up
+#     "نعم" / "أرسل" against ``state.last_platform_topic`` so the
+#     conversation feels continuous instead of restart-from-zero.
+#
+# These tests lock the second half: the engine must inherit the
+# previous platform topic when the customer only sends a short
+# confirmation.
+
+def _build_decision_inputs(
+    *,
+    message: str,
+    last_platform_topic: str = "",
+    current_product_focus=None,
+    has_products: bool = True,
+):
+    """Build the minimal BrainContext + Decision-engine inputs.
+
+    Pulled out as a helper because constructing the full BrainContext
+    pulls a chunk of brain machinery; tests should stay short and
+    declarative.
+    """
+    from modules.ai.brain.types import (
+        BrainContext,
+        CommerceFacts,
+        Intent,
+        MerchantConversationState,
+        INTENT_GENERAL,
+    )
+
+    state = MerchantConversationState()
+    state.last_platform_topic = last_platform_topic
+    state.current_product_focus = current_product_focus
+    facts = CommerceFacts(
+        has_products=has_products,
+        product_count=3 if has_products else 0,
+        orderable=has_products,
+        store_name="متجر الاختبار",
+    )
+    intent = Intent(
+        name=INTENT_GENERAL,
+        confidence=0.5,
+        slots={},
+        raw_message=message,
+    )
+    ctx = BrainContext(
+        tenant_id=1,
+        customer_phone="+966500000000",
+        message=message,
+        intent=intent,
+        state=state,
+        facts=facts,
+    )
+    return ctx, state, intent, facts
+
+
+def test_context_inherit_bare_yes_after_platform_topic() -> None:
+    """`state.last_platform_topic` set + customer says "نعم" → re-emit
+    ACTION_PLATFORM_REPLY for that topic, not a generic greet."""
+    from modules.ai.brain.decision.actions import ACTION_PLATFORM_REPLY
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+
+    ctx, _state, _intent, _facts = _build_decision_inputs(
+        message="نعم",
+        last_platform_topic="meta_connection",
+    )
+    decision = DefaultDecisionEngine().decide(ctx)
+    assert decision.action == ACTION_PLATFORM_REPLY
+    assert decision.args.get("platform_topic") == "meta_connection"
+    assert decision.args.get("inherited_from_context") is True
+
+
+@pytest.mark.parametrize("message", ["طيب", "أرسل", "ابعث", "اوكي", "ok"])
+def test_context_inherit_various_confirmation_words(message: str) -> None:
+    from modules.ai.brain.decision.actions import ACTION_PLATFORM_REPLY
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+
+    ctx, *_ = _build_decision_inputs(
+        message=message,
+        last_platform_topic="subscription",
+    )
+    decision = DefaultDecisionEngine().decide(ctx)
+    assert decision.action == ACTION_PLATFORM_REPLY
+    assert decision.args.get("platform_topic") == "subscription"
+
+
+def test_context_inherit_does_not_fire_without_topic() -> None:
+    """No `last_platform_topic` → branch 0z must stay out of the way."""
+    from modules.ai.brain.decision.actions import ACTION_PLATFORM_REPLY
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+
+    ctx, *_ = _build_decision_inputs(message="نعم", last_platform_topic="")
+    decision = DefaultDecisionEngine().decide(ctx)
+    assert decision.action != ACTION_PLATFORM_REPLY
+
+
+def test_context_inherit_does_not_fire_with_product_focus() -> None:
+    """A bare "نعم" while a product is in focus is an order
+    confirmation, NOT a platform-context inheritance signal."""
+    from modules.ai.brain.decision.actions import ACTION_PLATFORM_REPLY
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+
+    ctx, *_ = _build_decision_inputs(
+        message="نعم",
+        last_platform_topic="api",
+        current_product_focus={
+            "id": "p1", "title": "عسل سدر", "price": 350,
+        },
+    )
+    decision = DefaultDecisionEngine().decide(ctx)
+    assert decision.action != ACTION_PLATFORM_REPLY
+
+
+def test_context_inherit_skips_long_messages() -> None:
+    """Long messages carry their own intent and must NOT inherit."""
+    from modules.ai.brain.decision.actions import ACTION_PLATFORM_REPLY
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+
+    ctx, *_ = _build_decision_inputs(
+        message="نعم وكمان أبي أعرف الأسعار",
+        last_platform_topic="subscription",
+    )
+    decision = DefaultDecisionEngine().decide(ctx)
+    # The classifier may have produced INTENT_GENERAL here; engine must
+    # decide based on the real signal, not inherit on a 5-word message.
+    assert decision.action != ACTION_PLATFORM_REPLY
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Direct production-bug regression: "السلام عليكم أبي سعر العسل"
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This is the EXACT customer message that produced silence in production
+# (see merchant screenshot, May 2026). The test asserts:
+#   * rules.match() returns INTENT_ASK_PRICE (not GREETING-only).
+#   * slots include ``embedded_greeting=True`` so the pipeline prepends
+#     a short salaam.
+#   * extraction_method is the welcome-gate variant.
+
+def test_production_bug_salaam_with_price_ask() -> None:
+    message = "السلام عليكم أبي سعر العسل"
+    result = intent_rules.match(message)
+    assert result is not None, "rules.match returned None — silent reply regression"
+    assert result.name == INTENT_ASK_PRICE, (
+        f"expected ASK_PRICE, got {result.name}. The customer asked about price "
+        f"and the welcome gate must NOT short-circuit into a greeting card."
+    )
+    assert (result.slots or {}).get("embedded_greeting") is True, (
+        "expected embedded_greeting slot so the composer can prepend a salaam "
+        "line on the actionable answer."
+    )
+    assert "welcome_gate" in (result.extraction_method or ""), (
+        f"expected welcome-gate decoration in extraction_method, got "
+        f"{result.extraction_method!r}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. MerchantConversationState — new context-memory fields
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The pipeline persists three new fields in state after each turn:
+#   * last_platform_topic   — set when ACTION_PLATFORM_REPLY fires
+#   * pending_confirmation  — tag describing what a bare "نعم" would do
+#   * last_link_sent /
+#     last_link_sent_turn   — repetition-guard for outbound CTAs
+# These tests validate the round-trip so the new fields survive a
+# serialise→deserialise cycle into Conversation.extra_metadata.
+
+def test_state_round_trip_preserves_context_fields() -> None:
+    from modules.ai.brain.types import MerchantConversationState
+
+    s = MerchantConversationState(
+        last_platform_topic="meta_connection",
+        pending_confirmation="send_platform_link",
+        last_link_sent="https://nahla.example/onboarding",
+        last_link_sent_turn=3,
+    )
+    payload = s.to_dict()
+    assert payload["last_platform_topic"] == "meta_connection"
+    assert payload["pending_confirmation"] == "send_platform_link"
+    assert payload["last_link_sent"] == "https://nahla.example/onboarding"
+    assert payload["last_link_sent_turn"] == 3
+
+    restored = MerchantConversationState.from_dict(payload)
+    assert restored.last_platform_topic == "meta_connection"
+    assert restored.pending_confirmation == "send_platform_link"
+    assert restored.last_link_sent == "https://nahla.example/onboarding"
+    assert restored.last_link_sent_turn == 3
+
+
+def test_state_round_trip_defaults_when_legacy_blob() -> None:
+    """Older brain_state dicts (pre-May-2026) must still deserialise
+    without raising — defaults fill in the new fields."""
+    from modules.ai.brain.types import MerchantConversationState
+
+    legacy = {"stage": "discovery", "greeted": False}
+    restored = MerchantConversationState.from_dict(legacy)
+    assert restored.last_platform_topic == ""
+    assert restored.pending_confirmation == ""
+    assert restored.last_link_sent == ""
+    assert restored.last_link_sent_turn == 0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

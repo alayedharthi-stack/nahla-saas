@@ -274,6 +274,31 @@ class MerchantBrain:
         # `BRAIN_RESULT` log line and `/debug/recent-whatsapp-turns`
         # endpoint can report it without parsing free-form logs.
         new_state.last_action = str(decision.action or "")
+
+        # ── Conversation-context memory (May 2026) ───────────────────────
+        # Persist the platform topic so a bare "نعم" on the NEXT turn
+        # can be resolved by the decision engine's context-inheritance
+        # branch (0z) instead of falling through to a generic greet.
+        # Also clear the topic when the conversation transitions to a
+        # commerce action so the platform context doesn't bleed into
+        # product flows.
+        if decision.action == ACTION_PLATFORM_REPLY:
+            _platform_topic_now = str(
+                (decision.args or {}).get("platform_topic") or "general_platform"
+            )
+            new_state.last_platform_topic = _platform_topic_now
+            new_state.pending_confirmation = "send_platform_link"
+        elif decision.action in (
+            "search_products",
+            ACTION_PROPOSE_DRAFT_ORDER,
+            "narrow_results",
+            "suggest_coupon",
+            "recommend_addon",
+        ):
+            new_state.last_platform_topic = ""
+            new_state.pending_confirmation = ""
+        else:
+            new_state.pending_confirmation = ""
         if result.data.get("checkout_url"):
             new_state.checkout_url  = result.data["checkout_url"]
             new_state.stage = "checkout"

@@ -326,6 +326,26 @@ class MerchantConversationState:
     # the customer to confirm or reject them. Synced from order_prep by
     # the pipeline after each turn.
     awaiting_option_confirmation: bool = False
+    # ── Conversation-context memory (May 2026) ───────────────────────────
+    # Topic of the LAST platform-inquiry turn (subscription / integration /
+    # api / meta_connection / …). Persists across turns so a follow-up
+    # "نعم" / "كيف؟" is resolved as platform continuation rather than
+    # going through commerce intents again. Cleared the moment the brain
+    # routes to a non-platform action (product / price / order / etc.).
+    last_platform_topic: str = ""
+    # Short tag describing what the bot's previous question/offer would
+    # be confirmed by a bare "نعم" / "طيب" / "أرسل". Examples:
+    #   "send_platform_link"      → resend last platform CTA
+    #   "send_payment_link"       → resend the checkout URL
+    #   "send_product_card"       → re-send the current product card
+    #   "explain_product"         → expand on current_product_focus
+    # Cleared automatically the next turn the bot DOESN'T ask a yes/no.
+    pending_confirmation: str = ""
+    # Last outbound CTA URL surfaced to the customer + how many turns ago.
+    # Used by the repetition guard to avoid sending the same link twice in
+    # a row. Updated by the responder after each successful outbound.
+    last_link_sent: str = ""
+    last_link_sent_turn: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -359,6 +379,10 @@ class MerchantConversationState:
             "current_selected_options": self.current_selected_options,
             "pending_option_groups": list(self.pending_option_groups or []),
             "awaiting_option_confirmation": self.awaiting_option_confirmation,
+            "last_platform_topic": self.last_platform_topic,
+            "pending_confirmation": self.pending_confirmation,
+            "last_link_sent": self.last_link_sent,
+            "last_link_sent_turn": self.last_link_sent_turn,
         }
 
     @staticmethod
@@ -396,6 +420,10 @@ class MerchantConversationState:
                 str(g) for g in (d.get("pending_option_groups") or []) if g
             ],
             awaiting_option_confirmation=bool(d.get("awaiting_option_confirmation", False)),
+            last_platform_topic=str(d.get("last_platform_topic", "") or ""),
+            pending_confirmation=str(d.get("pending_confirmation", "") or ""),
+            last_link_sent=str(d.get("last_link_sent", "") or ""),
+            last_link_sent_turn=int(d.get("last_link_sent_turn") or 0),
         )
 
 
