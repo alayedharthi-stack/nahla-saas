@@ -5041,6 +5041,27 @@ async def _handle_merchant_message(
         # ONLY for logging purposes (so the merchant dashboard, which
         # reads message events directly from the DB, also sees the
         # cleaned copy — not because we trust the inline path).
+
+        # ── Delivery-mode audit (May 2026 — observability) ─────────
+        # Per-turn record of what we actually sent to the customer.
+        # Each successful send below stamps a flag / increments a
+        # counter; at the end of dispatch we compute one closed-enum
+        # verdict (catalog / image_cta / media_only / cta_only /
+        # text_only / failed) and log a [FINAL_DELIVERY] line. When
+        # the customer asked for product / image / catalog content
+        # but the verdict is unacceptable, we additionally emit a
+        # [DELIVERY_GUARD_FAIL] ERROR — that's the alarm for the
+        # exact production regression where the bot replied
+        # "أبشر خالد 🍯" to "أبغى أشوف صورة لعسل السمر" with no
+        # image, no card, no link, no fallback. Defensive: any
+        # exception when computing or logging the mode is swallowed
+        # so the customer turn always exits cleanly.
+        try:
+            from modules.observability import new_delivery_audit as _new_audit  # noqa: PLC0415
+            _delivery_audit = _new_audit()
+        except Exception:  # noqa: BLE001
+            _delivery_audit = {}
+
         if reply:
             try:
                 from core.ai_libraries import scrub_internal_markers as _scrub  # noqa: PLC0415
@@ -5067,6 +5088,9 @@ async def _handle_merchant_message(
                 buttons=_brain_buttons,
                 _tenant_id=tenant_id, _db=db,
             )
+            if _send_ok and isinstance(_delivery_audit, dict):
+                _delivery_audit["interactive_buttons_sent"] = True
+                _delivery_audit["text_sent"] = True
         else:
             # ── URL → CTA-button normaliser ─────────────────────────
             # The reply may carry 0, 1 or >1 URLs. WhatsApp's
@@ -5119,11 +5143,17 @@ async def _handle_merchant_message(
                                 btn_url=_msg.cta.url,
                                 _tenant_id=tenant_id, _db=db,
                             )
+                            if _ok_one and isinstance(_delivery_audit, dict):
+                                _delivery_audit["cta_url_sent_count"] = (
+                                    int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                                )
                         else:
                             _ok_one = await _send_whatsapp_message(
                                 phone_id=phone_id, to=to, text=_msg.body,
                                 _tenant_id=tenant_id, _db=db,
                             )
+                            if _ok_one and isinstance(_delivery_audit, dict):
+                                _delivery_audit["text_sent"] = True
                     except Exception as _split_send_exc:
                         logger.warning(
                             "[CTA_BUTTON_SPLIT_FALLBACK] tenant=%s idx=%d reason=%s",
@@ -5166,6 +5196,10 @@ async def _handle_merchant_message(
                         btn_url=_cls.url,
                         _tenant_id=tenant_id, _db=db,
                     )
+                    if _send_ok and isinstance(_delivery_audit, dict):
+                        _delivery_audit["cta_url_sent_count"] = (
+                            int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                        )
                 except Exception as _cta_send_exc:
                     logger.warning(
                         "[CTA_BUTTON_FALLBACK] tenant=%s reason=%s url_type=%s",
@@ -5190,6 +5224,8 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to, text=reply,
                         _tenant_id=tenant_id, _db=db,
                     )
+                    if _send_ok and isinstance(_delivery_audit, dict):
+                        _delivery_audit["text_sent"] = True
             else:
                 # No URLs in reply → plain text send (also handles the
                 # degenerate case where the splitter returned only
@@ -5198,6 +5234,8 @@ async def _handle_merchant_message(
                     phone_id=phone_id, to=to, text=reply,
                     _tenant_id=tenant_id, _db=db,
                 )
+                if _send_ok and isinstance(_delivery_audit, dict):
+                    _delivery_audit["text_sent"] = True
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
@@ -5304,6 +5342,10 @@ async def _handle_merchant_message(
                         # Catalog rendered the product card natively
                         # — no need to send a separate image+CTA.
                         # Continue to the next attachment.
+                        if isinstance(_delivery_audit, dict):
+                            _delivery_audit["catalog_card_sent_count"] = (
+                                int(_delivery_audit.get("catalog_card_sent_count", 0)) + 1
+                            )
                         continue
 
                 # Library media goes through the full validation
@@ -5324,13 +5366,17 @@ async def _handle_merchant_message(
                         # so the customer at least gets the link.
                         if _att.get("product_url"):
                             try:
-                                await _send_cta_url(
+                                _cta_only_ok = await _send_cta_url(
                                     phone_id=phone_id, to=to,
                                     body_text=_att.get("title") or "عرض المنتج",
                                     btn_label="عرض المنتج",
                                     btn_url=_att.get("product_url"),
                                     _tenant_id=tenant_id, _db=db,
                                 )
+                                if _cta_only_ok and isinstance(_delivery_audit, dict):
+                                    _delivery_audit["cta_url_sent_count"] = (
+                                        int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                                    )
                             except Exception:
                                 pass
                         continue
@@ -5367,6 +5413,10 @@ async def _handle_merchant_message(
                         _tenant_id=tenant_id,
                         _db=db,
                     )
+                    if _media_ok and isinstance(_delivery_audit, dict):
+                        _delivery_audit["legacy_media_sent_count"] = (
+                            int(_delivery_audit.get("legacy_media_sent_count", 0)) + 1
+                        )
                     if _is_product:
                         logger.info(
                             "[ProductCard.send] tenant=%s to=%s product_id=%s "
@@ -5392,7 +5442,7 @@ async def _handle_merchant_message(
                     # succeeded and a product URL exists.
                     if _is_product and _media_ok and _att.get("product_url"):
                         try:
-                            await _send_cta_url(
+                            _product_cta_ok = await _send_cta_url(
                                 phone_id=phone_id, to=to,
                                 body_text="اضغط زر «عرض المنتج» لإكمال "
                                           "الطلب من المتجر مباشرة.",
@@ -5400,6 +5450,10 @@ async def _handle_merchant_message(
                                 btn_url=_att.get("product_url"),
                                 _tenant_id=tenant_id, _db=db,
                             )
+                            if _product_cta_ok and isinstance(_delivery_audit, dict):
+                                _delivery_audit["cta_url_sent_count"] = (
+                                    int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                                )
                         except Exception as _cta_exc:
                             logger.debug(
                                 "[ProductCard.cta] tenant=%s product_id=%s "
@@ -5434,6 +5488,8 @@ async def _handle_merchant_message(
                         payload=_contacts_payload,
                         _tenant_id=tenant_id, _db=db,
                     )
+                    if _contacts_ok and isinstance(_delivery_audit, dict):
+                        _delivery_audit["contacts_sent"] = True
                     try:
                         import json as _json_call  # noqa: PLC0415
                         _call_log_payload = {
@@ -5495,11 +5551,115 @@ async def _handle_merchant_message(
                     "[ORDER_FLOW_STATE] awaiting-receipt detection "
                     "failed: %s", _ar_exc,
                 )
+
+            # ── Final-delivery-mode verdict + UX guard (May 2026) ──────
+            # See the audit init block earlier for rationale. We log
+            # ONE structured line per turn — operators grep
+            # ``[FINAL_DELIVERY]`` to answer "did the customer
+            # actually see something useful?". When the customer
+            # asked for product / image / catalog content but the
+            # final mode is unacceptable, we additionally emit a
+            # ``[DELIVERY_GUARD_FAIL]`` ERROR. The guard is the
+            # alarm for silent UX regressions like the production
+            # case where the bot replied "أبشر خالد 🍯" to
+            # "أبغى أشوف صورة لعسل السمر" — no image, no card, no
+            # link, no fallback, no log line that flagged it.
+            try:
+                from modules.observability import (  # noqa: PLC0415
+                    compute_final_delivery_mode as _compute_mode,
+                    customer_wants_product_or_image as _wants_product,
+                )
+                from modules.observability.delivery_mode import (  # noqa: PLC0415
+                    is_acceptable_mode_for_product_intent as _mode_ok,
+                )
+
+                _final_mode = _compute_mode(_delivery_audit)
+                _wants = _wants_product(
+                    inbound_text=text or "",
+                    brain_action=_br_action or "",
+                )
+                logger.info(
+                    "[FINAL_DELIVERY] tenant=%s to=*%s mode=%s "
+                    "wants_product_or_image=%s brain_action=%s "
+                    "audit=%s",
+                    tenant_id,
+                    (to[-4:] if to else ""),
+                    _final_mode,
+                    str(bool(_wants)).lower(),
+                    _br_action or "?",
+                    _delivery_audit,
+                )
+                if _wants and not _mode_ok(_final_mode):
+                    logger.error(
+                        "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
+                        "mode=%s reason=product_intent_without_rich_content "
+                        "inbound=%r brain_action=%s reply_len=%d "
+                        "audit=%s",
+                        tenant_id,
+                        (to[-4:] if to else ""),
+                        _final_mode,
+                        (text or "")[:120],
+                        _br_action or "?",
+                        len(reply or ""),
+                        _delivery_audit,
+                    )
+            except Exception as _fd_exc:  # noqa: BLE001
+                logger.debug(
+                    "[FINAL_DELIVERY] tenant=%s instrumentation failed: %s",
+                    tenant_id, _fd_exc,
+                )
         else:
+            # Initial reply send failed. Stamp the audit so the
+            # FINAL_DELIVERY classifier (which we still want to emit
+            # for observability symmetry) returns ``"failed"``.
+            if isinstance(_delivery_audit, dict):
+                _delivery_audit["first_send_failed"] = True
             logger.error(
                 "[TRACE][5/6] MERCHANT_AI_SEND_FAILED | tenant=%s to=%s reply_len=%s",
                 tenant_id, to, len(reply or ""),
             )
+            try:
+                from modules.observability import (  # noqa: PLC0415
+                    compute_final_delivery_mode as _compute_mode,
+                    customer_wants_product_or_image as _wants_product,
+                )
+                from modules.observability.delivery_mode import (  # noqa: PLC0415
+                    is_acceptable_mode_for_product_intent as _mode_ok,
+                )
+
+                _final_mode = _compute_mode(_delivery_audit)
+                _wants = _wants_product(
+                    inbound_text=text or "",
+                    brain_action=_br_action or "",
+                )
+                logger.info(
+                    "[FINAL_DELIVERY] tenant=%s to=*%s mode=%s "
+                    "wants_product_or_image=%s brain_action=%s "
+                    "audit=%s",
+                    tenant_id,
+                    (to[-4:] if to else ""),
+                    _final_mode,
+                    str(bool(_wants)).lower(),
+                    _br_action or "?",
+                    _delivery_audit,
+                )
+                if _wants and not _mode_ok(_final_mode):
+                    logger.error(
+                        "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
+                        "mode=%s reason=product_intent_send_failed "
+                        "inbound=%r brain_action=%s reply_len=%d",
+                        tenant_id,
+                        (to[-4:] if to else ""),
+                        _final_mode,
+                        (text or "")[:120],
+                        _br_action or "?",
+                        len(reply or ""),
+                    )
+            except Exception as _fd_exc:  # noqa: BLE001
+                logger.debug(
+                    "[FINAL_DELIVERY] tenant=%s instrumentation failed: %s",
+                    tenant_id, _fd_exc,
+                )
 
     except Exception as exc:
         # Any failure inside the merchant reply pipeline (store_knowledge,
