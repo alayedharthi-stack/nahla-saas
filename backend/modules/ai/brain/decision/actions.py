@@ -56,6 +56,26 @@ ACTION_STASH_ADDRESS_PRE_PRODUCT = "stash_address_pre_product"
 # that used to leak DuckDuckGo dumps into customer threads.
 ACTION_OUT_OF_SCOPE        = "out_of_scope_reply"
 
+# ── Social / platform actions (May 2026 #4 — context routing) ─────────────────
+#
+# Two new actions emitted by the new ``INTENT_SOCIAL`` and
+# ``INTENT_PLATFORM_INQUIRY`` intents. They short-circuit the rule
+# chain with deterministic, culturally-appropriate canned replies and
+# DO NOT trigger:
+#   * product search / catalog flow
+#   * KB / sales context retrieval
+#   * LLM expansion
+#   * upsell / recommendation
+#   * order or payment flow
+#
+# Why they're separate actions (not just two ACTION_LLM_REPLY branches
+# with different system prompts): putting them at the executor level
+# means the entire orchestrator skips its sales-oriented machinery
+# for these turns. The decision is purely "category → template" so
+# behaviour is auditable and provably can't drift into a sales pitch.
+ACTION_SOCIAL_REPLY        = "social_reply"
+ACTION_PLATFORM_REPLY      = "platform_reply"
+
 ALL_ACTIONS = [
     ACTION_GREET,
     ACTION_FAQ_REPLY,
@@ -72,4 +92,6 @@ ALL_ACTIONS = [
     ACTION_CLARIFY,
     ACTION_NARROW,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
+    ACTION_SOCIAL_REPLY,
+    ACTION_PLATFORM_REPLY,
 ]

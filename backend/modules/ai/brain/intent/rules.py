@@ -29,12 +29,16 @@ from ..types import (
     INTENT_HESITATION,
     INTENT_PAY_NOW,
     INTENT_PICK_LIST_ITEM,
+    INTENT_PLATFORM_INQUIRY,
+    INTENT_SOCIAL,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
     INTENT_WHO_ARE_YOU,
     Intent,
 )
+from .platform_classifier import classify_platform
+from .social_classifier import classify_social
 
 
 @dataclass
@@ -276,6 +280,25 @@ def match(message: str) -> Optional[Intent]:
     """
     Try all rule-sets against *message*.
     Returns the best-matching Intent or None when nothing fires.
+
+    Evaluation order:
+      0. Single-digit fast path → INTENT_PICK_LIST_ITEM (deterministic).
+      1. INTENT_SOCIAL — social / courtesy / religious messages
+         ("جزاك الله خير", "بيض الله وجهك", "صلى الله عليه وسلم",
+         "بسم الله", "كفو", etc.). Conservative; only fires when the
+         message is dominantly social (short + no commercial signal)
+         or unmistakably religious (prophet invocation / basmala).
+         Confidence 0.92–0.97. Slot: ``social_category``.
+      2. INTENT_PLATFORM_INQUIRY — questions about NAHLA the SaaS
+         platform ("كم اشتراك نحلة؟"، "كيف أربط مع Meta؟"، "API"،
+         "لوحة التحكم"، voice notes about "الذكاء، الباقات، الربط").
+         Confidence 0.93–0.95. Slot: ``platform_topic``.
+      3. Regex chain — commerce / FAQ / order intents as before.
+
+    Both new classifiers run BEFORE the regex chain so their higher
+    confidences (0.92+) beat the commerce defaults (0.82–0.90) on
+    overlap. The classifiers themselves are deterministic and run in
+    O(message length) — safe on the synchronous critical path.
     """
     # ── Fast path: single digit → pick from last shown list ──────────────
     m = _SINGLE_DIGIT.match(message)
@@ -292,6 +315,32 @@ def match(message: str) -> Optional[Intent]:
 
     best: Optional[Tuple[float, Intent]] = None
 
+    # ── Layer 1: social / courtesy / religious ──────────────────────────
+    social = classify_social(message)
+    if social is not None:
+        candidate = Intent(
+            name=INTENT_SOCIAL,
+            confidence=social.confidence,
+            slots={"social_category": social.category},
+            raw_message=message,
+            extraction_method="rules",
+        )
+        best = (social.confidence, candidate)
+
+    # ── Layer 2: platform / SaaS inquiry ────────────────────────────────
+    platform = classify_platform(message)
+    if platform is not None:
+        candidate = Intent(
+            name=INTENT_PLATFORM_INQUIRY,
+            confidence=platform.confidence,
+            slots={"platform_topic": platform.topic},
+            raw_message=message,
+            extraction_method="rules",
+        )
+        if best is None or platform.confidence > best[0]:
+            best = (platform.confidence, candidate)
+
+    # ── Layer 3: regex chain (commerce / FAQ / order intents) ───────────
     for ruleset, compiled in _RULES:
         for pattern in compiled:
             if pattern.search(message):

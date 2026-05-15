@@ -41,6 +41,26 @@ INTENT_TALK_HUMAN       = "talk_to_human"
 INTENT_TRACK_ORDER      = "track_order"
 INTENT_GENERAL          = "general"
 INTENT_PICK_LIST_ITEM   = "pick_list_item"   # customer picks numbered option
+# Social / courtesy / religious signals — thanks ("جزاك الله خير"),
+# blessings ("الله يعافيك")، prophet invocations ("صلى الله عليه
+# وسلم")، basmala ("بسم الله"), compliments ("كفو", "ما قصرت").
+# These messages carry no commercial intent and MUST NOT trigger the
+# product / catalog / KB / LLM-expansion paths — they get a short,
+# culturally-appropriate canned reply via ACTION_SOCIAL_REPLY.
+# Slot: ``social_category`` ∈ {thanks, blessing, prophet_invocation,
+# basmala, compliment, general_courtesy}.
+INTENT_SOCIAL           = "social"
+# Customer is asking about NAHLA (the SaaS platform) itself — not
+# the merchant's products. Subscription, API, dashboard, Meta /
+# WhatsApp Business linking, campaigns, AI capabilities, packages,
+# pricing of Nahla. The merchant brain MUST NOT try to answer these
+# with the merchant's product catalogue — the answer comes via
+# ACTION_PLATFORM_REPLY with a short scoping line that points the
+# customer at Nahla support without inventing platform facts.
+# Slot: ``platform_topic`` ∈ {subscription, integration, api,
+# ai_capabilities, campaigns, dashboard, meta_connection,
+# general_platform}.
+INTENT_PLATFORM_INQUIRY = "platform_inquiry"
 
 
 @dataclass

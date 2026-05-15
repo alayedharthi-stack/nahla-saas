@@ -32,10 +32,12 @@ from .actions import (
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_NARROW,
+    ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
@@ -53,6 +55,8 @@ from ..types import (
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
     INTENT_HESITATION,
+    INTENT_PLATFORM_INQUIRY,
+    INTENT_SOCIAL,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
     INTENT_GENERAL,
@@ -122,6 +126,55 @@ class DefaultDecisionEngine:
                 },
                 reason=f"awaiting_option_confirmation — {_pred_source}",
                 confidence=0.99,
+            )
+
+        # ── 0a. Social / courtesy / religious (May 2026 #4) ─────────────────
+        # The intent classifier set INTENT_SOCIAL when the customer's
+        # message is a deterministic social ACK — thanks, blessing,
+        # prophet invocation, basmala, compliment, courtesy. These
+        # carry zero commercial intent. We MUST NOT route to product
+        # / KB / LLM here because the sales-oriented prompt would
+        # either stay silent or derail into a sales pitch — that's
+        # the exact regression we're fixing.
+        #
+        # Sitting at priority 0a (right after prediction-confirmation)
+        # means we run BEFORE every commerce branch. If the customer
+        # is mid-checkout, the ACK is harmless — the order state
+        # stays intact and the next turn resumes normally. The only
+        # signal in the message was "thanks", and we honour it.
+        if intent.name == INTENT_SOCIAL:
+            category = str((intent.slots or {}).get("social_category") or "general_courtesy")
+            logger.info(
+                "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
+                getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_SOCIAL_REPLY,
+                args={"social_category": category},
+                reason=f"social courtesy ack ({category})",
+                confidence=intent.confidence,
+            )
+
+        # ── 0b. Platform / SaaS inquiry (May 2026 #4) ───────────────────────
+        # Customer is asking about Nahla (the platform) itself —
+        # subscription, API, dashboard, Meta linking, campaigns.
+        # We MUST NOT search the merchant's catalogue for "اشتراك"
+        # / "API" — the legacy ASK_PRODUCT regex used to do exactly
+        # that and the brain would improvise wrong answers (the May
+        # 2026 voice-note incident). Route to the platform-reply
+        # template which scopes the conversation back to the merchant
+        # WITHOUT inventing platform facts.
+        if intent.name == INTENT_PLATFORM_INQUIRY:
+            topic = str((intent.slots or {}).get("platform_topic") or "general_platform")
+            logger.info(
+                "[PLATFORM_ROUTE] tenant=%s topic=%s preview=%r",
+                getattr(ctx, "tenant_id", None), topic, (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_PLATFORM_REPLY,
+                args={"platform_topic": topic},
+                reason=f"platform inquiry ({topic})",
+                confidence=intent.confidence,
             )
 
         # ── 0. Deterministic checkout continuation (highest priority) ────────

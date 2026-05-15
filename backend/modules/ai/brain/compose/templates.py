@@ -729,6 +729,179 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
     return _HARD_OUT_OF_SCOPE_VARIANTS[variant % len(_HARD_OUT_OF_SCOPE_VARIANTS)]
 
 
+# ── Social / courtesy / religious replies (May 2026 #4) ──────────────────────
+#
+# Short, culturally-appropriate Gulf-Arabic replies for the new
+# ``INTENT_SOCIAL`` intent. The classifier in
+# ``intent/social_classifier.py`` attaches a ``social_category`` slot
+# that tells us which family to pick from. Variants rotate per
+# customer turn so repeated thanks don't echo the exact same line.
+#
+# Design rules (per merchant feedback May 2026 #2):
+#   * One emoji MAX (usually 🌷 or 🌹) — no clown-tone clusters.
+#   * No "أرشّح لك عسل؟" funnel-opener — these are social ACKs, not
+#     sales bridges. The customer can move the conversation forward
+#     when they're ready.
+#   * Religious replies match the canonical responses Gulf customers
+#     expect ("صلى الله عليه وسلم", "آمين وإياك").
+
+_SOCIAL_THANKS_VARIANTS = [
+    "العفو، أي وقت 🌹",
+    "الله يعافيك، ما سويت شي.",
+    "ما عليك زود، تأمر بأي شي.",
+    "العفو، هذا واجب.",
+]
+
+_SOCIAL_BLESSING_VARIANTS = [
+    "آمين، وإياك يارب.",
+    "الله يبارك فيك ويسعدك 🌹",
+    "آمين ولك بالمثل.",
+    "ربي يعافيك ويوفقك.",
+]
+
+_SOCIAL_PROPHET_INVOCATION_VARIANTS = [
+    "صلى الله عليه وسلم.",
+    "اللهم صل وسلم على نبينا محمد.",
+    "صلى الله عليه وسلم وعلى آله وصحبه.",
+]
+
+_SOCIAL_BASMALA_VARIANTS = [
+    "بسم الله، تفضل.",
+    "بسم الله الرحمن الرحيم.",
+    "بسم الله، حياك.",
+]
+
+_SOCIAL_COMPLIMENT_VARIANTS = [
+    "تسلم، هذا من ذوقك.",
+    "الله يبارك فيك 🌹",
+    "ما عليك زود.",
+]
+
+_SOCIAL_GENERAL_COURTESY_VARIANTS = [
+    "الله يحييك 🌹",
+    "أهلاً وسهلاً فيك.",
+    "حياك الله.",
+    "تأمر بشي؟",
+]
+
+_SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
+    "thanks":             _SOCIAL_THANKS_VARIANTS,
+    "blessing":           _SOCIAL_BLESSING_VARIANTS,
+    "prophet_invocation": _SOCIAL_PROPHET_INVOCATION_VARIANTS,
+    "basmala":            _SOCIAL_BASMALA_VARIANTS,
+    "compliment":         _SOCIAL_COMPLIMENT_VARIANTS,
+    "general_courtesy":   _SOCIAL_GENERAL_COURTESY_VARIANTS,
+}
+
+
+def social_reply(category: str = "general_courtesy", variant: int = 0, **_: Any) -> str:
+    """Pick a short, culturally-appropriate social reply.
+
+    ``category`` is one of the keys in ``_SOCIAL_REPLIES_BY_CATEGORY``.
+    Unknown categories fall back to ``general_courtesy`` so the caller
+    can pass the slot through verbatim without defensive None-checks.
+    ``variant`` rotates inside the bucket.
+    """
+    bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(
+        (category or "").strip().lower() or "general_courtesy",
+        _SOCIAL_GENERAL_COURTESY_VARIANTS,
+    )
+    return bucket[variant % len(bucket)]
+
+
+# ── Platform inquiry replies (May 2026 #4) ───────────────────────────────────
+#
+# Replies for the new ``INTENT_PLATFORM_INQUIRY`` intent. The customer
+# is asking about Nahla (the SaaS platform), not the merchant's
+# products. We do NOT invent platform facts here (pricing, package
+# names, etc.) — the safe-and-honest behaviour is to scope the
+# conversation back to the MERCHANT'S CONTEXT and tell the customer
+# that platform questions are best handled by Nahla support.
+#
+# Topic-aware so the reply mentions what was asked, but each variant
+# is short and ends with a graceful pivot back to "هل أساعدك في شي
+# يخص المتجر؟" — which is honest scoping, not a sales push.
+
+_PLATFORM_GENERIC_VARIANTS = [
+    "هذا استفسار يخص منصة نحلة وفريق الدعم. أنا هنا لما يخص هذا المتجر "
+    "ومنتجاته — لو عندك سؤال عن منتج أو طلب، تفضل 🌹",
+    "هذا سؤال عن منصة نحلة وليس عن المتجر. تواصل مع دعم نحلة لو احتجت "
+    "تفاصيل عن المنصة، وأنا في خدمتك لكل ما يخص المتجر.",
+]
+
+_PLATFORM_SUBSCRIPTION_VARIANTS = [
+    "تفاصيل الاشتراك والباقات تخص منصة نحلة، وفريق نحلة هم الأقدر "
+    "على شرحها. أنا متخصصة بمنتجات هذا المتجر فقط 🌹",
+    "أسعار وباقات نحلة يجيب عليها فريق دعم نحلة مباشرة. لو في شي "
+    "يخص المتجر أو منتج معين، خبرني وأنا معك.",
+]
+
+_PLATFORM_INTEGRATION_VARIANTS = [
+    "موضوع ربط واتساب الأعمال يحتاج فريق دعم نحلة. أنا هنا لخدمة "
+    "عملاء هذا المتجر فقط — لو تحتاج شي يخصه، تفضل 🌹",
+    "الربط مع واتساب الأعمال يجاوب عنه فريق نحلة. أما ما يخص المتجر "
+    "فأنا في الخدمة.",
+]
+
+_PLATFORM_API_VARIANTS = [
+    "أسئلة الـ API والـ Webhook تخص فريق نحلة التقني. أما ما يخص "
+    "هذا المتجر فأنا معك 🌹",
+    "تكامل الـ API يتولاه فريق نحلة. لو احتجت شي يخص منتجات المتجر، "
+    "خبرني.",
+]
+
+_PLATFORM_AI_VARIANTS = [
+    "ميزات الذكاء في منصة نحلة يشرحها فريق دعم نحلة. أنا هنا "
+    "لمساعدتك في منتجات وطلبات هذا المتجر 🌹",
+    "تفاصيل قدرات الذكاء الاصطناعي في نحلة يجاوب عنها فريق نحلة. "
+    "أما ما يخص هذا المتجر فأنا معك.",
+]
+
+_PLATFORM_CAMPAIGNS_VARIANTS = [
+    "الحملات التسويقية في نحلة يشرحها فريق نحلة. أنا في خدمتك "
+    "لمنتجات وطلبات هذا المتجر 🌹",
+    "إعداد الحملات يتولاه فريق نحلة، وأنا متخصصة في خدمة عملاء "
+    "المتجر فقط.",
+]
+
+_PLATFORM_DASHBOARD_VARIANTS = [
+    "أسئلة لوحة التحكم تخص فريق نحلة. أنا هنا لخدمتك في كل ما "
+    "يخص منتجات وطلبات هذا المتجر 🌹",
+]
+
+_PLATFORM_META_VARIANTS = [
+    "إعداد الربط مع Meta يتولاه فريق نحلة. أنا في خدمتك لما يخص "
+    "هذا المتجر — منتجات أو طلبات 🌹",
+    "ربط Meta وبيانات WABA يجيب عنها فريق نحلة. أما ما يخص "
+    "المتجر فأنا معك.",
+]
+
+_PLATFORM_REPLIES_BY_TOPIC: Dict[str, List[str]] = {
+    "subscription":     _PLATFORM_SUBSCRIPTION_VARIANTS,
+    "integration":      _PLATFORM_INTEGRATION_VARIANTS,
+    "api":              _PLATFORM_API_VARIANTS,
+    "ai_capabilities":  _PLATFORM_AI_VARIANTS,
+    "campaigns":        _PLATFORM_CAMPAIGNS_VARIANTS,
+    "dashboard":        _PLATFORM_DASHBOARD_VARIANTS,
+    "meta_connection":  _PLATFORM_META_VARIANTS,
+    "general_platform": _PLATFORM_GENERIC_VARIANTS,
+}
+
+
+def platform_reply(topic: str = "general_platform", variant: int = 0, **_: Any) -> str:
+    """Pick a short reply that scopes the conversation back to the
+    merchant's store WITHOUT inventing platform facts.
+
+    ``topic`` is one of the keys in ``_PLATFORM_REPLIES_BY_TOPIC``.
+    Unknown topics fall back to ``general_platform``.
+    """
+    bucket = _PLATFORM_REPLIES_BY_TOPIC.get(
+        (topic or "").strip().lower() or "general_platform",
+        _PLATFORM_GENERIC_VARIANTS,
+    )
+    return bucket[variant % len(bucket)]
+
+
 # ── Legacy no-op shims ───────────────────────────────────────────────────────
 # These three functions are no longer reached by the responder
 # pipeline (the engine no longer emits chitchat / safe_fact tiers),

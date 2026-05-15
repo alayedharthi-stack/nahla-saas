@@ -50,10 +50,12 @@ from ..decision.actions import (
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_NARROW,
+    ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
@@ -404,6 +406,30 @@ class DefaultComposer:
         # boring: one polite redirect, no LLM call, no jokes.
         if action == ACTION_OUT_OF_SCOPE:
             return T.hard_out_of_scope_reply(variant=self._variant_idx(ctx))
+
+        # ── Social / courtesy / religious (May 2026 #4) ────────────────────
+        # The decision engine routes INTENT_SOCIAL here. The slot
+        # ``social_category`` was set by ``social_classifier`` and
+        # picks one of:
+        #     thanks | blessing | prophet_invocation | basmala |
+        #     compliment | general_courtesy
+        # No LLM, no KB, no catalog touch — short canned reply only.
+        # This is what keeps "جزاك الله خير" / "صلى الله عليه وسلم"
+        # / "بسم الله" from derailing into a sales pitch.
+        if action == ACTION_SOCIAL_REPLY:
+            category = str((decision.args or {}).get("social_category") or "general_courtesy")
+            return T.social_reply(category=category, variant=self._variant_idx(ctx))
+
+        # ── Platform / SaaS inquiry (May 2026 #4) ──────────────────────────
+        # The customer asked about Nahla (the platform), not the
+        # merchant's products. Slot ``platform_topic`` picks one of:
+        #     subscription | integration | api | ai_capabilities |
+        #     campaigns | dashboard | meta_connection | general_platform
+        # The reply scopes the conversation back to the merchant's
+        # store WITHOUT inventing platform facts. No catalog flow.
+        if action == ACTION_PLATFORM_REPLY:
+            topic = str((decision.args or {}).get("platform_topic") or "general_platform")
+            return T.platform_reply(topic=topic, variant=self._variant_idx(ctx))
 
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:

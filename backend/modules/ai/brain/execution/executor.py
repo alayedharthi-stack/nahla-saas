@@ -22,10 +22,13 @@ from ..decision.actions import (
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_NARROW,
+    ACTION_OUT_OF_SCOPE,
+    ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
+    ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
@@ -45,6 +48,36 @@ class _GreetHandler:
 class _HandoffHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         return ActionResult(success=True, data={"type": "handoff"})
+
+
+# Direct-compose actions: the responder produces the text deterministically,
+# so the executor only needs to acknowledge success. No LLM call, no tool
+# invocation, no catalog lookup. Same shape as ``_GreetHandler``.
+class _OutOfScopeHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        return ActionResult(success=True, data={"type": "out_of_scope"})
+
+
+class _SocialReplyHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        return ActionResult(
+            success=True,
+            data={
+                "type": "social_reply",
+                "social_category": str((decision.args or {}).get("social_category") or "general_courtesy"),
+            },
+        )
+
+
+class _PlatformReplyHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        return ActionResult(
+            success=True,
+            data={
+                "type": "platform_reply",
+                "platform_topic": str((decision.args or {}).get("platform_topic") or "general_platform"),
+            },
+        )
 
 
 class _SendPaymentLinkHandler:
@@ -282,6 +315,14 @@ class DefaultActionExecutor:
             ACTION_WEB_SEARCH:          _WebSearchHandler(),
             ACTION_LLM_REPLY:           _LLMReplyHandler(),
             ACTION_STASH_ADDRESS_PRE_PRODUCT: _StashAddressPreProductHandler(),
+            # Direct-compose actions — no tool invocation, the responder
+            # owns the text. Registered explicitly so the unknown-action
+            # safety net doesn't accidentally fall back to the LLM and
+            # waste a model call (or worse, leak an answer the brain
+            # decided not to produce).
+            ACTION_OUT_OF_SCOPE:        _OutOfScopeHandler(),
+            ACTION_SOCIAL_REPLY:        _SocialReplyHandler(),
+            ACTION_PLATFORM_REPLY:      _PlatformReplyHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:
