@@ -682,5 +682,80 @@ def test_state_round_trip_defaults_when_legacy_blob() -> None:
     assert restored.last_link_sent_turn == 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. conversation_mode.detect_identity_topic — welcome-gate yield
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Direct production-bug reproducer: "السلام عليكم أبي سعر العسل" was
+# matching the greeting prefix in conversation_mode's _GREETING_PATTERNS
+# and triggering MODE_IDENTITY_REPLY → canned identity card. That
+# short-circuited the brain entirely so the welcome-gate fix in
+# intent/rules.py never ran. The fix yields to the brain whenever a
+# greeting prefix is followed by an actionable signal.
+
+@pytest.mark.parametrize("text,expected", [
+    # Pure greetings → canned identity card (legacy behaviour preserved).
+    ("السلام عليكم",                          "greeting"),
+    ("وعليكم السلام",                          "greeting"),
+    ("مرحبا",                                  "greeting"),
+    ("هلا والله",                              "greeting"),
+    ("صباح الخير",                             "greeting"),
+    ("أهلاً وسهلاً",                            "greeting"),
+    ("hello",                                  "greeting"),
+    # Greeting + actionable commerce ask → yield to brain (empty string).
+    ("السلام عليكم أبي سعر العسل",             ""),
+    ("وعليكم السلام، كم سعر كيلو ضهيان؟",      ""),
+    ("السلام عليكم أبغى عسل سدر",              ""),
+    ("مرحبا، كم سعر العسل؟",                   ""),
+    ("السلام عليكم وش أسعاركم",                ""),
+    ("هلا، عندكم عسل سدر؟",                    ""),
+    ("صباح الخير أبي تفاصيل عن العسل",         ""),
+    # Greeting + platform inquiry → yield to brain.
+    ("السلام عليكم أبي أربط واتساب الأعمال",    ""),
+    ("مرحبا، كم اشتراك نحلة؟",                  ""),
+    # Greeting + payment info / shipping → yield to brain.
+    ("السلام عليكم، أبي رابط الدفع",            ""),
+    ("مرحبا، كم الشحن للرياض؟",                 ""),
+    # Greeting + identity question with greeting FIRST → stays on the
+    # canned greeting card path (legacy behaviour preserved). The
+    # identity sub-question gets handled by the brain on the next turn
+    # since the greeting card asks "what would you like to know?".
+    ("السلام عليكم، من أنت؟",                   "greeting"),
+    # Pure identity asks → identity card.
+    ("من أنت؟",                                "identity"),
+    ("هل أنت AI؟",                             "identity"),
+])
+def test_detect_identity_topic_welcome_gate_yield(
+    text: str, expected: str,
+) -> None:
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic(text) == expected, (
+        f"detect_identity_topic({text!r}) returned the wrong topic — the "
+        f"welcome-gate yield is broken and this exact message will be "
+        f"swallowed by MODE_IDENTITY_REPLY in production."
+    )
+
+
+def test_actionable_after_greeting_helper_strips_long_salaam() -> None:
+    """Long salaam variants (with ورحمة الله وبركاته) must also strip
+    cleanly so a price ask after them still routes through the brain."""
+    from modules.ai.routing.conversation_mode import (
+        _message_has_actionable_after_greeting,
+    )
+    assert _message_has_actionable_after_greeting(
+        "السلام عليكم ورحمة الله وبركاته، أبي سعر العسل"
+    )
+    assert _message_has_actionable_after_greeting(
+        "وعليكم السلام ورحمة الله، كم سعر السدر؟"
+    )
+    # Greeting + non-actionable courtesy → NOT actionable.
+    assert not _message_has_actionable_after_greeting(
+        "السلام عليكم ورحمة الله"
+    )
+    assert not _message_has_actionable_after_greeting(
+        "صباح الخير، كيف حالك؟"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -242,6 +242,83 @@ _GREETING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
     )
 )
 
+
+# ── Actionable signal detector (welcome-gate consistency) ────────────────────
+#
+# A real production bug (May 2026): a customer wrote
+#     "السلام عليكم أبي سعر العسل"
+# and got a canned greeting card instead of a price answer. The greeting
+# pattern above matched at the start of the message, MODE_IDENTITY_REPLY
+# fired, and the brain pipeline (with the welcome-gate fix that demotes
+# the greeting to ASK_PRICE+embedded_greeting) never even ran.
+#
+# Fix: a greeting at the start is only allowed to route to the canned
+# identity card when the REST of the message carries no actionable
+# commerce/platform signal. The regex below mirrors the actionable
+# keyword set that ``intent.rules`` recognises so the two layers cannot
+# diverge. Adding a new actionable intent? Add its discriminating tokens
+# here too.
+_ACTIONABLE_AFTER_GREETING_RE = re.compile(
+    "|".join((
+        # Price / cost asks (avoid bare "كم" because "كيف حالك" would
+        # false-positive — require concrete price tokens).
+        r"سعر", r"اسعار", r"أسعار",
+        r"كم\s*ثمن", r"كم\s*يساوي", r"كم\s*تمنه", r"كم\s*ثمنه",
+        r"بكم", r"ثمنه",
+        r"price", r"cost", r"how\s*much",
+        # Product / catalog asks
+        r"عسل", r"سدر", r"طلح", r"ضهيان", r"قسط",
+        r"شمع", r"قرص\s*العسل",
+        r"منتج", r"بضاعة", r"سلعة", r"صنف", r"موديل",
+        r"عندك", r"عندكم", r"لديك", r"لديكم",
+        r"ابي", r"أبي", r"ابغى", r"أبغى", r"ابغي", r"أبغي",
+        r"اريد", r"أريد", r"بدي", r"ودي", r"بغيت",
+        r"اشتري", r"أشتري", r"اطلب", r"أطلب",
+        r"تفاصيل",
+        # Payment / shipping / address asks
+        r"رابط", r"تحويل", r"ايبان", r"آيبان", r"iban",
+        r"راجحي", r"الراجحي", r"باركود", r"qr",
+        r"شحن", r"توصيل", r"عنوان",
+        # Platform asks
+        r"اشتراك", r"باقات", r"\bapi\b", r"نحلة",
+        r"واتساب\s*الاعمال", r"واتساب\s*الأعمال",
+        r"meta", r"embedded\s*signup",
+        # Track order asks
+        r"طلبي", r"طلبية", r"شحنتي", r"تتبع",
+    )),
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Greeting prefix tokens we strip off before testing for actionable content.
+# Kept separate from the matching patterns so we can compute the "what's
+# LEFT after the salaam?" remainder without re-grepping.
+_GREETING_PREFIX_RE = re.compile(
+    r"^\s*("
+    r"السلام\s*عليكم(?:\s*ورحمة\s*الله(?:\s*وبركاته)?)?|"
+    r"وعليكم\s*السلام(?:\s*ورحمة\s*الله(?:\s*وبركاته)?)?|"
+    r"مرحبا?ً?|أهلاً?|أهلين|هلا+|يا\s*هلا|أهلا\s+وسهلا|"
+    r"صباح\s+الخير(?:ات)?|مساء\s+الخير(?:ات)?|"
+    r"كيف\s+حالك|هاي|هلو|hello|hi|hey"
+    r")[\s،,.!؟?]*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _message_has_actionable_after_greeting(text: str) -> bool:
+    """True when the customer combined a greeting with a real ask.
+
+    Example: "السلام عليكم أبي سعر العسل" → the salaam prefix is
+    stripped, the remainder "أبي سعر العسل" matches an actionable
+    token (سعر / عسل / أبي), so we MUST NOT route to the canned
+    greeting card. The brain's welcome-gate handles the rest.
+    """
+    if not isinstance(text, str):
+        return False
+    remainder = _GREETING_PREFIX_RE.sub("", text, count=1).strip()
+    if not remainder:
+        return False
+    return bool(_ACTIONABLE_AFTER_GREETING_RE.search(remainder))
+
 _SUPPORT_PATTERNS: Tuple[re.Pattern, ...] = tuple(
     re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
         r"\b(تحدث\s+مع\s+(إنسان|بشر|موظف)|موظف|خدمة\s+العملاء|تواصل\s+مع\s+شخص|"
@@ -283,12 +360,27 @@ def detect_identity_topic(text: str) -> str:
     """Return 'identity' for who-are-you, 'greeting' for السلام-عليكم,
     or '' for anything else. Both topics route to MODE_IDENTITY_REPLY
     so the deterministic identity path can introduce the assistant
-    once instead of falling through to automation boilerplate."""
+    once instead of falling through to automation boilerplate.
+
+    IMPORTANT — welcome-gate consistency (May 2026):
+    A greeting prefix WITH an actionable commerce/platform signal
+    after it ("السلام عليكم أبي سعر العسل") is NOT a pure greeting.
+    Routing it to the canned identity card means the customer's real
+    question never reaches the brain pipeline. We yield to the brain
+    in that case so its welcome-gate can demote the greeting to the
+    underlying actionable intent and answer the real question with a
+    short embedded salaam on top.
+    """
     if not isinstance(text, str):
         return ""
     if _matches_any(text, _IDENTITY_PATTERNS):
         return "identity"
     if _matches_any(text, _GREETING_PATTERNS):
+        # Welcome-gate yield: greeting + actionable signal → let the
+        # brain handle it. Pure greeting (or greeting + courtesy only)
+        # stays on the canned identity reply path.
+        if _message_has_actionable_after_greeting(text):
+            return ""
         return "greeting"
     return ""
 

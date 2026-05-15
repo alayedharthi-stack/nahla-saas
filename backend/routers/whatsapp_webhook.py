@@ -3902,6 +3902,70 @@ async def _handle_merchant_message(
                         "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
                     )
 
+                # ── Welcome-gate reply validation (May 2026) ─────────────
+                # Production regression: "السلام عليكم أبي سعر العسل" was
+                # producing a generic intro card ("أنا نحلة مستشارة... وش
+                # تحب نبدأ فيه؟") even though the brain routed the message
+                # to ASK_PRICE. The intro came from an upstream
+                # MODE_IDENTITY_REPLY short-circuit in
+                # ``conversation_mode.detect_identity_topic`` — already
+                # fixed at the source by the welcome-gate-yield guard
+                # there. This is the DEFENSIVE last-resort check: if for
+                # any reason the customer asked an actionable question
+                # and the final outbound is still a self-intro / generic
+                # "وش تحب نبدأ" card, substitute a price-clarifying reply
+                # so we don't ignore the question.
+                try:
+                    from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
+                        _message_has_actionable_after_greeting as _has_action,
+                    )
+                    _has_action_signal = bool(_has_action(text or ""))
+                except Exception:  # noqa: BLE001
+                    _has_action_signal = False
+
+                # Detect intro-only / generic-funnel replies. Match the
+                # exact phrasings used by ``render_identity_reply`` and
+                # the legacy AI fallback. Keep this list narrow so we
+                # never replace a legitimate sales-flow reply that just
+                # happens to contain the assistant name.
+                _INTRO_ONLY_MARKERS = (
+                    "وش تحب نبدأ فيه",
+                    "وش تحب أعرفك",
+                    "وش تحب اعرفك",
+                    "كيف أقدر أخدمك اليوم",
+                    "كيف اقدر اخدمك اليوم",
+                    "أهلاً فيك في",
+                    "اهلا فيك في",
+                )
+                _is_intro_only = bool(
+                    reply
+                    and any(m in reply for m in _INTRO_ONLY_MARKERS)
+                    and len(reply) <= 220
+                )
+
+                if _has_action_signal and _is_intro_only:
+                    try:
+                        logger.error(
+                            "[WELCOME_GATE_INVALID_REPLY] tenant=%s phone=*%s "
+                            "inbound_text=%r reply=%r reason=intro_only_after_actionable_ask",
+                            tenant_id, (to or "")[-4:],
+                            (text or "")[:120], (reply or "")[:160],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Substitute a short, actionable clarifying reply
+                    # that addresses the ask (price) while still
+                    # acknowledging the salaam — exactly what the
+                    # welcome-gate would produce. We deliberately don't
+                    # invent a price; we ask which type of honey so the
+                    # next turn can answer with the catalogue.
+                    reply = (
+                        "وعليكم السلام ورحمة الله 🌷\n"
+                        "أكيد، عندنا عدة أنواع من العسل. "
+                        "تحب أعطيك الأسعار حسب النوع (سدر / طلح / "
+                        "ضهيان)؟"
+                    )
+
                 # ── BRAIN_RESULT trace ───────────────────────────────────────
                 # Pull the just-saved brain_state out of the conversation row
                 # so the log line tells us what the brain decided AND what
