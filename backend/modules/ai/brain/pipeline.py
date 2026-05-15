@@ -39,7 +39,14 @@ from .types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
 )
-from .decision.actions import ACTION_HANDOFF, ACTION_PROPOSE_DRAFT_ORDER
+from .decision.actions import (
+    ACTION_GREET,
+    ACTION_HANDOFF,
+    ACTION_OUT_OF_SCOPE,
+    ACTION_PLATFORM_REPLY,
+    ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SOCIAL_REPLY,
+)
 from .protocols import (
     IntentClassifier,
     StateStore,
@@ -711,6 +718,38 @@ class MerchantBrain:
             new_state.last_question_asked = state.last_question_asked
             new_state.last_question_answered = True if state.last_question_asked else state.last_question_answered
 
+        # ── 7c. First-contact welcome gate — prepend salaam acknowledgment ─
+        # When ``intent.slots["embedded_greeting"]`` is True the customer
+        # opened the conversation with a salaam AND an actionable question.
+        # The rules layer already routed past ACTION_GREET so the actionable
+        # answer is composed in full; here we simply prepend a short warm
+        # acknowledgment so the salaam is honoured. After that we mark the
+        # conversation as greeted so the welcome card cannot fire later.
+        try:
+            _embedded = bool(getattr(ctx.intent, "slots", {}).get("embedded_greeting"))
+            if (
+                _embedded
+                and not new_state.greeted
+                and decision.action not in {ACTION_GREET, ACTION_SOCIAL_REPLY, ACTION_OUT_OF_SCOPE}
+                and isinstance(reply, str)
+                and reply.strip()
+            ):
+                reply = _prepend_first_contact_salaam(reply, ctx)
+                new_state.greeted = True
+                # Composer must not try to "re-introduce identity" later in
+                # the same conversation either.
+                new_state.assistant_identity_introduced = True
+                result.data["welcome_gate"] = "embedded_greeting_acknowledged"
+                logger.info(
+                    "[WELCOME_GATE] embedded_greeting acknowledged | tenant=%s "
+                    "intent=%s action=%s",
+                    tenant_id,
+                    getattr(ctx.intent, "name", "?"),
+                    decision.action,
+                )
+        except Exception as _wg_exc:  # noqa: BLE001 — never break a turn
+            logger.warning("[WELCOME_GATE] prepend skipped: %s", _wg_exc)
+
         # ── 8. Persist state ───────────────────────────────────────────────
         self._state_store.save(db, tenant_id, customer_phone, new_state)
 
@@ -900,6 +939,41 @@ def _build_reply_state(
     sensitivity_score = float(ctx.profile.get("price_sensitivity_score") or 0.5)
     selected_product = current_state.current_product_focus or None
 
+    platform_kb_mode = False
+    platform_topic = ""
+    platform_kb_excerpt = ""
+    if decision.action == ACTION_PLATFORM_REPLY:
+        platform_kb_mode = True
+        platform_topic = str((decision.args or {}).get("platform_topic") or "general_platform")
+        # Prevent JSON state from anchoring the model to a honey SKU when
+        # the customer is asking about WABA / Meta / subscription.
+        selected_product = None
+        try:
+            from modules.ai.brain.knowledge_platform_slice import (  # noqa: PLC0415
+                extract_platform_kb_excerpt,
+            )
+
+            _ai_s = dict(merchant_context or {}).get("ai_settings") or {}
+            _raw_kb = str(_ai_s.get("manual_knowledge_base") or "").strip()
+            platform_kb_excerpt = extract_platform_kb_excerpt(
+                _raw_kb,
+                platform_topic,
+                ctx.message or "",
+            )
+            if platform_kb_excerpt:
+                logger.info(
+                    "[PLATFORM_KB] tenant=%s topic=%s excerpt_chars=%d",
+                    ctx.tenant_id,
+                    platform_topic,
+                    len(platform_kb_excerpt),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[PLATFORM_KB] slice failed tenant=%s: %s",
+                getattr(ctx, "tenant_id", "?"),
+                exc,
+            )
+
     known_facts = {
         "store_name": ctx.facts.store_name,
         "store_url": ctx.facts.store_url,
@@ -952,6 +1026,9 @@ def _build_reply_state(
         intent_name=getattr(ctx.intent, "name", "") or "",
         response_goal=_compose_response_goal(decision, suggestion),
         merchant_context=dict(merchant_context or {}),
+        platform_kb_mode=platform_kb_mode,
+        platform_topic=platform_topic,
+        platform_kb_excerpt=platform_kb_excerpt,
     )
 
 
@@ -962,6 +1039,15 @@ def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -
     what success looks like instead of inferring it from the message and
     the persona. Kept short so it fits in the prompt without bloating it.
     """
+    if decision.action == ACTION_PLATFORM_REPLY:
+        # Critical — keep the commerce-oriented suggestion engine hints from
+        # hijacking ``response_goal``. Platform turns are NOT sales funnel.
+        return (
+            "platform_inquiry — أجيب باختصار ودّي عن منصّة نحلة/الاشتراك/الربط/التقنية "
+            "استخداماً لمقطع المعرفة أعلاه فقط؛ ممنوع اقتراح منتجات أو أسعار الكتالوج "
+            "أو markers [PRODUCT:/[MEDIA_KEY:"
+        )
+
     parts: List[str] = []
     if decision.reason:
         parts.append(decision.reason.strip())
@@ -971,6 +1057,52 @@ def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -
     if suggestion and suggestion.needs_follow_up_question and suggestion.follow_up_question:
         parts.append(f"ask_one={suggestion.follow_up_question.strip()}")
     return " | ".join(parts) or "advance the conversation toward the next sales step"
+
+
+# Short Gulf-style salaam acknowledgments rotated by message length so
+# the prefix never feels canned across a small batch of customers. The
+# variants stay under one line each and intentionally do NOT add a
+# follow-up question — the actionable answer below already drives the
+# conversation forward.
+_WELCOME_GATE_PREFIXES: List[str] = [
+    "وعليكم السلام ورحمة الله 🌹",
+    "وعليكم السلام يا الغالي 🌹",
+    "وعليكم السلام 🌷",
+    "أهلاً بك 🌹",
+    "هلا والله 🌷",
+]
+
+
+def _prepend_first_contact_salaam(reply: str, ctx: Any) -> str:
+    """Return ``reply`` with a brief Gulf-style salaam line prepended.
+
+    The prefix is chosen deterministically from the message length so a
+    given customer message always produces the same opener (helpful for
+    debugging) while different customers see different lines.
+    """
+    if not isinstance(reply, str) or not reply.strip():
+        return reply
+    message = str(getattr(ctx, "message", "") or "")
+    idx = (len(message) + 7) % len(_WELCOME_GATE_PREFIXES)
+    prefix = _WELCOME_GATE_PREFIXES[idx]
+    # If the composed reply already opens with a salaam/greeting from the
+    # LLM we leave it untouched — double-greeting would feel mechanical.
+    head = reply.lstrip()[:30]
+    head_l = head.lower()
+    if any(
+        marker in head
+        for marker in (
+            "وعليكم السلام",
+            "السلام عليكم",
+            "أهلاً",
+            "أهلا",
+            "هلا",
+            "حياك",
+            "مرحبا",
+        )
+    ) or head_l.startswith(("hi ", "hello", "hey ")):
+        return reply
+    return f"{prefix}\n{reply}"
 
 
 def _history_has_outbound(history: List[Dict[str, Any]]) -> bool:

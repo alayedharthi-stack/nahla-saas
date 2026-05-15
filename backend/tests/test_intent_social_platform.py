@@ -335,10 +335,45 @@ def test_social_template_renders_for_every_category() -> None:
         SOCIAL_COMPLIMENT,
         SOCIAL_GENERAL_COURTESY,
     ):
-        text = T.social_reply(category=cat, variant=0)
+        text = T.social_reply(category=cat, variant=0, sub_variant=2)
         assert text, f"empty social_reply for category {cat}"
-        # Must be short (one-liner) — Gulf-Arabic ack, not a paragraph.
-        assert len(text) <= 80, f"social_reply too long for {cat}: {text!r}"
+        assert len(text) <= 220, f"social_reply too long for {cat}: {text!r}"
+        assert text.count("\n") <= 2, f"social_reply too many lines for {cat}: {text!r}"
+
+
+def test_platform_kb_excerpt_subscription() -> None:
+    from modules.ai.brain.knowledge_platform_slice import (
+        PLATFORM_SUBSCRIPTION,
+        extract_platform_kb_excerpt,
+    )
+
+    kb = (
+        "### العسل السدر الكيلو 400 ريال\n"
+        "عسل نقي ومجرّب.\n\n"
+        "### الاشتراك في نحلة\n"
+        "لباقات نحلة: تواصل مع support@nahla.example — الأساسية شهرية "
+        "ويمكنك التجربة قبل الدفع من لوحة التحكم.\n\n"
+        "### الربط مع واتساب الأعمال\n"
+        "افتح لوحة التحكم → الواتساب → واتحدث خطوات الربط."
+    )
+    ex = extract_platform_kb_excerpt(
+        kb,
+        PLATFORM_SUBSCRIPTION,
+        "وش خطط الأشتراك؟",
+        min_score=2.0,
+    )
+    assert "support@nahla.example" in ex
+    assert "السدر" not in ex  # catalogue paragraph should lose to subscription chunk
+
+
+def test_platform_kb_empty_when_no_signals() -> None:
+    from modules.ai.brain.knowledge_platform_slice import (
+        PLATFORM_INTEGRATION,
+        extract_platform_kb_excerpt,
+    )
+
+    kb = "كل شي عن العسل الطبيعي والشحن خلال مدينة الرياض."
+    assert extract_platform_kb_excerpt(kb, PLATFORM_INTEGRATION, "") == ""
 
 
 def test_platform_template_renders_for_every_topic() -> None:
@@ -359,6 +394,79 @@ def test_platform_template_renders_for_every_topic() -> None:
         # to NOT redirect to merchandise.
         assert "كم سعر" not in text, f"platform_reply leaks price ask: {text!r}"
         assert "أرشّح" not in text, f"platform_reply leaks recommendation funnel: {text!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. First-contact welcome gate
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Customers regularly open a conversation with a salaam plus an actionable
+# question in the same breath ("السلام عليكم أبي سعر العسل"). The legacy
+# behaviour returned a long welcome card and ignored the question. The fix
+# routes the salaam → actionable secondary intent with
+# ``embedded_greeting=True`` so the composer can prepend a tiny salaam and
+# answer the real question. These tests lock the routing.
+
+@pytest.mark.parametrize("message,expected_intent", [
+    ("السلام عليكم أبي سعر العسل",                INTENT_ASK_PRICE),
+    ("وعليكم السلام، كم سعر كيلو ضهيان؟",         INTENT_ASK_PRICE),
+    ("السلام عليكم أبغى عسل سدر",                 INTENT_ASK_PRODUCT),
+    (
+        "وعليكم السلام مساء الخيرات، أبي تفاصيل عن العسل الصح وكم سعره",
+        INTENT_ASK_PRICE,
+    ),
+    ("السلام عليكم أبي أربط واتساب الأعمال",       INTENT_PLATFORM_INQUIRY),
+    ("مرحبا، كم اشتراك نحلة؟",                     INTENT_PLATFORM_INQUIRY),
+])
+def test_welcome_gate_routes_to_actionable(message: str, expected_intent: str) -> None:
+    result = intent_rules.match(message)
+    assert result is not None, f"rules.match returned None for: {message!r}"
+    assert result.name == expected_intent, (
+        f"expected {expected_intent}, got {result.name} (conf={result.confidence}) for {message!r}"
+    )
+    assert (result.slots or {}).get("embedded_greeting") is True, (
+        f"expected embedded_greeting=True slot on {message!r}, got slots={result.slots}"
+    )
+
+
+@pytest.mark.parametrize("message", [
+    "السلام عليكم",
+    "مرحبا",
+    "صباح الخير",
+    "هلا والله",
+    "أهلاً وسهلاً",
+])
+def test_welcome_gate_keeps_pure_greeting(message: str) -> None:
+    """Plain greetings (no embedded ask) must NOT be demoted."""
+    result = intent_rules.match(message)
+    assert result is not None
+    assert result.name == INTENT_GREETING
+    assert (result.slots or {}).get("embedded_greeting") is None
+
+
+def test_welcome_gate_prepend_helper() -> None:
+    """Pipeline helper prepends a salaam line and skips when one already exists."""
+    from modules.ai.brain.pipeline import _prepend_first_contact_salaam
+
+    class _Ctx:
+        message = "السلام عليكم أبي سعر العسل"
+
+    out = _prepend_first_contact_salaam("الكيلو ٣٥٠ ريال.", _Ctx())
+    assert "\n" in out, f"prefix must be a separate line, got: {out!r}"
+    head = out.splitlines()[0]
+    assert any(tok in head for tok in ("وعليكم السلام", "أهلاً", "أهلا", "هلا"))
+
+    # If the reply already opens with salaam, don't double up.
+    already = "وعليكم السلام، الكيلو ٣٥٠ ريال."
+    assert _prepend_first_contact_salaam(already, _Ctx()) == already
+
+
+def test_welcome_gate_embedded_slot_present_for_platform() -> None:
+    result = intent_rules.match("السلام عليكم أبي أربط واتساب الأعمال")
+    assert result is not None
+    assert result.name == INTENT_PLATFORM_INQUIRY
+    assert (result.slots or {}).get("platform_topic")
+    assert (result.slots or {}).get("embedded_greeting") is True
 
 
 if __name__ == "__main__":

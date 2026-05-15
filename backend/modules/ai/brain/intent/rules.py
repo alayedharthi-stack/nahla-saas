@@ -313,46 +313,150 @@ def match(message: str) -> Optional[Intent]:
             extraction_method="rules",
         )
 
-    best: Optional[Tuple[float, Intent]] = None
+    candidates: List[Tuple[float, Intent]] = []
 
     # ── Layer 1: social / courtesy / religious ──────────────────────────
     social = classify_social(message)
     if social is not None:
-        candidate = Intent(
-            name=INTENT_SOCIAL,
-            confidence=social.confidence,
-            slots={"social_category": social.category},
-            raw_message=message,
-            extraction_method="rules",
-        )
-        best = (social.confidence, candidate)
+        candidates.append((
+            social.confidence,
+            Intent(
+                name=INTENT_SOCIAL,
+                confidence=social.confidence,
+                slots={"social_category": social.category},
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
 
     # ── Layer 2: platform / SaaS inquiry ────────────────────────────────
     platform = classify_platform(message)
     if platform is not None:
-        candidate = Intent(
-            name=INTENT_PLATFORM_INQUIRY,
-            confidence=platform.confidence,
-            slots={"platform_topic": platform.topic},
-            raw_message=message,
-            extraction_method="rules",
-        )
-        if best is None or platform.confidence > best[0]:
-            best = (platform.confidence, candidate)
+        candidates.append((
+            platform.confidence,
+            Intent(
+                name=INTENT_PLATFORM_INQUIRY,
+                confidence=platform.confidence,
+                slots={"platform_topic": platform.topic},
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
 
     # ── Layer 3: regex chain (commerce / FAQ / order intents) ───────────
     for ruleset, compiled in _RULES:
         for pattern in compiled:
             if pattern.search(message):
-                candidate = Intent(
-                    name=ruleset.intent,
-                    confidence=ruleset.confidence,
-                    slots=dict(ruleset.slots),
-                    raw_message=message,
-                    extraction_method="rules",
-                )
-                if best is None or ruleset.confidence > best[0]:
-                    best = (ruleset.confidence, candidate)
+                candidates.append((
+                    ruleset.confidence,
+                    Intent(
+                        name=ruleset.intent,
+                        confidence=ruleset.confidence,
+                        slots=dict(ruleset.slots),
+                        raw_message=message,
+                        extraction_method="rules",
+                    ),
+                ))
                 break   # first pattern that fires for this ruleset is enough
 
-    return best[1] if best else None
+    if not candidates:
+        return None
+
+    # Default: highest-confidence wins.
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_conf, best_intent = candidates[0]
+
+    # ── First-contact welcome gate ───────────────────────────────────────
+    # When the customer sends "السلام عليكم أبي سعر العسل" the bare
+    # confidence ranking can pick ``INTENT_GREETING`` (0.95) and route to
+    # ACTION_GREET — but the customer ALSO asked a real question and
+    # ignoring it feels robotic. Two cases to handle:
+    #
+    #   (a) GREETING is the best → demote to the strongest actionable
+    #       sibling (price / product / order / payment / shipping /
+    #       platform / store-info / owner-contact / track).
+    #   (b) GREETING fired *alongside* an actionable best (e.g.
+    #       PLATFORM_INQUIRY 0.95 + GREETING 0.95 — platform wins on
+    #       tie-breaker insertion order) → keep the actionable intent
+    #       and just decorate it with ``embedded_greeting=True``.
+    #
+    # In both cases the composer/pipeline prepends a warm salaam line so
+    # the salutation is honoured and the actionable answer follows.
+    has_greeting = any(intent.name == INTENT_GREETING for _, intent in candidates)
+
+    if best_intent.name == INTENT_GREETING:
+        actionable = _pick_embedded_actionable(candidates)
+        if actionable is not None:
+            embedded_slots = dict(actionable.slots or {})
+            embedded_slots["embedded_greeting"] = True
+            return Intent(
+                name=actionable.name,
+                confidence=actionable.confidence,
+                slots=embedded_slots,
+                raw_message=message,
+                extraction_method="rules+welcome_gate",
+            )
+        return best_intent
+
+    if has_greeting and best_intent.name in _FIRST_CONTACT_ACTIONABLE_INTENTS:
+        embedded_slots = dict(best_intent.slots or {})
+        embedded_slots["embedded_greeting"] = True
+        return Intent(
+            name=best_intent.name,
+            confidence=best_intent.confidence,
+            slots=embedded_slots,
+            raw_message=message,
+            extraction_method="rules+welcome_gate",
+        )
+
+    return best_intent
+
+
+# Intents we treat as "actionable" enough on the very first turn that a
+# leading greeting should NOT short-circuit the conversation into the
+# welcome card. Kept tight on purpose:
+#   * commerce (price/product/order/payment) — the core sales reasons a
+#     customer would salaam-and-ask in the same breath.
+#   * platform inquiry — onboarding/subscription questions deserve their
+#     KB-aware reply instead of "هلا بك في المتجر".
+#   * shipping / store_info / owner_contact / track_order — FAQ-grade
+#     replies still beat a generic welcome.
+# Deliberately EXCLUDED:
+#   * INTENT_SOCIAL — short courtesies; if the customer said salaam +
+#     blessing we still want the greeting card (they've offered nothing
+#     to act on).
+#   * INTENT_GREETING / INTENT_GENERAL / INTENT_WHO_ARE_YOU /
+#     INTENT_PICK_LIST_ITEM / INTENT_HESITATION / INTENT_TALK_HUMAN —
+#     either redundant or wrong fit for an embedded-greeting case.
+_FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
+    INTENT_ASK_PRODUCT,
+    INTENT_ASK_PRICE,
+    INTENT_START_ORDER,
+    INTENT_PAY_NOW,
+    INTENT_ASK_PAYMENT_INFO,
+    INTENT_ASK_SHIPPING,
+    INTENT_ASK_STORE_INFO,
+    INTENT_ASK_OWNER_CONTACT,
+    INTENT_TRACK_ORDER,
+    INTENT_PLATFORM_INQUIRY,
+})
+
+
+def _pick_embedded_actionable(
+    candidates: List[Tuple[float, Intent]],
+) -> Optional[Intent]:
+    """Return the strongest actionable candidate or ``None``.
+
+    Requires confidence ≥ 0.80 so we only demote the greeting for a
+    clearly intentional secondary signal. Sorted by confidence descending.
+    """
+    actionable = [
+        (conf, intent)
+        for conf, intent in candidates
+        if intent.name in _FIRST_CONTACT_ACTIONABLE_INTENTS
+        and conf >= 0.80
+    ]
+    if not actionable:
+        return None
+    actionable.sort(key=lambda x: x[0], reverse=True)
+    return actionable[0][1]

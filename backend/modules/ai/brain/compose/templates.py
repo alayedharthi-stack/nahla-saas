@@ -729,59 +729,64 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
     return _HARD_OUT_OF_SCOPE_VARIANTS[variant % len(_HARD_OUT_OF_SCOPE_VARIANTS)]
 
 
-# ── Social / courtesy / religious replies (May 2026 #4) ──────────────────────
+# ── Social / courtesy / religious replies (May 2026 #4, tone pass #2) ─────
 #
-# Short, culturally-appropriate Gulf-Arabic replies for the new
-# ``INTENT_SOCIAL`` intent. The classifier in
-# ``intent/social_classifier.py`` attaches a ``social_category`` slot
-# that tells us which family to pick from. Variants rotate per
-# customer turn so repeated thanks don't echo the exact same line.
+# Hybrid approach: **small weighted template pools** — not a second LLM call.
+# Reasons: zero extra latency/cost, predictable safety (no sales leakage),
+# culturally auditable copy. Two rotation indices (``variant`` ×
+# ``sub_variant``) widen variety without spamming the same line every hour.
 #
-# Design rules (per merchant feedback May 2026 #2):
-#   * One emoji MAX (usually 🌷 or 🌹) — no clown-tone clusters.
-#   * No "أرشّح لك عسل؟" funnel-opener — these are social ACKs, not
-#     sales bridges. The customer can move the conversation forward
-#     when they're ready.
-#   * Religious replies match the canonical responses Gulf customers
-#     expect ("صلى الله عليه وسلم", "آمين وإياك").
+# Tone: خليجية دافئة، سطر أو سطرين، إيموجي خفيف (🌹/🌷) — بدون ضحك مفرط
+# وبلا طرح بيعي.
 
 _SOCIAL_THANKS_VARIANTS = [
-    "العفو، أي وقت 🌹",
-    "الله يعافيك، ما سويت شي.",
-    "ما عليك زود، تأمر بأي شي.",
-    "العفو، هذا واجب.",
+    "وياك يا غالي 🌹\nالله يجزاك خير.",
+    "الله يبارك فيك 🌹\nأي وقت وتحت أمرك.",
+    "يعافيك ربي وأحسن الله إليك 🤍\nدوم بخير.",
+    "مو عليك يا الغالي 🤍\nالله يعافيك.",
+    "الله يخليك 🤍\nتشرفنا فيك.",
+    "وهذا من ذوقك أنت يا الغالي 🌹\nالله يبيض وجهك.",
 ]
 
 _SOCIAL_BLESSING_VARIANTS = [
-    "آمين، وإياك يارب.",
-    "الله يبارك فيك ويسعدك 🌹",
-    "آمين ولك بالمثل.",
-    "ربي يعافيك ويوفقك.",
+    "ووجهك أبيض 🌹\nالله يسعدك.",
+    "الله يبيض وجهك مثل ما بيضت وجهنا 🌹\nويحفظك.",
+    "آمين يارب… ولك بالمثل أضعاف 🤍",
+    "الله يكرمك 🤍\nما قصرت.",
+    "ربي يعافيك ويطوّل بعمرك 🌹\nالله يطرّي أيامك 🤍",
+    # Legacy warm close for dua-style lines (بيض الله وجهك, يعطيك العافية, etc.)
+    "الله يعافيك ويسعدك 🌷\nأي وقت.",
 ]
 
 _SOCIAL_PROPHET_INVOCATION_VARIANTS = [
-    "صلى الله عليه وسلم.",
-    "اللهم صل وسلم على نبينا محمد.",
-    "صلى الله عليه وسلم وعلى آله وصحبه.",
+    "صلى الله عليه وسلم 🌹\nجزاك الله خير.",
+    "صلى الله عليه وسلم 🌹\nجزاك الله خير وكتب أجرك.",
+    "عليه أفضل الصلاة وأزكى السلام 🤍\nالله يجزاك الخير الجميل.",
+    "صلى الله عليه وسلم 🌷\nويبارك الله فيك.",
+    "اللهم صل وسلم على نبينا محمد 🤍\nوشكراً لذوقك الطيب.",
+    "صلى الله عليه وسلم عدد خلق الله 🤍\nوما أحسنت.",
 ]
 
 _SOCIAL_BASMALA_VARIANTS = [
-    "بسم الله، تفضل.",
-    "بسم الله الرحمن الرحيم.",
-    "بسم الله، حياك.",
+    "بسم الله يا الغالي 🤍\nتفضل…",
+    "بسم الله الرحمن الرحيم 🌹\nوعليك السلام والبركة.",
+    "بسم الله 🌷\nتفضل… أنا معك خطوة بخطوة.",
 ]
 
 _SOCIAL_COMPLIMENT_VARIANTS = [
-    "تسلم، هذا من ذوقك.",
-    "الله يبارك فيك 🌹",
-    "ما عليك زود.",
+    "تسلم 🤍\nوهذا كله من لطفك.",
+    "الله يبحث عنك بحسن ظنك 🌹\nدوم بخير 🤍",
+    "والله الثناء منك وسام 🌷\nالله يعافيك.",
+    "ما تقصر أبدًا 🤍\nويّاك.",
+    "دوم إحساسك 🤍\nالله يبارك فيك.",
 ]
 
 _SOCIAL_GENERAL_COURTESY_VARIANTS = [
-    "الله يحييك 🌹",
-    "أهلاً وسهلاً فيك.",
-    "حياك الله.",
-    "تأمر بشي؟",
+    "الله يحييك 🌹\nوش الخدمة؟",
+    "حياك الله 🤍",
+    "هلا وسهلا 🌹\nتشرفنا.",
+    "أهلًا فيك 🤍",
+    "يامرحبا 🌹\nوش اللي تحتاجه؟",
 ]
 
 _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
@@ -794,19 +799,25 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
 }
 
 
-def social_reply(category: str = "general_courtesy", variant: int = 0, **_: Any) -> str:
-    """Pick a short, culturally-appropriate social reply.
+def social_reply(
+    category: str = "general_courtesy",
+    variant: int = 0,
+    sub_variant: int = 0,
+    **_: Any,
+) -> str:
+    """Pick a warm Gulf-style social acknowledgment (1–2 short lines).
 
-    ``category`` is one of the keys in ``_SOCIAL_REPLIES_BY_CATEGORY``.
-    Unknown categories fall back to ``general_courtesy`` so the caller
-    can pass the slot through verbatim without defensive None-checks.
-    ``variant`` rotates inside the bucket.
+    ``variant`` and ``sub_variant`` are deterministic indices supplied by the
+    composer so neighbouring turns rarely repeat verbatim.
     """
     bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(
         (category or "").strip().lower() or "general_courtesy",
         _SOCIAL_GENERAL_COURTESY_VARIANTS,
     )
-    return bucket[variant % len(bucket)]
+    if not bucket:
+        return ""
+    idx = (int(variant) + int(sub_variant) * 7 + len(bucket) * 5) % len(bucket)
+    return bucket[idx]
 
 
 # ── Platform inquiry replies (May 2026 #4) ───────────────────────────────────

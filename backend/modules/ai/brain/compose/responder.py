@@ -408,26 +408,26 @@ class DefaultComposer:
             return T.hard_out_of_scope_reply(variant=self._variant_idx(ctx))
 
         # ── Social / courtesy / religious (May 2026 #4) ────────────────────
-        # The decision engine routes INTENT_SOCIAL here. The slot
-        # ``social_category`` was set by ``social_classifier`` and
-        # picks one of:
-        #     thanks | blessing | prophet_invocation | basmala |
-        #     compliment | general_courtesy
-        # No LLM, no KB, no catalog touch — short canned reply only.
-        # This is what keeps "جزاك الله خير" / "صلى الله عليه وسلم"
-        # / "بسم الله" from derailing into a sales pitch.
         if action == ACTION_SOCIAL_REPLY:
             category = str((decision.args or {}).get("social_category") or "general_courtesy")
-            return T.social_reply(category=category, variant=self._variant_idx(ctx))
+            # Two rotation axes: turn index × category → more variety without drift.
+            v_main = self._variant_idx(ctx)
+            v_secondary = (len(ctx.history or []) // 3) % 5
+            return T.social_reply(
+                category=category,
+                variant=v_main,
+                sub_variant=v_secondary,
+            )
 
-        # ── Platform / SaaS inquiry (May 2026 #4) ──────────────────────────
-        # The customer asked about Nahla (the platform), not the
-        # merchant's products. Slot ``platform_topic`` picks one of:
-        #     subscription | integration | api | ai_capabilities |
-        #     campaigns | dashboard | meta_connection | general_platform
-        # The reply scopes the conversation back to the merchant's
-        # store WITHOUT inventing platform facts. No catalog flow.
+        # ── Platform / SaaS inquiry ────────────────────────────────────────
+        # Gateway: if onboarding docs exist in manual_knowledge_base, we
+        # delegate to the same thin LLM path as commerce — but prompt_builder
+        # swaps in an excerpt-only KB slice + anti-catalog guardrails. When
+        # the slice is empty we keep the deterministic canned fallback.
         if action == ACTION_PLATFORM_REPLY:
+            rs = ctx.reply_state
+            if rs and getattr(rs, "platform_kb_excerpt", "").strip():
+                return await self._llm_compose(ctx, result)
             topic = str((decision.args or {}).get("platform_topic") or "general_platform")
             return T.platform_reply(topic=topic, variant=self._variant_idx(ctx))
 

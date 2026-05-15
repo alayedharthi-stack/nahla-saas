@@ -557,6 +557,17 @@ class BrainReplyState:
     # intent + state + current product + response goal in one struct.
     intent_name: str = ""
     response_goal: str = ""
+    # ── Platform-inquiry KB gateway (May 2026 — UX fix) ──────────────────────
+    # When ACTION_PLATFORM_REPLY fires we still route away from catalogue
+    # search, but ``manual_knowledge_base`` may contain real onboarding /
+    # subscription / WhatsApp-docs written by the merchant team. Those
+    # paragraphs pass through ``extract_platform_kb_excerpt(...)`` into
+    # ``platform_kb_excerpt``. When non-empty the responder delegates to the
+    # thin LLM path while ``prompt_builder`` swaps the Facts block for this
+    # excerpt-only slice + anti-sales guardrails.
+    platform_kb_mode: bool = False
+    platform_topic: str = ""
+    platform_kb_excerpt: str = ""
     # True after the bot has introduced itself ("أنا نحلة" / "أنا
     # مساعدتك الذكية") once in this conversation. The HIGH PRIORITY
     # block reads this field and FORBIDS the LLM from re-introducing
