@@ -153,6 +153,20 @@ class Product(Base):
     in_stock = Column(Boolean, default=True, nullable=False)
     extra_metadata = Column('metadata', JSONB, nullable=True)
     recommendation_tags = Column(JSONB, nullable=True)
+    # ── Meta WhatsApp Catalog (migration 0061) ─────────────────────────────
+    # Override the retailer id used when sending this product via Meta
+    # Catalog messages (``interactive.type = "product"`` /
+    # ``"product_list"``). When NULL the runtime helper
+    # ``effective_retailer_id(product)`` falls back to ``external_id`` —
+    # which is the convention Salla's Meta Commerce auto-publish uses, so
+    # 95% of merchants need zero manual mapping. Populate this column
+    # only when a merchant publishes products to Meta with custom ids.
+    meta_retailer_id = Column(String(255), nullable=True)
+    # Last time we observed / verified this product is live in the
+    # merchant's Meta Catalog. Stays NULL until a future "publish to Meta"
+    # job populates it. Reading code MUST tolerate NULL — absence here
+    # never blocks a send attempt, it only suppresses the freshness badge.
+    meta_catalog_published_at = Column(DateTime(timezone=True), nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='products')
 
@@ -1726,6 +1740,24 @@ class WhatsAppConnection(Base):
     meta_messaging_limit = Column(String, nullable=True)     # e.g. "TIER_1K", "TIER_10K", "TIER_100K", "UNLIMITED"
     meta_quality_rating  = Column(String, nullable=True)     # "GREEN", "YELLOW", "RED"
     meta_tier_updated_at = Column(DateTime, nullable=True)
+
+    # ── Meta WhatsApp Catalog identity (migration 0061) ───────────────────
+    # The Meta Commerce Catalog id linked to this WABA. Every
+    # ``interactive.type = "product"`` / ``"product_list"`` payload carries
+    # it inside ``action.catalog_id``. Per-WABA (one catalog can back
+    # many phone numbers), so we store it on the connection — not on
+    # TenantSettings. NULL means "merchant hasn't linked a catalog yet";
+    # the catalog sender will fall back to the legacy image+CTA path.
+    meta_catalog_id = Column(String(255), nullable=True)
+    # Per-connection kill-switch for catalog message sending. When False
+    # (the default) the catalog sender silently degrades to the legacy
+    # image+CTA path even if ``meta_catalog_id`` is populated — useful
+    # when a merchant wants to pause catalog rendering without losing
+    # the catalog binding. Plan-level gating
+    # (``PlanFeatures.meta_catalog_sync``) is enforced separately.
+    catalog_enabled = Column(
+        Boolean, nullable=False, server_default=sa.text("false"),
+    )
 
     extra_metadata    = Column(JSONB, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
