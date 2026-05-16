@@ -69,6 +69,35 @@ def _diag_sql_error(exc: BaseException, *, db: Any = None) -> str:
     Designed for ``logger.exception(..., extra={...})`` or appending
     to a normal exception log line. Output is intentionally compact
     so Railway / Datadog log dumps stay greppable.
+
+    May 2026 #19 update — expanded fields:
+
+      * ``orig_msg``           : ``str(exc.orig)``
+      * ``pgerror``            : ``exc.orig.pgerror`` (full PG message)
+      * ``msg_primary``        : ``exc.orig.diag.message_primary``
+                                 (Postgres primary error text — most
+                                 useful: contains the OFFENDING COLUMN
+                                 name verbatim, e.g.
+                                 ``column "X" of relation "products"
+                                 does not exist``)
+      * ``msg_detail``         : ``exc.orig.diag.message_detail``
+      * ``msg_hint``           : ``exc.orig.diag.message_hint``
+      * ``stmt_position``      : ``exc.orig.diag.statement_position``
+      * ``column_name``        : ``exc.orig.diag.column_name``
+                                 (set for some PG errors)
+      * ``constraint_name``    : ``exc.orig.diag.constraint_name``
+      * ``table_name``         : ``exc.orig.diag.table_name``
+      * ``schema_name``        : ``exc.orig.diag.schema_name``
+
+    Stmt cap raised from 240 → 2000 chars (TEMP) so the full failing
+    SQL fits — the merchant needs to see the actual columns/relations
+    in the INSERT to root-cause a column drift, not a truncated head.
+    Once root cause is found, lower the cap back to 240 to keep
+    log lines tight.
+
+    All extraction is wrapped in defensive ``getattr`` calls so the
+    diagnostic itself can NEVER raise — the worst case is missing
+    fields, never a secondary crash.
     """
     try:
         cls_name = exc.__class__.__name__
@@ -77,10 +106,43 @@ def _diag_sql_error(exc: BaseException, *, db: Any = None) -> str:
         orig     = getattr(exc, "orig", None)
         orig_cls = orig.__class__.__name__ if orig is not None else "-"
         pgcode   = getattr(orig, "pgcode", None) or "-"
+        pgerror  = getattr(orig, "pgerror", None) or "-"
+        # ``str(orig)`` is the human-readable psycopg2 message line —
+        # different from ``pgerror`` (which is the FULL PG server
+        # output). Keep both: ``orig_msg`` is the short line,
+        # ``pgerror`` is the canonical PG dump.
+        try:
+            orig_msg = str(orig) if orig is not None else "-"
+        except Exception:  # noqa: BLE001
+            orig_msg = "-"
+
+        # psycopg2 ``Diagnostic`` object — only present on psycopg2
+        # errors. Holds the structured PG fields including the
+        # column / table name the error is about.
+        diag = getattr(orig, "diag", None)
+        def _diag_field(name: str) -> str:
+            try:
+                v = getattr(diag, name, None) if diag is not None else None
+                return str(v) if v is not None else "-"
+            except Exception:  # noqa: BLE001
+                return "-"
+
+        msg_primary     = _diag_field("message_primary")
+        msg_detail      = _diag_field("message_detail")
+        msg_hint        = _diag_field("message_hint")
+        stmt_position   = _diag_field("statement_position")
+        column_name     = _diag_field("column_name")
+        constraint_name = _diag_field("constraint_name")
+        table_name      = _diag_field("table_name")
+        schema_name     = _diag_field("schema_name")
 
         stmt_raw = getattr(exc, "statement", None) or ""
-        # Trim to 240 chars so multi-statement INSERT logs stay readable.
-        stmt     = (stmt_raw[:240] + ("…" if len(stmt_raw) > 240 else "")).replace("\n", " ")
+        # TEMP (May 2026 #19): bumped to 2000 to surface the full
+        # failing INSERT/SELECT — the merchant needs to see the
+        # actual column list to root-cause a products-table column
+        # drift. Drop back to 240 after the bug is fixed.
+        STMT_CAP = 2000
+        stmt = (stmt_raw[:STMT_CAP] + ("…" if len(stmt_raw) > STMT_CAP else "")).replace("\n", " ")
 
         params   = getattr(exc, "params", None)
         if isinstance(params, dict):
@@ -101,6 +163,12 @@ def _diag_sql_error(exc: BaseException, *, db: Any = None) -> str:
         return (
             f"sql_err={cls_name} sa_code={sa_code} "
             f"orig_cls={orig_cls} pgcode={pgcode} "
+            f"msg_primary={msg_primary!r} "
+            f"column_name={column_name!r} table_name={table_name!r} "
+            f"schema_name={schema_name!r} constraint_name={constraint_name!r} "
+            f"stmt_position={stmt_position} "
+            f"msg_detail={msg_detail!r} msg_hint={msg_hint!r} "
+            f"orig_msg={orig_msg!r} pgerror={pgerror!r} "
             f"params=[{param_keys}] session=[{session_state}] "
             f"stmt={stmt!r}"
         )
