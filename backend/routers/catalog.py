@@ -1670,9 +1670,29 @@ async def merchant_catalog_import_from_meta(
     try:
         report = import_from_meta(db, tenant_id)
     except MetaCatalogImportError as exc:
+        # ── 502 observability (May 2026 #19d/#19e) ─────────────
+        # Previously the dashboard / curl received a bare
+        # ``{"detail": "meta_http_error"}`` because we passed
+        # ``detail=exc.code`` (a string). FastAPI happily renders
+        # a dict-typed ``detail``, so we now compose a structured
+        # payload carrying the service-layer's exc.detail
+        # (graph_url, status, meta_message, fbtrace_id, …) and
+        # use it as the HTTPException detail directly. Result:
+        # the merchant / support engineer sees the real reason in
+        # PowerShell / curl without having to tail Railway logs.
+        detail_payload: Dict[str, Any] = {
+            "code":    exc.code,
+            "message": str(exc) or exc.code,
+        }
+        _exc_detail = getattr(exc, "detail", None)
+        if isinstance(_exc_detail, dict):
+            detail_payload.update(_exc_detail)
+        elif _exc_detail is not None:
+            detail_payload["raw_detail"] = str(_exc_detail)[:2000]
+
         # Map our closed-set error codes to HTTP statuses. The
-        # dashboard pattern-matches on ``detail`` to render the
-        # right remediation copy ("اربط واتساب أولاً" vs
+        # dashboard pattern-matches on ``detail.code`` to render
+        # the right remediation copy ("اربط واتساب أولاً" vs
         # "ضع Catalog ID" vs "أعد المصادقة").
         status = {
             "connection_not_found":   404,
@@ -1680,7 +1700,17 @@ async def merchant_catalog_import_from_meta(
             "access_token_missing":   400,
             "meta_http_error":        502,
         }.get(exc.code, 500)
-        raise HTTPException(status_code=status, detail=exc.code) from exc
+
+        # ``logger.exception`` (not ``logger.error``) so Railway
+        # captures the full chained traceback — the service-layer
+        # already emitted [META_IMPORT][EXC], but this second
+        # frame proves the exception traversed the router and was
+        # not swallowed by an upstream try/except.
+        logger.exception(
+            "[META_IMPORT][API_ERROR] tenant=%s code=%s status=%d detail=%s",
+            tenant_id, exc.code, status, detail_payload,
+        )
+        raise HTTPException(status_code=status, detail=detail_payload) from exc
     audit(
         "merchant_catalog_import_meta",
         tenant_id=tenant_id,
@@ -1708,13 +1738,30 @@ async def admin_catalog_import_from_meta(
     try:
         report = import_from_meta(db, body.tenant_id)
     except MetaCatalogImportError as exc:
+        # Mirror the merchant endpoint's structured detail
+        # (May 2026 #19d/#19e) so admin curl / support tooling
+        # gets the same actionable error body.
+        detail_payload: Dict[str, Any] = {
+            "code":    exc.code,
+            "message": str(exc) or exc.code,
+        }
+        _exc_detail = getattr(exc, "detail", None)
+        if isinstance(_exc_detail, dict):
+            detail_payload.update(_exc_detail)
+        elif _exc_detail is not None:
+            detail_payload["raw_detail"] = str(_exc_detail)[:2000]
+
         status = {
             "connection_not_found":   404,
             "catalog_id_missing":     400,
             "access_token_missing":   400,
             "meta_http_error":        502,
         }.get(exc.code, 500)
-        raise HTTPException(status_code=status, detail=exc.code) from exc
+        logger.exception(
+            "[META_IMPORT][API_ERROR] admin tenant=%s code=%s status=%d detail=%s",
+            body.tenant_id, exc.code, status, detail_payload,
+        )
+        raise HTTPException(status_code=status, detail=detail_payload) from exc
     audit(
         "admin_catalog_import_meta",
         tenant_id=body.tenant_id,
