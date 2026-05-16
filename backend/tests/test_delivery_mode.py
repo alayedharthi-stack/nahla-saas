@@ -274,11 +274,17 @@ class TestGuardRule:
             DELIVERY_MODE_TEXT_ONLY
         ) is False
 
-    def test_cta_only_for_product_intent_is_NOT_acceptable(self):
-        """A bare URL with no image isn't "seeing" anything — alarm."""
+    def test_cta_only_for_product_intent_IS_acceptable(self):
+        """May 2026 #10 contract change — ``cta_only`` is now an
+        acceptable final mode. The hard-recovery layer in the
+        webhook downgrades text_only → cta_only on purpose; treating
+        it as unacceptable would create alarm fatigue on a turn that
+        actually delivered a clickable buy-page link to the customer.
+        See ``[VISUAL_FALLBACK_RECOVERED]`` in ``whatsapp_webhook.py``.
+        """
         assert is_acceptable_mode_for_product_intent(
             DELIVERY_MODE_CTA_ONLY
-        ) is False
+        ) is True
 
     def test_failed_for_product_intent_is_NOT_acceptable(self):
         assert is_acceptable_mode_for_product_intent(
@@ -289,6 +295,7 @@ class TestGuardRule:
         DELIVERY_MODE_CATALOG,
         DELIVERY_MODE_IMAGE_CTA,
         DELIVERY_MODE_MEDIA_ONLY,
+        DELIVERY_MODE_CTA_ONLY,  # May 2026 #10 — joined the OK set
     ])
     def test_rich_modes_for_product_intent_are_acceptable(self, mode):
         assert is_acceptable_mode_for_product_intent(mode) is True

@@ -4188,3 +4188,462 @@ async def admin_debug_recent_webhook_events(
     )
 
     return response
+
+
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║  CATALOG CONFIG + DIAGNOSTIC SEND — May 2026 #10                     ║
+# ║                                                                       ║
+# ║  Two endpoints that close the gap "catalog exists in Meta but the    ║
+# ║  webhook can't use it":                                              ║
+# ║                                                                       ║
+# ║    POST /admin/debug/catalog-config                                  ║
+# ║      Set ``meta_catalog_id`` and ``catalog_enabled`` on              ║
+# ║      WhatsAppConnection. Until now there was NO write path for       ║
+# ║      these columns outside hand-running SQL on the production DB.    ║
+# ║                                                                       ║
+# ║    POST /admin/debug/whatsapp/send-product                           ║
+# ║      Exercise the EXACT same dispatch chain a brain reply would      ║
+# ║      use — catalog first, fall back to image+CTA, fall back to       ║
+# ║      CTA-only — and return a structured audit so support can         ║
+# ║      isolate the failing stage (config / eligibility / payload /    ║
+# ║      provider / AI trigger).                                         ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+
+
+class _CatalogConfigBody(BaseModel):
+    """Body for ``POST /admin/debug/catalog-config``."""
+
+    tenant_id: int = Field(..., ge=1)
+    meta_catalog_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Meta Commerce Manager catalog id (numeric string). Pass "
+            "an empty string to CLEAR the binding."
+        ),
+    )
+    catalog_enabled: Optional[bool] = Field(
+        default=None,
+        description="Toggle the per-connection kill switch.",
+    )
+
+
+@router.post("/catalog-config")
+async def admin_debug_set_catalog_config(
+    body: _CatalogConfigBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Persist ``meta_catalog_id`` / ``catalog_enabled`` on the
+    ``WhatsAppConnection`` row for *tenant_id*.
+
+    The merchant dashboard does not currently surface these fields, so
+    operators were hand-editing the DB whenever a catalog needed to be
+    wired up. This endpoint is the supported writeable path —
+    idempotent, audited, and returns the resulting catalog summary so
+    the caller can confirm the binding without a follow-up
+    ``GET /admin/debug/catalog-state``.
+
+    Either ``meta_catalog_id`` or ``catalog_enabled`` may be omitted
+    in the body; only the supplied fields are written, the others
+    keep their current values. Passing ``meta_catalog_id=""`` clears
+    the binding (sets the column to NULL).
+
+    Auth: ``require_admin`` — same gate as ``/catalog-state``.
+    """
+    from core.catalog import catalog_summary  # noqa: PLC0415
+
+    conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == body.tenant_id)
+        .first()
+    )
+    if conn is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"WhatsAppConnection not found for tenant_id={body.tenant_id}",
+        )
+
+    before = catalog_summary(conn)
+    changes: Dict[str, Any] = {}
+
+    if body.meta_catalog_id is not None:
+        new_val = body.meta_catalog_id.strip() or None
+        if (conn.meta_catalog_id or None) != new_val:
+            conn.meta_catalog_id = new_val
+            changes["meta_catalog_id"] = {
+                "before": before["meta_catalog_id"],
+                "after":  new_val,
+            }
+
+    if body.catalog_enabled is not None:
+        new_flag = bool(body.catalog_enabled)
+        if bool(conn.catalog_enabled) != new_flag:
+            conn.catalog_enabled = new_flag
+            changes["catalog_enabled"] = {
+                "before": bool(before["catalog_enabled"]),
+                "after":  new_flag,
+            }
+
+    if changes:
+        db.commit()
+        db.refresh(conn)
+
+    after = catalog_summary(conn)
+
+    admin_sub = _admin.get("sub") or "?"
+    audit(
+        "admin_debug_set_catalog_config",
+        admin_sub=admin_sub,
+        tenant_id=body.tenant_id,
+        changes=changes,
+        catalog_summary=after,
+    )
+    logger.info(
+        "[CATALOG_CONFIG] admin=%s tenant=%s changes=%s summary=%s",
+        admin_sub, body.tenant_id, changes, after,
+    )
+
+    return {
+        "ok":               True,
+        "tenant_id":        body.tenant_id,
+        "before":           before,
+        "after":            after,
+        "applied_changes":  changes,
+    }
+
+
+class _SendProductBody(BaseModel):
+    """Body for ``POST /admin/debug/whatsapp/send-product``."""
+
+    tenant_id: int = Field(..., ge=1)
+    to: str = Field(
+        ...,
+        description=(
+            "Recipient MSISDN in E.164 without the leading + "
+            "(e.g. 9665XXXXXXXX)."
+        ),
+    )
+    product_id: Optional[int] = Field(
+        default=None,
+        description="Resolve by Nahla Product.id (preferred when known).",
+    )
+    product_title: Optional[str] = Field(
+        default=None,
+        description=(
+            "Resolve by fuzzy title match — same path the visual "
+            "enforcer uses. Required when ``product_id`` is absent."
+        ),
+    )
+    mode: str = Field(
+        default="auto",
+        description=(
+            "Send strategy: ``auto`` (catalog → image+CTA → CTA only, "
+            "matching the webhook), ``catalog`` (force catalog only), "
+            "``image`` (force legacy image+CTA), ``cta`` (force "
+            "CTA-only with the buy URL). Any other value → ``auto``."
+        ),
+    )
+
+
+@router.post("/whatsapp/send-product")
+async def admin_debug_send_product(
+    body: _SendProductBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Exercise the FULL product send chain for a single test
+    recipient and return a structured audit.
+
+    The endpoint runs the same helpers the WhatsApp webhook uses, in
+    the same order:
+
+      1. Resolve the product (by id or fuzzy title).
+      2. Look up the ``WhatsAppConnection`` for the tenant.
+      3. Run ``is_catalog_eligible`` and log the verdict.
+      4. Attempt ``send_single_product_message`` (catalog) when
+         eligible and ``mode`` allows it.
+      5. Attempt legacy ``_send_media_message`` + ``_send_cta_url``
+         when the catalog send fell through and ``mode`` allows it.
+      6. Attempt ``_send_cta_url`` ONLY as a last resort or when
+         ``mode='cta'`` is forced.
+
+    The response shape mirrors what the webhook stamps onto the
+    delivery audit:
+
+      {
+        "ok":                bool,
+        "tenant_id":         int,
+        "to_masked":         "9665***430",
+        "product": {
+          "id":         int,
+          "title":      str,
+          "external_id": str | None,
+          "retailer_id": str | None,
+          "image_url":   str | None,
+          "product_url": str | None,
+        },
+        "catalog": {
+          "eligible":   bool,
+          "reason":     str,
+          "attempted":  bool,
+          "succeeded":  bool,
+          "raw_error":  any | None,
+        },
+        "image_cta": {
+          "attempted":      bool,
+          "image_ok":       bool,
+          "cta_ok":         bool,
+        },
+        "cta_only": {
+          "attempted":  bool,
+          "ok":         bool,
+        },
+        "final_mode": "catalog" | "image_cta" | "media_only" | "cta_only" | "text_only" | "failed",
+        "mode_requested": str,
+      }
+    """
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415, F401
+
+    from core.catalog import (  # noqa: PLC0415
+        effective_retailer_id, is_catalog_eligible,
+    )
+    from modules.observability.delivery_mode import (  # noqa: PLC0415
+        compute_final_delivery_mode, new_delivery_audit,
+    )
+    from routers.whatsapp_webhook import (  # noqa: PLC0415
+        _send_cta_url, _send_media_message, _try_send_catalog_product,
+    )
+    from services.product_resolver import (  # noqa: PLC0415
+        format_product_card_caption, resolve_by_external_id, resolve_by_query,
+    )
+
+    admin_sub = _admin.get("sub") or "?"
+    requested_mode = (body.mode or "auto").strip().lower()
+    if requested_mode not in ("auto", "catalog", "image", "cta"):
+        requested_mode = "auto"
+
+    to = (body.to or "").strip().lstrip("+")
+    if not to.isdigit() or len(to) < 8:
+        raise HTTPException(status_code=400, detail="invalid recipient phone")
+    to_masked = f"{to[:4]}***{to[-3:]}" if len(to) >= 7 else f"***{to[-2:]}"
+
+    # ── 1. Resolve product ──────────────────────────────────────
+    resolution = None
+    if body.product_id is not None:
+        try:
+            resolution = resolve_by_external_id(db, body.tenant_id, str(body.product_id))
+        except Exception:
+            resolution = None
+        if resolution is None:
+            # Fallback: load Product by id and synthesise resolution
+            from database.models import Product as _Product  # noqa: PLC0415
+            product_row = (
+                db.query(_Product)
+                .filter(_Product.id == body.product_id,
+                        _Product.tenant_id == body.tenant_id)
+                .first()
+            )
+            if product_row is not None:
+                try:
+                    resolution = resolve_by_external_id(
+                        db, body.tenant_id, product_row.external_id or "",
+                    )
+                except Exception:
+                    resolution = None
+    if resolution is None and body.product_title:
+        try:
+            resolution = resolve_by_query(
+                db, body.tenant_id, body.product_title.strip(),
+            )
+        except Exception:
+            resolution = None
+    if resolution is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "could not resolve product — pass product_id (Nahla "
+                "Product.id) or a more specific product_title."
+            ),
+        )
+
+    # ── 2. Resolve connection + retailer id + eligibility ──────
+    conn = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == body.tenant_id)
+        .first()
+    )
+    if conn is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"WhatsAppConnection not found for tenant_id={body.tenant_id}",
+        )
+    phone_id = str(getattr(conn, "phone_number_id", "") or "").strip()
+    if not phone_id:
+        raise HTTPException(
+            status_code=409,
+            detail="WhatsAppConnection missing phone_number_id — provision the connection first.",
+        )
+
+    attachment: Dict[str, Any] = {
+        "kind":         "product_card",
+        "id":           resolution.id,
+        "title":        resolution.title,
+        "media_type":   "image",
+        "file_url":     resolution.image_url or "",
+        "caption":      format_product_card_caption(resolution),
+        "product_url":  resolution.product_url or "",
+        "price":        resolution.price,
+        "in_stock":     resolution.in_stock,
+        "external_id":  resolution.external_id,
+        "confidence":   resolution.confidence,
+    }
+    retailer_id = effective_retailer_id(attachment)
+    elig = is_catalog_eligible(conn, products=[attachment])
+
+    # ── 3. Build audit + run sender chain ───────────────────────
+    audit_doc = new_delivery_audit()
+    audit_doc["text_sent"] = True  # mirrors webhook — admin tests outbound only
+    catalog_block: Dict[str, Any] = {
+        "eligible":  elig.ok,
+        "reason":    elig.reason,
+        "attempted": False,
+        "succeeded": False,
+        "raw_error": None,
+    }
+    image_cta_block: Dict[str, Any] = {
+        "attempted": False, "image_ok": False, "cta_ok": False,
+    }
+    cta_only_block: Dict[str, Any] = {"attempted": False, "ok": False}
+
+    async def _try_image_cta() -> None:
+        if not attachment.get("file_url"):
+            return
+        image_cta_block["attempted"] = True
+        try:
+            image_cta_block["image_ok"] = await _send_media_message(
+                phone_id=phone_id, to=to,
+                media_type="image",
+                media_url=attachment["file_url"],
+                filename=None,
+                caption=attachment.get("caption"),
+                _tenant_id=body.tenant_id, _db=db,
+            )
+            if image_cta_block["image_ok"]:
+                audit_doc["legacy_media_sent_count"] = 1
+        except Exception as exc:  # noqa: BLE001
+            image_cta_block["image_ok"] = False
+            image_cta_block["raw_error"] = repr(exc)
+        if image_cta_block["image_ok"] and attachment.get("product_url"):
+            try:
+                image_cta_block["cta_ok"] = await _send_cta_url(
+                    phone_id=phone_id, to=to,
+                    body_text="اضغط زر «عرض المنتج» للمتابعة.",
+                    btn_label="عرض المنتج",
+                    btn_url=attachment["product_url"],
+                    _tenant_id=body.tenant_id, _db=db,
+                )
+                if image_cta_block["cta_ok"]:
+                    audit_doc["cta_url_sent_count"] = (
+                        int(audit_doc.get("cta_url_sent_count", 0)) + 1
+                    )
+            except Exception as exc:  # noqa: BLE001
+                image_cta_block["cta_ok"] = False
+                image_cta_block["raw_error"] = repr(exc)
+
+    async def _try_cta_only() -> None:
+        if not attachment.get("product_url"):
+            return
+        cta_only_block["attempted"] = True
+        try:
+            cta_only_block["ok"] = await _send_cta_url(
+                phone_id=phone_id, to=to,
+                body_text=attachment.get("title") or "عرض المنتج",
+                btn_label="عرض المنتج",
+                btn_url=attachment["product_url"],
+                _tenant_id=body.tenant_id, _db=db,
+            )
+            if cta_only_block["ok"]:
+                audit_doc["cta_url_sent_count"] = (
+                    int(audit_doc.get("cta_url_sent_count", 0)) + 1
+                )
+        except Exception as exc:  # noqa: BLE001
+            cta_only_block["ok"] = False
+            cta_only_block["raw_error"] = repr(exc)
+
+    if requested_mode in ("auto", "catalog"):
+        catalog_block["attempted"] = True
+        try:
+            catalog_block["succeeded"] = await _try_send_catalog_product(
+                db=db, connection=conn,
+                tenant_id=body.tenant_id,
+                phone_id=phone_id, to=to,
+                attachment=attachment,
+            )
+            if catalog_block["succeeded"]:
+                audit_doc["catalog_card_sent_count"] = 1
+        except Exception as exc:  # noqa: BLE001
+            catalog_block["raw_error"] = repr(exc)
+            catalog_block["succeeded"] = False
+
+    if (
+        requested_mode == "image"
+        or (requested_mode == "auto" and not catalog_block["succeeded"])
+    ):
+        await _try_image_cta()
+
+    if (
+        requested_mode == "cta"
+        or (
+            requested_mode == "auto"
+            and not catalog_block["succeeded"]
+            and not image_cta_block.get("image_ok")
+        )
+    ):
+        await _try_cta_only()
+
+    final_mode = compute_final_delivery_mode(audit_doc)
+    audit(
+        "admin_debug_send_product",
+        admin_sub=admin_sub,
+        tenant_id=body.tenant_id,
+        product_id=resolution.id,
+        retailer_id=retailer_id or "",
+        catalog_eligible=elig.ok,
+        catalog_succeeded=catalog_block["succeeded"],
+        image_ok=image_cta_block.get("image_ok"),
+        cta_ok=image_cta_block.get("cta_ok") or cta_only_block.get("ok"),
+        final_mode=final_mode,
+    )
+    logger.info(
+        "[ADMIN/SEND_PRODUCT] admin=%s tenant=%s product=%s ext=%s "
+        "retailer=%s mode_req=%s catalog_elig=%s catalog_ok=%s "
+        "image_ok=%s cta_ok=%s final=%s",
+        admin_sub, body.tenant_id, resolution.id, resolution.external_id,
+        retailer_id, requested_mode, elig.ok, catalog_block["succeeded"],
+        image_cta_block.get("image_ok"),
+        image_cta_block.get("cta_ok") or cta_only_block.get("ok"),
+        final_mode,
+    )
+
+    return {
+        "ok": (
+            catalog_block["succeeded"]
+            or image_cta_block.get("image_ok")
+            or cta_only_block.get("ok")
+        ),
+        "tenant_id":      body.tenant_id,
+        "to_masked":      to_masked,
+        "mode_requested": requested_mode,
+        "product": {
+            "id":          resolution.id,
+            "title":       resolution.title,
+            "external_id": resolution.external_id,
+            "retailer_id": retailer_id or None,
+            "image_url":   bool(resolution.image_url),
+            "product_url": bool(resolution.product_url),
+        },
+        "catalog":      catalog_block,
+        "image_cta":    image_cta_block,
+        "cta_only":     cta_only_block,
+        "final_mode":   final_mode,
+    }

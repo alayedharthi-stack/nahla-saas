@@ -69,10 +69,22 @@ DELIVERY_MODE_FAILED       = "failed"
 # Modes that satisfy a product / image / catalog intent. Anything
 # OUTSIDE this set when the customer asked for product content is
 # the alarm condition the [DELIVERY_GUARD_FAIL] log fires on.
+#
+# May 2026 #10 — ``cta_only`` is now treated as acceptable. The
+# customer asked to see a product; if catalog AND legacy image both
+# fell through but a CTA-URL with the buy-page link did land, the
+# customer can still tap through and SEE the product on the store.
+# Operators previously got fatigued by the guard firing on this
+# perfectly-recoverable mode, so we kept it in the alarm set and
+# silenced it manually. With the explicit hard-recovery (see
+# whatsapp_webhook.py ``[VISUAL_FALLBACK_RECOVERED]``) the rescue
+# path lands here on purpose. The guard now ONLY fires for
+# ``text_only`` and ``failed`` — the actual UX regression cases.
 _PRODUCT_INTENT_OK_MODES = frozenset({
     DELIVERY_MODE_CATALOG,
     DELIVERY_MODE_IMAGE_CTA,
     DELIVERY_MODE_MEDIA_ONLY,
+    DELIVERY_MODE_CTA_ONLY,
 })
 
 
@@ -365,11 +377,13 @@ def customer_wants_product_or_image(
 def is_acceptable_mode_for_product_intent(mode: str) -> bool:
     """``True`` when *mode* satisfies a product / image request.
 
-    We treat ``catalog`` / ``image_cta`` / ``media_only`` as
-    acceptable because they all deliver actual product content.
-    ``cta_only`` is intentionally EXCLUDED — a URL with no image
-    looks like a generic link, not a product card; the customer
-    asked to "see", so they should see something.
+    May 2026 #10 — ``catalog`` / ``image_cta`` / ``media_only`` /
+    ``cta_only`` are all acceptable. The first three deliver actual
+    product content; ``cta_only`` gives the customer a clickable
+    buy-page link they can open in WhatsApp's in-app browser, which
+    is the explicit fallback contract from the visual-product
+    enforcement layer. ``text_only`` and ``failed`` are the only
+    modes that flip the [DELIVERY_GUARD_FAIL] alarm.
     """
     return mode in _PRODUCT_INTENT_OK_MODES
 

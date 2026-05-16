@@ -4714,6 +4714,22 @@ async def _handle_merchant_message(
                         len(_missing_products),
                         [r.id for r in _resolutions],
                     )
+                    # May 2026 #10 — structured lifecycle log so an
+                    # operator grepping ``[PRODUCT_ATTACHMENT]``
+                    # sees the entire path of a product card from
+                    # marker → resolver → dispatch loop. Source
+                    # ``llm_marker`` distinguishes this from the
+                    # visual-enforcer (``visual_enforcement``) and
+                    # safety-net (``safety_net``) paths added below.
+                    logger.info(
+                        "[PRODUCT_ATTACHMENT] tenant=%s stage=resolved "
+                        "source=llm_marker count=%d ids=%s "
+                        "with_image=%d with_url=%d",
+                        tenant_id, len(_resolutions),
+                        [r.id for r in _resolutions],
+                        sum(1 for r in _resolutions if r.image_url),
+                        sum(1 for r in _resolutions if r.product_url),
+                    )
                 if _missing_products and not _resolutions:
                     logger.info(
                         "[ProductResolver] tenant=%s ALL product markers "
@@ -5403,6 +5419,13 @@ async def _handle_merchant_message(
                                     bool(_vp_res.product_url),
                                     _candidate_source,
                                 )
+                                logger.info(
+                                    "[PRODUCT_ATTACHMENT] tenant=%s "
+                                    "stage=enforced source=visual_enforcement "
+                                    "count=1 ids=[%s] with_image=1 with_url=%d",
+                                    tenant_id, _vp_res.id,
+                                    1 if _vp_res.product_url else 0,
+                                )
                             elif _vp_res and _vp_res.product_url:
                                 _product_attachments.append({
                                     "kind":         "product_card",
@@ -5425,6 +5448,12 @@ async def _handle_merchant_message(
                                     "reason=no_image_url source=%s",
                                     tenant_id, _vp_res.id, _vp_res.title,
                                     _candidate_source,
+                                )
+                                logger.info(
+                                    "[PRODUCT_ATTACHMENT] tenant=%s "
+                                    "stage=enforced source=visual_enforcement "
+                                    "count=1 ids=[%s] with_image=0 with_url=1",
+                                    tenant_id, _vp_res.id,
                                 )
                             else:
                                 logger.warning(
@@ -5490,6 +5519,42 @@ async def _handle_merchant_message(
                         "(catalog send will be skipped, legacy path "
                         "will run): %s",
                         tenant_id, _conn_lookup_exc,
+                    )
+
+                # ── [CATALOG_ELIGIBILITY] — May 2026 #10 ────────────
+                # One structured line per turn that has product cards
+                # queued. Mirrors the exact decision the dispatch loop
+                # will make for the FIRST product attachment. Operator
+                # grepping ``[CATALOG_ELIGIBILITY]`` answers
+                # "did the catalog path even get a chance to run, and
+                # if not why?". Reasons are the closed set from
+                # ``core.catalog.CatalogEligibility.reason``.
+                try:
+                    from core.catalog import (  # noqa: PLC0415
+                        is_catalog_eligible as _is_elig,
+                        effective_retailer_id as _eff_rid,
+                        catalog_summary as _cat_summary,
+                    )
+                    _first_att = _product_attachments[0]
+                    _summary = _cat_summary(_cached_wa_conn)
+                    _elig = _is_elig(_cached_wa_conn, products=[_first_att])
+                    logger.info(
+                        "[CATALOG_ELIGIBILITY] tenant=%s eligible=%s "
+                        "reason=%s catalog_bound=%s catalog_enabled=%s "
+                        "meta_catalog_id_set=%s product_id=%s "
+                        "retailer_id=%r attachments=%d",
+                        tenant_id, str(_elig.ok).lower(), _elig.reason,
+                        str(_summary["catalog_bound"]).lower(),
+                        str(_summary["catalog_enabled"]).lower(),
+                        bool(_summary["meta_catalog_id"]),
+                        _first_att.get("id"),
+                        _eff_rid(_first_att) or "",
+                        len(_product_attachments),
+                    )
+                except Exception as _elig_log_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[CATALOG_ELIGIBILITY] tenant=%s instrumentation "
+                        "failed: %s", tenant_id, _elig_log_exc,
                     )
 
             for _att in _all_attachments:
@@ -5755,6 +5820,7 @@ async def _handle_merchant_message(
                     customer_wants_product_or_image as _wants_product,
                 )
                 from modules.observability.delivery_mode import (  # noqa: PLC0415
+                    DELIVERY_MODE_TEXT_ONLY as _MODE_TEXT_ONLY,
                     is_acceptable_mode_for_product_intent as _mode_ok,
                 )
 
@@ -5763,15 +5829,105 @@ async def _handle_merchant_message(
                     inbound_text=text or "",
                     brain_action=_br_action or "",
                 )
+
+                # ── Hard fallback recovery — May 2026 #10 ──────────
+                # The [DELIVERY_GUARD_FAIL] log used to be observation
+                # only; this block actively RECOVERS the turn. When
+                # the customer asked for a product/image/catalog but
+                # the final mode is ``text_only`` (catalog + media
+                # both fell through OR no product was queued at all),
+                # we attempt one last CTA-URL send so the customer
+                # leaves the turn with at LEAST a clickable link.
+                #
+                # Source ladder (first non-empty wins):
+                #   1. ``product_url`` on any product attachment that
+                #      was queued earlier in the turn (catalog send
+                #      failed but the resolver knew where to point).
+                #   2. A one-shot resolver pass on the inbound text
+                #      itself — covers the case where the visual
+                #      enforcer's candidate didn't match but a fresh
+                #      query (the customer's exact words) does.
+                # Failure here is silent; the [DELIVERY_GUARD_FAIL]
+                # log still fires so operators can see we tried.
+                _recovered = False
+                if (
+                    _wants
+                    and _final_mode == _MODE_TEXT_ONLY
+                    and not _delivery_audit.get("first_send_failed")
+                ):
+                    _rescue_url = ""
+                    _rescue_title = ""
+                    for _att in (_product_attachments or []):
+                        _u = (_att.get("product_url") or "").strip()
+                        if _u:
+                            _rescue_url = _u
+                            _rescue_title = str(_att.get("title") or "")
+                            break
+                    if not _rescue_url and (text or "").strip():
+                        try:
+                            from services.product_resolver import (  # noqa: PLC0415
+                                resolve_by_query as _rescue_resolve,
+                            )
+                            _r = _rescue_resolve(
+                                db, tenant_id, (text or "").strip(),
+                                customer_id=getattr(convo, "customer_id", None),
+                            )
+                            if _r and _r.product_url:
+                                _rescue_url = _r.product_url
+                                _rescue_title = _r.title or ""
+                        except Exception as _rescue_exc:  # noqa: BLE001
+                            logger.debug(
+                                "[VISUAL_FALLBACK_RESCUE] tenant=%s "
+                                "resolver_failed: %s", tenant_id, _rescue_exc,
+                            )
+                    if _rescue_url:
+                        try:
+                            _rescue_ok = await _send_cta_url(
+                                phone_id=phone_id, to=to,
+                                body_text=(_rescue_title or "عرض المنتج"),
+                                btn_label="عرض المنتج",
+                                btn_url=_rescue_url,
+                                _tenant_id=tenant_id, _db=db,
+                            )
+                            if _rescue_ok and isinstance(_delivery_audit, dict):
+                                _delivery_audit["cta_url_sent_count"] = (
+                                    int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                                )
+                                _recovered = True
+                                _final_mode = _compute_mode(_delivery_audit)
+                                logger.info(
+                                    "[VISUAL_FALLBACK_RECOVERED] tenant=%s "
+                                    "to=*%s title=%r url=%s new_mode=%s",
+                                    tenant_id,
+                                    (to[-4:] if to else ""),
+                                    _rescue_title[:80], bool(_rescue_url),
+                                    _final_mode,
+                                )
+                        except Exception as _cta_rescue_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[VISUAL_FALLBACK_RESCUE] tenant=%s "
+                                "cta_send_failed: %s",
+                                tenant_id, _cta_rescue_exc,
+                            )
+                    else:
+                        logger.warning(
+                            "[VISUAL_FALLBACK_NO_PRODUCT] tenant=%s "
+                            "to=*%s inbound=%r — no rescue URL found, "
+                            "guard will fire",
+                            tenant_id, (to[-4:] if to else ""),
+                            (text or "")[:80],
+                        )
+
                 logger.info(
                     "[FINAL_DELIVERY] tenant=%s to=*%s mode=%s "
                     "wants_product_or_image=%s brain_action=%s "
-                    "audit=%s",
+                    "recovered=%s audit=%s",
                     tenant_id,
                     (to[-4:] if to else ""),
                     _final_mode,
                     str(bool(_wants)).lower(),
                     _br_action or "?",
+                    str(bool(_recovered)).lower(),
                     _delivery_audit,
                 )
                 if _wants and not _mode_ok(_final_mode):
