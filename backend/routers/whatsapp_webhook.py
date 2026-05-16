@@ -3149,6 +3149,25 @@ async def _handle_merchant_message(
         tenant_id, to, len(text or ""), (text or "")[:60],
     )
 
+    # ── Turn lifecycle observability (May 2026 #16) ─────────────────────────
+    # One ``TurnTrace`` per inbound message. Every layer of the pipeline
+    # (pause guard / mode resolver / brain / composer / fallback) mutates
+    # fields on this object. A single ``[TURN] ...`` log line is emitted
+    # in the ``finally`` block so partial-progress turns still produce
+    # one greppable record.
+    #
+    # The flag ``_trace.outbound_sent`` is also used defensively by the
+    # safe-reply path to skip a second send when a primary reply has
+    # already gone out for this same message_id — see
+    # ``mark_outbound_sent`` / ``outbound_lock_acquired`` semantics.
+    from services import turn_trace as _TS  # noqa: PLC0415
+    _trace = _TS.new_trace(
+        tenant_id    = tenant_id,
+        phone        = to,
+        message_id   = wa_msg_id or "",
+        inbound_text = text or "",
+    )
+
     # ── Strict AI activation cutoff (WhatsApp business timestamp) ───────────
     # Anything strictly before ``whatsapp_ai_live_since`` is persisted for
     # inbox/history only — never COD / Brain / outbound automation side-effects.
@@ -3805,6 +3824,7 @@ async def _handle_merchant_message(
                     tenant_id, to, (text or "")[:80].replace("\n", " "),
                     len(history or []),
                 )
+                _trace.brain_called = True
                 brain_result = await brain.process(
                     db=db,
                     tenant_id=tenant_id,
@@ -3852,7 +3872,15 @@ async def _handle_merchant_message(
                 # We also emit a structured trace so the next regression is
                 # debuggable. The trace is one log line per silent turn so
                 # we can grep [BRAIN_SILENT_REPLY] in production logs.
+                if _billing_denied:
+                    _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
+                    _trace.response_goal   = "silent"
+                    _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
+
                 if not _billing_denied and not (reply or "").strip():
+                    _trace.brain_silent    = True
+                    _trace.fallback_source = "brain_silent_ack"
+                    _trace.response_goal   = "ack"
                     try:
                         _matched_intent = ""
                         _matched_action = ""
@@ -4034,6 +4062,25 @@ async def _handle_merchant_message(
                     _br_missing, _br_options_pending, _br_unsync,
                     len(reply or ""), len(_brain_buttons), _brain_handoff,
                 )
+                # Mirror critical fields into the turn trace so the
+                # final [TURN] line surfaces what the Brain decided
+                # alongside what was actually sent.
+                _trace.brain_action      = _br_action or ""
+                _trace.brain_stage       = _br_stage or ""
+                _trace.missing_fields    = list(_br_missing or [])
+                _trace.options_pending   = list(_br_options_pending or [])
+                _trace.handoff_triggered = bool(_brain_handoff)
+                _trace.buttons_count     = len(_brain_buttons or [])
+                # If we have a real, non-empty reply (NOT a fallback
+                # substitution), provisionally mark the source as
+                # ``brain``. The actual send hasn't happened yet — the
+                # ``outbound_sent`` flag flips to True only after the
+                # network call below. Marking the SOURCE here is safe
+                # because a later substitution (welcome-gate) updates
+                # ``_trace.fallback_source`` and ``reply_source`` again.
+                if not _trace.brain_silent and not _billing_denied and (reply or "").strip():
+                    _trace.reply_source  = _TS.SOURCE_BRAIN
+                    _trace.response_goal = _trace.response_goal or "answer"
 
                 if _brain_handoff:
                     # Guard: if there is active order preparation (a focused
@@ -4104,26 +4151,81 @@ async def _handle_merchant_message(
                 logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d handoff=%s",
                             tenant_id, to, len(_brain_buttons), _brain_handoff)
             except Exception as brain_exc:
+                # ── Brain crash recovery (May 2026 #16) ──────────────────
+                # Production regression: a customer asked "وشلون طريقة
+                # توصيل الطلبات عندكم?" — a simple informational ask.
+                # Brain raised, the except arm caught it, logged with
+                # ``logger.error("...: %s", brain_exc)`` (NO TRACEBACK),
+                # and sent the canned handoff template
+                # "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت من فريق المتجر."
+                #
+                # Two problems with that:
+                #   1. ``logger.error`` with ``%s`` drops the traceback,
+                #      so we never know what crashed inside Brain → we
+                #      can't fix the root cause.
+                #   2. The canned template promises a human reply that
+                #      doesn't exist for most tenants. For an
+                #      informational question that the Brain could
+                #      easily have answered if it hadn't crashed, this
+                #      is a UX lie that breaks the illusion of natural
+                #      conversation.
+                #
+                # The fix: ``logger.exception`` to capture the full
+                # traceback, route the customer through
+                # ``fallback_policy.choose_safe_fallback`` so the reply
+                # is HONEST (no false human-handoff promise), and emit
+                # the structured TurnTrace so the regression is
+                # debuggable from logs alone (grep `reply_source=
+                # brain_exception` for the bug class).
+                _trace.mark_brain_exception(brain_exc)
                 if MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK:
-                    logger.error(
-                        "[Merchant/Brain] Brain pipeline failed: %s — falling back to legacy "
-                        "(MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true)",
-                        brain_exc,
+                    logger.exception(
+                        "[Merchant/Brain] Brain pipeline failed — falling back to legacy "
+                        "(MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true) | tenant=%s to=%s",
+                        tenant_id, to,
                     )
                     MERCHANT_BRAIN_ENABLED_FALLBACK = True
                 else:
-                    # Brain is the only sanctioned conversational path. We
-                    # send a single safe canned reply and stop instead of
-                    # routing the customer through the unprotected legacy
-                    # LLM (no intent/dedup/handoff guards).
-                    logger.error(
-                        "[Merchant/Brain] Brain pipeline failed: %s — sending canned safe reply, "
-                        "legacy fallback DISABLED (set MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true to re-enable)",
-                        brain_exc,
+                    # Brain is the only sanctioned conversational path.
+                    # We send a single HONEST fallback reply and stop
+                    # instead of routing the customer through the
+                    # unprotected legacy LLM (no intent/dedup/handoff
+                    # guards).
+                    logger.exception(
+                        "[Merchant/Brain] Brain pipeline failed — sending policy-driven safe reply, "
+                        "legacy fallback DISABLED (set MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true to re-enable) "
+                        "| tenant=%s to=%s",
+                        tenant_id, to,
                     )
-                    _safe_reply = (
-                        "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت من فريق المتجر."
+                    from services.fallback_policy import (  # noqa: PLC0415
+                        FALLBACK_REASON_BRAIN_EXCEPTION,
+                        choose_safe_fallback,
                     )
+                    _decision = choose_safe_fallback(
+                        text or "",
+                        reason=FALLBACK_REASON_BRAIN_EXCEPTION,
+                        store_has_live_agent=False,
+                    )
+                    _trace.fallback_source = _decision.kind
+                    _trace.response_goal   = _decision.response_goal
+                    logger.info(
+                        "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
+                        tenant_id, to, _decision.kind, _decision.response_goal, _decision.rationale,
+                    )
+                    # Defence in depth: if for any reason a prior path
+                    # already sent an outbound for this same inbound,
+                    # don't double-send. ``mark_outbound_sent`` is
+                    # idempotent — the conditional check here is
+                    # purely so we skip the StateManager save and the
+                    # network send when we know a reply went out.
+                    if not _trace.outbound_lock_acquired():
+                        logger.warning(
+                            "[Merchant/Brain] suppressed safe-reply send "
+                            "(outbound already marked) | tenant=%s to=%s",
+                            tenant_id, to,
+                        )
+                        return
+                    _safe_reply = _decision.text
                     StateManager.save_message(
                         db, to, _safe_reply, "outbound",
                         conversation_id=convo.id, tenant_id=tenant_id,
@@ -4134,14 +4236,20 @@ async def _handle_merchant_message(
                             _tenant_id=tenant_id, _db=db,
                         )
                     except Exception as _safe_exc:
-                        logger.error(
-                            "[Merchant/Brain] safe-reply send failed tenant=%s to=%s: %s",
-                            tenant_id, to, _safe_exc,
+                        _trace.outbound_error = _safe_exc.__class__.__name__
+                        logger.exception(
+                            "[Merchant/Brain] safe-reply send failed | tenant=%s to=%s",
+                            tenant_id, to,
                         )
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN_EXCEPTION,
+                        length=len(_safe_reply),
+                    )
                     logger.info(
-                        "[OUTBOUND] tenant=%s to=%s source=brain_canned_safe trigger=inbound "
-                        "intent=brain_failed handoff_triggered=false dedup_blocked=false reply_len=%d",
-                        tenant_id, to, len(_safe_reply),
+                        "[OUTBOUND] tenant=%s to=%s source=brain_exception trigger=inbound "
+                        "intent=brain_failed fallback_kind=%s handoff_triggered=false "
+                        "dedup_blocked=false reply_len=%d",
+                        tenant_id, to, _decision.kind, len(_safe_reply),
                     )
                     return
             else:
@@ -5281,6 +5389,27 @@ async def _handle_merchant_message(
                 "loop_guard_recovery" if _loop_replaced_with_recovery
                 else ("brain" if (_brain_active and not MERCHANT_BRAIN_ENABLED_FALLBACK) else "legacy")
             )
+            # Mark the turn trace's outbound lock — primary reply went
+            # out successfully. Any fallback path that runs AFTER this
+            # point (e.g. the outer try/except) will see
+            # ``outbound_lock_acquired()=False`` and refuse to send a
+            # second message for the same inbound — the merchant's
+            # rule:
+            #   "إذا تم إرسال outbound reply بنجاح، فيجب إلغاء أي
+            #    pending auto_ack لنفس turn/message_id."
+            #
+            # The trace source mirrors the existing _outbound_source so
+            # downstream dashboards stay consistent.
+            _trace_src = {
+                "brain":  _TS.SOURCE_BRAIN,
+                "legacy": _TS.SOURCE_LEGACY,
+                "loop_guard_recovery": _TS.SOURCE_BRAIN,
+            }.get(_outbound_source, _TS.SOURCE_UNKNOWN)
+            _trace.mark_outbound_sent(
+                source=_trace_src,
+                length=len(reply or ""),
+                mode=(_TS.DELIVERY_INTERACTIVE if _brain_buttons else _TS.DELIVERY_TEXT),
+            )
             logger.info(
                 "[OUTBOUND] tenant=%s to=%s source=%s trigger=inbound "
                 "intent=merchant_reply handoff_triggered=%s dedup_blocked=%s "
@@ -6024,32 +6153,84 @@ async def _handle_merchant_message(
         # send a single polite fallback so the customer still gets a
         # reply within the 24-hour service window. The fallback uses the
         # same tenant-scoped send path as the primary reply.
-        import traceback  # noqa: PLC0415
-        logger.error(
-            "[Merchant] Error generating reply for tenant=%s: %s\n%s",
-            tenant_id, exc, traceback.format_exc(),
+        #
+        # The fallback text used to be the hardcoded
+        # "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت." — which lies to
+        # the customer that a human will respond. We now route through
+        # ``fallback_policy`` so informational questions get an honest
+        # "ask to re-phrase" reply instead.
+        logger.exception(
+            "[Merchant] Error generating reply for tenant=%s | inbound=%r",
+            tenant_id, (text or "")[:200],
         )
-        _fallback_text = "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت."
-        try:
-            await _send_whatsapp_message(
-                phone_id=phone_id, to=to,
-                text=_fallback_text,
-                _tenant_id=tenant_id, _db=db,
+        # Defence in depth: if the primary path already sent something
+        # for this turn (e.g. brain reply succeeded then a downstream
+        # delivery-guard raised) we skip the outer fallback to avoid
+        # a double-message.
+        if not _trace.outbound_lock_acquired():
+            logger.warning(
+                "[Merchant] outer-fallback suppressed (outbound already sent) | tenant=%s to=%s",
+                tenant_id, to,
+            )
+        else:
+            try:
+                from services.fallback_policy import (  # noqa: PLC0415
+                    FALLBACK_REASON_OUTER_EXCEPTION,
+                    choose_safe_fallback as _choose_safe_fallback,
+                )
+                _outer_decision = _choose_safe_fallback(
+                    text or "",
+                    reason=FALLBACK_REASON_OUTER_EXCEPTION,
+                    store_has_live_agent=False,
+                )
+            except Exception:  # noqa: BLE001 — policy import shouldn't fail, but never crash here
+                from services.fallback_policy import FallbackDecision as _FD  # type: ignore[unused-ignore]  # noqa: PLC0415
+                _outer_decision = _FD(
+                    text="حصل خطأ مؤقت 🙏 ممكن تعيد رسالتك؟",
+                    kind="neutral_retry", response_goal="retry",
+                )
+            _trace.fallback_source = _outer_decision.kind
+            _trace.response_goal   = _outer_decision.response_goal
+            _fallback_text         = _outer_decision.text
+            logger.info(
+                "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s "
+                "rationale=outer_exception_path",
+                tenant_id, to, _outer_decision.kind, _outer_decision.response_goal,
             )
             try:
-                from routers.conversations import record_outbound_message  # noqa: PLC0415
-                record_outbound_message(
-                    db, tenant_id, to, _fallback_text,
-                    event_type="ai_fallback",
-                    extra={"is_ai": True},
+                await _send_whatsapp_message(
+                    phone_id=phone_id, to=to,
+                    text=_fallback_text,
+                    _tenant_id=tenant_id, _db=db,
                 )
-            except Exception:
-                pass
-        except Exception as send_exc:  # noqa: BLE001
-            logger.error(
-                "[Merchant] Fallback send also failed for tenant=%s: %s",
-                tenant_id, send_exc,
-            )
+                _trace.mark_outbound_sent(
+                    source=_TS.SOURCE_OUTER_EXCEPTION,
+                    length=len(_fallback_text),
+                )
+                try:
+                    from routers.conversations import record_outbound_message  # noqa: PLC0415
+                    record_outbound_message(
+                        db, tenant_id, to, _fallback_text,
+                        event_type="ai_fallback",
+                        extra={"is_ai": True, "fallback_kind": _outer_decision.kind},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as send_exc:  # noqa: BLE001
+                _trace.outbound_error = send_exc.__class__.__name__
+                logger.exception(
+                    "[Merchant] Fallback send also failed | tenant=%s to=%s",
+                    tenant_id, to,
+                )
+    finally:
+        # Emit ONE structured turn-trace line, no matter how the
+        # function exited. ``emit()`` is wrapped in its own try/except
+        # internally — observability MUST NOT take down the response
+        # path under any circumstance.
+        try:
+            _trace.emit()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
