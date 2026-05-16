@@ -3937,10 +3937,32 @@ async def _handle_merchant_message(
                     "أهلاً فيك في",
                     "اهلا فيك في",
                 )
+                # May 2026 #5 — defensive narrowing. The validator was
+                # over-firing: it replaced ANY reply ≤ 220 chars that
+                # mentioned one of these phrases, including legitimate
+                # short LLM answers that happened to phrase a follow-up
+                # question similarly. Now it only fires when:
+                #   * length ≤ 120 (true intro card territory)
+                #   * brain's last action WAS the canned greet path
+                #     (the only path that produces these phrasings
+                #     legitimately). When we cannot resolve the action
+                #     (early-init / state-write failure) we still allow
+                #     the substitute as a safety net — better than a
+                #     greeting card hanging on an actionable ask — but
+                #     the length cap keeps the blast radius small.
+                _br_action_for_gate = ""
+                try:
+                    _bs_for_gate = (
+                        (convo.extra_metadata or {}).get("brain_state") or {}
+                    )
+                    _br_action_for_gate = str(_bs_for_gate.get("last_action") or "")
+                except Exception:  # noqa: BLE001
+                    _br_action_for_gate = ""
                 _is_intro_only = bool(
                     reply
                     and any(m in reply for m in _INTRO_ONLY_MARKERS)
-                    and len(reply) <= 220
+                    and len(reply) <= 120
+                    and _br_action_for_gate in ("greet", "ACTION_GREET", "")
                 )
 
                 if _has_action_signal and _is_intro_only:

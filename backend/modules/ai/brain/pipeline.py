@@ -42,6 +42,7 @@ from .types import (
 from .decision.actions import (
     ACTION_GREET,
     ACTION_HANDOFF,
+    ACTION_LLM_REPLY,
     ACTION_OUT_OF_SCOPE,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
@@ -1072,6 +1073,41 @@ def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -
             "استخداماً لمقطع المعرفة أعلاه فقط؛ ممنوع اقتراح منتجات أو أسعار الكتالوج "
             "أو markers [PRODUCT:/[MEDIA_KEY:"
         )
+
+    # ── Execute-pending offer (May 2026 #5) ───────────────────────────────
+    # The decision engine routed a bare confirmation ("اي" / "تمام" /
+    # "ي ريت" / "👍") to LLM_REPLY with explicit args carrying the
+    # context of the previous offer. Without a strict goal here the LLM
+    # would compose a vague "أبشري" / "تمام" reply and never emit a
+    # marker — the customer sees a verbal ack but no link / card /
+    # image. We tell the model EXACTLY what to do.
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "execute_pending_offer"
+    ):
+        _last_q = str((decision.args or {}).get("last_question_asked") or "").strip()
+        _pending = str((decision.args or {}).get("pending_action") or "").strip()
+        _focus = str((decision.args or {}).get("focus_product") or "").strip()
+        lines: List[str] = [
+            "execute_pending_offer — العميل ردّ بتأكيد قصير على عرض/سؤال "
+            "سابق من الذكاء. نفّذ ما عُرض دون إعادة السؤال ودون رد بكلمة "
+            "واحدة فقط مثل «أبشري» أو «تمام»."
+        ]
+        if _last_q:
+            lines.append(f"السؤال السابق من الذكاء: «{_last_q}»")
+        if _pending:
+            lines.append(f"الإجراء المعلّق (pending_action): {_pending}")
+        if _focus:
+            lines.append(
+                f"المنتج في التركيز: «{_focus}» — استخدم "
+                f"`[PRODUCT:{_focus}]` لإرسال البطاقة الفعلية مع الصورة "
+                f"والسعر والرابط."
+            )
+        lines.append(
+            "إذا طلب العميل وسيلة دفع/شهادة/باركود استخدم "
+            "`[MEDIA_KEY:<slug>]` المناسب من قائمة المفاتيح المتاحة."
+        )
+        return " | ".join(lines)
 
     parts: List[str] = []
     if decision.reason:

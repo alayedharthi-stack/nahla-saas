@@ -147,12 +147,43 @@ class DefaultDecisionEngine:
             "طيب", "تمام", "اوكي", "أوكي", "اوك", "اوكيه", "موافق",
             "ارسل", "أرسل", "ابعث", "ابعثه", "ابعثها", "ابعثلي",
             "ابغى", "أبغى", "ابي", "أبي", "ودي",
-            "yes", "yep", "ok", "okay", "sure", "go", "send", "send it",
+            # May 2026 #5 — additional Gulf affirmations the LLM tail kept
+            # missing because they weren't in the set: "حسنا/ماشي/تكفى"
+            # are everyday "go ahead" tokens, "okey/okie" are common Latin
+            # mis-spellings the prior strict matcher rejected.
+            "حسنا", "حسناً", "ماشي", "تكفى", "تكفي",
+            "yes", "yep", "ok", "okay", "okey", "okie", "sure", "go",
+            "send", "send it",
         }
+        # Multi-token Gulf affirmations that don't decompose into all-token
+        # confirm-words (e.g. "ي ريت" has a bare "ي" that we deliberately
+        # keep OUT of the set to avoid false-positives on inflected verbs
+        # starting with "ي"). Matched on the full normalised string.
+        _BARE_CONFIRM_PHRASES = frozenset({
+            "ي ريت", "يا ريت", "ياريت",
+            "تمام تمام", "اي اي", "نعم نعم", "تمام يا غالي",
+            "اوكي تمام", "تمام اوكي", "اوك تمام", "تمام اوك",
+            "go ahead", "do it",
+        })
+        # Positive-only emoji set — bare "👍" / "🙏" / "✅" after the bot
+        # offered something (link / product card / image) is a clear
+        # "yes, do it". The regex anchors the whole message to one or
+        # more positive emojis so it never matches a message that ALSO
+        # carries text.
+        _POSITIVE_EMOJIS_ONLY_RE = re.compile(
+            r"^[\s\u200B-\u200F]*"
+            r"[\U0001F44D\U0001F44C\U0001F64F\u2705\U0001F4AF\U0001F31F\u2728]+"
+            r"[\s\u200B-\u200F]*$",
+            re.UNICODE,
+        )
         _conf_tokens = [t for t in re.split(r"\s+", _conf_msg) if t]
         _is_bare_confirmation = (
-            1 <= len(_conf_tokens) <= 4
-            and all(t in _CONFIRM_WORDS for t in _conf_tokens)
+            _conf_msg in _BARE_CONFIRM_PHRASES
+            or bool(_POSITIVE_EMOJIS_ONLY_RE.match(ctx.message or ""))
+            or (
+                1 <= len(_conf_tokens) <= 4
+                and all(t in _CONFIRM_WORDS for t in _conf_tokens)
+            )
         )
         if (
             _is_bare_confirmation
@@ -1401,6 +1432,57 @@ class DefaultDecisionEngine:
                     reason="ordering_stage_safety_net: no product focus — ask customer to pick",
                     confidence=0.75,
                 )
+
+        # ── 9.4 Execute-pending-offer fallback (May 2026 #5) ─────────────
+        # Production regression: after the bot offers something explicitly
+        # ("تبين أرسل الرابط؟" / "تحب أرشّح لك العسل المناسب؟" / a product
+        # card with implicit "أرسل لي الرابط؟"), the customer answers with
+        # a bare confirmation ("اي" / "تمام" / "ي ريت" / "اوكي" / "👍").
+        # The intent classifier returns INTENT_GENERAL (no pattern hits)
+        # and we would otherwise fall through to a context-free
+        # ACTION_LLM_REPLY whose response_goal says only "no rule matched
+        # — LLM fallback". The LLM then often replies "أبشري" without
+        # actually emitting a marker — the customer sees a verbal
+        # acknowledgement but no link / image / card.
+        #
+        # This block intercepts that case: if the message IS a bare
+        # confirmation AND the conversation carries a clear pending-offer
+        # signal (last_question_asked / pending_action / product focus),
+        # route to a TYPED LLM_REPLY whose ``decision.args`` carry the
+        # context that the prompt-builder reads to construct a strict
+        # execute-now goal. Confidence kept just below the higher-priority
+        # rules so a future rule can still preempt this branch.
+        _pending_offer_context = bool(
+            (state.last_question_asked or "").strip()
+            or (state.pending_action or "").strip()
+            or state.current_product_focus
+        )
+        if _is_bare_confirmation and _pending_offer_context:
+            _focus_title = (state.current_product_focus or {}).get("title") or ""
+            logger.info(
+                "[CTX_INHERIT] bare confirmation honours pending offer | "
+                "tenant=%s last_q=%r pending=%r focus=%r preview=%r",
+                getattr(ctx, "tenant_id", None),
+                (state.last_question_asked or "")[:60],
+                state.pending_action,
+                _focus_title,
+                _conf_msg[:40],
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "execute_pending_offer",
+                    "last_question_asked": state.last_question_asked or "",
+                    "pending_action": state.pending_action or "",
+                    "focus_product": _focus_title,
+                },
+                reason=(
+                    "bare-confirmation honours pending offer: "
+                    f"last_q={(state.last_question_asked or '')[:40]!r} "
+                    f"pending={state.pending_action!r}"
+                ),
+                confidence=0.78,
+            )
 
         # ── 9. Fallback: LLM ─────────────────────────────────────────────
         return Decision(

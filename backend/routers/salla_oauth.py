@@ -2474,6 +2474,24 @@ async def salla_oauth_callback(
     Salla OAuth 2.0 callback — public endpoint (no JWT).
     Salla redirects here after the merchant authorises the app.
 
+    LEGACY ENDPOINT (Dual Integration Architecture).
+    ────────────────────────────────────────────────
+    This callback is bound to the **Communication App**
+    (``SALLA_CLIENT_ID`` / ``SALLA_REDIRECT_URI``). Under the Dual
+    Architecture, a Communication App *cannot* deliver
+    ``offline_access`` / a refresh_token on itself, so the canonical
+    path for new merchants is the **dedicated Sync OAuth app** at:
+
+        GET /api/salla/oauth/start    → Sync OAuth authorize
+        GET /api/salla/oauth/callback → Sync OAuth callback
+
+    This legacy callback is intentionally retained for any
+    pre-Dual-Architecture installs whose Partner Portal app was
+    configured as a true Custom OAuth Communication App — those
+    deployments still flow through here and we don't want to break
+    them. New code MUST NOT add features here; extend the Sync OAuth
+    callback above instead.
+
     Steps:
       1. Validate code/state
       2. Exchange code → access_token + refresh_token
