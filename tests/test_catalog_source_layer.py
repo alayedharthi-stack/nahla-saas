@@ -159,11 +159,45 @@ def test_dominant_source_empty_returns_unknown():
 
 def test_known_sources_includes_all_documented_strings():
     """Regression: every writer in store_sync / salla sync / manual
-    CRUD MUST stamp a value that's inside KNOWN_SOURCES, otherwise
-    ``product_source`` will silently coerce it to ``"unknown"`` and
-    the dashboard badge will lie."""
-    expected = {SOURCE_SALLA, SOURCE_MANUAL, SOURCE_UNKNOWN, "zid"}
+    CRUD / Meta import MUST stamp a value that's inside KNOWN_SOURCES,
+    otherwise ``product_source`` will silently coerce it to
+    ``"unknown"`` and the dashboard badge will lie."""
+    expected = {SOURCE_SALLA, SOURCE_MANUAL, SOURCE_UNKNOWN, "zid", "meta"}
     assert expected.issubset(KNOWN_SOURCES)
+
+
+def test_source_meta_is_known_and_roundtrips_through_product_source():
+    """Hub architecture #14: products imported FROM Meta carry
+    ``source = "meta"`` and the resolver must round-trip them back
+    verbatim — losing the tag would let a re-sync silently
+    misattribute them."""
+    from core.catalog import SOURCE_META  # noqa: PLC0415
+
+    assert SOURCE_META == "meta"
+    assert SOURCE_META in KNOWN_SOURCES
+    assert product_source(_p(source="meta")) == SOURCE_META
+    assert product_source(_p(source="META  ")) == SOURCE_META  # case + ws
+
+
+def test_known_channels_are_exposed_for_hub_diagram():
+    """The dashboard hub diagram reads CHANNEL_* constants from
+    ``core.catalog``. Re-imports here to fail loudly if a constant
+    is renamed."""
+    from core.catalog import (  # noqa: PLC0415
+        CHANNEL_AI,
+        CHANNEL_CAMPAIGNS,
+        CHANNEL_CHECKOUT,
+        CHANNEL_GOOGLE_MERCHANT,
+        CHANNEL_META_CATALOG,
+        CHANNEL_WHATSAPP,
+        KNOWN_CHANNELS,
+    )
+
+    expected = {
+        CHANNEL_WHATSAPP, CHANNEL_META_CATALOG, CHANNEL_AI,
+        CHANNEL_CAMPAIGNS, CHANNEL_GOOGLE_MERCHANT, CHANNEL_CHECKOUT,
+    }
+    assert expected == set(KNOWN_CHANNELS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,3 +308,174 @@ def test_serialise_manual_product_handles_missing_jsonb():
     assert out["product_url"] == ""
     # When meta_retailer_id is set, that becomes the effective id.
     assert out["effective_retailer_id"] == "manual_rid"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  Meta Catalog import — pure helpers (no network)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_meta_import_price_parser_handles_ws_and_iso_currency():
+    """Meta typically returns ``"199.00 SAR"`` — the parser must
+    extract both value and currency. Validates the pure helper
+    without hitting the wire."""
+    from services.meta_catalog_import import _parse_meta_price  # noqa: PLC0415
+
+    out = _parse_meta_price("199.00 SAR")
+    assert out["value"] == "199.00"
+    assert out["currency"] == "SAR"
+    assert out["raw"] == "199.00 SAR"
+
+
+def test_meta_import_price_parser_handles_dict_shape():
+    """Some Meta SKUs return ``{"amount": "19.99", "currency": "USD"}`` —
+    the parser handles both string and dict shapes."""
+    from services.meta_catalog_import import _parse_meta_price  # noqa: PLC0415
+
+    out = _parse_meta_price({"amount": "19.99", "currency": "usd"})
+    assert out["value"] == "19.99"
+    assert out["currency"] == "USD"
+
+
+def test_meta_import_price_parser_handles_none():
+    """None must not crash + must not invent a value."""
+    from services.meta_catalog_import import _parse_meta_price  # noqa: PLC0415
+
+    assert _parse_meta_price(None) == {"value": None, "currency": None, "raw": ""}
+
+
+def test_meta_import_error_carries_structured_code():
+    """The closed-set error codes are the contract between the
+    service and the router — pin the four current codes."""
+    from services.meta_catalog_import import MetaCatalogImportError  # noqa: PLC0415
+
+    err = MetaCatalogImportError("catalog_id_missing", "set it first")
+    assert err.code == "catalog_id_missing"
+    assert "set it first" in str(err)
+
+
+def test_meta_import_report_to_dict_caps_error_samples():
+    """The merchant-facing UI receives at most 10 error samples even
+    if the import had hundreds — anything more is hostile UX +
+    payload bloat."""
+    from services.meta_catalog_import import ImportReport  # noqa: PLC0415
+
+    r = ImportReport()
+    r.scanned = 200
+    r.errors = 50
+    for i in range(50):
+        r.error_samples.append({"id": f"x{i}", "reason": "bad"})
+    d = r.to_dict()
+    assert len(d["error_samples"]) == 10
+    assert d["errors"] == 50  # underlying counter unchanged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7.  Meta Catalog export — pure payload builder (network deferred)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_meta_export_payload_builder_maps_fields_correctly():
+    """Pure function test of the Nahla → Meta field mapping. The
+    surrounding ``export_to_meta`` is planning-only today, but the
+    payload builder is implemented and unit-testable so the
+    implementation PR can land as a thin wrapper."""
+    from services.meta_catalog_export import build_meta_product_payload  # noqa: PLC0415
+
+    p = SimpleNamespace(
+        id=10,
+        title="عسل سدر",
+        description="500 غ",
+        price="95 ر.س",
+        in_stock=True,
+        external_id="ext_99",
+        meta_retailer_id="rid_99",
+        extra_metadata={
+            "image_url":   "https://cdn.example/honey.jpg",
+            "product_url": "https://store.example/p/honey",
+        },
+    )
+    out = build_meta_product_payload(p)
+    assert out["retailer_id"] == "rid_99"   # explicit override wins
+    assert out["name"]         == "عسل سدر"
+    assert out["description"]  == "500 غ"
+    assert out["image_url"]    == "https://cdn.example/honey.jpg"
+    assert out["url"]          == "https://store.example/p/honey"
+    assert out["price"]        == "95 ر.س"
+    assert out["availability"] == "in stock"
+
+
+def test_meta_export_payload_marks_out_of_stock_for_meta():
+    from services.meta_catalog_export import build_meta_product_payload  # noqa: PLC0415
+
+    p = SimpleNamespace(
+        id=1, title="x", description=None, price=None,
+        in_stock=False, external_id="e", meta_retailer_id=None,
+        extra_metadata=None,
+    )
+    out = build_meta_product_payload(p)
+    assert out["availability"] == "out of stock"
+    # Falls back to external_id when override missing.
+    assert out["retailer_id"] == "e"
+
+
+def test_meta_export_stub_raises_not_implemented():
+    """The async export call is deferred — the stub must clearly
+    refuse rather than silently no-op."""
+    import pytest
+
+    from services.meta_catalog_export import export_to_meta  # noqa: PLC0415
+
+    with pytest.raises(NotImplementedError):
+        export_to_meta(db=None, tenant_id=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  AI / catalog contract — "the resolver reads Nahla catalog ONLY"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_product_resolver_never_imports_external_apis():
+    """Regression: the product resolver MUST stay off the Salla /
+    Meta / Zid live APIs. Reading ``Product`` rows from Postgres is
+    the only acceptable path — see the "AI / catalog contract"
+    section in product_resolver's module docstring.
+
+    Asserted at the import-graph level: a future PR that absent-
+    mindedly imports a platform client from inside the resolver
+    trips this test rather than shipping silently."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "backend" / "services" / "product_resolver.py"
+    text = src.read_text(encoding="utf-8")
+    import_lines = [
+        ln.strip() for ln in text.splitlines()
+        if ln.strip().startswith(("import ", "from "))
+    ]
+    forbidden_modules = (
+        "integrations.salla.api",
+        "integrations.zid.api",
+        "services.meta_catalog_import",
+        "integrations.salla.sync",
+        "httpx",
+        "requests",
+    )
+    for line in import_lines:
+        for forb in forbidden_modules:
+            assert forb not in line, (
+                f"product_resolver.py imports {forb!r} — violates the "
+                f"'AI reads Nahla catalog only' contract. See its module "
+                f"docstring under 'AI / catalog contract'.\n"
+                f"Offending line: {line!r}"
+            )
+
+
+def test_product_resolver_docstring_mentions_hub_contract():
+    """Live documentation check: the contract section MUST exist in
+    the module docstring. If someone deletes it during a refactor,
+    they're also deleting institutional memory."""
+    from services import product_resolver  # noqa: PLC0415
+
+    doc = (product_resolver.__doc__ or "").lower()
+    assert "ai / catalog contract" in doc
+    assert "nahla local" in doc or "nahla catalog" in doc

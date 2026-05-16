@@ -39,9 +39,38 @@ What this module does NOT do
 * It does NOT send anything. Sending lives in the WhatsApp
   webhook's attachment loop — see
   ``_attach_resolved_products`` there.
-* It does NOT touch the Product table. We always go through
-  ``CatalogContextBuilder`` so orderability + variant rules stay
-  centralised.
+* It does NOT touch the Product table directly. We always go
+  through ``CatalogContextBuilder`` so orderability + variant
+  rules stay centralised.
+
+AI / catalog contract (May 2026 #14 — Hub architecture)
+────────────────────────────────────────────────────────
+This resolver is the SOLE source of product data for the WhatsApp
+AI. It MUST read from the Nahla local ``products`` table ONLY —
+NEVER from Salla's live API, NEVER from Meta's Catalog API, NEVER
+from Zid's API. Sources upstream of the catalog are responsible for
+keeping the Nahla table fresh:
+
+    INPUT SOURCES    →    NAHLA CATALOG    →    AI (this resolver)
+    ─────────────         ─────────────         ────────────────
+    Salla sync                                  product_resolver
+    Manual entry          ``products``          ↓
+    Meta import           table                 WhatsApp send chain
+
+The rule "AI reads the hub only, never the source platforms" gives
+us three concrete guarantees:
+
+  1. Source independence — an AI reply that recommends a product is
+     correct regardless of which input source produced the row. A
+     manual product from a no-Salla merchant looks identical to a
+     Salla-synced product from the AI's perspective.
+  2. Failure isolation — Salla / Meta API outages cannot break the
+     WhatsApp brain. Stale data is far better than no data.
+  3. Latency control — every product lookup is a local FTS / ILIKE
+     against ``products``; no external HTTP on the critical path.
+
+Regression-tested in ``tests/test_catalog_source_layer.py``
+(``test_product_resolver_only_imports_local_models``).
 
 Tenant isolation
 ────────────────

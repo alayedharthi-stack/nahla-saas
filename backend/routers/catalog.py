@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from core.audit import audit
@@ -857,8 +858,95 @@ async def admin_catalog_test_send(
 # so the catalog send chain stops bailing out with ``no_retailer_id``.
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Studio filters — typed enum for the products listing endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The Product Studio grid (May 2026 #15) needs to slice the catalog by a
+# closed set of operator-relevant predicates. We encode them as query
+# params on ``GET /products`` so the dashboard can build URL-state-driven
+# filters without inventing a new endpoint per combination.
+#
+# Each filter applies AND with the others. Empty / unset filters are
+# no-ops. Unknown filter values are tolerated (treated as no-op) rather
+# than 422'd so a future dashboard version using a new filter name
+# never breaks an older backend.
+
+
+def _apply_studio_filters(
+    query: Any,
+    *,
+    q: Optional[str],
+    source: Optional[str],
+    has_image: Optional[bool],
+    has_retailer_id: Optional[bool],
+    in_stock: Optional[bool],
+):
+    """Apply Studio filters to a base ``Query(Product)``.
+
+    Pure SQLAlchemy chaining — returns the (possibly-narrowed) query.
+    Caller still handles ``order_by`` + ``limit`` + ``offset``.
+    """
+    from models import Product as _Product  # noqa: PLC0415
+
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(
+            (_Product.title.ilike(like))
+            | (_Product.external_id.ilike(like))
+            | (_Product.sku.ilike(like))
+            | (_Product.meta_retailer_id.ilike(like))
+        )
+
+    if source:
+        s = source.strip().lower()
+        if s in KNOWN_SOURCES:
+            query = query.filter(_Product.source == s)
+        # Unknown source string → no-op (don't 4xx the grid).
+
+    if has_retailer_id is not None:
+        if has_retailer_id:
+            query = query.filter(
+                (_Product.meta_retailer_id.isnot(None))
+                | (_Product.external_id.isnot(None))
+            )
+        else:
+            query = query.filter(
+                _Product.meta_retailer_id.is_(None),
+                _Product.external_id.is_(None),
+            )
+
+    if in_stock is not None:
+        query = query.filter(_Product.in_stock == bool(in_stock))
+
+    # ``has_image`` reads from JSONB — slower than the column-level
+    # filters but bounded by the prior narrowing. Applied last.
+    if has_image is not None:
+        # ``extra_metadata->>'image_url'`` is the canonical Phase 1
+        # location (Salla writer + Meta import + manual editor all
+        # write there). Phase 2 promotes this to a top-level column;
+        # this filter becomes a column compare then.
+        from sqlalchemy import or_  # noqa: PLC0415
+
+        json_image_present = sa.text(
+            "extra_metadata::jsonb ->> 'image_url' IS NOT NULL "
+            "AND extra_metadata::jsonb ->> 'image_url' <> ''"
+        )
+        if has_image:
+            query = query.filter(json_image_present)
+        else:
+            query = query.filter(sa.not_(json_image_present))
+
+    return query
+
+
 def _product_diag_rows(
     db: Session, tenant_id: int, *, limit: int, offset: int,
+    q: Optional[str] = None,
+    source: Optional[str] = None,
+    has_image: Optional[bool] = None,
+    has_retailer_id: Optional[bool] = None,
+    in_stock: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Build the response shape for ``GET /merchant/catalog/products``.
 
@@ -887,16 +975,40 @@ def _product_diag_rows(
     """
     from models import Product as _Product  # noqa: PLC0415
 
+    from services.product_readiness import compute_badge  # noqa: PLC0415
+
+    # Total (unfiltered) — used for the legacy ``coverage`` block so
+    # the "X of N" copy under the diagnostics card matches the tenant-
+    # wide picture, not the filtered one. The filtered total is
+    # reported separately as ``filtered_total`` below.
     total = (
         db.query(_Product)
         .filter(_Product.tenant_id == tenant_id)
         .count()
     )
 
-    rows = (
+    # Filtered count — drives pagination on the Studio grid.
+    filtered_q = (
         db.query(_Product)
         .filter(_Product.tenant_id == tenant_id)
-        .order_by(_Product.id)
+    )
+    filtered_q = _apply_studio_filters(
+        filtered_q,
+        q=q, source=source, has_image=has_image,
+        has_retailer_id=has_retailer_id, in_stock=in_stock,
+    )
+    try:
+        filtered_total = filtered_q.with_entities(sa.func.count(_Product.id)).scalar() or 0
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        filtered_total = 0
+
+    rows = (
+        filtered_q
+        .order_by(_Product.id.desc())   # newest first — matches the Meta Commerce Manager grid ordering
         .limit(int(limit))
         .offset(int(offset))
         .all()
@@ -912,20 +1024,45 @@ def _product_diag_rows(
             status = "ready"
         else:
             status = "needs_mapping"
+
+        # Compute the one-pill readiness badge for the grid. Pure
+        # function — no DB, no I/O — so the per-row cost is bounded
+        # by the number of constraints across all enabled channels
+        # (currently 5 channels × ~10 fields each = O(50) string ops).
+        try:
+            badge = compute_badge(p).to_dict()
+        except Exception:
+            badge = None
+
+        # Surface the image / product URL at the top level so the
+        # Studio grid can render thumbnails without a second
+        # round-trip. Reads through the central ``extract_field``
+        # helper so Phase 2's column-promotion is a one-line change.
+        meta = (p.extra_metadata or {}) if hasattr(p, "extra_metadata") else {}
+        image_url   = meta.get("image_url") or meta.get("thumbnail") or ""
+        product_url = meta.get("product_url") or meta.get("url") or ""
+
         out_rows.append({
             "id":                    p.id,
             "title":                 p.title,
             "external_id":           getattr(p, "external_id", None),
+            "sku":                   getattr(p, "sku", None),
             "meta_retailer_id":      getattr(p, "meta_retailer_id", None),
             "effective_retailer_id": eff or None,
             "publish_status":        status,
             "in_stock":              bool(getattr(p, "in_stock", True)),
+            "stock_quantity":        getattr(p, "stock_quantity", None),
+            "price":                 getattr(p, "price", None),
+            "image_url":             image_url,
+            "product_url":           product_url,
             # Surface the product source so the dashboard table can
             # render a Salla / Manual / Unknown badge per row without
             # a second round-trip. Reads ``Product.source`` (column,
             # post-migration 0062) with JSONB + heuristic fallback —
             # see ``core.catalog.product_source`` for the contract.
             "source":                product_source(p),
+            # One-pill readiness summary — see ``ProductBadge``.
+            "readiness_badge":       badge,
         })
 
     # Cheap counts via SQL — same dual-column predicate as the audit
@@ -955,7 +1092,8 @@ def _product_diag_rows(
 
     return {
         "rows":   out_rows,
-        "total":  int(total),
+        "total":  int(filtered_total),       # respects active filters
+        "tenant_total": int(total),          # unfiltered (for tenant-wide copy)
         "limit":  int(limit),
         "offset": int(offset),
         "coverage": {
@@ -964,6 +1102,13 @@ def _product_diag_rows(
             "published":   int(published),
             "unpublished": int(total) - int(published),
             "total":       int(total),
+        },
+        "filters_applied": {
+            "q":               q or None,
+            "source":          source or None,
+            "has_image":       has_image,
+            "has_retailer_id": has_retailer_id,
+            "in_stock":        in_stock,
         },
     }
 
@@ -1070,14 +1215,28 @@ async def merchant_catalog_products(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    q:                Optional[str]  = Query(None, description="Free-text search across title / SKU / retailer ids"),
+    source:           Optional[str]  = Query(None, description="Filter by Product.source (salla|manual|meta|...)"),
+    has_image:        Optional[bool] = Query(None, description="True = only products with an image; False = only without"),
+    has_retailer_id:  Optional[bool] = Query(None),
+    in_stock:         Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """List products with their retailer_id mapping state. Read-only;
-    no plan gate (a merchant on Starter can inspect their coverage
-    before upgrading — gating the READ would be hostile UX)."""
+    """List products for the Studio grid (May 2026 #15).
+
+    Read-only, NOT plan-gated. Supports the closed set of Studio
+    filters; see ``_apply_studio_filters`` for the predicate map.
+    Pagination is offset-based — the grid uses page-size 50 by
+    default and bumps to 100 on big screens.
+    """
     tenant_id = resolve_tenant_id(request)
-    return _product_diag_rows(db, tenant_id, limit=limit, offset=offset)
+    return _product_diag_rows(
+        db, tenant_id, limit=limit, offset=offset,
+        q=q, source=source,
+        has_image=has_image, has_retailer_id=has_retailer_id,
+        in_stock=in_stock,
+    )
 
 
 @merchant_router.post("/resync")
@@ -1110,10 +1269,20 @@ async def admin_catalog_products(
     tenant_id: int = Query(..., ge=1),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    q:                Optional[str]  = Query(None),
+    source:           Optional[str]  = Query(None),
+    has_image:        Optional[bool] = Query(None),
+    has_retailer_id:  Optional[bool] = Query(None),
+    in_stock:         Optional[bool] = Query(None),
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
-    return _product_diag_rows(db, tenant_id, limit=limit, offset=offset)
+    return _product_diag_rows(
+        db, tenant_id, limit=limit, offset=offset,
+        q=q, source=source,
+        has_image=has_image, has_retailer_id=has_retailer_id,
+        in_stock=in_stock,
+    )
 
 
 class _AdminResyncBody(BaseModel):
@@ -1464,6 +1633,99 @@ async def merchant_catalog_update_manual_product(
     return _serialise_manual_product(p)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Import from Meta — Path 4 in the new architecture
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Pull products FROM the merchant's Meta Commerce Manager catalog INTO the
+# Nahla Product Catalog. Implementation lives in
+# ``services/meta_catalog_import.py`` — keep this router thin and limited to
+# preflight / auth / error-code translation.
+#
+# Plan-gated: this is a write operation that adopts Meta-side data, so a
+# merchant on a paid plan with catalog wired up is the audience. Starter
+# merchants will see the standard upgrade payload.
+
+
+@merchant_router.post("/import/meta")
+async def merchant_catalog_import_from_meta(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Import the merchant's Meta Catalog into Nahla.
+
+    On success returns ``{"ok": true, "report": ImportReport.to_dict()}``.
+    On preflight failures (no catalog id / no token / no connection)
+    returns a 400/404 with a structured ``detail`` code the dashboard
+    can match against (``catalog_id_missing`` etc.).
+    """
+    from services.meta_catalog_import import (  # noqa: PLC0415
+        MetaCatalogImportError,
+        import_from_meta,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    try:
+        report = import_from_meta(db, tenant_id)
+    except MetaCatalogImportError as exc:
+        # Map our closed-set error codes to HTTP statuses. The
+        # dashboard pattern-matches on ``detail`` to render the
+        # right remediation copy ("اربط واتساب أولاً" vs
+        # "ضع Catalog ID" vs "أعد المصادقة").
+        status = {
+            "connection_not_found":   404,
+            "catalog_id_missing":     400,
+            "access_token_missing":   400,
+            "meta_http_error":        502,
+        }.get(exc.code, 500)
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+    audit(
+        "merchant_catalog_import_meta",
+        tenant_id=tenant_id,
+        scanned=report.scanned,
+        created=report.created,
+        updated=report.updated,
+        errors=report.errors,
+    )
+    return {"ok": True, "report": report.to_dict()}
+
+
+@admin_router.post("/import/meta")
+async def admin_catalog_import_from_meta(
+    body: _AdminResyncBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin variant — runs the Meta import for an arbitrary tenant.
+    Used by support to seed a tenant's catalog mid-onboarding."""
+    from services.meta_catalog_import import (  # noqa: PLC0415
+        MetaCatalogImportError,
+        import_from_meta,
+    )
+
+    try:
+        report = import_from_meta(db, body.tenant_id)
+    except MetaCatalogImportError as exc:
+        status = {
+            "connection_not_found":   404,
+            "catalog_id_missing":     400,
+            "access_token_missing":   400,
+            "meta_http_error":        502,
+        }.get(exc.code, 500)
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+    audit(
+        "admin_catalog_import_meta",
+        tenant_id=body.tenant_id,
+        scanned=report.scanned,
+        created=report.created,
+        updated=report.updated,
+        errors=report.errors,
+    )
+    return {"ok": True, "report": report.to_dict()}
+
+
 @merchant_router.delete("/products/manual/{product_id}")
 async def merchant_catalog_delete_manual_product(
     product_id: int,
@@ -1495,6 +1757,273 @@ async def merchant_catalog_delete_manual_product(
         tenant_id=tenant_id, product_id=int(product_id),
     )
     return {"deleted": True, "id": int(product_id)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Product Studio — detail + readiness endpoints (May 2026 #15)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The Studio drawer needs two server interactions:
+#
+#   1. ``GET  /products/{id}``           — load the full row plus
+#      per-channel readiness so the drawer renders badges + warnings
+#      on open.
+#   2. ``POST /readiness/preview``       — recompute readiness on every
+#      keystroke (debounced client-side). Body is the in-flight
+#      draft; the server never persists, just runs the pure engine
+#      and returns the same shape as #1.
+#
+# Both return the SAME ``per_channel`` shape so the drawer can swap
+# between "stored" and "draft" verdicts without rewiring its UI tree.
+
+
+def _serialise_studio_product(p: "Product") -> Dict[str, Any]:
+    """Detail-view serialiser — superset of the grid serialiser.
+
+    Pulls the JSONB sidecar fields the drawer's edit form needs
+    (image / product URL / additional images / variants). Tolerant
+    of legacy rows where the sidecar is NULL.
+    """
+    meta = p.extra_metadata or {}
+    return {
+        "id":               int(p.id),
+        "tenant_id":        int(p.tenant_id),
+        "title":            p.title,
+        "description":      p.description,
+        "price":            p.price,
+        "sku":              p.sku,
+        "external_id":      p.external_id,
+        "meta_retailer_id": p.meta_retailer_id,
+        "effective_retailer_id": effective_retailer_id(p),
+        "in_stock":         bool(p.in_stock),
+        "stock_quantity":   p.stock_quantity,
+        "source":           product_source(p),
+        # Phase 1 JSONB sidecar — Phase 2 promotes these to columns.
+        "image_url":          meta.get("image_url") or meta.get("thumbnail") or "",
+        "product_url":        meta.get("product_url") or meta.get("url") or "",
+        "additional_images":  meta.get("additional_images") or [],
+        "sale_price":         meta.get("sale_price") or "",
+        "currency":           meta.get("currency") or "",
+        "availability":       meta.get("availability") or ("in stock" if p.in_stock else "out of stock"),
+        "brand":              meta.get("brand") or "",
+        "category":           meta.get("category") or "",
+        "condition":          meta.get("condition") or "",
+        "gtin":               meta.get("gtin") or "",
+        "mpn":                meta.get("mpn") or "",
+        # Variants stay in JSONB throughout Phase 1 — the Studio drawer
+        # reads them but writing variants is gated until Phase 2's
+        # ``ProductVariant`` table lands. UI displays them read-only.
+        "variants":           meta.get("variants") or [],
+        "meta_catalog_published_at": p.meta_catalog_published_at.isoformat() if p.meta_catalog_published_at else None,
+    }
+
+
+def _compute_per_channel(product_or_draft: Any) -> List[Dict[str, Any]]:
+    """Run the readiness engine and return JSON-friendly dicts.
+
+    Wrapping the engine in this helper means the router never has
+    to know about ``ChannelReadiness`` — every endpoint that needs
+    readiness gets the serialised list.
+    """
+    from services.product_readiness import compute_all  # noqa: PLC0415
+    return [r.to_dict() for r in compute_all(product_or_draft)]
+
+
+@merchant_router.get("/products/{product_id}")
+async def merchant_catalog_product_detail(
+    product_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Full detail for the Studio drawer.
+
+    Tenant isolation: ``tenant_id`` is resolved from the JWT and the
+    query is scoped against it — a 404 fires for cross-tenant access
+    rather than 403 (no information leak about row existence).
+    """
+    tenant_id = resolve_tenant_id(request)
+    p = (
+        db.query(Product)
+          .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+          .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    return {
+        "product":     _serialise_studio_product(p),
+        "per_channel": _compute_per_channel(p),
+    }
+
+
+@admin_router.get("/products/{product_id}")
+async def admin_catalog_product_detail(
+    product_id: int,
+    tenant_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    p = (
+        db.query(Product)
+          .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+          .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    return {
+        "product":     _serialise_studio_product(p),
+        "per_channel": _compute_per_channel(p),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Readiness preview — keystroke-friendly, no DB write
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ReadinessPreviewBody(BaseModel):
+    """In-flight product draft.
+
+    Mirrors the Studio drawer's form state. Every field is optional
+    so the preview works from the first keystroke (when only ``title``
+    is filled) all the way through a complete row.
+
+    The body is **the entire product**, not a patch — the dashboard
+    sends what it has rendered, and the server computes against
+    THAT (not against the DB row). This means a draft never gets
+    "blended" with stale DB state, which would confuse the live
+    counter UX.
+    """
+    title:            Optional[str]  = Field(None, max_length=2048)
+    description:      Optional[str]  = None
+    price:            Optional[str]  = Field(None, max_length=128)
+    sale_price:       Optional[str]  = Field(None, max_length=128)
+    currency:         Optional[str]  = Field(None, max_length=8)
+    sku:              Optional[str]  = Field(None, max_length=128)
+    external_id:      Optional[str]  = Field(None, max_length=128)
+    meta_retailer_id: Optional[str]  = Field(None, max_length=255)
+    image_url:        Optional[str]  = Field(None, max_length=2048)
+    product_url:      Optional[str]  = Field(None, max_length=2048)
+    additional_images: Optional[List[str]] = None
+    availability:     Optional[str]  = None
+    brand:            Optional[str]  = Field(None, max_length=255)
+    category:         Optional[str]  = Field(None, max_length=255)
+    condition:        Optional[str]  = None
+    gtin:             Optional[str]  = Field(None, max_length=64)
+    mpn:              Optional[str]  = Field(None, max_length=64)
+    in_stock:         Optional[bool] = None
+    stock_quantity:   Optional[int]  = Field(None, ge=0)
+
+
+def _readiness_preview_impl(body: "_ReadinessPreviewBody") -> Dict[str, Any]:
+    """Tenant-agnostic readiness computation for a draft.
+
+    Pure-ish — only side effect is normalising the draft into the
+    same shape ``extract_field`` reads at runtime. No DB, no audit
+    log (the merchant hasn't committed anything yet).
+    """
+    data = body.model_dump(exclude_unset=False)
+
+    # Synthesise availability from in_stock if the merchant hasn't
+    # touched the field — keeps the preview verdict aligned with
+    # what the create endpoint will store.
+    if not data.get("availability"):
+        if data.get("in_stock") is False:
+            data["availability"] = "out of stock"
+        elif data.get("in_stock") is True:
+            data["availability"] = "in stock"
+
+    draft = {
+        **{k: v for k, v in data.items() if k != "additional_images"},
+        # Match the live Product shape — drawer fields live at top-
+        # level AND inside extra_metadata so ``extract_field`` finds
+        # them on first try regardless of resolution order.
+        "extra_metadata": {
+            "image_url":         data.get("image_url"),
+            "product_url":       data.get("product_url"),
+            "additional_images": data.get("additional_images") or [],
+            "sale_price":        data.get("sale_price"),
+            "currency":          data.get("currency"),
+            "availability":      data.get("availability"),
+            "brand":             data.get("brand"),
+            "category":          data.get("category"),
+            "condition":         data.get("condition"),
+            "gtin":              data.get("gtin"),
+            "mpn":               data.get("mpn"),
+        },
+    }
+    return {"per_channel": _compute_per_channel(draft)}
+
+
+@merchant_router.post("/readiness/preview")
+async def merchant_catalog_readiness_preview(
+    body: _ReadinessPreviewBody,
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Recompute per-channel readiness for a draft. No DB write.
+
+    Designed to be hit on every keystroke (the dashboard debounces
+    at ~250ms). The engine is pure → this endpoint is hot-cache-
+    friendly and the latency floor is dominated by network RTT.
+    Tenant isolation is irrelevant because no row is read or written;
+    we still gate on a valid session so anonymous probing can't
+    enumerate channel constraints.
+    """
+    return _readiness_preview_impl(body)
+
+
+@admin_router.post("/readiness/preview")
+async def admin_catalog_readiness_preview(
+    body: _ReadinessPreviewBody,
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin variant — same pure computation as merchant."""
+    return _readiness_preview_impl(body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Channel registry — surface the constraint catalogue to the dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@merchant_router.get("/channels")
+async def merchant_catalog_channels(
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Snapshot of every registered ``ChannelSpec``.
+
+    The Studio drawer uses this to render the live counters' labels +
+    tooltips + the order of channel badges. Cached per-process; the
+    registry is static at import time so the response is effectively
+    free.
+    """
+    from services.channel_specs import all_specs  # noqa: PLC0415
+
+    out = []
+    for spec in all_specs():
+        out.append({
+            "channel":        spec.channel,
+            "label_ar":       spec.label_ar,
+            "icon_key":       spec.icon_key,
+            "enabled":        spec.enabled,
+            "description_ar": spec.description_ar,
+            "image_required": spec.image_required,
+            "fields": [
+                {
+                    "field":            fc.field,
+                    "label_ar":         fc.label_ar,
+                    "required":         fc.required,
+                    "min_length":       fc.min_length,
+                    "max_length":       fc.max_length,
+                    "allowed_values":   list(fc.allowed_values) if fc.allowed_values else None,
+                    "regex":            fc.regex,
+                    "soft_warn_at_pct": fc.soft_warn_at_pct,
+                    "rationale_ar":     fc.rationale_ar,
+                }
+                for fc in spec.fields
+            ],
+        })
+    return {"channels": out}
 
 
 __all__ = ["merchant_router", "admin_router"]

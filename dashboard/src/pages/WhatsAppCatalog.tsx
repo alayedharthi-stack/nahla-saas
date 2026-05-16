@@ -34,7 +34,8 @@ import { useEffect, useState } from 'react'
 import {
   AlertTriangle, BookOpen, CheckCircle2, ExternalLink, Loader2,
   Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
-  Store, MessageCircle, Database,
+  Store, MessageCircle, Database, ArrowDown, Bot, Megaphone, ShoppingBag,
+  Download, Clock,
 } from 'lucide-react'
 import {
   catalogApi,
@@ -45,7 +46,9 @@ import {
   type CatalogTestSendResult,
   type ProductSource,
   type DominantSource,
+  type MetaImportReport,
 } from '../api/catalog'
+import ProductStudio from './ProductStudio'
 
 // Source → Arabic label + colour palette mapping. Single source of
 // truth for the source badges that appear on the diagnostics card AND
@@ -53,6 +56,7 @@ import {
 const SOURCE_META: Record<DominantSource, { label: string; bg: string; text: string }> = {
   salla:   { label: 'سلة',    bg: 'bg-orange-50  border-orange-200',  text: 'text-orange-700' },
   zid:     { label: 'زد',     bg: 'bg-violet-50  border-violet-200',  text: 'text-violet-700' },
+  meta:    { label: 'Meta',   bg: 'bg-blue-50    border-blue-200',    text: 'text-blue-700'   },
   manual:  { label: 'يدوي',   bg: 'bg-sky-50     border-sky-200',     text: 'text-sky-700'    },
   unknown: { label: 'غير محدد', bg: 'bg-slate-50  border-slate-200',  text: 'text-slate-600'  },
   mixed:   { label: 'مختلط',  bg: 'bg-amber-50   border-amber-200',   text: 'text-amber-700'  },
@@ -265,6 +269,16 @@ export default function WhatsAppCatalog() {
         </p>
       </div>
 
+      {/* ── Hub diagram: Sources → Catalog → Channels ─────────────
+            Visual mental model: Nahla Catalog is the central hub.
+            Sources feed it (Manual / Salla / Meta-import / future);
+            Channels consume it (WhatsApp / AI / Campaigns / future).
+            The diagram reads the same diagnostics payload that the
+            "حالة الكتالوج" card uses — single source of truth. */}
+      {diagnostics && (
+        <HubDiagramCard diagnostics={diagnostics} />
+      )}
+
       {/* ── Diagnostics snapshot (source-agnostic) ──────────────── */}
       {diagnostics && (
         <Card title="حالة الكتالوج" icon={<Database className="w-5 h-5 text-emerald-600" />}>
@@ -459,10 +473,11 @@ export default function WhatsAppCatalog() {
         </div>
       </Card>
 
-      {/* ── Product mapping (resync + full coverage table) ────────── */}
-      <Card title="ربط المنتجات بالكتالوج" icon={<Package className="w-5 h-5 text-emerald-600" />}>
+      {/* ── Catalog tools (resync + retailer_id coverage) ───────────
+            Catalog-level operations live above the Studio. Per-product
+            actions live INSIDE the Studio (the grid + drawer). */}
+      <Card title="أدوات الكتالوج" icon={<RefreshCw className="w-5 h-5 text-emerald-600" />}>
         <div className="space-y-4">
-          {/* Coverage summary + resync button */}
           <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
             <div className="space-y-1">
               <p className="text-sm font-semibold text-slate-800">
@@ -510,73 +525,20 @@ export default function WhatsAppCatalog() {
               </ul>
             </div>
           )}
+        </div>
+      </Card>
 
-          {/* Products table */}
-          {productsLoading && (
-            <div className="text-sm text-slate-500 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" /> جاري تحميل المنتجات...
-            </div>
-          )}
-
-          {products && products.rows.length > 0 && (
-            <div className="overflow-x-auto -mx-2">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-slate-500 uppercase">
-                  <tr className="border-b border-slate-100">
-                    <th className="text-right py-2 px-2">ID</th>
-                    <th className="text-right py-2 px-2">المنتج</th>
-                    <th className="text-right py-2 px-2">المصدر</th>
-                    <th className="text-right py-2 px-2">external_id</th>
-                    <th className="text-right py-2 px-2">meta_retailer_id</th>
-                    <th className="text-right py-2 px-2">retailer_id فعّال</th>
-                    <th className="text-right py-2 px-2">الحالة</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {products.rows.map(p => (
-                    <tr key={p.id} className="border-b border-slate-50 last:border-0">
-                      <td className="py-2 px-2 text-slate-500">{p.id}</td>
-                      <td className="py-2 px-2 text-slate-800 truncate max-w-[260px]" title={p.title}>{p.title}</td>
-                      <td className="py-2 px-2"><SourceBadge source={p.source} /></td>
-                      <td className="py-2 px-2 text-slate-500 font-mono text-xs" dir="ltr">{p.external_id ?? '—'}</td>
-                      <td className="py-2 px-2 text-slate-500 font-mono text-xs" dir="ltr">{p.meta_retailer_id ?? '—'}</td>
-                      <td className="py-2 px-2">
-                        {p.effective_retailer_id
-                          ? <code className="bg-emerald-50 text-emerald-700 text-xs px-1.5 py-0.5 rounded" dir="ltr">{p.effective_retailer_id}</code>
-                          : <span className="text-xs text-amber-700">مفقود</span>}
-                      </td>
-                      <td className="py-2 px-2">
-                        <span className={
-                          'text-xs px-2 py-0.5 rounded-full font-semibold ' +
-                          (p.publish_status === 'published'
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : p.publish_status === 'ready'
-                              ? 'bg-blue-50 text-blue-700'
-                              : 'bg-amber-50 text-amber-700')
-                        }>
-                          {p.publish_status === 'published' ? 'منشور'
-                            : p.publish_status === 'ready' ? 'جاهز'
-                              : 'بحاجة لمزامنة'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {products.total > products.rows.length && (
-                <p className="text-xs text-slate-400 mt-2 text-center">
-                  عرض {products.rows.length} من أصل {products.total} منتج. استخدم Meta Commerce Manager لإدارة الباقي.
-                </p>
-              )}
-            </div>
-          )}
-
-          {products && products.rows.length === 0 && (
-            <p className="text-sm text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-4 text-center leading-relaxed">
-              لا توجد منتجات بعد. اربط متجر سلة لجلب المنتجات تلقائياً،
-              أو أضف منتجاتك يدوياً من القسم أدناه إذا لم يكن لديك متجر.
-            </p>
-          )}
+      {/* ── Product Studio (May 2026 #15 — Phase 1) ──────────────────
+            Meta-Commerce-Manager-style grid + drawer with live counters
+            and per-channel readiness. Owns the per-product UX. */}
+      <Card title="استوديو المنتجات" icon={<Package className="w-5 h-5 text-emerald-600" />}>
+        <div className="space-y-2">
+          <p className="text-xs text-slate-500 leading-relaxed">
+            استوديو إدارة المنتجات الموحّد. اضغط على أي منتج لفتحه في النافذة الجانبية
+            ومعاينة جاهزيته للنشر عبر القنوات (واتساب / Meta / الذكاء / الحملات / Google قريباً)
+            مع عدّادات الحدود الحيّة أثناء التحرير.
+          </p>
+          <ProductStudio />
         </div>
       </Card>
 
@@ -592,6 +554,19 @@ export default function WhatsAppCatalog() {
           await loadDiagnostics()
         }}
       />
+
+      {/* ── Import from Meta (Hub: Meta → Nahla) ────────────────────
+            Optional source for merchants who already have products
+            inside Meta Commerce Manager. Only renders when the Meta
+            channel is wired (we need a catalog_id + token to pull). */}
+      {diagnostics?.catalog.catalog_id_present && (
+        <MetaImportSection
+          onChanged={async () => {
+            await loadProducts()
+            await loadDiagnostics()
+          }}
+        />
+      )}
 
       {/* ── Test send ────────────────────────────────────────────── */}
       <Card title="إرسال تجريبي" icon={<Send className="w-5 h-5 text-emerald-600" />}>
@@ -662,6 +637,278 @@ export default function WhatsAppCatalog() {
         </div>
       </Card>
     </div>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Hub diagram (May 2026 #14 — Hub architecture)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Visual representation of the catalog hub: Sources on the left feed
+// the central Catalog box, which then feeds Channels on the right.
+// Each Source / Channel renders an availability state read from the
+// existing diagnostics payload — no new endpoint required.
+//
+// Source states:
+//   • ``active``   — at least one product on this source is in Nahla
+//   • ``available`` — wired but no products imported yet (e.g. Meta
+//                     catalog_id present but no Meta-source rows)
+//   • ``unused``   — not wired
+//
+// Channel states:
+//   • ``live``     — channel is wired AND has data to send
+//   • ``available`` — wired but no products to consume yet
+//   • ``planned``  — future feature (Google Merchant, Checkout)
+//   • ``unused``   — not wired
+
+type NodeStatus = 'live' | 'active' | 'available' | 'unused' | 'planned'
+
+const STATUS_STYLES: Record<NodeStatus, { pill: string; dot: string; label: string }> = {
+  live:      { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500',   label: 'مُفعّل' },
+  active:    { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500',   label: 'يغذّي الكتالوج' },
+  available: { pill: 'bg-blue-50    border-blue-200',    dot: 'bg-blue-500',      label: 'متاح' },
+  unused:    { pill: 'bg-slate-50   border-slate-200',   dot: 'bg-slate-300',     label: 'غير مربوط' },
+  planned:   { pill: 'bg-amber-50   border-amber-200',   dot: 'bg-amber-400',     label: 'قريباً' },
+}
+
+function HubNode(props: {
+  icon: React.ReactNode
+  title: string
+  subtitle?: string
+  status: NodeStatus
+}) {
+  const s = STATUS_STYLES[props.status]
+  return (
+    <div className={`relative rounded-xl border p-3 ${s.pill}`}>
+      <div className="flex items-center gap-2">
+        <div className="shrink-0">{props.icon}</div>
+        <div className="min-w-0">
+          <div className="font-bold text-sm text-slate-800 truncate">{props.title}</div>
+          {props.subtitle && (
+            <div className="text-[11px] text-slate-500 truncate">{props.subtitle}</div>
+          )}
+        </div>
+      </div>
+      <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
+        <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+        <span className="text-[10px] text-slate-600">{s.label}</span>
+      </div>
+    </div>
+  )
+}
+
+function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
+  const d = props.diagnostics
+  const breakdown = d.products.source_breakdown
+
+  // Source availability — derived purely from the diagnostics payload.
+  const sallaCount  = breakdown.salla  ?? 0
+  const metaCount   = breakdown.meta   ?? 0
+  const manualCount = breakdown.manual ?? 0
+
+  const sallaStatus:  NodeStatus = sallaCount > 0 ? 'active' : 'unused'
+  const metaStatus:   NodeStatus =
+    metaCount > 0 ? 'active'
+    : d.catalog.catalog_id_present ? 'available'
+    : 'unused'
+  const manualStatus: NodeStatus = manualCount > 0 ? 'active' : 'available'
+
+  // Channel availability.
+  const waStatus: NodeStatus =
+    d.readiness.catalog_ready ? 'live'
+    : d.catalog.whatsapp_connected ? 'available'
+    : 'unused'
+  const aiStatus: NodeStatus = d.products.total > 0 ? 'live' : 'available'
+  const campaignsStatus: NodeStatus = d.products.total > 0 ? 'available' : 'unused'
+
+  return (
+    <Card title="بنية الكتالوج (Hub)" icon={<Database className="w-5 h-5 text-emerald-600" />}>
+      <p className="text-xs text-slate-600 leading-relaxed mb-4">
+        كتالوج نحلة هو المصدر المركزي للمنتجات. <strong>المصادر</strong> تغذّي الكتالوج،
+        و<strong>القنوات</strong> تستهلك منه. الذكاء يقرأ من كتالوج نحلة فقط — أبداً
+        من سلة أو Meta مباشرة.
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr_auto_1fr] gap-3 items-center">
+        {/* ── Sources column ── */}
+        <div className="space-y-2">
+          <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
+            المصادر (Inputs)
+          </div>
+          <HubNode
+            icon={<Store className="w-4 h-4 text-orange-600" />}
+            title="سلة"
+            subtitle={sallaCount > 0 ? `${sallaCount} منتج` : 'غير مربوط'}
+            status={sallaStatus}
+          />
+          <HubNode
+            icon={<Package className="w-4 h-4 text-blue-600" />}
+            title="Meta Catalog"
+            subtitle={metaCount > 0 ? `${metaCount} منتج (مستورد)` : (d.catalog.catalog_id_present ? 'جاهز للاستيراد' : 'لم يُربط بعد')}
+            status={metaStatus}
+          />
+          <HubNode
+            icon={<Store className="w-4 h-4 text-sky-600" />}
+            title="إدخال يدوي"
+            subtitle={manualCount > 0 ? `${manualCount} منتج` : 'متاح دائماً'}
+            status={manualStatus}
+          />
+          <HubNode
+            icon={<Clock className="w-4 h-4 text-amber-500" />}
+            title="Shopify / CSV / Zid"
+            subtitle="قريباً"
+            status="planned"
+          />
+        </div>
+
+        {/* Arrow Sources → Hub */}
+        <div className="hidden md:flex flex-col items-center text-slate-400">
+          <ArrowDown className="w-6 h-6 -rotate-90" />
+        </div>
+        <div className="flex md:hidden justify-center">
+          <ArrowDown className="w-5 h-5 text-slate-400" />
+        </div>
+
+        {/* ── Catalog Hub (center) ── */}
+        <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-2 border-emerald-300 rounded-2xl p-4 text-center">
+          <Database className="w-8 h-8 text-emerald-700 mx-auto mb-1" />
+          <div className="font-black text-sm text-emerald-900">كتالوج نحلة</div>
+          <div className="text-xs text-emerald-800 mt-1">
+            {d.products.total} منتج
+          </div>
+          <div className="text-[11px] text-emerald-700 mt-1">
+            المصدر الموحّد
+          </div>
+        </div>
+
+        {/* Arrow Hub → Channels */}
+        <div className="hidden md:flex flex-col items-center text-slate-400">
+          <ArrowDown className="w-6 h-6 -rotate-90" />
+        </div>
+        <div className="flex md:hidden justify-center">
+          <ArrowDown className="w-5 h-5 text-slate-400" />
+        </div>
+
+        {/* ── Channels column ── */}
+        <div className="space-y-2">
+          <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
+            القنوات (Outputs)
+          </div>
+          <HubNode
+            icon={<MessageCircle className="w-4 h-4 text-emerald-600" />}
+            title="WhatsApp Catalog"
+            subtitle={waStatus === 'live' ? 'جاهز للإرسال' : (waStatus === 'available' ? 'يحتاج Meta Catalog ID' : 'اربط واتساب أولاً')}
+            status={waStatus}
+          />
+          <HubNode
+            icon={<Bot className="w-4 h-4 text-violet-600" />}
+            title="الذكاء (AI)"
+            subtitle={aiStatus === 'live' ? 'يقرأ من الكتالوج' : 'يحتاج منتجات'}
+            status={aiStatus}
+          />
+          <HubNode
+            icon={<Megaphone className="w-4 h-4 text-rose-600" />}
+            title="الحملات"
+            subtitle={campaignsStatus === 'available' ? 'متاح للاستخدام' : 'يحتاج منتجات'}
+            status={campaignsStatus}
+          />
+          <HubNode
+            icon={<ShoppingBag className="w-4 h-4 text-amber-500" />}
+            title="Google Merchant / الدفع"
+            subtitle="قريباً"
+            status="planned"
+          />
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Meta import section (Path 4)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Trigger ``/merchant/catalog/import/meta``. Only mounted when the
+// Meta channel is wired (catalog_id present) — otherwise the import
+// would fail preflight anyway, so showing a button would be confusing.
+
+function MetaImportSection(props: { onChanged: () => Promise<void> }) {
+  const [busy, setBusy]       = useState(false)
+  const [error, setError]     = useState<string | null>(null)
+  const [report, setReport]   = useState<MetaImportReport | null>(null)
+
+  const errorCopy = (code: string | undefined): string => {
+    switch (code) {
+      case 'connection_not_found':  return 'لا يوجد ربط واتساب حالياً. يرجى ربط واتساب أولاً.'
+      case 'catalog_id_missing':    return 'يرجى إدخال Meta Catalog ID في قسم "ربط الكتالوج بواتساب وMeta" أعلاه.'
+      case 'access_token_missing':  return 'الرمز المطلوب للوصول إلى Meta غير متوفر. أعد ربط واتساب لتجديده.'
+      case 'meta_http_error':       return 'تعذّر الاتصال بـ Meta Catalog. يرجى التأكد من صلاحية الـ Catalog ID والرمز.'
+      default:                      return code ? `خطأ غير متوقع: ${code}` : 'تعذّر تنفيذ الاستيراد.'
+    }
+  }
+
+  const onImport = async () => {
+    setBusy(true); setError(null); setReport(null)
+    try {
+      const r = await catalogApi.importFromMeta()
+      setReport(r.report)
+      await props.onChanged()
+    } catch (e: any) {
+      // The API wrapper surfaces the FastAPI ``detail`` as ``e.code``
+      // or ``e.message`` — try both.
+      setError(errorCopy(e?.code ?? e?.detail ?? e?.message))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="استيراد المنتجات من Meta" icon={<Download className="w-5 h-5 text-emerald-600" />}>
+      <div className="space-y-3">
+        <p className="text-xs text-slate-600 leading-relaxed">
+          إذا كانت منتجاتك جاهزة بالفعل في Meta Commerce Manager، يمكنك استيرادها مباشرة
+          إلى كتالوج نحلة. الاستيراد آمن وقابل للإعادة (idempotent) — تشغيله مرّة أخرى
+          يحدّث البيانات بدون تكرار. المنتجات اليدوية محميّة من الكتابة فوقها.
+        </p>
+
+        {error && (
+          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
+            <XCircle className="w-4 h-4 shrink-0 mt-0.5" /> {error}
+          </div>
+        )}
+
+        {report && (
+          <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-900 space-y-1">
+            <p className="font-bold">تقرير الاستيراد</p>
+            <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
+              <li>تم المسح: {report.scanned}</li>
+              <li>جديد: {report.created}</li>
+              <li>محدّث: {report.updated}</li>
+              <li>محمي (يدوي): {report.skipped_manual}</li>
+              <li>أخطاء: {report.errors}</li>
+              <li>صفحات: {report.pages_fetched}</li>
+            </ul>
+            {report.truncated && (
+              <p className="text-amber-700 mt-1">
+                تنبيه: تم بلوغ حد الصفحات. شغّل الاستيراد مرة أخرى لجلب الباقي.
+              </p>
+            )}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onImport}
+          disabled={busy}
+          className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
+        >
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          استيراد الآن من Meta
+        </button>
+      </div>
+    </Card>
   )
 }
 

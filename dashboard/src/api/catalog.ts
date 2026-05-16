@@ -106,25 +106,89 @@ export interface CatalogPatchResponse {
 
 // Canonical product-source strings the backend stamps on every row.
 // Mirrors `KNOWN_SOURCES` in backend/core/catalog.py. Extend together.
-export type ProductSource = 'salla' | 'zid' | 'manual' | 'unknown'
+//
+// Hub architecture: each value names an INPUT side that feeds the
+// central Nahla Catalog. ``meta`` is for products imported FROM the
+// merchant's Meta Commerce Manager catalog — even if they will later
+// be pushed BACK to Meta as an output channel, the input-side tag is
+// permanent.
+export type ProductSource = 'salla' | 'zid' | 'meta' | 'manual' | 'unknown'
 export type DominantSource = ProductSource | 'mixed'
+
+// Output channels the catalog can publish to. ``google_merchant`` and
+// ``checkout`` are planning-only today.
+export type CatalogChannel =
+  | 'whatsapp'
+  | 'meta_catalog'
+  | 'ai'
+  | 'campaigns'
+  | 'google_merchant'
+  | 'checkout'
+
+// ── Product Studio types (May 2026 #15) ──────────────────────────────
+//
+// Mirrors backend/services/product_readiness.* and the new Studio
+// endpoints in routers/catalog.py.
+
+export type ReadinessState = 'ok' | 'warn' | 'error' | 'missing'
+export type ReadinessLevel = 'green' | 'amber' | 'red' | 'slate'
+
+export interface ReadinessFieldStatus {
+  field:     string
+  label_ar:  string
+  state:     ReadinessState
+  count:     number | null
+  limit:     number | null
+  soft_at:   number | null
+  message:   string
+  rationale: string
+  required:  boolean
+}
+
+export interface ChannelReadiness {
+  channel:        string
+  label_ar:       string
+  icon_key:       string
+  enabled:        boolean
+  ready:          boolean
+  score_pct:      number
+  blocking_count: number
+  warnings_count: number
+  fields:         ReadinessFieldStatus[]
+}
+
+export interface ProductBadge {
+  enabled_total:  number
+  ready_count:    number
+  warn_count:     number
+  blocking_count: number
+  score_pct:      number
+  level:          ReadinessLevel
+}
 
 export interface CatalogProductDiagRow {
   id:                    number
   title:                 string
   external_id:           string | null
+  sku:                   string | null
   meta_retailer_id:      string | null
   effective_retailer_id: string | null
   publish_status:        'published' | 'ready' | 'needs_mapping'
   in_stock:              boolean
+  stock_quantity:        number | null
+  price:                 string | null
+  image_url:             string
+  product_url:           string
   source:                ProductSource
+  readiness_badge:       ProductBadge | null
 }
 
 export interface CatalogProductDiagResponse {
-  rows:   CatalogProductDiagRow[]
-  total:  number
-  limit:  number
-  offset: number
+  rows:          CatalogProductDiagRow[]
+  total:         number   // post-filter count (drives pagination)
+  tenant_total?: number   // unfiltered count (tenant-wide stat)
+  limit:         number
+  offset:        number
   coverage: {
     with_rid:    number
     missing_rid: number
@@ -132,6 +196,110 @@ export interface CatalogProductDiagResponse {
     unpublished: number
     total:       number
   }
+  filters_applied?: {
+    q:               string | null
+    source:          string | null
+    has_image:       boolean | null
+    has_retailer_id: boolean | null
+    in_stock:        boolean | null
+  }
+}
+
+// Studio filters — typed query-string for the products list.
+export interface StudioFilters {
+  q?:               string
+  source?:          ProductSource
+  has_image?:       boolean
+  has_retailer_id?: boolean
+  in_stock?:        boolean
+}
+
+// Full product detail returned by GET /products/{id}.
+export interface StudioProduct {
+  id:                          number
+  tenant_id:                   number
+  title:                       string
+  description:                 string | null
+  price:                       string | null
+  sku:                         string | null
+  external_id:                 string | null
+  meta_retailer_id:            string | null
+  effective_retailer_id:       string
+  in_stock:                    boolean
+  stock_quantity:              number | null
+  source:                      ProductSource
+  image_url:                   string
+  product_url:                 string
+  additional_images:           string[]
+  sale_price:                  string
+  currency:                    string
+  availability:                string
+  brand:                       string
+  category:                    string
+  condition:                   string
+  gtin:                        string
+  mpn:                         string
+  variants:                    Array<Record<string, unknown>>
+  meta_catalog_published_at:   string | null
+}
+
+export interface ProductDetailResponse {
+  product:     StudioProduct
+  per_channel: ChannelReadiness[]
+}
+
+// Body for the readiness preview endpoint — mirrors
+// `_ReadinessPreviewBody`. Every field optional so the live counter
+// works from the first keystroke.
+export interface ReadinessPreviewBody {
+  title?:             string
+  description?:       string
+  price?:             string
+  sale_price?:        string
+  currency?:          string
+  sku?:               string
+  external_id?:       string
+  meta_retailer_id?:  string
+  image_url?:         string
+  product_url?:       string
+  additional_images?: string[]
+  availability?:      string
+  brand?:             string
+  category?:          string
+  condition?:         string
+  gtin?:              string
+  mpn?:               string
+  in_stock?:          boolean
+  stock_quantity?:    number
+}
+
+export interface ReadinessPreviewResponse {
+  per_channel: ChannelReadiness[]
+}
+
+// Channel registry snapshot — drives the live-counter labels +
+// tooltips so the dashboard never has to hard-code "Meta title is
+// 200 chars".
+export interface ChannelFieldSpec {
+  field:            string
+  label_ar:         string
+  required:         boolean
+  min_length:       number | null
+  max_length:       number | null
+  allowed_values:   string[] | null
+  regex:            string | null
+  soft_warn_at_pct: number
+  rationale_ar:     string
+}
+
+export interface ChannelSpecResponse {
+  channel:        string
+  label_ar:       string
+  icon_key:       string
+  enabled:        boolean
+  description_ar: string
+  image_required: boolean
+  fields:         ChannelFieldSpec[]
 }
 
 export interface CatalogResyncReport {
@@ -147,6 +315,39 @@ export interface CatalogResyncResponse {
   ok:     boolean
   report: CatalogResyncReport
 }
+
+// ── Import from Meta (Hub architecture — May 2026 #14) ───────────────
+//
+// Pull merchant products FROM Meta Commerce Manager INTO the Nahla
+// catalog. Mirrors `services/meta_catalog_import.ImportReport`.
+
+export interface MetaImportReport {
+  scanned:        number
+  created:        number
+  updated:        number
+  skipped_manual: number
+  errors:         number
+  pages_fetched:  number
+  truncated:      boolean
+  error_samples:  Array<{
+    id?:          string | null
+    retailer_id?: string | null
+    reason:       string
+  }>
+}
+
+export interface MetaImportResponse {
+  ok:     boolean
+  report: MetaImportReport
+}
+
+// Error detail codes the backend returns on preflight failure. The UI
+// matches on these to render the right remediation copy.
+export type MetaImportErrorCode =
+  | 'connection_not_found'
+  | 'catalog_id_missing'
+  | 'access_token_missing'
+  | 'meta_http_error'
 
 // ── Diagnostics (source-agnostic snapshot) ───────────────────────────
 //
@@ -227,9 +428,30 @@ export const catalogApi = {
       body:   JSON.stringify(body),
     })
   },
-  products(limit: number = 50, offset: number = 0): Promise<CatalogProductDiagResponse> {
+  products(
+    limit: number = 50,
+    offset: number = 0,
+    filters?: StudioFilters,
+  ): Promise<CatalogProductDiagResponse> {
     const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    if (filters?.q)               qs.set('q', filters.q)
+    if (filters?.source)          qs.set('source', filters.source)
+    if (filters?.has_image       !== undefined) qs.set('has_image',       String(filters.has_image))
+    if (filters?.has_retailer_id !== undefined) qs.set('has_retailer_id', String(filters.has_retailer_id))
+    if (filters?.in_stock        !== undefined) qs.set('in_stock',        String(filters.in_stock))
     return apiCall<CatalogProductDiagResponse>(`/merchant/catalog/products?${qs.toString()}`)
+  },
+  productDetail(id: number): Promise<ProductDetailResponse> {
+    return apiCall<ProductDetailResponse>(`/merchant/catalog/products/${id}`)
+  },
+  readinessPreview(draft: ReadinessPreviewBody): Promise<ReadinessPreviewResponse> {
+    return apiCall<ReadinessPreviewResponse>('/merchant/catalog/readiness/preview', {
+      method: 'POST',
+      body:   JSON.stringify(draft),
+    })
+  },
+  channels(): Promise<{ channels: ChannelSpecResponse[] }> {
+    return apiCall<{ channels: ChannelSpecResponse[] }>('/merchant/catalog/channels')
   },
   resync(): Promise<CatalogResyncResponse> {
     return apiCall<CatalogResyncResponse>('/merchant/catalog/resync', { method: 'POST' })
@@ -255,6 +477,13 @@ export const catalogApi = {
       `/merchant/catalog/products/manual/${id}`,
       { method: 'DELETE' },
     )
+  },
+  // Import from Meta — Path 4. Pulls products from Meta Commerce
+  // Manager into the Nahla catalog. Idempotent.
+  importFromMeta(): Promise<MetaImportResponse> {
+    return apiCall<MetaImportResponse>('/merchant/catalog/import/meta', {
+      method: 'POST',
+    })
   },
 }
 

@@ -181,14 +181,53 @@ def assign_canonical_retailer_id(product: Any) -> bool:
 # Closed set of canonical source strings. Adding a new source = adding a
 # new entry here AND updating the writer. The UI badge mapping lives in
 # the dashboard's CatalogPage and reads exactly these strings.
+#
+# Hub architecture (May 2026 #14)
+# ───────────────────────────────
+# Nahla Catalog is the central product hub. SOURCES feed it (one-way
+# IN) and CHANNELS consume it (one-way OUT). The two directions are
+# strictly separate at the data layer:
+#
+#     INPUT SOURCES   →   NAHLA CATALOG   →   OUTPUT CHANNELS
+#     ───────────────     ─────────────       ────────────────
+#     Manual entry        ``products``       WhatsApp / Meta
+#     Salla sync             table           Campaigns
+#     Meta import                            AI (product_resolver)
+#     (future: Zid /                         (future: Google
+#      Shopify / CSV)                         Merchant / Checkout)
+#
+# Each ``Product.source`` value names which INPUT side produced the row.
+# A product imported FROM Meta has ``source = "meta"`` even if it will
+# later be pushed BACK to Meta as an output channel — direction matters,
+# and the input-side tag is permanent.
 SOURCE_SALLA   = "salla"
 SOURCE_ZID     = "zid"
+SOURCE_META    = "meta"     # Imported FROM Meta Catalog into Nahla
 SOURCE_MANUAL  = "manual"
 SOURCE_UNKNOWN = "unknown"
 
 # Sources we accept on intake. ``unknown`` is allowed as a backfill value
 # only — new writes MUST pick a concrete source.
-KNOWN_SOURCES = frozenset({SOURCE_SALLA, SOURCE_ZID, SOURCE_MANUAL, SOURCE_UNKNOWN})
+KNOWN_SOURCES = frozenset({
+    SOURCE_SALLA, SOURCE_ZID, SOURCE_META, SOURCE_MANUAL, SOURCE_UNKNOWN,
+})
+
+
+# Output channels — for the dashboard hub diagram + future export jobs.
+# Strings are stable: campaign senders + future Google Merchant export
+# read this exact vocabulary when they self-report which channel a
+# given send went through.
+CHANNEL_WHATSAPP        = "whatsapp"
+CHANNEL_META_CATALOG    = "meta_catalog"
+CHANNEL_AI              = "ai"
+CHANNEL_CAMPAIGNS       = "campaigns"
+CHANNEL_GOOGLE_MERCHANT = "google_merchant"   # planning-only
+CHANNEL_CHECKOUT        = "checkout"          # planning-only
+
+KNOWN_CHANNELS = frozenset({
+    CHANNEL_WHATSAPP, CHANNEL_META_CATALOG, CHANNEL_AI,
+    CHANNEL_CAMPAIGNS, CHANNEL_GOOGLE_MERCHANT, CHANNEL_CHECKOUT,
+})
 
 
 def product_source(product: Any) -> str:
