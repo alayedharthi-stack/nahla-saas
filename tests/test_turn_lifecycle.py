@@ -159,9 +159,38 @@ def test_production_incident_now_returns_soft_retry_not_false_handoff():
     # The forbidden false-handoff template must NEVER come back for
     # this question. Pin the exact substring that caused the bug.
     assert "سيتم الرد عليك في أقرب وقت من فريق المتجر" not in decision.text
-    # The new copy should ask the customer to re-phrase / give more
-    # detail — that's the "honest" part of the contract.
+    # The new copy should ask the customer to re-send — that's the
+    # "honest" part of the contract.
     assert decision.text  # non-empty
+
+
+def test_soft_retry_no_longer_offers_four_topic_menu():
+    """May 2026 #18 production regression: the original SOFT_RETRY
+    copy "(عن المنتج / السعر / التوصيل / الدفع)" surfaced too often
+    for clear informational asks like "وش عندكم عسل" / "وشلون
+    التوصيل" / "كم مدة التوصيل" — Brain was crashing on these and
+    the customer saw a four-topic clarification menu that made the
+    AI feel dumber than it actually is.
+
+    The fix rolls the SOFT_RETRY wording back to a simple, honest
+    retry that does NOT imply the customer was vague and does NOT
+    push a topic menu. This test pins both pathologies as
+    forbidden so a future "let's add helpful topic hints" patch
+    doesn't reintroduce the regression."""
+    decision = choose_safe_fallback(
+        "وش عندكم عسل",
+        reason=FALLBACK_REASON_BRAIN_EXCEPTION,
+    )
+    # The four-topic parenthetical is the most insulting bit — it
+    # offers a fixed menu that doesn't match what the customer
+    # asked. Must never reappear.
+    assert "(عن المنتج / السعر / التوصيل / الدفع)" not in decision.text
+    # "بتفاصيل أكثر" implies the customer was vague. For a clear
+    # ask, that's wrong-footed. Must never reappear either.
+    assert "بتفاصيل أكثر" not in decision.text
+    # We're still in the soft-retry telemetry bucket so the team
+    # can see informational-ask retries in [TURN] logs.
+    assert decision.kind == FALLBACK_KIND_SOFT_RETRY
 
 
 def test_explicit_handoff_request_keeps_handoff_ack():

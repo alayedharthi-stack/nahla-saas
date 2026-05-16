@@ -223,12 +223,45 @@ _TEXT_HANDOFF_ACK = (
 )
 
 # Informational + LLM failed. We tell the truth: there was a glitch,
-# and we ask the customer to re-phrase. No false promise of human
+# and we ask the customer to re-send. No false promise of human
 # escalation. Emoji is intentional (matches the rest of the tenant
 # voice).
+#
+# May 2026 #18 — production regression rollback. The previous wording
+# was:
+#
+#     "حصل خلل تقني بسيط 🌷 ممكن تعيد سؤالك بتفاصيل أكثر؟ "
+#     "(عن المنتج / السعر / التوصيل / الدفع)"
+#
+# That copy fired whenever Brain raised on an informational ask
+# (anything starting with وش / كيف / كم / هل / متى / وين etc.). Two
+# problems showed up in production:
+#
+#   1. The "بتفاصيل أكثر" wording IMPLIES the customer was vague.
+#      For clear asks like "وش عندكم عسل" / "وشلون طريقة التوصيل"
+#      / "كم مدة التوصيل" the customer's intent is already obvious
+#      — telling them to "give more detail" is wrong-footed and
+#      makes the AI feel dumber than it actually is.
+#
+#   2. The four-topic parenthetical "(عن المنتج / السعر / التوصيل
+#      / الدفع)" offers a fixed menu that doesn't even match what
+#      the customer asked about. The merchant's rule was:
+#
+#         "لا يجوز أن يسقط الرد إلى 'وش تقصد؟' إلا إذا كانت
+#          الرسالة الحالية نفسها غامضة."
+#
+#      A clear shipping ask shouldn't get a "pick a topic" menu —
+#      it should get a shipping answer (the intent-aware path) or
+#      a friendly retry that doesn't insinuate vagueness.
+#
+# This wording strips both pathologies. It stays honest about the
+# glitch but does NOT accuse the customer of being unclear and does
+# NOT push a topic menu in their face. The kind label
+# (``FALLBACK_KIND_SOFT_RETRY``) is preserved for telemetry so we
+# can still tell informational-ask retries apart from generic
+# retries in the [TURN] log.
 _TEXT_SOFT_RETRY = (
-    "حصل خلل تقني بسيط 🌷 ممكن تعيد سؤالك بتفاصيل أكثر؟ "
-    "(عن المنتج / السعر / التوصيل / الدفع)"
+    "حصل خلل تقني بسيط 🌷 ممكن تعيد رسالتك؟"
 )
 
 # Generic — when the question is neither clearly informational nor a
