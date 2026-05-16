@@ -1693,12 +1693,14 @@ async def merchant_catalog_import_from_meta(
         # Map our closed-set error codes to HTTP statuses. The
         # dashboard pattern-matches on ``detail.code`` to render
         # the right remediation copy ("اربط واتساب أولاً" vs
-        # "ضع Catalog ID" vs "أعد المصادقة").
+        # "ضع Catalog ID" vs "أعد المصادقة" vs "نحتاج Meta OAuth
+        # token لإستيراد الكتالوج، لا يكفي 360dialog").
         status = {
-            "connection_not_found":   404,
-            "catalog_id_missing":     400,
-            "access_token_missing":   400,
-            "meta_http_error":        502,
+            "connection_not_found":      404,
+            "catalog_id_missing":        400,
+            "access_token_missing":      400,
+            "meta_access_token_missing": 400,
+            "meta_http_error":           502,
         }.get(exc.code, 500)
 
         # ``logger.exception`` (not ``logger.error``) so Railway
@@ -1752,10 +1754,11 @@ async def admin_catalog_import_from_meta(
             detail_payload["raw_detail"] = str(_exc_detail)[:2000]
 
         status = {
-            "connection_not_found":   404,
-            "catalog_id_missing":     400,
-            "access_token_missing":   400,
-            "meta_http_error":        502,
+            "connection_not_found":      404,
+            "catalog_id_missing":        400,
+            "access_token_missing":      400,
+            "meta_access_token_missing": 400,
+            "meta_http_error":           502,
         }.get(exc.code, 500)
         logger.exception(
             "[META_IMPORT][API_ERROR] admin tenant=%s code=%s status=%d detail=%s",

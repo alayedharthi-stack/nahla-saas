@@ -50,13 +50,24 @@ Import contract
 
 Auth + endpoints
 ────────────────
-We reuse the SAME credentials the WhatsApp send chain already has:
+The Catalog Graph API requires a Meta OAuth / system-user token —
+NOT every credential on ``WhatsAppConnection`` qualifies. See
+``_select_graph_token`` below for the full selection contract;
+the short version is:
 
-  • ``WhatsAppConnection.access_token`` — long-lived system user
-    token granted during embedded-signup. Carries the
-    ``catalog_management`` scope when the merchant opted into it.
-  • ``WhatsAppConnection.meta_catalog_id`` — the Commerce Manager
-    catalog identifier the merchant pasted on the catalog page.
+  1. ``WhatsAppConnection.access_token`` when
+     ``WhatsAppConnection.provider == "meta"`` — long-lived
+     system-user token granted during Embedded Signup. Carries
+     the ``catalog_management`` scope when the merchant opted in.
+
+  2. Platform-wide system user token (env ``WHATSAPP_TOKEN``) as
+     a fallback for 360dialog / coexistence merchants whose
+     ``conn.access_token`` is a ``D360-API-KEY`` — that field
+     CANNOT authenticate against ``graph.facebook.com`` and is
+     never sent there.
+
+  3. ``WhatsAppConnection.meta_catalog_id`` — the Commerce Manager
+     catalog identifier the merchant pasted on the catalog page.
 
 Meta Graph API:
     GET https://graph.facebook.com/{v}/{catalog_id}/products
@@ -86,7 +97,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from core.catalog import SOURCE_MANUAL, SOURCE_META, assign_canonical_retailer_id
-from core.config import META_GRAPH_API_VERSION
+from core.config import META_GRAPH_API_VERSION, WA_TOKEN
 from models import Product, WhatsAppConnection
 
 logger = logging.getLogger("nahla.meta_catalog_import")
@@ -173,10 +184,14 @@ class MetaCatalogImportError(RuntimeError):
 
     Codes (closed set, mapped 1:1 in the router):
 
-    * ``connection_not_found`` → 404
-    * ``catalog_id_missing``   → 400 (merchant must wire Meta first)
-    * ``access_token_missing`` → 400 (token not present)
-    * ``meta_http_error``      → 502 (upstream failure)
+    * ``connection_not_found``       → 404
+    * ``catalog_id_missing``         → 400 (merchant must wire Meta first)
+    * ``access_token_missing``       → 400 (no token at all on conn)
+    * ``meta_access_token_missing``  → 400 (token exists but is the wrong
+                                            kind — typically a 360dialog
+                                            D360-API-KEY where Graph
+                                            requires Meta OAuth)
+    * ``meta_http_error``            → 502 (upstream failure)
     """
     def __init__(self, code: str, message: str = "", *, detail: Any = None):
         super().__init__(message or code)
@@ -213,6 +228,136 @@ class ImportReport:
             "truncated":       self.truncated,
             "error_samples":   self.error_samples[:10],
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Graph API token selection (May 2026 #19e)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Production incident (tenant=33, catalog_id=2426534581035003):
+# Meta rejected our call with ``code=190 — Invalid OAuth access token``.
+# Root cause: the merchant connected via 360dialog (coexistence), so
+# their ``WhatsAppConnection.access_token`` column holds a 360dialog
+# ``D360-API-KEY``, NOT a Meta Graph API token. The original importer
+# blindly read ``conn.access_token`` and sent it to
+# ``graph.facebook.com``, which can never authenticate a D360 key.
+#
+# Token sources we accept for the Catalog Graph API (ordered):
+#
+#   1. ``merchant_meta_oauth``  — ``conn.access_token`` when
+#      ``conn.provider == "meta"``. This is the Meta system-user /
+#      OAuth token the merchant produced through Embedded Signup;
+#      it natively carries the ``catalog_management`` scope when the
+#      merchant clicked that permission during signup.
+#
+#   2. ``platform_system_user`` — the platform-wide system user
+#      token in ``WA_TOKEN`` (env ``WHATSAPP_TOKEN``). Used as a
+#      fallback for merchants whose connection has no merchant-side
+#      Meta OAuth token (coexistence / 360dialog merchants, or
+#      merchants who signed up before catalog_management was added
+#      to the Embedded Signup config). Whether the platform's
+#      system user actually has catalog_management on the target
+#      catalog is enforced upstream by Meta — we let that surface
+#      as ``[META_IMPORT][HTTP_ERROR]`` rather than guessing here.
+#
+# What we NEVER do:
+#
+#   * ``conn.access_token`` for ``provider="dialog360"`` — that's a
+#     D360-API-KEY, not a Graph token. Sending it would produce
+#     exactly the ``code=190`` error this incident surfaced.
+#
+# When neither source is available we raise the new
+# ``meta_access_token_missing`` code (mapped to 400 in the router)
+# so the merchant gets a clear "this needs a Meta OAuth token" copy
+# in the dashboard instead of an opaque 502.
+_TOKEN_SOURCE_MERCHANT_OAUTH  = "merchant_meta_oauth"
+_TOKEN_SOURCE_PLATFORM_SYSTEM = "platform_system_user"
+_TOKEN_SOURCE_NONE            = "none"
+
+
+def _select_graph_token(conn: Any) -> Dict[str, Any]:
+    """Pick a Graph API-compatible token for the Catalog endpoints.
+
+    Returns a dict carrying the resolved token alongside enough
+    metadata for both the ``[META_IMPORT][READY]`` log line and the
+    structured ``meta_access_token_missing`` response payload:
+
+        {
+            "token":            str | None,
+            "token_source":     "merchant_meta_oauth"
+                              | "platform_system_user"
+                              | "none",
+            "provider":         "meta" | "dialog360" | "",
+            "connection_type":  "direct" | "embedded" | "coexistence" | "",
+            "token_tail":       last 4 chars or "<empty>",
+            "token_len":        int,
+            "considered":       list[dict]  ← which sources were
+                                             tried, in order, with
+                                             reason they were rejected
+                                             (so support can see why
+                                             the merchant_oauth slot
+                                             was skipped).
+        }
+    """
+    provider     = str(getattr(conn, "provider", "") or "").lower()
+    connection_t = str(getattr(conn, "connection_type", "") or "").lower()
+    raw_token    = str(getattr(conn, "access_token", "") or "").strip()
+
+    considered: List[Dict[str, Any]] = []
+
+    # ── Slot 1: merchant Meta OAuth (only when provider=meta) ──
+    if provider == "meta":
+        if raw_token:
+            return {
+                "token":           raw_token,
+                "token_source":    _TOKEN_SOURCE_MERCHANT_OAUTH,
+                "provider":        provider,
+                "connection_type": connection_t,
+                "token_tail":      _mask_token(raw_token),
+                "token_len":       len(raw_token),
+                "considered":      considered,
+            }
+        considered.append({
+            "source": _TOKEN_SOURCE_MERCHANT_OAUTH,
+            "reason": "provider=meta but conn.access_token is empty",
+        })
+    else:
+        considered.append({
+            "source": _TOKEN_SOURCE_MERCHANT_OAUTH,
+            "reason": (
+                f"skipped — provider={provider or '<unset>'} is not 'meta', "
+                f"so conn.access_token is a non-Graph credential "
+                f"(typically a 360dialog D360-API-KEY) and would trigger "
+                f"OAuthException code=190 against graph.facebook.com."
+            ),
+        })
+
+    # ── Slot 2: platform system user token (WA_TOKEN env) ──────
+    platform_token = (WA_TOKEN or "").strip()
+    if platform_token:
+        return {
+            "token":           platform_token,
+            "token_source":    _TOKEN_SOURCE_PLATFORM_SYSTEM,
+            "provider":        provider,
+            "connection_type": connection_t,
+            "token_tail":      _mask_token(platform_token),
+            "token_len":       len(platform_token),
+            "considered":      considered,
+        }
+    considered.append({
+        "source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
+        "reason": "WA_TOKEN env (WHATSAPP_TOKEN) is empty",
+    })
+
+    return {
+        "token":           None,
+        "token_source":    _TOKEN_SOURCE_NONE,
+        "provider":        provider,
+        "connection_type": connection_t,
+        "token_tail":      "<none>",
+        "token_len":       0,
+        "considered":      considered,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,12 +406,35 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             "Meta Catalog ID is not configured on the WhatsApp connection.",
             detail={"hint": "WhatsAppConnection.meta_catalog_id is empty"},
         )
-    token = (conn.access_token or "").strip()
+    # ── Graph token selection (May 2026 #19e) ─────────────────
+    # NOT a simple ``conn.access_token`` read anymore — for
+    # dialog360 / coexistence merchants that field holds a
+    # D360-API-KEY which Meta rejects with code=190. See
+    # ``_select_graph_token`` docstring for the full ordering.
+    token_pick = _select_graph_token(conn)
+    token = token_pick["token"]
     if not token:
         raise MetaCatalogImportError(
-            "access_token_missing",
-            "Meta access token is not present on the connection.",
-            detail={"hint": "WhatsAppConnection.access_token is empty"},
+            "meta_access_token_missing",
+            "Meta catalog import requires a Meta Graph API access "
+            "token, not a 360dialog API key. No merchant Meta OAuth "
+            "token is on file for this WhatsApp connection and the "
+            "platform system-user fallback (WA_TOKEN) is not "
+            "configured.",
+            detail={
+                "provider":         token_pick["provider"],
+                "connection_type":  token_pick["connection_type"],
+                "catalog_id":       catalog_id,
+                "token_source":     token_pick["token_source"],
+                "considered":       token_pick["considered"],
+                "hint": (
+                    "Ask the merchant to reconnect WhatsApp via Meta "
+                    "Embedded Signup and grant the 'catalog_management' "
+                    "permission, OR set WHATSAPP_TOKEN to a platform "
+                    "system-user token with catalog_management on the "
+                    "target catalog."
+                ),
+            },
         )
 
     report = ImportReport()
@@ -284,9 +452,15 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
 
     logger.info(
         "[META_IMPORT][READY] tenant=%s catalog_id=%s graph_api_version=%s "
-        "token=%s page_size=%d max_pages=%d timeout=%.1fs",
+        "provider=%s connection_type=%s token_source=%s token_tail=%s "
+        "token_len=%d page_size=%d max_pages=%d timeout=%.1fs",
         tenant_id, catalog_id, META_GRAPH_API_VERSION,
-        _mask_token(token), PAGE_SIZE, MAX_PAGES, REQUEST_TIMEOUT,
+        token_pick["provider"] or "<unset>",
+        token_pick["connection_type"] or "<unset>",
+        token_pick["token_source"],
+        token_pick["token_tail"],
+        token_pick["token_len"],
+        PAGE_SIZE, MAX_PAGES, REQUEST_TIMEOUT,
     )
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
