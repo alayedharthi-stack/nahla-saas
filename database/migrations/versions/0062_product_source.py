@@ -95,12 +95,23 @@ def upgrade() -> None:
     # diagnostics report meaningful numbers on day one. Subsequent
     # writes go through the application layer (Salla sync, manual
     # CRUD, etc.) which set the column directly.
+    #
+    # Column-naming note (May 2026 #19c — production fix):
+    # ``Product.extra_metadata = Column('metadata', JSONB)`` in
+    # ``database/models.py:154`` — i.e. the ORM ATTRIBUTE is
+    # ``extra_metadata`` but the actual Postgres COLUMN is named
+    # ``metadata``. The original SQL here referenced
+    # ``extra_metadata`` and blew up on production with
+    # ``UndefinedColumn: column "extra_metadata" does not exist``,
+    # leaving the migration rolled back at 0061. Use the real DB
+    # column name in raw SQL (the SQLite branch below already
+    # used ``metadata`` correctly).
     if dialect == "postgresql":
         op.execute(sa.text("""
             UPDATE products
                SET source = COALESCE(
-                       NULLIF(extra_metadata::jsonb->>'source', ''),
-                       extra_metadata::jsonb->>'source',
+                       NULLIF(metadata::jsonb->>'source', ''),
+                       metadata::jsonb->>'source',
                        CASE
                            WHEN external_id IS NOT NULL
                                 AND external_id <> ''
