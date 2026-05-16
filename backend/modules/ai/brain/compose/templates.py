@@ -50,6 +50,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .mirror_replies import mirror_reply as _mirror_reply
+
 # ── Greeting ─────────────────────────────────────────────────────────────────
 #
 # Two persona modes, both wired through the same `greeting()` entry point:
@@ -828,13 +830,32 @@ def social_reply(
     category: str = "general_courtesy",
     variant: int = 0,
     sub_variant: int = 0,
+    *,
+    inbound_text: str = "",
     **_: Any,
 ) -> str:
     """Pick a warm Gulf-style social acknowledgment (1–2 short lines).
 
-    ``variant`` and ``sub_variant`` are deterministic indices supplied by the
-    composer so neighbouring turns rarely repeat verbatim.
+    Priority cascade:
+
+    1. ``mirror_reply(inbound_text)`` — if the customer used a
+       culturally-anchored blessing ("تسلم" / "بيض الله وجهك" /
+       "جزاك الله خير" / ...) we deterministically return its
+       conventional reciprocal. This was the May 2026 #9 fix for
+       "pool answers feel disconnected from what the customer said".
+    2. Otherwise rotate through the per-category pool keyed by
+       ``variant`` × ``sub_variant`` for variety across turns.
+
+    ``inbound_text`` is keyword-only so existing callers pass through
+    unchanged — they just won't benefit from the mirror layer until
+    they start forwarding the customer message.
     """
+    # 1) Mirror layer — deterministic cultural reciprocal.
+    mirrored = _mirror_reply(inbound_text)
+    if mirrored:
+        return mirrored
+
+    # 2) Pool rotation — historical behaviour.
     bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(
         (category or "").strip().lower() or "general_courtesy",
         _SOCIAL_GENERAL_COURTESY_VARIANTS,

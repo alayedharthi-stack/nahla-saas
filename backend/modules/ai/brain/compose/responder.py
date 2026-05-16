@@ -413,10 +413,16 @@ class DefaultComposer:
             # Two rotation axes: turn index × category → more variety without drift.
             v_main = self._variant_idx(ctx)
             v_secondary = (len(ctx.history or []) // 3) % 5
+            # Forward the inbound text so the mirror layer (May 2026 #9)
+            # can return a culturally-anchored reciprocal when the
+            # customer's exact phrasing carries one ("تسلم" → "الله
+            # يسلمك" / "بيض الله وجهك" → "وجهك أبيض"). When no mirror
+            # rule fires the pool rotation takes over unchanged.
             reply = T.social_reply(
                 category=category,
                 variant=v_main,
                 sub_variant=v_secondary,
+                inbound_text=(ctx.message or ""),
             )
             # Light gender-awareness layer (May 2026 — surgical add-on).
             # The default template is masculine (Arabic's unmarked
