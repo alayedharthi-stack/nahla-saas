@@ -163,6 +163,132 @@ def assign_canonical_retailer_id(product: Any) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Product source identification (catalog source-agnostic architecture)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The Nahla Product Catalog is an independent first-class asset, deliberately
+# decoupled from any specific upstream platform. Today it can be populated by
+# the Salla sync (``services/store_sync.py``), the Zid sync, or by merchants
+# entering products by hand through the dashboard. Future writers (Shopify,
+# WooCommerce, CSV upload) plug in by setting ``Product.source`` and the
+# usual ``Product.*`` fields — nothing else in the catalog pipeline cares.
+#
+# The helpers below are the SINGLE source of truth for:
+#   * what ``source`` strings are recognised,
+#   * how to read ``source`` off a heterogeneous Product / dict shape,
+#   * how to summarise the source mix across a tenant.
+
+# Closed set of canonical source strings. Adding a new source = adding a
+# new entry here AND updating the writer. The UI badge mapping lives in
+# the dashboard's CatalogPage and reads exactly these strings.
+SOURCE_SALLA   = "salla"
+SOURCE_ZID     = "zid"
+SOURCE_MANUAL  = "manual"
+SOURCE_UNKNOWN = "unknown"
+
+# Sources we accept on intake. ``unknown`` is allowed as a backfill value
+# only — new writes MUST pick a concrete source.
+KNOWN_SOURCES = frozenset({SOURCE_SALLA, SOURCE_ZID, SOURCE_MANUAL, SOURCE_UNKNOWN})
+
+
+def product_source(product: Any) -> str:
+    """Return the canonical source string for *product*.
+
+    Resolution order (first non-empty wins):
+
+    1. ``product.source`` (top-level column, post-migration 0062).
+    2. ``product.extra_metadata['source']`` — historical location used by
+       the legacy Salla sync writer at ``integrations/salla/sync/products.py``.
+    3. Heuristic: if ``external_id`` is set we assume the row came from a
+       sync (most likely Salla — the longest-running writer); otherwise we
+       can't tell and return ``"unknown"``. This is the same heuristic the
+       0062 backfill uses, so old + new rows render consistently.
+
+    Returns a lowercased string from the closed ``KNOWN_SOURCES`` set,
+    or ``"unknown"`` when no signal can be derived. Tolerant of plain
+    dicts and ORM rows alike. Never raises.
+    """
+    if product is None:
+        return SOURCE_UNKNOWN
+
+    raw = getattr(product, "source", None)
+    if raw is None and isinstance(product, dict):
+        raw = product.get("source")
+    if raw:
+        s = str(raw).strip().lower()
+        if s in KNOWN_SOURCES:
+            return s
+        # Unknown literal string — surface as "unknown" rather than the
+        # opaque foreign value so the UI badge mapping stays a closed set.
+        return SOURCE_UNKNOWN
+
+    meta = getattr(product, "extra_metadata", None)
+    if meta is None and isinstance(product, dict):
+        meta = product.get("extra_metadata") or product.get("metadata")
+    if isinstance(meta, dict):
+        meta_src = meta.get("source")
+        if meta_src:
+            s = str(meta_src).strip().lower()
+            if s in KNOWN_SOURCES:
+                return s
+
+    # No explicit source — fall back to the same heuristic the migration
+    # uses. A product with an external_id almost certainly came from a
+    # sync (legacy: ``salla``); a row with neither could be a manual row
+    # from before migration 0062 OR a half-written sync row.
+    ext = getattr(product, "external_id", None)
+    if ext is None and isinstance(product, dict):
+        ext = product.get("external_id")
+    if ext and str(ext).strip():
+        return SOURCE_SALLA
+    return SOURCE_UNKNOWN
+
+
+def source_breakdown(products: Iterable[Any]) -> dict:
+    """Aggregate ``product_source`` across an iterable into a count map.
+
+    Used by the catalog diagnostics endpoint. The return shape is a plain
+    ``{source: int}`` dict so it serialises straight to JSON. Sources with
+    zero rows are omitted from the result — empty dicts mean "tenant has
+    zero products at all".
+    """
+    counts: dict[str, int] = {}
+    for p in products or []:
+        s = product_source(p)
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def dominant_source(breakdown: dict) -> str:
+    """Pick the "main" source for badge rendering in the UI.
+
+    Rules:
+      * Empty input → ``"unknown"``.
+      * Single non-zero entry → that source.
+      * Multiple entries: the strict majority (>50%) wins; otherwise
+        ``"mixed"``. The latter case lets the UI show "مصدر مختلط" so
+        the merchant knows manual edits live next to sync rows.
+
+    Returns one of: any KNOWN_SOURCES member, or the special string
+    ``"mixed"`` for plural-source tenants.
+    """
+    if not breakdown:
+        return SOURCE_UNKNOWN
+    total = sum(breakdown.values())
+    if total == 0:
+        return SOURCE_UNKNOWN
+    # Single-source short-circuit.
+    nonzero = [(k, v) for k, v in breakdown.items() if v > 0]
+    if len(nonzero) == 1:
+        return nonzero[0][0]
+    # Plural — does anyone strictly own the majority?
+    top_key, top_val = max(nonzero, key=lambda kv: kv[1])
+    if top_val * 2 > total:
+        return top_key
+    return "mixed"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Catalog eligibility
 # ─────────────────────────────────────────────────────────────────────────────
 

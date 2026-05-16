@@ -104,6 +104,11 @@ export interface CatalogPatchResponse {
 
 // ── Product diagnostic + resync ──────────────────────────────────────
 
+// Canonical product-source strings the backend stamps on every row.
+// Mirrors `KNOWN_SOURCES` in backend/core/catalog.py. Extend together.
+export type ProductSource = 'salla' | 'zid' | 'manual' | 'unknown'
+export type DominantSource = ProductSource | 'mixed'
+
 export interface CatalogProductDiagRow {
   id:                    number
   title:                 string
@@ -112,6 +117,7 @@ export interface CatalogProductDiagRow {
   effective_retailer_id: string | null
   publish_status:        'published' | 'ready' | 'needs_mapping'
   in_stock:              boolean
+  source:                ProductSource
 }
 
 export interface CatalogProductDiagResponse {
@@ -142,6 +148,67 @@ export interface CatalogResyncResponse {
   report: CatalogResyncReport
 }
 
+// ── Diagnostics (source-agnostic snapshot) ───────────────────────────
+//
+// Shape mirrors `backend/routers/catalog.py::_diagnostics_payload`.
+// Used by the new "Catalog readiness" card on top of /catalog.
+
+export interface CatalogDiagnostics {
+  catalog: {
+    catalog_id_present:  boolean
+    catalog_id:          string
+    catalog_enabled:     boolean
+    whatsapp_connected:  boolean
+  }
+  products: {
+    total:                          number
+    with_effective_retailer_id:     number
+    without_effective_retailer_id:  number
+    coverage_pct:                   number
+    source_breakdown:               Partial<Record<ProductSource, number>>
+    dominant_source:                DominantSource
+  }
+  readiness: {
+    catalog_ready:  boolean
+  }
+}
+
+// ── Manual product CRUD (Path 3 — no-Salla merchants) ────────────────
+//
+// Mirrors `_ManualProductIn` / `_ManualProductPatch` in
+// backend/routers/catalog.py. All fields except ``title`` are optional
+// on create; every field is optional on patch.
+
+export interface ManualProductInput {
+  title:             string
+  description?:      string | null
+  price?:            string | null
+  sku?:              string | null
+  external_id?:      string | null
+  meta_retailer_id?: string | null
+  image_url?:        string | null
+  product_url?:      string | null
+  in_stock?:         boolean
+  stock_quantity?:   number | null
+}
+
+export interface ManualProductRow {
+  id:                     number
+  tenant_id:              number
+  title:                  string
+  description:            string | null
+  price:                  string | null
+  sku:                    string | null
+  external_id:            string | null
+  meta_retailer_id:       string | null
+  effective_retailer_id:  string
+  in_stock:               boolean
+  stock_quantity:         number | null
+  source:                 ProductSource
+  image_url:              string
+  product_url:            string
+}
+
 // ── Merchant surface ─────────────────────────────────────────────────
 
 export const catalogApi = {
@@ -166,6 +233,28 @@ export const catalogApi = {
   },
   resync(): Promise<CatalogResyncResponse> {
     return apiCall<CatalogResyncResponse>('/merchant/catalog/resync', { method: 'POST' })
+  },
+  diagnostics(): Promise<CatalogDiagnostics> {
+    return apiCall<CatalogDiagnostics>('/merchant/catalog/diagnostics')
+  },
+  // Manual product CRUD — Path 3 in the new architecture.
+  createManualProduct(body: ManualProductInput): Promise<ManualProductRow> {
+    return apiCall<ManualProductRow>('/merchant/catalog/products/manual', {
+      method: 'POST',
+      body:   JSON.stringify(body),
+    })
+  },
+  updateManualProduct(id: number, body: Partial<ManualProductInput>): Promise<ManualProductRow> {
+    return apiCall<ManualProductRow>(`/merchant/catalog/products/manual/${id}`, {
+      method: 'PATCH',
+      body:   JSON.stringify(body),
+    })
+  },
+  deleteManualProduct(id: number): Promise<{ deleted: boolean; id: number }> {
+    return apiCall<{ deleted: boolean; id: number }>(
+      `/merchant/catalog/products/manual/${id}`,
+      { method: 'DELETE' },
+    )
   },
 }
 
@@ -238,5 +327,9 @@ export const adminCatalogApi = {
       method: 'POST',
       body:   JSON.stringify({ tenant_id: tenantId }),
     })
+  },
+  diagnostics(tenantId: number): Promise<CatalogDiagnostics> {
+    const qs = new URLSearchParams({ tenant_id: String(tenantId) })
+    return apiCall<CatalogDiagnostics>(`/admin/catalog/diagnostics?${qs.toString()}`)
   },
 }

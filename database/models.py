@@ -167,6 +167,23 @@ class Product(Base):
     # job populates it. Reading code MUST tolerate NULL — absence here
     # never blocks a send attempt, it only suppresses the freshness badge.
     meta_catalog_published_at = Column(DateTime(timezone=True), nullable=True)
+    # ── Product source (migration 0062) ────────────────────────────────────
+    # Which adapter / channel produced this row. The catalog feature is
+    # explicitly *source-agnostic* — it consumes any product regardless
+    # of where it came from. This column exists so:
+    #   • diagnostics can render a "current source" badge in the UI
+    #     (Salla / Manual / Mixed / Unknown);
+    #   • per-source resync / purge endpoints can scope themselves
+    #     without scanning every row's ``extra_metadata`` JSONB;
+    #   • future writers (Shopify / WooCommerce / CSV upload) plug in
+    #     by setting this string and nothing else.
+    # Allowed values are intentionally not constrained at the DB level
+    # so new writers can plug in without a migration. The string
+    # ``"manual"`` is reserved for products entered through the Nahla
+    # dashboard CRUD; ``"salla"`` for the Salla sync; ``"zid"`` for
+    # the Zid sync; ``"unknown"`` for legacy rows whose origin we
+    # can't determine.
+    source = Column(String(32), nullable=True, index=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='products')
 

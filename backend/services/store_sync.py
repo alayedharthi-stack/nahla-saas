@@ -585,12 +585,32 @@ class StoreSyncService:
         # loop so we don't slow down each iteration with ProductInterest queries
         # for products no one is waiting on.
         restocked: List[Dict[str, Any]] = []
+        # Resolve the product source for THIS sync run once — the value is
+        # the same for every row coming out of a given adapter. Falls back
+        # to the registered adapter platform name (salla/zid/shopify) so
+        # that even adapters that forget to stamp ``source`` on normalised
+        # rows still get a meaningful column value. We deliberately do NOT
+        # default to ``"manual"`` here — a sync that can't identify itself
+        # is still a sync, not a hand-entered product. The diagnostics
+        # endpoint reads ``Product.source`` exclusively, so getting this
+        # right at intake means we never have to scan ``extra_metadata``
+        # JSONB at read time.
+        adapter_source = (
+            getattr(adapter, "platform", None)
+            or "salla"
+        )
+
         for raw in raw_list:
             normalised = _normalise_product(raw)
             ext_id = normalised["external_id"]
             new_qty = _coerce_int(normalised.get("stock_qty"))
             new_in_stock = bool(normalised.get("in_stock", True))
             new_available = new_in_stock and (new_qty is None or new_qty > 0)
+            # Per-row source override (some adapters surface ``source`` on
+            # the normalised dict — e.g. a Salla product re-exported from
+            # a Zid bridge would carry ``source="salla"`` despite being
+            # pulled by the Zid adapter). Per-row beats per-adapter.
+            row_source = normalised.get("source") or adapter_source
 
             existing = (
                 self.db.query(Product)
@@ -611,6 +631,16 @@ class StoreSyncService:
                 existing.in_stock    = new_in_stock
                 existing.stock_quantity = new_qty
                 existing.extra_metadata = normalised
+                # Stamp the canonical source column (migration 0062) on
+                # every sync run so the diagnostics badge stays accurate
+                # even if the merchant later switches platforms. We never
+                # promote a row OUT of ``manual`` — a manual product must
+                # not be silently overwritten by a sync that happens to
+                # match an external_id (that would let a Salla sync wipe
+                # out a merchant's hand-written row). See ``manual_products``
+                # endpoint for the reverse direction.
+                if (existing.source or "").lower() != "manual":
+                    existing.source = row_source
                 # Auto-map: if the row was synced before we started
                 # writing retailer ids, give it one now. Idempotent +
                 # never overwrites an explicit value.
@@ -638,6 +668,7 @@ class StoreSyncService:
                     in_stock     = new_in_stock,
                     stock_quantity = new_qty,
                     extra_metadata = normalised,
+                    source       = row_source,
                 )
                 self.db.add(p)
                 created += 1

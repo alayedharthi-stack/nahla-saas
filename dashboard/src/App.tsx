@@ -145,6 +145,12 @@ export default function App() {
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />
+            {/* Product Catalog — first-class asset, channel-agnostic.
+                  /catalog is the canonical path; /whatsapp-catalog is a
+                  legacy alias so deep-linked bookmarks + the merchant
+                  onboarding email keep working. Both render the same
+                  component. */}
+            <Route path="catalog"            element={<WhatsAppCatalog />} />
             <Route path="whatsapp-catalog"   element={<WhatsAppCatalog />} />
             <Route path="wa-usage"           element={<WaUsage />} />
             <Route path="delivery-quality"   element={<DeliveryQuality />} />

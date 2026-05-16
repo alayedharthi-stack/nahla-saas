@@ -58,6 +58,11 @@ async def fetch_and_sync_products(store_id: str, access_token: str, tenant_id: i
                         product.sku = item.get("sku")
                         price_data = item.get("price", {})
                         product.price = str(price_data.get("amount", "")) if isinstance(price_data, dict) else str(price_data)
+                        # Stamp the canonical source column (migration 0062).
+                        # The legacy ``metadata.source`` field is retained for
+                        # backwards compatibility with old reads, but every new
+                        # diagnostic / UI badge reads the top-level column.
+                        product.source = "salla"
                         product.metadata = {
                             "status": item.get("status"),
                             "thumbnail": item.get("thumbnail", {}).get("url") if isinstance(item.get("thumbnail"), dict) else None,

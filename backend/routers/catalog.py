@@ -58,11 +58,17 @@ from sqlalchemy.orm import Session
 from core.audit import audit
 from core.auth import get_current_user, require_admin
 from core.catalog import (
+    KNOWN_SOURCES,
+    SOURCE_MANUAL,
+    SOURCE_UNKNOWN,
     assign_canonical_retailer_id,
     canonical_retailer_id,
     catalog_summary,
+    dominant_source,
     effective_retailer_id,
     is_catalog_eligible,
+    product_source,
+    source_breakdown,
 )
 from core.database import get_db
 from core.plan_entitlements import (
@@ -72,7 +78,7 @@ from core.plan_entitlements import (
     require_feature,
 )
 from core.tenant import resolve_tenant_id
-from models import Tenant, WhatsAppConnection
+from models import Product, Tenant, WhatsAppConnection
 from modules.observability.delivery_mode import (
     compute_final_delivery_mode,
     new_delivery_audit,
@@ -914,6 +920,12 @@ def _product_diag_rows(
             "effective_retailer_id": eff or None,
             "publish_status":        status,
             "in_stock":              bool(getattr(p, "in_stock", True)),
+            # Surface the product source so the dashboard table can
+            # render a Salla / Manual / Unknown badge per row without
+            # a second round-trip. Reads ``Product.source`` (column,
+            # post-migration 0062) with JSONB + heuristic fallback —
+            # see ``core.catalog.product_source`` for the contract.
+            "source":                product_source(p),
         })
 
     # Cheap counts via SQL — same dual-column predicate as the audit
@@ -1122,6 +1134,367 @@ async def admin_catalog_resync(
         retailer_id_set=report["retailer_id_set"],
     )
     return {"ok": True, "report": report}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics — catalog readiness + product source breakdown
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This endpoint is the single source of truth for the "Catalog status"
+# card the dashboard renders at the top of /catalog. It deliberately
+# returns a flat, JSON-friendly dict (no Pydantic model — the shape is
+# additive and we want to ship new keys without bumping versions) and
+# reads EXACTLY the columns the catalog feature actually uses:
+#
+#   • meta_catalog_id  — Meta side of the integration (per WABA, on
+#                        WhatsAppConnection)
+#   • catalog_enabled  — per-WABA kill switch
+#   • products + their source + their effective_retailer_id coverage
+#
+# It does NOT inspect Salla integrations, JWT scopes, plan tiers, or
+# anything else outside the catalog feature itself. The merchant should
+# see a complete picture of "where do my products come from, where will
+# they appear, and what's missing" without having to cross-reference
+# three other dashboards.
+
+
+def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Build the diagnostics payload for *tenant_id*.
+
+    Three sections in the return value:
+
+    ``catalog`` — Meta WhatsApp Catalog state:
+        ``catalog_id_present`` (bool), ``catalog_id`` (str or empty),
+        ``catalog_enabled`` (bool), ``whatsapp_connected`` (bool — does
+        the tenant have a WhatsAppConnection row at all?).
+
+    ``products`` — Nahla Product Catalog state:
+        ``total`` (count), ``with_effective_retailer_id`` (count),
+        ``without_effective_retailer_id`` (count),
+        ``coverage_pct`` (0-100 int), ``source_breakdown`` (dict),
+        ``dominant_source`` (one of KNOWN_SOURCES + "mixed").
+
+    ``readiness`` — boolean rollup so the UI can render the big "green
+    /amber/red" pill without re-computing the rules:
+        ``catalog_ready`` — meta_catalog_id + catalog_enabled + at
+        least one product has a retailer_id.
+
+    The payload is intentionally tolerant of NULLs: a tenant with zero
+    products + no WhatsApp connection still gets a well-formed response
+    with every count = 0 and ``readiness.catalog_ready = false``.
+    """
+    conn = (
+        db.query(WhatsAppConnection)
+          .filter(WhatsAppConnection.tenant_id == tenant_id)
+          .first()
+    )
+    catalog_id = (getattr(conn, "meta_catalog_id", None) or "").strip() if conn else ""
+    catalog_enabled = bool(getattr(conn, "catalog_enabled", False)) if conn else False
+    wa_connected = bool(
+        conn
+        and getattr(conn, "status", "") == "connected"
+        and getattr(conn, "sending_enabled", False)
+    )
+
+    # Pull all products in one query — we already filter by tenant so the
+    # cost is bounded by the merchant's catalog size, which is the same
+    # bound the /products listing endpoint already pays.
+    products = (
+        db.query(Product)
+          .filter(Product.tenant_id == tenant_id)
+          .all()
+    )
+    total = len(products)
+    with_rid = sum(1 for p in products if effective_retailer_id(p))
+    without_rid = total - with_rid
+    coverage_pct = int(round((with_rid / total) * 100)) if total else 0
+
+    breakdown = source_breakdown(products)
+    dom = dominant_source(breakdown)
+
+    catalog_ready = (
+        bool(catalog_id)
+        and catalog_enabled
+        and with_rid > 0
+    )
+
+    return {
+        "catalog": {
+            "catalog_id_present":  bool(catalog_id),
+            "catalog_id":          catalog_id,
+            "catalog_enabled":     catalog_enabled,
+            "whatsapp_connected":  wa_connected,
+        },
+        "products": {
+            "total":                          total,
+            "with_effective_retailer_id":     with_rid,
+            "without_effective_retailer_id":  without_rid,
+            "coverage_pct":                   coverage_pct,
+            "source_breakdown":               breakdown,
+            "dominant_source":                dom,
+        },
+        "readiness": {
+            "catalog_ready":  catalog_ready,
+        },
+    }
+
+
+@merchant_router.get("/diagnostics")
+async def merchant_catalog_diagnostics(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Source-agnostic catalog diagnostics for the dashboard.
+
+    Read-only, NOT plan-gated — a merchant on Starter should be able to
+    see exactly where they stand before being asked to upgrade. The
+    response shape is documented on ``_diagnostics_payload``.
+    """
+    tenant_id = resolve_tenant_id(request)
+    return _diagnostics_payload(db, tenant_id)
+
+
+@admin_router.get("/diagnostics")
+async def admin_catalog_diagnostics(
+    tenant_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin variant of the merchant diagnostics — same payload, but
+    callable for any tenant. Used by support to triage "my products
+    don't show up in WhatsApp" tickets without asking the merchant to
+    re-share their dashboard."""
+    return _diagnostics_payload(db, tenant_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual products — CRUD for tenants who don't have a synced store
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Path 3 in the new architecture: a merchant with no Salla / Zid / Shopify
+# can still build a Product Catalog inside Nahla by entering rows by
+# hand. The same products are then usable everywhere the catalog feature
+# already plugs in (WhatsApp catalog send, AI [PRODUCT:...] resolver,
+# campaigns).
+#
+# Contract for manual products:
+#   • ``source = "manual"`` is the marker that a sync run MUST NOT
+#     overwrite this row even if its ``external_id`` (NULL by default
+#     for manual rows) happens to clash with an upstream product. The
+#     store_sync upsert at ``services/store_sync.py:_upsert_products``
+#     honours this — see the explicit guard there.
+#   • ``external_id`` is NULL by default. The merchant CAN provide one
+#     if they're entering a row that mirrors a known platform id (e.g.
+#     for hand-pre-population before connecting Salla) — same column
+#     space, no extra plumbing.
+#   • ``meta_retailer_id`` is optional. When NULL,
+#     ``assign_canonical_retailer_id`` writes a synthetic
+#     ``nahla_p_<id>`` after creation so the row is at least catalog-
+#     dispatchable.
+#   • Validation: title is required (and non-empty after trim); price
+#     is a free-form string (merchant decides currency formatting —
+#     same convention as platform-synced rows); image_url + product_url
+#     live inside ``extra_metadata`` to match the Salla shape so the
+#     resolver / sender don't need a manual-specific branch.
+
+
+class _ManualProductIn(BaseModel):
+    """Create payload for a manual product.
+
+    All fields except ``title`` are optional. We deliberately keep the
+    intake permissive — merchants typing on phones make a lot of typos
+    and we'd rather accept and let them iterate than 422 them.
+    """
+    title:            str = Field(..., min_length=1, max_length=512)
+    description:      Optional[str] = None
+    price:            Optional[str] = Field(None, max_length=64)
+    sku:              Optional[str] = Field(None, max_length=128)
+    external_id:      Optional[str] = Field(None, max_length=128)
+    meta_retailer_id: Optional[str] = Field(None, max_length=255)
+    image_url:        Optional[str] = Field(None, max_length=2048)
+    product_url:      Optional[str] = Field(None, max_length=2048)
+    in_stock:         bool = True
+    stock_quantity:   Optional[int] = Field(None, ge=0)
+
+
+class _ManualProductPatch(BaseModel):
+    """Patch payload — every field optional, ``None`` means "leave as is"."""
+    title:            Optional[str] = Field(None, min_length=1, max_length=512)
+    description:      Optional[str] = None
+    price:            Optional[str] = Field(None, max_length=64)
+    sku:              Optional[str] = Field(None, max_length=128)
+    external_id:      Optional[str] = Field(None, max_length=128)
+    meta_retailer_id: Optional[str] = Field(None, max_length=255)
+    image_url:        Optional[str] = Field(None, max_length=2048)
+    product_url:      Optional[str] = Field(None, max_length=2048)
+    in_stock:         Optional[bool] = None
+    stock_quantity:   Optional[int] = Field(None, ge=0)
+
+
+def _serialise_manual_product(p: Product) -> Dict[str, Any]:
+    """Render a product row in the shape the dashboard expects.
+
+    Surfaces both top-level columns AND the JSONB fields the catalog
+    UI cares about (image_url, product_url) — so callers don't need to
+    know that those live in ``extra_metadata``.
+    """
+    meta = p.extra_metadata or {}
+    return {
+        "id":               int(p.id),
+        "tenant_id":        int(p.tenant_id),
+        "title":            p.title,
+        "description":      p.description,
+        "price":            p.price,
+        "sku":              p.sku,
+        "external_id":      p.external_id,
+        "meta_retailer_id": p.meta_retailer_id,
+        "effective_retailer_id": effective_retailer_id(p),
+        "in_stock":         bool(p.in_stock),
+        "stock_quantity":   p.stock_quantity,
+        "source":           product_source(p),
+        "image_url":        meta.get("image_url") or "",
+        "product_url":      meta.get("product_url") or meta.get("url") or "",
+    }
+
+
+@merchant_router.post("/products/manual", status_code=201)
+async def merchant_catalog_create_manual_product(
+    payload: _ManualProductIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Create a manual product row.
+
+    Tenant isolation: tenant_id is resolved from the JWT, never from
+    the body. NOT plan-gated — merchants on Starter need to be able to
+    build their catalog before they upgrade to start sending.
+    """
+    tenant_id = resolve_tenant_id(request)
+    # Build the same ``extra_metadata`` shape the Salla sync produces
+    # so the resolver / sender don't need a manual-specific branch.
+    meta_blob = {
+        "source":        SOURCE_MANUAL,
+        "image_url":     (payload.image_url or "").strip() or None,
+        "product_url":   (payload.product_url or "").strip() or None,
+    }
+    p = Product(
+        tenant_id        = tenant_id,
+        title            = payload.title.strip(),
+        description      = (payload.description or None),
+        price            = (payload.price or None),
+        sku              = (payload.sku or None),
+        external_id      = (payload.external_id or None) or None,
+        meta_retailer_id = (payload.meta_retailer_id or None) or None,
+        in_stock         = bool(payload.in_stock),
+        stock_quantity   = payload.stock_quantity,
+        extra_metadata   = meta_blob,
+        source           = SOURCE_MANUAL,
+    )
+    db.add(p)
+    db.flush()
+    # Backfill a synthetic retailer id so the row is dispatchable on day
+    # one. Honours an explicit ``meta_retailer_id`` if the merchant
+    # provided one — see ``assign_canonical_retailer_id`` docstring.
+    try:
+        assign_canonical_retailer_id(p)
+    except Exception:  # noqa: BLE001
+        pass
+    db.commit()
+    db.refresh(p)
+    audit(
+        "merchant_catalog_create_manual_product",
+        tenant_id=tenant_id, product_id=int(p.id), title=p.title[:80],
+    )
+    return _serialise_manual_product(p)
+
+
+@merchant_router.patch("/products/manual/{product_id}")
+async def merchant_catalog_update_manual_product(
+    product_id: int,
+    payload: _ManualProductPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Update a manual product. Refuses to touch non-manual rows so a
+    misclick can't accidentally edit a Salla-synced product (whose
+    fields would get overwritten on the next sync anyway)."""
+    tenant_id = resolve_tenant_id(request)
+    p = (
+        db.query(Product)
+          .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+          .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    if product_source(p) != SOURCE_MANUAL:
+        raise HTTPException(
+            status_code=409,
+            detail="product_not_manual_cannot_edit_via_manual_endpoint",
+        )
+
+    data = payload.model_dump(exclude_unset=True)
+    # Top-level columns
+    for col in (
+        "title", "description", "price", "sku",
+        "external_id", "meta_retailer_id",
+        "in_stock", "stock_quantity",
+    ):
+        if col in data:
+            setattr(p, col, data[col])
+    # JSONB-only fields (image_url / product_url) — merge instead of
+    # replacing the whole blob so we don't drop other metadata.
+    if "image_url" in data or "product_url" in data:
+        meta = dict(p.extra_metadata or {})
+        if "image_url" in data:
+            meta["image_url"] = (data["image_url"] or "").strip() or None
+        if "product_url" in data:
+            meta["product_url"] = (data["product_url"] or "").strip() or None
+        # Keep the source marker pinned regardless of patch shape.
+        meta["source"] = SOURCE_MANUAL
+        p.extra_metadata = meta
+    db.commit()
+    db.refresh(p)
+    audit(
+        "merchant_catalog_update_manual_product",
+        tenant_id=tenant_id, product_id=int(p.id), fields=sorted(data.keys()),
+    )
+    return _serialise_manual_product(p)
+
+
+@merchant_router.delete("/products/manual/{product_id}")
+async def merchant_catalog_delete_manual_product(
+    product_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Delete a manual product. Refuses on synced rows for the same
+    reason ``PATCH`` does — the sync would re-create them on the next
+    run anyway, but the audit log + UX is cleaner with an explicit
+    failure than a silent revert."""
+    tenant_id = resolve_tenant_id(request)
+    p = (
+        db.query(Product)
+          .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+          .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    if product_source(p) != SOURCE_MANUAL:
+        raise HTTPException(
+            status_code=409,
+            detail="product_not_manual_cannot_delete_via_manual_endpoint",
+        )
+    db.delete(p)
+    db.commit()
+    audit(
+        "merchant_catalog_delete_manual_product",
+        tenant_id=tenant_id, product_id=int(product_id),
+    )
+    return {"deleted": True, "id": int(product_id)}
 
 
 __all__ = ["merchant_router", "admin_router"]
