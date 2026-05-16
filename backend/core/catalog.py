@@ -66,6 +66,103 @@ def effective_retailer_id(product: Any) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Canonical retailer-id + auto-mapping (May 2026 #12)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ``effective_retailer_id`` is a READ-only resolver and returns an empty
+# string when the upstream fields are NULL. That's the right behaviour
+# at SEND time — we want the catalog send to bail out cleanly when the
+# product was never published to Meta — but it's the wrong behaviour at
+# SYNC time, when we want every freshly-imported product to land with a
+# usable retailer id so the merchant doesn't have to do anything manual.
+#
+# The two helpers below close that gap:
+#
+#   * ``canonical_retailer_id`` — same priority order as ``effective_…``
+#     but with a deterministic SYNTHETIC fallback so it NEVER returns an
+#     empty string. The synthetic id is namespaced (``nahla_p_<id>``)
+#     so it can never collide with a real Salla / Zid product id and
+#     so support can tell at a glance that the merchant hasn't published
+#     to Meta yet (the catalog will still try, will not find the SKU on
+#     Meta's side, and the legacy image+CTA fallback will fire).
+#
+#   * ``assign_canonical_retailer_id`` — writes the canonical id onto
+#     ``product.meta_retailer_id`` when it's currently NULL. Idempotent;
+#     returns True only when an actual change was made so the caller
+#     can count writes for the resync audit endpoint. Never overwrites
+#     an existing override — merchants who edit the column by hand from
+#     the admin UI keep their value.
+
+
+def canonical_retailer_id(product: Any, *, fallback_to_synthetic: bool = True) -> str:
+    """Resolve a retailer id that NEVER comes back empty.
+
+    Resolution order:
+
+        1. ``product.meta_retailer_id``
+        2. ``product.external_id``
+        3. ``f"nahla_p_{product.id}"`` (when ``fallback_to_synthetic``)
+
+    The synthetic third tier is deliberately namespaced so it can be
+    spotted in logs and on Meta's side — a retailer id beginning with
+    ``nahla_p_`` is by construction *not* a real Salla / Zid id, which
+    tells support that this product has not been published to the Meta
+    catalog yet. The catalog send for such a product will fall back to
+    image + CTA — which is the desired behaviour: the merchant gets a
+    rich-ish render today, and a real catalog card the moment they
+    publish to Meta and resync.
+
+    Pass ``fallback_to_synthetic=False`` when you specifically want the
+    legacy empty-string behaviour (only ``effective_retailer_id`` does
+    that today).
+    """
+    primary = effective_retailer_id(product)
+    if primary:
+        return primary
+    if not fallback_to_synthetic:
+        return ""
+    pid = getattr(product, "id", None)
+    if pid is None and isinstance(product, dict):
+        pid = product.get("id")
+    if pid is None:
+        return ""
+    return f"nahla_p_{pid}"
+
+
+def assign_canonical_retailer_id(product: Any) -> bool:
+    """Populate ``product.meta_retailer_id`` if it's currently empty.
+
+    Returns True when a write actually happened (so callers can count
+    it for audit logs / progress meters). Never overwrites a value that
+    is already set, even if a "better" candidate exists — merchants who
+    hand-edit the override column from the admin UI keep their value.
+
+    Designed to be called from the Salla / Zid sync upserts AND from a
+    one-shot backfill that walks every product for a tenant. Idempotent
+    by construction: a second call on the same product is a no-op.
+    """
+    if product is None:
+        return False
+    current = getattr(product, "meta_retailer_id", None)
+    if current and str(current).strip():
+        return False
+    canonical = canonical_retailer_id(product, fallback_to_synthetic=True)
+    if not canonical:
+        return False
+    try:
+        product.meta_retailer_id = canonical
+    except Exception:  # noqa: BLE001
+        # Plain dicts and frozen dataclasses don't allow attribute
+        # writes — fall through silently so the caller can decide what
+        # to do (sync passes ORM rows so this branch is dead in prod).
+        if isinstance(product, dict):
+            product["meta_retailer_id"] = canonical
+            return True
+        return False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Catalog eligibility
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -163,6 +260,8 @@ def catalog_summary(connection: Any) -> dict:
 
 __all__: List[str] = [
     "CatalogEligibility",
+    "assign_canonical_retailer_id",
+    "canonical_retailer_id",
     "catalog_summary",
     "effective_retailer_id",
     "is_catalog_eligible",

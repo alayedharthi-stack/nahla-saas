@@ -20,10 +20,12 @@
 import { useEffect, useState } from 'react'
 import {
   AlertTriangle, BookOpen, CheckCircle2, ExternalLink, Loader2,
-  Package, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
+  Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
 } from 'lucide-react'
 import {
   catalogApi,
+  type CatalogProductDiagResponse,
+  type CatalogResyncReport,
   type CatalogStatus,
   type CatalogTestSendResult,
 } from '../api/catalog'
@@ -76,6 +78,46 @@ export default function WhatsAppCatalog() {
   const [testing, setTesting]       = useState(false)
   const [testResult, setTestResult] = useState<CatalogTestSendResult | null>(null)
 
+  // Product diagnostic + resync
+  const [products, setProducts]     = useState<CatalogProductDiagResponse | null>(null)
+  const [productsLoading, setProductsLoading] = useState(false)
+  const [resyncing, setResyncing]   = useState(false)
+  const [resyncReport, setResyncReport] = useState<CatalogResyncReport | null>(null)
+
+  const loadProducts = async () => {
+    setProductsLoading(true)
+    try {
+      const r = await catalogApi.products(100, 0)
+      setProducts(r)
+    } catch {
+      // soft-fail — the page is still useful without this section
+    } finally {
+      setProductsLoading(false)
+    }
+  }
+
+  const onResync = async () => {
+    setResyncing(true)
+    setError(null)
+    setSuccess(null)
+    setResyncReport(null)
+    try {
+      const r = await catalogApi.resync()
+      setResyncReport(r.report)
+      setSuccess(
+        `تمت إعادة المزامنة: تم تعيين retailer_id لـ ${r.report.retailer_id_set} منتج، ` +
+        `${r.report.synthetic_assigned} منها بمعرّف اصطناعي.`,
+      )
+      // Refresh status + products to reflect new coverage.
+      await refresh()
+      await loadProducts()
+    } catch (e: any) {
+      setError(e?.message ?? 'تعذّر تنفيذ إعادة المزامنة.')
+    } finally {
+      setResyncing(false)
+    }
+  }
+
   const refresh = async () => {
     setLoading(true)
     setError(null)
@@ -91,7 +133,7 @@ export default function WhatsAppCatalog() {
     }
   }
 
-  useEffect(() => { void refresh() }, [])
+  useEffect(() => { void refresh(); void loadProducts() }, [])
 
   const onSave = async () => {
     setSaving(true)
@@ -262,37 +304,123 @@ export default function WhatsAppCatalog() {
         </div>
       </Card>
 
-      {/* ── Product sample ───────────────────────────────────────── */}
-      {status && status.products_sample.length > 0 && (
-        <Card title="عيّنة المنتجات وتغطية retailer_id" icon={<Package className="w-5 h-5 text-emerald-600" />}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-xs text-slate-500 uppercase">
-                <tr className="border-b border-slate-100">
-                  <th className="text-right py-2 pl-2">ID</th>
-                  <th className="text-right py-2 pl-2">المنتج</th>
-                  <th className="text-right py-2 pl-2">external_id</th>
-                  <th className="text-right py-2 pl-2">effective retailer_id</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.products_sample.map(p => (
-                  <tr key={p.id} className="border-b border-slate-50 last:border-0">
-                    <td className="py-2 pl-2 text-slate-500">{p.id}</td>
-                    <td className="py-2 pl-2 text-slate-800 truncate max-w-[280px]">{p.title}</td>
-                    <td className="py-2 pl-2 text-slate-500 font-mono text-xs">{p.external_id ?? '—'}</td>
-                    <td className="py-2 pl-2">
-                      {p.effective_retailer_id
-                        ? <code className="bg-emerald-50 text-emerald-700 text-xs px-1.5 py-0.5 rounded">{p.effective_retailer_id}</code>
-                        : <span className="text-xs text-amber-700">مفقود</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* ── Product mapping (resync + full coverage table) ────────── */}
+      <Card title="ربط المنتجات بالكتالوج" icon={<Package className="w-5 h-5 text-emerald-600" />}>
+        <div className="space-y-4">
+          {/* Coverage summary + resync button */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-slate-800">
+                تغطية retailer_id:{' '}
+                <span className="text-emerald-700">
+                  {products ? products.coverage.with_rid : '—'}
+                </span>
+                <span className="text-slate-400"> / </span>
+                <span className="text-slate-700">
+                  {products ? products.coverage.total : '—'}
+                </span>
+                {products && products.coverage.total > 0 && (
+                  <span className="text-xs text-slate-500 mr-2">
+                    ({Math.round(products.coverage.with_rid / products.coverage.total * 100)}%)
+                  </span>
+                )}
+              </p>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                إعادة المزامنة تربط كل منتج بمعرّف Meta retailer_id تلقائيًا
+                (عبر external_id، أو معرّف اصطناعي إذا لزم). آمنة وتشغّل أكثر من مرة.
+              </p>
+            </div>
+            <button
+              onClick={onResync}
+              disabled={resyncing}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-xl text-sm transition shrink-0"
+            >
+              {resyncing
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <RefreshCw className="w-4 h-4" />}
+              إعادة مزامنة وربط
+            </button>
           </div>
-        </Card>
-      )}
+
+          {resyncReport && (
+            <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-900 space-y-1">
+              <p className="font-bold">تقرير المزامنة</p>
+              <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
+                <li>تم المسح: {resyncReport.scanned}</li>
+                <li>تم التعيين: {resyncReport.retailer_id_set}</li>
+                <li>كان معيّن مسبقًا: {resyncReport.already_set}</li>
+                <li>معرّف اصطناعي: {resyncReport.synthetic_assigned}</li>
+                <li>تم نشره: {resyncReport.published_stamped}</li>
+                <li>أخطاء: {resyncReport.errors}</li>
+              </ul>
+            </div>
+          )}
+
+          {/* Products table */}
+          {productsLoading && (
+            <div className="text-sm text-slate-500 flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> جاري تحميل المنتجات...
+            </div>
+          )}
+
+          {products && products.rows.length > 0 && (
+            <div className="overflow-x-auto -mx-2">
+              <table className="w-full text-sm">
+                <thead className="text-xs text-slate-500 uppercase">
+                  <tr className="border-b border-slate-100">
+                    <th className="text-right py-2 px-2">ID</th>
+                    <th className="text-right py-2 px-2">المنتج</th>
+                    <th className="text-right py-2 px-2">external_id</th>
+                    <th className="text-right py-2 px-2">meta_retailer_id</th>
+                    <th className="text-right py-2 px-2">retailer_id فعّال</th>
+                    <th className="text-right py-2 px-2">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {products.rows.map(p => (
+                    <tr key={p.id} className="border-b border-slate-50 last:border-0">
+                      <td className="py-2 px-2 text-slate-500">{p.id}</td>
+                      <td className="py-2 px-2 text-slate-800 truncate max-w-[260px]" title={p.title}>{p.title}</td>
+                      <td className="py-2 px-2 text-slate-500 font-mono text-xs" dir="ltr">{p.external_id ?? '—'}</td>
+                      <td className="py-2 px-2 text-slate-500 font-mono text-xs" dir="ltr">{p.meta_retailer_id ?? '—'}</td>
+                      <td className="py-2 px-2">
+                        {p.effective_retailer_id
+                          ? <code className="bg-emerald-50 text-emerald-700 text-xs px-1.5 py-0.5 rounded" dir="ltr">{p.effective_retailer_id}</code>
+                          : <span className="text-xs text-amber-700">مفقود</span>}
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className={
+                          'text-xs px-2 py-0.5 rounded-full font-semibold ' +
+                          (p.publish_status === 'published'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : p.publish_status === 'ready'
+                              ? 'bg-blue-50 text-blue-700'
+                              : 'bg-amber-50 text-amber-700')
+                        }>
+                          {p.publish_status === 'published' ? 'منشور'
+                            : p.publish_status === 'ready' ? 'جاهز'
+                              : 'بحاجة لمزامنة'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {products.total > products.rows.length && (
+                <p className="text-xs text-slate-400 mt-2 text-center">
+                  عرض {products.rows.length} من أصل {products.total} منتج. استخدم Meta Commerce Manager لإدارة الباقي.
+                </p>
+              )}
+            </div>
+          )}
+
+          {products && products.rows.length === 0 && (
+            <p className="text-sm text-slate-500 bg-slate-50 border border-slate-100 rounded-xl p-4 text-center">
+              لا توجد منتجات بعد. أكمل ربط المتجر (سلة/زد) لمزامنة المنتجات تلقائيًا.
+            </p>
+          )}
+        </div>
+      </Card>
 
       {/* ── Test send ────────────────────────────────────────────── */}
       <Card title="إرسال تجريبي" icon={<Send className="w-5 h-5 text-emerald-600" />}>

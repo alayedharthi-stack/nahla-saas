@@ -102,6 +102,46 @@ export interface CatalogPatchResponse {
   status: CatalogStatus
 }
 
+// ── Product diagnostic + resync ──────────────────────────────────────
+
+export interface CatalogProductDiagRow {
+  id:                    number
+  title:                 string
+  external_id:           string | null
+  meta_retailer_id:      string | null
+  effective_retailer_id: string | null
+  publish_status:        'published' | 'ready' | 'needs_mapping'
+  in_stock:              boolean
+}
+
+export interface CatalogProductDiagResponse {
+  rows:   CatalogProductDiagRow[]
+  total:  number
+  limit:  number
+  offset: number
+  coverage: {
+    with_rid:    number
+    missing_rid: number
+    published:   number
+    unpublished: number
+    total:       number
+  }
+}
+
+export interface CatalogResyncReport {
+  scanned:            number
+  retailer_id_set:    number
+  already_set:        number
+  synthetic_assigned: number
+  published_stamped:  number
+  errors:             number
+}
+
+export interface CatalogResyncResponse {
+  ok:     boolean
+  report: CatalogResyncReport
+}
+
 // ── Merchant surface ─────────────────────────────────────────────────
 
 export const catalogApi = {
@@ -119,6 +159,13 @@ export const catalogApi = {
       method: 'POST',
       body:   JSON.stringify(body),
     })
+  },
+  products(limit: number = 50, offset: number = 0): Promise<CatalogProductDiagResponse> {
+    const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    return apiCall<CatalogProductDiagResponse>(`/merchant/catalog/products?${qs.toString()}`)
+  },
+  resync(): Promise<CatalogResyncResponse> {
+    return apiCall<CatalogResyncResponse>('/merchant/catalog/resync', { method: 'POST' })
   },
 }
 
@@ -178,6 +225,18 @@ export const adminCatalogApi = {
     return apiCall<CatalogTestSendResult>('/admin/catalog/test-send', {
       method: 'POST',
       body:   JSON.stringify(body),
+    })
+  },
+  products(tenantId: number, limit: number = 50, offset: number = 0): Promise<CatalogProductDiagResponse> {
+    const qs = new URLSearchParams({
+      tenant_id: String(tenantId), limit: String(limit), offset: String(offset),
+    })
+    return apiCall<CatalogProductDiagResponse>(`/admin/catalog/products?${qs.toString()}`)
+  },
+  resync(tenantId: number): Promise<CatalogResyncResponse> {
+    return apiCall<CatalogResyncResponse>('/admin/catalog/resync', {
+      method: 'POST',
+      body:   JSON.stringify({ tenant_id: tenantId }),
     })
   },
 }

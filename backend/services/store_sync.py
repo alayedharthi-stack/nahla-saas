@@ -611,6 +611,14 @@ class StoreSyncService:
                 existing.in_stock    = new_in_stock
                 existing.stock_quantity = new_qty
                 existing.extra_metadata = normalised
+                # Auto-map: if the row was synced before we started
+                # writing retailer ids, give it one now. Idempotent +
+                # never overwrites an explicit value.
+                try:
+                    from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
+                    assign_canonical_retailer_id(existing)
+                except Exception:  # noqa: BLE001
+                    pass
                 updated += 1
 
                 if was_unavailable and new_available:
@@ -634,6 +642,23 @@ class StoreSyncService:
                 self.db.add(p)
                 created += 1
         self.db.flush()
+        # Auto-map retailer ids on freshly-created rows. We do this
+        # after ``flush()`` so the synthetic-id fallback can read
+        # ``p.id`` (newly assigned by Postgres). Idempotent — only
+        # touches rows whose meta_retailer_id is still NULL.
+        try:
+            from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
+
+            for p in (
+                self.db.query(Product)
+                .filter(Product.tenant_id == self.tenant_id)
+                .filter(Product.meta_retailer_id.is_(None))
+                .all()
+            ):
+                assign_canonical_retailer_id(p)
+            self.db.flush()
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── Back-in-stock fan-out ─────────────────────────────────────────────
         # For each product that just came back, emit one

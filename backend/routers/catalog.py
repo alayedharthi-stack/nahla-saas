@@ -58,6 +58,8 @@ from sqlalchemy.orm import Session
 from core.audit import audit
 from core.auth import get_current_user, require_admin
 from core.catalog import (
+    assign_canonical_retailer_id,
+    canonical_retailer_id,
     catalog_summary,
     effective_retailer_id,
     is_catalog_eligible,
@@ -366,8 +368,8 @@ async def _run_test_send(
     )
     from services.product_resolver import (  # noqa: PLC0415
         format_product_card_caption,
+        resolve_best_effort,
         resolve_by_external_id,
-        resolve_by_query,
     )
 
     requested_mode = (body.mode or "auto").strip().lower()
@@ -398,7 +400,11 @@ async def _run_test_send(
             resolution = None
     if resolution is None and body.product_title:
         try:
-            resolution = resolve_by_query(
+            # Use the best-effort resolver here: the merchant is
+            # testing whether their catalog renders correctly, and
+            # filtering out OUT-OF-STOCK products would make the
+            # test feel broken from the merchant's perspective.
+            resolution = resolve_best_effort(
                 db, tenant_id, body.product_title.strip(),
             )
         except Exception:
@@ -831,6 +837,291 @@ async def admin_catalog_test_send(
         body.tenant_id, result["product"]["id"], result["final_mode"],
     )
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Product mapping endpoints (May 2026 #12)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The status endpoint only ships a 5-row sample of products. Operators
+# need the full mapping picture when retailer_id coverage shows
+# anomalies — these endpoints give that. ``GET .../catalog/products``
+# returns a paged list; ``POST .../catalog/resync`` walks every row
+# and writes a canonical ``meta_retailer_id`` wherever one is missing
+# so the catalog send chain stops bailing out with ``no_retailer_id``.
+
+
+def _product_diag_rows(
+    db: Session, tenant_id: int, *, limit: int, offset: int,
+) -> Dict[str, Any]:
+    """Build the response shape for ``GET /merchant/catalog/products``.
+
+    Shared between merchant + admin (admin endpoint just plumbs a
+    different tenant_id). Returns:
+
+      {
+        "rows": [ {id, title, external_id, meta_retailer_id,
+                   effective_retailer_id, publish_status}, ... ],
+        "total": int,
+        "limit": int, "offset": int,
+        "coverage": {with_rid, missing_rid, published, unpublished, total},
+      }
+
+    ``publish_status`` is the three-state token operators read:
+
+      * ``published``    — has ``meta_catalog_published_at``
+                           (catalog send chain has fired at least once
+                           successfully against this row).
+      * ``ready``        — has a usable retailer id but the catalog
+                           send chain has not been exercised yet.
+      * ``needs_mapping``— missing both ``meta_retailer_id`` AND
+                           ``external_id``. The resync endpoint will
+                           assign a synthetic id so the row at least
+                           reaches the legacy image+CTA fallback.
+    """
+    from models import Product as _Product  # noqa: PLC0415
+
+    total = (
+        db.query(_Product)
+        .filter(_Product.tenant_id == tenant_id)
+        .count()
+    )
+
+    rows = (
+        db.query(_Product)
+        .filter(_Product.tenant_id == tenant_id)
+        .order_by(_Product.id)
+        .limit(int(limit))
+        .offset(int(offset))
+        .all()
+    )
+
+    out_rows: List[Dict[str, Any]] = []
+    for p in rows:
+        eff = effective_retailer_id(p)
+        published_at = getattr(p, "meta_catalog_published_at", None)
+        if published_at:
+            status = "published"
+        elif eff:
+            status = "ready"
+        else:
+            status = "needs_mapping"
+        out_rows.append({
+            "id":                    p.id,
+            "title":                 p.title,
+            "external_id":           getattr(p, "external_id", None),
+            "meta_retailer_id":      getattr(p, "meta_retailer_id", None),
+            "effective_retailer_id": eff or None,
+            "publish_status":        status,
+            "in_stock":              bool(getattr(p, "in_stock", True)),
+        })
+
+    # Cheap counts via SQL — same dual-column predicate as the audit
+    # endpoint so the dashboard's "tedded" view matches the table view.
+    try:
+        with_rid = (
+            db.query(_Product)
+            .filter(_Product.tenant_id == tenant_id)
+            .filter(
+                (_Product.meta_retailer_id.isnot(None))
+                | (_Product.external_id.isnot(None))
+            )
+            .count()
+        )
+        published = (
+            db.query(_Product)
+            .filter(_Product.tenant_id == tenant_id)
+            .filter(_Product.meta_catalog_published_at.isnot(None))
+            .count()
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        with_rid, published = 0, 0
+
+    return {
+        "rows":   out_rows,
+        "total":  int(total),
+        "limit":  int(limit),
+        "offset": int(offset),
+        "coverage": {
+            "with_rid":    int(with_rid),
+            "missing_rid": int(total) - int(with_rid),
+            "published":   int(published),
+            "unpublished": int(total) - int(published),
+            "total":       int(total),
+        },
+    }
+
+
+def _run_catalog_resync(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Backfill ``meta_retailer_id`` (and stamp
+    ``meta_catalog_published_at``) for every product belonging to
+    *tenant_id*. Returns a structured report:
+
+      {
+        "scanned":            int,    # rows visited
+        "retailer_id_set":    int,    # rows that gained a retailer id
+        "already_set":        int,    # rows that already had one
+        "synthetic_assigned": int,    # rows that got nahla_p_<id>
+        "published_stamped":  int,    # meta_catalog_published_at updated
+        "errors":             int,
+      }
+
+    The operation is idempotent — running it twice in a row yields
+    zeros for ``retailer_id_set`` and ``synthetic_assigned`` and the
+    ``published_stamped`` count covers only rows whose stamp was
+    older than the start of the run.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from models import Product as _Product  # noqa: PLC0415
+
+    counters = {
+        "scanned":            0,
+        "retailer_id_set":    0,
+        "already_set":        0,
+        "synthetic_assigned": 0,
+        "published_stamped":  0,
+        "errors":             0,
+    }
+    now = datetime.now(timezone.utc)
+
+    rows = (
+        db.query(_Product)
+        .filter(_Product.tenant_id == tenant_id)
+        .order_by(_Product.id)
+        .all()
+    )
+    counters["scanned"] = len(rows)
+
+    for p in rows:
+        try:
+            previously_set = bool(
+                (getattr(p, "meta_retailer_id", None) or "") and
+                str(getattr(p, "meta_retailer_id", "") or "").strip()
+            )
+            if previously_set:
+                counters["already_set"] += 1
+            else:
+                assigned = assign_canonical_retailer_id(p)
+                if assigned:
+                    counters["retailer_id_set"] += 1
+                    new_val = str(p.meta_retailer_id or "")
+                    if new_val.startswith("nahla_p_"):
+                        counters["synthetic_assigned"] += 1
+
+            # Stamp publish marker only when we actually have a
+            # usable retailer id. The webhook send path is the
+            # canonical place to mark success on real Meta sends,
+            # but we mirror it here so the dashboard's "published"
+            # counter starts useful before the first chat happens.
+            if getattr(p, "meta_retailer_id", None) and getattr(
+                p, "meta_catalog_published_at", None,
+            ) is None:
+                p.meta_catalog_published_at = now
+                counters["published_stamped"] += 1
+        except Exception as exc:  # noqa: BLE001
+            counters["errors"] += 1
+            logger.warning(
+                "[CATALOG_RESYNC] tenant=%s product_id=%s failed=%r",
+                tenant_id, getattr(p, "id", "?"), exc,
+            )
+
+    try:
+        db.commit()
+    except Exception as commit_exc:  # noqa: BLE001
+        db.rollback()
+        counters["errors"] += 1
+        logger.warning(
+            "[CATALOG_RESYNC] tenant=%s commit_failed=%r",
+            tenant_id, commit_exc,
+        )
+
+    logger.info(
+        "[CATALOG_RESYNC] tenant=%s scanned=%d set=%d "
+        "synthetic=%d published=%d errors=%d",
+        tenant_id,
+        counters["scanned"], counters["retailer_id_set"],
+        counters["synthetic_assigned"], counters["published_stamped"],
+        counters["errors"],
+    )
+    return counters
+
+
+# ── Merchant variants ─────────────────────────────────────────────────
+
+@merchant_router.get("/products")
+async def merchant_catalog_products(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """List products with their retailer_id mapping state. Read-only;
+    no plan gate (a merchant on Starter can inspect their coverage
+    before upgrading — gating the READ would be hostile UX)."""
+    tenant_id = resolve_tenant_id(request)
+    return _product_diag_rows(db, tenant_id, limit=limit, offset=offset)
+
+
+@merchant_router.post("/resync")
+async def merchant_catalog_resync(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Backfill ``meta_retailer_id`` across the merchant's products.
+
+    Plan-gated: this is a write operation that prepares the catalog
+    for live sends — same gate as the config / test-send endpoints.
+    """
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    report = _run_catalog_resync(db, tenant_id)
+    audit(
+        "merchant_catalog_resync",
+        tenant_id=tenant_id,
+        scanned=report["scanned"],
+        retailer_id_set=report["retailer_id_set"],
+    )
+    return {"ok": True, "report": report}
+
+
+# ── Admin variants ────────────────────────────────────────────────────
+
+@admin_router.get("/products")
+async def admin_catalog_products(
+    tenant_id: int = Query(..., ge=1),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    return _product_diag_rows(db, tenant_id, limit=limit, offset=offset)
+
+
+class _AdminResyncBody(BaseModel):
+    tenant_id: int = Field(..., ge=1)
+
+
+@admin_router.post("/resync")
+async def admin_catalog_resync(
+    body: _AdminResyncBody,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    report = _run_catalog_resync(db, body.tenant_id)
+    audit(
+        "admin_catalog_resync",
+        tenant_id=body.tenant_id,
+        scanned=report["scanned"],
+        retailer_id_set=report["retailer_id_set"],
+    )
+    return {"ok": True, "report": report}
 
 
 __all__ = ["merchant_router", "admin_router"]

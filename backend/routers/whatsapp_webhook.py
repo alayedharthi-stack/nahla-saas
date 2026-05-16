@@ -5865,8 +5865,16 @@ async def _handle_merchant_message(
                             break
                     if not _rescue_url and (text or "").strip():
                         try:
+                            # Use the best-effort resolver here — the
+                            # customer asked for a visual product render
+                            # and we're already on the rescue path. If
+                            # the strict resolver missed (e.g. out-of-
+                            # stock honey jar), the relaxed normalized-
+                            # title pass will still find the row and let
+                            # us at least send a CTA URL instead of
+                            # text_only.
                             from services.product_resolver import (  # noqa: PLC0415
-                                resolve_by_query as _rescue_resolve,
+                                resolve_best_effort as _rescue_resolve,
                             )
                             _r = _rescue_resolve(
                                 db, tenant_id, (text or "").strip(),
@@ -5875,6 +5883,12 @@ async def _handle_merchant_message(
                             if _r and _r.product_url:
                                 _rescue_url = _r.product_url
                                 _rescue_title = _r.title or ""
+                                logger.info(
+                                    "[CATALOG_PRODUCT_RESOLVE] tenant=%s "
+                                    "rescue_via=best_effort product_id=%s "
+                                    "confidence=%s",
+                                    tenant_id, _r.id, _r.confidence,
+                                )
                         except Exception as _rescue_exc:  # noqa: BLE001
                             logger.debug(
                                 "[VISUAL_FALLBACK_RESCUE] tenant=%s "
