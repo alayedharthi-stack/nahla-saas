@@ -107,6 +107,29 @@ BASELINE_STYLE_RULES: tuple[str, ...] = (
     # reverting to a brochure tone here. Force the same WhatsApp-shape
     # (recommendation + CTA, not a paragraph of benefits).
     "للأسئلة الصحية والترشيحات وفوائد المنتجات: 2–3 أسطر، توصية واحدة مباشرة، ثم CTA قصير (رابط المنتج / المتجر). ممنوع تكرار وصف الفوائد.",
+    # ── Relational frame — May 2026 #7 ────────────────────────────────────
+    # Production gap: customers were sending non-direct commercial messages
+    # ("الحبل الأول باقي عندي ماخلص لكن المرات الجاية إن شاء الله") and
+    # the bot replied with a sales-shaped "كيف أقدر أخدمك؟" — tone-deaf
+    # because the customer was DEFERRING the purchase warmly, not opening
+    # a new buying session. The brain now classifies every turn into one
+    # of: buying_now / deferred / browsing / objection / polite_close /
+    # social_bonding / info_only / support_request / unknown. The
+    # classification, when meaningful, is PREPENDED to `response_goal`
+    # under the label `relational_frame=<stance>`. The rule below tells
+    # the LLM how to honour each frame WITHOUT canned text — adapt tone
+    # and avoid the pushy follow-up that breaks the relationship.
+    "اقرئي `relational_frame` في response_goal قبل صياغة الرد: "
+    "(buying_now) أكملي خطوات الشراء فورًا. "
+    "(deferred) العميل عنده مخزون سابق أو يؤجل — ممنوع pitch بيعي، "
+    "اعترفي بكلامه واتركي الباب مفتوحًا بسطر واحد. "
+    "(polite_close) ردّي بدعوة مقابلة قصيرة ولا تسألي سؤال متابعة بيعي. "
+    "(objection) تجاوبي بصدق وثقة بدون دفاعية، اذكري قيمة المنتج باختصار. "
+    "(social_bonding) ردّ ودّي مختصر ثم استكملي خيط الحوار السابق. "
+    "(info_only) أجيبي على السؤال فقط بدون اقتراح منتجات. "
+    "(browsing) خيار واحد أو سؤال موجّه واحد بدون قائمة. "
+    "(support_request) لا اقتراحات بيعية حتى تُحل المشكلة. "
+    "(unknown) تصرفي كالمعتاد بحسب باقي السياق.",
 )
 
 BASELINE_POLICY_RULES: tuple[str, ...] = (

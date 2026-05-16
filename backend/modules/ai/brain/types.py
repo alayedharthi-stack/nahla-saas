@@ -619,6 +619,16 @@ class BrainReplyState:
     # assistant_identity_introduced`` and is the production fix for
     # the "البوت يعرّف نفسه في كل رسالة" complaint.
     identity_already_introduced: bool = False
+    # ── Relational frame (May 2026 #7 — semantic stance layer) ───────────────
+    # Closed-enum classification of the customer's CURRENT stance for this
+    # turn (see modules/ai/brain/intent/stance_detector.py). Empty string
+    # means "unknown / no override" and the LLM behaves exactly as before.
+    # When non-empty, the directive is prepended to ``response_goal`` so the
+    # LLM reads the stance through the right lens (e.g. ``deferred`` ⇒ no
+    # sales pitch; ``polite_close`` ⇒ no follow-up question). Surfaced for
+    # observability — operators grep for ``relational_frame=`` in logs.
+    relational_frame: str = ""
+    relational_evidence: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

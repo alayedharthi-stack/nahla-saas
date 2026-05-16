@@ -955,12 +955,51 @@ def _build_reply_state(
     merchant_context: Optional[Dict[str, Any]] = None,
 ) -> BrainReplyState:
     recent_turns = []
+    recent_customer_messages: List[str] = []
     for turn in (ctx.history or [])[-4:]:
         body = str(turn.get("body") or "").strip()
         if not body:
             continue
         role = "customer" if turn.get("direction") == "in" else "assistant"
         recent_turns.append(f"{role}: {body}")
+        if role == "customer":
+            recent_customer_messages.append(body)
+
+    # ── Semantic stance detection (May 2026 #7) ──────────────────────────
+    # Closed-enum classification of the customer's relational frame for THIS
+    # turn. Pure function — see modules/ai/brain/intent/stance_detector.py.
+    # Returns STANCE_UNKNOWN for anything ambiguous so the rest of the
+    # pipeline behaves exactly as before; a non-unknown stance feeds a
+    # directive into ``response_goal`` so the LLM reads the message through
+    # the right lens (e.g. ``deferred`` ⇒ no sales pitch).
+    _stance_result = None
+    try:
+        from .intent.stance_detector import detect_stance as _detect_stance  # noqa: PLC0415
+        _stance_result = _detect_stance(
+            ctx.message or "",
+            recent_customer_messages=recent_customer_messages[-3:],
+            state_hints={
+                "greeted": bool(getattr(current_state, "greeted", False)),
+                "has_focus_product": bool(current_state.current_product_focus),
+            },
+        )
+        if _stance_result and _stance_result.stance and _stance_result.stance != "unknown":
+            logger.info(
+                "[STANCE] tenant=%s stance=%s confidence=%.2f evidence=%r "
+                "intent=%s preview=%r",
+                getattr(ctx, "tenant_id", None),
+                _stance_result.stance,
+                float(_stance_result.confidence or 0.0),
+                (_stance_result.evidence or "")[:80],
+                getattr(ctx.intent, "name", "") or "",
+                (ctx.message or "")[:80],
+            )
+    except Exception as _stance_exc:  # noqa: BLE001
+        logger.debug(
+            "[STANCE] tenant=%s detection failed: %s",
+            getattr(ctx, "tenant_id", "?"), _stance_exc,
+        )
+        _stance_result = None
 
     sensitivity_score = float(ctx.profile.get("price_sensitivity_score") or 0.5)
     selected_product = current_state.current_product_focus or None
@@ -1050,21 +1089,52 @@ def _build_reply_state(
         tenant_overlay=tenant_overlay,
         explicit_pending_action=current_state.pending_action,
         intent_name=getattr(ctx.intent, "name", "") or "",
-        response_goal=_compose_response_goal(decision, suggestion),
+        response_goal=_compose_response_goal(
+            decision, suggestion, stance=_stance_result,
+        ),
         merchant_context=dict(merchant_context or {}),
         platform_kb_mode=platform_kb_mode,
         platform_topic=platform_topic,
         platform_kb_excerpt=platform_kb_excerpt,
+        relational_frame=(
+            _stance_result.stance if _stance_result
+            and _stance_result.stance != "unknown" else ""
+        ),
+        relational_evidence=(
+            _stance_result.evidence if _stance_result
+            and _stance_result.stance != "unknown" else ""
+        ),
     )
 
 
-def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -> str:
+def _compose_response_goal(
+    decision: Decision,
+    suggestion: SuggestionSnapshot,
+    *,
+    stance: Any = None,
+) -> str:
     """Single-line summary of WHY this turn is being composed.
 
     Surfaced to the LLM in the operating-rules block so the model knows
     what success looks like instead of inferring it from the message and
     the persona. Kept short so it fits in the prompt without bloating it.
+
+    When ``stance`` is a non-unknown ``StanceResult`` (see
+    :mod:`modules.ai.brain.intent.stance_detector`) its directive is
+    PREPENDED to the goal — the LLM reads the relational frame BEFORE any
+    sales suggestion, so a ``deferred`` / ``polite_close`` / ``objection``
+    stance can prevent a tone-deaf pitch. The stance NEVER replaces the
+    primary goal; it widens the lens.
     """
+    base_goal = _compose_base_response_goal(decision, suggestion)
+    return _prepend_stance_directive(base_goal, stance)
+
+
+def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -> str:
+    """Decision-action-specific goal text (no stance, no relational frame).
+
+    Pulled into its own function so the stance enrichment can wrap it
+    without re-implementing every branch."""
     if decision.action == ACTION_PLATFORM_REPLY:
         # Critical — keep the commerce-oriented suggestion engine hints from
         # hijacking ``response_goal``. Platform turns are NOT sales funnel.
@@ -1118,6 +1188,39 @@ def _compose_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -
     if suggestion and suggestion.needs_follow_up_question and suggestion.follow_up_question:
         parts.append(f"ask_one={suggestion.follow_up_question.strip()}")
     return " | ".join(parts) or "advance the conversation toward the next sales step"
+
+
+def _prepend_stance_directive(base_goal: str, stance: Any) -> str:
+    """Prepend the relational-frame directive when ``stance`` is meaningful.
+
+    No-op when ``stance`` is ``None`` / ``STANCE_UNKNOWN`` / empty —
+    preserves the legacy goal byte-for-byte so paths without stance
+    detection (or with ambiguous messages) behave identically.
+
+    The directive table lives in ``stance_detector.STANCE_DIRECTIVES``
+    so adding a new stance is a single-table edit; this helper stays
+    open/closed.
+    """
+    if stance is None:
+        return base_goal
+    s = getattr(stance, "stance", "") or ""
+    if not s or s == "unknown":
+        return base_goal
+    try:
+        from .intent.stance_detector import STANCE_DIRECTIVES  # noqa: PLC0415
+        directive = STANCE_DIRECTIVES.get(s, "")
+    except Exception:
+        directive = ""
+    if not directive:
+        return base_goal
+    # Optional evidence note — when present, gives the LLM a hint about
+    # which trigger we saw so it can reflect it in the reply ("لاحظت
+    # إنك قلت …"). Stays compact via the same separator the rest of
+    # the goal uses.
+    evidence = getattr(stance, "evidence", "") or ""
+    if evidence:
+        return f"{directive} | evidence={evidence} | {base_goal}"
+    return f"{directive} | {base_goal}"
 
 
 # Short Gulf-style salaam acknowledgments rotated by message length so

@@ -183,11 +183,25 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         else "- identity_already_introduced=false — يمكن تعريف النفس "
              "مرة واحدة فقط (مرة في هذه الجولة)."
     )
+    # May 2026 #7 — surface the relational frame in the decision block so
+    # the LLM sees it BEFORE the response_goal text. Hidden when the
+    # detector returned "unknown" so the prompt shape stays identical for
+    # the ambiguous turns we don't want to force a frame on.
+    _rf = (getattr(state, "relational_frame", "") or "").strip()
+    _rf_ev = (getattr(state, "relational_evidence", "") or "").strip()
+    relational_line = (
+        f"- relational_frame: {_rf}"
+        + (f" — {_rf_ev}" if _rf_ev else "")
+        + "\n"
+        if _rf
+        else ""
+    )
     decision_block = (
         "## سياق القرار لهذه الجولة (مصدر واحد فقط)\n"
         f"- الـ intent الحالي: {state.intent_name or 'unknown'}\n"
         f"- المرحلة (stage): {state.stage}\n"
         f"- المنتج الحالي: {selected_title or '—'}\n"
+        f"{relational_line}"
         f"- هدف الرد (response_goal): {state.response_goal or '—'}\n"
         f"{identity_line}\n"
         "هذا السياق هو الحقيقة الرسمية للجولة — لا تتجاوزيه ولا تعيدي "
