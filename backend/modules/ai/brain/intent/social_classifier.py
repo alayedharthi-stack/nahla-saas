@@ -66,6 +66,14 @@ SOCIAL_PROPHET_INVOCATION   = "prophet_invocation"
 SOCIAL_BASMALA              = "basmala"
 SOCIAL_COMPLIMENT           = "compliment"
 SOCIAL_GENERAL_COURTESY     = "general_courtesy"
+# May 2026 #8 — distinct bucket for HEAVY, explicit praise like
+# "بيض الله وجهك" / "ما قصرت" / "كفو" / "رفعت رأسنا". Carved out
+# from generic ``compliment`` so the response pool can deploy a
+# reciprocal-heavy reply ("الله يبيض وجهك مثل ما بيضت وجهنا") ONLY
+# when the customer used a trigger that warrants it. The previous
+# template pool was leaking the heavy compliment onto routine
+# blessing/thanks turns, which felt over-the-top.
+SOCIAL_STRONG_PRAISE        = "strong_praise"
 
 
 @dataclass(frozen=True)
@@ -192,12 +200,46 @@ def _is_blessing(norm: str) -> bool:
     return any(kw in norm for kw in _BLESSING_KEYWORDS)
 
 
+# ── Strong praise (May 2026 #8) ──────────────────────────────────────────────
+# Heavy, explicit praise tokens that warrant a heavy reciprocal reply
+# ("الله يبيض وجهك مثل ما بيضت وجهنا"). Kept TIGHT on purpose: a
+# trigger here makes the responder pick from the strong-praise pool
+# AND unlocks the high-priority prompt allowance for the same phrase.
+# Anything not in this set must NOT receive the heavy compliment —
+# the customer would feel the over-reaction.
+_STRONG_PRAISE_KEYWORDS = (
+    "بيض الله وجهك", "بيض الله وجوهكم", "بيضت وجهنا", "بيضتو وجهنا",
+    "بيضتم وجهنا", "بيضتي وجهنا", "بيضتوا وجوهنا",
+    "ما قصرت", "ماقصرت", "ما قصرتو", "ماقصرتو", "ما قصرتم", "ماقصرتم",
+    "كفو", "كفوو", "كفوكم", "كفوكن",
+    "رفعت راسي", "رفعتم راسي", "رفعتو راسي",
+    "رفعت راسنا", "رفعتم راسنا", "رفعتو راسنا",
+    "خدمه كبيره", "خدمه كبيرة", "خدمة كبيرة", "خدمة كبيره",
+    "خدمتنا خدمه كبيره", "خدمتنا خدمة كبيرة",
+    "والله ما قصرت", "والله ماقصرت",
+)
+
+
+def _is_strong_praise(norm: str) -> bool:
+    """High-confidence detector for EXPLICIT heavy praise.
+
+    Only fires on the closed trigger set — bare "شكرا" / "تسلم" /
+    "الله يجزاك" do NOT count. The pool consumer relies on this
+    being conservative so the heavy reciprocal reply never lands on
+    a casual thanks/blessing turn (the May 2026 #8 regression).
+    """
+    return any(kw in norm for kw in _STRONG_PRAISE_KEYWORDS)
+
+
 # ── Compliments / "you've done well" ─────────────────────────────────────────
+# Tightened May 2026 #8 — the strong-praise tokens above are now their
+# OWN category. Generic compliments here stay routed to the lighter
+# compliment pool. We deliberately leave overlapping words ("كفو" /
+# "ما قصرت") out of THIS list now; if they appear the strong-praise
+# branch wins because it runs first.
 _COMPLIMENT_KEYWORDS = (
-    "كفو", "كفوو", "كفوكم",
     "والنعم", "نعم الرد",
     "سلمت", "سلمتي", "سلمتو",
-    "ما قصرت", "ماقصرت", "ما قصرتو", "ماقصرتو",
     "احسنت", "احسنتم", "ابدعت", "ابدعتو", "ابدعتم",
     "ممتاز", "روعه", "تحفه",
     "ما شاء الله",
@@ -251,8 +293,46 @@ _COMMERCIAL_DISQUALIFIERS = (
 )
 
 
+# May 2026 #8 — relational signals that DOMINATE a courtesy phrase. A
+# message like "الله يسعدك، ما خلص اللي عندنا من أول" mixes a blessing
+# with a clear deferral; the dominant content is the deferral, not the
+# blessing. Treating it as plain social would dispatch a generic
+# blessing reply (and historically the heavy "بيض الله وجهك" pool)
+# instead of letting the stance layer + LLM honour the deferred frame.
+# Listing these as disqualifiers makes the social classifier yield to
+# the brain pipeline on mixed turns, which then routes through
+# detect_stance and STANCE_DEFERRED. Conservative tokens only — we
+# never want to disqualify a pure blessing.
+_RELATIONAL_NON_SOCIAL_SIGNALS = (
+    # "Still have some / hasn't finished" (leftover inventory).
+    "ماخلص", "ما خلص", "ماخلصت", "ما خلصت",
+    "باقي عندي", "باقي عندنا", "باقي منه عندي", "باقي منه عندنا",
+    "لسه عندي", "لسه عندنا", "لسا عندي", "لسا عندنا",
+    "مازال عندي", "ما زال عندي", "لازال عندي", "لا زال عندي",
+    "متبقي عندي", "متبقي عندنا",
+    # "Next time / later" — explicit future deferral.
+    "المره الجايه", "المره القادمه", "المرات الجايه", "المرات القادمه",
+    "ان شاء الله المره", "انشالله المره",
+    "بعدين ان شاء الله", "لاحقا ان شاء الله",
+    # Explicit "not now" combos.
+    "مو الحين", "مش الحين", "ليس الان",
+    # Active support signals (already in stance support_request but we
+    # want the social classifier to defer here too).
+    "ما وصل الطلب", "ماوصل الطلب", "تاخر الطلب", "تأخر الطلب",
+    "فيه مشكله", "عندي مشكله", "مكسور", "تالف",
+)
+
+
 def _has_commercial_signal(norm: str) -> bool:
     return any(kw in norm for kw in _COMMERCIAL_DISQUALIFIERS)
+
+
+def _has_relational_non_social_signal(norm: str) -> bool:
+    """Return True when a courtesy phrase is paired with a dominant
+    deferral / support signal. Lets the brain pipeline handle the
+    relational frame end-to-end instead of canning a template reply
+    that ignores the real intent."""
+    return any(kw in norm for kw in _RELATIONAL_NON_SOCIAL_SIGNALS)
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -279,12 +359,25 @@ def classify_social(message: str) -> Optional[SocialMatch]:
     if _is_basmala(norm):
         return SocialMatch(category=SOCIAL_BASMALA, confidence=0.95)
 
-    # 3. Everything else requires SHORT + no commercial signal.
+    # 3. Everything else requires SHORT + no commercial signal +
+    #    no dominant relational signal (deferred / support).
     if _word_count(message) > _MAX_TOKENS_FOR_SOCIAL_DOMINANCE:
         return None
     if _has_commercial_signal(norm):
         return None
+    if _has_relational_non_social_signal(norm):
+        # Mixed turn: courtesy + deferral / support. Yield to the
+        # brain pipeline so the stance detector reads it as
+        # DEFERRED / SUPPORT_REQUEST and the LLM honours the real
+        # frame instead of canning a generic blessing reply.
+        return None
 
+    # Strong praise — the heavy reciprocal pool ("الله يبيض وجهك ...")
+    # is reserved for this category ONLY. Checked BEFORE generic
+    # compliment so explicit tokens (كفو / ما قصرت / بيض الله وجهك)
+    # never fall into the lighter pool.
+    if _is_strong_praise(norm):
+        return SocialMatch(category=SOCIAL_STRONG_PRAISE, confidence=0.95)
     if _is_thanks(norm):
         return SocialMatch(category=SOCIAL_THANKS, confidence=0.94)
     if _is_blessing(norm):
@@ -304,6 +397,7 @@ __all__ = [
     "SOCIAL_BASMALA",
     "SOCIAL_COMPLIMENT",
     "SOCIAL_GENERAL_COURTESY",
+    "SOCIAL_STRONG_PRAISE",
     "SocialMatch",
     "classify_social",
 ]

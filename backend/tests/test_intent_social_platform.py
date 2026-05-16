@@ -118,7 +118,10 @@ def test_social_thanks(message: str) -> None:
     "الله يبارك فيك",
     "الله يبارك لك",
     "الله يطول عمرك",
-    "بيض الله وجهك",
+    # NOTE: "بيض الله وجهك" was here historically but now routes to
+    # SOCIAL_STRONG_PRAISE (May 2026 #8) so the reciprocal heavy reply
+    # is reserved for explicit praise. The dedicated coverage now
+    # lives in test_strong_praise_phrasing.py.
     "رحم الله والديك",
     "الله يحفظك",
     "الله يوفقك",
@@ -154,10 +157,11 @@ def test_social_basmala(message: str) -> None:
 
 
 @pytest.mark.parametrize("message", [
-    "كفو",
+    # NOTE: "كفو" / "ما قصرت" / "ماقصرت" used to be in this bucket but
+    # were promoted to SOCIAL_STRONG_PRAISE in May 2026 #8 so the
+    # template pool routes them to the reciprocal heavy reply. See
+    # test_strong_praise_phrasing.py for their coverage.
     "والنعم",
-    "ما قصرت",
-    "ماقصرت",
     "أحسنت",
     "ما شاء الله",
     "تبارك الله",

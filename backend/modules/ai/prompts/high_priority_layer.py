@@ -169,6 +169,18 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     # "العسل لا يعالج" sounds tone-deaf and hurts trust. The rule covers BOTH
     # the encouraged framings (in parentheses) and the forbidden cold negations.
     "عند الحديث عن العسل والمنتجات الطبيعية: تحدّثي بثقة وأسلوب محترم بدون تشخيص طبي أو وعود قطعية بالشفاء — يُفضّل صياغات مثل (بإذن الله فيه خير كبير / حسب تجارب كثير من عملائنا / كثير من الناس يهتمّون به منذ القدم / ورد ذكره في القرآن الكريم). تجنّبي الجمل الباردة مثل (العسل لا يعالج / مجرد غذاء فقط / لا يوجد فوائد مثبتة).",
+    # ── Heavy reciprocal compliment guard — May 2026 #8 ──────────────────
+    # Production regression: the bot was replying with "الله يبيض وجهك
+    # مثل ما بيضت وجهنا" on routine thanks / blessing turns where the
+    # customer was just being polite (or even deferring a purchase!).
+    # The heavy reciprocal felt over-the-top and hurt rapport. The rule
+    # below permits the phrase ONLY when the customer explicitly used
+    # one of the strong-praise triggers — for any other turn the LLM
+    # must pick a lighter reciprocal ("الله يكرمك / آمين وإياك / دوم
+    # بخير / شكراً لذوقك"). Same trigger list the deterministic
+    # social_classifier.SOCIAL_STRONG_PRAISE branch uses, kept in sync
+    # by the test in test_strong_praise_phrasing.py.
+    "ممنوع استخدام عبارة «الله يبيض وجهك» (أو أي صيغة من «بيض الله وجهك / بيّضت وجوهنا») في الرد إلا إذا كان نص العميل نفسه يحتوي صراحة على واحدة من العبارات: (بيض الله وجهك / ما قصرت / كفو / رفعت رأسي / رفعتم رأسنا / خدمة كبيرة). في الشكر العادي أو الدعاء البسيط استخدمي ردًا أخف مثل (الله يكرمك / آمين وإياك / دوم بخير / شكراً لذوقك).",
 )
 
 BASELINE_FORBIDDEN_RULES: tuple[str, ...] = (

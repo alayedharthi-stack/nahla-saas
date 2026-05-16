@@ -739,23 +739,46 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
 # Tone: خليجية دافئة، سطر أو سطرين، إيموجي خفيف (🌹/🌷) — بدون ضحك مفرط
 # وبلا طرح بيعي.
 
+# May 2026 #8 — REMOVED the "وهذا من ذوقك … الله يبيض وجهك" entry.
+# Routine "شكرًا" / "تسلم" turns must NOT trigger the heavy reciprocal
+# blessing — it felt over-the-top when the customer hadn't praised us
+# in kind. The heavy phrase now lives ONLY in
+# ``_SOCIAL_STRONG_PRAISE_VARIANTS`` below and is reached only when
+# the social classifier matches the explicit ``_STRONG_PRAISE_KEYWORDS``
+# triggers (بيض الله وجهك / ما قصرت / كفو / رفعت رأسنا / ...).
 _SOCIAL_THANKS_VARIANTS = [
     "وياك يا غالي 🌹\nالله يجزاك خير.",
     "الله يبارك فيك 🌹\nأي وقت وتحت أمرك.",
     "يعافيك ربي وأحسن الله إليك 🤍\nدوم بخير.",
     "مو عليك يا الغالي 🤍\nالله يعافيك.",
     "الله يخليك 🤍\nتشرفنا فيك.",
-    "وهذا من ذوقك أنت يا الغالي 🌹\nالله يبيض وجهك.",
+    "العفو يا الغالي 🌹\nأي وقت وتحت أمرك.",
 ]
 
+# May 2026 #8 — same surgery here. The reciprocal "الله يبيض وجهك مثل
+# ما بيضت وجهنا" was firing on any blessing keyword ("الله يسعدك" /
+# "الله يحفظك") and landing on customers who were just being polite,
+# not praising us. Replaced with neutral warm closures that fit ANY
+# blessing turn. Heavy reciprocal stays in the strong-praise pool.
 _SOCIAL_BLESSING_VARIANTS = [
-    "ووجهك أبيض 🌹\nالله يسعدك.",
-    "الله يبيض وجهك مثل ما بيضت وجهنا 🌹\nويحفظك.",
+    "آمين وإياك 🌹\nالله يسعدك.",
+    "ولك بمثل ما دعيت وأضعاف 🤍",
     "آمين يارب… ولك بالمثل أضعاف 🤍",
-    "الله يكرمك 🤍\nما قصرت.",
+    "الله يكرمك 🤍\nشكراً لذوقك.",
     "ربي يعافيك ويطوّل بعمرك 🌹\nالله يطرّي أيامك 🤍",
-    # Legacy warm close for dua-style lines (بيض الله وجهك, يعطيك العافية, etc.)
     "الله يعافيك ويسعدك 🌷\nأي وقت.",
+]
+
+# Strong-praise reciprocal pool — reached ONLY when the social
+# classifier matches a trigger from ``_STRONG_PRAISE_KEYWORDS``. This
+# is the single place in the codebase where the heavy "الله يبيض
+# وجهك" reciprocal is allowed; keeping it isolated makes the
+# regression test trivial (see test_strong_praise_phrasing.py).
+_SOCIAL_STRONG_PRAISE_VARIANTS = [
+    "الله يبيض وجهك مثل ما بيضت وجهنا 🌹\nويحفظك.",
+    "تسلم يا الغالي 🌹\nالله يبيض وجهك ويرفع قدرك.",
+    "ما قصّرت 🤍\nالله يبيض وجهك ويعطيك العافية.",
+    "كفو والله 🌷\nالله يبيض وجهك وقدّرك خير.",
 ]
 
 _SOCIAL_PROPHET_INVOCATION_VARIANTS = [
@@ -796,6 +819,8 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
     "basmala":            _SOCIAL_BASMALA_VARIANTS,
     "compliment":         _SOCIAL_COMPLIMENT_VARIANTS,
     "general_courtesy":   _SOCIAL_GENERAL_COURTESY_VARIANTS,
+    # May 2026 #8 — reserved pool for explicit heavy praise only.
+    "strong_praise":      _SOCIAL_STRONG_PRAISE_VARIANTS,
 }
 
 
