@@ -314,11 +314,24 @@ def record_outbound_message(
         ))
         db.flush()
     except Exception as exc:
+        # ── Surface psycopg2 details (May 2026 #19) ─────────────────
+        # See ``_diag_sql_error`` in ``core/conversation_engine.py``
+        # for the rationale. Same contract: rollback FIRST so any
+        # bound-object attribute access in the diagnostic doesn't
+        # re-raise InFailedSqlTransaction.
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
-        _log.warning("[record_outbound_message] %s tenant=%s: %s", phone, tenant_id, exc)
+        try:
+            from core.conversation_engine import _diag_sql_error  # noqa: PLC0415
+            _diag = _diag_sql_error(exc, db=db)
+        except Exception:  # noqa: BLE001
+            _diag = f"diag_unavailable exc_type={type(exc).__name__}"
+        _log.exception(
+            "[record_outbound_message] tenant=%s phone=%s event=%s | %s",
+            tenant_id, phone, event_type, _diag,
+        )
 
 
 @router.get("")

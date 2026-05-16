@@ -4173,6 +4173,48 @@ async def _handle_merchant_message(
                 logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d handoff=%s",
                             tenant_id, to, len(_brain_buttons), _brain_handoff)
             except Exception as brain_exc:
+                # ── Session-poisoning recovery (May 2026 #19) ────────────
+                # If Brain raised because of a SQL error mid-transaction
+                # (e.g. ``INSERT INTO message_events`` triggered a
+                # ProgrammingError), the SQLAlchemy session is left in
+                # ``InFailedSqlTransaction`` state. EVERY subsequent
+                # ``db.*`` call below — ``build_merchant_context``,
+                # ``StateManager.save_message``, ``record_outbound_
+                # message`` — would otherwise raise
+                # ``psycopg2.errors.InFailedSqlTransaction`` (mapped to
+                # ``sqlalchemy.exc.InternalError`` / sometimes
+                # surfaced as a second ``ProgrammingError``), masking
+                # the ORIGINAL traceback under a cascade of secondary
+                # errors. Roll back FIRST so:
+                #   * the diagnostic ``logger.exception(...)`` below
+                #     prints the REAL traceback,
+                #   * the safe-reply persistence + WhatsApp send below
+                #     don't inherit a poisoned session,
+                #   * partial Brain work doesn't sneak into a later
+                #     commit on this same request.
+                # Failure of the rollback itself is logged but never
+                # raised — we still want to attempt the safe-reply.
+                try:
+                    db.rollback()
+                except Exception as _rb_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Merchant/Brain] rollback after brain_exc failed "
+                        "| tenant=%s to=%s rb_err=%s",
+                        tenant_id, to, _rb_exc.__class__.__name__,
+                    )
+                # Emit a structured diagnostic that captures the
+                # SQLAlchemy / psycopg2 fields if the brain_exc is a
+                # SQL error. For non-SQL exceptions ``_diag_sql_error``
+                # returns the safe fallback string. Either way this
+                # adds one greppable line per crash.
+                try:
+                    from core.conversation_engine import _diag_sql_error  # noqa: PLC0415
+                    logger.error(
+                        "[Merchant/Brain] brain_exc diag | tenant=%s to=%s | %s",
+                        tenant_id, to, _diag_sql_error(brain_exc, db=db),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 # ── Brain crash recovery (May 2026 #16) ──────────────────
                 # Production regression: a customer asked "وشلون طريقة
                 # توصيل الطلبات عندكم?" — a simple informational ask.
@@ -6224,6 +6266,28 @@ async def _handle_merchant_message(
         # the customer that a human will respond. We now route through
         # ``fallback_policy`` so informational questions get an honest
         # "ask to re-phrase" reply instead.
+        #
+        # ── Session-poisoning recovery (May 2026 #19) ───────────────
+        # Same rationale as the inner brain_exc arm: roll back the
+        # session FIRST so the diagnostic + fallback persistence
+        # don't inherit a poisoned transaction and crash with a
+        # cascade of ``InFailedSqlTransaction`` errors that masks the
+        # real root cause.
+        try:
+            db.rollback()
+        except Exception as _rb_outer_exc:  # noqa: BLE001
+            logger.warning(
+                "[Merchant] rollback after outer exc failed | tenant=%s rb_err=%s",
+                tenant_id, _rb_outer_exc.__class__.__name__,
+            )
+        try:
+            from core.conversation_engine import _diag_sql_error  # noqa: PLC0415
+            logger.error(
+                "[Merchant] outer_exc diag | tenant=%s | %s",
+                tenant_id, _diag_sql_error(exc, db=db),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         logger.exception(
             "[Merchant] Error generating reply for tenant=%s | inbound=%r",
             tenant_id, (text or "")[:200],

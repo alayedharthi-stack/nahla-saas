@@ -28,6 +28,85 @@ logger = logging.getLogger("nahla.engine")
 HISTORY_WINDOW     = 15   # messages sent to Claude
 PLATFORM_TENANT_ID = 1    # Platform Brain lives on tenant 1
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temporary SQL-error diagnostic helper (May 2026 #19)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Production logs show
+#
+#   [SQL: INSERT INTO message_events ...]
+#   [SQL: INSERT INTO message_delivery_events ...]
+#   brain_exc=ProgrammingError
+#
+# for nearly every customer message, but the original psycopg2 details
+# (SQLSTATE, the actual failing column / value, the underlying error
+# class) are dropped because every persistence path catches
+# ``Exception`` generically and logs ``logger.warning(..., exc)`` — no
+# traceback, no ``exc.orig.pgcode``.
+#
+# This helper pulls the structured fields we need to root-cause the
+# next crash from logs alone:
+#
+#   * exc.__class__.__name__       — e.g. ``ProgrammingError``
+#   * exc.code                     — SQLAlchemy short code
+#   * getattr(exc.orig, "pgcode")  — Postgres SQLSTATE
+#                                    (``42703`` = UndefinedColumn,
+#                                     ``23502`` = NotNullViolation,
+#                                     ``22P02`` = InvalidTextRepr.,
+#                                     ``25P02`` = InFailedSqlTxn, …)
+#   * exc.statement (trimmed)      — the failing SQL text
+#   * exc.params keys              — parameter NAMES only, no values
+#                                    (values can contain PII)
+#   * len(db.new) / len(db.dirty)  — session state at failure
+#
+# All extraction is wrapped in defensive ``getattr`` calls so the
+# diagnostic itself can NEVER raise — the worst case is missing
+# fields, never a secondary crash.
+def _diag_sql_error(exc: BaseException, *, db: Any = None) -> str:
+    """Return a single-line key=value summary of a SQL error.
+
+    Designed for ``logger.exception(..., extra={...})`` or appending
+    to a normal exception log line. Output is intentionally compact
+    so Railway / Datadog log dumps stay greppable.
+    """
+    try:
+        cls_name = exc.__class__.__name__
+        sa_code  = getattr(exc, "code", None) or "-"
+
+        orig     = getattr(exc, "orig", None)
+        orig_cls = orig.__class__.__name__ if orig is not None else "-"
+        pgcode   = getattr(orig, "pgcode", None) or "-"
+
+        stmt_raw = getattr(exc, "statement", None) or ""
+        # Trim to 240 chars so multi-statement INSERT logs stay readable.
+        stmt     = (stmt_raw[:240] + ("…" if len(stmt_raw) > 240 else "")).replace("\n", " ")
+
+        params   = getattr(exc, "params", None)
+        if isinstance(params, dict):
+            param_keys = ",".join(list(params.keys())[:24])
+        elif isinstance(params, (list, tuple)) and params and isinstance(params[0], dict):
+            param_keys = ",".join(list(params[0].keys())[:24])
+        else:
+            param_keys = "-"
+
+        if db is not None:
+            new_n   = len(getattr(db, "new", ()) or ())
+            dirty_n = len(getattr(db, "dirty", ()) or ())
+            deleted_n = len(getattr(db, "deleted", ()) or ())
+            session_state = f"new={new_n} dirty={dirty_n} deleted={deleted_n}"
+        else:
+            session_state = "-"
+
+        return (
+            f"sql_err={cls_name} sa_code={sa_code} "
+            f"orig_cls={orig_cls} pgcode={pgcode} "
+            f"params=[{param_keys}] session=[{session_state}] "
+            f"stmt={stmt!r}"
+        )
+    except Exception:  # noqa: BLE001 — diagnostic must never raise
+        return f"sql_err_diag_failed exc_type={type(exc).__name__}"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. FACT GUARD — ground truth for Nahla platform (Claude never invents these)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -980,11 +1059,35 @@ class StateManager:
             ))
             db.commit()
         except Exception as exc:
-            logger.warning("[StateManager] save_message error: %s", exc)
+            # ── Surface psycopg2 details (May 2026 #19) ─────────────
+            # The original ``logger.warning("...: %s", exc)`` dropped
+            # the traceback AND the psycopg2 fields (SQLSTATE, failing
+            # column, underlying error class). With ``logger.exception``
+            # plus ``_diag_sql_error`` we now log:
+            #   * full traceback
+            #   * SQLAlchemy code + Postgres SQLSTATE
+            #   * trimmed failing SQL
+            #   * parameter NAMES (values omitted for PII)
+            #   * session counts (new / dirty / deleted)
+            # That single log line is enough to root-cause an
+            # ``INSERT INTO message_events`` ProgrammingError without
+            # turning on PG slow-query logs in Railway.
+            #
+            # CRITICAL: rollback BEFORE the diagnostic. If the session
+            # is in failed-transaction state, ANY further attribute
+            # access on bound objects can trigger lazy loads that
+            # re-raise ``InFailedSqlTransaction`` and mask the
+            # original error. Roll back first, then diagnose.
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
+            logger.exception(
+                "[StateManager] save_message error tenant=%s phone=%s "
+                "direction=%s event_type=%s | %s",
+                _tid, phone, direction, event_type or "whatsapp",
+                _diag_sql_error(exc, db=db),
+            )
 
     @classmethod
     def load_history(cls, db, phone: str, limit: int = HISTORY_WINDOW,
