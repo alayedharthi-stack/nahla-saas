@@ -3168,6 +3168,28 @@ async def _handle_merchant_message(
         inbound_text = text or "",
     )
 
+    # ── Top-k intent ranking (May 2026 #17) ─────────────────────────────────
+    # Run the rule classifier ONCE at the top of the turn, capture the
+    # full ranking, and stash it on the trace. The Brain pipeline will
+    # run its own (richer) classifier later — this is observability
+    # data for the [TURN] line AND a cheap "current-turn intent" signal
+    # the fallback paths can consult later without re-running the
+    # regex chain.
+    #
+    # Pure compute — no DB, no network. Cost is bounded by the regex
+    # chain length × inbound length, negligible vs the Brain pipeline.
+    _top_intents_raw: list = []
+    try:
+        from modules.ai.brain.intent import rules as _intent_rules  # noqa: PLC0415
+        _top_intents_raw = _intent_rules.match_top_k(text or "", k=3)
+        _trace.top_intents = [(float(c), it.name) for c, it in _top_intents_raw]
+        if _top_intents_raw:
+            _best_conf, _best_intent = _top_intents_raw[0]
+            _trace.intent             = _best_intent.name
+            _trace.intent_confidence  = float(_best_conf)
+    except Exception as _topk_exc:  # noqa: BLE001
+        logger.debug("[TURN] top_intents capture failed: %s", _topk_exc)
+
     # ── Strict AI activation cutoff (WhatsApp business timestamp) ───────────
     # Anything strictly before ``whatsapp_ai_live_since`` is persisted for
     # inbox/history only — never COD / Brain / outbound automation side-effects.
@@ -4198,16 +4220,59 @@ async def _handle_merchant_message(
                         tenant_id, to,
                     )
                     from services.fallback_policy import (  # noqa: PLC0415
+                        FALLBACK_KIND_INTENT_DETERMINISTIC,
+                        FALLBACK_KIND_SOFT_RETRY,
                         FALLBACK_REASON_BRAIN_EXCEPTION,
-                        choose_safe_fallback,
+                        choose_intent_aware_fallback,
                     )
-                    _decision = choose_safe_fallback(
+                    # Build a lightweight shipping-info dict from
+                    # store knowledge so the deterministic-shipping
+                    # branch of the intent-aware fallback has data
+                    # to render. The full Brain pipeline does this
+                    # via ``build_merchant_context``; here we just
+                    # pull the policies sub-dict if available so
+                    # this code path stays fast even when Brain
+                    # crashed early.
+                    _ship_info_for_fallback: Dict[str, Any] = {}
+                    try:
+                        from core.store_knowledge import (  # noqa: PLC0415
+                            build_merchant_context as _bmc,
+                        )
+                        _mctx = _bmc(db, tenant_id, customer_phone=to)
+                        _policies = (_mctx or {}).get("policies") or {}
+                        if isinstance(_policies, dict):
+                            _ship_info_for_fallback = {
+                                "shipping_methods": _policies.get("shipping_methods") or [],
+                                "shipping_notes":   _policies.get("shipping_notes")   or "",
+                                "shipping_policy":  _policies.get("shipping_policy")  or "",
+                                "delivery_areas":   _policies.get("delivery_areas")   or [],
+                                "support_hours":    _policies.get("working_hours")    or "",
+                            }
+                    except Exception:  # noqa: BLE001
+                        _ship_info_for_fallback = {}
+
+                    _decision = choose_intent_aware_fallback(
                         text or "",
                         reason=FALLBACK_REASON_BRAIN_EXCEPTION,
                         store_has_live_agent=False,
+                        shipping_info=_ship_info_for_fallback,
                     )
                     _trace.fallback_source = _decision.kind
                     _trace.response_goal   = _decision.response_goal
+                    # If the policy fell through to soft_retry, mark
+                    # the trace so the [TURN] line tells the team
+                    # WHY we ended up at clarification — was it
+                    # "intent low-confidence" or "no intent
+                    # matched"?
+                    if _decision.kind == FALLBACK_KIND_SOFT_RETRY:
+                        _trace.clarification_triggered = True
+                        _trace.clarification_reason = (
+                            "no_confident_intent" if not _trace.top_intents
+                            else f"top_conf_{_trace.intent_confidence:.2f}_below_threshold"
+                        )
+                    elif _decision.kind == FALLBACK_KIND_INTENT_DETERMINISTIC:
+                        _trace.clarification_triggered = False
+                        _trace.clarification_reason = "suppressed_by_confident_intent"
                     logger.info(
                         "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
                         tenant_id, to, _decision.kind, _decision.response_goal, _decision.rationale,
@@ -6176,12 +6241,36 @@ async def _handle_merchant_message(
             try:
                 from services.fallback_policy import (  # noqa: PLC0415
                     FALLBACK_REASON_OUTER_EXCEPTION,
-                    choose_safe_fallback as _choose_safe_fallback,
+                    choose_intent_aware_fallback as _choose_intent_aware,
                 )
-                _outer_decision = _choose_safe_fallback(
+                # Outer-except runs AFTER an indeterminate amount of
+                # pipeline work; we may or may not have store
+                # knowledge available depending on which layer
+                # raised. Try cheaply for shipping info; if anything
+                # blows up we still get a valid fallback (the
+                # policy delegates to soft_retry when no
+                # deterministic answer applies).
+                _outer_ship_info: Dict[str, Any] = {}
+                try:
+                    from core.store_knowledge import (  # noqa: PLC0415
+                        build_merchant_context as _bmc_outer,
+                    )
+                    _mctx_outer = _bmc_outer(db, tenant_id, customer_phone=to)
+                    _pol_outer = (_mctx_outer or {}).get("policies") or {}
+                    if isinstance(_pol_outer, dict):
+                        _outer_ship_info = {
+                            "shipping_methods": _pol_outer.get("shipping_methods") or [],
+                            "shipping_notes":   _pol_outer.get("shipping_notes")   or "",
+                            "shipping_policy":  _pol_outer.get("shipping_policy")  or "",
+                            "delivery_areas":   _pol_outer.get("delivery_areas")   or [],
+                        }
+                except Exception:  # noqa: BLE001
+                    _outer_ship_info = {}
+                _outer_decision = _choose_intent_aware(
                     text or "",
                     reason=FALLBACK_REASON_OUTER_EXCEPTION,
                     store_has_live_agent=False,
+                    shipping_info=_outer_ship_info,
                 )
             except Exception:  # noqa: BLE001 — policy import shouldn't fail, but never crash here
                 from services.fallback_policy import FallbackDecision as _FD  # type: ignore[unused-ignore]  # noqa: PLC0415

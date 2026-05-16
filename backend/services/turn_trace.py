@@ -180,6 +180,15 @@ class TurnTrace:
     options_pending:  list[str] = field(default_factory=list)
     extra:            dict      = field(default_factory=dict)
 
+    # ── Intent ranking (May 2026 #17) ────────────────────────────
+    # Top-k candidates with their confidence scores — a single grep
+    # answers "why did this turn route to intent X?" by showing the
+    # runners-up. Populated from ``rules.match_top_k(text)``.
+    top_intents:      list = field(default_factory=list)   # List[Tuple[float, str]]
+    intent_confidence:float = 0.0
+    clarification_triggered: bool = False
+    clarification_reason:    str = ""
+
     # ── Helpers ──────────────────────────────────────────────────
 
     def mark_outbound_sent(self, *, source: str, length: int = 0, mode: str = DELIVERY_TEXT) -> None:
@@ -246,22 +255,39 @@ class TurnTrace:
             src = self.reply_source if self.reply_source in _ALL_SOURCES else SOURCE_UNKNOWN
             invalid_src_hint = "" if src == self.reply_source else f" invalid_reply_source={self.reply_source!r}"
 
+            # Format the top-intents list compactly: [(name, conf), ...]
+            # Each tuple becomes "name@0.90" to stay inside a single
+            # space-friendly log field that downstream regex parsers
+            # can still tokenise.
+            top_intents_str = "[" + ", ".join(
+                f"{name}@{conf:.2f}"
+                for conf, name in (
+                    (float(c) if isinstance(c, (int, float)) else 0.0,
+                     str(n) if not hasattr(n, "name") else str(n.name))
+                    for c, n in self.top_intents[:3]
+                )
+            ) + "]"
+
             logger.info(
                 "[TURN] tenant=%s phone=*%s wamid=%s "
-                "mode=%s intent=%s stance=%s "
+                "mode=%s intent=%s intent_conf=%.2f stance=%s "
+                "top_intents=%s "
                 "paused=%s pause_reason=%s "
                 "brain_called=%s brain_failed=%s brain_silent=%s "
                 "brain_action=%s brain_stage=%s brain_exc=%s "
                 "response_goal=%s delivery=%s fallback_source=%s "
+                "clarification_triggered=%s clarification_reason=%s "
                 "reply_source=%s reply_len=%d buttons=%d "
                 "handoff=%s outbound_sent=%s outbound_err=%s "
                 "missing=%s opts=%s elapsed_ms=%d inbound=%r%s",
                 self.tenant_id, (self.phone or "")[-4:], self.message_id or "-",
-                self.mode or "-", self.intent or "-", self.stance or "-",
+                self.mode or "-", self.intent or "-", float(self.intent_confidence or 0.0), self.stance or "-",
+                top_intents_str,
                 self.paused, self.pause_reason or "-",
                 self.brain_called, self.brain_failed, self.brain_silent,
                 self.brain_action or "-", self.brain_stage or "-", self.brain_exc_class or "-",
                 self.response_goal or "-", self.delivery_mode or "-", self.fallback_source or "-",
+                self.clarification_triggered, self.clarification_reason or "-",
                 src, self.reply_len, self.buttons_count,
                 self.handoff_triggered, self.outbound_sent, self.outbound_error or "-",
                 self.missing_fields, self.options_pending, elapsed, inbound, invalid_src_hint,

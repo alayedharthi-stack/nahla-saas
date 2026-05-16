@@ -347,8 +347,210 @@ def fallback_text(
     return d.text, d.kind
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Intent-aware fallback — "current-turn dominance" (May 2026 #17)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Pure ``choose_safe_fallback`` produces a *generic* retry ("ممكن تعيد
+# سؤالك بتفاصيل أكثر؟") which is the right call when we have NO idea
+# what the customer asked. But when the rule classifier IS confident
+# about the current turn — e.g. it matches ``INTENT_ASK_SHIPPING`` with
+# confidence 0.90 — falling back to a "what do you mean?" reply is
+# strictly worse than answering directly from store knowledge.
+#
+# This module exposes a higher-level wrapper, ``choose_intent_aware_
+# fallback``, that:
+#
+#   1. Looks at the rule classifier's top-k candidates for the current
+#      turn.
+#   2. If the winning intent is one we have a DETERMINISTIC handler
+#      for (currently: ``INTENT_ASK_SHIPPING``) AND confidence is at
+#      or above the rules-only threshold, renders a real answer from
+#      the supplied knowledge dict.
+#   3. Otherwise delegates to plain ``choose_safe_fallback``.
+#
+# The behavioural rule the merchant stated:
+#
+#     "إذا كان current turn confidence أعلى من threshold،
+#      فامنع clarification fallback حتى لو كانت المحادثة السابقة noisy."
+#
+# is encoded as the ``min_confidence`` argument (default 0.85 — matches
+# the rules-only short-circuit threshold in ``intent.classifier``).
+#
+# We deliberately do NOT depend on the full Brain pipeline here: the
+# whole point is to produce a sensible answer EVEN when Brain crashed
+# or returned empty. So we re-use only the lightweight ``rules.match_
+# top_k`` regex layer, plus the existing deterministic template
+# ``modules.ai.brain.compose.templates.faq_shipping``.
+
+# Confidence below this means "the regex isn't sure" → defer to the
+# standard retry copy. Pinned to match
+# ``modules.ai.brain.intent.classifier.RULES_ONLY_THRESHOLD``.
+INTENT_AWARE_MIN_CONFIDENCE = 0.85
+
+FALLBACK_KIND_INTENT_DETERMINISTIC = "intent_deterministic"
+
+
+def _build_shipping_answer(shipping_info: dict) -> str:
+    """Render a real shipping answer from store knowledge.
+
+    ``shipping_info`` is the dict the webhook builds from
+    ``core.store_knowledge.build_merchant_context``. We accept a
+    plain dict (not a typed snapshot) so the function stays usable
+    from any caller — tests can pass a minimal dict with just
+    ``shipping_policy`` and we still produce a reasonable answer.
+
+    When the merchant has NOT configured any shipping info, we
+    return an honest line that asks ONE concrete question
+    ("لأي مدينة تبغى التوصيل؟") instead of the generic four-topic
+    clarification — exactly the behaviour the merchant asked for.
+    """
+    methods = shipping_info.get("shipping_methods") or shipping_info.get("methods") or []
+    notes   = (shipping_info.get("shipping_notes") or shipping_info.get("notes") or "").strip()
+    policy  = (shipping_info.get("shipping_policy") or shipping_info.get("policy") or "").strip()
+    areas   = shipping_info.get("delivery_areas") or shipping_info.get("areas") or []
+    hours   = (shipping_info.get("support_hours") or shipping_info.get("hours") or "").strip()
+
+    have_anything = bool(methods or notes or policy or areas)
+
+    if not have_anything:
+        # No configured shipping knowledge → ask one focused question
+        # rather than the four-topic generic retry. This is the
+        # "current-turn dominance" behaviour the merchant required:
+        # the customer already picked the topic (delivery), so don't
+        # offer them the topic menu again.
+        return (
+            "بالنسبة للتوصيل 🌷 لأي مدينة تبغى التوصيل؟ "
+            "أعطني المدينة (الرياض / جدة / الدمام / ...) ورح أتحقق لك "
+            "من الخيارات المتاحة."
+        )
+
+    lines: list[str] = ["بالنسبة للتوصيل 🌷"]
+    if policy:
+        lines.append(f"- سياسة الشحن: {policy}")
+    if methods:
+        if isinstance(methods, (list, tuple)):
+            lines.append(f"- طرق الشحن: {', '.join(str(m) for m in methods if m)}")
+        else:
+            lines.append(f"- طرق الشحن: {methods}")
+    if notes:
+        lines.append(f"- ملاحظات: {notes}")
+    if areas:
+        if isinstance(areas, (list, tuple)):
+            joined = ", ".join(str(a) for a in areas if a)
+            if joined:
+                lines.append(f"- مناطق التوصيل: {joined}")
+        else:
+            lines.append(f"- مناطق التوصيل: {areas}")
+    if hours:
+        lines.append(f"- ساعات الدعم: {hours}")
+    lines.append("لو حابب أكمل الطلب أعطني المنتج والمدينة.")
+    return "\n".join(lines)
+
+
+def choose_intent_aware_fallback(
+    inbound_text: str,
+    *,
+    reason: str,
+    store_has_live_agent: bool = False,
+    shipping_info: dict | None = None,
+    min_confidence: float = INTENT_AWARE_MIN_CONFIDENCE,
+) -> FallbackDecision:
+    """Choose a fallback respecting the current-turn intent.
+
+    Behavioural rule (May 2026 #17):
+
+      * IF the rule classifier matches an intent we have a
+        deterministic responder for AND the confidence is at or
+        above ``min_confidence`` → return that deterministic answer.
+        This SUPPRESSES the generic "ممكن تعيد سؤالك بتفاصيل أكثر؟
+        (عن المنتج / السعر / التوصيل / الدفع)" retry that lies to
+        the customer about what we understood.
+
+      * OTHERWISE → delegate to :func:`choose_safe_fallback`.
+
+    Parameters
+    ----------
+    inbound_text:
+        Customer's message — feeds the rule classifier.
+    reason:
+        One of ``FALLBACK_REASON_*``. Passed through to
+        ``choose_safe_fallback`` when we delegate.
+    store_has_live_agent:
+        Forwarded to ``choose_safe_fallback`` for the handoff-ack
+        path. Has no effect on the deterministic-intent path.
+    shipping_info:
+        Optional dict the webhook builds from store knowledge. When
+        the deterministic shipping path fires, this dict is what we
+        render. Pass ``None`` if you don't have shipping info — the
+        responder will emit an honest "which city?" question.
+    min_confidence:
+        Threshold for "trust the regex enough to skip the generic
+        retry". Default mirrors the rules-only short-circuit
+        threshold.
+
+    Returns
+    -------
+    FallbackDecision identical in shape to :func:`choose_safe_fallback`,
+    so the webhook can swap the call without changing downstream
+    logging / telemetry.
+    """
+    # Import lazily — keeps this module importable from environments
+    # that don't have the Brain package available (e.g. small test
+    # harnesses).
+    try:
+        from modules.ai.brain.intent import rules as _rules  # noqa: PLC0415
+        from modules.ai.brain.types import INTENT_ASK_SHIPPING  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        # Brain package missing → fall back to plain policy.
+        return choose_safe_fallback(
+            inbound_text, reason=reason,
+            store_has_live_agent=store_has_live_agent,
+        )
+
+    # Always defer the no-API-key path to the standard policy — no
+    # deterministic intent answer makes sense when the AI is fully
+    # disabled.
+    if reason == FALLBACK_REASON_NO_API_KEY:
+        return choose_safe_fallback(
+            inbound_text, reason=reason,
+            store_has_live_agent=store_has_live_agent,
+        )
+
+    try:
+        candidates = _rules.match_top_k(inbound_text or "", k=3)
+    except Exception:  # noqa: BLE001
+        candidates = []
+
+    if candidates:
+        best_conf, best_intent = candidates[0]
+        # Current-turn dominance gate: high-confidence intent BLOCKS
+        # the generic clarification retry even when prior context
+        # was noisy. The rules layer is agnostic to history — that's
+        # the property we want here.
+        if best_conf >= min_confidence and best_intent.name == INTENT_ASK_SHIPPING:
+            text = _build_shipping_answer(shipping_info or {})
+            return FallbackDecision(
+                text          = text,
+                kind          = FALLBACK_KIND_INTENT_DETERMINISTIC,
+                response_goal = GOAL_ANSWER,
+                rationale     = (
+                    f"intent={best_intent.name} conf={best_conf:.2f} "
+                    f"≥ min={min_confidence:.2f} → deterministic shipping "
+                    f"answer instead of soft_retry"
+                ),
+            )
+
+    # No confident deterministic intent → standard policy decision.
+    return choose_safe_fallback(
+        inbound_text, reason=reason,
+        store_has_live_agent=store_has_live_agent,
+    )
+
+
 __all__ = [
     "FALLBACK_KIND_HANDOFF_ACK",
+    "FALLBACK_KIND_INTENT_DETERMINISTIC",
     "FALLBACK_KIND_NEUTRAL_RETRY",
     "FALLBACK_KIND_NO_AI",
     "FALLBACK_KIND_SOFT_RETRY",
@@ -362,6 +564,8 @@ __all__ = [
     "GOAL_HANDOFF",
     "GOAL_RETRY",
     "GOAL_SILENT",
+    "INTENT_AWARE_MIN_CONFIDENCE",
+    "choose_intent_aware_fallback",
     "choose_safe_fallback",
     "fallback_text",
     "is_explicit_handoff_request",

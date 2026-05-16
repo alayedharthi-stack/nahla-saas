@@ -150,21 +150,73 @@ _register(RuleSet(
 # personal-shipment status question — and locked them into the generic
 # shipping-policy FAQ template instead of the order-tracking flow.
 #
-# We now require explicit shipping-POLICY context (rates, methods,
-# duration, free shipping, etc.) and let everything else fall through to
-# the LLM where the brain can look at the customer's order history.
+# We require explicit shipping-POLICY context (rates, methods, duration,
+# free shipping, etc.) and let everything else fall through to the LLM
+# where the brain can look at the customer's order history.
+#
+# May 2026 #17 — production regression: customer asked
+# "وشلون طريقة توصيل الطلبات عندكم?" and the message DID NOT match any
+# of the original patterns:
+#   * "طريقة" (singular) vs "طرق" (plural) — only plural was covered.
+#   * "وشلون / كيف" "how" colloquial questions weren't covered at all.
+#   * "توصلون / تشحنون" verb forms weren't covered.
+# So the message fell through to ``INTENT_ASK_PRODUCT`` (which fires on
+# the substring "طلب" inside "الطلبات", confidence 0.82) and ultimately
+# the soft-retry fallback.
+#
+# This rule now covers:
+#   * Cost: "كم الشحن / رسوم التوصيل / كم سعر الشحن"
+#   * "How do you ship?" verb forms: "وشلون التوصيل / كيف توصلون /
+#     شلون الشحن / كيفية التوصيل"
+#   * Method / area: "طريقة|طرق الشحن|التوصيل / سياسة الشحن /
+#     شحن مجاني / مناطق التوصيل"
+#   * Existence: "هل تشحنون / هل عندكم توصيل / عندكم مندوب /
+#     عندكم شحن"
+#   * Duration: "مدة الشحن / كم يوم / متى يوصل الطلب"
+#   * Carrier: "هل التوصيل سمسا / عن طريق سمسا / اراميكس / dhl"
+#     (Saudi shipping carriers are domain-specific enough that
+#     mentioning one in a question is unambiguous shipping intent)
+#   * Destination city: "الشحن للرياض / تشحنون لجدة / التوصيل للدمام"
+#
+# Confidence bumped 0.85 → 0.90 so it beats the bare ASK_PRODUCT match
+# on "طلب" substring (conf 0.82) AND the rules-only threshold (0.85)
+# so we short-circuit the LLM extractor for these very common asks.
 _register(RuleSet(
     intent=INTENT_ASK_SHIPPING,
     patterns=[
-        # Cost / fee questions
+        # Cost / fee
         r"(كم.{0,8}(الشحن|التوصيل)|رسوم.{0,5}(الشحن|التوصيل)|سعر.{0,5}(الشحن|التوصيل))",
-        # Method / area questions
-        r"(طرق.{0,5}(الشحن|التوصيل)|سياسة.{0,5}(الشحن|التوصيل)|شحن مجاني|توصيل مجاني|مناطق.{0,5}(الشحن|التوصيل))",
-        # Duration questions ("how many days", "when does it arrive")
+        # "How do you ship?" — colloquial + formal Arabic interrogatives.
+        # Covers: وشلون / شلون / كيف / كيفية + (الشحن | التوصيل |
+        # توصلون | توصيل | تشحنون | الشحنات | شحنكم).
+        r"(وشلون|شلون|كيف|كيفية).{0,15}(الشحن|التوصيل|توصلون|توصيل|تشحنون|الشحنات|شحنكم|التوصيلات)",
+        # Method / area — singular AND plural now covered ("طريقة" vs "طرق").
+        r"((طريقة|طرق).{0,8}(الشحن|التوصيل|توصيل|توصيلكم|شحنكم|التوصيلات)|سياسة.{0,5}(الشحن|التوصيل)|شحن مجاني|توصيل مجاني|مناطق.{0,5}(الشحن|التوصيل))",
+        # Existence / "do you have"
+        r"(هل.{0,8}(تشحنون|توصلون|توصيل|عندكم.{0,5}(توصيل|شحن|مندوب))|عندكم.{0,5}(توصيل|شحن|مندوب|مناديب))",
+        # Carrier-by-name question — "توصيلكم عن طريق مين؟" / "الشحن
+        # عن طريق شركة" / "بواسطة سمسا". The "by-whom" framing is
+        # unambiguous shipping intent regardless of which carrier
+        # name follows.
+        r"((توصيلكم|التوصيل|الشحن|شحنكم|تشحنون|توصلون).{0,12}(عن طريق|بواسطة|مع شركة|شركة الشحن|مع مين|عن طريق مين))",
+        # Duration
         r"(مدة.{0,5}(الشحن|التوصيل)|كم يوم|كم تأخذ|كم يستغرق|متى يوصل الطلب|متى توصل الطلبية)",
-        r"(shipping (cost|fee|price|policy|methods?|areas?)|how (long|many days)|free shipping|delivery (cost|fee|time))",
+        # Carrier / courier — Saudi market specific. Customers naming a
+        # carrier in a question are unambiguously asking about shipping
+        # ("هل التوصيل سمسا؟" / "تشحنون مع اراميكس؟").
+        r"(سمسا|اراميكس|ارامكس|دي ?اتش ?ال|\bdhl\b|\baramex\b|\bsmsa\b)",
+        # Destination city for shipping. Whitelisted to major Saudi
+        # cities (with/without the ل prefix) so we don't misfire on
+        # unrelated questions that happen to mention a city. The
+        # outer alternation lists each city WITH its ل prefix
+        # variant — a previous attempt at factoring "ل" outside the
+        # group produced "للجدة" / "للالرياض" double prefixes.
+        r"((الشحن|التوصيل|تشحنون|توصلون).{0,8}(للرياض|للجدة|لجدة|لجده|للجده|للطائف|للمدينة|للدمام|لمكة|للمكة|للقصيم|للأحساء|الرياض|جدة|جده|الدمام|الطائف|مكة|الأحساء))",
+        # English fallbacks
+        r"(shipping (cost|fee|price|policy|methods?|areas?)|how (do|long|many days)|free shipping|delivery (cost|fee|time|method))",
+        r"(do you (ship|deliver)|where (do|can) you (ship|deliver))",
     ],
-    confidence=0.85,
+    confidence=0.90,
 ))
 
 # ── Store info / location / link ─────────────────────────────────────────────
@@ -274,6 +326,92 @@ _register(RuleSet(
 _SINGLE_DIGIT = re.compile(r'^\s*([١٢٣٤٥٦٧٨٩1-9])\s*$', re.UNICODE)
 _ARABIC_DIGIT_MAP = {'١': '1', '٢': '2', '٣': '3', '٤': '4', '٥': '5',
                      '٦': '6', '٧': '7', '٨': '8', '٩': '9'}
+
+
+def match_top_k(message: str, *, k: int = 3) -> List[Tuple[float, "Intent"]]:
+    """Return the top-k intent candidates ranked by confidence.
+
+    Equivalent to :func:`match` but exposes the runner-up intents
+    instead of collapsing to the single winner. Built for the
+    observability layer (``TurnTrace``) so the production log line
+    can show:
+
+        top_intents=[(ask_shipping, 0.90), (ask_product, 0.82),
+                     (greeting, 0.50)]
+
+    which makes "why did this turn route to X?" answerable from a
+    single grep instead of replaying the regex chain in the head.
+
+    The function is a SEPARATE entry point on purpose:
+
+      * ``match()`` keeps its existing contract (single ``Intent`` or
+        ``None``) so all downstream consumers — pipeline, decision
+        engine, slot-extractor gating — stay untouched.
+      * ``match_top_k()`` is observability-only; it does NOT apply
+        the welcome-gate demotion (the runner-up list is more useful
+        for debugging when shown WITHOUT post-processing).
+
+    Returns
+    -------
+    List[Tuple[confidence, Intent]] sorted descending by confidence.
+    Length is clamped to ``k`` (default 3). Empty list when no rule
+    fires.
+    """
+    out: List[Tuple[float, "Intent"]] = []
+
+    # Single-digit fast path — short-circuit and return a single
+    # high-confidence intent (matches the welcome-gate-free behaviour
+    # of the original match() for digits).
+    m = _SINGLE_DIGIT.match(message)
+    if m:
+        digit = m.group(1)
+        latin = _ARABIC_DIGIT_MAP.get(digit, digit)
+        return [(
+            0.97,
+            Intent(
+                name=INTENT_PICK_LIST_ITEM, confidence=0.97,
+                slots={"list_index": int(latin)},
+                raw_message=message, extraction_method="rules",
+            ),
+        )]
+
+    social = classify_social(message)
+    if social is not None:
+        out.append((
+            social.confidence,
+            Intent(
+                name=INTENT_SOCIAL, confidence=social.confidence,
+                slots={"social_category": social.category},
+                raw_message=message, extraction_method="rules",
+            ),
+        ))
+
+    platform = classify_platform(message)
+    if platform is not None:
+        out.append((
+            platform.confidence,
+            Intent(
+                name=INTENT_PLATFORM_INQUIRY, confidence=platform.confidence,
+                slots={"platform_topic": platform.topic},
+                raw_message=message, extraction_method="rules",
+            ),
+        ))
+
+    for ruleset, compiled in _RULES:
+        for pattern in compiled:
+            if pattern.search(message):
+                out.append((
+                    ruleset.confidence,
+                    Intent(
+                        name=ruleset.intent, confidence=ruleset.confidence,
+                        slots=dict(ruleset.slots),
+                        raw_message=message, extraction_method="rules",
+                    ),
+                ))
+                break
+
+    out.sort(key=lambda x: x[0], reverse=True)
+    return out[: max(1, int(k))]
 
 
 def match(message: str) -> Optional[Intent]:
