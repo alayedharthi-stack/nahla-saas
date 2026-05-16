@@ -216,6 +216,99 @@ _PRODUCT_INBOUND_KEYWORDS = (
     "أبي صورة",
     "أبغى صورة",
     "ودي صورة",
+    # ── May 2026 #6 — visual-product enforcement keyword pack ────────
+    # Production gap: customers say "عندك صورة للضهيان؟" / "ورني
+    # السمر" / "أرسل رابط السمر" / "أبي الكتالوج" and the previous
+    # keyword set missed them, so the FINAL_DELIVERY guard never
+    # tripped and the text-only reply slipped through. Each new
+    # entry is a HIGH-confidence Arabic phrasing — we deliberately
+    # avoid bare "صورة" / "رابط" / "شكل" because they appear in
+    # neutral chitchat ("صورة العقد" / "رابط الموقع" / "شكلك
+    # تعبان") that we must not flag.
+    # "show me / see / display" — verb-anchored variants.
+    "اعرض لي",
+    "اعرضي لي",
+    "اعرضو",
+    "عرض المنتج",
+    "عرض المنتجات",
+    # "what does it look like" — noun-anchored shape questions.
+    "شكل المنتج",
+    "شكله ايش",
+    "شكلها ايش",
+    "كيف شكله",
+    "كيف شكلها",
+    # "do you have a picture of …?" — possessive image asks.
+    "عندك صورة",
+    "عندكم صورة",
+    "فيه صورة",
+    "صورة ل",
+    "صورة لـ",
+    "صورة عن",
+    # Explicit product-link asks (resend the buy URL or a fresh one).
+    "ارسل رابط",
+    "أرسل رابط",
+    "ابعث رابط",
+    "ابعث لي رابط",
+    "ابعثلي رابط",
+    "ارسل الرابط",
+    "أرسل الرابط",
+    "ابعث الرابط",
+    "ابعث لي الرابط",
+    "ابعثلي الرابط",
+    "ودي رابط",
+    "أبي رابط",
+    "أبغى رابط",
+    "رابط المنتج",
+    "رابط للمنتج",
+)
+
+
+_NEGATIVE_NON_PRODUCT_PHRASES = (
+    # May 2026 #6 — anchored non-product nouns that the expanded
+    # keyword pack ("أرسل رابط …" / "صورة …") would otherwise drag
+    # into the visual-product bucket and trigger a false enforcement
+    # alarm. Each phrase is a HIGH-confidence "this is NOT about a
+    # catalog product" signal:
+    #
+    #   * Generic web / contact links — store website, IG handle,
+    #     WhatsApp link, contact-us link, login link, etc.
+    #   * Document-style images — contract, invoice, receipt, ID,
+    #     bank-account screenshot. These are usually customer-side
+    #     uploads, not catalog asks; even when the customer ASKS
+    #     for one (e.g. the bank-transfer barcode), the [MEDIA_KEY:]
+    #     marker path handles it and the visual enforcer must not
+    #     also attach a product card.
+    "رابط الموقع",
+    "رابط موقع",
+    "رابط الانستا",
+    "رابط الإنستا",
+    "رابط الانستجرام",
+    "رابط الإنستجرام",
+    "رابط انستجرام",
+    "رابط الواتس",
+    "رابط واتس",
+    "رابط الواتساب",
+    "رابط الفيس",
+    "رابط فيسبوك",
+    "رابط الفيسبوك",
+    "رابط التواصل",
+    "رابط تواصل",
+    "رابط الدخول",
+    "رابط دخول",
+    "رابط الدفع",                 # handled by ACTION_SEND_PAYMENT_LINK
+    "رابط الفاتورة",
+    "صورة العقد",
+    "صورة الايصال",
+    "صورة الإيصال",
+    "صورة الفاتورة",
+    "صورة البطاقة",
+    "صورة الهوية",
+    "صورة الحوالة",
+    "صورة التحويل",
+    "صورة الايبان",
+    "صورة الآيبان",
+    "صورة البروفايل",
+    "صورة الشخصية",
 )
 
 
@@ -232,11 +325,18 @@ def customer_wants_product_or_image(
       * The brain's explicit action choice (the strongest signal —
         the decision engine already ran the full intent pipeline).
       * Inbound-text keyword match against a closed set of
-        high-confidence Arabic phrasings.
+        high-confidence Arabic phrasings, gated by a negative
+        filter for non-product nouns (web links, documents, IDs).
 
-    Either signal alone is enough. The function is pure, fast, and
-    case-insensitive. It never raises and treats ``None`` inputs as
-    empty strings.
+    Either signal alone is enough — except when the inbound text
+    explicitly names a non-product noun, in which case the keyword
+    path is suppressed to avoid false positives that would attach
+    a random catalog card to a "أرسل رابط الموقع" / "صورة العقد"
+    turn. Brain-action precedence is preserved: a decision-engine
+    ``search_products`` always wins.
+
+    Pure, fast, and case-insensitive. It never raises and treats
+    ``None`` inputs as empty strings.
     """
     if (brain_action or "").strip() in _PRODUCT_BRAIN_ACTIONS:
         return True
@@ -248,6 +348,13 @@ def customer_wants_product_or_image(
     # Arabic but cheap insurance for any Latin tail like product
     # SKUs).
     norm = " ".join(raw.split()).lower()
+
+    # Cheap negative gate FIRST: if the customer named a non-product
+    # noun explicitly we want the legacy text/CTA path to handle the
+    # turn without the enforcer adding a card.
+    if any(neg in norm for neg in _NEGATIVE_NON_PRODUCT_PHRASES):
+        return False
+
     return any(kw in norm for kw in _PRODUCT_INBOUND_KEYWORDS)
 
 

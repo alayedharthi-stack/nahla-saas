@@ -5292,6 +5292,169 @@ async def _handle_merchant_message(
             except Exception:  # noqa: BLE001
                 _validate_media = None  # type: ignore[assignment]
 
+            # ── [VISUAL_PRODUCT_ENFORCEMENT] — May 2026 #6 ────────────
+            # Production regression: customer says "أبغى أشوف صورة
+            # لعسل السمر" / "ورني السمر" / "أرسل رابط السمر" / "أبي
+            # الكتالوج" / "عندك صورة للضهيان؟" and the LLM replies
+            # with a TEXT description ("هذا سمر الحجاز إنتاج 1446…").
+            # No [PRODUCT:] marker → no product card attached → no
+            # image → final_delivery_mode = text_only. The
+            # [DELIVERY_GUARD_FAIL] alarm fires but is observation-
+            # only; the customer still sees text.
+            #
+            # The enforcer below intercepts EXACTLY that case:
+            #   * the inbound matches a visual-product intent
+            #     (closed keyword set in delivery_mode.py +
+            #     brain-action signals)
+            #   * AND no [PRODUCT:]/[MEDIA_KEY:] marker landed
+            #   * AND no library/product attachment is queued
+            # → we resolve a best-candidate title from
+            # brain_state (current_product_focus →
+            # last_search_candidates → last_recommended_products →
+            # inbound text fallback) and APPEND a synthetic
+            # product_card attachment so the existing
+            # dispatch loop (catalog → legacy image+CTA) delivers
+            # rich content as a FOLLOW-UP message. The original
+            # text reply is preserved verbatim.
+            #
+            # Scope is intentionally narrow: only fires on visual
+            # intents, only when no rich content exists, only
+            # attaches ONE card. Zero impact on any other path.
+            _enforcement_applied = False
+            try:
+                from modules.observability import (  # noqa: PLC0415
+                    customer_wants_product_or_image as _wants_visual,
+                    has_visual_marker as _has_marker,
+                    pick_best_candidate_title as _pick_candidate,
+                )
+                _vp_wants = _wants_visual(
+                    inbound_text=text or "",
+                    brain_action=_br_action or "",
+                )
+                _vp_has_marker = _has_marker(reply or "")
+                _vp_has_rich = bool(_product_attachments) or any(
+                    str(_a.get("media_type") or "").lower().startswith("image")
+                    for _a in (_media_attachments or [])
+                )
+                if not _vp_wants:
+                    logger.debug(
+                        "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
+                        "reason=not_visual_intent inbound=%r brain_action=%s",
+                        tenant_id, (text or "")[:80], _br_action or "?",
+                    )
+                elif _vp_has_marker or _vp_has_rich:
+                    logger.info(
+                        "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
+                        "reason=already_rich inbound=%r brain_action=%s "
+                        "has_marker=%s product_attachments=%d media_attachments=%d",
+                        tenant_id, (text or "")[:80], _br_action or "?",
+                        str(_vp_has_marker).lower(),
+                        len(_product_attachments or []),
+                        len(_media_attachments or []),
+                    )
+                else:
+                    _candidate_title, _candidate_source = _pick_candidate(
+                        _bs if isinstance(_bs, dict) else {},
+                        text or "",
+                    )
+                    logger.info(
+                        "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s TRIGGER "
+                        "inbound=%r brain_action=%s candidate=%r source=%s",
+                        tenant_id, (text or "")[:80], _br_action or "?",
+                        _candidate_title[:80], _candidate_source,
+                    )
+                    if _candidate_title:
+                        try:
+                            from services.product_resolver import (  # noqa: PLC0415
+                                resolve_by_query as _resolve_query,
+                                format_product_card_caption as _vp_caption,
+                            )
+                            _cust_id_for_aff = None
+                            try:
+                                _cust_id_for_aff = getattr(convo, "customer_id", None) or None
+                            except Exception:
+                                _cust_id_for_aff = None
+                            _vp_res = _resolve_query(
+                                db, tenant_id, _candidate_title,
+                                customer_id=_cust_id_for_aff,
+                            )
+                            if _vp_res and _vp_res.image_url:
+                                _product_attachments.append({
+                                    "kind":         "product_card",
+                                    "id":           _vp_res.id,
+                                    "title":        _vp_res.title,
+                                    "media_type":   "image",
+                                    "file_url":     _vp_res.image_url,
+                                    "caption":      _vp_caption(_vp_res),
+                                    "product_url":  _vp_res.product_url,
+                                    "price":        _vp_res.price,
+                                    "in_stock":     _vp_res.in_stock,
+                                    "external_id":  _vp_res.external_id,
+                                    "confidence":   _vp_res.confidence,
+                                    "_enforced":    True,
+                                })
+                                _enforcement_applied = True
+                                logger.info(
+                                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                    "ENFORCED product_id=%s title=%r "
+                                    "image=%s url=%s source=%s",
+                                    tenant_id, _vp_res.id, _vp_res.title,
+                                    bool(_vp_res.image_url),
+                                    bool(_vp_res.product_url),
+                                    _candidate_source,
+                                )
+                            elif _vp_res and _vp_res.product_url:
+                                _product_attachments.append({
+                                    "kind":         "product_card",
+                                    "id":           _vp_res.id,
+                                    "title":        _vp_res.title,
+                                    "media_type":   "image",
+                                    "file_url":     "",
+                                    "caption":      _vp_caption(_vp_res),
+                                    "product_url":  _vp_res.product_url,
+                                    "price":        _vp_res.price,
+                                    "in_stock":     _vp_res.in_stock,
+                                    "external_id":  _vp_res.external_id,
+                                    "confidence":   _vp_res.confidence,
+                                    "_enforced":    True,
+                                })
+                                _enforcement_applied = True
+                                logger.info(
+                                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                    "ENFORCED_CTA_ONLY product_id=%s title=%r "
+                                    "reason=no_image_url source=%s",
+                                    tenant_id, _vp_res.id, _vp_res.title,
+                                    _candidate_source,
+                                )
+                            else:
+                                logger.warning(
+                                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                    "FALLBACK_TEXT_ONLY reason=resolver_no_match "
+                                    "candidate=%r source=%s",
+                                    tenant_id, _candidate_title[:80],
+                                    _candidate_source,
+                                )
+                        except Exception as _vp_res_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                "RESOLVER_FAILED candidate=%r err=%s",
+                                tenant_id, _candidate_title[:80],
+                                _vp_res_exc,
+                            )
+                    else:
+                        logger.warning(
+                            "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                            "FALLBACK_TEXT_ONLY reason=no_candidate "
+                            "inbound=%r brain_action=%s",
+                            tenant_id, (text or "")[:80],
+                            _br_action or "?",
+                        )
+            except Exception as _vp_exc:  # noqa: BLE001
+                logger.debug(
+                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s instrumentation "
+                    "failed: %s", tenant_id, _vp_exc,
+                )
+
             # Concatenate library media + product cards into one
             # ordered list so the customer sees them in the same
             # sequence the LLM intended. Library media go FIRST

@@ -27,6 +27,15 @@ from .delivery_mode import (
     customer_wants_product_or_image,
     new_delivery_audit,
 )
+from .visual_enforcement import (
+    SOURCE_FOCUS,
+    SOURCE_INBOUND_TEXT,
+    SOURCE_LAST_RECOMMENDED,
+    SOURCE_LAST_SEARCH,
+    SOURCE_NONE,
+    has_visual_marker,
+    pick_best_candidate_title,
+)
 
 __all__ = [
     "DELIVERY_MODE_CATALOG",
@@ -39,4 +48,12 @@ __all__ = [
     "compute_final_delivery_mode",
     "customer_wants_product_or_image",
     "new_delivery_audit",
+    # visual-product enforcement pure helpers
+    "SOURCE_FOCUS",
+    "SOURCE_INBOUND_TEXT",
+    "SOURCE_LAST_RECOMMENDED",
+    "SOURCE_LAST_SEARCH",
+    "SOURCE_NONE",
+    "has_visual_marker",
+    "pick_best_candidate_title",
 ]
