@@ -70,11 +70,17 @@ the short version is:
      catalog identifier the merchant pasted on the catalog page.
 
 Meta Graph API:
-    GET https://graph.facebook.com/{v}/{catalog_id}/products
-        ?fields=id,retailer_id,name,description,price,currency,url,
-                image_url,availability,inventory
+    GET https://graph.facebook.com/{v}/{catalog_id}/items
+        ?fields=id,retailer_id,name,description,price,sale_price,
+                currency,availability,url,image_url,brand,condition
         &limit={PAGE_SIZE}
         &access_token={TOKEN}
+
+    Fallback (one attempt) when ``/items`` returns
+    ``code=100 — nonexisting field``:
+        GET https://graph.facebook.com/{v}/{catalog_id}/product_items
+        (same fields)
+    Logged as ``[META_IMPORT][ENDPOINT_FALLBACK]``.
 
 Failure modes (raised as ``MetaCatalogImportError``):
     * connection_not_found       — no WhatsAppConnection row.
@@ -160,17 +166,42 @@ def _mask_url(url: str) -> str:
 PAGE_SIZE: int          = 100   # Meta hard-caps at 100 per page anyway
 MAX_PAGES: int          = 5     # safety budget — 500 products / call
 REQUEST_TIMEOUT: float  = 30.0  # seconds — Meta is usually <3s
+
+# ── Catalog edge selection (May 2026 #19f) ───────────────────────────
+# Meta exposes the same catalog rows under multiple edge names
+# depending on the catalog type / API version. Production incident:
+#
+#   GET /v21.0/{catalog_id}/products
+#   → (#100) Tried accessing nonexisting field (products)
+#
+# Commerce catalogs (the ones bound to WhatsApp / Instagram Shopping)
+# expose their rows under ``/items``. The legacy "Marketing API
+# product catalog" edge ``/products`` was retired for those catalogs
+# somewhere around v18 / v19. We default to ``/items`` and fall back
+# to ``/product_items`` if Meta tells us that edge doesn't exist
+# either (some very old catalogs only respond to product_items).
+META_CATALOG_EDGE_PRIMARY  = "items"
+META_CATALOG_EDGE_FALLBACK = "product_items"
+
+# Field set tuned for ``ProductItem`` objects on Commerce catalogs.
+# ``sale_price`` / ``brand`` / ``condition`` weren't requested by the
+# legacy ``/products`` query — adding them now means the merchant
+# sees on-sale pricing, brand badges, and condition (new / used /
+# refurbished) right after import, matching what Meta Commerce
+# Manager shows in its own UI.
 META_CATALOG_FIELDS = ",".join([
     "id",
     "retailer_id",
     "name",
     "description",
     "price",
+    "sale_price",
     "currency",
+    "availability",
     "url",
     "image_url",
-    "availability",
-    "inventory",
+    "brand",
+    "condition",
 ])
 
 
@@ -438,8 +469,12 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         )
 
     report = ImportReport()
+    # Edge defaults to /items; we may downgrade to /product_items
+    # once on first-page failure (see fallback block below).
+    current_edge = META_CATALOG_EDGE_PRIMARY
     next_url: Optional[str] = (
-        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/products"
+        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+        f"/{catalog_id}/{current_edge}"
     )
     # First page is built explicitly; subsequent pages come back with a
     # ready-to-call ``paging.next`` URL from Meta that already carries
@@ -463,8 +498,19 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         PAGE_SIZE, MAX_PAGES, REQUEST_TIMEOUT,
     )
 
+    # ``_first_real_attempt`` stays True until we get a successful
+    # response from EITHER edge. It's the real "is this still the
+    # first request from the merchant's POV" signal — Python's for-
+    # loop counter increments even when we ``continue`` after an
+    # edge fallback, so we can't use page_idx for the raise-vs-
+    # soft-fail decision anymore.
+    _first_real_attempt = True
+    _fallback_tried     = False
+
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        for page_idx in range(MAX_PAGES):
+        # MAX_PAGES + 1 budget so a single ``/items`` → ``/product_items``
+        # fallback retry doesn't eat into the 5-page paging budget.
+        for page_idx in range(MAX_PAGES + 1):
             if next_url is None:
                 break
 
@@ -476,9 +522,11 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             log_url = _mask_url(next_url)
             logger.info(
                 "[META_IMPORT][REQ] page=%d tenant=%s catalog_id=%s "
-                "graph_url=%s has_first_params=%s token=%s",
-                page_idx, tenant_id, catalog_id, log_url,
+                "edge=%s graph_url=%s has_first_params=%s token=%s "
+                "fallback_tried=%s first_real_attempt=%s",
+                page_idx, tenant_id, catalog_id, current_edge, log_url,
                 first_params is not None, _mask_token(token),
+                _fallback_tried, _first_real_attempt,
             )
 
             _t0 = time.perf_counter()
@@ -492,11 +540,12 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                 # urllib3 / ssl error class.
                 logger.exception(
                     "[META_IMPORT][EXC] page=%d tenant=%s catalog_id=%s "
-                    "transport_error exc_class=%s elapsed_ms=%.0f graph_url=%s",
-                    page_idx, tenant_id, catalog_id,
+                    "edge=%s transport_error exc_class=%s elapsed_ms=%.0f "
+                    "graph_url=%s",
+                    page_idx, tenant_id, catalog_id, current_edge,
                     exc.__class__.__name__, _elapsed_ms, log_url,
                 )
-                if page_idx == 0:
+                if _first_real_attempt:
                     raise MetaCatalogImportError(
                         "meta_http_error",
                         f"Meta Catalog transport error: "
@@ -504,6 +553,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                         detail={
                             "stage":        "transport",
                             "page":         page_idx,
+                            "edge":         current_edge,
                             "exc_class":    exc.__class__.__name__,
                             "exc_msg":      str(exc)[:_RESP_PREVIEW_CAP],
                             "graph_url":    log_url,
@@ -563,8 +613,8 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                 _body_preview = "<text_unavailable>"
             logger.info(
                 "[META_IMPORT][RESP] page=%d tenant=%s catalog_id=%s "
-                "status=%d elapsed_ms=%.0f body_len=%d body_preview=%r",
-                page_idx, tenant_id, catalog_id,
+                "edge=%s status=%d elapsed_ms=%.0f body_len=%d body_preview=%r",
+                page_idx, tenant_id, catalog_id, current_edge,
                 resp.status_code, _elapsed_ms,
                 len(resp.content or b""),
                 _body_preview,
@@ -586,9 +636,10 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
 
                 logger.error(
                     "[META_IMPORT][HTTP_ERROR] page=%d tenant=%s catalog_id=%s "
-                    "status=%d meta_code=%s meta_subcode=%s meta_type=%s "
+                    "edge=%s status=%d meta_code=%s meta_subcode=%s meta_type=%s "
                     "meta_message=%r fbtrace_id=%s",
-                    page_idx, tenant_id, catalog_id, resp.status_code,
+                    page_idx, tenant_id, catalog_id, current_edge,
+                    resp.status_code,
                     _meta_err.get("code"),
                     _meta_err.get("error_subcode"),
                     _meta_err.get("type"),
@@ -596,7 +647,50 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                     _meta_err.get("fbtrace_id"),
                 )
 
-                if page_idx == 0:
+                # ── Edge fallback (May 2026 #19f) ─────────────────
+                # Meta returns code=100 / "nonexisting field" when
+                # the catalog isn't a Commerce catalog and doesn't
+                # expose ``/items``. Retry once on ``/product_items``
+                # before bubbling up the error. We only attempt the
+                # fallback on the FIRST page of the FIRST edge —
+                # any other failure mode (auth, rate-limit) shouldn't
+                # cycle through edge names.
+                _meta_msg = str(_meta_err.get("message") or "")
+                _is_nonexisting_field = (
+                    page_idx == 0
+                    and current_edge == META_CATALOG_EDGE_PRIMARY
+                    and _meta_err.get("code") == 100
+                    and "nonexisting field" in _meta_msg.lower()
+                )
+                if _is_nonexisting_field and not _fallback_tried:
+                    logger.warning(
+                        "[META_IMPORT][ENDPOINT_FALLBACK] tenant=%s "
+                        "catalog_id=%s from=/%s to=/%s reason=%r",
+                        tenant_id, catalog_id,
+                        META_CATALOG_EDGE_PRIMARY,
+                        META_CATALOG_EDGE_FALLBACK,
+                        _meta_msg[:_RESP_PREVIEW_CAP],
+                    )
+                    _fallback_tried = True
+                    # NOTE: we KEEP _first_real_attempt=True so a
+                    # subsequent failure still raises hard rather
+                    # than being silently swallowed as a "page 1+"
+                    # soft-fail.
+                    current_edge = META_CATALOG_EDGE_FALLBACK
+                    next_url = (
+                        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                        f"/{catalog_id}/{current_edge}"
+                    )
+                    # Restore first_params so the retry carries
+                    # fields + limit + access_token again.
+                    first_params = {
+                        "fields":       META_CATALOG_FIELDS,
+                        "limit":        str(PAGE_SIZE),
+                        "access_token": token,
+                    }
+                    continue
+
+                if _first_real_attempt:
                     raise MetaCatalogImportError(
                         "meta_http_error",
                         f"Meta returned {resp.status_code}: "
@@ -605,6 +699,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                             "stage":          "http_error",
                             "status":         resp.status_code,
                             "page":           page_idx,
+                            "edge":           current_edge,
                             "graph_url":      log_url,
                             "catalog_id":     catalog_id,
                             "elapsed_ms":     round(_elapsed_ms, 1),
@@ -648,10 +743,13 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
 
             page_rows = body.get("data") or []
             report.pages_fetched += 1
+            # First successful page locks the edge in — any later
+            # failure during pagination is treated as a soft-fail.
+            _first_real_attempt = False
             logger.info(
                 "[META_IMPORT][PAGE_OK] page=%d tenant=%s catalog_id=%s "
-                "row_count=%d total_scanned_before=%d",
-                page_idx, tenant_id, catalog_id,
+                "edge=%s row_count=%d total_scanned_before=%d",
+                page_idx, tenant_id, catalog_id, current_edge,
                 len(page_rows), report.scanned,
             )
             for row in page_rows:
@@ -739,27 +837,48 @@ def _process_one_meta_product(
     """
     report.scanned += 1
     try:
-        retailer_id = (row.get("retailer_id") or "").strip()
+        # ── Field normalization (May 2026 #19f) ────────────────
+        # /items returns a ProductItem object — same field names
+        # the user spec wants stored:
+        #   id           → Product.external_id  (Meta-side global ID)
+        #   retailer_id  → Product.meta_retailer_id (merchant SKU;
+        #                  fallback to id when Meta didn't send it,
+        #                  e.g. items created via Commerce Manager
+        #                  UI without a SKU)
+        #   name         → Product.title
+        #   description  → Product.description
+        #   price        → Product.price (raw display string)
+        #   sale_price   → extra_metadata.sale_price
+        #   currency     → extra_metadata.currency
+        #   availability → extra_metadata.availability + in_stock
+        #   url          → extra_metadata.product_url
+        #   image_url    → extra_metadata.image_url
+        #   brand        → extra_metadata.brand
+        #   condition    → extra_metadata.condition
+        meta_id     = str(row.get("id") or "").strip()
+        retailer_id = (row.get("retailer_id") or "").strip() or meta_id
         title       = (row.get("name") or "").strip()
-        if not retailer_id or not title:
+
+        if not meta_id or not title:
             report.errors += 1
             if len(report.error_samples) < 10:
                 report.error_samples.append({
                     "id":          row.get("id"),
                     "retailer_id": row.get("retailer_id"),
-                    "reason":      "missing_retailer_id_or_name",
+                    "reason":      "missing_id_or_name",
                 })
             return
 
-        # Match by retailer_id → external_id (we use ``external_id`` to
-        # store Meta's retailer_id when importing FROM Meta — same
-        # column-space convention as the Salla writer, which keeps the
-        # resolver / sender / dispatch path source-agnostic).
+        # Match by Meta's global id first (``external_id``), then
+        # by retailer_id on either column for backwards-compat with
+        # the previous import (which stored retailer_id in BOTH
+        # external_id and meta_retailer_id).
         existing = (
             db.query(Product)
               .filter(Product.tenant_id == tenant_id)
               .filter(
-                  (Product.meta_retailer_id == retailer_id)
+                  (Product.external_id == meta_id)
+                  | (Product.meta_retailer_id == retailer_id)
                   | (Product.external_id == retailer_id)
               )
               .first()
@@ -774,18 +893,27 @@ def _process_one_meta_product(
             report.skipped_manual += 1
             return
 
-        price_blob = _parse_meta_price(row.get("price"))
-        currency   = price_blob["currency"] or (row.get("currency") or None)
-        availability = (row.get("availability") or "").lower()
-        in_stock = availability in {"", "in stock", "in_stock", "available"}
+        price_blob      = _parse_meta_price(row.get("price"))
+        sale_price_blob = _parse_meta_price(row.get("sale_price"))
+        currency        = (
+            price_blob["currency"]
+            or sale_price_blob["currency"]
+            or (row.get("currency") or None)
+        )
+        availability    = (row.get("availability") or "").lower()
+        in_stock        = availability in {"", "in stock", "in_stock", "available"}
         meta_blob = {
             "source":       SOURCE_META,
-            "meta_id":      row.get("id"),
+            "meta_id":      meta_id or None,
             "image_url":    row.get("image_url") or None,
             "product_url":  row.get("url") or None,
             "currency":     currency,
             "availability": availability or None,
-            "inventory":    row.get("inventory"),
+            "sale_price":   sale_price_blob["raw"] or None,
+            "sale_price_value":    sale_price_blob["value"],
+            "sale_price_currency": sale_price_blob["currency"],
+            "brand":        (row.get("brand") or None),
+            "condition":    (row.get("condition") or None),
         }
         # Drop empty values so the JSONB stays compact.
         meta_blob = {k: v for k, v in meta_blob.items() if v is not None}
@@ -793,7 +921,7 @@ def _process_one_meta_product(
         if existing is None:
             p = Product(
                 tenant_id        = tenant_id,
-                external_id      = retailer_id,
+                external_id      = meta_id,
                 meta_retailer_id = retailer_id,
                 title            = title,
                 description      = row.get("description") or None,
@@ -822,13 +950,19 @@ def _process_one_meta_product(
             # Stamp ``source`` so a row that was previously "unknown"
             # (legacy backfill heuristic) gets correctly tagged.
             existing.source = SOURCE_META
-            # Make sure the retailer-id columns are populated — many
-            # legacy rows have NULL ``meta_retailer_id``; an import is
-            # exactly the moment to fill that in.
+            # Make sure the retailer-id columns reflect the new
+            # semantics — external_id always holds Meta's id, and
+            # meta_retailer_id holds the merchant SKU. Backfill on
+            # any legacy row that has either column NULL.
             if not (existing.meta_retailer_id or "").strip():
                 existing.meta_retailer_id = retailer_id
-            if not (existing.external_id or "").strip():
-                existing.external_id = retailer_id
+            # Migrate legacy rows whose external_id is the
+            # retailer_id (old behaviour) over to the Meta id. We
+            # only overwrite when the new id is non-empty AND the
+            # existing value differs from it — preserves rows where
+            # external_id was already set by a non-Meta writer.
+            if meta_id and (existing.external_id or "").strip() != meta_id:
+                existing.external_id = meta_id
             report.updated += 1
     except Exception as exc:  # noqa: BLE001
         report.errors += 1
