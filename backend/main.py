@@ -378,6 +378,10 @@ from routers.whatsapp_webhook  import router as _wa_webhook_router        # noqa
 from routers.store_sync        import router as _store_sync_router        # noqa: E402
 from routers.zid_oauth         import router as _zid_oauth_router         # noqa: E402
 from routers.integrations      import router as _integrations_router       # noqa: E402
+from routers.catalog           import (                                     # noqa: E402
+    admin_router    as _admin_catalog_router,
+    merchant_router as _merchant_catalog_router,
+)
 from routers.support_access    import router as _support_access_router     # noqa: E402
 from routers.notification_logs import router as _notification_logs_router  # noqa: E402
 from routers.addons            import router as _addons_router               # noqa: E402
@@ -431,6 +435,8 @@ app.include_router(_wa_webhook_router)
 app.include_router(_store_sync_router)
 app.include_router(_zid_oauth_router)
 app.include_router(_integrations_router)
+app.include_router(_merchant_catalog_router)
+app.include_router(_admin_catalog_router)
 app.include_router(_support_access_router)
 app.include_router(_notification_logs_router)
 app.include_router(_addons_router)

@@ -67,6 +67,8 @@ import MerchantWidgets from './pages/MerchantWidgets'
 import Customers from './pages/Customers'
 import CustomersImport from './pages/CustomersImport'
 import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
+import WhatsAppCatalog from './pages/WhatsAppCatalog'
+import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 
 export default function App() {
@@ -143,6 +145,7 @@ export default function App() {
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />
+            <Route path="whatsapp-catalog"   element={<WhatsAppCatalog />} />
             <Route path="wa-usage"           element={<WaUsage />} />
             <Route path="delivery-quality"   element={<DeliveryQuality />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />
@@ -161,6 +164,7 @@ export default function App() {
             <Route path="admin/tools"          element={<AdminTools />} />
             <Route path="admin/webhook-health"    element={<AdminWebhookHealth />} />
             <Route path="admin/tenant-integrity" element={<AdminTenantIntegrity />} />
+            <Route path="admin/catalog"           element={<AdminCatalog />} />
             <Route path="admin/salla-activations" element={<AdminSallaActivations />} />
             <Route path="admin/salla/integrations/token-status" element={<AdminSallaTokenStatus />} />
             <Route path="admin/salla/diagnose/:tenantId" element={<AdminSallaTokenStatus />} />

@@ -31,6 +31,7 @@ import {
   HelpCircle,
   BookOpen,
   Gauge,
+  Package,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -65,6 +66,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/team',             icon: Layers,       label: tr => tr.nav.adminItems.team            },
       { to: '/admin/system',           icon: Activity,     label: tr => tr.nav.adminItems.system          },
       { to: '/admin/tools',            icon: Wrench,       label: tr => tr.nav.adminItems.tools           },
+      { to: '/admin/catalog',          icon: Package,      label: tr => tr.nav.adminItems.catalog         },
     ],
   },
   {
@@ -107,6 +109,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/integrations',               icon: Plug,         label: tr => tr.nav.items.integrations     },
       { to: '/store-integration',          icon: Store,        label: tr => tr.nav.items.storeIntegration },
       { to: '/whatsapp-connect',           icon: MessageCircle,label: tr => tr.nav.items.whatsappConnect  },
+      { to: '/whatsapp-catalog',           icon: Package,      label: tr => tr.nav.items.whatsappCatalog  },
       { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: tr => tr.nav.items.manualSetup      },
       { to: '/widgets',                    icon: TrendingUp,   label: tr => tr.nav.items.widgets          },
       { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },

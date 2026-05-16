@@ -38,6 +38,7 @@ export interface Translations {
       integrations:     string
       storeIntegration: string
       whatsappConnect:  string
+      whatsappCatalog:  string
       manualSetup:      string
       widgets:          string
       systemStatus:     string
@@ -56,6 +57,7 @@ export interface Translations {
       team:            string
       system:          string
       tools:           string
+      catalog:         string
       settings:        string
     }
     adminTagline:  string
