@@ -374,6 +374,134 @@ _GENERIC_PAYMENT_HINTS: Tuple[str, ...] = tuple(_normalise(s) for s in (
     "invoice",
 ))
 
+# ── Hard-negative lexicon (May 2026 hotfix) ─────────────────────────
+# A regression in production (Kaaba/Hajj greeting card was classified
+# as payment evidence → bot asked the customer for a missing product
+# and shipping details instead of just replying to the greeting):
+# the lexicon-based classifier was too permissive when an image was
+# *clearly* religious / social / festive in nature. We now run a
+# short, conservative greeting/social filter BEFORE any payment
+# scoring. A hit here forces ``NOT_PAYMENT`` regardless of any other
+# context hits — those generic words ("ايصال" in caption text, etc.)
+# are noise once we know the image is a greeting card.
+#
+# This list intentionally captures only UNAMBIGUOUS greetings — the
+# kind a bank statement / receipt / invoice would NEVER print:
+#   * Eid / Ramadan / Hajj / Friday well-wishes,
+#   * generic congratulations,
+#   * sympathies / condolences,
+#   * "good morning" / "good evening" / friendly invocations.
+#
+# It is NOT a catch-all for "any unrelated image". Unrelated images
+# with no payment context already classify as NOT_PAYMENT via the
+# existing decision tree. This filter exists only to protect against
+# the case where a greeting card happens to share a token with the
+# payment lexicon (e.g. someone wrote "إيصال صدقة" on it).
+_GREETING_AND_SOCIAL_PHRASES: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    # Religious / festive greetings (Saudi-typical wording).
+    "اهنئكم",
+    "أهنئكم",
+    "تهنئه",
+    "تهنئة",
+    "تقبل الله منا ومنكم",
+    "تقبل الله",
+    "كل عام وانتم بخير",
+    "كل عام وأنتم بخير",
+    "عيدكم مبارك",
+    "عيد مبارك",
+    "عيد سعيد",
+    "عيد اضحى مبارك",
+    "عيد فطر مبارك",
+    "بقدوم عشر ذي الحجه",
+    "بقدوم عشر ذي الحجة",
+    "عشر ذي الحجه",
+    "عشر ذي الحجة",
+    "يوم النحر",
+    "يوم عرفه",
+    "يوم عرفة",
+    "وقفة عرفه",
+    "وقفة عرفة",
+    "الحج المبرور",
+    "حج مبرور",
+    "اضحى مبارك",
+    "اضحى سعيد",
+    "رمضان مبارك",
+    "رمضان كريم",
+    "حلول شهر رمضان",
+    "العام الهجري",
+    "مولد النبوي",
+    "ذكرى المولد",
+    "اليوم الوطني",
+    "يوم التاسيس",
+    "يوم التأسيس",
+    "جمعه مباركه",
+    "جمعة مباركة",
+    "صباح الخير",
+    "مساء الخير",
+    "صبحكم الله بالخير",
+    "مساكم الله بالخير",
+    "اسعد الله صباحكم",
+    "أسعد الله صباحكم",
+    # Generic congratulations / condolences (never on a receipt).
+    "مبروك",
+    "الف مبروك",
+    "ألف مبروك",
+    "تهانينا",
+    "بمناسبة",
+    "بالسلامه",
+    "بالسلامة",
+    "حمدا لله على السلامه",
+    "حمداً لله على السلامة",
+    "البقاء لله",
+    "انا لله وانا اليه راجعون",
+    "إنا لله وإنا إليه راجعون",
+    "احسن الله عزاكم",
+    "أحسن الله عزاكم",
+    # Common Islamic supplications used in social cards.
+    "اللهم صل وسلم",
+    "اللهم صلي وسلم",
+    "اللهم آمين",
+    "اللهم امين",
+    "جزاكم الله خير",
+    "بارك الله فيكم",
+    "اسعدكم الله",
+    "أسعدكم الله",
+    "يبلغكم الله",
+    "بلغكم الله",
+    "اسعدكم طول الدهر",
+    "أسعدكم طول الدهر",
+    # English equivalents that show up on bilingual cards.
+    "eid mubarak",
+    "ramadan kareem",
+    "ramadan mubarak",
+    "happy eid",
+    "blessed eid",
+    "blessed hajj",
+    "happy new year",
+    "happy friday",
+    "good morning",
+    "good evening",
+    "congratulations",
+    "condolences",
+))
+
+
+def _is_hard_negative(blob: str) -> Optional[str]:
+    """Return the first matched greeting / social phrase if the blob
+    is unmistakably a greeting card / social message. Returns
+    ``None`` otherwise. Pure substring check on the normalised blob.
+
+    Used as a HARD GATE in front of the payment-evidence classifier:
+    when a hit fires, we immediately return ``NOT_PAYMENT`` so the
+    image flows back to the general vision/brain path.
+    """
+    if not blob:
+        return None
+    for phrase in _GREETING_AND_SOCIAL_PHRASES:
+        if phrase and phrase in blob:
+            return phrase
+    return None
+
 # Regex for the "SA + 22 digits" IBAN form (Saudi). When this matches
 # we know the screen is payment-related even if no Arabic keywords
 # fire (e.g. screenshot of a pure-numbers verification screen).
@@ -471,6 +599,29 @@ def classify_payment_evidence(
             },
         }
 
+    # ── Hard-negative gate ─────────────────────────────────────────
+    # Greeting cards / social messages immediately short-circuit to
+    # NOT_PAYMENT, even if the OCR text also happens to contain a
+    # noisy payment token. The image flows back to the general
+    # vision/brain path so the bot replies to the actual content
+    # (e.g. "تقبل الله منا ومنكم").
+    _hn = _is_hard_negative(blob)
+    if _hn is not None:
+        return {
+            "status":  PAYMENT_EVIDENCE_NOT_PAYMENT,
+            "reason":  "greeting_or_social_content",
+            "signals": {
+                "success_hits": [],
+                "pre_review_hits": [],
+                "context_hits": [],
+                "generic_payment_hits": [],
+                "iban_present": False,
+                "reference_number_present": False,
+                "weak_success_present": False,
+                "greeting_hit":  _hn,
+            },
+        }
+
     success_hits     = _scan_phrases(blob, _STRONG_SUCCESS_PHRASES)
     pre_review_hits  = _scan_phrases(blob, _PRE_TRANSFER_REVIEW_PHRASES)
     context_hits_all = _scan_phrases(blob, _PAYMENT_CONTEXT_PHRASES)
@@ -539,8 +690,26 @@ def classify_payment_evidence(
             "signals": signals,
         }
 
+    # ── Discriminating-context check ───────────────────────────────
+    # A single weak hit like "ريال" / "sar" / "amount" appearing on
+    # any random image (a product photo with a price tag, a salary
+    # screenshot, etc.) used to be enough to push the verdict to
+    # NEEDS_CONFIRMATION — which then short-circuited the
+    # conversation into the receipt-pending flow. We now require
+    # one of:
+    #   * a Saudi IBAN (regex-confirmed),
+    #   * OR ≥ 2 distinct payment-context hits (e.g. bank brand +
+    #     amount, or beneficiary + IBAN-prefix-without-22-digits),
+    #   * OR ≥ 2 distinct generic payment hints (e.g. "تحويل" AND
+    #     "إيصال" — single hit alone is too noisy).
+    # This keeps real bank screenshots well within the gate while
+    # closing the false-positive door for product photos and chat
+    # text that only mentions a price.
     has_payment_context = bool(
-        context_hits or iban_present or len(generic_hits) >= 2
+        iban_present
+        or len(context_hits) >= 2
+        or len(generic_hits) >= 2
+        or (len(context_hits) >= 1 and len(generic_hits) >= 1)
     )
 
     if weak_success_hits and has_payment_context:
@@ -567,12 +736,11 @@ def classify_payment_evidence(
             "signals": signals,
         }
 
-    if generic_hits:
-        # Single generic hint like the word "تحويل" without context.
-        # Could be the customer typing the word ("هذا التحويل …") on
-        # a screenshot of something else entirely. We mark it as
-        # needs_confirmation only when the brain state says the bot
-        # was waiting for a receipt; otherwise it's not_payment.
+    if len(generic_hits) >= 2:
+        # Two or more generic payment hints (e.g. "تحويل" + "إيصال")
+        # without IBAN / bank-brand / amount. Marginal evidence: only
+        # treat as ``needs_confirmation`` when the brain state says
+        # the bot was waiting for a receipt. Otherwise → not_payment.
         if extra_context and bool(extra_context.get("awaiting_payment_receipt")):
             return {
                 "status":  PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
@@ -584,6 +752,10 @@ def classify_payment_evidence(
             "reason":  "generic_payment_hint_only",
             "signals": signals,
         }
+    # Single generic hit (e.g. the lone word "ايصال" in caption text)
+    # is intentionally treated as NOT_PAYMENT regardless of brain
+    # state — too noisy to act on. The brain still sees the image and
+    # can react to it via the normal vision/brain path.
 
     return {
         "status":  PAYMENT_EVIDENCE_NOT_PAYMENT,

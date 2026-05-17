@@ -1176,25 +1176,50 @@ async def _process_image(
             _map_blob = " ".join(
                 str(x or "") for x in (caption, vision_text)
             ).lower()
-            _map_markers = (
-                # English (Apple/Google Maps UI labels)
+            # STRONG map markers — only one of these alone is enough.
+            # These are bare UI strings that the Apple/Google Maps
+            # apps render in the chrome of a location screenshot, OR
+            # short-link domains that only the share sheet emits.
+            # A vision description that includes any of these is an
+            # unambiguous map screenshot.
+            _strong_map_markers = (
                 "apple maps", "google maps", "google map",
                 "maps.app.goo.gl", "goo.gl/maps",
-                "share your location", "drop a pin", "dropped pin",
-                "directions", "your location",
-                # Arabic (Apple/Google Maps UI labels)
+                "drop a pin", "dropped pin",
                 "خرائط apple", "خرائط آبل", "خرائط ابل",
                 "خرائط قوقل", "خرائط جوجل", "خرائط جوقل",
                 "خرائط google",
-                "موقعي الحالي", "تحديد الموقع",
                 "تثبيت دبوس", "وضع دبوس",
+                "share your location", "share my location",
                 "مشاركة الموقع",
-                "اتجاهات",
             )
-            _map_hits = [m for m in _map_markers if m in _map_blob]
+            # WEAK map markers — require TWO independent hits before
+            # we trust the classification, because each of these
+            # words also appears outside of map contexts (a
+            # restaurant flyer with "اتجاهات" arrows, a fitness app
+            # screenshot with "your location", etc.).
+            _weak_map_markers = (
+                "directions", "your location",
+                "current location", "satellite",
+                "موقعي الحالي", "تحديد الموقع",
+                "اتجاهات", "الاتجاهات",
+                "خط السير", "المسار",
+            )
+            _strong_hits = [m for m in _strong_map_markers if m in _map_blob]
+            _weak_hits   = [m for m in _weak_map_markers if m in _map_blob]
+            _map_hits: list[str] = []
+            if _strong_hits:
+                _map_hits = _strong_hits
+                _confidence = "high"
+            elif len(_weak_hits) >= 2:
+                _map_hits = _weak_hits
+                _confidence = "medium"
+            else:
+                _map_hits = []
+                _confidence = ""
             if _map_hits:
                 base_meta["image_kind"]            = "map_screenshot"
-                base_meta["image_kind_confidence"] = "medium"
+                base_meta["image_kind_confidence"] = _confidence
                 base_meta["image_kind_reasons"]    = [
                     "map_marker:" + _map_hits[0],
                 ]

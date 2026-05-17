@@ -466,3 +466,122 @@ def test_map_screenshot_no_short_circuit_without_active_order(
         inbound_metadata={"image_kind": "map_screenshot"},
     )
     assert decision is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Image classification — narrow gates (May 2026 hotfix #2)
+#
+# The previous round of fixes made the map / payment-evidence gates
+# too wide, causing a Kaaba-themed Hajj greeting card to be
+# misclassified and the bot to ask the customer for product /
+# shipping. The gates must now be NARROW: map only on strong UI
+# markers, payment only on strong receipt markers, everything else
+# is a "general image" that flows to the vision/brain path with no
+# inline classification tag prepended.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_greeting_image_skips_payment_evidence_short_circuit(
+    monkeypatch: Any,
+) -> None:
+    """End-to-end short-circuit check: when the image normaliser sees
+    a Hajj greeting card, ``payment_evidence_status`` is not set,
+    therefore the order-flow short-circuit must short-return None and
+    the brain stays in charge of replying."""
+    from core import order_flow
+
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda *_a, **_k: (None, {"current_product_focus": {}}),
+    )
+    decision = order_flow.maybe_handle_payment_evidence_inbound(
+        db=None,
+        tenant_id=1,
+        phone="+966500000020",
+        inbound_normalized_type="image",
+        inbound_metadata={
+            # The normaliser would NOT set these on a greeting card
+            # any more — confirm the short-circuit also refuses to
+            # fire if a downstream caller mistakenly forwards a
+            # greeting image with empty payment metadata.
+            "image_kind": None,
+            "payment_evidence_status": None,
+        },
+    )
+    assert decision is None
+
+
+def test_greeting_image_skips_map_short_circuit(monkeypatch: Any) -> None:
+    """Greeting card → no map_screenshot tag → map short-circuit
+    must return None even when the conversation is in an active
+    order state."""
+    from core import order_flow
+
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda *_a, **_k: (
+            None,
+            {
+                "current_product_focus": {
+                    "title": "عسل سدر", "price": 360, "currency": "SAR",
+                },
+                "order_prep": {"awaiting_payment_receipt": True},
+            },
+        ),
+    )
+    decision = order_flow.maybe_handle_map_image_inbound(
+        db=None,
+        tenant_id=1,
+        phone="+966500000021",
+        inbound_normalized_type="image",
+        inbound_metadata={
+            # No image_kind set → general image → must not fire.
+            "image_kind": None,
+        },
+    )
+    assert decision is None
+
+
+def test_payment_evidence_classifier_greeting_card_is_not_payment() -> None:
+    """The Kaaba/Hajj greeting card (production reproducer) MUST
+    classify as not_payment regardless of any noisy token overlap
+    with the payment lexicon."""
+    from core.payment_evidence import (
+        classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+    )
+    ocr_text = (
+        "أهنئكم بقدوم عشر ذي الحجة، خير الأيام عند الله، "
+        "تقبل الله منا ومنكم صالح الأعمال، وكتب لكم الأجر، "
+        "ويبلغكم يوم النحر، وأسعدكم طول الدهر، كل عام وأنتم "
+        "إلى الله أقرب، وعلى الطاعة أدوم، وعن النار أبعد، "
+        "وإلى الجنة أسبق"
+    )
+    v = classify_payment_evidence(ocr_text)
+    assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+    assert v["reason"] == "greeting_or_social_content"
+
+
+def test_general_product_image_caption_is_not_payment() -> None:
+    """A product photo with a price tag is a SINGLE payment-context
+    hit + one currency token — under the tightened thresholds this
+    must stay not_payment so the brain replies to the actual product."""
+    from core.payment_evidence import (
+        classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+    )
+    v = classify_payment_evidence(
+        "صورة عسل سدر طبيعي 1 كيلو السعر 360 ريال"
+    )
+    assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+
+def test_real_receipt_still_classifies_as_confirmed() -> None:
+    """Lock-in: tightening the noise floor must NOT block actual
+    completed-transfer screenshots from firing."""
+    from core.payment_evidence import (
+        classify_payment_evidence, PAYMENT_EVIDENCE_CONFIRMED,
+    )
+    v = classify_payment_evidence(
+        "تم التحويل بنجاح\n"
+        "المبلغ: 360 ريال\nالمستفيد: متجر نهلة\nرقم العملية: 9981234"
+    )
+    assert v["status"] == PAYMENT_EVIDENCE_CONFIRMED

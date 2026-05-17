@@ -242,15 +242,33 @@ class TestPaymentEvidenceClassifier:
         v = classify_payment_evidence(text)
         assert v["status"] == PAYMENT_EVIDENCE_CONFIRMED
 
-    def test_generic_hint_with_awaiting_context_is_needs_confirmation(self):
+    def test_two_generic_hints_with_awaiting_context_is_needs_confirmation(self):
+        """Tightened May 2026: a SINGLE generic word ("تحويل") on its
+        own is too noisy — could be a customer typing the word over
+        an unrelated screenshot. We now require ≥2 distinct generic
+        hints OR a discriminating signal (IBAN / bank brand / amount)
+        before classifying as needs_confirmation."""
         from core.payment_evidence import (
             classify_payment_evidence, PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
+        )
+        v = classify_payment_evidence(
+            "تحويل إيصال",
+            extra_context={"awaiting_payment_receipt": True},
+        )
+        assert v["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION
+
+    def test_single_generic_hint_is_not_payment_even_when_awaiting(self):
+        """Hotfix lock-in: one bare word ("تحويل") MUST stay
+        not_payment even when the bot is awaiting a receipt — the
+        brain should still get the image and reply normally."""
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
         )
         v = classify_payment_evidence(
             "تحويل",
             extra_context={"awaiting_payment_receipt": True},
         )
-        assert v["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
 
     def test_generic_hint_without_context_is_not_payment(self):
         from core.payment_evidence import (
@@ -272,6 +290,125 @@ class TestPaymentEvidenceClassifier:
         )
         # Same as "تم التحويل" but with explicit fatha + sukun.
         v = classify_payment_evidence("تَمَّ التَّحْوِيلُ بنجاح")
+        assert v["status"] == PAYMENT_EVIDENCE_CONFIRMED
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1c. Hard-negative gate (greeting / social images)
+#
+# Production regression May 2026: a Kaaba/Hajj greeting card sent in
+# the middle of a conversation was being misclassified as payment
+# evidence, derailing the bot into shipping/product prompts. The
+# greeting gate runs BEFORE any payment scoring and forces
+# NOT_PAYMENT for unambiguous greeting / social content.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHardNegativeGreetingGate:
+    """Greeting / social images must never become payment evidence,
+    regardless of context."""
+
+    def test_hajj_greeting_card_is_not_payment(self):
+        """The exact image from the user-supplied production report:
+        Kaaba + 'أهنئكم بقدوم عشر ذي الحجة' + 'تقبل الله منا ومنكم'."""
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        ocr = (
+            "أهنئكم بقدوم عشر ذي الحجة، خير الأيام عند الله، "
+            "تقبل الله منا ومنكم صالح الأعمال، وكتب لكم الأجر، "
+            "ويبلغكم يوم النحر، وأسعدكم طول الدهر، كل عام وأنتم إلى الله أقرب"
+        )
+        v = classify_payment_evidence(ocr)
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+        assert v["reason"] == "greeting_or_social_content"
+
+    def test_eid_card_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence("عيد مبارك وكل عام وأنتم بخير")
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_ramadan_card_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence("رمضان مبارك تقبل الله طاعتكم")
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_greeting_with_payment_noise_token_still_not_payment(self):
+        """Even when a greeting card text happens to contain a
+        generic payment word like 'إيصال صدقة', the greeting gate
+        forces NOT_PAYMENT — the card is a greeting, not a receipt."""
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence(
+            "تقبل الله منا ومنكم وجعلها صدقة إيصال خير لكم"
+        )
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+        assert v["reason"] == "greeting_or_social_content"
+
+    def test_friday_greeting_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence("جمعة مباركة وأسعدكم الله")
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_morning_greeting_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence("صباح الخير وسعادة لكم")
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_english_eid_greeting_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence("Eid Mubarak! May your day be blessed.")
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_condolences_is_not_payment(self):
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence(
+            "إنا لله وإنا إليه راجعون، أحسن الله عزاكم"
+        )
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_generic_product_photo_caption_is_not_payment(self):
+        """Random product photo / advertising caption MUST stay
+        not_payment so the brain replies to the actual content."""
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_NOT_PAYMENT,
+        )
+        v = classify_payment_evidence(
+            "صورة عسل سدر طبيعي من مناحلنا الجبلية، السعر ٣٦٠ ريال"
+        )
+        # The price tag alone is a SINGLE generic context hit + one
+        # currency token → not enough to fire under the tightened
+        # thresholds.
+        assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+    def test_real_completed_receipt_still_fires_after_greeting_gate(self):
+        """Sanity: the greeting gate must NOT swallow a real receipt
+        text just because it shares a noun with a greeting (e.g.
+        bank confirmation that says 'مبروك' is fine — we still want
+        confirmed)."""
+        from core.payment_evidence import (
+            classify_payment_evidence, PAYMENT_EVIDENCE_CONFIRMED,
+        )
+        # No greeting markers — pure receipt body.
+        v = classify_payment_evidence(
+            "تم التحويل بنجاح\n"
+            "المبلغ: 360 ريال\n"
+            "إلى: متجر نهلة - الراجحي\n"
+            "رقم العملية: 9981234"
+        )
         assert v["status"] == PAYMENT_EVIDENCE_CONFIRMED
 
 
