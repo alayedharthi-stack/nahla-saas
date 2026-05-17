@@ -1265,12 +1265,170 @@ async def _process_image(
             "[تصنيف الصورة: لقطة خرائط — لا يمكن استخراج "
             "إحداثيات دقيقة من صورة]\n"
         ) + combined
+
+    # Mandatory per-image classification trace (May 2026 hotfix #2).
+    # Operators must be able to grep one log line to see exactly
+    # what the classifier decided and which rules fired. Keeps
+    # filename/caption/text_preview, the chosen image_kind, the
+    # payment-evidence verdict + reason + matched signals, the
+    # map verdict, the hard-negative outcome, and the resolved
+    # final route so we can answer "why did the bot pick this
+    # path?" in one query. Never raises.
+    _emit_media_classify_trace(
+        tenant_id=tenant_id,
+        media_id=media_id,
+        media_type="image",
+        filename=None,
+        mime_type=base_meta.get("mime_type"),
+        caption=caption,
+        extracted_text_preview=vision_text,
+        image_kind=base_meta.get("image_kind"),
+        image_kind_confidence=base_meta.get("image_kind_confidence"),
+        image_kind_reasons=base_meta.get("image_kind_reasons"),
+        payment_evidence_status=base_meta.get("payment_evidence_status"),
+        payment_evidence_reason=base_meta.get("payment_evidence_reason"),
+        payment_evidence_signals=base_meta.get("payment_evidence_signals"),
+        order_context=order_context,
+    )
+
     return MediaNormalizationResult(
         normalized_type="image",
         text=combined,
         metadata=base_meta,
         should_process=True,
     )
+
+
+# ── MEDIA_CLASSIFY_TRACE (centralised audit logger) ────────────────
+# Single grep-able log line per inbound media classification. Wired
+# from BOTH ``_process_image`` (images / vision) and
+# ``_process_document`` (PDFs) so on-call can answer "why did the
+# bot reply with X to this media?" without re-running the
+# classifier locally.
+#
+# Required fields (per the user's May 2026 spec):
+#   tenant_id, conversation_id, media_type, filename, mime_type,
+#   extracted_text_preview, classifier_used, image_kind,
+#   payment_evidence_status, map_status, hard_negative_matched,
+#   matched_rules, final_route, reply_template_used.
+#
+# ``conversation_id`` and ``reply_template_used`` are unknown at
+# normaliser time (the webhook resolves those later) — we emit them
+# as nullable placeholders so the grep query stays stable and the
+# webhook can emit a follow-up [MEDIA_CLASSIFY_TRACE_ROUTE] line
+# with the resolved values.
+def _emit_media_classify_trace(
+    *,
+    tenant_id: Any,
+    media_id: Any,
+    media_type: str,
+    filename: Optional[str],
+    mime_type: Optional[str],
+    caption: Optional[str],
+    extracted_text_preview: Optional[str],
+    image_kind: Optional[str] = None,
+    image_kind_confidence: Optional[str] = None,
+    image_kind_reasons: Optional[list] = None,
+    pdf_kind: Optional[str] = None,
+    pdf_kind_confidence: Optional[str] = None,
+    pdf_kind_reasons: Optional[list] = None,
+    payment_evidence_status: Optional[str] = None,
+    payment_evidence_reason: Optional[str] = None,
+    payment_evidence_signals: Optional[Dict[str, Any]] = None,
+    order_context: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        # Build the matched-rules list. Pulls directly from the
+        # signals dict the classifier returned so the trace
+        # reflects EXACTLY what the rule passed evaluated.
+        sig = payment_evidence_signals or {}
+        matched_rules: list = []
+        for key in (
+            "success_hits", "pre_review_hits", "context_hits",
+            "generic_payment_hits",
+        ):
+            vals = sig.get(key) or []
+            if vals:
+                matched_rules.append(f"{key}={list(vals)[:5]}")
+        if sig.get("iban_present"):
+            matched_rules.append("iban_present=True")
+        if sig.get("reference_number_present"):
+            matched_rules.append("reference_number_present=True")
+        if sig.get("weak_success_present"):
+            matched_rules.append("weak_success_present=True")
+        if sig.get("greeting_hit"):
+            matched_rules.append(f"greeting_hit={sig.get('greeting_hit')!r}")
+        if sig.get("filename_signals_receipt"):
+            matched_rules.append("filename_signals_receipt=True")
+        if sig.get("pre_review_imperative_match"):
+            matched_rules.append("pre_review_imperative_match=True")
+
+        # Hard-negative outcome.
+        hard_negative_matched = (
+            payment_evidence_reason == "greeting_or_social_content"
+        )
+
+        # Final route decision. The webhook will emit a more
+        # complete follow-up trace once it knows whether a
+        # short-circuit fired; this line is the BEST GUESS based
+        # on the classifier outcome alone.
+        kind = image_kind or pdf_kind
+        if image_kind == "map_screenshot":
+            map_status = "map_screenshot"
+            final_route = "map_short_circuit"
+        else:
+            map_status = "not_map"
+            if kind == "payment_receipt":
+                final_route = "receipt_short_circuit"
+            elif kind in ("payment_pre_review", "payment_pending_evidence"):
+                final_route = "payment_evidence_short_circuit"
+            else:
+                final_route = "vision_brain"
+
+        # Truncate text preview hard — never leak >200 chars of
+        # customer document content into the log stream.
+        preview = (extracted_text_preview or "")
+        if preview:
+            preview = preview.replace("\n", " ")
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+
+        logger.info(
+            "[MEDIA_CLASSIFY_TRACE] tenant=%s conv=%s media_id=%s "
+            "media_type=%s filename=%r mime=%s caption=%r "
+            "text_preview=%r classifier=payment_evidence "
+            "image_kind=%s image_kind_conf=%s image_kind_reasons=%s "
+            "pdf_kind=%s pdf_kind_conf=%s pdf_kind_reasons=%s "
+            "payment_evidence_status=%s payment_evidence_reason=%s "
+            "map_status=%s hard_negative_matched=%s "
+            "matched_rules=%s "
+            "order_ctx_awaiting=%s order_ctx_active=%s "
+            "final_route=%s reply_template_used=%s",
+            tenant_id,
+            (order_context or {}).get("conversation_id"),
+            media_id,
+            media_type,
+            filename,
+            mime_type,
+            (caption or "")[:80],
+            preview,
+            image_kind, image_kind_confidence,
+            list(image_kind_reasons or []),
+            pdf_kind, pdf_kind_confidence,
+            list(pdf_kind_reasons or []),
+            payment_evidence_status,
+            payment_evidence_reason,
+            map_status,
+            hard_negative_matched,
+            matched_rules,
+            bool((order_context or {}).get("awaiting_payment_receipt")),
+            bool((order_context or {}).get("has_active_order")),
+            final_route,
+            None,  # webhook fills this in via the follow-up route trace
+        )
+    except Exception:
+        # Trace must NEVER raise — it is a passive observer.
+        pass
 
 
 def _image_failure(
@@ -1506,6 +1664,7 @@ async def _process_document(
                     (order_context or {}).get("awaiting_payment_receipt")
                 ),
             },
+            filename=filename or None,
         )
         base_meta["payment_evidence_status"]  = _ev["status"]
         base_meta["payment_evidence_reason"]  = _ev["reason"]
@@ -1642,6 +1801,25 @@ async def _process_document(
         int(base_meta.get("pdf_text_length") or 0),
         bool((order_context or {}).get("awaiting_payment_receipt")),
         bool((order_context or {}).get("has_active_order")),
+    )
+
+    # Mandatory per-document classification trace — mirror of the
+    # image-side emit. See ``_emit_media_classify_trace`` docs.
+    _emit_media_classify_trace(
+        tenant_id=tenant_id,
+        media_id=media_id,
+        media_type="document",
+        filename=filename or None,
+        mime_type=base_meta.get("mime_type"),
+        caption=caption,
+        extracted_text_preview=extracted_text,
+        pdf_kind=base_meta.get("pdf_kind"),
+        pdf_kind_confidence=base_meta.get("pdf_kind_confidence"),
+        pdf_kind_reasons=base_meta.get("pdf_kind_reasons"),
+        payment_evidence_status=base_meta.get("payment_evidence_status"),
+        payment_evidence_reason=base_meta.get("payment_evidence_reason"),
+        payment_evidence_signals=base_meta.get("payment_evidence_signals"),
+        order_context=order_context,
     )
 
     return MediaNormalizationResult(

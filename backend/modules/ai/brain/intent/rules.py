@@ -199,8 +199,20 @@ _register(RuleSet(
         # unambiguous shipping intent regardless of which carrier
         # name follows.
         r"((توصيلكم|التوصيل|الشحن|شحنكم|تشحنون|توصلون).{0,12}(عن طريق|بواسطة|مع شركة|شركة الشحن|مع مين|عن طريق مين))",
-        # Duration
-        r"(مدة.{0,5}(الشحن|التوصيل)|كم يوم|كم تأخذ|كم يستغرق|متى يوصل الطلب|متى توصل الطلبية)",
+        # Duration. Word-boundary on Arabic is tricky (re.findall on
+        # naked tokens like "كم يوم" matches the "-كم" suffix of any
+        # verb followed by "يوم" — production bug May 2026: greeting
+        # card with "ويبلغكم يوم النحر" mis-classified as shipping).
+        # We now require either:
+        #   * the duration question to be ABOUT shipping/delivery
+        #     ("كم يوم للتوصيل / كم يوم يستغرق الشحن"), OR
+        #   * a true sentence-initial / whitespace-anchored ask
+        #     ("^كم يوم" or "كم يوم[?؟]?$" — short duration query).
+        r"(مدة.{0,5}(الشحن|التوصيل|الطلب|الطلبية|التوصيلات))",
+        r"(?<![\u0600-\u06FF])كم\s+يوم\s+(?:(?:يـ|للـ?|على|من|في|للشحن|للتوصيل|للوصول|للتسليم|تأخذ|تأخذون|توصل|يوصل|يأخذ|يستغرق))",
+        r"(?<![\u0600-\u06FF])كم\s+يوم\b(?:\s*[\u061F\u003F])?\s*$",
+        r"(?<![\u0600-\u06FF])كم\s+(?:تأخذ|تأخذون|يستغرق|يستغرقها)\s+(?:الشحن|التوصيل|الطلب|الطلبية|التوصيلات|الوصول|الشحنة)",
+        r"(متى يوصل الطلب|متى توصل الطلبية|متى تشحنون|متى يتم الشحن|متى يجي الطلب)",
         # Carrier / courier — Saudi market specific. Customers naming a
         # carrier in a question are unambiguously asking about shipping
         # ("هل التوصيل سمسا؟" / "تشحنون مع اراميكس؟").

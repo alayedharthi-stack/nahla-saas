@@ -536,10 +536,109 @@ def _scan_phrases(blob: str, phrases: Tuple[str, ...]) -> List[str]:
     return hits
 
 
+# ── Filename hints (May 2026 hotfix #2) ────────────────────────────
+# Production regression: a real bank-generated PDF named
+# ``Transaction-Receipt.pdf`` was demoted from confirmed →
+# pre_transfer_review because its body contained the section header
+# "تأكيد التحويل" (which is ALSO a pre-review imperative on the
+# pre-transfer page of some apps). The filename is a strong positive
+# signal — banks don't call the *review* page a "Receipt". When the
+# filename clearly indicates a receipt artifact AND the body lacks
+# explicit pre-review IMPERATIVE verbs (like "اضغط تحويل" / "Tap
+# to transfer"), we keep the verdict as CONFIRMED instead of
+# demoting it.
+#
+# This list captures the canonical Saudi & GCC bank receipt
+# filenames we've observed in production exports.
+_RECEIPT_FILENAME_PATTERNS: Tuple[str, ...] = tuple(s.lower() for s in (
+    "transaction-receipt",
+    "transaction_receipt",
+    "transactionreceipt",
+    "transfer-receipt",
+    "transfer_receipt",
+    "transferreceipt",
+    "wire-confirmation",
+    "wire_confirmation",
+    "payment-confirmation",
+    "payment_confirmation",
+    "payment-receipt",
+    "payment_receipt",
+    "receipt-",
+    "_receipt",
+    "ايصال",
+    "إيصال",
+    "ايصال_تحويل",
+    "إيصال_تحويل",
+    "ايصال-تحويل",
+    "tahweel",
+    "tahwil",
+    "rajhi_receipt",
+    "alahli_receipt",
+    "alinma_receipt",
+    "stcpay_receipt",
+    "stcpay-receipt",
+))
+
+# Strict pre-review IMPERATIVES — these are call-to-action verbs that
+# appear ONLY on the pre-transfer button screen, never on a completed
+# transfer receipt. Hits here override the receipt-filename hint.
+_PRE_TRANSFER_IMPERATIVES: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "اضغط تحويل",
+    "اضغط على تحويل",
+    "اضغط تأكيد",
+    "اضغط تاكيد",
+    "اضغط على تأكيد",
+    "اضغط لاتمام التحويل",
+    "اضغط لإتمام التحويل",
+    "اضغط لإتمام العمليه",
+    "اضغط لاتمام العمليه",
+    "اضغط للتحويل",
+    "press transfer",
+    "press confirm",
+    "press to confirm",
+    "tap transfer",
+    "tap to transfer",
+    "tap to confirm",
+    "confirm and transfer",
+    "review and confirm",
+    "review & confirm",
+    "are you sure you want to transfer",
+    "do you want to confirm",
+))
+
+
+def _filename_signals_receipt(filename: Optional[str]) -> bool:
+    """Return True when the filename matches the canonical
+    bank-receipt naming convention. Pure substring check on a
+    lowercased copy of the filename."""
+    if not filename:
+        return False
+    fn = str(filename).lower()
+    for pat in _RECEIPT_FILENAME_PATTERNS:
+        if pat and pat in fn:
+            return True
+    return False
+
+
+def _body_has_pre_review_imperative(blob: str) -> bool:
+    """Return True when the (already-normalised) body contains an
+    explicit pre-transfer button label ("Tap to transfer" /
+    "اضغط تحويل") — distinct from a passive section header like
+    "تأكيد التحويل" which is rendered on both the pre-review screen
+    AND on completed receipts."""
+    if not blob:
+        return False
+    for phrase in _PRE_TRANSFER_IMPERATIVES:
+        if phrase and phrase in blob:
+            return True
+    return False
+
+
 def classify_payment_evidence(
     text: Optional[str],
     *,
     extra_context: Optional[Dict[str, Any]] = None,
+    filename: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Classify a blob of extracted text (vision OCR + caption +
     filename + PDF text) into one of the four payment-evidence
@@ -676,6 +775,12 @@ def classify_payment_evidence(
     #   6. Generic payment hints only → NEEDS_CONFIRMATION.
     #   7. Nothing → NOT_PAYMENT.
 
+    # Record filename-hint signal for trace logging.
+    _fname_signals_receipt = _filename_signals_receipt(filename)
+    _body_has_imperative   = _body_has_pre_review_imperative(blob)
+    signals["filename_signals_receipt"]    = _fname_signals_receipt
+    signals["pre_review_imperative_match"] = _body_has_imperative
+
     if success_hits:
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
@@ -683,10 +788,42 @@ def classify_payment_evidence(
             "signals": signals,
         }
 
-    if pre_review_hits:
+    # Pre-review demotion is conditional. A bank-generated PDF named
+    # "Transaction-Receipt.pdf" frequently contains the section
+    # header "تأكيد التحويل" even though the transfer is complete —
+    # that header sits in our pre_review lexicon. We only treat the
+    # blob as pre-review when:
+    #   * the filename does NOT signal a receipt artifact, OR
+    #   * the body contains an explicit pre-review IMPERATIVE
+    #     ("اضغط تحويل" / "Tap to transfer") that no completed
+    #     receipt would ever print.
+    if pre_review_hits and not _fname_signals_receipt:
         return {
             "status":  PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
             "reason":  "pre_transfer_review_phrase",
+            "signals": signals,
+        }
+    if pre_review_hits and _fname_signals_receipt and _body_has_imperative:
+        return {
+            "status":  PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+            "reason":  "pre_transfer_imperative_with_receipt_filename",
+            "signals": signals,
+        }
+    # ── Filename-only confirmation ────────────────────────────────
+    # Filename is a real-receipt artifact name, no explicit
+    # pre-review imperative, and the body has SOME payment context
+    # (even just a section header like "تأكيد التحويل"). Treat as
+    # confirmed so the customer's funnel proceeds. Without this
+    # branch we'd loop the customer back through "send me the final
+    # receipt" forever when the bank PDF body shares a noun with
+    # the pre-review lexicon — exactly the production bug May 2026.
+    if _fname_signals_receipt and (
+        pre_review_hits or context_hits or iban_present
+        or weak_success_hits or generic_hits
+    ):
+        return {
+            "status":  PAYMENT_EVIDENCE_CONFIRMED,
+            "reason":  "receipt_filename_with_payment_context",
             "signals": signals,
         }
 
