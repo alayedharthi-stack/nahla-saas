@@ -6694,6 +6694,99 @@ async def _handle_merchant_message(
                 tenant_id, to,
             )
         else:
+            # ── Rule-based handoff promotion on the OUTER except path ─
+            # Even when the brain raised, an explicit "أبي أتكلم مع
+            # أحد" must still land in the merchant's "طلب موظف"
+            # filter — otherwise the customer types the same phrase
+            # twice and gets only generic "حصل خطأ مؤقت" copies. We
+            # run the deterministic rule classifier here, and when it
+            # fires we:
+            #   1. Create the handoff session + flip needs_human /
+            #      handoff_active.
+            #   2. Override the fallback reply with the canonical
+            #      handoff message instead of asking the customer to
+            #      resend a message they already sent.
+            #   3. Pause the AI so subsequent inbounds don't keep
+            #      triggering the same broken brain branch.
+            _outer_handoff_text: Optional[str] = None
+            try:
+                from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+                    match as _outer_rules_match,
+                )
+                from modules.ai.brain.types import (  # noqa: PLC0415
+                    INTENT_TALK_HUMAN as _OUTER_INTENT_TALK_HUMAN,
+                )
+                _outer_rule_intent = _outer_rules_match(text or "")
+                if (
+                    _outer_rule_intent is not None
+                    and getattr(_outer_rule_intent, "name", "") == _OUTER_INTENT_TALK_HUMAN
+                    and float(getattr(_outer_rule_intent, "confidence", 0.0) or 0.0) >= 0.85
+                ):
+                    try:
+                        from handoff.manager import create_handoff_session  # noqa: PLC0415
+                        from models import Conversation, Customer  # noqa: PLC0415
+                        from core.order_flow import (  # noqa: PLC0415
+                            _find_conversation_by_phone as _outer_find_conv,
+                            _normalize_e164 as _outer_norm_e164,
+                        )
+                        _outer_e164 = _outer_norm_e164(to) or to
+                        _outer_conv = _outer_find_conv(
+                            db, tenant_id=int(tenant_id),
+                            phones=(_outer_e164, to),
+                            Conversation=Conversation, Customer=Customer,
+                        )
+                        create_handoff_session(
+                            db, tenant_id, to, to, text or "",
+                            reason="customer_request_outer_exception",
+                        )
+                        if _outer_conv is not None:
+                            _outer_conv.status            = "human"
+                            _outer_conv.is_human_handoff  = True
+                            _outer_conv.needs_human       = True
+                            _outer_conv.handoff_active    = True
+                            db.flush()
+                        try:
+                            from core.ai_pause_guard import (  # noqa: PLC0415
+                                pause_ai as _outer_pause_ai,
+                                REASON_HUMAN_HANDOFF as _OUTER_R_HOFF,
+                            )
+                            if _outer_conv is not None:
+                                _outer_pause_ai(
+                                    db, _outer_conv,
+                                    reason=_OUTER_R_HOFF,
+                                    by="webhook:outer_exc_handoff",
+                                )
+                        except Exception as _outer_pause_exc:  # noqa: BLE001
+                            logger.debug(
+                                "[Merchant] outer-exc handoff pause failed: %s",
+                                _outer_pause_exc,
+                            )
+                        # Canonical handoff copy so the customer
+                        # doesn't think the request was lost. We use
+                        # the same wording as the brain's `T.handoff`
+                        # variant 0 — kept inline to avoid importing
+                        # the responder during an error path.
+                        _outer_handoff_text = (
+                            "تمام، راح يتواصل معك أحد فريقنا في أقرب وقت 🌷"
+                        )
+                        logger.info(
+                            "[Merchant] outer-exc handoff promoted | "
+                            "tenant=%s to=%s rule_conf=%.2f",
+                            tenant_id, to,
+                            float(getattr(_outer_rule_intent, "confidence", 0.0) or 0.0),
+                        )
+                    except Exception as _outer_ho_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[Merchant] outer-exc handoff create failed | "
+                            "tenant=%s err=%s",
+                            tenant_id, _outer_ho_exc,
+                        )
+            except Exception as _outer_rule_exc:  # noqa: BLE001
+                logger.debug(
+                    "[Merchant] outer-exc rule match failed | tenant=%s err=%s",
+                    tenant_id, _outer_rule_exc,
+                )
+
             try:
                 from services.fallback_policy import (  # noqa: PLC0415
                     FALLBACK_REASON_OUTER_EXCEPTION,
@@ -6737,6 +6830,14 @@ async def _handle_merchant_message(
             _trace.fallback_source = _outer_decision.kind
             _trace.response_goal   = _outer_decision.response_goal
             _fallback_text         = _outer_decision.text
+            # When the rule classifier promoted this turn to handoff,
+            # send the handoff acknowledgement instead of the generic
+            # neutral-retry copy. The flags / pause have already been
+            # applied above so the conversation stops looping the
+            # broken brain branch.
+            if _outer_handoff_text:
+                _fallback_text = _outer_handoff_text
+                _trace.fallback_source = "outer_exception_handoff_promoted"
             logger.info(
                 "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s "
                 "rationale=outer_exception_path",
