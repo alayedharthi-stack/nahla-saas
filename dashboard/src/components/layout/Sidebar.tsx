@@ -78,12 +78,22 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
 ]
 
 // ── Merchant navigation ────────────────────────────────────────────────────────
+//
+// Layout note (May 2026, post-catalog promotion):
+// "كتالوج المنتجات" used to live in the "store" group at the bottom of the
+// sidebar, between low-frequency integration links. After the May-2026
+// Product-Studio + Meta-import revamp the catalog is no longer a settings
+// surface — it's a daily-driver page (AI reads from it, WhatsApp Product
+// Cards send from it, campaigns pick from it). We pin it right under
+// /conversations so merchants find it where their attention already is.
 const MERCHANT_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: tr => tr.nav.groups.main,
     items: [
       { to: '/overview',               icon: LayoutDashboard, label: tr => tr.nav.items.overview         },
       { to: '/conversations',          icon: MessageSquare,   label: tr => tr.nav.items.conversations    },
+      // ▸ Promoted from "store" group — see header comment above.
+      { to: '/catalog',                icon: Package,         label: tr => tr.nav.items.whatsappCatalog  },
       { to: '/orders',                 icon: ShoppingCart,    label: tr => tr.nav.items.orders           },
       { to: '/customers',              icon: Users,           label: tr => tr.nav.items.customers        },
       { to: '/smart-automations',      icon: Bot,             label: tr => tr.nav.items.autopilot,  isAI: true },
@@ -109,7 +119,6 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/integrations',               icon: Plug,         label: tr => tr.nav.items.integrations     },
       { to: '/store-integration',          icon: Store,        label: tr => tr.nav.items.storeIntegration },
       { to: '/whatsapp-connect',           icon: MessageCircle,label: tr => tr.nav.items.whatsappConnect  },
-      { to: '/catalog',                    icon: Package,      label: tr => tr.nav.items.whatsappCatalog  },
       { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: tr => tr.nav.items.manualSetup      },
       { to: '/widgets',                    icon: TrendingUp,   label: tr => tr.nav.items.widgets          },
       { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },

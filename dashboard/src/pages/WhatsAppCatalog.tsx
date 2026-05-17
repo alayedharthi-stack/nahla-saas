@@ -253,20 +253,89 @@ export default function WhatsAppCatalog() {
     )
   }
 
+  // ── Top-header import button (May 2026 UI revamp) ──────────────────
+  // The full-fledged Meta-import section still lives lower in the
+  // page (with its diagnostics, error copy, and report card), but
+  // merchants expect a "استيراد من Meta" CTA next to the page title
+  // — the way Meta Commerce Manager places its Add/Import buttons in
+  // the page header. We anchor-scroll to the same section instead of
+  // duplicating logic, so the source of truth stays single.
+  const scrollToMetaImport = () => {
+    const el = document.getElementById('meta-import-section')
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
+
+  // Layout note: this page DELIBERATELY does NOT clamp itself to
+  // ``max-w-4xl mx-auto`` — the catalog is now a daily-driver page
+  // whose product grid needs the full app width (12+ columns of
+  // product metadata). The outer ``<main>`` already applies the
+  // right horizontal padding; we just let the content fill what's
+  // left after the sidebar.
   return (
-    <div className="p-6 space-y-6 max-w-4xl mx-auto" dir="rtl">
-      {/* ── Header ──────────────────────────────────────────────── */}
-      <div>
-        <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">
-          <Package className="w-7 h-7 text-emerald-600" />
-          كتالوج المنتجات
-        </h1>
-        <p className="text-sm text-slate-500 mt-1 leading-relaxed">
-          كتالوج المنتجات هو المصدر الموحّد لمنتجاتك داخل نحلة.
-          يمكن جلبه تلقائياً من سلة، أو إضافته يدوياً، ثم استخدامه في
-          واتساب والذكاء والحملات. يستخدم الذكاء هذا الكتالوج لإرسال
-          كرت منتج رسمي (صورة + سعر + زر شراء) بدلاً من رابط نصي.
-        </p>
+    <div className="space-y-6 w-full" dir="rtl">
+      {/* ── Header: title + primary CTAs (Meta-style command bar) ──
+            Pinned at the top so merchants always see the import +
+            add-product actions, regardless of how far down the
+            page they scroll. The lower-down sections (sub-cards)
+            still hold the full configuration UX. */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-5 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">
+            <Package className="w-7 h-7 text-emerald-600" />
+            كتالوج المنتجات
+            {diagnostics && (
+              <span className="text-base font-bold text-slate-500 bg-slate-100 rounded-full px-3 py-0.5">
+                {diagnostics.products.total} منتج
+              </span>
+            )}
+          </h1>
+          <p className="text-sm text-slate-500 mt-1.5 leading-relaxed max-w-3xl">
+            كتالوج المنتجات هو المصدر الموحّد لمنتجاتك داخل نحلة.
+            يمكن جلبه تلقائياً من سلة، أو إضافته يدوياً، أو استيراده
+            من Meta، ثم استخدامه في واتساب والذكاء والحملات. يستخدم
+            الذكاء هذا الكتالوج لإرسال كرت منتج رسمي (صورة + سعر +
+            زر شراء) بدلاً من رابط نصي.
+          </p>
+        </div>
+        {/* Primary CTAs — visible above the fold. The Meta import
+            button is conditional on the channel being wired,
+            matching the behaviour of the section below. */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {diagnostics?.catalog.catalog_id_present && (
+            <button
+              type="button"
+              onClick={scrollToMetaImport}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2.5 rounded-xl text-sm transition shadow-sm"
+            >
+              <Download className="w-4 h-4" />
+              استيراد من Meta
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const el = document.getElementById('manual-product-section')
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }}
+            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-sm transition"
+          >
+            <Package className="w-4 h-4" />
+            إضافة منتج يدوي
+          </button>
+          <button
+            type="button"
+            onClick={onResync}
+            disabled={resyncing}
+            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-sm transition disabled:opacity-50"
+          >
+            {resyncing
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <RefreshCw className="w-4 h-4" />}
+            إعادة مزامنة
+          </button>
+        </div>
       </div>
 
       {/* ── Hub diagram: Sources → Catalog → Channels ─────────────
@@ -401,6 +470,33 @@ export default function WhatsAppCatalog() {
         </Card>
       )}
 
+      {/* ── Product Studio (PROMOTED to above the fold) ──────────────
+            Daily-driver content. Moved above the channel-binding card
+            so the table is the FIRST thing merchants see after the
+            status banner — matches Meta Commerce Manager's IA where
+            the products table is the page, and the settings are tabs
+            beside it. The settings cards below still hold the full
+            configuration UX (channel binding / manual add / Meta
+            import / test send). */}
+      <section
+        id="product-studio"
+        className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
+      >
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Package className="w-5 h-5 text-emerald-600" />
+          <div className="flex-1 min-w-0">
+            <h3 className="text-base font-bold text-slate-800">استوديو المنتجات</h3>
+            <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+              اضغط على أي منتج لفتحه في نافذة جانبية ومعاينة جاهزيته للنشر عبر القنوات
+              (واتساب / Meta / الذكاء / الحملات / Google قريباً) مع عدّادات الحدود الحيّة.
+            </p>
+          </div>
+        </div>
+        <div className="p-5">
+          <ProductStudio />
+        </div>
+      </section>
+
       {/* ── Channel binding (WhatsApp + Meta) ────────────────────────
             Catalog itself is channel-agnostic; this sub-section is
             specifically the WhatsApp/Meta channel wire-up. */}
@@ -525,20 +621,6 @@ export default function WhatsAppCatalog() {
               </ul>
             </div>
           )}
-        </div>
-      </Card>
-
-      {/* ── Product Studio (May 2026 #15 — Phase 1) ──────────────────
-            Meta-Commerce-Manager-style grid + drawer with live counters
-            and per-channel readiness. Owns the per-product UX. */}
-      <Card title="استوديو المنتجات" icon={<Package className="w-5 h-5 text-emerald-600" />}>
-        <div className="space-y-2">
-          <p className="text-xs text-slate-500 leading-relaxed">
-            استوديو إدارة المنتجات الموحّد. اضغط على أي منتج لفتحه في النافذة الجانبية
-            ومعاينة جاهزيته للنشر عبر القنوات (واتساب / Meta / الذكاء / الحملات / Google قريباً)
-            مع عدّادات الحدود الحيّة أثناء التحرير.
-          </p>
-          <ProductStudio />
         </div>
       </Card>
 
@@ -865,6 +947,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
   }
 
   return (
+    <div id="meta-import-section">
     <Card title="استيراد المنتجات من Meta" icon={<Download className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-3">
         <p className="text-xs text-slate-600 leading-relaxed">
@@ -909,6 +992,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
         </button>
       </div>
     </Card>
+    </div>
   )
 }
 
@@ -935,6 +1019,8 @@ function ManualProductsSection(props: {
   currentSource: DominantSource
   onChanged: () => Promise<void>
 }) {
+  // ``id="manual-product-section"`` is used by the top-bar CTA so
+  // clicking "إضافة منتج يدوي" up there scrolls down here.
   const [open, setOpen]       = useState(false)
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState<string | null>(null)
@@ -989,6 +1075,7 @@ function ManualProductsSection(props: {
       : 'إذا لم يكن لديك متجر سلة أو زد، أضف منتجاتك يدوياً هنا ليتمكن الذكاء وواتساب من استخدامها.'
 
   return (
+    <div id="manual-product-section">
     <Card title="إضافة منتج يدوي" icon={<Store className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-4">
         <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3 leading-relaxed">
@@ -1105,5 +1192,6 @@ function ManualProductsSection(props: {
         )}
       </div>
     </Card>
+    </div>
   )
 }

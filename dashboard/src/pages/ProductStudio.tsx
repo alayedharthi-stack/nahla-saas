@@ -256,17 +256,43 @@ function ProductGrid(props: {
 }) {
   if (props.loading) {
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500">
-        <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
-        جاري تحميل المنتجات...
+      <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center text-slate-500">
+        <Loader2 className="w-7 h-7 animate-spin mx-auto mb-3 text-emerald-500" />
+        <p className="text-sm">جاري تحميل المنتجات...</p>
       </div>
     )
   }
   if (props.rows.length === 0) {
+    // Full-width empty state with actionable CTAs (May 2026 UI revamp).
+    // The previous version was a 12-row gray box that read like an
+    // error; merchants asked for a Meta-style empty state that
+    // points to the next step (import / add manually).
     return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500">
-        <Package className="w-10 h-10 mx-auto mb-3 text-slate-300" />
-        <p className="text-sm">لا توجد منتجات تطابق التصفية الحالية.</p>
+      <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center">
+        <div className="mx-auto w-16 h-16 rounded-full bg-emerald-50 border border-emerald-100 flex items-center justify-center mb-4">
+          <Package className="w-8 h-8 text-emerald-500" />
+        </div>
+        <h3 className="text-base font-bold text-slate-800 mb-1">
+          لا توجد منتجات تطابق التصفية الحالية
+        </h3>
+        <p className="text-sm text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
+          ابدأ بإضافة منتج يدوي، أو استورد المنتجات من Meta Commerce Manager،
+          أو اربط متجر سلة لتُجلب منتجاتك تلقائياً.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <a
+            href="#meta-import-section"
+            className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
+          >
+            استيراد من Meta
+          </a>
+          <a
+            href="#manual-product-section"
+            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-sm transition"
+          >
+            إضافة منتج يدوي
+          </a>
+        </div>
       </div>
     )
   }
