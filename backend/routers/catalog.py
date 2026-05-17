@@ -1700,6 +1700,8 @@ async def merchant_catalog_import_from_meta(
             "catalog_id_missing":        400,
             "access_token_missing":      400,
             "meta_access_token_missing": 400,
+            "catalog_not_found":         404,
+            "catalog_type_unsupported":  400,
             "meta_http_error":           502,
         }.get(exc.code, 500)
 
@@ -1758,6 +1760,8 @@ async def admin_catalog_import_from_meta(
             "catalog_id_missing":        400,
             "access_token_missing":      400,
             "meta_access_token_missing": 400,
+            "catalog_not_found":         404,
+            "catalog_type_unsupported":  400,
             "meta_http_error":           502,
         }.get(exc.code, 500)
         logger.exception(

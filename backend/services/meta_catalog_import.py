@@ -93,11 +93,12 @@ Failure modes (raised as ``MetaCatalogImportError``):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
@@ -205,6 +206,106 @@ META_CATALOG_FIELDS = ",".join([
 ])
 
 
+# ── Catalog preflight discovery (May 2026 #19g) ──────────────────────
+# Production symptom: BOTH ``/items``, ``/products`` and
+# ``/product_items`` return ``code=100 — nonexisting field`` for the
+# merchant's configured catalog_id. That means the object behind
+# that ID is NOT a standard Commerce ProductCatalog — it might be a
+# Commerce Account, a Catalog Item Set, a partner-managed feed, or
+# even a deleted catalog whose ID lingered in the dashboard.
+#
+# We have NO business guessing which edge to call next. Instead we
+# call the catalog OBJECT itself first and read what Meta says
+# about it:
+#
+#   GET /{version}/{catalog_id}
+#     ?fields=id,name,vertical,product_count,feed_count,catalog_type,
+#             commerce_merchant_settings,business{id,name}
+#
+# Then we introspect the supported fields/edges via the Graph
+# Metadata API:
+#
+#   GET /{version}/{catalog_id}?metadata=1
+#
+# Both responses are logged in full (truncated to _RESP_PREVIEW_CAP)
+# under structured ``[META_IMPORT][CATALOG_INFO]`` and
+# ``[META_IMPORT][CATALOG_METADATA]`` lines so support can read off
+# the actual catalog_type / vertical / business binding without
+# replaying the import.
+#
+# Behaviour during the diagnostic window:
+#   * Discovery ALWAYS runs (cost = 2 cheap GETs).
+#   * If the catalog_id resolves to a valid object → discovery
+#     metadata is stored on the report and the import proceeds
+#     with the best-guess edge (informed by what discovery
+#     returned, not by hard-coded ``/items``).
+#   * If the catalog_id does NOT resolve → raise the new
+#     ``catalog_not_found`` / ``catalog_type_unsupported`` codes
+#     with the full Meta error in ``detail`` so the dashboard
+#     shows "this is not a valid catalog" instead of a 502.
+#   * ``META_CATALOG_DISCOVERY_ONLY=true`` short-circuits BEFORE
+#     the item-edge call: useful in production when we want
+#     fresh ``[CATALOG_INFO]`` lines without paying for a full
+#     import.
+
+# The exact field projection we ask for on the catalog object.
+# Keep the ``business{...}`` nested expansion so we don't need a
+# separate hop to learn which Business Manager owns the catalog
+# (production debugging clue: a catalog whose business doesn't
+# match the merchant's WhatsApp BM is almost always the reason
+# Meta returns "nonexisting field" — the merchant pasted the
+# wrong catalog ID).
+META_CATALOG_DISCOVERY_FIELDS = ",".join([
+    "id",
+    "name",
+    "vertical",
+    "product_count",
+    "feed_count",
+    "catalog_type",
+    "commerce_merchant_settings",
+    "business{id,name}",
+])
+
+# Catalog verticals that we KNOW how to import. ``commerce`` is the
+# overwhelming majority of WhatsApp / Shopify / Salla catalogs;
+# ``generic`` and ``transactable_items`` also expose ``/products``
+# the same way. Anything else (hotels, flights, vehicles, jobs…)
+# uses a different row schema and we refuse to import.
+_KNOWN_PRODUCT_VERTICALS: set = {
+    "",                    # not all catalog responses include vertical
+    "commerce",
+    "ecommerce",
+    "e_commerce",
+    "generic",
+    "transactable_items",
+    "transactable_item",
+    "offline_commerce",
+}
+
+
+def _discovery_only_enabled() -> Tuple[bool, str]:
+    """Kill-switch — when truthy, skip the item-edge call entirely
+    and return a discovery-only ImportReport. Useful for
+    production diagnostic loops (read fresh [CATALOG_INFO] without
+    paying for a full crawl).
+
+    Returns ``(enabled, raw_value)`` so the caller can log BOTH the
+    parsed bool AND the exact string that arrived from the
+    environment — production incident May 2026 #19g: the merchant
+    set the env var on Railway but the importer kept hitting
+    /product_items, so the support team needs the raw string to
+    prove the variable was actually present in the process
+    environment at the moment of the request (vs. having been set
+    on a different service / replica that wasn't restarted).
+
+    Parsing rule (exact, no fuzz):
+        raw.strip().lower() ∈ {"1","true","yes","on"}
+    """
+    raw = os.getenv("META_CATALOG_DISCOVERY_ONLY", "")
+    enabled = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return enabled, raw
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Result + error types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,19 +316,78 @@ class MetaCatalogImportError(RuntimeError):
 
     Codes (closed set, mapped 1:1 in the router):
 
-    * ``connection_not_found``       → 404
-    * ``catalog_id_missing``         → 400 (merchant must wire Meta first)
-    * ``access_token_missing``       → 400 (no token at all on conn)
-    * ``meta_access_token_missing``  → 400 (token exists but is the wrong
-                                            kind — typically a 360dialog
-                                            D360-API-KEY where Graph
-                                            requires Meta OAuth)
-    * ``meta_http_error``            → 502 (upstream failure)
+    * ``connection_not_found``        → 404
+    * ``catalog_id_missing``          → 400 (merchant must wire Meta first)
+    * ``access_token_missing``        → 400 (no token at all on conn)
+    * ``meta_access_token_missing``   → 400 (token exists but is the wrong
+                                             kind — typically a 360dialog
+                                             D360-API-KEY where Graph
+                                             requires Meta OAuth)
+    * ``catalog_not_found``           → 404 (preflight GET /{catalog_id}
+                                             failed — the ID does not
+                                             resolve to any object Meta
+                                             knows about)
+    * ``catalog_type_unsupported``    → 400 (preflight succeeded but the
+                                             object is a vertical we
+                                             don't import — hotels /
+                                             flights / vehicles / jobs,
+                                             or a Commerce Account /
+                                             Catalog Item Set rather
+                                             than a ProductCatalog)
+    * ``meta_http_error``             → 502 (upstream failure)
     """
     def __init__(self, code: str, message: str = "", *, detail: Any = None):
         super().__init__(message or code)
         self.code: str = code
         self.detail: Any = detail
+
+
+@dataclass
+class CatalogDiscovery:
+    """Result of the preflight ``GET /{catalog_id}`` + ``?metadata=1``
+    introspection pair. Always populated, even on failure, so the
+    dashboard / support never see a 502 with no upstream context.
+    """
+    catalog_id:           str = ""
+    ok:                   bool = False
+    http_status:          Optional[int] = None
+    # The headline fields Meta exposes on a ProductCatalog object.
+    catalog_type:         str = ""
+    vertical:             str = ""
+    name:                 str = ""
+    product_count:        Optional[int] = None
+    feed_count:           Optional[int] = None
+    business_id:          str = ""
+    business_name:        str = ""
+    # The raw introspection result from ``?metadata=1`` — the
+    # ``connections`` keys are the actual edge names this object
+    # supports, and the ``fields`` keys are its readable scalar
+    # fields. We carry the lists separately for ergonomic logging
+    # plus stash the full raw dict for support deep-dives.
+    supported_edges:      List[str] = field(default_factory=list)
+    supported_fields:     List[str] = field(default_factory=list)
+    raw_object:           Dict[str, Any] = field(default_factory=dict)
+    raw_metadata:         Dict[str, Any] = field(default_factory=dict)
+    # Populated on failure: Meta's structured error envelope from
+    # whichever preflight call broke.
+    error:                Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "catalog_id":       self.catalog_id,
+            "ok":               self.ok,
+            "http_status":      self.http_status,
+            "catalog_type":     self.catalog_type or None,
+            "vertical":         self.vertical or None,
+            "name":             self.name or None,
+            "product_count":    self.product_count,
+            "feed_count":       self.feed_count,
+            "business_id":      self.business_id or None,
+            "business_name":    self.business_name or None,
+            "supported_edges":  list(self.supported_edges),
+            "supported_fields": list(self.supported_fields),
+            "error":            self.error or None,
+        }
 
 
 @dataclass
@@ -247,6 +407,17 @@ class ImportReport:
     pages_fetched:   int = 0
     truncated:       bool = False    # True when MAX_PAGES hit + Meta had more
     error_samples:   List[Dict[str, Any]] = field(default_factory=list)
+    # Populated by the preflight discovery hop — null on hard
+    # preflight failure (we raise before assigning).
+    discovery:       Optional[CatalogDiscovery] = None
+    # True when ``META_CATALOG_DISCOVERY_ONLY`` short-circuited
+    # the run after preflight without touching item edges. The
+    # dashboard renders this as "discovery-only run — re-enable
+    # full import to fetch products".
+    discovery_only:  bool = False
+    # The edge actually used to fetch items. Empty when the run
+    # was discovery-only or when no edge was attempted at all.
+    edge_used:       str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -258,7 +429,263 @@ class ImportReport:
             "pages_fetched":   self.pages_fetched,
             "truncated":       self.truncated,
             "error_samples":   self.error_samples[:10],
+            "discovery":       self.discovery.to_dict() if self.discovery else None,
+            "discovery_only":  self.discovery_only,
+            "edge_used":       self.edge_used or None,
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Catalog preflight discovery (May 2026 #19g)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _parse_meta_error(resp: httpx.Response) -> Dict[str, Any]:
+    """Pull Meta's structured ``{"error": {...}}`` envelope off a
+    Graph response. Returns an empty dict when the body isn't JSON
+    or doesn't carry an error block."""
+    try:
+        body = resp.json() or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        return body["error"]
+    return {}
+
+
+def _preflight_catalog_discovery(
+    client: httpx.Client,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    token: str,
+) -> CatalogDiscovery:
+    """Inspect the catalog OBJECT before attempting any item edge.
+
+    Performs TWO cheap GETs:
+
+      1. ``GET /{catalog_id}?fields=id,name,vertical,product_count,
+                                    feed_count,catalog_type,
+                                    commerce_merchant_settings,
+                                    business{id,name}``
+         → tells us if the ID is real, what kind of catalog it is,
+           how many products Meta has on file, and which Business
+           Manager owns it.
+
+      2. ``GET /{catalog_id}?metadata=1``
+         → returns ``metadata.connections`` (the actual edge names
+           this object supports — /products, /product_items,
+           /items, /product_sets, /assigned_users, …) and
+           ``metadata.fields`` (the readable scalar fields). This
+           IS the authoritative source of truth for which edge
+           we should call next.
+
+    Both responses are logged in full under
+    ``[META_IMPORT][CATALOG_INFO]`` and
+    ``[META_IMPORT][CATALOG_METADATA]``. The function NEVER raises
+    — it returns a ``CatalogDiscovery`` with ``ok=False`` and the
+    Meta error block populated on failure. The caller decides
+    whether the import should proceed.
+    """
+    out = CatalogDiscovery(catalog_id=catalog_id)
+
+    # ── Hop 1: object fields ──────────────────────────────────
+    info_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    info_params = {
+        "fields":       META_CATALOG_DISCOVERY_FIELDS,
+        "access_token": token,
+    }
+    _t0 = time.perf_counter()
+    try:
+        resp = client.get(info_url, params=info_params)
+    except Exception as exc:  # noqa: BLE001
+        out.error = {
+            "stage":      "catalog_info_transport",
+            "exc_class":  exc.__class__.__name__,
+            "exc_msg":    str(exc)[:_RESP_PREVIEW_CAP],
+        }
+        logger.exception(
+            "[META_IMPORT][CATALOG_INFO][EXC] tenant=%s catalog_id=%s "
+            "exc_class=%s",
+            tenant_id, catalog_id, exc.__class__.__name__,
+        )
+        return out
+
+    _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
+    out.http_status = resp.status_code
+    try:
+        info_preview = (resp.text or "")[:_RESP_PREVIEW_CAP]
+    except Exception:  # noqa: BLE001
+        info_preview = "<text_unavailable>"
+
+    if resp.status_code >= 400:
+        meta_err = _parse_meta_error(resp)
+        out.error = {
+            "stage":          "catalog_info_http_error",
+            "status":         resp.status_code,
+            "body_preview":   info_preview,
+            "meta_code":      meta_err.get("code"),
+            "meta_subcode":   meta_err.get("error_subcode"),
+            "meta_type":      meta_err.get("type"),
+            "meta_message":   str(meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
+            "fbtrace_id":     meta_err.get("fbtrace_id"),
+        }
+        logger.error(
+            "[META_IMPORT][CATALOG_INFO][HTTP_ERROR] tenant=%s catalog_id=%s "
+            "status=%d meta_code=%s meta_subcode=%s meta_type=%s "
+            "meta_message=%r fbtrace_id=%s elapsed_ms=%.0f body_preview=%r",
+            tenant_id, catalog_id, resp.status_code,
+            meta_err.get("code"), meta_err.get("error_subcode"),
+            meta_err.get("type"),
+            str(meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
+            meta_err.get("fbtrace_id"),
+            _elapsed_ms, info_preview,
+        )
+        return out
+
+    try:
+        body = resp.json() or {}
+    except Exception as exc:  # noqa: BLE001
+        out.error = {
+            "stage":        "catalog_info_json_decode",
+            "exc_class":    exc.__class__.__name__,
+            "body_preview": info_preview,
+        }
+        logger.exception(
+            "[META_IMPORT][CATALOG_INFO][EXC] tenant=%s catalog_id=%s "
+            "json_decode exc_class=%s",
+            tenant_id, catalog_id, exc.__class__.__name__,
+        )
+        return out
+
+    out.raw_object   = body if isinstance(body, dict) else {}
+    out.name         = str(out.raw_object.get("name") or "").strip()
+    out.catalog_type = str(out.raw_object.get("catalog_type") or "").strip()
+    out.vertical     = str(out.raw_object.get("vertical") or "").strip()
+    _pc = out.raw_object.get("product_count")
+    out.product_count = int(_pc) if isinstance(_pc, (int, float)) else None
+    _fc = out.raw_object.get("feed_count")
+    out.feed_count    = int(_fc) if isinstance(_fc, (int, float)) else None
+    biz = out.raw_object.get("business") or {}
+    if isinstance(biz, dict):
+        out.business_id   = str(biz.get("id") or "").strip()
+        out.business_name = str(biz.get("name") or "").strip()
+
+    logger.info(
+        "[META_IMPORT][CATALOG_INFO] tenant=%s catalog_id=%s status=%d "
+        "elapsed_ms=%.0f name=%r catalog_type=%r vertical=%r "
+        "product_count=%s feed_count=%s business_id=%s business_name=%r "
+        "body_preview=%r",
+        tenant_id, catalog_id, resp.status_code, _elapsed_ms,
+        out.name, out.catalog_type, out.vertical,
+        out.product_count, out.feed_count,
+        out.business_id or "<unset>", out.business_name,
+        info_preview,
+    )
+
+    # ── Hop 2: ``?metadata=1`` edge / field introspection ─────
+    meta_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    meta_params = {
+        "metadata":     "1",
+        "access_token": token,
+    }
+    _t1 = time.perf_counter()
+    try:
+        meta_resp = client.get(meta_url, params=meta_params)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[META_IMPORT][CATALOG_METADATA][EXC] tenant=%s catalog_id=%s "
+            "exc_class=%s",
+            tenant_id, catalog_id, exc.__class__.__name__,
+        )
+        # We still consider the discovery a success — the object
+        # exists (hop 1 returned 2xx); we just couldn't enumerate
+        # its edges. Caller falls back to the default edge.
+        out.ok = True
+        return out
+
+    _elapsed_ms2 = (time.perf_counter() - _t1) * 1000.0
+    try:
+        meta_preview = (meta_resp.text or "")[:_RESP_PREVIEW_CAP]
+    except Exception:  # noqa: BLE001
+        meta_preview = "<text_unavailable>"
+
+    if meta_resp.status_code >= 400:
+        meta_err = _parse_meta_error(meta_resp)
+        logger.warning(
+            "[META_IMPORT][CATALOG_METADATA][HTTP_ERROR] tenant=%s "
+            "catalog_id=%s status=%d meta_code=%s meta_message=%r "
+            "fbtrace_id=%s elapsed_ms=%.0f body_preview=%r",
+            tenant_id, catalog_id, meta_resp.status_code,
+            meta_err.get("code"),
+            str(meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
+            meta_err.get("fbtrace_id"), _elapsed_ms2, meta_preview,
+        )
+        out.ok = True  # hop 1 already proved the object exists
+        return out
+
+    try:
+        meta_body = meta_resp.json() or {}
+    except Exception:  # noqa: BLE001
+        out.ok = True
+        return out
+
+    if isinstance(meta_body, dict):
+        metadata = meta_body.get("metadata") or {}
+        if isinstance(metadata, dict):
+            out.raw_metadata = metadata
+            connections = metadata.get("connections") or {}
+            if isinstance(connections, dict):
+                out.supported_edges = sorted(str(k) for k in connections.keys())
+            fields_block = metadata.get("fields") or []
+            if isinstance(fields_block, list):
+                names: List[str] = []
+                for f in fields_block:
+                    if isinstance(f, dict):
+                        n = f.get("name")
+                        if n:
+                            names.append(str(n))
+                    elif isinstance(f, str):
+                        names.append(f)
+                out.supported_fields = sorted(set(names))
+
+    logger.info(
+        "[META_IMPORT][CATALOG_METADATA] tenant=%s catalog_id=%s status=%d "
+        "elapsed_ms=%.0f supported_edges=%s supported_fields_count=%d "
+        "body_preview=%r",
+        tenant_id, catalog_id, meta_resp.status_code, _elapsed_ms2,
+        out.supported_edges, len(out.supported_fields),
+        meta_preview,
+    )
+
+    out.ok = True
+    return out
+
+
+def _choose_item_edge(discovery: CatalogDiscovery) -> Tuple[str, str]:
+    """Pick the best item-edge name to fetch products from, based on
+    the discovery output. Returns ``(primary_edge, fallback_edge)``.
+
+    Selection rules (most specific first):
+      1. If ``products`` is in supported_edges → use it (this is
+         what Commerce ProductCatalog objects support natively).
+      2. Else if ``product_items`` is there → use it (some legacy
+         catalogs only expose this name).
+      3. Else if ``items`` is there → use it (rare; some
+         transactable-items catalogs).
+      4. Else fall back to the historical default ``items`` and
+         leave ``product_items`` as a one-shot fallback. The
+         caller will surface a ``catalog_type_unsupported`` error
+         if BOTH attempts also fail.
+    """
+    edges = set(discovery.supported_edges or [])
+    if "products" in edges:
+        return "products", "product_items"
+    if "product_items" in edges:
+        return "product_items", "items"
+    if "items" in edges:
+        return "items", "product_items"
+    return META_CATALOG_EDGE_PRIMARY, META_CATALOG_EDGE_FALLBACK
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,6 +847,25 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         tenant_id, META_GRAPH_API_VERSION,
     )
 
+    # ── Env-var visibility (May 2026 #19g hardening) ──────────
+    # Production incident: a merchant set
+    # ``META_CATALOG_DISCOVERY_ONLY=true`` on Railway and
+    # redeployed, but the importer still hit /product_items.
+    # Root cause turned out to be a stale deploy of an older
+    # commit that didn't read the variable yet. To prove the
+    # env contract on every single request we now log the RAW
+    # value (exactly what ``os.getenv`` returned) AND the
+    # parsed bool. If this line shows ``raw='' parsed=False``
+    # while the dashboard insists the variable is set, the
+    # process is reading from a different environment than
+    # Railway claims — that's an ops problem, not a code
+    # problem, and the log proves it.
+    _discovery_only, _discovery_only_raw = _discovery_only_enabled()
+    logger.info(
+        "[META_IMPORT][ENV] tenant=%s META_CATALOG_DISCOVERY_ONLY raw=%r parsed=%s",
+        tenant_id, _discovery_only_raw, _discovery_only,
+    )
+
     conn = (
         db.query(WhatsAppConnection)
           .filter(WhatsAppConnection.tenant_id == tenant_id)
@@ -469,9 +915,136 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         )
 
     report = ImportReport()
-    # Edge defaults to /items; we may downgrade to /product_items
-    # once on first-page failure (see fallback block below).
-    current_edge = META_CATALOG_EDGE_PRIMARY
+
+    # ── Catalog preflight discovery (May 2026 #19g) ───────────
+    # Two cheap GETs against the catalog object itself BEFORE we
+    # try any item edge. This is the authoritative source of
+    # truth for catalog_type / vertical / supported edges — we
+    # no longer guess between /items / /products / /product_items
+    # by trial and error.
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as _disc_client:
+        discovery = _preflight_catalog_discovery(
+            _disc_client,
+            tenant_id=tenant_id,
+            catalog_id=catalog_id,
+            token=token,
+        )
+    report.discovery = discovery
+
+    # Hard failure: the catalog_id doesn't resolve. Most common
+    # cause is a Commerce Account ID or a deleted catalog pasted
+    # into the dashboard by the merchant.
+    if not discovery.ok:
+        meta_err = discovery.error or {}
+        meta_code = meta_err.get("meta_code")
+        # Meta returns ``code=803`` ("Some of the aliases you
+        # requested do not exist") OR ``code=100`` with the
+        # nonexisting-object message for a bad catalog_id.
+        is_not_found = (
+            meta_code in (803, 100)
+            and "does not exist" in str(meta_err.get("meta_message") or "").lower()
+        ) or (meta_err.get("status") == 404)
+        raise MetaCatalogImportError(
+            "catalog_not_found" if is_not_found else "meta_http_error",
+            "Preflight catalog discovery failed — the configured "
+            "catalog_id does not resolve to a Meta object the "
+            "current token can read.",
+            detail={
+                "stage":      "preflight_discovery",
+                "catalog_id": catalog_id,
+                "discovery":  discovery.to_dict(),
+                "token_source": token_pick["token_source"],
+                "provider":     token_pick["provider"],
+                "hint": (
+                    "Ask the merchant to re-copy the Catalog ID from "
+                    "Meta Commerce Manager → Catalog → Settings. If "
+                    "the ID is correct, the token may lack "
+                    "catalog_management scope on this catalog, OR "
+                    "the catalog may belong to a different Business "
+                    "Manager than the merchant's WhatsApp BM."
+                ),
+            },
+        )
+
+    # Soft refusal: the object exists but its vertical isn't one
+    # we know how to import (hotels / flights / vehicles / jobs).
+    if (discovery.vertical or "").lower() not in _KNOWN_PRODUCT_VERTICALS:
+        raise MetaCatalogImportError(
+            "catalog_type_unsupported",
+            f"Catalog vertical {discovery.vertical!r} is not "
+            f"supported by Nahla's product importer. We only "
+            f"import 'commerce' / 'generic' / 'transactable_items' "
+            f"catalogs today.",
+            detail={
+                "stage":      "preflight_vertical_check",
+                "catalog_id": catalog_id,
+                "discovery":  discovery.to_dict(),
+                "hint": (
+                    "Ask the merchant whether this catalog ID was "
+                    "intentional. Vehicles / hotels / flights / "
+                    "jobs catalogs use a different row schema and "
+                    "need a dedicated importer."
+                ),
+            },
+        )
+
+    # Pick the item-edge name from the discovery output instead of
+    # hard-coding ``/items``. ``_choose_item_edge`` reads
+    # ``discovery.supported_edges`` (populated by ``?metadata=1``)
+    # and prefers the actual edge Meta says this catalog exposes.
+    # We compute this BEFORE the discovery_only short-circuit so
+    # the [DISCOVERY_ONLY_STOP] log can also report what edge
+    # WOULD have been chosen — operators reading the diagnostic
+    # log can sanity-check the routing without re-running the
+    # import with the kill-switch flipped off.
+    primary_edge, fallback_edge = _choose_item_edge(discovery)
+    edge_choice = {
+        "primary":          primary_edge,
+        "fallback":         fallback_edge,
+        "supported_edges":  list(discovery.supported_edges or []),
+    }
+    logger.info(
+        "[META_IMPORT][EDGE_CHOICE] tenant=%s catalog_id=%s "
+        "primary_edge=/%s fallback_edge=/%s supported_edges=%s "
+        "catalog_type=%r vertical=%r",
+        tenant_id, catalog_id, primary_edge, fallback_edge,
+        discovery.supported_edges,
+        discovery.catalog_type, discovery.vertical,
+    )
+
+    # Diagnostic kill-switch: when ON, stop here so production
+    # logs surface fresh [CATALOG_INFO] lines without paying for
+    # a full import. Default OFF — discovery is always logged
+    # regardless of this flag. Uses the SAME parsed value the
+    # [META_IMPORT][ENV] line already reported at the top of this
+    # call so the two logs are guaranteed to agree (no risk of a
+    # race between two os.getenv reads if some upstream code
+    # mutates the env mid-request).
+    if _discovery_only:
+        report.discovery_only = True
+        # ``logger.warning`` (not info) so this branch is visually
+        # impossible to miss in Railway's default INFO-and-above
+        # filter. When ops flip the kill-switch they expect to see
+        # something LOUD, not buried in a sea of [REQ] / [RESP]
+        # noise — and warning is the cheapest level that satisfies
+        # that without being a spurious error.
+        logger.warning(
+            "[META_IMPORT][DISCOVERY_ONLY_STOP] tenant=%s catalog_id=%s "
+            "edge_choice=%s discovery_summary=%s — "
+            "META_CATALOG_DISCOVERY_ONLY is on, no item-edge call will "
+            "fire. Set META_CATALOG_DISCOVERY_ONLY=false (or unset it) "
+            "to perform a full import.",
+            tenant_id, catalog_id, edge_choice,
+            {
+                "ok":             discovery.ok,
+                "catalog_type":   discovery.catalog_type,
+                "vertical":       discovery.vertical,
+                "product_count":  discovery.product_count,
+            },
+        )
+        return report
+
+    current_edge = primary_edge
     next_url: Optional[str] = (
         f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
         f"/{catalog_id}/{current_edge}"
@@ -658,25 +1231,26 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                 _meta_msg = str(_meta_err.get("message") or "")
                 _is_nonexisting_field = (
                     page_idx == 0
-                    and current_edge == META_CATALOG_EDGE_PRIMARY
+                    and current_edge == primary_edge
                     and _meta_err.get("code") == 100
                     and "nonexisting field" in _meta_msg.lower()
                 )
                 if _is_nonexisting_field and not _fallback_tried:
                     logger.warning(
                         "[META_IMPORT][ENDPOINT_FALLBACK] tenant=%s "
-                        "catalog_id=%s from=/%s to=/%s reason=%r",
+                        "catalog_id=%s from=/%s to=/%s reason=%r "
+                        "discovered_edges=%s",
                         tenant_id, catalog_id,
-                        META_CATALOG_EDGE_PRIMARY,
-                        META_CATALOG_EDGE_FALLBACK,
+                        primary_edge, fallback_edge,
                         _meta_msg[:_RESP_PREVIEW_CAP],
+                        discovery.supported_edges,
                     )
                     _fallback_tried = True
                     # NOTE: we KEEP _first_real_attempt=True so a
                     # subsequent failure still raises hard rather
                     # than being silently swallowed as a "page 1+"
                     # soft-fail.
-                    current_edge = META_CATALOG_EDGE_FALLBACK
+                    current_edge = fallback_edge
                     next_url = (
                         f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
                         f"/{catalog_id}/{current_edge}"
@@ -746,6 +1320,12 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             # First successful page locks the edge in — any later
             # failure during pagination is treated as a soft-fail.
             _first_real_attempt = False
+            # Record the edge that actually returned 2xx so the
+            # report (and the dashboard) can show "imported via
+            # /{edge}" — important for support when production
+            # surfaces a fallback chain.
+            if not report.edge_used:
+                report.edge_used = current_edge
             logger.info(
                 "[META_IMPORT][PAGE_OK] page=%d tenant=%s catalog_id=%s "
                 "edge=%s row_count=%d total_scanned_before=%d",
