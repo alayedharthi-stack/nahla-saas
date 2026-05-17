@@ -46,9 +46,11 @@ from models import (  # noqa: E402
 from services.campaign_dispatcher import (  # noqa: E402
     LOG_QUEUED,
     LOG_SENT,
+    LOG_SKIPPED_BLOCKED_CUSTOMER,
     LOG_SKIPPED_DUPLICATE,
     LOG_SKIPPED_UNREACHABLE,
     LOG_SKIPPED_UNSUBSCRIBED,
+    REASON_BLOCKED_CUSTOMER,
     REASON_FREQ_CAP,
     _apply_frequency_cap,
     _count_log_statuses,
@@ -243,6 +245,121 @@ class TestSnapshot:
 
         row = db.query(CampaignSendLog).filter_by(campaign_id=camp.id).one()
         assert row.status == LOG_SKIPPED_UNREACHABLE
+
+
+# ── Merchant block list (store_settings.blocked_customers) ───────────────
+
+
+class TestBlockedCustomers:
+    """The merchant's hard-block list is the strongest exclusion the
+    platform exposes. A phone on this list MUST NOT receive a campaign
+    — even if it matches the audience, hasn't opted out, and isn't in
+    any other suppression bucket. We log a skipped row with
+    ``skip_reason='blocked_customer'`` so the campaign debug surface
+    can show the merchant exactly why the customer was excluded.
+    """
+
+    def test_blocked_customer_is_not_sent_and_is_logged_as_skipped(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+
+        # Two customers: one normal, one on the block list.
+        normal = _seed_customer(db, t.id, "+966500000001", name="Normal")
+        blocked = _seed_customer(db, t.id, "+966500000099", name="Blocked")
+
+        # Pass the merchant's block set just like dispatch_campaign would
+        # after loading store_settings.blocked_customers.
+        _snapshot_recipients(
+            db, t.id, camp.id, [normal, blocked], tpl,
+            blocked_phones={"+966500000099"},
+        )
+        db.commit()
+
+        rows = {
+            r.customer_phone_e164: r
+            for r in db.query(CampaignSendLog).filter_by(campaign_id=camp.id).all()
+        }
+        # Normal customer is queued for send.
+        assert rows["+966500000001"].status == LOG_QUEUED
+        # Blocked customer is logged as skipped with the canonical reason
+        # so the merchant report can render "عميل محظور بواسطة التاجر".
+        blocked_row = rows["+966500000099"]
+        assert blocked_row.status == LOG_SKIPPED_BLOCKED_CUSTOMER
+        assert blocked_row.skip_reason == REASON_BLOCKED_CUSTOMER
+
+    def test_blocked_overrides_audience_and_opt_in(self):
+        """The blocklist must win over EVERY other status. A customer
+        who is fully opted-in, has a normalized phone, and matches the
+        audience — but is on the block list — must still be skipped
+        with ``blocked_customer`` and not reach the queued state."""
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+
+        opted_in = _seed_customer(
+            db, t.id, "+966500000123", name="Opted-in",
+            extra_metadata={"is_unsubscribed": False},
+        )
+
+        _snapshot_recipients(
+            db, t.id, camp.id, [opted_in], tpl,
+            blocked_phones={"+966500000123"},
+        )
+        db.commit()
+
+        row = db.query(CampaignSendLog).filter_by(campaign_id=camp.id).one()
+        assert row.status == LOG_SKIPPED_BLOCKED_CUSTOMER
+        assert row.skip_reason == REASON_BLOCKED_CUSTOMER
+
+    def test_blocked_list_matches_digit_form_against_e164(self):
+        """The merchant typed ``0501234567`` in the block-list UI but
+        the customer's stored ``normalized_phone`` is ``+966501234567``.
+        The dispatcher MUST resolve both to the same key so the block
+        actually applies."""
+        from services.campaign_dispatcher import _normalize_blocked_phone
+
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+
+        cust = _seed_customer(db, t.id, "+966501234567")
+
+        # Build the set the way dispatch_campaign does: through the
+        # normalizer, which accepts a raw Saudi local number.
+        blocked = {_normalize_blocked_phone("0501234567")}
+        _snapshot_recipients(
+            db, t.id, camp.id, [cust], tpl,
+            blocked_phones=blocked,
+        )
+        db.commit()
+
+        row = db.query(CampaignSendLog).filter_by(campaign_id=camp.id).one()
+        assert row.status == LOG_SKIPPED_BLOCKED_CUSTOMER
+        assert row.skip_reason == REASON_BLOCKED_CUSTOMER
+
+    def test_empty_block_list_does_not_affect_normal_send(self):
+        """Regression guard: with no blocked phones configured the
+        snapshot must behave exactly like before — every reachable
+        customer queues for send."""
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        tpl = _seed_template(db, t.id)
+        camp = _seed_campaign(db, t.id, tpl)
+
+        cust = _seed_customer(db, t.id, "+966500000200")
+
+        _snapshot_recipients(
+            db, t.id, camp.id, [cust], tpl,
+            blocked_phones=set(),
+        )
+        db.commit()
+
+        row = db.query(CampaignSendLog).filter_by(campaign_id=camp.id).one()
+        assert row.status == LOG_QUEUED
 
 
 # ── Frequency cap ───────────────────────────────────────────────────────

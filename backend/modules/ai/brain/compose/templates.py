@@ -1019,6 +1019,19 @@ def handoff(variant: int = 0, **_: Any) -> str:
     return _HANDOFF_VARIANTS[variant % 3]
 
 
+def handoff_after_hours(**_: Any) -> str:
+    """Polite "we received your request, the team will reply during
+    work hours" copy. Used by the responder when
+    ``PolicyGate._working_hours`` flagged the handoff as off-hours so
+    we keep the request registered (HandoffSession + needs_human) but
+    don't promise an immediate reply."""
+    return (
+        "وصلتني رغبتك بالتحدث مع موظف 🤝\n"
+        "حالياً خارج أوقات الدوام، وسجّلت طلبك للفريق.\n"
+        "سيتواصل معك أحد أعضاء الفريق فور بداية الدوام بإذن الله 🙏"
+    )
+
+
 # ── Fallback ──────────────────────────────────────────────────────────────────
 
 def clarify(question: str = "", **_: Any) -> str:

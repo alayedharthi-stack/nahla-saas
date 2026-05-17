@@ -461,7 +461,18 @@ class DefaultComposer:
             return text
 
         # ── Handoff ────────────────────────────────────────────────────────
+        # ``after_hours`` is propagated by ``PolicyGate._working_hours``
+        # when the customer requests a human outside the merchant's
+        # configured working hours. We keep the action as HANDOFF (so
+        # the webhook still registers the handoff session + needs_human
+        # flags) but use a different copy variant that tells the
+        # customer the team will reply during working hours — no
+        # "I'll alert the team now" implication.
         if action == ACTION_HANDOFF:
+            args = result.decision.args or {}
+            after_hours = bool(args.get("after_hours"))
+            if after_hours:
+                return T.handoff_after_hours()
             variant = self._variant_idx(ctx)
             text = T.handoff(variant=variant)
             if self._is_duplicate(text, ctx):

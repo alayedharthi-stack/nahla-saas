@@ -49,6 +49,7 @@ const filterLabels: Record<string, string> = {
   agent_req:    'طلب موظف',
   paused:       'متوقف الذكاء',
   blocked:      'محظور',
+  paid:         'طلبات مدفوعة',
   unsubscribed: 'ألغى الاشتراك',
   closed:       'مغلقة',
 }
@@ -59,7 +60,7 @@ export default function Conversations() {
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
-  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'unsubscribed' | 'closed'>('all')
+  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'paid' | 'unsubscribed' | 'closed'>('all')
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -83,7 +84,7 @@ export default function Conversations() {
   // the new tab would render the wrong slice. Server-side SQL
   // narrowing depends on this — that's the post-pagination fix for
   // "بعض الفلاتر تأثرت بعد إصلاحات SQL".
-  const filterRef = useRef<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'unsubscribed' | 'closed'>('all')
+  const filterRef = useRef<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'paid' | 'unsubscribed' | 'closed'>('all')
 
   const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
   const [hasMoreServer, setHasMoreServer]      = useState(false)
@@ -631,6 +632,9 @@ export default function Conversations() {
   const _isUnsubscribed = (c: DashboardConversation) =>
     !!(c.isUnsubscribed || c.pendingUnsubscribe)
 
+  const _isPaid = (c: DashboardConversation) =>
+    !!c.lastPaymentConfirmedAt
+
   // "مغلقة": server-stamped ``status='closed'`` is the canonical
   // signal (set by /conversations/close or by automations). The
   // 24h WhatsApp window expiry is included as a secondary signal so
@@ -649,6 +653,7 @@ export default function Conversations() {
     else if (filter === 'agent_req') matchFilter = _isAwaitingAgent(c)
     else if (filter === 'paused') matchFilter = _isAIPausedOnly(c)
     else if (filter === 'blocked') matchFilter = _isBlocked(c)
+    else if (filter === 'paid') matchFilter = _isPaid(c)
     else if (filter === 'unsubscribed') matchFilter = _isUnsubscribed(c)
     else if (filter === 'closed') matchFilter = _isClosed(c)
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
@@ -708,13 +713,14 @@ export default function Conversations() {
 
         {/* Filter tabs */}
         <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'unsubscribed', 'closed'] as const).map((f) => {
+          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'paid', 'unsubscribed', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
               : f === 'active' ? conversations.filter(c => c.windowOpen === true && !_isUnsubscribed(c)).length
               : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
               : f === 'agent_req' ? conversations.filter(c => _isAwaitingAgent(c)).length
               : f === 'paused' ? conversations.filter(c => _isAIPausedOnly(c)).length
               : f === 'blocked' ? conversations.filter(c => _isBlocked(c)).length
+              : f === 'paid' ? conversations.filter(c => _isPaid(c)).length
               : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
               : conversations.filter(c => _isClosed(c)).length
 
@@ -722,6 +728,7 @@ export default function Conversations() {
               f === 'agent_req'    ? 'bg-red-500 text-white shadow-sm' :
               f === 'paused'       ? 'bg-amber-500 text-white shadow-sm' :
               f === 'blocked'      ? 'bg-rose-600 text-white shadow-sm' :
+              f === 'paid'         ? 'bg-sky-500 text-white shadow-sm' :
               f === 'unsubscribed' ? 'bg-slate-600 text-white shadow-sm' :
               'bg-brand-500 text-white shadow-sm'
 
@@ -729,6 +736,7 @@ export default function Conversations() {
               f === 'agent_req' && count > 0    ? 'text-red-600 bg-red-50 hover:bg-red-100' :
               f === 'paused' && count > 0       ? 'text-amber-700 bg-amber-50 hover:bg-amber-100' :
               f === 'blocked' && count > 0      ? 'text-rose-700 bg-rose-50 hover:bg-rose-100' :
+              f === 'paid' && count > 0         ? 'text-sky-700 bg-sky-50 hover:bg-sky-100' :
               f === 'unsubscribed' && count > 0 ? 'text-slate-600 bg-slate-100 hover:bg-slate-200' :
               'text-slate-500 hover:bg-slate-100'
 
@@ -737,6 +745,7 @@ export default function Conversations() {
               f === 'agent_req' ? 'text-red-400' :
               f === 'paused' ? 'text-amber-500' :
               f === 'blocked' ? 'text-rose-500' :
+              f === 'paid' ? 'text-sky-500' :
               f === 'unsubscribed' ? 'text-slate-500' :
               'text-slate-400'
 
@@ -751,6 +760,7 @@ export default function Conversations() {
                 {f === 'unsubscribed' && <BellOff className="inline w-3 h-3 me-1 opacity-70" />}
                 {f === 'paused' && <Pause className="inline w-3 h-3 me-1 opacity-70" />}
                 {f === 'blocked' && <Ban className="inline w-3 h-3 me-1 opacity-70" />}
+                {f === 'paid' && <PackageCheck className="inline w-3 h-3 me-1 opacity-70" />}
                 {filterLabels[f]}
                 {f !== 'all' && count > 0 && (
                   <span className={`ms-1 ${countClass}`}>{count}</span>
@@ -828,7 +838,19 @@ export default function Conversations() {
                   )}
                 </div>
                 <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                  {/* Unsubscribe badges — shown first, highest priority */}
+                  {/* Paid badge — surfaces the most recent confirmed
+                      payment for this conversation so the merchant can
+                      spot completed transfers without opening the
+                      drawer. Shown first so the green is the most
+                      prominent signal even when other status badges
+                      apply (e.g. the customer keeps chatting after
+                      paying). */}
+                  {c.lastPaymentConfirmedAt && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
+                      <PackageCheck className="w-2.5 h-2.5" /> دفع مؤكد
+                    </span>
+                  )}
+                  {/* Unsubscribe badges — shown next, high priority */}
                   {c.isUnsubscribed ? (
                     <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300">
                       <BellOff className="w-2.5 h-2.5" /> ألغى الاشتراك

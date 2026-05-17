@@ -606,6 +606,14 @@ class Conversation(Base):
     # timestamp, so opening the conversation zeros the badge even
     # without a manual reply.
     last_read_at = Column(DateTime(timezone=True), nullable=True)
+    # ── Paid-order signal ──────────────────────────────────────────────────
+    # Stamped when payment evidence is confirmed (the
+    # ``maybe_handle_receipt_inbound`` short-circuit fires, or any other
+    # code path that flips ``payment_evidence_status='confirmed'`` /
+    # ``payment_receipt_received=True``). Drives the "طلبات مدفوعة" inbox
+    # filter so the merchant can jump straight to conversations with a
+    # confirmed transfer attached. NULL = no confirmed receipt yet.
+    last_payment_confirmed_at = Column(DateTime(timezone=True), nullable=True)
     extra_metadata = Column('metadata', JSONB, nullable=True)
 
 class MessageEvent(Base):

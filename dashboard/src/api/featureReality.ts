@@ -277,6 +277,12 @@ export interface DashboardConversation {
   // (or paused with reason='internal_number'). Mutually exclusive
   // with the human and "paused only" filters at the UI level.
   isBlocked?: boolean
+  // ISO timestamp of the most recent payment receipt the platform
+  // confirmed for this conversation (``payment_evidence_status='confirmed'``
+  // / ``payment_receipt_received=True``). Drives the "طلبات مدفوعة"
+  // filter + the green CheckCheck-style badge. ``null`` when the
+  // customer has never uploaded an accepted receipt.
+  lastPaymentConfirmedAt?: string | null
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'

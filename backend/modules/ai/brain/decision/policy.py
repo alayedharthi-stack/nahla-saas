@@ -134,14 +134,29 @@ class RealPolicyGate:
 
     def _working_hours(self, decision: Decision, ctx: BrainContext) -> Decision:
         if ctx.facts.within_working_hours is False and decision.action == ACTION_HANDOFF:
+            # Off-hours change (May 2026):
+            # Previously this rule silently downgraded HANDOFF → LLM_REPLY,
+            # which meant the customer got an apology line BUT the
+            # conversation never got pinned to a human in the inbox.
+            # Merchants then woke up to "we had three customers asking
+            # for support overnight and saw nothing in the dashboard"
+            # complaints. The handoff request itself is too valuable to
+            # drop — we now keep ACTION_HANDOFF (so the webhook creates
+            # the HandoffSession + raises needs_human / handoff_active)
+            # and tag ``args["after_hours"]=True`` so the responder can
+            # ship the polite "the team will reply during work hours"
+            # variant instead of the regular "I'll alert the team now"
+            # acknowledgement.
             logger.info(
-                "[PolicyGate] outside working hours — handoff not available, routing to llm_reply",
-                decision.action,
+                "[PolicyGate] outside working hours — handoff registered "
+                "with after_hours=True (was: downgraded to llm_reply)"
             )
             return Decision(
-                action=ACTION_LLM_REPLY,
-                args={"policy_reason": "outside_working_hours_handoff"},
-                reason="policy: human support not available outside working hours — LLM apologises",
+                action=ACTION_HANDOFF,
+                args={**(decision.args or {}), "after_hours": True,
+                      "policy_reason": "outside_working_hours_handoff"},
+                reason=(decision.reason or "")
+                       + " | policy: after_hours — keep handoff but use polite copy",
                 confidence=decision.confidence,
             )
         return decision

@@ -312,37 +312,42 @@ class DefaultDecisionEngine:
             )
 
         # ── 1. Handoff ────────────────────────────────────────────────────
-        # Guard: never escalate to a human if the customer is mid-order.
-        # The classifier already blocks LLM-suggested INTENT_TALK_HUMAN
-        # while order flow is active; this is a second layer of defence
-        # in case the rules emit it (or a different path constructs the
-        # intent directly). Same guard as in the webhook's order-flow
-        # recovery override — kept symmetrical on purpose.
+        # The customer explicitly asked for a human agent. We honour that
+        # ALWAYS — even mid-order. Production feedback showed merchants
+        # losing trust when the brain kept "helping" a customer who had
+        # already typed "حولني لموظف" or "أبي مختص يكلمني". An active
+        # order_prep no longer blocks the handoff; the order data stays
+        # in state and the merchant can resume the sale manually, or the
+        # brain picks it up on the next inbound. We capture the active-
+        # order signal in ``args`` so the handoff session creation path
+        # in the webhook can log it (useful for audit / "this customer
+        # bailed mid-cart" support tickets).
         if intent.name == INTENT_TALK_HUMAN:
-            try:
-                from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
-                    message_has_order_recovery_signal,
-                )
-            except Exception:
-                message_has_order_recovery_signal = lambda _t: False  # type: ignore
-
+            # ``order_prep`` is a default-initialised dataclass on every
+            # MerchantConversationState, so it's always truthy. We need
+            # to ask whether it carries actual order data (a product
+            # has been pinned) before considering this "mid-order".
+            _op = getattr(state, "order_prep", None)
             _has_active_order = bool(
-                getattr(state, "order_prep", None)
-                or getattr(state, "current_product_focus", None)
+                getattr(state, "current_product_focus", None)
+                or (_op is not None and (
+                    getattr(_op, "product_id", "") or ""
+                    or bool(getattr(_op, "missing_fields", None))
+                    or getattr(_op, "awaiting_payment_receipt", False)
+                ))
             )
-            _msg = getattr(ctx, "message", "") or ""
-            if _has_active_order or message_has_order_recovery_signal(_msg):
+            if _has_active_order:
                 logger.info(
-                    "[ORDER FLOW] continuing order despite previous failure | "
-                    "blocking ACTION_HANDOFF — intent=%s active_order=%s",
-                    intent.name, _has_active_order,
+                    "[HANDOFF] customer requested human DURING active order — "
+                    "honouring handoff (no longer blocked by order_prep) | "
+                    "intent=%s tenant=%s",
+                    intent.name, getattr(ctx, "tenant_id", "?"),
                 )
-                # Fall through to the regular order/checkout decision logic.
-            else:
-                return Decision(
-                    action=ACTION_HANDOFF,
-                    reason="customer requested human agent",
-                )
+            return Decision(
+                action=ACTION_HANDOFF,
+                args={"during_active_order": _has_active_order} if _has_active_order else {},
+                reason="customer requested human agent",
+            )
 
         # ── 2. Resend payment link / retry order ──────────────────────────
         if intent.name == INTENT_PAY_NOW or (

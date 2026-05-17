@@ -1069,6 +1069,7 @@ async def get_campaign_report(
         "skipped_unsubscribed":  counts.get("skipped_unsubscribed", 0),
         "skipped_unreachable":   counts.get("skipped_unreachable", 0),
         "skipped_manual_exclusion": counts.get("skipped_manual_exclusion", 0),
+        "skipped_blocked_customer": counts.get("skipped_blocked_customer", 0),
         "stopped_by_limit":      counts.get("skipped_duplicate", 0),
         "last_error_code":       last_error_row.error_code if last_error_row else None,
         "last_error_message":    last_error_row.error_message if last_error_row else None,
@@ -1104,6 +1105,7 @@ _KNOWN_LOG_STATUSES = {
     "queued", "sending", "sent", "failed",
     "skipped_duplicate", "skipped_invalid", "skipped_unsubscribed",
     "skipped_unreachable", "skipped_manual_exclusion",
+    "skipped_blocked_customer",
 }
 
 
@@ -1302,6 +1304,7 @@ async def debug_campaign(
         "skipped_unsubscribed":     counts.get("skipped_unsubscribed", 0),
         "skipped_unreachable":      counts.get("skipped_unreachable", 0),
         "skipped_manual_exclusion": counts.get("skipped_manual_exclusion", 0),
+        "skipped_blocked_customer": counts.get("skipped_blocked_customer", 0),
         # Bucket every non-canonical status under "unknown_status" so
         # the merchant immediately sees the count without having to
         # parse every key in ``counts``.
@@ -1920,6 +1923,7 @@ async def debug_campaign(
                 + counts.get("skipped_unsubscribed", 0)
                 + counts.get("skipped_invalid", 0)
                 + counts.get("skipped_manual_exclusion", 0)
+                + counts.get("skipped_blocked_customer", 0)
             )),
             "frequency_cap_skipped":  int(
                 funnel.get("frequency_cap_skipped")
@@ -1958,6 +1962,7 @@ async def debug_campaign(
             "marketing_opt_out_manual": "إلغاء التسويق يدوياً",
             "excluded_by_manual_segment": "مستبعد بواسطة فلتر يدوي",
             "frequency_cap_marketing":  "تجاوز الحد الأقصى للرسائل التسويقية",
+            "blocked_customer":         "عميل محظور بواسطة التاجر",
         }
         ar_status = {
             "skipped_unreachable":      "غير قابل للوصول",
@@ -1965,6 +1970,7 @@ async def debug_campaign(
             "skipped_invalid":          "بيانات غير صالحة",
             "skipped_manual_exclusion": "مستبعد يدوياً",
             "skipped_duplicate":        "تكرار / تجاوز الحد الأقصى",
+            "skipped_blocked_customer": "عميل محظور بواسطة التاجر",
         }
         out: List[Dict[str, Any]] = []
         for status_v, reason, n in rows:
@@ -2432,6 +2438,7 @@ async def debug_campaign(
             "skipped_unsubscribed":      counts.get("skipped_unsubscribed", 0),
             "skipped_unreachable":       counts.get("skipped_unreachable", 0),
             "skipped_manual_exclusion":  counts.get("skipped_manual_exclusion", 0),
+            "skipped_blocked_customer":  counts.get("skipped_blocked_customer", 0),
         },
         # NEW: exact per-status breakdown including a bucket for any
         # non-canonical legacy/unknown status names. ``status_breakdown_raw``
@@ -3266,6 +3273,7 @@ async def _prepare_waves_async(campaign_id: int, wave_plan: Any) -> None:
         _snapshot_recipients,
         _resolve_audience,
         _apply_frequency_cap,
+        _load_blocked_phone_set,
         _load_template,
     )
 
@@ -3315,9 +3323,11 @@ async def _prepare_waves_async(campaign_id: int, wave_plan: Any) -> None:
             if isinstance(excl_raw, list) else []
         )
 
+        blocked_phones = _load_blocked_phone_set(db, campaign.tenant_id)
         _snapshot_recipients(
             db, campaign.tenant_id, campaign.id, customers, template,
             excluded_segments=excluded_segments,
+            blocked_phones=blocked_phones,
         )
         db.commit()
 

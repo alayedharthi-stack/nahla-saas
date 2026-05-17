@@ -310,13 +310,62 @@ _register(RuleSet(
 ))
 
 # ── Talk to human ─────────────────────────────────────────────────────────────
+# Patterns are intentionally broad: in production we observed merchants
+# losing sales because the brain kept "helping" customers who had
+# already typed clear escalation requests like "كلموني" or "حولني". The
+# patterns now cover:
+#   * direct asks for a staff member (موظف / مختص / مسؤول / مشرف)
+#   * "talk to / call me / transfer me" phrasing in Saudi/Gulf dialect
+#     (كلموني / كلميني / اتصلوا فيني / حولني / حوّلني)
+#   * "is there anyone there?" patterns (في أحد / في حد يرد / في موظف)
+#   * existing English fallback (human agent / real person / …)
+# Every variant is anchored on a unique token so the patterns don't
+# fire on unrelated messages — e.g. "موظف" is paired with verbs/
+# prefixes so we don't escalate on "أنا موظف لدى …".
 _register(RuleSet(
     intent=INTENT_TALK_HUMAN,
     patterns=[
-        r"(تحدث مع إنسان|تحدث مع بشر|موظف|خدمة العملاء|تواصل مع شخص|إنسان حقيقي|مو روبوت|مو بوت)",
-        r"(human agent|real person|customer service|speak to someone|talk to agent)",
+        # "talk to human / real person / not a bot"
+        r"(تحدث مع إنسان|تحدث مع بشر|تواصل مع شخص|إنسان حقيقي|"
+        r"مو روبوت|مو بوت|مش بوت|مش روبوت)",
+        # Standalone customer-service mention (e.g. "خدمة العملاء من
+        # فضلك", "خدمة العملاء لو سمحت") — the phrase is specific
+        # enough to escalate on its own without an انتي/أبي prefix.
+        r"(خدمة العملاء|خدمه العملاء|الدعم الفني|دعم العملاء)",
+        # Direct asks for a staff member (موظف / مختص / مسؤول / مشرف /
+        # خدمة العملاء / شخص). The "أبي / أبغى / أريد / أحتاج / لو سمحت
+        # / ممكن / في" prefix anchors guard against "أنا موظف …"
+        # phrasing that should NOT escalate.
+        r"(أبي|أبغى|أبغا|ابغى|ابغا|ابي|أريد|اريد|أحتاج|احتاج|محتاج|"
+        r"ممكن|لو سمحت|في|فيه|هل في|هل يوجد|يوجد)"
+        r"\s*"
+        r"(موظف|مختص|مسؤول|مشرف|خدمة العملاء|خدمه العملاء|شخص|بشري|"
+        r"إنسان|انسان)",
+        # "حولني / حوّلني / حولوني (لموظف|للموظف|لخدمة|لشخص|للدعم)"
+        r"(حولني|حوّلني|حولوني|حوّلوني|حولني|حولونا|حولنا)"
+        r"\s*"
+        r"(ل|لـ|الى|إلى)?"
+        r"\s*"
+        r"(موظف|مختص|مسؤول|مشرف|خدمة العملاء|شخص|بشري|إنسان|انسان|الدعم|دعم)?",
+        # "كلموني / كلميني / كلمني / اتصلوا (فيني|بي|عليّ) / ردوا عليّ"
+        r"(كلموني|كلميني|كلمني|كلموننا|كلمونا|اتصلوا فيني|اتصلوا بي|"
+        r"اتصلوا علي|اتصل فيني|اتصل بي|ردوا علي|ردو علي|ردوا عليّ)",
+        # "أبي أكلم أحد / أبغى أكلم موظف"
+        r"(أبي|أبغى|أبغا|أريد|أحتاج|ممكن|لو سمحت)"
+        r"\s*(أكلم|اكلم|اتكلم|اتحدث|كلم|أتكلم)"
+        r"\s*(أحد|احد|واحد|موظف|مختص|شخص|بشري|إنسان|انسان)?",
+        # "في أحد يرد / فيه أحد يرد / هل في أحد / محد رد / ما حد رد"
+        r"(في|فيه|هل في|هل يوجد|يوجد)"
+        r"\s*(أحد|احد|واحد|حد)"
+        r"\s*(يرد|يردّ|يرد علي|يكلمني|يتواصل|يحكي)?",
+        # English fallback — kept intact.
+        r"(human agent|real person|customer service|speak to someone|"
+        r"talk to agent|talk to a human|connect me to|transfer me to)",
     ],
-    confidence=0.90,
+    # Bumped above the default 0.88 so the broader new patterns still
+    # win cleanly against generic "ask_product"-style matches when a
+    # customer mentions a product name in the same sentence.
+    confidence=0.92,
 ))
 
 

@@ -4220,12 +4220,15 @@ async def _handle_merchant_message(
                     _trace.response_goal = _trace.response_goal or "answer"
 
                 if _brain_handoff:
-                    # Guard: if there is active order preparation (a focused
-                    # product or saved order_state), DO NOT auto-pin the
-                    # conversation to human. Brain would only emit handoff
-                    # when the customer explicitly asked for a human, and
-                    # in that case we still want them to be able to resume
-                    # the order on the next turn just by sending order data.
+                    # The brain emits handoff ONLY when the customer
+                    # explicitly asked for one. We now ALWAYS raise the
+                    # canonical human-takeover signals — even mid-order
+                    # and even outside working hours. Production
+                    # feedback showed merchants losing trust when a
+                    # clear "حولني لموظف" request kept being absorbed
+                    # by the order flow with no inbox red-pill.
+                    # The active-order signal is still captured (for
+                    # log audit) but no longer gates the flag-raise.
                     _has_active_order = False
                     try:
                         meta = (convo.extra_metadata or {}) if convo is not None else {}
@@ -4245,43 +4248,33 @@ async def _handle_merchant_message(
                             db, tenant_id, to, _cust_name, text,
                             reason="customer_request",
                         )
-                        if _has_active_order:
-                            logger.info(
-                                "[ORDER FLOW] continuing order despite handoff request | "
-                                "skipping convo handoff flag | tenant=%s to=%s",
-                                tenant_id, to,
+                        # Always set the FULL canonical human-takeover
+                        # signal. The dashboard "طلب موظف" filter and
+                        # the conversations list router both prefer the
+                        # newer ``needs_human`` / ``handoff_active``
+                        # columns over the legacy ``is_human_handoff``
+                        # alone.
+                        convo.status = "human"
+                        convo.is_human_handoff = True
+                        convo.needs_human = True
+                        convo.handoff_active = True
+                        db.flush()
+                        logger.info(
+                            "[Merchant/Brain] handoff session created for tenant=%s to=%s "
+                            "needs_human=True handoff_active=True during_active_order=%s",
+                            tenant_id, to, _has_active_order,
+                        )
+                        # Pause AI so subsequent inbounds don't keep
+                        # producing brain handoff replies. Mirrors the
+                        # support-escalation branch's behaviour.
+                        try:
+                            from core.ai_pause_guard import (  # noqa: PLC0415
+                                pause_ai as _pause_ai,
+                                REASON_HUMAN_HANDOFF as _R_HOFF,
                             )
-                        else:
-                            # Set the FULL canonical human-takeover signal,
-                            # not just the legacy `is_human_handoff` flag.
-                            # The dashboard "طلب موظف" filter and the
-                            # conversations list router both prefer the
-                            # newer `needs_human` / `handoff_active`
-                            # columns. Skipping them was leaving the
-                            # inbox row without a reliable red pill in
-                            # some merchant tenants (per production UX
-                            # feedback).
-                            convo.status = "human"
-                            convo.is_human_handoff = True
-                            convo.needs_human = True
-                            convo.handoff_active = True
-                            db.flush()
-                            logger.info(
-                                "[Merchant/Brain] handoff session created for tenant=%s to=%s "
-                                "needs_human=True handoff_active=True",
-                                tenant_id, to,
-                            )
-                            # Pause AI so subsequent inbounds don't keep
-                            # producing brain handoff replies. Mirrors the
-                            # support-escalation branch's behaviour.
-                            try:
-                                from core.ai_pause_guard import (  # noqa: PLC0415
-                                    pause_ai as _pause_ai,
-                                    REASON_HUMAN_HANDOFF as _R_HOFF,
-                                )
-                                _pause_ai(db, convo, reason=_R_HOFF, by="brain:handoff")
-                            except Exception as _ph_exc:
-                                logger.debug("[ai_pause] brain handoff pause failed: %s", _ph_exc)
+                            _pause_ai(db, convo, reason=_R_HOFF, by="brain:handoff")
+                        except Exception as _ph_exc:
+                            logger.debug("[ai_pause] brain handoff pause failed: %s", _ph_exc)
                     except Exception as ho_exc:
                         logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
 

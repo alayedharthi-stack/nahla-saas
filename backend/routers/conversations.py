@@ -397,6 +397,7 @@ async def list_conversations(
     _allowed_filters = {
         "all", "active", "human", "agent_req",
         "paused", "blocked", "unsubscribed", "closed",
+        "paid",
     }
     filter_slug = (filter or "all").strip().lower()
     if filter_slug not in _allowed_filters:
@@ -602,6 +603,15 @@ async def list_conversations(
             )
         )
         extra_clauses.append(or_(*blocked_clauses))
+    elif filter_slug == "paid":
+        # "طلبات مدفوعة" — conversations whose customer has uploaded a
+        # receipt the platform recognised as
+        # ``payment_evidence_status='confirmed'`` (the
+        # ``maybe_handle_receipt_inbound`` short-circuit stamps
+        # ``Conversation.last_payment_confirmed_at``). NULL is filtered
+        # out so the merchant only sees rows with a real confirmation
+        # signal — not every active conversation.
+        extra_clauses.append(Conversation.last_payment_confirmed_at.isnot(None))
     # ``all`` / ``active`` / ``unsubscribed`` → no SQL narrowing.
 
     convo_rows_q = (
@@ -664,6 +674,15 @@ async def list_conversations(
                     prev["takenOverAt"] = convo.taken_over_at.isoformat()
                 if getattr(convo, "taken_over_by", None) and not prev.get("takenOverBy"):
                     prev["takenOverBy"] = convo.taken_over_by
+            # If ANY sibling row carries a confirmed payment, propagate
+            # the latest timestamp onto the merged display row so the
+            # "paid" filter / badge still surfaces it.
+            sibling_paid_at = getattr(convo, "last_payment_confirmed_at", None)
+            if sibling_paid_at is not None:
+                sibling_iso = sibling_paid_at.isoformat()
+                prev_iso = prev.get("lastPaymentConfirmedAt") or ""
+                if not prev_iso or sibling_iso > prev_iso:
+                    prev["lastPaymentConfirmedAt"] = sibling_iso
             # If ANY sibling row matches the blocklist, the merged
             # display row is blocked.
             if _is_phone_blocked(phone) or (
@@ -722,6 +741,13 @@ async def list_conversations(
             ),
             "takenOverBy": getattr(convo, "taken_over_by", None),
             "isBlocked": is_blocked_now,
+            # "طلبات مدفوعة" badge: ISO timestamp of the most recent
+            # confirmed payment receipt for this conversation (NULL when
+            # the customer has never uploaded an accepted receipt).
+            "lastPaymentConfirmedAt": (
+                convo.last_payment_confirmed_at.isoformat()
+                if getattr(convo, "last_payment_confirmed_at", None) else None
+            ),
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone

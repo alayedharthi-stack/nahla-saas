@@ -98,6 +98,19 @@ def detect_awaiting_receipt_in_reply(reply_text: str) -> bool:
     return any(k in blob or k in reply_text for k in _RECEIPT_ASK_KEYWORDS)
 
 
+def _normalize_e164(raw: Optional[str]) -> Optional[str]:
+    """Best-effort wrapper around ``utils.phone_utils.normalize_to_e164``
+    that never raises (lazy-imported so the unit-tested module stays
+    cheap when libphonenumber isn't installed)."""
+    if not raw:
+        return None
+    try:
+        from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
+        return normalize_to_e164(raw) or None
+    except Exception:
+        return None
+
+
 def _load_brain_state(
     db: Any, *, tenant_id: int, phone: str,
 ) -> Tuple[Optional[Any], Dict[str, Any]]:
@@ -107,30 +120,12 @@ def _load_brain_state(
     if db is None or not tenant_id or not phone:
         return None, {}
     try:
-        from models import Conversation  # noqa: PLC0415
-        from core.phone import normalize_phone_e164  # noqa: PLC0415
-        e164 = normalize_phone_e164(phone) or phone
-        conv = (
-            db.query(Conversation)
-            .filter(
-                Conversation.tenant_id == int(tenant_id),
-                Conversation.customer_phone == e164,
-            )
-            .order_by(Conversation.id.desc())
-            .first()
+        from models import Conversation, Customer  # noqa: PLC0415
+        e164 = _normalize_e164(phone) or phone
+        conv = _find_conversation_by_phone(
+            db, tenant_id=int(tenant_id), phones=(e164, phone),
+            Conversation=Conversation, Customer=Customer,
         )
-        if conv is None:
-            # Some installs key conversations by raw (non-normalised)
-            # phone too. Try the raw value as a last resort.
-            conv = (
-                db.query(Conversation)
-                .filter(
-                    Conversation.tenant_id == int(tenant_id),
-                    Conversation.customer_phone == phone,
-                )
-                .order_by(Conversation.id.desc())
-                .first()
-            )
         if conv is None:
             return None, {}
         meta = dict(conv.extra_metadata or {})
@@ -141,6 +136,74 @@ def _load_brain_state(
     except Exception as exc:  # noqa: BLE001
         logger.debug("[ORDER_FLOW_STATE] load brain_state failed: %s", exc)
         return None, {}
+
+
+def _find_conversation_by_phone(
+    db: Any,
+    *,
+    tenant_id: int,
+    phones: Tuple[str, ...],
+    Conversation: Any,
+    Customer: Any,
+) -> Optional[Any]:
+    """Locate the latest ``Conversation`` row for the given customer
+    phone. Conversation rows are linked to customers via
+    ``customer_id`` (Customer.normalized_phone / Customer.phone holds
+    the actual number) — there's no ``customer_phone`` column on
+    Conversation itself. We try the JOIN-based lookup first, then
+    fall back to the legacy ``extra_metadata['customer_phone']``
+    payload for rows created before the customer link existed."""
+    phone_candidates = tuple({p for p in phones if p})
+    if not phone_candidates:
+        return None
+    try:
+        conv = (
+            db.query(Conversation)
+            .join(Customer, Conversation.customer_id == Customer.id)
+            .filter(
+                Conversation.tenant_id == int(tenant_id),
+                (
+                    Customer.normalized_phone.in_(phone_candidates)
+                    | Customer.phone.in_(phone_candidates)
+                ),
+            )
+            .order_by(Conversation.id.desc())
+            .first()
+        )
+        if conv is not None:
+            return conv
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[ORDER_FLOW_STATE] conversation lookup via customer join "
+            "failed: %s", exc,
+        )
+
+    try:
+        from sqlalchemy import or_  # noqa: PLC0415
+        meta_phone_clauses = []
+        for p in phone_candidates:
+            meta_phone_clauses.append(
+                Conversation.extra_metadata.op("->>")("customer_phone") == p,
+            )
+            meta_phone_clauses.append(
+                Conversation.extra_metadata.op("->>")("phone") == p,
+            )
+        if meta_phone_clauses:
+            return (
+                db.query(Conversation)
+                .filter(
+                    Conversation.tenant_id == int(tenant_id),
+                    or_(*meta_phone_clauses),
+                )
+                .order_by(Conversation.id.desc())
+                .first()
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[ORDER_FLOW_STATE] conversation lookup via metadata "
+            "fallback failed: %s", exc,
+        )
+    return None
 
 
 def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -462,29 +525,13 @@ def apply_state_patch(
     if not state_patch:
         return False
     try:
-        from models import Conversation  # noqa: PLC0415
+        from models import Conversation, Customer  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        from core.phone import normalize_phone_e164  # noqa: PLC0415
-        e164 = normalize_phone_e164(phone) or phone
-        conv = (
-            db.query(Conversation)
-            .filter(
-                Conversation.tenant_id == int(tenant_id),
-                Conversation.customer_phone == e164,
-            )
-            .order_by(Conversation.id.desc())
-            .first()
+        e164 = _normalize_e164(phone) or phone
+        conv = _find_conversation_by_phone(
+            db, tenant_id=int(tenant_id), phones=(e164, phone),
+            Conversation=Conversation, Customer=Customer,
         )
-        if conv is None:
-            conv = (
-                db.query(Conversation)
-                .filter(
-                    Conversation.tenant_id == int(tenant_id),
-                    Conversation.customer_phone == phone,
-                )
-                .order_by(Conversation.id.desc())
-                .first()
-            )
         if conv is None:
             logger.info(
                 "[ORDER_FLOW_STATE] apply_state_patch: no conversation "
@@ -504,6 +551,18 @@ def apply_state_patch(
             flag_modified(conv, "extra_metadata")
         except Exception:
             pass
+        # ── Paid-order signal ────────────────────────────────────────
+        # When the patch promotes the order into the "receipt confirmed"
+        # branch, stamp the dedicated column the conversations listing
+        # uses for the ``paid`` filter. We update on the actual
+        # transition (False → True) so a redundant patch doesn't push
+        # the timestamp forward and falsely re-promote the row.
+        if state_patch.get("payment_receipt_received") is True:
+            try:
+                if getattr(conv, "last_payment_confirmed_at", None) is None:
+                    conv.last_payment_confirmed_at = datetime.now(timezone.utc)
+            except Exception:
+                pass
         db.add(conv)
         db.commit()
         logger.info(

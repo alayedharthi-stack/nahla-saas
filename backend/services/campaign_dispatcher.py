@@ -149,6 +149,67 @@ REASON_MANUAL_EXCLUDE   = "excluded_by_manual_segment"
 LOG_SKIPPED_QUALITY_SUPPRESSED = "skipped_quality_suppressed"
 REASON_QUALITY_SUPPRESSED = "auto_suppressed_quality"
 
+# Merchant block list (store_settings.blocked_customers). Distinct from
+# opt-outs and auto-suppression: the merchant manually marked the phone
+# as hard-blocked from every customer touchpoint (AI replies AND
+# campaigns). This is the strongest exclusion — it overrides every
+# audience-targeting rule. Logged under its own status/reason so the
+# campaign debug surface can show the merchant exactly why the row was
+# excluded.
+LOG_SKIPPED_BLOCKED_CUSTOMER = "skipped_blocked_customer"
+REASON_BLOCKED_CUSTOMER = "blocked_customer"
+
+
+def _normalize_blocked_phone(raw: str) -> str:
+    """Return a comparable key for a phone number.
+
+    Prefers full E.164 (via ``utils.phone_utils.normalize_to_e164``) so
+    a merchant who typed ``0501234567`` in the block list matches the
+    customer's stored ``+966501234567``. Falls back to a digits/plus
+    sanitization when libphonenumber isn't available or rejects the
+    input, which still lets legacy raw-format entries match.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
+        e164 = normalize_to_e164(raw)
+        if e164:
+            return e164
+    except Exception:
+        pass
+    return "".join(c for c in raw if c.isdigit() or c == "+")
+
+
+def _load_blocked_phone_set(db: Session, tenant_id: int) -> set:
+    """Build the set of E.164/digit-normalized phones the merchant has
+    flagged as blocked. Empty list / missing settings → empty set, so
+    callers can do a cheap ``if phone in blocked_phones`` membership
+    check without conditionals."""
+    try:
+        from core.tenant import (  # noqa: PLC0415
+            DEFAULT_STORE,
+            get_or_create_settings,
+            merge_defaults,
+        )
+        settings = get_or_create_settings(db, tenant_id)
+        store = merge_defaults(settings.store_settings, DEFAULT_STORE)
+        raw = store.get("blocked_customers") or []
+    except Exception as exc:
+        logger.debug(
+            "[campaign_dispatcher] blocked_customers load skipped: %s", exc,
+        )
+        return set()
+    if not isinstance(raw, list):
+        return set()
+    out: set = set()
+    for p in raw:
+        norm = _normalize_blocked_phone(str(p))
+        if norm:
+            out.add(norm)
+    return out
+
 
 def _reconstruct_template_body(
     template: WhatsAppTemplate,
@@ -430,10 +491,22 @@ async def dispatch_campaign(
         if isinstance(excl_raw, list) else []
     )
 
+    # Load the merchant's hard-block list once per dispatch. This is
+    # the strongest exclusion the platform supports — a phone here
+    # is ALWAYS excluded, regardless of audience targeting, segments,
+    # or even prior opt-in. Logged with skip_reason=blocked_customer.
+    blocked_phones = _load_blocked_phone_set(db, tenant_id)
+    if blocked_phones:
+        logger.info(
+            "[campaign_dispatcher] campaign=%d blocked_customers=%d (merchant block list)",
+            campaign_id, len(blocked_phones),
+        )
+
     # ── 1. Snapshot recipients into campaign_send_logs ──────────────────
     snapshot = _snapshot_recipients(
         db, tenant_id, campaign_id, customers, template,
         excluded_segments=excluded_segments,
+        blocked_phones=blocked_phones,
     )
     db.commit()
 
@@ -617,6 +690,8 @@ async def dispatch_campaign(
         "skipped_manual_exclusion": counts.get(LOG_SKIPPED_MANUAL_EXCLUSION, 0),
         "skipped_quality_suppressed":
             counts.get(LOG_SKIPPED_QUALITY_SUPPRESSED, 0),
+        "skipped_blocked_customer":
+            counts.get(LOG_SKIPPED_BLOCKED_CUSTOMER, 0),
         "frequency_cap_days": MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":         errors,
     }
@@ -639,6 +714,7 @@ def _empty_result(*, error: str = "") -> Dict[str, Any]:
         "skipped_unreachable":  0,
         "skipped_manual_exclusion": 0,
         "skipped_quality_suppressed": 0,
+        "skipped_blocked_customer": 0,
         "frequency_cap_days":   MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "errors":               [error] if error else [],
     }
@@ -652,6 +728,7 @@ def _snapshot_recipients(
     template: WhatsAppTemplate,
     *,
     excluded_segments: Optional[List[str]] = None,
+    blocked_phones: Optional[set] = None,
 ) -> Dict[str, int]:
     """Insert one ``campaign_send_logs`` row per recipient with
     ``status='queued'`` (or the appropriate ``skipped_*`` status when
@@ -664,6 +741,11 @@ def _snapshot_recipients(
     """
     if not customers:
         return {"new": 0, "existing": 0, "no_phone": 0}
+
+    # Defensive copy so we can ``in`` against multiple key shapes
+    # (raw normalized_phone AND a digit-canonicalized variant) without
+    # mutating the caller's set.
+    blocked_set: set = set(blocked_phones or ())
 
     # Existing rows for this campaign — these have already gone through
     # snapshot and may even be in `sent` status. We do NOT touch them.
@@ -735,6 +817,28 @@ def _snapshot_recipients(
 
         if phone in existing_phones:
             continue
+
+        # ── Merchant block list (strongest exclusion) ─────────────
+        # Honoured BEFORE any opt-out / segment / suppression rules
+        # because the merchant explicitly hard-blocked this customer
+        # from every touchpoint. Match against E.164 AND the
+        # digit-canonicalized variant so legacy entries stored as
+        # ``0501234567`` still match a stored ``+966501234567``.
+        if blocked_set:
+            phone_keys = {phone, _normalize_blocked_phone(phone)}
+            if phone_keys & blocked_set:
+                new_rows.append(CampaignSendLog(
+                    tenant_id=tenant_id,
+                    campaign_id=campaign_id,
+                    customer_id=cust.id,
+                    customer_phone_e164=phone,
+                    template_name=template.name,
+                    template_language=template.language,
+                    status=LOG_SKIPPED_BLOCKED_CUSTOMER,
+                    skip_reason=REASON_BLOCKED_CUSTOMER,
+                ))
+                existing_phones.add(phone)
+                continue
 
         meta = getattr(cust, "extra_metadata", None) or {}
         if meta.get("is_unsubscribed"):
