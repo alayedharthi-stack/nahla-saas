@@ -97,6 +97,52 @@ class DefaultDecisionEngine:
         }
 
         # ── -1. Prediction confirmation (absolute highest priority) ─────────
+        # ── Variant choice gate (Phase 3 — migration 0064) ─────────────
+        # The customer asked for a parent product that had 2+ in-stock
+        # variants; the responder shipped ``ask_product_variants`` and
+        # set ``awaiting_variant_choice=True`` + pinned the parent's id
+        # on the conversation. THIS turn's job is to map the customer's
+        # message (digit or variant label) back to a real variant and
+        # then re-route to a normal product-card send with the chosen
+        # variant pinned. Fires BEFORE any other rule so the customer
+        # never gets dropped into a search loop just because they said
+        # "2".
+        _order_prep = getattr(state, "order_prep", None)
+        _awaiting_variant = bool(getattr(_order_prep, "awaiting_variant_choice", False))
+        if _awaiting_variant and _order_prep:
+            _msg = (ctx.message or "").strip()
+            _picked = None
+            # Numeric pick — "1" / "٢" / "3."
+            _m = re.match(r"^\s*([1-9]\d?|[١٢٣٤٥٦٧٨٩][٠-٩]?)\s*\.?", _msg)
+            if _m:
+                _digits = _m.group(1)
+                _trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+                try:
+                    _idx = int(_digits.translate(_trans))
+                except (TypeError, ValueError):
+                    _idx = 0
+                if _idx > 0:
+                    _picked = {"index_one_based": _idx}
+            # Fallback: free-text match against option summary
+            if _picked is None and len(_msg) >= 1:
+                _picked = {"label": _msg}
+            if _picked is not None:
+                logger.info(
+                    "[VARIANT_PICK] tenant=%s parent_product_id=%s pick=%r",
+                    ctx.tenant_id, _order_prep.pending_variant_product_id,
+                    _picked,
+                )
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={
+                        "variant_pick": _picked,
+                        "pending_variant_product_id":
+                            _order_prep.pending_variant_product_id,
+                    },
+                    reason="awaiting_variant_choice — mapped customer pick",
+                    confidence=0.97,
+                )
+
         # When the system proposed predicted options and is waiting for the
         # customer to confirm/reject, ALWAYS route to the draft-order handler
         # so the handler can process the confirm/reject logic.  This MUST

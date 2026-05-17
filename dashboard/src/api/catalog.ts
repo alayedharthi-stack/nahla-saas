@@ -166,6 +166,26 @@ export interface ProductBadge {
   level:          ReadinessLevel
 }
 
+// Per-variant payload returned by the diagnostics row (migration
+// 0064 — Phase 4). When the parent product has no real variants
+// the array contains a single ``is_default=true`` synthetic row;
+// when it does, callers can expand the row in ProductStudio and
+// see one entry per sellable SKU.
+export interface CatalogProductVariantRow {
+  id:               number
+  salla_variant_id: string | null
+  sku:              string | null
+  retailer_id:      string | null
+  price:            string | null
+  currency:         string | null
+  stock_quantity:   number | null
+  in_stock:         boolean
+  is_default:       boolean
+  options:          Record<string, unknown>
+  option_summary:   string
+  image_url:        string
+}
+
 export interface CatalogProductDiagRow {
   id:                    number
   title:                 string
@@ -181,6 +201,24 @@ export interface CatalogProductDiagRow {
   product_url:           string
   source:                ProductSource
   readiness_badge:       ProductBadge | null
+  // Parent / variant intelligence layer (migration 0064).
+  has_variants?:               boolean
+  default_variant_id?:         number | null
+  variants?:                   CatalogProductVariantRow[]
+  variants_count?:             number
+  sellable_variants_count?:    number
+}
+
+// Five-counter summary surfaced in the ProductStudio header.
+// `products` = parent count, `variants` = real (non-default)
+// sellable rows, the remaining four are channel-readiness pills.
+export interface CatalogVariantsSummary {
+  products:          number
+  variants:          number
+  variants_in_stock: number
+  whatsapp_ready:    number
+  meta_ready:        number
+  google_ready:      number
 }
 
 export interface CatalogProductDiagResponse {
@@ -196,6 +234,7 @@ export interface CatalogProductDiagResponse {
     unpublished: number
     total:       number
   }
+  variants_summary?: CatalogVariantsSummary
   filters_applied?: {
     q:               string | null
     source:          string | null

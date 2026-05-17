@@ -124,6 +124,26 @@ _PAYMENT_CONFIRMATION_PHRASES: Tuple[str, ...] = tuple(
         "إيصال التحويل",
         "وصل التحويل",
         "وصل الدفع",
+        # ── Override phrases (May 2026 hotfix) ──────────────────────
+        # Customer is correcting the bot after we mis-classified
+        # a real receipt PDF as a "pre-transfer review screen".
+        # Real production phrasings:
+        #   "لا هذا ايصال مدفوع" / "هذا ايصال مدفوع" / "ايصال مدفوع"
+        #   "هذا الايصال النهائي" / "هذا الايصال الاصلي"
+        "ايصال مدفوع",
+        "إيصال مدفوع",
+        "هذا ايصال مدفوع",
+        "هذا إيصال مدفوع",
+        "لا هذا ايصال",
+        "لا هذا إيصال",
+        "لا هذا الايصال",
+        "لا هذا الإيصال",
+        "هذا الايصال النهائي",
+        "هذا الإيصال النهائي",
+        "هذا الايصال الاصلي",
+        "هذا الإيصال الأصلي",
+        "هذي مدفوعة",
+        "هذي مدفوعه",
         # ── First-person past-tense claims ────────────────────────
         "حولت لك",
         "حولت المبلغ",
@@ -380,6 +400,34 @@ def maybe_handle_payment_claim(
         )
         return None
 
+    # ── Receipt-override promotion (May 2026 hotfix) ─────────────────
+    # When the customer's previous inbound was a PDF / image that we
+    # *misclassified* as pre-transfer-review (or as ambiguous
+    # payment-context data) and they now correct us with "هذا ايصال
+    # مدفوع" / "لا هذا ايصال" / "تم التحويل" — promote the prior
+    # evidence to confirmed: apply the same state_patch
+    # ``maybe_handle_receipt_inbound`` would have applied, and reply
+    # with the proper receipt ACK. Without this branch the customer
+    # is stuck repeating themselves while the bot keeps asking for a
+    # "final receipt" we already have.
+    #
+    # Safe-by-construction: we only promote when a recent inbound
+    # message event actually carried payment evidence — never
+    # speculatively. Any DB failure here silently falls through to
+    # the legacy claim-ack branch below.
+    _override_promotion = _maybe_promote_prior_evidence(
+        db=db, tenant_id=tenant_id, phone=phone,
+        selected_summary=s,
+    )
+    if _override_promotion is not None:
+        logger.info(
+            "[PAYMENT_INTENT] short_circuit=evidence_override "
+            "tenant=%s phone=*%s prior_pe_status=%s",
+            tenant_id, (phone or "")[-4:],
+            _override_promotion.get("_prior_pe_status"),
+        )
+        return _override_promotion
+
     reply_text = compose_payment_claim_ack(
         selected_product=selected_product,
         awaiting_receipt=awaiting_receipt,
@@ -451,6 +499,162 @@ def rewrite_generic_reply_for_payment_context(
 def _utcnow_iso() -> str:
     from datetime import datetime, timezone   # noqa: PLC0415
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── Evidence-override promotion helper ──────────────────────────────
+# When a customer's text override fires ("هذا ايصال مدفوع") we want
+# to retroactively confirm a recent PDF / image they sent — but only
+# when that media was actually classified as payment-context but
+# non-confirmed. We read the customer's last few INBOUND
+# ``MessageEvent`` rows (newest first) and inspect their
+# ``extra_metadata.payment_evidence_status``.
+#
+# Returns the same shape as ``maybe_handle_payment_claim`` —
+# ``{"reply_text": str, "state_patch": dict}`` — when promotion is
+# warranted, else ``None``.
+
+
+# Maximum age of the prior receipt-like inbound that the override is
+# allowed to retroactively confirm. 6 hours is a safe window that
+# covers a customer who sent the PDF, waited for the bot's reply,
+# and then corrected the verdict (real cases sit at 1–10 minutes).
+_EVIDENCE_OVERRIDE_LOOKBACK_HOURS = 6
+# Look back at most this many inbound messages.
+_EVIDENCE_OVERRIDE_LOOKBACK_LIMIT = 6
+
+
+def _maybe_promote_prior_evidence(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    selected_summary: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Scan recent inbound messages for a payment-evidence PDF/image
+    that we marked non-confirmed, and (if found) return the
+    confirmed-receipt patch + ACK reply the customer should have
+    gotten in the first place.
+
+    Pure read on DB; never raises. Returns ``None`` on any error so
+    the caller falls back to the legacy claim-ack branch.
+    """
+    if db is None or not tenant_id:
+        return None
+    try:
+        from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+        from models import Conversation, Customer, MessageEvent  # noqa: PLC0415
+        from core.order_flow import (  # noqa: PLC0415
+            _find_conversation_by_phone,
+            _normalize_e164,
+        )
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            hours=_EVIDENCE_OVERRIDE_LOOKBACK_HOURS,
+        )
+
+        # Resolve conversation_id from the customer phone. The
+        # MessageEvent row stores conversation_id, not phone, so we
+        # need the join via Customer.normalized_phone first.
+        e164 = _normalize_e164(phone) or phone
+        conv = _find_conversation_by_phone(
+            db, tenant_id=int(tenant_id), phones=(e164, phone),
+            Conversation=Conversation, Customer=Customer,
+        )
+        # In unit tests / mocked DBs we may not have a conversation
+        # row but still want to scan whatever events the fake exposes.
+        # Build the query conditionally on having a conversation.
+        q = (
+            db.query(MessageEvent)
+              .filter(MessageEvent.tenant_id == tenant_id)
+              .filter(MessageEvent.direction == "inbound")
+              .filter(MessageEvent.created_at >= cutoff)
+        )
+        if conv is not None:
+            q = q.filter(MessageEvent.conversation_id == conv.id)
+        events = (
+            q.order_by(MessageEvent.created_at.desc())
+             .limit(_EVIDENCE_OVERRIDE_LOOKBACK_LIMIT)
+             .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_INTENT] evidence-override scan failed "
+            "tenant=%s phone=*%s err=%s",
+            tenant_id, (phone or "")[-4:], exc,
+        )
+        return None
+
+    target = None
+    for ev in events or []:
+        md = getattr(ev, "extra_metadata", None) or {}
+        if not isinstance(md, dict):
+            continue
+        pe_status = md.get("payment_evidence_status") or ""
+        kind = md.get("pdf_kind") or md.get("image_kind") or ""
+        if pe_status in ("pre_transfer_review", "needs_confirmation"):
+            target = (ev, md, pe_status, kind)
+            break
+        if kind in ("payment_pre_review", "payment_pending_evidence"):
+            target = (ev, md, pe_status, kind)
+            break
+    if target is None:
+        return None
+    ev, md, pe_status, kind = target
+
+    # Build a receipt-confirmed state_patch mirroring
+    # ``maybe_handle_receipt_inbound`` so downstream consumers (paid
+    # filter, receipt analytics) treat it identically. The previous
+    # inbound's metadata is carried through under
+    # ``payment_receipt_metadata`` so support can deep-link the
+    # original PDF/image even though it was promoted by a text reply.
+    state_patch: Dict[str, Any] = {
+        "awaiting_payment_receipt": False,
+        "payment_receipt_received": True,
+        "payment_receipt_at":       _utcnow_iso(),
+        "order_status":             "under_review",
+        "payment_receipt_metadata": {
+            "kind":            kind or "payment_receipt",
+            "promoted_from":   pe_status or "evidence_override",
+            "promoted_at":     _utcnow_iso(),
+            "wa_message_id":   md.get("wa_message_id"),
+            "filename":        md.get("filename"),
+            "mime_type":       md.get("mime_type"),
+            "storage_url":     md.get("storage_url"),
+            "storage_sha256":  md.get("storage_sha256"),
+            "original_received_at": getattr(ev, "created_at", None) and
+                                    ev.created_at.isoformat(),
+        },
+    }
+
+    # Reply: use the dedicated receipt-ACK composer when available
+    # (mirrors ``maybe_handle_receipt_inbound``'s wording), falling
+    # back to the payment-claim ACK if for some reason that helper
+    # can't be imported. The customer is acknowledged with the
+    # product + price + address summary just like a clean receipt.
+    s = selected_summary or {}
+    selected_product = s.get("selected_product")
+    try:
+        from core.order_flow import _compose_receipt_ack  # noqa: PLC0415
+        reply_text = _compose_receipt_ack(s)
+    except Exception as _ack_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_INTENT] receipt-ack import failed tenant=%s err=%s",
+            tenant_id, _ack_exc,
+        )
+        reply_text = compose_payment_claim_ack(
+            selected_product=selected_product,
+            awaiting_receipt=bool(s.get("awaiting_payment_receipt")),
+            receipt_received=True,  # we're about to flip it
+        )
+
+    return {
+        "reply_text":      reply_text,
+        "state_patch":     state_patch,
+        # Diagnostic key consumed by the webhook logger — never sent
+        # to the customer because the webhook reads only the
+        # ``reply_text`` field for the outbound message body.
+        "_prior_pe_status": pe_status or kind or "unknown",
+    }
 
 
 __all__ = [

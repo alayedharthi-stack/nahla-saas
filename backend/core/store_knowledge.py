@@ -298,16 +298,77 @@ class CatalogContextBuilder:
         in_stock_flag = meta.get("in_stock", p.in_stock)
         status = str(meta.get("status", "active") or "active").lower()
 
-        # Variant awareness: if variants are synced, at least one must be
-        # in-stock for the parent product to be orderable.
-        variants = meta.get("variants") or []
-        variants_ok = True
-        if variants:
-            variants_ok = any(
-                _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
-                for v in variants
-                if isinstance(v, dict)
+        # ── Variant intelligence (migration 0064) ────────────────────────
+        # After 0064 every product has at least one ``ProductVariant``
+        # row. We prefer the real rows for orderability + the new
+        # structured ``variants`` payload, but stay backward-compatible
+        # by falling back to ``metadata->variants`` JSON when the
+        # variant relationship hasn't been loaded (e.g. the resolver
+        # passed a Product loaded without an eager-load) so callers
+        # that still read the legacy ``variants_summary`` keep working.
+        variant_rows = list(getattr(p, "variants", []) or [])
+        if variant_rows:
+            sellable = [v for v in variant_rows if not v.is_default]
+            in_stock_variants = [
+                v for v in variant_rows
+                if v.in_stock and (v.stock_quantity is None
+                                   or v.stock_quantity > 0)
+            ]
+            variants_ok = bool(in_stock_variants)
+            variants_in_stock = len(in_stock_variants)
+            # A multi-variant parent forces the brain to ask which one
+            # before sending — see Phase 3 sender short-circuit. Single-
+            # variant (or default-only) products send straight through.
+            real_in_stock = [v for v in in_stock_variants if not v.is_default]
+            needs_variant_choice = bool(p.has_variants and len(real_in_stock) > 1)
+            structured_variants = [
+                {
+                    "id":               v.id,
+                    "salla_variant_id": v.salla_variant_id,
+                    "retailer_id":      v.retailer_id,
+                    "sku":              v.sku,
+                    "price":            v.price,
+                    "currency":         v.currency,
+                    "in_stock":         bool(v.in_stock),
+                    "stock_quantity":   v.stock_quantity,
+                    "options":          v.options or {},
+                    "option_summary":   v.option_summary or "",
+                    "image_url":        v.image_url or "",
+                    "is_default":       bool(v.is_default),
+                }
+                for v in variant_rows
+            ]
+            variants_summary = _format_variants_for_llm([
+                {"name": v.option_summary or v.sku or v.salla_variant_id or "",
+                 "stock_quantity": v.stock_quantity}
+                for v in real_in_stock
+            ]) if real_in_stock else _format_variants_for_llm(meta.get("variants") or [])
+            # Pull a default_variant snapshot for senders that want a
+            # single retailer_id without scanning the array.
+            default_v = (
+                next((v for v in variant_rows if v.id == p.default_variant_id), None)
+                or next((v for v in variant_rows if v.is_default), None)
+                or (variant_rows[0] if variant_rows else None)
             )
+        else:
+            # ── Legacy JSON path ──
+            variants = meta.get("variants") or []
+            variants_ok = True
+            if variants:
+                variants_ok = any(
+                    _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
+                    for v in variants
+                    if isinstance(v, dict)
+                )
+            variants_in_stock = sum(
+                1 for v in variants
+                if isinstance(v, dict)
+                and _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
+            ) if variants else 0
+            needs_variant_choice = False
+            structured_variants = []
+            variants_summary = _format_variants_for_llm(variants)
+            default_v = None
 
         # ── Single source of truth for orderability ──────────────────────
         # `can_checkout` is the ONE authoritative flag that decides whether
@@ -315,11 +376,6 @@ class CatalogContextBuilder:
         # customer picks it by number.  Every downstream check (decision
         # engine, order executor, debug endpoint) MUST read this field
         # instead of re-computing the logic.
-        variants_in_stock = sum(
-            1 for v in variants
-            if isinstance(v, dict)
-            and _safe_int(v.get("stock_quantity") or v.get("quantity") or 0, 0) > 0
-        ) if variants else 0
         can_checkout = (
             bool(ext_id)
             and status == "active"
@@ -349,7 +405,22 @@ class CatalogContextBuilder:
             "variants_in_stock": variants_in_stock,
             # Variant/option names (e.g. "S, M, L" or "أحمر، أزرق") —
             # only in-stock combinations, max 6 entries.
-            "variants_summary": _format_variants_for_llm(variants),
+            "variants_summary": variants_summary,
+            # Structured per-variant array — populated when the
+            # ProductVariant rows are loaded (migration 0064 path).
+            # Senders + brain read this to pick a retailer_id; legacy
+            # callers that only care about variants_summary keep
+            # working unchanged.
+            "variants":         structured_variants,
+            "has_variants":     bool(getattr(p, "has_variants", False)),
+            "default_variant_id": getattr(p, "default_variant_id", None),
+            "default_variant_retailer_id": (
+                default_v.retailer_id if default_v is not None else None
+            ),
+            # True only when there are 2+ real (non-default) in-stock
+            # variants — the brain uses this to short-circuit
+            # ACTION_SEND_PRODUCT_CARD and ask "أي مقاس؟" first.
+            "needs_variant_choice": needs_variant_choice,
         }
 
     def _filter_orderable(

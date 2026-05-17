@@ -164,6 +164,24 @@ _BLOCKED_TOKENS = frozenset({
     "مسافر", "مسافره", "خارج", "داخل",
     "من", "الى", "عند", "بعد", "قبل", "مع",
     "محل", "زبون",
+    # ── Arrival / presence verbs (May 2026 hotfix) ────────────────────
+    # Real cases from production: "أنا وصلت" / "وصلت" / "أنا جاي"
+    # / "جايه الحين" got stored as the customer's name (we ended up
+    # calling them "أبوي وصلت" in subsequent turns). These are status
+    # statements, never personal names. Normalised forms only — see
+    # ``_normalize_arabic`` for the mapping (alef-hamza → alef,
+    # ta-marbuta → ha, etc.).
+    "وصلت", "وصل", "وصلنا", "وصلتي", "وصلتو",
+    "جاي", "جايه", "جاية", "جايين", "جاي الحين", "جايه الحين",
+    "راجع", "راجعه", "راجعة", "رايح", "رايحه", "رايحة",
+    "طالع", "طالعه", "طالعة", "نازل", "نازله", "نازلة",
+    "اقرب", "قريب", "بعيد",
+    "بانتظار", "بانتظارك", "منتظر", "منتظره", "منتظرك",
+    # Single-word arrival/presence statements that arrive WITHOUT
+    # the "أنا" prefix (e.g. a bare "وصلت") — these match other
+    # anchors (الاسم: …) only when typed deliberately, so the
+    # blocklist is the right place to catch them.
+    "هلا", "اهلا", "اهلين", "السلام",
 })
 
 

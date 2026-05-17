@@ -519,10 +519,22 @@ def products_to_section(
 
         section = products_to_section("الأكثر مبيعاً", top_products)
         await send_multi_product_message(... sections=[section] ...)
+
+    Variant intelligence (migration 0064): we now prefer the
+    variant-aware ``effective_variant_retailer_id`` so a parent
+    with a sensible ``default_variant`` ships its variant's
+    retailer_id (per-SKU Meta card) rather than the parent's
+    legacy ``external_id``. Falls back to ``effective_retailer_id``
+    on dicts that don't carry a ``default_variant`` snapshot — full
+    backward compatibility for legacy callers.
     """
+    try:
+        from core.catalog import effective_variant_retailer_id  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        effective_variant_retailer_id = effective_retailer_id  # type: ignore
     ids: List[str] = []
     for p in products or []:
-        rid = effective_retailer_id(p)
+        rid = effective_variant_retailer_id(p) or effective_retailer_id(p)
         if rid:
             ids.append(rid)
     return CatalogSection(title=title or "المنتجات", retailer_ids=tuple(ids))

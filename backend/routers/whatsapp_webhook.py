@@ -2584,6 +2584,35 @@ async def _dispatch_message(
                     )
                     _evidence_decision = None
 
+            # ── Map-image short-circuit (May 2026 hotfix) ──────────────
+            # Apple Maps / Google Maps screenshots arrive as plain
+            # images (not WhatsApp location messages) so the brain
+            # used to silently ignore them. Run the dedicated
+            # detector here BEFORE the payment-claim branch so a
+            # map image during an active order produces an explicit
+            # "send the link or the national short-address" reply
+            # instead of leaking into the LLM fallback.
+            _map_image_decision = None
+            if _receipt_decision is None and _evidence_decision is None:
+                try:
+                    from core.order_flow import (  # noqa: PLC0415
+                        maybe_handle_map_image_inbound,
+                    )
+                    _map_image_decision = maybe_handle_map_image_inbound(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_normalized_type=normalized_inbound.normalized_type,
+                        inbound_metadata=normalized_inbound.metadata or {},
+                    )
+                except Exception as _map_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] map-image short-circuit check "
+                        "failed (non-fatal) tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _map_exc,
+                    )
+                    _map_image_decision = None
+
             # ── Text-only payment-claim short-circuit (May 2026) ──────
             # When the customer SAYS they paid without attaching a
             # receipt ("تم التحويل" / "حولت" / "دفعت"), the brain
@@ -2601,7 +2630,11 @@ async def _dispatch_message(
             #     receipt / under-review state.
             # On any failure we silently fall through to the brain.
             _payment_claim_decision = None
-            if _receipt_decision is None and _evidence_decision is None:
+            if (
+                _receipt_decision is None
+                and _evidence_decision is None
+                and _map_image_decision is None
+            ):
                 try:
                     from core.payment_intent import (  # noqa: PLC0415
                         maybe_handle_payment_claim,
@@ -2787,6 +2820,82 @@ async def _dispatch_message(
                         "type": "text",
                         "text": {
                             "body": _receipt_decision["reply_text"],
+                        },
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
+            if _map_image_decision is not None:
+                # Apple/Google Maps screenshot during an active
+                # order. Persist inbound + outbound deterministically,
+                # apply the optional state_patch (e.g.
+                # awaiting_location_text=True), then reply asking
+                # for a parseable location form.
+                try:
+                    from core.order_flow import (  # noqa: PLC0415
+                        apply_state_patch as _apply_state_patch_map,
+                    )
+                    _apply_state_patch_map(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        state_patch=_map_image_decision.get("state_patch") or {},
+                    )
+                except Exception as _mp_pp_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] map_image state_patch apply "
+                        "failed tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _mp_pp_exc,
+                    )
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="inbound",
+                        body=text or "[لقطة خرائط]",
+                        event_type="whatsapp_image",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "normalized_inbound": normalized_inbound.metadata,
+                            "wa_message_id": msg_id or None,
+                            "map_image_short_circuit": True,
+                        },
+                    )
+                except Exception as _mp_in_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] map_image inbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _mp_in_exc,
+                    )
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="outbound",
+                        body=_map_image_decision["reply_text"],
+                        event_type="whatsapp_message",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "is_ai": True,
+                            "deterministic_path": "map_image_ack",
+                        },
+                    )
+                except Exception as _mp_out_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] map_image outbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _mp_out_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {
+                            "body": _map_image_decision["reply_text"],
                         },
                     },
                     _tenant_id=resolved_tenant_id,
@@ -3997,6 +4106,46 @@ async def _handle_merchant_message(
                     _brain_buttons = []
                     _brain_handoff = False
 
+                # ── Belt-and-suspenders handoff guard (May 2026) ─────────
+                # Even when the brain returned ACTION_LLM_REPLY (because
+                # the LLM-side intent classifier didn't fire on a
+                # marginal phrase), if the inbound text DETERMINISTICALLY
+                # matches the talk-to-human rules we still want the
+                # conversation to land in the merchant's "طلب موظف"
+                # filter. The reply text the brain produced is kept
+                # as-is — we don't override the message, only the
+                # downstream flag-raising side-effect.
+                if not _brain_handoff and (text or "").strip():
+                    try:
+                        from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+                            match as _rules_match,
+                        )
+                        from modules.ai.brain.types import (  # noqa: PLC0415
+                            INTENT_TALK_HUMAN as _RULES_INTENT_TALK_HUMAN,
+                        )
+                        _rule_intent = _rules_match(text or "")
+                        if (
+                            _rule_intent is not None
+                            and getattr(_rule_intent, "name", "") == _RULES_INTENT_TALK_HUMAN
+                            and float(getattr(_rule_intent, "confidence", 0.0) or 0.0) >= 0.85
+                        ):
+                            _brain_handoff = True
+                            logger.info(
+                                "[Merchant/Brain] handoff forced by rule-based "
+                                "fallback tenant=%s to=%s rule_confidence=%.2f",
+                                tenant_id, to,
+                                float(getattr(_rule_intent, "confidence", 0.0) or 0.0),
+                            )
+                    except Exception as _ho_guard_exc:  # noqa: BLE001
+                        # Pure observability fallback — never raise out
+                        # of the brain dispatch loop because we tried
+                        # to be helpful.
+                        logger.debug(
+                            "[Merchant/Brain] handoff guard rule match failed "
+                            "tenant=%s err=%s",
+                            tenant_id, _ho_guard_exc,
+                        )
+
                 # ── No-silent-reply guard ─────────────────────────────────
                 # Production regression (May 2026): "السلام عليكم أبي سعر
                 # العسل" arrived from a real merchant and got NO outbound
@@ -5028,6 +5177,19 @@ async def _handle_merchant_message(
                         "in_stock":     _res.in_stock,
                         "external_id":  _res.external_id,
                         "confidence":   _res.confidence,
+                        # Variant intelligence (migration 0064 — Phase 3).
+                        # Carries the resolver's variant insight onto
+                        # the attachment so the catalog send path can:
+                        #   1. Short-circuit the card when 2+ in-stock
+                        #      variants exist and the customer hasn't
+                        #      picked one yet (ship the question
+                        #      instead, via the responder).
+                        #   2. Pick the correct per-SKU retailer_id
+                        #      when a variant HAS been picked.
+                        "needs_variant_choice": getattr(_res, "needs_variant_choice", False),
+                        "variants":             list(getattr(_res, "variants", []) or []),
+                        "has_variants":         getattr(_res, "has_variants", False),
+                        "default_variant_retailer_id": getattr(_res, "default_variant_retailer_id", None),
                     })
                 if _resolutions:
                     logger.info(
@@ -7184,7 +7346,8 @@ async def _try_send_catalog_product(
         return False
     try:
         from core.catalog import (  # noqa: PLC0415
-            effective_retailer_id, is_catalog_eligible,
+            effective_retailer_id, effective_variant_retailer_id,
+            is_catalog_eligible,
         )
         from services.whatsapp_platform.catalog_sender import (  # noqa: PLC0415
             send_single_product_message,
@@ -7195,6 +7358,87 @@ async def _try_send_catalog_product(
             tenant_id, imp_exc,
         )
         return False
+
+    # ── Variant intelligence (Phase 3 — migration 0064) ──────────────────
+    # If the customer has already picked a variant for this product in
+    # the current turn, the resolver flagged it on the attachment via
+    # ``picked_variant_id`` / ``picked_variant_retailer_id``. We honour
+    # that pick first so a card for "M / Red" goes out for the right
+    # SKU and not the parent's default.
+    picked_variant_rid = (attachment.get("picked_variant_retailer_id") or "").strip()
+
+    # Multi-variant short-circuit. When the resolver flagged
+    # ``needs_variant_choice`` AND the customer hasn't pinned one
+    # yet, we DON'T send a catalog card — we ship the variant
+    # question template and persist the awaiting flag so the next
+    # turn can map the customer's pick. Feature-flagged via
+    # ``CATALOG_VARIANT_SEND`` so operators can roll the entire
+    # variant-aware send path back without redeploying.
+    import os as _os  # noqa: PLC0415
+    _variant_send_enabled = (_os.getenv("CATALOG_VARIANT_SEND", "true")
+                             or "").strip().lower() not in {
+                                 "false", "0", "off", "no", "",
+                             }
+    if (
+        _variant_send_enabled
+        and not picked_variant_rid
+        and bool(attachment.get("needs_variant_choice"))
+    ):
+        try:
+            from modules.ai.brain.compose.templates import (  # noqa: PLC0415
+                ask_product_variants as _ask_variants,
+            )
+        except Exception as imp_exc:  # noqa: BLE001
+            logger.debug(
+                "[CATALOG_VARIANT_PROMPT] tenant=%s helpers unavailable, "
+                "falling through to legacy card: %s",
+                tenant_id, imp_exc,
+            )
+        else:
+            try:
+                prompt = _ask_variants(
+                    {"title": attachment.get("title")},
+                    list(attachment.get("variants") or []),
+                )
+                await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=prompt,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                logger.info(
+                    "[CATALOG_VARIANT_PROMPT] tenant=%s product_id=%s "
+                    "variants=%d — sent variant question, suppressed card",
+                    tenant_id, attachment.get("id"),
+                    len(attachment.get("variants") or []),
+                )
+                # Persist the awaiting-choice marker on the conversation
+                # so the next inbound digit maps to a variant pick.
+                try:
+                    from core.order_flow import apply_state_patch  # noqa: PLC0415
+                    apply_state_patch(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=to,
+                        state_patch={
+                            "awaiting_variant_choice": True,
+                            "pending_variant_product_id":
+                                str(attachment.get("id") or ""),
+                        },
+                    )
+                except Exception as _patch_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[CATALOG_VARIANT_PROMPT] tenant=%s state patch "
+                        "failed (non-fatal): %s",
+                        tenant_id, _patch_exc,
+                    )
+                # Return True so the caller skips the legacy image+CTA
+                # path; we've already delivered a meaningful turn.
+                return True
+            except Exception as _prompt_exc:  # noqa: BLE001
+                logger.warning(
+                    "[CATALOG_VARIANT_PROMPT] tenant=%s prompt path "
+                    "failed, falling through to default-variant card: %s",
+                    tenant_id, _prompt_exc,
+                )
 
     # Honour an explicit `meta_retailer_id` override when set. One
     # cheap SELECT keyed on (id, tenant_id) — we already have both
@@ -7217,8 +7461,17 @@ async def _try_send_catalog_product(
                 tenant_id, q_exc,
             )
 
-    if product_row is not None:
-        retailer_id = effective_retailer_id(product_row)
+    # ── Variant-aware retailer_id resolution ─────────────────────────────
+    # Priority: explicit attachment pick → variant resolver helper
+    # (reads default_variant.retailer_id when the parent loaded its
+    # relationship) → legacy meta_retailer_id/external_id chain.
+    if picked_variant_rid:
+        retailer_id = picked_variant_rid
+    elif product_row is not None:
+        retailer_id = (
+            effective_variant_retailer_id(product_row)
+            or effective_retailer_id(product_row)
+        )
     if not retailer_id:
         # Fallback path: the attachment dict carries external_id from
         # the resolver. effective_retailer_id treats it as the

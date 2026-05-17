@@ -94,6 +94,93 @@ def effective_retailer_id(product: Any) -> str:
 #     the admin UI keep their value.
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Variant-aware retailer-id resolution (migration 0064 — Phase 1)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# After 0064 every sellable SKU lives as a ``ProductVariant`` row, with the
+# parent ``Product`` carrying ``has_variants`` + ``default_variant_id``. We
+# want one helper the sender / brain / Google feed can call regardless of
+# what shape they're holding — a variant ORM row, a parent ORM row, or a
+# plain dict (resolver still passes those in places). The resolution
+# order intentionally mirrors ``effective_retailer_id`` so:
+#
+#   * sites that already migrated to variant rows get per-variant IDs;
+#   * sites that still pass a parent get the parent's default_variant
+#     retailer_id (or fall back to the legacy meta_retailer_id /
+#     external_id chain) — i.e. zero regression for un-migrated callers.
+#
+# The function is deliberately DB-free: pass a fully populated ORM object
+# (default_variant relationship already loaded) or a dict; we never open
+# a session.
+
+
+def _variant_retailer_id(variant: Any) -> str:
+    """Return the explicit ``retailer_id`` from a variant-shaped input.
+
+    Falls through to ``effective_retailer_id`` so a variant that was
+    persisted before the migration backfill filled in ``retailer_id``
+    (only theoretically possible — the migration writes it directly)
+    still resolves via the legacy meta/external chain. Empty string
+    means "nothing usable".
+    """
+    if variant is None:
+        return ""
+    rid = getattr(variant, "retailer_id", None)
+    if rid is None and isinstance(variant, dict):
+        rid = variant.get("retailer_id")
+    if rid:
+        return str(rid).strip()
+    # Pre-backfill safety net: a variant row missing retailer_id should
+    # still resolve via the legacy parent fields if they were copied
+    # onto the dict / ORM row.
+    return effective_retailer_id(variant)
+
+
+def effective_variant_retailer_id(target: Any) -> str:
+    """Variant-aware version of :func:`effective_retailer_id`.
+
+    Accepts:
+
+    * A ``ProductVariant`` ORM row (or any shape with ``retailer_id``)
+      → returns its ``retailer_id``.
+    * A ``Product`` ORM row (or dict with ``default_variant``) → returns
+      the default variant's ``retailer_id``.
+    * A bare dict from the legacy resolver path → falls through to the
+      legacy ``effective_retailer_id`` chain (meta_retailer_id →
+      external_id) so old callers don't regress.
+
+    Returns an empty string when nothing usable is found. Never raises.
+    """
+    if target is None:
+        return ""
+
+    # Heuristic: a ProductVariant exposes ``product_id`` (the FK back to
+    # parent). Anything carrying that is treated as variant-shaped.
+    pid = getattr(target, "product_id", None)
+    if pid is None and isinstance(target, dict):
+        pid = target.get("product_id")
+    if pid is not None:
+        rid = _variant_retailer_id(target)
+        if rid:
+            return rid
+        # Variant row exists but had no retailer_id and no legacy
+        # fallback — return empty so the catalog sender bails out.
+        return ""
+
+    # Parent-shaped: try the default_variant relationship first, then
+    # the legacy parent-level retailer_id.
+    default_variant = getattr(target, "default_variant", None)
+    if default_variant is None and isinstance(target, dict):
+        default_variant = target.get("default_variant")
+    if default_variant is not None:
+        rid = _variant_retailer_id(default_variant)
+        if rid:
+            return rid
+
+    return effective_retailer_id(target)
+
+
 def canonical_retailer_id(product: Any, *, fallback_to_synthetic: bool = True) -> str:
     """Resolve a retailer id that NEVER comes back empty.
 
@@ -429,5 +516,6 @@ __all__: List[str] = [
     "canonical_retailer_id",
     "catalog_summary",
     "effective_retailer_id",
+    "effective_variant_retailer_id",
     "is_catalog_eligible",
 ]

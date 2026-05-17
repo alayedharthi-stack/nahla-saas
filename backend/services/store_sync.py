@@ -112,12 +112,317 @@ def _normalise_product(raw: Any) -> Dict:
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
         "image_url":     raw.get("image", raw.get("thumbnail", "")),
+        "currency":      raw.get("currency", "SAR"),
         "in_stock":      raw.get("in_stock", True),
         "stock_qty":     raw.get("quantity", raw.get("stock_quantity", None)),
         "tags":          raw.get("tags", []),
         "variants":      raw.get("variants", []),
+        "options":       raw.get("options", []),
+        "has_required_options": bool(raw.get("has_required_options", False)),
         "metadata":      raw.get("metadata", {}),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parent / variant catalog layer (migration 0064 — Phase 2)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every parent ``Product`` row must end up with at least one sellable
+# ``ProductVariant`` row after a sync. There are three cases we handle:
+#
+#   1. Salla returned a non-empty ``variants`` array — one variant row
+#      per element. Match by ``salla_variant_id`` (== the platform
+#      variant id) so a re-sync updates in place instead of duplicating.
+#
+#   2. Salla returned an empty array — we create exactly one
+#      ``is_default=True`` synthetic variant mirroring the parent. This
+#      keeps the downstream contract simple: senders / brain / Google
+#      feed always go through ``product_variants``, never through
+#      "the parent itself".
+#
+#   3. A variant that used to be there disappears from Salla — we
+#      SOFT-DELETE (``in_stock=False``) rather than ``db.delete`` so:
+#         * order_items.variant_id history stays referentially clean
+#           once that FK lands later, and
+#         * a merchant who pauses a variant on Salla can resume it on
+#           a future sync without losing analytics / affinity.
+#
+# This helper is invoked from ``sync_products`` AFTER the parent row
+# has been flushed (so ``product.id`` is populated for the FK). Soft-
+# disabled via the ``CATALOG_VARIANT_SYNC`` env flag — flip to "false"
+# to roll back variant writes without touching the parent path.
+
+
+_CATALOG_VARIANT_SYNC_DISABLED_VALUES = {"false", "0", "off", "no", ""}
+
+
+def _variant_sync_enabled() -> bool:
+    raw = os.getenv("CATALOG_VARIANT_SYNC", "true")
+    return (raw or "").strip().lower() not in _CATALOG_VARIANT_SYNC_DISABLED_VALUES
+
+
+def _variant_option_summary(variant_dict: Dict[str, Any]) -> str:
+    """Build a short single-line summary from a variant's options/title.
+
+    Falls through priorities so we always get *something* readable:
+      1. Explicit ``option_summary`` set by the adapter.
+      2. Pretty-print of ``options`` dict (e.g. ``"M / Red"``).
+      3. ``title`` (Salla often labels variants by joining option names).
+      4. ``sku`` as a last resort.
+    """
+    summary = variant_dict.get("option_summary")
+    if summary:
+        return str(summary).strip()[:255]
+    options = variant_dict.get("options")
+    if isinstance(options, dict) and options:
+        return " / ".join(str(v) for v in options.values() if v)[:255]
+    title = variant_dict.get("title")
+    if title:
+        return str(title).strip()[:255]
+    sku = variant_dict.get("sku")
+    if sku:
+        return str(sku).strip()[:255]
+    return ""
+
+
+def _coerce_variant_dict(raw: Any) -> Dict[str, Any]:
+    """Normalise an inbound variant entry (Pydantic / dict / object)
+    into a plain dict the upsert can read fields off."""
+    if raw is None:
+        return {}
+    if hasattr(raw, "dict"):
+        try:
+            return dict(raw.dict())
+        except Exception:  # noqa: BLE001
+            pass
+    if isinstance(raw, dict):
+        return dict(raw)
+    # Bare object — best-effort attribute scrape.
+    return {
+        k: getattr(raw, k, None)
+        for k in ("id", "title", "price", "sku", "in_stock",
+                  "stock_quantity", "options", "option_summary",
+                  "image_url", "currency")
+        if hasattr(raw, k)
+    }
+
+
+def _resolve_variant_retailer_id(parent: Any, variant_id: Optional[int],
+                                 salla_variant_id: Optional[str]) -> str:
+    """Pick a per-variant retailer_id.
+
+    Order:
+      1. The merchant's parent-level override (``meta_retailer_id``)
+         when it carries a hyphenated shape like ``parent-variant``;
+         we split it so per-variant ids round-trip cleanly.
+      2. ``{parent.external_id}-{salla_variant_id}`` when both exist —
+         the convention Salla's Meta Commerce auto-publish uses.
+      3. ``nahla_v_{variant_id}`` synthetic fallback so a send never
+         goes out without a retailer_id.
+    """
+    salla_id = (salla_variant_id or "").strip()
+    parent_ext = (getattr(parent, "external_id", "") or "").strip()
+    parent_override = (getattr(parent, "meta_retailer_id", "") or "").strip()
+    if parent_override and "-" in parent_override and salla_id:
+        # Merchant put a ``parent-variant`` shape on the parent —
+        # respect it by swapping in the per-variant suffix.
+        head, _, _tail = parent_override.partition("-")
+        if head:
+            return f"{head}-{salla_id}"
+    if parent_ext and salla_id:
+        return f"{parent_ext}-{salla_id}"
+    if salla_id:
+        return salla_id
+    if variant_id is not None:
+        return f"nahla_v_{variant_id}"
+    return parent_override or parent_ext or ""
+
+
+def _upsert_variants_for(db: Session, product: Any,
+                         normalised: Dict[str, Any]) -> None:
+    """Reconcile ``product_variants`` rows with the adapter's payload.
+
+    Behaviour:
+
+      * Variants present in ``normalised['variants']`` are upserted
+        keyed by ``(product_id, salla_variant_id)``.
+      * Variants previously persisted but not in this run are SOFT-
+        PRUNED — ``in_stock=False`` rather than deleted.
+      * If the adapter returned an empty array we ensure exactly one
+        ``is_default=True`` synthetic row exists.
+      * Parent flags ``has_variants`` / ``default_variant_id`` are
+        re-stamped at the end.
+
+    No-op when the env flag is off. Tolerant of partial / malformed
+    variant payloads — we log and skip individual rows rather than
+    abort the whole sync.
+    """
+    if not _variant_sync_enabled():
+        return
+
+    # Lazy import to avoid a cycle with models on first run.
+    try:
+        from models import ProductVariant  # noqa: PLC0415
+    except ImportError:  # noqa: BLE001
+        from database.models import ProductVariant  # type: ignore  # noqa: PLC0415
+
+    raw_variants = normalised.get("variants") or []
+    parent_currency = normalised.get("currency") or "SAR"
+    parent_price = normalised.get("price") or ""
+    parent_image = normalised.get("image_url") or ""
+
+    # Index existing rows for O(1) lookup. ``salla_variant_id`` may be
+    # NULL (synthetic default rows) — we match those by ``is_default``.
+    existing_rows = (
+        db.query(ProductVariant)
+          .filter(ProductVariant.product_id == product.id)
+          .all()
+    )
+    by_salla_id: Dict[str, Any] = {}
+    default_row = None
+    for row in existing_rows:
+        if row.salla_variant_id:
+            by_salla_id[row.salla_variant_id] = row
+        if row.is_default:
+            default_row = row
+
+    seen_salla_ids: set = set()
+
+    if raw_variants:
+        # ── Case 1: real variants from the adapter ──────────────────
+        for raw_v in raw_variants:
+            v_dict = _coerce_variant_dict(raw_v)
+            sid = str(v_dict.get("id") or "").strip() or None
+            if not sid:
+                # No platform id — we can't upsert reliably. Skip.
+                logger.warning(
+                    "[catalog/variants] tenant=%s product=%s skipping "
+                    "variant without id: %r",
+                    product.tenant_id, product.id, v_dict,
+                )
+                continue
+            seen_salla_ids.add(sid)
+            price = v_dict.get("price")
+            if price in (None, ""):
+                price = parent_price
+            else:
+                price = str(price)
+            stock_qty = _coerce_int(v_dict.get("stock_quantity"))
+            in_stock = bool(v_dict.get("in_stock", True))
+            if stock_qty is not None and stock_qty <= 0:
+                in_stock = False
+            options = v_dict.get("options")
+            if not isinstance(options, dict):
+                options = None
+            image_url = v_dict.get("image_url") or parent_image or None
+            row = by_salla_id.get(sid)
+            if row is None:
+                row = ProductVariant(
+                    tenant_id=product.tenant_id,
+                    product_id=product.id,
+                    salla_variant_id=sid,
+                    sku=v_dict.get("sku") or None,
+                    price=price or None,
+                    currency=v_dict.get("currency") or parent_currency,
+                    stock_quantity=stock_qty,
+                    in_stock=in_stock,
+                    options=options,
+                    option_summary=_variant_option_summary(v_dict) or None,
+                    image_url=image_url,
+                    is_default=False,
+                    extra_metadata=v_dict,
+                )
+                db.add(row)
+                db.flush()  # populate row.id for retailer_id synthesis
+            else:
+                row.sku = v_dict.get("sku") or row.sku
+                row.price = price or row.price
+                row.currency = (v_dict.get("currency")
+                                or row.currency or parent_currency)
+                row.stock_quantity = stock_qty
+                row.in_stock = in_stock
+                if options is not None:
+                    row.options = options
+                summary = _variant_option_summary(v_dict)
+                if summary:
+                    row.option_summary = summary
+                if image_url:
+                    row.image_url = image_url
+                row.extra_metadata = v_dict
+            # Stamp retailer_id only when missing (never overwrite an
+            # explicit publish that came in via the dashboard / admin).
+            if not row.retailer_id:
+                row.retailer_id = _resolve_variant_retailer_id(
+                    product, row.id, sid,
+                )
+        # Soft-prune the ones that vanished from this payload.
+        for sid, row in by_salla_id.items():
+            if sid not in seen_salla_ids:
+                row.in_stock = False
+        # If a synthetic default existed earlier (e.g. the product
+        # used to be option-less and now sprouted variants) flag it
+        # as out of stock so it doesn't pollute sends — but DON'T
+        # delete it; orders may still reference it.
+        if default_row is not None:
+            default_row.in_stock = False
+    else:
+        # ── Case 2: no variants → ensure one synthetic default exists.
+        if default_row is None and not existing_rows:
+            new_default_rid = _resolve_variant_retailer_id(
+                product, None, None,
+            )
+            if not new_default_rid:
+                # Fall back to the canonical chain — this never returns
+                # empty for a flushed parent (synthesises nahla_p_<id>).
+                try:
+                    from core.catalog import canonical_retailer_id  # noqa: PLC0415
+                    new_default_rid = canonical_retailer_id(product) or ""
+                except Exception:  # noqa: BLE001
+                    new_default_rid = ""
+            db.add(ProductVariant(
+                tenant_id=product.tenant_id,
+                product_id=product.id,
+                salla_variant_id=None,
+                sku=getattr(product, "sku", None),
+                retailer_id=new_default_rid or None,
+                price=parent_price or None,
+                currency=parent_currency,
+                stock_quantity=_coerce_int(normalised.get("stock_qty")),
+                in_stock=bool(normalised.get("in_stock", True)),
+                options=None,
+                option_summary=None,
+                image_url=parent_image or None,
+                is_default=True,
+            ))
+            db.flush()
+        elif default_row is not None:
+            # Keep the synthetic default in sync with the parent.
+            default_row.price = parent_price or default_row.price
+            default_row.in_stock = bool(normalised.get("in_stock", True))
+            default_row.stock_quantity = _coerce_int(normalised.get("stock_qty"))
+            default_row.image_url = parent_image or default_row.image_url
+
+    # Re-stamp parent flags from the current variant set.
+    fresh_rows = (
+        db.query(ProductVariant)
+          .filter(ProductVariant.product_id == product.id)
+          .all()
+    )
+    non_default = [r for r in fresh_rows if not r.is_default]
+    in_stock_rows = [r for r in fresh_rows if r.in_stock]
+    product.has_variants = bool(
+        len(in_stock_rows) > 1 or bool(non_default)
+        or normalised.get("has_required_options")
+    )
+    if not product.default_variant_id and fresh_rows:
+        # Prefer an in-stock variant; prefer is_default among them;
+        # fall back to lowest id for determinism.
+        candidates = in_stock_rows or fresh_rows
+        candidates_sorted = sorted(
+            candidates,
+            key=lambda r: (not r.is_default, r.id),
+        )
+        product.default_variant_id = candidates_sorted[0].id
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -649,6 +954,19 @@ class StoreSyncService:
                     assign_canonical_retailer_id(existing)
                 except Exception:  # noqa: BLE001
                     pass
+                # Parent / variant intelligence layer (migration 0064).
+                # Reconcile ``product_variants`` rows against the
+                # adapter payload. No-op when ``CATALOG_VARIANT_SYNC``
+                # is off so we can roll the writer back without
+                # touching the parent path.
+                try:
+                    _upsert_variants_for(self.db, existing, normalised)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[catalog/variants] tenant=%s product=%s upsert "
+                        "failed — continuing parent sync",
+                        self.tenant_id, existing.id,
+                    )
                 updated += 1
 
                 if was_unavailable and new_available:
@@ -671,6 +989,15 @@ class StoreSyncService:
                     source       = row_source,
                 )
                 self.db.add(p)
+                self.db.flush()  # populate p.id for variant FK
+                try:
+                    _upsert_variants_for(self.db, p, normalised)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[catalog/variants] tenant=%s product=%s "
+                        "(new) variant upsert failed — continuing",
+                        self.tenant_id, p.id,
+                    )
                 created += 1
         self.db.flush()
         # Auto-map retailer ids on freshly-created rows. We do this

@@ -121,6 +121,15 @@ class ProductResolution:
     # this only to render an "متوفر بأحجام" hint, not to
     # influence the link.
     variants: List[Dict[str, Any]] = field(default_factory=list)
+    # Variant intelligence layer (migration 0064). When the parent
+    # has 2+ in-stock real variants the sender MUST short-circuit
+    # the product card and ask the customer to pick a variant
+    # first. Carries the parent's ``default_variant_id`` so
+    # single-variant products skip the prompt.
+    needs_variant_choice: bool = False
+    default_variant_id: Optional[int] = None
+    default_variant_retailer_id: Optional[str] = None
+    has_variants: bool = False
     # Which raw search query produced this resolution. Surfaced so
     # logs can answer "did `[PRODUCT:عسل]` match the right item?"
     # without re-running the search.
@@ -535,6 +544,12 @@ def _dict_to_resolution(
         s = (str(v).strip() if v is not None else "")
         return s or None
 
+    raw_variants = d.get("variants")
+    if not isinstance(raw_variants, list):
+        # Legacy callers may have written ``variants_summary`` (a
+        # string). Don't try to coerce — just leave the structured
+        # variants list empty and let the sender fall back.
+        raw_variants = []
     return ProductResolution(
         id=int(d.get("id") or 0),
         external_id=_nonempty(d.get("external_id")),
@@ -546,7 +561,11 @@ def _dict_to_resolution(
         description=_nonempty(d.get("description")),
         in_stock=bool(d.get("in_stock", True)),
         can_checkout=bool(d.get("can_checkout", d.get("orderable", True))),
-        variants=list(d.get("variants") or d.get("variants_summary") or []),
+        variants=list(raw_variants),
+        needs_variant_choice=bool(d.get("needs_variant_choice", False)),
+        default_variant_id=d.get("default_variant_id"),
+        default_variant_retailer_id=_nonempty(d.get("default_variant_retailer_id")),
+        has_variants=bool(d.get("has_variants", False)),
         matched_query=matched_query,
         confidence=confidence,
     )

@@ -1042,6 +1042,31 @@ def _product_diag_rows(
         image_url   = meta.get("image_url") or meta.get("thumbnail") or ""
         product_url = meta.get("product_url") or meta.get("url") or ""
 
+        # Variant intelligence layer (migration 0064). Surface the
+        # per-variant rows so ProductStudio can render the expandable
+        # drawer and the counters at the top of the grid. Cheap join
+        # — loaded as part of the SQLAlchemy relationship since we
+        # already hold the Product instance.
+        variants_payload: List[Dict[str, Any]] = []
+        try:
+            for v in (getattr(p, "variants", None) or []):
+                variants_payload.append({
+                    "id":               v.id,
+                    "salla_variant_id": v.salla_variant_id,
+                    "sku":              v.sku,
+                    "retailer_id":      v.retailer_id,
+                    "price":            v.price,
+                    "currency":         v.currency,
+                    "stock_quantity":   v.stock_quantity,
+                    "in_stock":         bool(v.in_stock),
+                    "is_default":       bool(v.is_default),
+                    "options":          v.options or {},
+                    "option_summary":   v.option_summary or "",
+                    "image_url":        v.image_url or "",
+                })
+        except Exception:  # noqa: BLE001
+            variants_payload = []
+
         out_rows.append({
             "id":                    p.id,
             "title":                 p.title,
@@ -1063,6 +1088,15 @@ def _product_diag_rows(
             "source":                product_source(p),
             # One-pill readiness summary — see ``ProductBadge``.
             "readiness_badge":       badge,
+            # Parent / variants intelligence (migration 0064).
+            "has_variants":          bool(getattr(p, "has_variants", False)),
+            "default_variant_id":    getattr(p, "default_variant_id", None),
+            "variants":              variants_payload,
+            "variants_count":        len(variants_payload),
+            "sellable_variants_count": sum(
+                1 for v in variants_payload
+                if v["in_stock"] and not v["is_default"]
+            ),
         })
 
     # Cheap counts via SQL — same dual-column predicate as the audit
@@ -1090,6 +1124,75 @@ def _product_diag_rows(
             pass
         with_rid, published = 0, 0
 
+    # ── Parent + variant intelligence counters (migration 0064) ──────
+    # Five header pills on ProductStudio. All five are tenant-wide
+    # (unfiltered) so the merchant sees the real shape of the catalog
+    # regardless of the active search. Cheap SQL — variants is a
+    # second small table with one tenant_id index.
+    try:
+        from models import ProductVariant as _PV  # noqa: PLC0415
+        variants_total = (
+            db.query(_PV)
+              .filter(_PV.tenant_id == tenant_id)
+              .filter(_PV.is_default.is_(False))
+              .count()
+        )
+        variants_in_stock = (
+            db.query(_PV)
+              .filter(_PV.tenant_id == tenant_id)
+              .filter(_PV.is_default.is_(False))
+              .filter(_PV.in_stock.is_(True))
+              .count()
+        )
+        wa_ready_variants = (
+            db.query(_PV)
+              .filter(_PV.tenant_id == tenant_id)
+              .filter(_PV.retailer_id.isnot(None))
+              .filter(_PV.retailer_id != "")
+              .filter(_PV.in_stock.is_(True))
+              .count()
+        )
+    except Exception:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        variants_total, variants_in_stock, wa_ready_variants = 0, 0, 0
+
+    # Meta-ready ≈ variants whose parent has been stamped
+    # ``meta_catalog_published_at``. We can't (yet) introspect the
+    # exact Meta export, so we approximate: a variant is meta-ready
+    # if its parent has been published AND the variant carries a
+    # retailer id. Google-ready uses the same readiness signal —
+    # the feed itself short-circuits malformed rows on emit.
+    try:
+        from models import ProductVariant as _PV2  # noqa: PLC0415
+        meta_ready_variants = (
+            db.query(_PV2)
+              .join(_Product, _PV2.product_id == _Product.id)
+              .filter(_PV2.tenant_id == tenant_id)
+              .filter(_PV2.retailer_id.isnot(None))
+              .filter(_PV2.retailer_id != "")
+              .filter(_Product.meta_catalog_published_at.isnot(None))
+              .count()
+        )
+        google_ready_variants = (
+            db.query(_PV2)
+              .filter(_PV2.tenant_id == tenant_id)
+              .filter(_PV2.retailer_id.isnot(None))
+              .filter(_PV2.retailer_id != "")
+              .filter(_PV2.price.isnot(None))
+              .filter(_PV2.price != "")
+              .filter(_PV2.in_stock.is_(True))
+              .count()
+        )
+    except Exception:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        meta_ready_variants, google_ready_variants = 0, 0
+
     return {
         "rows":   out_rows,
         "total":  int(filtered_total),       # respects active filters
@@ -1102,6 +1205,17 @@ def _product_diag_rows(
             "published":   int(published),
             "unpublished": int(total) - int(published),
             "total":       int(total),
+        },
+        # New five counters surfaced as a separate sub-block so the
+        # frontend can render them independently without touching
+        # ``coverage`` (which other consumers depend on).
+        "variants_summary": {
+            "products":             int(total),
+            "variants":             int(variants_total),
+            "variants_in_stock":    int(variants_in_stock),
+            "whatsapp_ready":       int(wa_ready_variants),
+            "meta_ready":           int(meta_ready_variants),
+            "google_ready":         int(google_ready_variants),
         },
         "filters_applied": {
             "q":               q or None,
@@ -1237,6 +1351,35 @@ async def merchant_catalog_products(
         has_image=has_image, has_retailer_id=has_retailer_id,
         in_stock=in_stock,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Google Merchant Center feed (migration 0064 — Phase 4)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Per-variant JSON feed that Merchant Center can pull on a schedule.
+# Endpoint is intentionally additive: rolling Phase 4 back simply
+# means dropping the route. The frontend "Google-ready" counter
+# reads the variant table directly and doesn't depend on this
+# endpoint being mounted.
+
+
+@merchant_router.get("/google/feed.json")
+async def merchant_google_feed(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Emit the Google Merchant Center JSON feed for this tenant.
+
+    Shape is documented in :mod:`backend.services.google_merchant_feed`.
+    Variants without a usable ``retailer_id`` are skipped (Google
+    rejects items without an id); the count is surfaced as
+    ``items_skipped`` so operators can spot un-mapped rows.
+    """
+    from services.google_merchant_feed import build_feed  # noqa: PLC0415
+    tenant_id = resolve_tenant_id(request)
+    return build_feed(db, tenant_id)
 
 
 @merchant_router.post("/resync")

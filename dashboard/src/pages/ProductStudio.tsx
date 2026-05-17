@@ -41,12 +41,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Search, X, Image as ImageIcon, ExternalLink, Loader2,
   AlertTriangle, CheckCircle2, XCircle, Package,
-  Filter as FilterIcon, ChevronLeft, ChevronRight,
-  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles,
+  Filter as FilterIcon, ChevronLeft, ChevronRight, ChevronDown,
+  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers,
 } from 'lucide-react'
 import {
   catalogApi,
   type CatalogProductDiagRow,
+  type CatalogProductVariantRow,
+  type CatalogVariantsSummary,
   type ChannelReadiness,
   type ChannelSpecResponse,
   type ProductDetailResponse,
@@ -249,6 +251,117 @@ function FiltersBar(props: {
 // Product grid — Meta-style table
 // ─────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────
+// Variants summary header — five-counter pill bar.
+// Surfaced from the diag endpoint's ``variants_summary`` block
+// (migration 0064 Phase 4). Reads tenant-wide totals regardless of
+// the active grid filter so merchants see the true catalog shape.
+// ─────────────────────────────────────────────────────────────────────
+
+function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) {
+  const s = props.summary
+  if (!s) return null
+  const pills: Array<{
+    label:  string
+    value:  number
+    Icon:   typeof Package
+    tone:   string
+  }> = [
+    { label: 'منتجات', value: s.products,
+      Icon: Package, tone: 'text-slate-700 bg-slate-50 border-slate-200' },
+    { label: 'الاختلافات', value: s.variants,
+      Icon: Layers, tone: 'text-indigo-700 bg-indigo-50 border-indigo-200' },
+    { label: 'جاهز للواتساب', value: s.whatsapp_ready,
+      Icon: MessageCircle, tone: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
+    { label: 'جاهز لـ Meta', value: s.meta_ready,
+      Icon: ShoppingBag, tone: 'text-sky-700 bg-sky-50 border-sky-200' },
+    { label: 'جاهز لـ Google', value: s.google_ready,
+      Icon: Sparkles, tone: 'text-amber-700 bg-amber-50 border-amber-200' },
+  ]
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {pills.map(p => (
+          <span
+            key={p.label}
+            className={`inline-flex items-center gap-1.5 ${p.tone} border rounded-full px-3 py-1 text-xs font-semibold`}
+          >
+            <p.Icon className="w-3.5 h-3.5" />
+            <span className="font-mono tabular-nums">{p.value.toLocaleString('ar-EG')}</span>
+            <span>{p.label}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Inline variants drawer — rendered under the expanded parent row.
+// Mirrors the shape of the per-row variant rows the diag endpoint
+// returns. Read-only: a per-variant publish action will land later
+// as part of the channel-listings work.
+// ─────────────────────────────────────────────────────────────────────
+
+function VariantsDrawer(props: { variants: CatalogProductVariantRow[] }) {
+  const real = props.variants.filter(v => !v.is_default)
+  if (real.length === 0) {
+    return (
+      <div className="bg-slate-50 border-t border-slate-200 px-6 py-3 text-xs text-slate-500">
+        لا توجد اختلافات حقيقية لهذا المنتج — متاح كـ SKU واحد فقط.
+      </div>
+    )
+  }
+  return (
+    <div className="bg-slate-50 border-t border-slate-200 px-6 py-3">
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="text-right py-1.5 px-2 font-semibold">الخيار</th>
+              <th className="text-right py-1.5 px-2 font-semibold">SKU</th>
+              <th className="text-right py-1.5 px-2 font-semibold">السعر</th>
+              <th className="text-right py-1.5 px-2 font-semibold">المخزون</th>
+              <th className="text-right py-1.5 px-2 font-semibold">retailer_id</th>
+              <th className="text-right py-1.5 px-2 font-semibold">الحالة</th>
+            </tr>
+          </thead>
+          <tbody>
+            {real.map(v => (
+              <tr key={v.id} className="border-t border-slate-200">
+                <td className="py-1.5 px-2 text-slate-700">
+                  {v.option_summary || (
+                    <span className="text-slate-400">—</span>
+                  )}
+                </td>
+                <td className="py-1.5 px-2 font-mono text-[11px] text-slate-500" dir="ltr">
+                  {v.sku ?? '—'}
+                </td>
+                <td className="py-1.5 px-2 font-medium text-slate-700">
+                  {v.price ? `${v.price} ${v.currency ?? ''}`.trim() : '—'}
+                </td>
+                <td className="py-1.5 px-2 text-slate-600 tabular-nums">
+                  {v.stock_quantity ?? '—'}
+                </td>
+                <td className="py-1.5 px-2 font-mono text-[11px] text-slate-500 max-w-[160px] truncate" dir="ltr" title={v.retailer_id ?? ''}>
+                  {v.retailer_id ?? <span className="text-amber-600">مفقود</span>}
+                </td>
+                <td className="py-1.5 px-2">
+                  {v.in_stock
+                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3 h-3" /> متوفر</span>
+                    : <span className="inline-flex items-center gap-1 text-rose-700"><XCircle className="w-3 h-3" /> غير متوفر</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
 function ProductGrid(props: {
   rows: CatalogProductDiagRow[]
   loading: boolean
@@ -303,6 +416,7 @@ function ProductGrid(props: {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-xs text-slate-600 uppercase tracking-wide">
             <tr>
+              <th className="text-right py-3 px-3 font-semibold w-10"></th>
               <th className="text-right py-3 px-3 font-semibold">المنتج</th>
               <th className="text-right py-3 px-3 font-semibold">المصدر</th>
               <th className="text-right py-3 px-3 font-semibold">السعر</th>
@@ -314,48 +428,107 @@ function ProductGrid(props: {
           </thead>
           <tbody>
             {props.rows.map(row => (
-              <tr
+              <ProductGridRow
                 key={row.id}
-                onClick={() => props.onSelect(row.id)}
-                className="border-t border-slate-100 hover:bg-emerald-50/30 cursor-pointer transition"
-              >
-                <td className="py-3 px-3">
-                  <div className="flex items-center gap-3">
-                    <div className="shrink-0 w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
-                      {row.image_url
-                        ? <img src={row.image_url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
-                        : <ImageIcon className="w-5 h-5 text-slate-300" />}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-slate-900 text-sm truncate max-w-[320px]" title={row.title}>
-                        {row.title}
-                      </div>
-                      <div className="text-[11px] text-slate-400 font-mono" dir="ltr">
-                        #{row.id} {row.sku ? `· ${row.sku}` : ''}
-                      </div>
-                    </div>
-                  </div>
-                </td>
-                <td className="py-3 px-3"><SourcePill source={row.source} /></td>
-                <td className="py-3 px-3 text-slate-700 font-medium">{row.price ?? '—'}</td>
-                <td className="py-3 px-3">
-                  {row.in_stock
-                    ? <span className="text-xs text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> متوفر</span>
-                    : <span className="text-xs text-rose-700 inline-flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> غير متوفر</span>}
-                </td>
-                <td className="py-3 px-3 font-mono text-[11px] text-slate-500 max-w-[140px] truncate" dir="ltr" title={row.effective_retailer_id ?? ''}>
-                  {row.effective_retailer_id ?? <span className="text-amber-600">مفقود</span>}
-                </td>
-                <td className="py-3 px-3"><ReadinessPill row={row} /></td>
-                <td className="py-3 px-3 text-slate-400">
-                  <ChevronLeft className="w-4 h-4" />
-                </td>
-              </tr>
+                row={row}
+                onSelect={props.onSelect}
+              />
             ))}
           </tbody>
         </table>
       </div>
     </div>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Single parent row + expandable variants drawer (migration 0064).
+// We split the row into its own component so the open/closed state
+// stays local — opening one row never re-renders the whole table.
+// ─────────────────────────────────────────────────────────────────────
+
+function ProductGridRow(props: {
+  row: CatalogProductDiagRow
+  onSelect: (id: number) => void
+}) {
+  const { row } = props
+  const [expanded, setExpanded] = useState(false)
+  const realVariantCount = row.sellable_variants_count ?? (
+    (row.variants ?? []).filter(v => !v.is_default).length
+  )
+  const hasExpandable = realVariantCount > 0
+  return (
+    <>
+      <tr
+        onClick={() => props.onSelect(row.id)}
+        className="border-t border-slate-100 hover:bg-emerald-50/30 cursor-pointer transition"
+      >
+        <td
+          className="py-3 px-3 text-slate-400"
+          onClick={e => {
+            e.stopPropagation()
+            if (hasExpandable) setExpanded(v => !v)
+          }}
+          title={hasExpandable
+            ? (expanded ? 'إخفاء الاختلافات' : `عرض ${realVariantCount} اختلاف`)
+            : 'لا توجد اختلافات'}
+        >
+          {hasExpandable ? (
+            expanded
+              ? <ChevronDown className="w-4 h-4" />
+              : <ChevronLeft className="w-4 h-4" />
+          ) : (
+            <span className="w-4 h-4 inline-block" />
+          )}
+        </td>
+        <td className="py-3 px-3">
+          <div className="flex items-center gap-3">
+            <div className="shrink-0 w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
+              {row.image_url
+                ? <img src={row.image_url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                : <ImageIcon className="w-5 h-5 text-slate-300" />}
+            </div>
+            <div className="min-w-0">
+              <div className="font-semibold text-slate-900 text-sm truncate max-w-[320px]" title={row.title}>
+                {row.title}
+              </div>
+              <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2" dir="ltr">
+                <span>#{row.id}</span>
+                {row.sku ? <span>· {row.sku}</span> : null}
+                {hasExpandable && (
+                  <span className="inline-flex items-center gap-1 text-indigo-600">
+                    <Layers className="w-3 h-3" />
+                    {realVariantCount} variants
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </td>
+        <td className="py-3 px-3"><SourcePill source={row.source} /></td>
+        <td className="py-3 px-3 text-slate-700 font-medium">{row.price ?? '—'}</td>
+        <td className="py-3 px-3">
+          {row.in_stock
+            ? <span className="text-xs text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> متوفر</span>
+            : <span className="text-xs text-rose-700 inline-flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> غير متوفر</span>}
+        </td>
+        <td className="py-3 px-3 font-mono text-[11px] text-slate-500 max-w-[140px] truncate" dir="ltr" title={row.effective_retailer_id ?? ''}>
+          {row.effective_retailer_id ?? <span className="text-amber-600">مفقود</span>}
+        </td>
+        <td className="py-3 px-3"><ReadinessPill row={row} /></td>
+        <td className="py-3 px-3 text-slate-400">
+          <ChevronLeft className="w-4 h-4" />
+        </td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={8} className="p-0">
+            <VariantsDrawer variants={row.variants ?? []} />
+          </td>
+        </tr>
+      )}
+    </>
   )
 }
 
@@ -892,6 +1065,8 @@ export default function ProductStudio() {
   const [limit]               = useState(50)
   const [rows, setRows]       = useState<CatalogProductDiagRow[]>([])
   const [total, setTotal]     = useState(0)
+  const [variantsSummary, setVariantsSummary] =
+    useState<CatalogVariantsSummary | null>(null)
   const [loading, setLoading] = useState(false)
   const [selectedId, setSelectedId] = useState<number | null>(null)
 
@@ -901,9 +1076,11 @@ export default function ProductStudio() {
       const r = await catalogApi.products(limit, offset, filters)
       setRows(r.rows)
       setTotal(r.total)
+      setVariantsSummary(r.variants_summary ?? null)
     } catch {
       setRows([])
       setTotal(0)
+      setVariantsSummary(null)
     } finally {
       setLoading(false)
     }
@@ -916,6 +1093,7 @@ export default function ProductStudio() {
 
   return (
     <div className="space-y-4">
+      <VariantsSummaryBar summary={variantsSummary} />
       <FiltersBar
         filters={filters}
         onChange={setFilters}

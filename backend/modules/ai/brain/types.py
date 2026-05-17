@@ -168,6 +168,20 @@ class OrderPreparationState:
     payment_receipt_at:       str = ""
     payment_receipt_metadata: Dict[str, Any] = field(default_factory=dict)
     order_status: str = ""
+    # ── Variant choice gate (migration 0064 — Phase 3) ───────────────────
+    # When the resolver returns a parent with 2+ in-stock variants, the
+    # responder ships ``ask_product_variants`` instead of the product
+    # card and flips ``awaiting_variant_choice=True``. The customer's
+    # next message (numeric / variant label) is then routed to a
+    # variant pick. ``pending_variant_product_id`` stores the parent's
+    # ``Product.id`` so the engine knows which variants to consider on
+    # the reply turn. The variant-aware sender reads
+    # ``selected_variant_id`` / ``selected_variant_retailer_id`` to
+    # ship the correct per-SKU Meta card.
+    awaiting_variant_choice: bool = False
+    pending_variant_product_id: str = ""
+    selected_variant_id:          str = ""
+    selected_variant_retailer_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -208,6 +222,10 @@ class OrderPreparationState:
             "payment_receipt_at":       self.payment_receipt_at,
             "payment_receipt_metadata": dict(self.payment_receipt_metadata or {}),
             "order_status":             self.order_status,
+            "awaiting_variant_choice":  self.awaiting_variant_choice,
+            "pending_variant_product_id": self.pending_variant_product_id,
+            "selected_variant_id":        self.selected_variant_id,
+            "selected_variant_retailer_id": self.selected_variant_retailer_id,
         }
 
     @staticmethod
@@ -256,6 +274,10 @@ class OrderPreparationState:
             payment_receipt_at=str(raw.get("payment_receipt_at", "") or ""),
             payment_receipt_metadata=dict(raw.get("payment_receipt_metadata") or {}),
             order_status=str(raw.get("order_status", "") or ""),
+            awaiting_variant_choice=bool(raw.get("awaiting_variant_choice", False)),
+            pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
+            selected_variant_id=str(raw.get("selected_variant_id", "") or ""),
+            selected_variant_retailer_id=str(raw.get("selected_variant_retailer_id", "") or ""),
         )
 
 

@@ -120,6 +120,20 @@ _ARABIC_NON_NAME_TOKENS = {
     "وين", "كيف", "متى", "كم", "ليش", "ليه", "حقي", "ذا", "هذا",
     "هذه", "هذي", "ذي", "هاد", "بدي", "اشتري", "أرسل", "ارسل",
     "موقعي", "موقع", "هنا",
+    # ── Arrival / presence verbs (May 2026 hotfix) ───────────────────
+    # Production bug: "وصلت" / "أنا وصلت" / "جايه الحين" were being
+    # captured as the customer's name in the order funnel, producing
+    # "أبوي وصلت" greetings on subsequent turns. These tokens are
+    # status statements, NEVER personal names. Normalised forms only
+    # — see _normalize_arabic for the canonical mapping.
+    "وصلت", "وصل", "وصلنا", "وصلتي", "وصلتو",
+    "جاي", "جايه", "جاية", "جايين",
+    "راجع", "راجعه", "راجعة", "رايح", "رايحه", "رايحة",
+    "طالع", "طالعه", "طالعة", "نازل", "نازله", "نازلة",
+    "موجود", "موجوده", "متوفر", "متوفره",
+    "جاهز", "جاهزه", "حاضر", "حاضره",
+    "بانتظار", "بانتظارك", "منتظر", "منتظره", "منتظرك",
+    "اقرب", "قريب", "بعيد",
 }
 
 _ARABIC_LETTERS_RE = re.compile(r"^[\u0621-\u064A][\u0621-\u064A\s]*$")

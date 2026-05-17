@@ -1155,6 +1155,56 @@ async def _process_image(
             tenant_id, media_id, _pe_exc,
         )
 
+    # ── Map screenshot detection (May 2026 hotfix) ────────────────
+    # Customers regularly send Apple Maps / Google Maps screenshots
+    # as their "location" — both miss WhatsApp's first-class
+    # location message type because the screenshot is sent as a
+    # photo. Without this classifier the image silently fell into
+    # the generic image-description path and the bot ignored the
+    # address signal entirely, then asked again for "pickup or
+    # shipping".
+    #
+    # We only run this when the payment-evidence classifier did NOT
+    # already claim the image — a real receipt screenshot is never
+    # also a map. The check is intentionally cheap: a substring
+    # scan over vision_text + caption against a curated list of
+    # map-app UI labels in Arabic and English. False positives are
+    # bounded because the customer paying for an order with a map
+    # screenshot is the *intended* trigger, not a regression.
+    if not base_meta.get("image_kind"):
+        try:
+            _map_blob = " ".join(
+                str(x or "") for x in (caption, vision_text)
+            ).lower()
+            _map_markers = (
+                # English (Apple/Google Maps UI labels)
+                "apple maps", "google maps", "google map",
+                "maps.app.goo.gl", "goo.gl/maps",
+                "share your location", "drop a pin", "dropped pin",
+                "directions", "your location",
+                # Arabic (Apple/Google Maps UI labels)
+                "خرائط apple", "خرائط آبل", "خرائط ابل",
+                "خرائط قوقل", "خرائط جوجل", "خرائط جوقل",
+                "خرائط google",
+                "موقعي الحالي", "تحديد الموقع",
+                "تثبيت دبوس", "وضع دبوس",
+                "مشاركة الموقع",
+                "اتجاهات",
+            )
+            _map_hits = [m for m in _map_markers if m in _map_blob]
+            if _map_hits:
+                base_meta["image_kind"]            = "map_screenshot"
+                base_meta["image_kind_confidence"] = "medium"
+                base_meta["image_kind_reasons"]    = [
+                    "map_marker:" + _map_hits[0],
+                ]
+        except Exception as _mp_exc:  # noqa: BLE001
+            logger.debug(
+                "[MAP_DETECT] image map-marker scan failed "
+                "tenant=%s media_id=%s err=%s",
+                tenant_id, media_id, _mp_exc,
+            )
+
     # ── Combine caption + vision description ────────────────────
     if caption:
         combined = f"{caption}\n\n[وصف الصورة] {vision_text}"
@@ -1178,6 +1228,17 @@ async def _process_image(
         combined = (
             "[تصنيف الصورة: بيانات دفع/تحويل بدون دليل إتمام — "
             "ينتظر الإيصال النهائي]\n"
+        ) + combined
+    elif _ikind == "map_screenshot":
+        # Tell the brain this is a location image — the deterministic
+        # short-circuit in ``order_flow.maybe_handle_map_image_inbound``
+        # will normally answer before the brain runs, but if it falls
+        # through (no active order, e.g.) the brain still sees a
+        # clean "this is a map" label so it can ask the customer to
+        # send the link / national-address code as text.
+        combined = (
+            "[تصنيف الصورة: لقطة خرائط — لا يمكن استخراج "
+            "إحداثيات دقيقة من صورة]\n"
         ) + combined
     return MediaNormalizationResult(
         normalized_type="image",

@@ -284,12 +284,68 @@ def _format_price(value: Any, currency: str = "SAR") -> str:
     return f"{amount_str} {symbol}".strip()
 
 
+def _missing_shipping_fields(summary: Dict[str, Any]) -> List[str]:
+    """Return the list of customer-side address fields still missing
+    after a payment receipt has been confirmed. Kept tight: we ask
+    only for what we cannot derive from anything already in state.
+
+    The order matches the order in which we want the customer to
+    answer (first name → last name → city → location proof).
+    """
+    missing: List[str] = []
+    if not (summary.get("customer_first_name") or "").strip():
+        missing.append("first_name")
+    if not (summary.get("customer_last_name") or "").strip():
+        missing.append("last_name")
+    if not (summary.get("city") or "").strip():
+        missing.append("city")
+    has_location_proof = bool(
+        (summary.get("short_address_code") or "").strip()
+        or (summary.get("google_maps_url") or "").strip()
+    )
+    if not has_location_proof:
+        missing.append("location")
+    return missing
+
+
+def _compose_address_interview(missing: List[str]) -> str:
+    """Render the post-receipt address interview as a single short
+    Arabic message. Keeps the wording minimal so the customer can
+    paste everything in one reply.
+
+    All fields are asked together (not one-by-one) so the order
+    funnel doesn't feel bureaucratic — production tests showed
+    customers abandon at any prompt that asks for "one thing at a
+    time" after they already paid.
+    """
+    if not missing:
+        return ""
+    lines: List[str] = ["عشان نوصّل طلبك بأسرع وقت، أرسل لنا:"]
+    if "first_name" in missing or "last_name" in missing:
+        lines.append("• الاسم الأول والأخير")
+    if "city" in missing:
+        lines.append("• مدينة التوصيل")
+    if "location" in missing:
+        lines.append(
+            "• الموقع: رابط قوقل ماب أو العنوان الوطني (٤ أحرف + ٤ أرقام)"
+        )
+    return "\n".join(lines)
+
+
 def _compose_receipt_ack(summary: Dict[str, Any]) -> str:
     """Build the deterministic "we received your transfer receipt"
     Arabic reply. The reply surfaces the product + price + national
     address so the customer can immediately confirm what's being
     processed — closes the "did the bot lose my context?" anxiety
-    that motivated this whole change."""
+    that motivated this whole change.
+
+    May 2026 update: when the conversation hasn't yet collected the
+    shipping fields (first/last name, city, Google Maps URL OR
+    national short address), append a single follow-up paragraph
+    asking for everything at once. This replaces the previous
+    behaviour where the funnel fell back to a generic "pickup or
+    shipping?" question that never collected structured data.
+    """
     lines: List[str] = [
         "وصلنا إيصال التحويل، شكراً لك 🌷",
         "تم استلام الطلب وسيتم مراجعته وتجهيزه بإذن الله.",
@@ -309,6 +365,12 @@ def _compose_receipt_ack(summary: Dict[str, Any]) -> str:
     if detail_bits:
         lines.append("")
         lines.extend(detail_bits)
+
+    missing = _missing_shipping_fields(summary)
+    interview = _compose_address_interview(missing)
+    if interview:
+        lines.append("")
+        lines.append(interview)
     return "\n".join(lines)
 
 
@@ -508,6 +570,90 @@ def maybe_handle_payment_evidence_inbound(
         # awaiting_payment_receipt flip. This branch is informational
         # only; the customer hasn't completed anything yet.
         "state_patch": {},
+    }
+
+
+def maybe_handle_map_image_inbound(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    inbound_normalized_type: str,
+    inbound_metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Short-circuit for map screenshots (Apple/Google Maps).
+
+    Customers frequently send a map screenshot when asked for their
+    location. The image isn't a real WhatsApp ``location`` message,
+    so we cannot extract coordinates — but we DO know it's a
+    location signal and we can ask for a parseable form (a Google
+    Maps share link OR the 4-letter+4-digit national short code)
+    without falling through to the brain's generic "أبشر، أنا هنا"
+    fallback.
+
+    Returns the standard short-circuit shape
+    (``{"reply_text", "summary", "state_patch"}``) or ``None`` if
+    the inbound isn't a map screenshot / the conversation has no
+    active order.
+    """
+    if inbound_normalized_type != "image":
+        return None
+    md = inbound_metadata or {}
+    if md.get("image_kind") != "map_screenshot":
+        return None
+
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    summary = _focus_summary(bs)
+
+    has_active = bool(summary.get("selected_product"))
+    receipt_received = bool(summary.get("payment_receipt_received"))
+    awaiting_receipt = bool(summary.get("awaiting_payment_receipt"))
+
+    # Only short-circuit when there's *something* the bot is doing
+    # — otherwise a random map screenshot on a fresh conversation
+    # would get an awkward "send me the link" reply with no context.
+    if not (has_active or receipt_received or awaiting_receipt):
+        return None
+
+    # If the customer already provided a short address code OR a
+    # Google Maps URL earlier, we don't need to nag again.
+    has_location_proof = bool(
+        (summary.get("short_address_code") or "").strip()
+        or (summary.get("google_maps_url") or "").strip()
+    )
+    if has_location_proof:
+        # Acknowledge softly so the customer doesn't think the bot
+        # ignored their image, but don't overwrite stored location.
+        reply_text = (
+            "وصلتنا لقطة الخريطة، الموقع المسجَّل عندنا كافٍ للتوصيل بإذن الله. "
+            "إذا تغيّر الموقع، أرسل لنا رابط قوقل ماب أو "
+            "العنوان الوطني نصياً."
+        )
+        return {
+            "reply_text":  reply_text,
+            "summary":     summary,
+            "state_patch": {},
+        }
+
+    reply_lines = [
+        "وصلتنا لقطة الخريطة، شكراً 🌷",
+        "بس عشان نضمن دقّة التوصيل نحتاج الموقع بصيغة قابلة للقراءة:",
+        "• رابط قوقل ماب (Google Maps) — share location → copy link",
+        "• أو العنوان الوطني (٤ أحرف + ٤ أرقام، مثل: RHRH1234)",
+    ]
+    state_patch: Dict[str, Any] = {
+        "awaiting_location_text": True,
+    }
+    logger.info(
+        "[ORDER_FLOW_STATE] map_screenshot short-circuit fired "
+        "tenant=%s phone=*%s product=%r receipt_received=%s",
+        tenant_id, (phone or "")[-4:],
+        summary.get("selected_product"), receipt_received,
+    )
+    return {
+        "reply_text":  "\n".join(reply_lines),
+        "summary":     summary,
+        "state_patch": state_patch,
     }
 
 

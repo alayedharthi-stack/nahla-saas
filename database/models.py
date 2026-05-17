@@ -184,8 +184,139 @@ class Product(Base):
     # the Zid sync; ``"unknown"`` for legacy rows whose origin we
     # can't determine.
     source = Column(String(32), nullable=True, index=True)
+    # ── Parent / variants intelligence layer (migration 0064) ──────────────
+    # ``Product`` is now treated as the PARENT (non-sellable when
+    # ``has_variants=True``). Every sellable SKU lives as a row in the
+    # new ``product_variants`` table (one default variant is created
+    # automatically for simple products by the migration backfill so
+    # downstream code can always go "give me the variant" without
+    # branching on legacy rows).
+    #
+    # ``has_variants`` is true iff the row has 2+ sellable variants OR
+    # the upstream platform (Salla) flagged the product as requiring
+    # option selection. The brain reads this to decide whether to ship
+    # the product card directly or first ask the customer "which size
+    # / color?".
+    #
+    # ``default_variant_id`` points at the variant the sender should
+    # use when ``has_variants`` is False (one-variant products) — it's
+    # the cheapest read path because we don't have to JOIN+ORDER on
+    # every send. The FK is intentionally string-typed so SQLAlchemy's
+    # declarative resolver can handle the forward reference to
+    # ``product_variants`` (defined below). Nullable because the
+    # column is populated by the migration backfill / sync writer, not
+    # at row-insert time.
+    has_variants       = Column(Boolean, nullable=False,
+                                server_default=sa.text("false"), default=False)
+    # ``use_alter=True`` + ``post_create=True`` so SQLAlchemy creates
+    # the table without this FK then ALTERs it in after both tables
+    # exist — breaks the otherwise unresolvable cycle between
+    # ``products.default_variant_id → product_variants.id`` and
+    # ``product_variants.product_id → products.id`` at table-create
+    # time. The migration mirrors this by adding the column with
+    # ``ADD COLUMN`` after the variant table exists.
+    default_variant_id = Column(
+        Integer,
+        ForeignKey(
+            "product_variants.id",
+            use_alter=True,
+            name="fk_products_default_variant",
+        ),
+        nullable=True, index=True,
+    )
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='products')
+    variants = relationship(
+        'ProductVariant',
+        back_populates='product',
+        foreign_keys='ProductVariant.product_id',
+        cascade='all, delete-orphan',
+        lazy='select',
+    )
+    default_variant = relationship(
+        'ProductVariant',
+        foreign_keys=[default_variant_id],
+        post_update=True,
+    )
+
+
+class ProductVariant(Base):
+    """A sellable SKU under a parent :class:`Product`.
+
+    Every catalog row eventually resolves to a variant: either a real
+    one (Salla options like "Size:M / Color:Red") or a synthetic
+    ``is_default=True`` row that mirrors the parent for legacy
+    one-SKU products. This keeps every downstream consumer (WhatsApp /
+    Meta sender, brain decision engine, Google Merchant feed) on a
+    single uniform contract: "pick a variant, then send its
+    ``retailer_id``" — no special-casing for "old products without
+    variants" anywhere in the runtime.
+
+    The ``retailer_id`` here is the per-variant Meta product identifier
+    Salla / the merchant publishes against Meta Catalog. We default it
+    to ``nahla_v_<id>`` when Salla didn't carry one so the catalog
+    sender can still attempt a send (the fallback image+CTA path will
+    catch the failure on Meta's side without breaking the user).
+    """
+    __tablename__ = "product_variants"
+    id                  = Column(Integer, primary_key=True)
+    tenant_id           = Column(Integer, ForeignKey('tenants.id'),
+                                 nullable=False, index=True)
+    # ``ondelete="CASCADE"`` is the right behaviour: when a parent is
+    # purged (manual delete or tenant wipe) the variants go too. We
+    # also configure ORM-level cascade on the parent relationship so
+    # in-Python deletes do the same without relying on the DB.
+    product_id          = Column(Integer,
+                                 ForeignKey("products.id", ondelete="CASCADE"),
+                                 nullable=False, index=True)
+    # Upstream platform's variant identifier. Nullable for synthetic
+    # default variants (one-SKU products created by the backfill).
+    salla_variant_id    = Column(String(64),  nullable=True, index=True)
+    sku                 = Column(String(128), nullable=True)
+    # Meta ``product_retailer_id`` used in catalog sends. Set per
+    # variant so a customer who picked "size M" gets the Meta card
+    # for *that* SKU, not for the parent. Falls back via the
+    # ``effective_variant_retailer_id`` helper at send-time.
+    retailer_id         = Column(String(255), nullable=True, index=True)
+    price               = Column(String(32),  nullable=True)
+    currency            = Column(String(8),   nullable=True)
+    stock_quantity      = Column(Integer,     nullable=True)
+    in_stock            = Column(Boolean,     nullable=False,
+                                 server_default=sa.text("true"), default=True)
+    # Option map (e.g. ``{"size": "M", "color": "red"}``) — read by the
+    # brain to render "which size?" prompts and by the Google Merchant
+    # feed to populate the size/color/material columns.
+    options             = Column(JSONB, nullable=True)
+    # Human-readable single-line summary of ``options`` (e.g.
+    # ``"M / Red"``). Denormalised so templates don't have to re-join
+    # option-name lookups on every send.
+    option_summary      = Column(String(255), nullable=True)
+    image_url           = Column(String(2048), nullable=True)
+    # True for the synthetic single variant created when a parent has
+    # no real variants (legacy one-SKU products). Lets the sender go
+    # straight to ``product.default_variant`` without branching.
+    is_default          = Column(Boolean, nullable=False,
+                                 server_default=sa.text("false"), default=False)
+    extra_metadata      = Column('metadata', JSONB, nullable=True)
+    created_at          = Column(DateTime(timezone=True),
+                                 server_default=sa.text("CURRENT_TIMESTAMP"))
+    updated_at          = Column(DateTime(timezone=True),
+                                 server_default=sa.text("CURRENT_TIMESTAMP"))
+
+    product = relationship(
+        'Product',
+        back_populates='variants',
+        foreign_keys=[product_id],
+    )
+
+    __table_args__ = (
+        # A given parent can only carry a given salla_variant_id once.
+        # NULL is allowed to repeat (synthetic default variants).
+        UniqueConstraint('product_id', 'salla_variant_id',
+                         name='uq_variants_product_salla'),
+        Index('ix_variants_tenant_retailer', 'tenant_id', 'retailer_id'),
+    )
+
 
 class Order(Base):
     __tablename__ = 'orders'

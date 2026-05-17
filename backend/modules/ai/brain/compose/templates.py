@@ -283,6 +283,58 @@ def collect_order_details(
     return ask
 
 
+def ask_product_variants(
+    product: Dict[str, Any],
+    variants: List[Dict[str, Any]] | None = None,
+    **_: Any,
+) -> str:
+    """Ask the customer to pick a sellable variant before we ship a card.
+
+    Used by the responder when the resolver returns a parent with
+    ``needs_variant_choice=True`` (Phase 3 of the catalog refactor —
+    migration 0064). Different from :func:`ask_product_options`:
+
+      * ``ask_product_options`` walks Salla *option groups* (one
+        question per group: size, then colour, then material …) —
+        used when a product has multiple option dimensions.
+      * ``ask_product_variants`` walks pre-rolled *variant SKUs*
+        (each row = a concrete combination already in stock) — used
+        when the catalog layer has variant rows ready to ship and we
+        just need the customer to pin one.
+
+    The two paths can both fire in a single conversation; the brain's
+    decision engine picks the right one based on which artefact the
+    resolver loaded.
+    """
+    title = (product.get("title") or "المنتج المحدد").strip()
+    sellable = [
+        v for v in (variants or [])
+        if v and v.get("in_stock", True) and not v.get("is_default")
+    ]
+    if not sellable:
+        return f"تمام، سأجهز طلب *{title}*."
+
+    lines: List[str] = [
+        f"تمام، *{title}* متوفر بعدة خيارات. اختر الأنسب:",
+        "",
+    ]
+    for idx, v in enumerate(sellable, 1):
+        label = (
+            (v.get("option_summary") or "").strip()
+            or (v.get("sku") or "").strip()
+            or (v.get("salla_variant_id") or "").strip()
+            or f"الخيار {idx}"
+        )
+        price = (v.get("price") or "").strip()
+        if price:
+            lines.append(f"{idx}. {label} — {price}")
+        else:
+            lines.append(f"{idx}. {label}")
+    lines.append("")
+    lines.append("(اكتب رقم الخيار أو اسمه)")
+    return "\n".join(lines)
+
+
 def ask_product_options(
     product: Dict[str, Any],
     missing_option_groups: List[Dict[str, Any]] | None = None,
