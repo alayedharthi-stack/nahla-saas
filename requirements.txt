@@ -39,3 +39,10 @@ openpyxl>=3.1.2
 # The orchestrator calls the Anthropic Messages API directly via httpx —
 # no extra SDK needed. anthropic SDK is listed here for optional local use.
 anthropic>=0.30.0
+
+# ── PDF text extraction (inbound bank-transfer receipts) ─────────────────────
+# Pure-Python PDF text reader used by ``modules.ai.media.normalizer`` to
+# read text out of PDFs that customers send (bank receipts, invoices).
+# When extraction returns empty text (scanned image-only PDF), the
+# normalizer falls back to OpenAI Vision on the raw PDF bytes.
+pypdf>=4.0.0

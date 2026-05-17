@@ -761,6 +761,14 @@ class DefaultComposer:
                 _TIMEOUT, ctx.tenant_id,
             )
             result.data["chosen_path"] = "llm_timeout"
+            # The downstream "clear-intent fallback" safety net
+            # (modules.ai.postprocess.safety_nets) will REWRITE this
+            # line into an intent-aware nudge whenever the customer's
+            # message had a recognisable intent (offers, price,
+            # honey product, store link, shipping, payment, ordering
+            # verb). We keep this generic copy ONLY as the absolute
+            # last-resort wording — never the customer-facing line
+            # for clear questions.
             return (
                 "عذراً، تأخّر الرد قليلاً. "
                 "هل يمكنك إعادة سؤالك؟ أو يمكنني مساعدتك في البحث عن منتج أو إنشاء طلب."

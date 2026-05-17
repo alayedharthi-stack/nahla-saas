@@ -270,6 +270,18 @@ def maybe_handle_receipt_inbound(
     The function NEVER mutates the DB itself — that's the caller's
     job. We separate the decision from the side-effect so this helper
     can be unit-tested with a fake ``db`` that returns canned state.
+
+    Universal payment-evidence gate (May 2026)
+    ──────────────────────────────────────────
+    Even when the legacy classifier set ``pdf_kind=payment_receipt``,
+    we now refuse to short-circuit unless the dedicated payment-
+    evidence classifier *also* returned ``status="confirmed"``. The
+    normalizer already demotes pre-transfer-review screens to
+    ``payment_pre_review`` and ambiguous data-entry screens to
+    ``payment_pending_evidence``, but we add a defence-in-depth
+    check here so any older normalizer output (rollback, downgrade,
+    cached message replay) still cannot leak through to the "thanks,
+    order under review" ACK without explicit completion proof.
     """
     if inbound_normalized_type not in ("document", "image"):
         return None
@@ -278,6 +290,19 @@ def maybe_handle_receipt_inbound(
     kind = (inbound_metadata or {}).get("pdf_kind") \
         or (inbound_metadata or {}).get("image_kind")
     if kind != "payment_receipt":
+        return None
+
+    # Universal payment-evidence gate.
+    pe_status = (inbound_metadata or {}).get("payment_evidence_status")
+    if pe_status and pe_status != "confirmed":
+        logger.info(
+            "[PAYMENT_EVIDENCE] receipt short-circuit blocked tenant=%s "
+            "phone=*%s pdf_kind=%s payment_evidence_status=%s "
+            "payment_evidence_reason=%s",
+            tenant_id, (phone[-4:] if phone else ""), kind,
+            pe_status,
+            (inbound_metadata or {}).get("payment_evidence_reason"),
+        )
         return None
 
     _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
@@ -330,6 +355,96 @@ def maybe_handle_receipt_inbound(
         "reply_text":  reply_text,
         "summary":     summary,
         "state_patch": state_patch,
+    }
+
+
+def maybe_handle_payment_evidence_inbound(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    inbound_normalized_type: str,
+    inbound_metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Sibling of ``maybe_handle_receipt_inbound`` that fires when
+    the inbound is payment-related but NOT yet confirmed —
+    i.e. the customer sent a pre-transfer review screen, or a
+    screenshot of bank/IBAN data, or a PDF with payment context but
+    no completion marker.
+
+    For these cases we:
+      * Reply with a short, polite, tone-safe sentence that asks
+        for the final receipt after the transfer is executed.
+      * Do NOT mutate ``order_status`` / ``payment_receipt_received``.
+      * Do NOT leak any internal phone/agent contact.
+      * Still let the customer's funnel continue (the brain stays
+        on standby for the next inbound, which is hopefully the
+        real receipt).
+
+    Returns the same shape as ``maybe_handle_receipt_inbound`` so
+    the webhook caller can use the identical send / persist path,
+    except ``state_patch`` is intentionally empty — we don't want
+    to record anything that downstream code might interpret as
+    progress.
+
+    Returns ``None`` when the inbound is not payment-evidence at
+    all (then the regular brain pipeline runs).
+    """
+    if inbound_normalized_type not in ("document", "image"):
+        return None
+    md = inbound_metadata or {}
+    pe_status = md.get("payment_evidence_status")
+    if pe_status not in (
+        "pre_transfer_review",
+        "needs_confirmation",
+    ):
+        return None
+
+    # Belt-and-braces: also look at the kind slot in case a future
+    # caller forgets to thread the payment-evidence status through.
+    kind = md.get("pdf_kind") or md.get("image_kind")
+    if pe_status is None and kind not in (
+        "payment_pre_review", "payment_pending_evidence",
+    ):
+        return None
+
+    try:
+        from core.payment_evidence import (  # noqa: PLC0415
+            compose_payment_evidence_reply,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_EVIDENCE] compose import failed "
+            "tenant=%s err=%s", tenant_id, exc,
+        )
+        return None
+
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    summary = _focus_summary(bs)
+    awaiting = bool(summary.get("awaiting_payment_receipt"))
+
+    reply_text = compose_payment_evidence_reply(
+        pe_status,
+        awaiting_receipt=awaiting,
+    )
+    if not reply_text:
+        return None
+
+    logger.info(
+        "[PAYMENT_EVIDENCE] short_circuit=payment_evidence_soft "
+        "tenant=%s phone=*%s payment_evidence_status=%s "
+        "payment_evidence_reason=%s kind=%s awaiting=%s product=%r",
+        tenant_id, (phone[-4:] if phone else ""), pe_status,
+        md.get("payment_evidence_reason"), kind, awaiting,
+        summary.get("selected_product"),
+    )
+    return {
+        "reply_text":  reply_text,
+        "summary":     summary,
+        # Empty state_patch — no order-status mutation, no
+        # awaiting_payment_receipt flip. This branch is informational
+        # only; the customer hasn't completed anything yet.
+        "state_patch": {},
     }
 
 

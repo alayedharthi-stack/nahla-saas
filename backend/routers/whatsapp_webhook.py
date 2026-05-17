@@ -2536,6 +2536,7 @@ async def _dispatch_message(
             try:
                 from core.order_flow import (  # noqa: PLC0415
                     maybe_handle_receipt_inbound,
+                    maybe_handle_payment_evidence_inbound,
                     apply_state_patch,
                 )
                 _receipt_decision = maybe_handle_receipt_inbound(
@@ -2552,6 +2553,36 @@ async def _dispatch_message(
                     resolved_tenant_id, sender, _r_exc,
                 )
                 _receipt_decision = None
+
+            # ── Pre-transfer-review / pending-evidence short-circuit ──
+            # Universal payment-evidence gate (May 2026): when the
+            # normalizer flagged the inbound as a pre-transfer
+            # review screen or as payment-context data without a
+            # completion marker, reply with a short polite sentence
+            # asking for the final receipt — WITHOUT mutating
+            # order_status / payment_receipt_received, and WITHOUT
+            # leaking any internal phone number.
+            #
+            # This branch only fires when the dedicated receipt
+            # short-circuit above did NOT fire (i.e. we have
+            # payment-related media but evidence is not confirmed).
+            _evidence_decision = None
+            if _receipt_decision is None:
+                try:
+                    _evidence_decision = maybe_handle_payment_evidence_inbound(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_normalized_type=normalized_inbound.normalized_type,
+                        inbound_metadata=normalized_inbound.metadata or {},
+                    )
+                except Exception as _ev_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PAYMENT_EVIDENCE] short-circuit check failed "
+                        "(non-fatal) tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _ev_exc,
+                    )
+                    _evidence_decision = None
 
             # ── Text-only payment-claim short-circuit (May 2026) ──────
             # When the customer SAYS they paid without attaching a
@@ -2570,7 +2601,7 @@ async def _dispatch_message(
             #     receipt / under-review state.
             # On any failure we silently fall through to the brain.
             _payment_claim_decision = None
-            if _receipt_decision is None:
+            if _receipt_decision is None and _evidence_decision is None:
                 try:
                     from core.payment_intent import (  # noqa: PLC0415
                         maybe_handle_payment_claim,
@@ -2762,6 +2793,90 @@ async def _dispatch_message(
                     _db=db,
                 )
                 return
+
+            if _evidence_decision is not None:
+                # Pre-transfer-review or pending-evidence inbound.
+                # We send a short polite sentence and DO NOT mutate
+                # order state. The customer's funnel remains open;
+                # the next inbound (hopefully the real receipt) is
+                # handled by the regular path.
+                _pe_status = (normalized_inbound.metadata or {}).get(
+                    "payment_evidence_status"
+                )
+                _pe_reason = (normalized_inbound.metadata or {}).get(
+                    "payment_evidence_reason"
+                )
+                logger.info(
+                    "[PAYMENT_EVIDENCE] short_circuit=evidence_soft "
+                    "tenant=%s phone=*%s payment_evidence_status=%s "
+                    "payment_evidence_reason=%s next_action=send_soft_ack",
+                    resolved_tenant_id,
+                    sender[-4:] if sender else "",
+                    _pe_status, _pe_reason,
+                )
+                # Persist the customer's inbound so the merchant
+                # drawer keeps the original PDF / image alongside
+                # our soft reply.
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="inbound",
+                        body=text or "[إثبات دفع غير مؤكد]",
+                        event_type=(
+                            "whatsapp_document"
+                            if normalized_inbound.normalized_type == "document"
+                            else "whatsapp_image"
+                        ),
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "normalized_inbound": normalized_inbound.metadata,
+                            "wa_message_id": msg_id or None,
+                            "payment_evidence_short_circuit": True,
+                        },
+                    )
+                except Exception as _ev_in_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PAYMENT_EVIDENCE] inbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _ev_in_exc,
+                    )
+                try:
+                    StateManager.save_message(
+                        db,
+                        phone=sender,
+                        direction="outbound",
+                        body=_evidence_decision["reply_text"],
+                        event_type="whatsapp_message",
+                        tenant_id=resolved_tenant_id,
+                        extra_metadata={
+                            "is_ai": True,
+                            "deterministic_path": "payment_evidence_soft_ack",
+                            "payment_evidence_status": _pe_status,
+                            "payment_evidence_reason": _pe_reason,
+                        },
+                    )
+                except Exception as _ev_out_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PAYMENT_EVIDENCE] outbound save failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _ev_out_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {
+                            "body": _evidence_decision["reply_text"],
+                        },
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
             logger.info(
                 "[TRACE][4/6] ROUTE_MERCHANT_AI | tenant_id=%s sender=%s text_len=%s",
                 resolved_tenant_id, sender, len(text),
@@ -5015,6 +5130,9 @@ async def _handle_merchant_message(
                 apply_product_safety_net as _sn_product,
                 apply_media_key_safety_net as _sn_media_key,
                 apply_staff_contact_safety_net as _sn_staff,
+                apply_store_link_safety_net as _sn_store_link,
+                apply_delivery_info_context_net as _sn_delivery_ctx,
+                apply_clear_intent_fallback_net as _sn_clear_intent,
             )
             import json as _json_sn  # noqa: PLC0415
 
@@ -5116,6 +5234,125 @@ async def _handle_merchant_message(
                         "[SAFETY_NET:staff_contact] failed tenant=%s err=%s",
                         tenant_id, _sse,
                     )
+
+            # Store-link safety net (May 2026): the customer asked
+            # for the store URL but the LLM shipped a generic line
+            # like "هذا متجرنا 🌷" with no link. We inject the
+            # configured ``store_url`` from TenantSettings so the
+            # customer sees a tappable preview — and never invent
+            # a URL when none is on file (polite fallback instead).
+            try:
+                _sl = _sn_store_link(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                )
+                if _sl.fired and _sl.rewrote_reply and _sl.new_reply:
+                    reply = _sl.new_reply
+                if _sl.fired or _sl.skipped_reason not in {
+                    "no_store_link_intent", "url_already_in_reply",
+                }:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_sl.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:store_link] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _sle:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:store_link] failed tenant=%s err=%s",
+                    tenant_id, _sle,
+                )
+
+            # ── Delivery-info context safety net (May 2026) ──────────
+            # When the bot's last outbound asked for delivery info
+            # (address / city / name+phone) and the customer's reply
+            # contains delivery signals — but the LLM dismissed it
+            # as out_of_scope / "didn't understand" — rewrite to a
+            # short acknowledgement so we don't tell the customer
+            # that "this is outside my scope" RIGHT AFTER we asked
+            # them for their address. Pure text rewrite — order
+            # state is updated by the regular slot extractor on
+            # the next turn.
+            try:
+                _dlv = _sn_delivery_ctx(
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                    history=history,
+                )
+                if _dlv.fired and _dlv.new_reply:
+                    reply = _dlv.new_reply
+                if _dlv.fired or _dlv.skipped_reason not in {
+                    "flag_disabled",
+                    "bot_not_awaiting_delivery",
+                    "reply_not_dismissive",
+                }:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_dlv.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:delivery_info_context] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _dle:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:delivery_info_context] failed tenant=%s err=%s",
+                    tenant_id, _dle,
+                )
+
+            # ── Clear-intent fallback safety net (May 2026) ──────────
+            # Catches the "عذرًا، تأخّر الرد قليلًا. هل يمكنك إعادة
+            # سؤالك؟" LLM-timeout copy AND generic "I didn't
+            # understand" replies when the customer's message had
+            # an obvious intent (offers / price / honey product /
+            # store_link / shipping / payment / order). Replaces
+            # the apology with a short intent-aware nudge so the
+            # conversation moves forward instead of bouncing the
+            # question back at the customer.
+            try:
+                _ci = _sn_clear_intent(
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                )
+                if _ci.fired and _ci.new_reply:
+                    reply = _ci.new_reply
+                if _ci.fired or _ci.skipped_reason not in {
+                    "flag_disabled",
+                    "reply_not_generic_fallback",
+                    "empty_reply",
+                    "no_clear_intent",
+                }:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        "customer_intent":   _ci.customer_intent,
+                        "reason":            _ci.reason or _ci.skipped_reason,
+                    }
+                    logger.info(
+                        "[SAFETY_NET:clear_intent_fallback] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+                elif _ci.fired:
+                    logger.info(
+                        "[SAFETY_NET:clear_intent_fallback] "
+                        "customer_intent=%s reason=%s",
+                        _ci.customer_intent,
+                        _ci.reason,
+                    )
+            except Exception as _cie:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:clear_intent_fallback] failed tenant=%s err=%s",
+                    tenant_id, _cie,
+                )
         except Exception as _sn_exc:  # noqa: BLE001
             logger.warning(
                 "[SAFETY_NET] module import failed tenant=%s err=%s",

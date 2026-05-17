@@ -165,6 +165,17 @@ def _log_skip(reason: str, *, tenant_id: Any, media_id: Any, kind: str) -> None:
 # a media message. Kept here so every code path that gives up on media
 # uses the exact same wording — operators have a single grep target
 # when they want to tweak the copy.
+#
+# NOTE on the document fallback — production complaint May 2026:
+# the customer attaches a transfer-receipt PDF, and the LLM later
+# replies with "للأسف لا أستطيع فتح ملفات PDF". That apology was
+# never canonical copy — it's an LLM hallucination triggered when
+# the previous fallback ("وصلني الملف، لكن لم أتمكن من قراءة
+# محتواه") arrived without any extracted text. The new normalizer
+# extracts text from PDFs via pypdf, so the fallback below now only
+# fires when the PDF is genuinely corrupt / encrypted / empty — and
+# we phrase it as "نحتاج إعادة الإرسال" instead of "I can't open
+# PDFs", which removes the trigger phrase from the brain context.
 AUDIO_FALLBACK_REPLY_AR = (
     "وصلني التسجيل، لكن لم أتمكن من سماعه بوضوح. "
     "ممكن تكتب طلبك؟"
@@ -174,40 +185,46 @@ IMAGE_FALLBACK_REPLY_AR = (
     "ممكن توضح طلبك بنص؟"
 )
 DOCUMENT_FALLBACK_REPLY_AR = (
-    "وصلني الملف، لكن لم أتمكن من قراءة محتواه. "
-    "ممكن توضح غرض الملف بنص؟"
+    "وصلني الملف، لكن يبدو أنه فاضي أو محمي بكلمة سر — "
+    "ممكن تعيد إرساله أو تكتب التفاصيل هنا؟"
 )
 
 
 # ── PDF / document heuristic classifier ─────────────────────────────
 #
-# Lightweight, dependency-free classifier for inbound WhatsApp
-# documents. We do NOT extract PDF text — that requires shipping a
-# new dependency (``pypdf`` / ``pdfplumber``) and the parsing of
-# Saudi bank receipts is unreliable enough that we'd still need
-# heuristics on top. Instead we lean on:
+# Two-stage classifier for inbound WhatsApp documents:
+#
+#   Stage 1 (this file, ``classify_inbound_document``):
+#     Lightweight filename + caption + extracted-text keyword scan
+#     that picks one of:
+#       * ``payment_receipt``  → bank-transfer receipt, deposit slip
+#       * ``invoice``          → tax/sales invoice the customer forwarded
+#       * ``identity``         → ID / passport scan
+#       * ``shipping_label``   → courier waybill
+#       * ``catalog``          → product catalog the customer shared
+#       * ``unknown``          → couldn't decide; treat as generic doc
+#
+#   Stage 2 (``core.payment_evidence.classify_payment_evidence``):
+#     For documents tentatively classified as ``payment_receipt``,
+#     this second pass decides whether the receipt is ACTUALLY a
+#     completed transfer or a pre-transfer review screen. Only
+#     ``confirmed`` is propagated as ``pdf_kind=payment_receipt``;
+#     ``pre_transfer_review`` and ``needs_confirmation`` are
+#     downgraded to ``pdf_kind=payment_pre_review`` /
+#     ``payment_pending_evidence`` so the deterministic
+#     "order under review" ACK does NOT fire.
+#
+# Stage 1 leans on:
 #
 #   * The document's ``filename`` (e.g. "Transfer-Receipt.pdf",
 #     "إيصال_التحويل.pdf").
 #   * The document's ``caption`` (text the customer typed alongside).
+#   * Text extracted from the PDF body via ``pypdf`` (see
+#     ``_extract_pdf_text``).
 #   * The merchant's recent conversation context (passed in by the
 #     webhook): if the bot just asked for an ``إيصال`` or there's an
 #     active product focus with a confirmed price + address, a PDF
-#     in that moment is overwhelmingly a payment receipt.
-#
-# Categories produced:
-#   * ``payment_receipt``  → bank-transfer receipt, deposit slip
-#   * ``invoice``          → tax/sales invoice the customer forwarded
-#   * ``identity``         → ID / passport scan
-#   * ``shipping_label``   → courier waybill
-#   * ``catalog``          → product catalog the customer shared
-#   * ``unknown``          → couldn't decide; treat as generic doc
-#
-# The classifier is deliberately fuzzy-conservative: we accept some
-# false positives on ``payment_receipt`` because the downstream
-# response just says "we received the receipt, the order is under
-# review" — even if the document was actually an invoice, that's a
-# reasonable thing to say after an order confirmation flow.
+#     in that moment is more likely a payment receipt.
 
 _PDF_RECEIPT_FILENAME_KEYWORDS = (
     "receipt", "transfer", "rajhi", "stcpay", "alinma", "alahli",
@@ -236,6 +253,7 @@ def classify_inbound_document(
     caption: Optional[str],
     mime_type: Optional[str],
     order_context: Optional[Dict[str, Any]] = None,
+    extracted_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Heuristic-classify an inbound PDF/document into one of the
     enum slots above. ``order_context`` is an optional hint passed
@@ -251,6 +269,12 @@ def classify_inbound_document(
             "price":                    float|None,
         }
 
+    ``extracted_text`` is the body text we got out of the PDF (via
+    ``_extract_pdf_text``). When present it is added to the keyword-
+    scan blob so a Saudi-bank receipt with a generic filename like
+    ``document_1778767962508.pdf`` but explicit Arabic content
+    ("تم التحويل …") still classifies as ``payment_receipt``.
+
     Return shape::
 
         {
@@ -260,28 +284,32 @@ def classify_inbound_document(
           "signals": {
               "filename_matched": bool,
               "caption_matched":  bool,
+              "text_matched":     bool,
               "context_boosted":  bool,
           },
         }
 
     Never raises. Pure-Python — safe to call from any path.
     """
-    fn = (filename or "").lower()
+    fn  = (filename or "").lower()
     cap = (caption or "").lower()
-    blob = f"{fn}  {cap}"
+    txt = (extracted_text or "").lower()
+    blob = f"{fn}  {cap}  {txt}"
 
     reasons: list = []
     fn_match = False
     cap_match = False
+    text_match = False
 
-    # Pass 1 — keyword scan on filename + caption.
+    # Pass 1 — keyword scan on filename + caption + extracted body.
     if any(k in blob for k in _PDF_RECEIPT_FILENAME_KEYWORDS):
         category = "payment_receipt"
-        # Decide whether the hit was in filename or caption for tracing.
-        fn_match = any(k in fn for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
-        cap_match = any(k in cap for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
-        reasons.append("filename/caption matches receipt keyword")
-        confidence = "high" if (fn_match or cap_match) else "medium"
+        # Decide where the hit landed for tracing.
+        fn_match   = any(k in fn  for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
+        cap_match  = any(k in cap for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
+        text_match = any(k in txt for k in _PDF_RECEIPT_FILENAME_KEYWORDS)
+        reasons.append("filename/caption/text matches receipt keyword")
+        confidence = "high" if (fn_match or cap_match or text_match) else "medium"
     elif any(k in blob for k in _PDF_INVOICE_KEYWORDS):
         category = "invoice"
         reasons.append("filename/caption matches invoice keyword")
@@ -333,9 +361,269 @@ def classify_inbound_document(
         "signals": {
             "filename_matched": fn_match,
             "caption_matched":  cap_match,
+            "text_matched":     text_match,
             "context_boosted":  context_boosted,
         },
     }
+
+
+# ── PDF text extraction (pypdf) ─────────────────────────────────────
+#
+# Saudi banking apps (Rajhi, AlAhli, Alinma, STC Pay, …) produce two
+# very different PDF receipt shapes:
+#
+#   * "Born-digital" PDFs with real text streams — these are the
+#     majority. pypdf extracts them in <50ms and produces clean
+#     Arabic + Latin text the downstream classifier can read.
+#   * Scanned image PDFs (less common; usually older banks or a
+#     customer who screenshotted a paper receipt and exported as
+#     PDF). pypdf returns empty / whitespace-only text. For these
+#     we set ``ocr_required=True`` so the caller can decide whether
+#     to fall back to vision OCR on the rendered first page.
+#
+# We deliberately keep the dependency surface small:
+#   * pypdf is pure-Python with no native compile step. Easy on
+#     Railway / Docker.
+#   * We do NOT add pdfminer / pdf2image / pytesseract here — the
+#     vision fallback handles scanned receipts via OpenAI and
+#     reuses the credentials we already have.
+#
+# The function never raises. A failure returns ``{"text": "",
+# "page_count": 0, "extraction_status": "<reason>"}``.
+
+_PDF_TEXT_CHAR_LIMIT = 20000  # plenty for any receipt; truncates absurd PDFs
+
+
+def _extract_pdf_text(
+    file_bytes: bytes,
+    *,
+    tenant_id: Optional[int] = None,
+    media_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Best-effort PDF text extraction via pypdf.
+
+    Returns a dict::
+
+        {
+          "text":              "<extracted body, possibly truncated>",
+          "page_count":        <int, 0 on failure>,
+          "extraction_status": "ok" | "empty" | "encrypted"
+                              | "corrupt" | "library_missing"
+                              | "exception",
+          "ocr_required":      bool,
+        }
+
+    ``ocr_required`` is True when the PDF *was* readable but pypdf
+    returned empty text — i.e. it's a scanned / image-only PDF and
+    the caller should fall back to vision OCR if available.
+    """
+    if not file_bytes:
+        return {
+            "text": "", "page_count": 0,
+            "extraction_status": "empty",
+            "ocr_required": False,
+        }
+
+    try:
+        from pypdf import PdfReader  # noqa: PLC0415
+        from pypdf.errors import PdfReadError  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PDF_EXTRACT] tenant=%s media_id=%s status=library_missing err=%s",
+            tenant_id, media_id, exc,
+        )
+        return {
+            "text": "", "page_count": 0,
+            "extraction_status": "library_missing",
+            "ocr_required": False,
+        }
+
+    from io import BytesIO  # noqa: PLC0415
+
+    try:
+        reader = PdfReader(BytesIO(file_bytes))
+    except Exception as exc:  # PdfReadError + any decoder explosion.
+        logger.warning(
+            "[PDF_EXTRACT] tenant=%s media_id=%s status=corrupt err=%s",
+            tenant_id, media_id, type(exc).__name__,
+        )
+        return {
+            "text": "", "page_count": 0,
+            "extraction_status": "corrupt",
+            "ocr_required": False,
+        }
+
+    # Encrypted PDFs need a password we don't have. pypdf can
+    # sometimes decrypt with an empty password; try once defensively.
+    if getattr(reader, "is_encrypted", False):
+        try:
+            reader.decrypt("")  # type: ignore[arg-type]
+        except Exception:
+            pass
+        if getattr(reader, "is_encrypted", False):
+            logger.warning(
+                "[PDF_EXTRACT] tenant=%s media_id=%s status=encrypted "
+                "page_count=%d",
+                tenant_id, media_id, len(reader.pages),
+            )
+            return {
+                "text": "", "page_count": len(reader.pages),
+                "extraction_status": "encrypted",
+                "ocr_required": False,
+            }
+
+    page_count = len(reader.pages)
+    chunks: list = []
+    total = 0
+    for idx, page in enumerate(reader.pages):
+        try:
+            page_text = page.extract_text() or ""
+        except Exception:
+            page_text = ""
+        if not page_text:
+            continue
+        chunks.append(page_text)
+        total += len(page_text)
+        if total >= _PDF_TEXT_CHAR_LIMIT:
+            # Truncate — the classifier only needs the first few KB
+            # to make a decision; receipts are < 2 KB in practice.
+            break
+
+    combined = "\n".join(chunks).strip()
+    if combined:
+        if len(combined) > _PDF_TEXT_CHAR_LIMIT:
+            combined = combined[:_PDF_TEXT_CHAR_LIMIT]
+        logger.info(
+            "[PDF_EXTRACT] tenant=%s media_id=%s status=ok page_count=%d "
+            "text_len=%d preview=%r",
+            tenant_id, media_id, page_count, len(combined),
+            combined[:120].replace("\n", " "),
+        )
+        return {
+            "text": combined,
+            "page_count": page_count,
+            "extraction_status": "ok",
+            "ocr_required": False,
+        }
+
+    logger.info(
+        "[PDF_EXTRACT] tenant=%s media_id=%s status=empty page_count=%d "
+        "(likely scanned image PDF — OCR needed)",
+        tenant_id, media_id, page_count,
+    )
+    return {
+        "text": "",
+        "page_count": page_count,
+        "extraction_status": "empty",
+        "ocr_required": page_count > 0,
+    }
+
+
+async def _ocr_pdf_with_vision(
+    file_bytes: bytes,
+    *,
+    tenant_id: Optional[int] = None,
+    media_id: Optional[str] = None,
+) -> str:
+    """Last-resort OCR for scanned-image PDFs.
+
+    Strategy: send the PDF bytes inline as a data URL to the OpenAI
+    Vision endpoint with an Arabic OCR prompt. OpenAI Vision now
+    accepts ``application/pdf`` data URLs directly (since the
+    gpt-4o family). When the model can't read the file (very old
+    scans, image-only with no recognisable text) we return ``""``.
+
+    We never raise — caller treats empty string as "OCR failed,
+    fall through to keyword-only classification".
+    """
+    if not file_bytes:
+        return ""
+    if not _runtime_openai_key():
+        _log_skip(
+            "vision_not_configured",
+            tenant_id=tenant_id, media_id=media_id, kind="document",
+        )
+        return ""
+
+    import base64
+
+    b64 = base64.b64encode(file_bytes).decode("ascii")
+    data_url = f"data:application/pdf;base64,{b64}"
+    headers = {
+        "Authorization": f"Bearer {_runtime_openai_key()}",
+        "Content-Type":  "application/json",
+    }
+    system_prompt = (
+        "أنت محرّك OCR متخصص في إيصالات التحويل البنكي وفواتير "
+        "المتاجر. مهمتك إخراج كل النص الظاهر داخل الملف كما هو، "
+        "بالعربية أو الإنجليزية، دون ترجمة وبدون تفسير. لا تضف "
+        "تعليقات. إن كان الملف فارغاً أو غير مقروء أجب بكلمة "
+        "«فارغ»."
+    )
+    body = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "استخرج كل النص في الملف."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
+                ],
+            },
+        ],
+        "max_tokens": 600,
+        "temperature": 0.0,
+    }
+    logger.info(
+        "[PDF_OCR_REQ] tenant=%s media_id=%s model=%s bytes_in=%d",
+        tenant_id, media_id, OPENAI_VISION_MODEL, len(file_bytes),
+    )
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            resp = await client.post(
+                f"{OPENAI_API_BASE.rstrip('/')}/chat/completions",
+                headers=headers, json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PDF_OCR_RESP] tenant=%s media_id=%s status=exception "
+            "err=%s",
+            tenant_id, media_id, exc,
+        )
+        return ""
+
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = (choices[0] or {}).get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        result = "".join(
+            str(p.get("text") or "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ).strip()
+    else:
+        result = str(content or "").strip()
+    if result.lower() in {"فارغ", "empty", ""}:
+        logger.info(
+            "[PDF_OCR_RESP] tenant=%s media_id=%s status=empty",
+            tenant_id, media_id,
+        )
+        return ""
+    logger.info(
+        "[PDF_OCR_RESP] tenant=%s media_id=%s status=ok text_len=%d "
+        "preview=%r",
+        tenant_id, media_id, len(result),
+        result[:120].replace("\n", " "),
+    )
+    return result
 
 
 @dataclass
@@ -790,46 +1078,107 @@ async def _process_image(
     base_meta["vision_text"]   = vision_text
     base_meta["ai_used_image"] = True
 
-    # ── Receipt detection from vision text ────────────────────────
-    # The vision system prompt instructs the model to label
-    # "إثبات دفع / إيصال". When that phrase appears in the vision
-    # text AND the conversation is in an active payment-receipt
-    # waiting state, surface a structured ``image_kind`` slot so
-    # the webhook can short-circuit into the deterministic
-    # "receipt-received" acknowledgement instead of running the
-    # generic LLM reply path (which used to lose product context).
+    # ── Payment-evidence classification (universal gate) ──────────
+    # Production policy (May 2026): the conversation MUST NOT be
+    # treated as paid/payment_confirmed/order_paid just because a
+    # vision-described image happens to contain words like
+    # "إيصال" / "تحويل" / a bank brand / an IBAN. Many of those
+    # screens are the *review-before-transfer* page that Saudi
+    # banking apps show RIGHT BEFORE the user taps the final
+    # "Confirm Transfer" button — nothing has been debited yet.
+    #
+    # We now run a single deterministic classifier
+    # (``core.payment_evidence.classify_payment_evidence``) over
+    # the vision text + caption. ONLY ``status="confirmed"``
+    # promotes the image to ``image_kind=payment_receipt``.
+    # ``pre_transfer_review`` and ``needs_confirmation`` are
+    # surfaced as separate ``image_kind`` slots that the webhook
+    # uses to send a soft polite reply (no order-state mutation,
+    # no internal phone-number leak).
     try:
-        _vision_lc = (vision_text or "").lower()
-        if any(k in _vision_lc for k in (
-            "إيصال", "ايصال", "تحويل", "حواله", "حوالة",
-            "إثبات دفع", "اثبات دفع", "receipt", "transfer",
-            "rajhi", "stcpay", "alinma", "snb", "alahli",
-        )):
-            base_meta["image_kind"] = "payment_receipt"
+        from core.payment_evidence import (  # noqa: PLC0415
+            classify_payment_evidence,
+            log_payment_evidence_verdict,
+            PAYMENT_EVIDENCE_CONFIRMED,
+            PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+            PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
+        )
+        _ev_blob = "\n".join(filter(None, [
+            caption or "",
+            vision_text or "",
+        ]))
+        _ev = classify_payment_evidence(
+            _ev_blob,
+            extra_context={
+                "awaiting_payment_receipt": bool(
+                    (order_context or {}).get("awaiting_payment_receipt")
+                ),
+            },
+        )
+        base_meta["payment_evidence_status"]  = _ev["status"]
+        base_meta["payment_evidence_reason"]  = _ev["reason"]
+        base_meta["payment_evidence_signals"] = _ev.get("signals") or {}
+        log_payment_evidence_verdict(
+            tenant_id=tenant_id, phone=None, source="image_vision",
+            verdict=_ev,
+            extra={
+                "media_id": media_id,
+                "awaiting_payment_receipt": bool(
+                    (order_context or {}).get("awaiting_payment_receipt")
+                ),
+            },
+        )
+        if _ev["status"] == PAYMENT_EVIDENCE_CONFIRMED:
+            base_meta["image_kind"]            = "payment_receipt"
             base_meta["image_kind_confidence"] = "high"
-            base_meta["image_kind_reasons"] = ["vision_text_keyword"]
-        elif order_context and bool(
-            order_context.get("awaiting_payment_receipt")
-        ):
-            # No keywords in the vision text but the bot just asked
-            # for a receipt — high-confidence boost based on flow
-            # state. Same logic as the PDF classifier's context
-            # boost.
-            base_meta["image_kind"] = "payment_receipt"
+            base_meta["image_kind_reasons"]    = [
+                "payment_evidence_" + str(_ev["reason"]),
+            ]
+        elif _ev["status"] == PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW:
+            base_meta["image_kind"]            = "payment_pre_review"
             base_meta["image_kind_confidence"] = "high"
-            base_meta["image_kind_reasons"] = ["awaiting_payment_receipt"]
-    except Exception:  # noqa: BLE001
-        pass
+            base_meta["image_kind_reasons"]    = [
+                "payment_evidence_" + str(_ev["reason"]),
+            ]
+        elif _ev["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION:
+            base_meta["image_kind"]            = "payment_pending_evidence"
+            base_meta["image_kind_confidence"] = "medium"
+            base_meta["image_kind_reasons"]    = [
+                "payment_evidence_" + str(_ev["reason"]),
+            ]
+        # NOT_PAYMENT → leave image_kind unset; vision_text alone
+        # flows to the brain as a generic image description.
+    except Exception as _pe_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_EVIDENCE] image classification failed "
+            "tenant=%s media_id=%s err=%s",
+            tenant_id, media_id, _pe_exc,
+        )
 
     # ── Combine caption + vision description ────────────────────
     if caption:
         combined = f"{caption}\n\n[وصف الصورة] {vision_text}"
     else:
         combined = f"[وصف الصورة المرسلة] {vision_text}"
-    if base_meta.get("image_kind") == "payment_receipt":
+    _ikind = base_meta.get("image_kind")
+    if _ikind == "payment_receipt":
         # Tag the brain-facing text so downstream rules can detect
         # without re-parsing the Arabic description.
-        combined = "[تصنيف الصورة: إيصال تحويل بنكي]\n" + combined
+        combined = "[تصنيف الصورة: إيصال تحويل بنكي مؤكد]\n" + combined
+    elif _ikind == "payment_pre_review":
+        # Critical: this tag tells the brain (when not short-
+        # circuited) that the customer sent a REVIEW-BEFORE-
+        # TRANSFER screen, not a real receipt. The brain must
+        # NOT mutate order state nor leak any internal phone.
+        combined = (
+            "[تصنيف الصورة: شاشة مراجعة قبل التحويل — "
+            "العملية لم تتم بعد]\n"
+        ) + combined
+    elif _ikind == "payment_pending_evidence":
+        combined = (
+            "[تصنيف الصورة: بيانات دفع/تحويل بدون دليل إتمام — "
+            "ينتظر الإيصال النهائي]\n"
+        ) + combined
     return MediaNormalizationResult(
         normalized_type="image",
         text=combined,
@@ -887,23 +1236,37 @@ async def _process_document(
 ) -> MediaNormalizationResult:
     """Handle inbound WhatsApp documents (PDFs, primarily).
 
-    We do not OCR or text-extract the PDF — that would add a new
-    dependency and Saudi bank receipts vary too much for reliable
-    parsing. Instead we:
+    Updated May 2026: this branch now reads the PDF body via
+    ``pypdf`` (and falls back to OpenAI Vision OCR for scanned-only
+    PDFs) so the bot can finally stop replying with "للأسف لا
+    أستطيع فتح ملفات PDF". The extracted text is then fed to the
+    universal ``core.payment_evidence`` gate to decide whether the
+    document is a *confirmed* transfer receipt, a *pre-transfer
+    review* screen, or just data-verification chat — only the
+    confirmed case triggers the deterministic "thanks, order under
+    review" ACK downstream.
 
+    Steps:
       1. Download the bytes so the merchant can re-open the file
          from the conversation drawer even after Meta's 5-minute
          CDN URL expires.
       2. Persist via :func:`save_inbound_media` for permanent
          storage.
-      3. Heuristically classify via :func:`classify_inbound_document`
-         using filename + caption + order context.
-      4. Compose a brain-facing text marker like
-         ``"[وثيقة PDF — تصنيف: إيصال تحويل بنكي] {filename}"``
-         so the decision engine can route on it without needing
-         to read the actual PDF.
+      3. Extract PDF text via :func:`_extract_pdf_text`. If empty
+         and OCR is needed, run :func:`_ocr_pdf_with_vision`.
+      4. Heuristically classify via :func:`classify_inbound_document`
+         using filename + caption + extracted text + order context.
+      5. For ``payment_receipt`` candidates, run
+         :func:`core.payment_evidence.classify_payment_evidence`
+         and demote the ``pdf_kind`` to ``payment_pre_review`` /
+         ``payment_pending_evidence`` when there is no completion
+         marker — protects every tenant from premature ACKs and
+         internal-phone leaks.
+      6. Compose a brain-facing text marker (with the actual PDF
+         text embedded) so the LLM can read the receipt content
+         instead of apologising for the file format.
 
-    The result is ``normalized_type="document"``; the webhook now
+    The result is ``normalized_type="document"``; the webhook
     treats this as a kept type (alongside ``text``/``audio``/``image``).
     """
     media_id  = str(document_payload.get("id") or "").strip()
@@ -927,6 +1290,15 @@ async def _process_document(
         "pdf_kind":                "unknown",
         "pdf_kind_confidence":     "low",
         "pdf_kind_reasons":        [],
+        # PDF text-extraction outputs (May 2026 addition).
+        "pdf_text_status":         "pending",
+        "pdf_text_length":         0,
+        "pdf_page_count":          0,
+        "pdf_text_preview":        None,
+        # Payment-evidence gate (universal, all tenants).
+        "payment_evidence_status": None,
+        "payment_evidence_reason": None,
+        "payment_evidence_signals": {},
     }
 
     if not media_id:
@@ -957,26 +1329,174 @@ async def _process_document(
         base_meta["mime_type"]      = stored.mime_type
     base_meta["document_download_status"] = "ok"
 
+    # ── PDF text extraction (pypdf, with vision-OCR fallback) ────
+    # For non-PDF documents we skip extraction; the legacy keyword
+    # heuristic still classifies by filename + caption.
+    extracted_text = ""
+    is_pdf_mime = "pdf" in (actual_mime or "").lower() \
+        or (filename or "").lower().endswith(".pdf")
+    if is_pdf_mime:
+        ex = _extract_pdf_text(
+            file_bytes,
+            tenant_id=tenant_id,
+            media_id=media_id,
+        )
+        base_meta["pdf_text_status"] = ex.get("extraction_status") or "unknown"
+        base_meta["pdf_page_count"]  = int(ex.get("page_count") or 0)
+        extracted_text               = str(ex.get("text") or "")
+        base_meta["pdf_text_length"] = len(extracted_text)
+        if extracted_text:
+            base_meta["pdf_text_preview"] = (
+                extracted_text[:280].replace("\n", " ")
+            )
+
+        # If pypdf returned empty body but the file has pages,
+        # fall back to OpenAI Vision OCR over the raw PDF bytes.
+        # This handles older Saudi banks that ship scanned-image
+        # PDFs with no text streams. Skipped silently when no
+        # OPENAI_API_KEY is configured.
+        if (
+            not extracted_text
+            and ex.get("ocr_required")
+            and _runtime_openai_key()
+        ):
+            try:
+                ocr_text = await _ocr_pdf_with_vision(
+                    file_bytes,
+                    tenant_id=tenant_id, media_id=media_id,
+                )
+            except Exception as ocr_exc:  # noqa: BLE001
+                logger.warning(
+                    "[PDF_OCR_RESP] tenant=%s media_id=%s "
+                    "status=exception err=%s",
+                    tenant_id, media_id, ocr_exc,
+                )
+                ocr_text = ""
+            if ocr_text:
+                extracted_text = ocr_text
+                base_meta["pdf_text_status"]  = "ocr"
+                base_meta["pdf_text_length"]  = len(ocr_text)
+                base_meta["pdf_text_preview"] = (
+                    ocr_text[:280].replace("\n", " ")
+                )
+
     # ── Heuristic classification ─────────────────────────────────
     verdict = classify_inbound_document(
         filename=filename,
         caption=caption,
         mime_type=actual_mime,
         order_context=order_context,
+        extracted_text=extracted_text,
     )
     base_meta["pdf_kind"]            = verdict.get("category") or "unknown"
     base_meta["pdf_kind_confidence"] = verdict.get("confidence") or "low"
     base_meta["pdf_kind_reasons"]    = verdict.get("reasons") or []
     base_meta["pdf_kind_signals"]    = verdict.get("signals") or {}
 
+    # ── Payment-evidence gate (universal) ────────────────────────
+    # Even if the heuristic above said ``payment_receipt``, we run
+    # the deterministic ``classify_payment_evidence`` over the
+    # extracted text + caption to distinguish a real completed
+    # transfer from a pre-transfer review screen or a screenshot
+    # of bank/IBAN data. The downstream short-circuit ACK fires
+    # ONLY when status == confirmed.
+    try:
+        from core.payment_evidence import (  # noqa: PLC0415
+            classify_payment_evidence,
+            log_payment_evidence_verdict,
+            PAYMENT_EVIDENCE_CONFIRMED,
+            PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+            PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
+        )
+        _ev_blob = "\n".join(filter(None, [
+            filename or "",
+            caption or "",
+            extracted_text or "",
+        ]))
+        _ev = classify_payment_evidence(
+            _ev_blob,
+            extra_context={
+                "awaiting_payment_receipt": bool(
+                    (order_context or {}).get("awaiting_payment_receipt")
+                ),
+            },
+        )
+        base_meta["payment_evidence_status"]  = _ev["status"]
+        base_meta["payment_evidence_reason"]  = _ev["reason"]
+        base_meta["payment_evidence_signals"] = _ev.get("signals") or {}
+        log_payment_evidence_verdict(
+            tenant_id=tenant_id, phone=None, source="document_pdf",
+            verdict=_ev,
+            extra={
+                "media_id": media_id,
+                "filename": filename or None,
+                "pdf_text_status": base_meta.get("pdf_text_status"),
+                "pdf_page_count":  base_meta.get("pdf_page_count"),
+            },
+        )
+
+        # Apply the gate to the pdf_kind slot — this is the
+        # protection layer that prevents premature paid/order_paid
+        # classification across all tenants.
+        if base_meta["pdf_kind"] == "payment_receipt":
+            if _ev["status"] == PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW:
+                base_meta["pdf_kind"]            = "payment_pre_review"
+                base_meta["pdf_kind_confidence"] = "high"
+                base_meta["pdf_kind_reasons"]    = (
+                    list(base_meta.get("pdf_kind_reasons") or [])
+                    + ["payment_evidence_pre_transfer_review"]
+                )
+            elif _ev["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION:
+                base_meta["pdf_kind"]            = "payment_pending_evidence"
+                base_meta["pdf_kind_confidence"] = "medium"
+                base_meta["pdf_kind_reasons"]    = (
+                    list(base_meta.get("pdf_kind_reasons") or [])
+                    + ["payment_evidence_needs_confirmation"]
+                )
+            # When status is CONFIRMED → keep pdf_kind=payment_receipt;
+            # this is the only path that lets the deterministic
+            # "thanks, order under review" ACK fire.
+        elif _ev["status"] == PAYMENT_EVIDENCE_CONFIRMED:
+            # Heuristic missed (e.g. unknown filename + caption,
+            # but the body text clearly says "تم التحويل بنجاح").
+            # Promote so the downstream ACK can still fire.
+            base_meta["pdf_kind"]            = "payment_receipt"
+            base_meta["pdf_kind_confidence"] = "high"
+            base_meta["pdf_kind_reasons"]    = (
+                list(base_meta.get("pdf_kind_reasons") or [])
+                + ["payment_evidence_confirmed_from_text"]
+            )
+        elif _ev["status"] == PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW:
+            base_meta["pdf_kind"]            = "payment_pre_review"
+            base_meta["pdf_kind_confidence"] = "high"
+            base_meta["pdf_kind_reasons"]    = (
+                list(base_meta.get("pdf_kind_reasons") or [])
+                + ["payment_evidence_pre_transfer_review"]
+            )
+        elif _ev["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION:
+            base_meta["pdf_kind"]            = "payment_pending_evidence"
+            base_meta["pdf_kind_confidence"] = "medium"
+            base_meta["pdf_kind_reasons"]    = (
+                list(base_meta.get("pdf_kind_reasons") or [])
+                + ["payment_evidence_needs_confirmation"]
+            )
+    except Exception as _pe_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_EVIDENCE] document classification failed "
+            "tenant=%s media_id=%s err=%s",
+            tenant_id, media_id, _pe_exc,
+        )
+
     # ── Compose brain-facing text ────────────────────────────────
     label_ar = {
-        "payment_receipt": "إيصال تحويل بنكي",
-        "invoice":         "فاتورة",
-        "identity":        "وثيقة هوية",
-        "shipping_label":  "بوليصة شحن",
-        "catalog":         "كتالوج منتجات",
-        "unknown":         "مستند",
+        "payment_receipt":            "إيصال تحويل بنكي مؤكد",
+        "payment_pre_review":         "شاشة مراجعة قبل التحويل (لم تتم العملية)",
+        "payment_pending_evidence":   "بيانات دفع/تحويل بدون دليل إتمام",
+        "invoice":                    "فاتورة",
+        "identity":                   "وثيقة هوية",
+        "shipping_label":             "بوليصة شحن",
+        "catalog":                    "كتالوج منتجات",
+        "unknown":                    "مستند",
     }.get(base_meta["pdf_kind"], "مستند")
 
     pieces: list = []
@@ -985,23 +1505,55 @@ async def _process_document(
         pieces.append(f"اسم الملف: {filename}")
     if caption:
         pieces.append(f"تعليق العميل: {caption}")
+    if extracted_text:
+        # Embed the actual PDF text so the LLM never has to apologise
+        # for "not being able to open the file". We cap at ~2 KB so
+        # large invoices don't blow the prompt budget.
+        _snippet = extracted_text
+        if len(_snippet) > 2000:
+            _snippet = _snippet[:2000] + "\n…[تم اقتطاع النص الزائد]"
+        pieces.append("نص الملف المستخرج:\n" + _snippet)
+
     if base_meta["pdf_kind"] == "payment_receipt":
-        # Make the receipt arrival impossible to miss in the prompt
-        # so the LLM (when not short-circuited deterministically)
-        # cannot accidentally re-ask product discovery.
+        # Make the confirmed-receipt arrival impossible to miss in
+        # the prompt so the LLM (when not short-circuited
+        # deterministically) cannot accidentally re-ask product
+        # discovery.
         pieces.append(
-            "ملاحظة للنظام: العميل أرسل إيصال تحويل بنكي. "
+            "ملاحظة للنظام: العميل أرسل إيصال تحويل بنكي مؤكد. "
             "لا تعد سؤال العميل عن المنتج، واعتمد على state الطلب الحالي."
+        )
+    elif base_meta["pdf_kind"] == "payment_pre_review":
+        # CRITICAL: tell the brain this is a review-before-transfer
+        # screen so it does NOT say "thanks, we received your
+        # receipt" and does NOT mutate order state.
+        pieces.append(
+            "ملاحظة للنظام: هذي شاشة مراجعة بيانات قبل تنفيذ التحويل، "
+            "والعملية لم تتم بعد. ممنوع تأكيد استلام إيصال، وممنوع "
+            "إرسال أي رقم تواصل داخلي. أكتفِ برد طبيعي قصير "
+            "وانتظر الإيصال النهائي."
+        )
+    elif base_meta["pdf_kind"] == "payment_pending_evidence":
+        pieces.append(
+            "ملاحظة للنظام: الملف يحتوي بيانات دفع (بنك / آيبان / مبلغ) "
+            "لكن لا يوجد دليل واضح أن التحويل تم. لا تؤكد استلام إيصال "
+            "ولا تغيّر حالة الطلب — اكتفِ برد قصير حسب السياق."
         )
     combined = "\n".join(pieces)
 
     logger.info(
         "[ORDER_FLOW_STATE] inbound_document tenant=%s media_id=%s "
         "filename=%r pdf_kind=%s confidence=%s reasons=%s "
+        "payment_evidence_status=%s payment_evidence_reason=%s "
+        "pdf_text_status=%s pdf_text_len=%d "
         "context_awaiting=%s context_active=%s",
         tenant_id, media_id, filename,
         base_meta["pdf_kind"], base_meta["pdf_kind_confidence"],
         base_meta["pdf_kind_reasons"],
+        base_meta.get("payment_evidence_status"),
+        base_meta.get("payment_evidence_reason"),
+        base_meta.get("pdf_text_status"),
+        int(base_meta.get("pdf_text_length") or 0),
         bool((order_context or {}).get("awaiting_payment_receipt")),
         bool((order_context or {}).get("has_active_order")),
     )
