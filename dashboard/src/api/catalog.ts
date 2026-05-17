@@ -347,6 +347,9 @@ export type MetaImportErrorCode =
   | 'connection_not_found'
   | 'catalog_id_missing'
   | 'access_token_missing'
+  | 'meta_access_token_missing'
+  | 'catalog_not_found'
+  | 'catalog_type_unsupported'
   | 'meta_http_error'
 
 // ── Diagnostics (source-agnostic snapshot) ───────────────────────────

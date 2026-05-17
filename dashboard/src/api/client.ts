@@ -120,10 +120,11 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
   //   { detail: { code: "subscription_inactive", message: "..."} }
   // Surface as a normal Error whose `.message` is the human Arabic text and
   // whose `.code` (when present) is the machine-readable reason.
-  const buildApiError = (body: any, fallback: string): Error & { code?: string; status?: number; validation?: unknown } => {
+  const buildApiError = (body: any, fallback: string): Error & { code?: string; status?: number; validation?: unknown; detail?: unknown } => {
     let msg  = fallback
     let code: string | undefined
     let validation: unknown
+    let structuredDetail: Record<string, unknown> | null = null
     const d = body?.detail
     if (typeof d === 'string') {
       msg = d
@@ -150,11 +151,28 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
       if (typeof d.message === 'string' && d.message.trim()) msg = d.message
       else if (typeof d.detail === 'string') msg = d.detail
       if (typeof d.code === 'string') code = d.code
+      // Stash the structured payload so callers (e.g. the Meta catalog
+      // import diagnostic panel) can read fields like ``token_source``,
+      // ``meta_message``, ``fbtrace_id``, ``hint`` directly off the
+      // Error object without having to re-parse ``e.detail``.
+      structuredDetail = d as Record<string, unknown>
     }
-    const err = new Error(msg) as Error & { code?: string; status?: number; validation?: unknown }
+    const err = new Error(msg) as Error & { code?: string; status?: number; validation?: unknown; detail?: unknown; [k: string]: unknown }
     err.code       = code
     err.status     = res.status
     err.validation = validation
+    if (structuredDetail) {
+      err.detail = structuredDetail
+      // Best-effort: copy any scalar/object key from the structured
+      // payload onto the Error itself so consumers can ``e?.token_source``
+      // without an extra ``e?.detail?.token_source`` fallback. We
+      // skip ``code`` (already handled) and ``message`` (already the
+      // Error's message) to avoid clobbering the standard fields.
+      for (const [k, v] of Object.entries(structuredDetail)) {
+        if (k === 'code' || k === 'message') continue
+        if (!(k in err)) err[k] = v as unknown
+      }
+    }
     return err
   }
 

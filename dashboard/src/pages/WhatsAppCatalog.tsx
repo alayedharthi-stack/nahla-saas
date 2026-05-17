@@ -917,30 +917,56 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
 // would fail preflight anyway, so showing a button would be confusing.
 
 function MetaImportSection(props: { onChanged: () => Promise<void> }) {
-  const [busy, setBusy]       = useState(false)
-  const [error, setError]     = useState<string | null>(null)
-  const [report, setReport]   = useState<MetaImportReport | null>(null)
+  const [busy, setBusy]               = useState(false)
+  const [error, setError]             = useState<string | null>(null)
+  const [errorDetail, setErrorDetail] = useState<Record<string, any> | null>(null)
+  const [showDetail, setShowDetail]   = useState(false)
+  const [report, setReport]           = useState<MetaImportReport | null>(null)
 
   const errorCopy = (code: string | undefined): string => {
     switch (code) {
-      case 'connection_not_found':  return 'لا يوجد ربط واتساب حالياً. يرجى ربط واتساب أولاً.'
-      case 'catalog_id_missing':    return 'يرجى إدخال Meta Catalog ID في قسم "ربط الكتالوج بواتساب وMeta" أعلاه.'
-      case 'access_token_missing':  return 'الرمز المطلوب للوصول إلى Meta غير متوفر. أعد ربط واتساب لتجديده.'
-      case 'meta_http_error':       return 'تعذّر الاتصال بـ Meta Catalog. يرجى التأكد من صلاحية الـ Catalog ID والرمز.'
-      default:                      return code ? `خطأ غير متوقع: ${code}` : 'تعذّر تنفيذ الاستيراد.'
+      case 'connection_not_found':       return 'لا يوجد ربط واتساب حالياً. يرجى ربط واتساب أولاً.'
+      case 'catalog_id_missing':         return 'يرجى إدخال Meta Catalog ID في قسم "ربط الكتالوج بواتساب وMeta" أعلاه.'
+      case 'access_token_missing':       return 'الرمز المطلوب للوصول إلى Meta غير متوفر. أعد ربط واتساب لتجديده.'
+      case 'meta_access_token_missing':  return 'الاتصال الحالي عبر 360dialog ولا يحمل توكِن Meta Graph. أعد ربط واتساب عبر Meta Embedded Signup مع منح صلاحية catalog_management، أو اطلب من الدعم تفعيل توكِن النظام.'
+      case 'catalog_not_found':          return 'الـ Catalog ID المُدخل غير موجود في Meta. انسخه من Meta Commerce Manager → Catalog → Settings والصقه مرة أخرى. تأكد أنه Catalog ID وليس Commerce Account ID.'
+      case 'catalog_type_unsupported':   return 'نوع الكتالوج غير مدعوم في نحلة (حالياً ندعم Commerce/Products فقط، أما السيارات/الفنادق/الطيران/الوظائف فتحتاج مستوردًا منفصلاً).'
+      case 'meta_http_error':            return 'تعذّر الاتصال بـ Meta Catalog. الـ Catalog ID صحيح من حيث الشكل لكن Meta رفض الطلب — غالباً لأن التوكِن لا يملك صلاحية catalog_management على هذا الكتالوج، أو لأن الكتالوج في Business Manager مختلف عن BM رقم واتساب. راجع التفاصيل أدناه.'
+      default:                           return code ? `خطأ غير متوقع: ${code}` : 'تعذّر تنفيذ الاستيراد.'
     }
   }
 
   const onImport = async () => {
-    setBusy(true); setError(null); setReport(null)
+    setBusy(true); setError(null); setErrorDetail(null); setShowDetail(false); setReport(null)
     try {
       const r = await catalogApi.importFromMeta()
       setReport(r.report)
       await props.onChanged()
     } catch (e: any) {
       // The API wrapper surfaces the FastAPI ``detail`` as ``e.code``
-      // or ``e.message`` — try both.
-      setError(errorCopy(e?.code ?? e?.detail ?? e?.message))
+      // and stashes the full structured detail on ``e.validation``
+      // (when present) or on ``e.detail``. We capture both so the
+      // collapsible diagnostic block can show what Meta actually
+      // said (token_source / provider / meta_message / fbtrace_id).
+      const code  = e?.code ?? e?.detail ?? e?.message
+      setError(errorCopy(code))
+      const detail = (e && typeof e === 'object') ? {
+        code:           code,
+        status:         e?.status,
+        provider:       e?.provider,
+        token_source:   e?.token_source,
+        catalog_id:     e?.catalog_id,
+        hint:           e?.hint,
+        meta_code:      e?.meta_code ?? e?.discovery?.error?.meta_code,
+        meta_message:   e?.meta_message ?? e?.discovery?.error?.meta_message,
+        fbtrace_id:     e?.fbtrace_id ?? e?.discovery?.error?.fbtrace_id,
+        stage:          e?.stage,
+      } : null
+      // Drop empty entries so the panel only shows what actually has a value.
+      const compact = detail
+        ? Object.fromEntries(Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''))
+        : null
+      setErrorDetail(compact && Object.keys(compact).length > 0 ? compact : null)
     } finally {
       setBusy(false)
     }
@@ -957,8 +983,27 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
         </p>
 
         {error && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
-            <XCircle className="w-4 h-4 shrink-0 mt-0.5" /> {error}
+          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm space-y-2">
+            <div className="flex items-start gap-2">
+              <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span className="leading-relaxed">{error}</span>
+            </div>
+            {errorDetail && (
+              <div className="ms-6">
+                <button
+                  type="button"
+                  onClick={() => setShowDetail(s => !s)}
+                  className="text-[11px] underline text-rose-700 hover:text-rose-900"
+                >
+                  {showDetail ? 'إخفاء التفاصيل التقنية' : 'عرض التفاصيل التقنية للدعم'}
+                </button>
+                {showDetail && (
+                  <pre dir="ltr" className="mt-2 bg-white border border-rose-100 rounded-lg p-2 text-[11px] text-slate-700 overflow-x-auto whitespace-pre-wrap leading-relaxed">
+{JSON.stringify(errorDetail, null, 2)}
+                  </pre>
+                )}
+              </div>
+            )}
           </div>
         )}
 
