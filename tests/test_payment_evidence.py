@@ -677,8 +677,18 @@ class TestOrderFlowReceiptGate:
         assert decision is None
 
     def test_evidence_soft_reply_fires_for_pre_review(self, monkeypatch):
+        """The soft reply fires when the conversation does NOT have
+        an active order awaiting a receipt — i.e. the customer sent
+        a bank screenshot without an open order context. The
+        active-order + awaiting_receipt path is now promoted to
+        confirmed (see ``test_evidence_promotes_for_pre_review_when_active_order``).
+        """
         from core.order_flow import maybe_handle_payment_evidence_inbound
-        self._patch_state(monkeypatch, self._bs())
+        # Remove the active-order trigger: no awaiting_receipt flag.
+        self._patch_state(
+            monkeypatch,
+            self._bs(order_prep={"awaiting_payment_receipt": False}),
+        )
         decision = maybe_handle_payment_evidence_inbound(
             db=MagicMock(), tenant_id=11, phone="+966500000001",
             inbound_normalized_type="document",
@@ -696,7 +706,11 @@ class TestOrderFlowReceiptGate:
 
     def test_evidence_soft_reply_fires_for_needs_confirmation(self, monkeypatch):
         from core.order_flow import maybe_handle_payment_evidence_inbound
-        self._patch_state(monkeypatch, self._bs())
+        # Remove the active-order trigger: no awaiting_receipt flag.
+        self._patch_state(
+            monkeypatch,
+            self._bs(order_prep={"awaiting_payment_receipt": False}),
+        )
         decision = maybe_handle_payment_evidence_inbound(
             db=MagicMock(), tenant_id=11, phone="+966500000001",
             inbound_normalized_type="image",
@@ -708,6 +722,37 @@ class TestOrderFlowReceiptGate:
         )
         assert decision is not None
         assert decision["state_patch"] == {}
+
+    def test_evidence_promotes_for_pre_review_when_active_order(self, monkeypatch):
+        """Hotfix coverage (May 2026): when a customer with an
+        ACTIVE order + ``awaiting_payment_receipt=True`` sends a
+        payment-context PDF that the classifier marked as
+        ``pre_transfer_review`` (e.g. a real receipt that the bank
+        printed with a "تأكيد التحويل" header), the helper must
+        promote to confirmed instead of re-asking for the receipt."""
+        from core.order_flow import maybe_handle_payment_evidence_inbound
+        self._patch_state(monkeypatch, self._bs())  # has awaiting + product
+        decision = maybe_handle_payment_evidence_inbound(
+            db=MagicMock(), tenant_id=11, phone="+966500000001",
+            inbound_normalized_type="document",
+            inbound_metadata={
+                "pdf_kind": "payment_pre_review",
+                "payment_evidence_status": "pre_transfer_review",
+                "payment_evidence_reason": "pre_transfer_review_phrase",
+            },
+        )
+        assert decision is not None
+        sp = decision["state_patch"]
+        assert sp.get("payment_receipt_received") is True
+        assert sp.get("awaiting_payment_receipt") is False
+        assert sp.get("order_status") == "under_review"
+        # Reply should be the receipt ACK, NOT the "send me the
+        # final receipt" soft reply.
+        assert "مراجعة قبل التحويل" not in decision["reply_text"]
+        assert (
+            "وصلنا" in decision["reply_text"]
+            or "إيصال" in decision["reply_text"]
+        )
 
     def test_evidence_soft_reply_skips_unrelated_inbound(self, monkeypatch):
         from core.order_flow import maybe_handle_payment_evidence_inbound

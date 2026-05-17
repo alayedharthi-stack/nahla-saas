@@ -3392,6 +3392,180 @@ async def _handle_merchant_message(
         inbound_text = text or "",
     )
 
+    # ── PRE-BRAIN HANDOFF GUARD (May 2026 critical hotfix) ─────────
+    # Production regression: a customer typing "أبي أتكلم مع أحد"
+    # would receive "حصل خطأ مؤقت 🙏 ممكن تعيد رسالتك؟" whenever the
+    # brain raised — and the conversation NEVER landed in the
+    # merchant's "طلب موظف" filter. Every prior fix sat INSIDE the
+    # brain try-block, so any earlier failure swallowed the request.
+    #
+    # The guard below runs BEFORE any brain / DB-heavy path:
+    #
+    #   1. Pure-string detector ``is_handoff_request`` (Arabic
+    #      normalised, no I/O) → True for "ابي اتكلم مع احد",
+    #      "كلموني", "حولني لموظف", "احد يرد علي", etc.
+    #   2. Find/create the conversation row and flip the FULL
+    #      canonical handoff signal: needs_human + handoff_active +
+    #      is_human_handoff + status="human".
+    #   3. Create a handoff_session via ``handoff.manager`` so the
+    #      merchant inbox shows a proper "طلب موظف" entry.
+    #   4. ``pause_ai(REASON_HUMAN_HANDOFF)`` so subsequent inbounds
+    #      stop looping the AI pipeline.
+    #   5. Send the canonical Arabic acknowledgement, record the
+    #      outbound, return cleanly. The brain is NEVER reached for
+    #      this turn — guaranteeing no exception can swallow the
+    #      handoff intent.
+    #
+    # Every nested step has its own try/except. A failure at any
+    # step still produces the acknowledgement send + early return so
+    # the customer never sees the generic retry copy for an explicit
+    # human-handoff request.
+    try:
+        from core.handoff_detector import (  # noqa: PLC0415
+            is_handoff_request as _is_handoff_req,
+            is_post_payment_modification_request as _is_post_pay_mod_req,
+            HANDOFF_ACK_TEXT_AR as _HANDOFF_ACK_TEXT,
+            HANDOFF_POST_PAYMENT_ACK_TEXT_AR as _HANDOFF_POST_PAY_ACK_TEXT,
+        )
+        _is_handoff = _is_handoff_req(text or "")
+        _is_post_pay_mod = _is_post_pay_mod_req(text or "")
+    except Exception as _hd_exc:  # noqa: BLE001
+        logger.debug("[Merchant/HANDOFF_GUARD] detector failed: %s", _hd_exc)
+        _is_handoff = False
+        _is_post_pay_mod = False
+
+    # Post-payment modification check piggybacks on the same handoff
+    # plumbing. We only promote it to a handoff when the customer
+    # has actually paid (or is in a post-payment state) — otherwise
+    # "ابي اضيف عسل" pre-payment must keep flowing into the brain
+    # so the catalog flow can add the new product to the cart.
+    if _is_post_pay_mod and not _is_handoff:
+        try:
+            from core.order_flow import (  # noqa: PLC0415
+                _load_brain_state as _ho_load_state,
+                _focus_summary as _ho_focus_summary,
+            )
+            _ho_state_conv, _ho_bs = _ho_load_state(
+                db, tenant_id=tenant_id, phone=to,
+            )
+            _ho_summary = _ho_focus_summary(_ho_bs)
+            _post_paid = (
+                bool(_ho_summary.get("payment_receipt_received"))
+                or str(_ho_summary.get("order_status") or "").lower()
+                in ("under_review", "processing", "payment_pending")
+            )
+        except Exception as _ho_post_exc:  # noqa: BLE001
+            logger.debug(
+                "[Merchant/HANDOFF_GUARD] post-pay state load failed: %s",
+                _ho_post_exc,
+            )
+            _post_paid = False
+        if _post_paid:
+            # Reuse the canonical handoff branch below but with the
+            # post-payment acknowledgement copy.
+            _is_handoff = True
+            _HANDOFF_ACK_TEXT = _HANDOFF_POST_PAY_ACK_TEXT
+            logger.info(
+                "[Merchant/HANDOFF_GUARD] PRE-BRAIN post-payment "
+                "modification → handoff | tenant=%s to=%s snippet=%r",
+                tenant_id, to, (text or "")[:80],
+            )
+
+    if _is_handoff:
+        logger.info(
+            "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
+            "to=%s text_snippet=%r",
+            tenant_id, to, (text or "")[:80],
+        )
+        _ho_convo = None
+        try:
+            from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+            _ho_convo = _get_or_create_conversation(db, tenant_id, to)
+        except Exception as _ho_conv_exc:  # noqa: BLE001
+            logger.warning(
+                "[Merchant/HANDOFF_GUARD] conversation lookup failed | "
+                "tenant=%s err=%s",
+                tenant_id, _ho_conv_exc,
+            )
+        if _ho_convo is not None:
+            try:
+                _ho_convo.status            = "human"
+                _ho_convo.is_human_handoff  = True
+                _ho_convo.needs_human       = True
+                _ho_convo.handoff_active    = True
+                db.flush()
+            except Exception as _ho_flag_exc:  # noqa: BLE001
+                logger.warning(
+                    "[Merchant/HANDOFF_GUARD] flag flip failed | "
+                    "tenant=%s err=%s",
+                    tenant_id, _ho_flag_exc,
+                )
+        try:
+            from handoff.manager import create_handoff_session  # noqa: PLC0415
+            create_handoff_session(
+                db, tenant_id, to, to, text or "",
+                reason="customer_request_pre_brain",
+            )
+        except Exception as _ho_sess_exc:  # noqa: BLE001
+            logger.warning(
+                "[Merchant/HANDOFF_GUARD] session creation failed | "
+                "tenant=%s err=%s",
+                tenant_id, _ho_sess_exc,
+            )
+        if _ho_convo is not None:
+            try:
+                from core.ai_pause_guard import (  # noqa: PLC0415
+                    pause_ai as _ho_pause_ai,
+                    REASON_HUMAN_HANDOFF as _HO_R_HOFF,
+                )
+                _ho_pause_ai(db, _ho_convo, reason=_HO_R_HOFF,
+                             by="webhook:pre_brain_handoff")
+            except Exception as _ho_pause_exc:  # noqa: BLE001
+                logger.debug(
+                    "[Merchant/HANDOFF_GUARD] pause_ai failed: %s",
+                    _ho_pause_exc,
+                )
+        try:
+            await _send_whatsapp_message(
+                phone_id=phone_id, to=to,
+                text=_HANDOFF_ACK_TEXT,
+                _tenant_id=tenant_id, _db=db,
+            )
+            _trace.mark_outbound_sent(
+                source="pre_brain_handoff",
+                length=len(_HANDOFF_ACK_TEXT),
+            )
+        except Exception as _ho_send_exc:  # noqa: BLE001
+            logger.exception(
+                "[Merchant/HANDOFF_GUARD] ack send failed | tenant=%s to=%s",
+                tenant_id, to,
+            )
+        try:
+            from routers.conversations import record_outbound_message  # noqa: PLC0415
+            record_outbound_message(
+                db, tenant_id, to, _HANDOFF_ACK_TEXT,
+                event_type="ai_handoff_ack",
+                extra={
+                    "is_ai": True,
+                    "deterministic_path": "pre_brain_handoff",
+                    "handoff_active": True,
+                    "needs_human": True,
+                },
+            )
+        except Exception as _ho_rec_exc:  # noqa: BLE001
+            logger.debug(
+                "[Merchant/HANDOFF_GUARD] outbound record failed: %s",
+                _ho_rec_exc,
+            )
+        try:
+            _trace.fallback_source = "pre_brain_handoff"
+            _trace.response_goal   = "handoff"
+            _trace.intent          = "talk_to_human"
+            _trace.emit()
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
     # ── Top-k intent ranking (May 2026 #17) ─────────────────────────────────
     # Run the rule classifier ONCE at the top of the turn, capture the
     # full ranking, and stash it on the trace. The Brain pipeline will

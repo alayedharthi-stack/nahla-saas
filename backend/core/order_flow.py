@@ -547,6 +547,61 @@ def maybe_handle_payment_evidence_inbound(
     _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
     summary = _focus_summary(bs)
     awaiting = bool(summary.get("awaiting_payment_receipt"))
+    has_active_order = bool(summary.get("selected_product"))
+
+    # ── Active-order promotion (May 2026 hotfix) ───────────────────
+    # When the customer already has an active order AND we were
+    # awaiting their payment receipt (i.e. we explicitly asked them
+    # to send proof of transfer), any bank-related document or
+    # screenshot is the answer. Real bank PDFs occasionally print
+    # "تأكيد التحويل" / "تأكيد العملية" headers that match our
+    # pre-transfer phrase library — even though the body shows the
+    # transfer is complete. Refusing to accept those forces the
+    # customer to re-send the same file, eroding trust.
+    #
+    # Policy: if the conversation has a selected_product AND we were
+    # awaiting their receipt, promote ANY payment-context evidence
+    # to confirmed instead of asking them to retake it. The customer
+    # is then routed to the receipt ACK which collects shipping
+    # details (name, city, location proof).
+    #
+    # This is intentionally GATED on ``awaiting`` so a random bank
+    # screenshot dropped into an unrelated conversation does NOT
+    # mark a non-existent order as paid.
+    if has_active_order and awaiting:
+        logger.info(
+            "[PAYMENT_EVIDENCE] active-order promotion → confirmed "
+            "tenant=%s phone=*%s pe_status=%s reason=%s product=%r",
+            tenant_id, (phone[-4:] if phone else ""),
+            pe_status, md.get("payment_evidence_reason"),
+            summary.get("selected_product"),
+        )
+        from datetime import datetime, timezone  # noqa: PLC0415
+        confirmed_patch: Dict[str, Any] = {
+            "awaiting_payment_receipt": False,
+            "payment_receipt_received": True,
+            "payment_receipt_at":       datetime.now(timezone.utc).isoformat(),
+            "order_status":             "under_review",
+            "payment_receipt_metadata": {
+                "kind":            kind or "payment_receipt",
+                "promoted_from":   pe_status or "evidence_active_order",
+                "promoted_at":     datetime.now(timezone.utc).isoformat(),
+                "wa_message_id":   md.get("wa_message_id"),
+                "filename":        md.get("filename"),
+                "mime_type":       md.get("mime_type"),
+                "storage_url":     md.get("storage_url"),
+                "storage_sha256":  md.get("storage_sha256"),
+            },
+        }
+        # ``_compose_receipt_ack`` includes the structured address
+        # interview when shipping fields are still missing — that's
+        # the explicit user requirement: never re-ask for product
+        # selection; ask only for the missing shipping data.
+        return {
+            "reply_text":  _compose_receipt_ack(summary),
+            "summary":     summary,
+            "state_patch": confirmed_patch,
+        }
 
     reply_text = compose_payment_evidence_reply(
         pe_status,

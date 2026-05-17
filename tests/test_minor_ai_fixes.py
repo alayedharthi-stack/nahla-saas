@@ -363,6 +363,88 @@ def test_map_screenshot_short_circuit_during_active_order(
     assert decision["state_patch"].get("awaiting_location_text") is True
 
 
+def test_payment_evidence_active_order_promotes_to_confirmed(
+    monkeypatch: Any,
+) -> None:
+    """When a customer with an ACTIVE order and an
+    ``awaiting_payment_receipt=True`` flag sends a payment-context
+    PDF that the classifier marked as ``pre_transfer_review``, the
+    soft-evidence helper must promote it to confirmed instead of
+    re-asking for the receipt. This is the production fix for the
+    "Transaction-Receipt.pdf forwarded twice" loop."""
+    from core import order_flow
+
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda *_a, **_k: (
+            None,
+            {
+                "current_product_focus": {
+                    "title": "عسل سدر", "price": 360, "currency": "SAR",
+                },
+                "order_prep": {
+                    "awaiting_payment_receipt": True,
+                    "city": "الرياض",
+                },
+            },
+        ),
+    )
+
+    decision = order_flow.maybe_handle_payment_evidence_inbound(
+        db=None,
+        tenant_id=1,
+        phone="+966500000010",
+        inbound_normalized_type="document",
+        inbound_metadata={
+            "payment_evidence_status": "pre_transfer_review",
+            "payment_evidence_reason": "pre_transfer_review_phrase",
+            "pdf_kind": "payment_pre_review",
+            "filename": "Transaction-Receipt.pdf",
+            "wa_message_id": "wamid.X",
+        },
+    )
+    assert decision is not None
+    sp = decision["state_patch"]
+    assert sp.get("payment_receipt_received") is True
+    assert sp.get("awaiting_payment_receipt") is False
+    assert sp.get("order_status") == "under_review"
+    # Reply should be the receipt ACK (with the address interview
+    # because the test summary has no name / address fields set).
+    assert "وصلنا" in decision["reply_text"] or "إيصال" in decision["reply_text"]
+    # No re-ask for the receipt anywhere in the body.
+    assert "ارسل" not in decision["reply_text"].split("بإذن الله")[0] or \
+           "العنوان" in decision["reply_text"]
+
+
+def test_payment_evidence_without_active_order_stays_soft(
+    monkeypatch: Any,
+) -> None:
+    """Without an active order, the soft branch must stay soft —
+    a stray bank screenshot on a brand-new conversation should NOT
+    flip ``payment_receipt_received`` to True."""
+    from core import order_flow
+
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda *_a, **_k: (None, {}),
+    )
+
+    decision = order_flow.maybe_handle_payment_evidence_inbound(
+        db=None,
+        tenant_id=1,
+        phone="+966500000011",
+        inbound_normalized_type="document",
+        inbound_metadata={
+            "payment_evidence_status": "pre_transfer_review",
+            "payment_evidence_reason": "pre_transfer_review_phrase",
+            "pdf_kind": "payment_pre_review",
+        },
+    )
+    if decision is not None:
+        sp = decision["state_patch"]
+        assert sp.get("payment_receipt_received") is not True
+
+
 def test_map_screenshot_no_short_circuit_without_active_order(
     monkeypatch: Any,
 ) -> None:
