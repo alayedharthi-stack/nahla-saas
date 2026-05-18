@@ -77,6 +77,127 @@ _CATALOG_QTY_RE      = _re_catalog.compile(r"عدد المنتجات:\s*(\d+)")
 # Stops at end-of-line so a multi-product join (" + ") stays intact
 # but the trailing buying-intent paragraph does not leak in.
 _CATALOG_NAME_RE     = _re_catalog.compile(r"^اسم المنتج:\s*(.+?)\s*$", _re_catalog.MULTILINE)
+# Strip every non-alphanumeric character for fuzzy SKU comparison.
+_CATALOG_NORM_RE     = _re_catalog.compile(r"[^a-z0-9]")
+
+
+def _normalize_sku_token(s: Any) -> str:
+    """Lowercase + strip non-alphanumeric chars so SKU variants like
+    ``"WA-123"`` / ``"wa_123"`` / ``"wa:123"`` all compare equal."""
+    return _CATALOG_NORM_RE.sub("", str(s or "").lower())
+
+
+def _resolve_catalog_product(
+    *,
+    db: Any,
+    tenant_id: int,
+    sku: str,
+    unit_price: Optional[float],
+    allow_price_fallback: bool,
+):
+    """Best-effort resolution of a catalog-order ``product_retailer_id``
+    to a row in the merchant's products table.
+
+    Lookup ladder (stops at the first hit):
+
+        1. ``direct``        — exact match on ``external_id`` /
+           ``sku`` / ``meta_retailer_id``.
+        2. ``normalized``    — same three columns after stripping
+           every non-alphanumeric char and lowercasing both sides.
+           Catches Salla / BSP id rewrites that drop hyphens or
+           prepend ``"wa-"`` style prefixes.
+        3. ``unique_price``  — only when ``allow_price_fallback`` is
+           True (no SKU AND no payload-supplied name): if EXACTLY ONE
+           tenant product has the same unit price, return it. Two or
+           more matches → refuse to guess.
+        4. ``miss``          — nothing useful, caller falls back to
+           the placeholder pin.
+
+    Returns ``(row_or_None, strategy)``. ``strategy`` is always
+    populated for the trace log.
+    """
+    try:
+        from database.models import Product  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None, "miss"
+
+    # 1) Direct, indexed match.
+    if sku:
+        try:
+            row = (
+                db.query(Product)
+                  .filter(Product.tenant_id == tenant_id)
+                  .filter(
+                      (Product.external_id      == sku) |
+                      (Product.sku              == sku) |
+                      (Product.meta_retailer_id == sku)
+                  )
+                  .first()
+            )
+            if row is not None:
+                return row, "direct"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[CATALOG_FOCUS] direct product lookup failed tenant=%s "
+                "sku=%r: %s",
+                tenant_id, sku, exc,
+            )
+
+    # Both fuzzy strategies need the tenant's product list. Capped so
+    # a runaway catalog never balloons the request.
+    rows: list = []
+    try:
+        rows = list(
+            db.query(Product)
+              .filter(Product.tenant_id == tenant_id)
+              .limit(2000)
+              .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG_FOCUS] tenant product fetch failed tenant=%s: %s",
+            tenant_id, exc,
+        )
+        return None, "miss"
+
+    # 2) Normalized SKU match.
+    if sku:
+        target = _normalize_sku_token(sku)
+        if target:
+            for r in rows:
+                for f in (
+                    getattr(r, "external_id", None),
+                    getattr(r, "sku", None),
+                    getattr(r, "meta_retailer_id", None),
+                ):
+                    if f and _normalize_sku_token(f) == target:
+                        return r, "normalized"
+
+    # 3) Unique-price fallback (only when explicitly allowed).
+    if allow_price_fallback and unit_price is not None:
+        same_price = []
+        for r in rows:
+            raw_p = getattr(r, "price", None)
+            if raw_p is None:
+                continue
+            try:
+                p = float(raw_p)
+            except (TypeError, ValueError):
+                continue
+            if abs(p - unit_price) < 0.01:
+                same_price.append(r)
+                if len(same_price) > 1:
+                    break  # already non-unique — refuse to guess
+        if len(same_price) == 1:
+            return same_price[0], "unique_price"
+        if len(same_price) > 1:
+            logger.info(
+                "[CATALOG_FOCUS] price=%s matched %d products — refusing "
+                "to guess | tenant=%s",
+                unit_price, len(same_price), tenant_id,
+            )
+
+    return None, "miss"
 
 
 def _maybe_pin_catalog_focus(
@@ -122,41 +243,39 @@ def _maybe_pin_catalog_focus(
         unit_price = round(total_price / qty, 2)
 
     # Best-effort lookup against the merchant's catalog so we can populate
-    # title / numeric id. Any failure is swallowed — the placeholder pin
-    # below is enough to gate the address-stash branch.
+    # title / numeric id. Unique-price fallback only when WhatsApp itself
+    # gave us no name AND the SKU lookup found nothing — we never want
+    # to guess on top of a label the BSP already supplied.
     resolved_id: Any = None
     resolved_title: str = ""
     resolved_price: Optional[float] = None
-    if sku:
-        try:
-            from database.models import Product  # noqa: PLC0415
-            row = (
-                db.query(Product)
-                  .filter(Product.tenant_id == tenant_id)
-                  .filter(
-                      (Product.external_id      == sku) |
-                      (Product.sku              == sku) |
-                      (Product.meta_retailer_id == sku)
-                  )
-                  .first()
-            )
-            if row is not None:
-                resolved_id    = getattr(row, "id", None)
-                resolved_title = getattr(row, "title", "") or ""
-                _p = getattr(row, "price", None)
-                if _p is not None:
-                    try:
-                        resolved_price = float(_p)
-                    except (TypeError, ValueError):
-                        resolved_price = None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[CATALOG_FOCUS] product lookup failed tenant=%s sku=%r: %s",
-                tenant_id, sku, exc,
-            )
+    strategy = "miss"
+    try:
+        row, strategy = _resolve_catalog_product(
+            db=db,
+            tenant_id=tenant_id,
+            sku=sku,
+            unit_price=unit_price,
+            allow_price_fallback=not bool(payload_name),
+        )
+        if row is not None:
+            resolved_id    = getattr(row, "id", None)
+            resolved_title = getattr(row, "title", "") or ""
+            _p = getattr(row, "price", None)
+            if _p is not None:
+                try:
+                    resolved_price = float(_p)
+                except (TypeError, ValueError):
+                    resolved_price = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG_FOCUS] product resolution failed tenant=%s sku=%r: %s",
+            tenant_id, sku, exc,
+        )
 
     # Title selection priority:
-    #   1. Real product row resolved from the merchant's catalog DB.
+    #   1. Real product row resolved from the merchant's catalog DB
+    #      (direct / normalized / unique_price).
     #   2. Human-readable name forwarded by WhatsApp / the BSP in the
     #      order payload (parsed back out of the framed text by the
     #      ``_CATALOG_NAME_RE`` regex above).
@@ -173,8 +292,16 @@ def _maybe_pin_catalog_focus(
     }
     logger.info(
         "[CATALOG_FOCUS] pinned current_product_focus from catalog order | "
-        "tenant=%s sku=%r resolved=%s payload_name=%r qty=%s total=%s currency=%r",
-        tenant_id, sku, bool(resolved_id), payload_name, qty, total_price, currency,
+        "tenant=%s sku=%r db_lookup_matched=%s match_strategy=%s "
+        "payload_name=%r resolved_title=%r unit_price=%s currency=%r",
+        tenant_id,
+        sku,
+        bool(resolved_id),
+        strategy,
+        payload_name,
+        resolved_title,
+        unit_price,
+        currency,
     )
 
 

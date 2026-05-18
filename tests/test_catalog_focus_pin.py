@@ -333,3 +333,306 @@ class TestPinIsWiredIntoPipeline:
         from modules.ai.media.normalizer import CATALOG_FRAME_MARKER
         from modules.ai.brain.pipeline import _CATALOG_FRAME_MARKER
         assert CATALOG_FRAME_MARKER == _CATALOG_FRAME_MARKER
+
+
+# ── 5. Enhanced SKU lookup ladder (June 2026) ────────────────────────────
+
+
+def _fake_product(*, id_, title, price, external_id="", sku="", meta_retailer_id=""):
+    """Stand-in for ``database.models.Product`` so we don't need a
+    live DB. Mirrors only the attributes ``_resolve_catalog_product``
+    reads."""
+    p = MagicMock()
+    p.id = id_
+    p.title = title
+    p.price = price
+    p.external_id = external_id or None
+    p.sku = sku or None
+    p.meta_retailer_id = meta_retailer_id or None
+    return p
+
+
+def _wire_db(*, direct_hit=None, all_rows=None):
+    """Build a mock SQLAlchemy session that distinguishes the direct
+    chain (``query → filter → filter → first``) from the bulk chain
+    (``query → filter → limit → all``).
+    """
+    db = MagicMock()
+    direct_filter = MagicMock()
+    direct_filter.filter.return_value.first.return_value = direct_hit
+    bulk_chain = MagicMock()
+    bulk_chain.limit.return_value.all.return_value = list(all_rows or [])
+    # Both chains share ``query().filter()`` — the SAME object then
+    # branches into ``.filter(...).first()`` (direct) or
+    # ``.limit(...).all()`` (bulk). MagicMock's auto-attribute means
+    # both calls reuse the same parent, which works because the
+    # direct path uses ``.filter().filter().first()`` and the bulk
+    # path uses ``.filter().limit().all()`` — distinct method names.
+    parent = MagicMock()
+    parent.filter.return_value.first.return_value = direct_hit
+    parent.limit.return_value.all.return_value = list(all_rows or [])
+    db.query.return_value.filter.return_value = parent
+    return db
+
+
+class TestResolveDirectStrategy:
+    def test_direct_hit_short_circuits_bulk_query(self):
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        hit = _fake_product(id_=1, title="كريم سم النحل", price=79.0,
+                            external_id="ext-79")
+        # Pre-populate ALL bulk rows with confounders to prove we
+        # short-circuit out of the first pass.
+        confounders = [
+            _fake_product(id_=2, title="WRONG", price=79.0, external_id="x"),
+            _fake_product(id_=3, title="WRONG2", price=79.0, external_id="y"),
+        ]
+        db = _wire_db(direct_hit=hit, all_rows=confounders)
+        row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="ext-79",
+            unit_price=79.0, allow_price_fallback=True,
+        )
+        assert strategy == "direct"
+        assert row is hit
+
+
+class TestResolveNormalizedStrategy:
+    def test_hyphen_dropped_id_matches_after_normalization(self):
+        """Catalog publishes ``"WA-EXT-101"`` but the row has
+        ``external_id="waext101"`` — must still match."""
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=42, title="كريم سم النحل", price=79.0,
+                            external_id="waext101")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="WA-EXT-101",
+            unit_price=79.0, allow_price_fallback=False,
+        )
+        assert strategy == "normalized"
+        assert out_row is row
+
+    def test_normalized_strategy_compares_against_meta_retailer_id(self):
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=7, title="منتج", price=10.0,
+                            meta_retailer_id="prod_42")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="PROD:42",
+            unit_price=None, allow_price_fallback=False,
+        )
+        assert strategy == "normalized"
+        assert out_row is row
+
+    def test_normalized_strategy_compares_against_sku(self):
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=11, title="منتج", price=10.0, sku="abc-123")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="ABC123",
+            unit_price=None, allow_price_fallback=False,
+        )
+        assert strategy == "normalized"
+        assert out_row is row
+
+
+class TestResolveUniquePriceStrategy:
+    def test_unique_price_match_returns_row(self):
+        """When SKU misses entirely AND no payload name was supplied,
+        a single tenant product at the matching price wins."""
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=99, title="كريم سم النحل", price="79.0",
+                            external_id="ext-NEHEL")
+        confounder = _fake_product(id_=100, title="عسل", price="120.0",
+                                   external_id="ext-honey")
+        db = _wire_db(direct_hit=None, all_rows=[row, confounder])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="totally-unknown",
+            unit_price=79.0, allow_price_fallback=True,
+        )
+        assert strategy == "unique_price"
+        assert out_row is row
+
+    def test_two_products_with_same_price_refuse_to_guess(self):
+        """If multiple products share the price, the resolver must
+        return ``"miss"`` rather than silently picking the first."""
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        a = _fake_product(id_=1, title="A", price="79.0", external_id="a")
+        b = _fake_product(id_=2, title="B", price="79.0", external_id="b")
+        db = _wire_db(direct_hit=None, all_rows=[a, b])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="unknown",
+            unit_price=79.0, allow_price_fallback=True,
+        )
+        assert strategy == "miss"
+        assert out_row is None
+
+    def test_price_fallback_disabled_when_payload_name_present(self):
+        """Caller controls the fallback toggle. When WhatsApp already
+        gave us a name we never want to second-guess it via price."""
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=99, title="some other product", price="79.0",
+                            external_id="ext")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="unknown",
+            unit_price=79.0, allow_price_fallback=False,
+        )
+        assert strategy == "miss"
+        assert out_row is None
+
+    def test_price_fallback_skipped_when_unit_price_unknown(self):
+        from modules.ai.brain.pipeline import _resolve_catalog_product
+        row = _fake_product(id_=99, title="X", price="79.0", external_id="ext")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        out_row, strategy = _resolve_catalog_product(
+            db=db, tenant_id=1, sku="",
+            unit_price=None, allow_price_fallback=True,
+        )
+        assert strategy == "miss"
+        assert out_row is None
+
+
+class TestResolveLogsAndDiagnostics:
+    def test_focus_log_includes_db_lookup_matched_and_strategy(self, caplog):
+        """``[CATALOG_FOCUS]`` line must surface the two diagnostic
+        fields the merchant asked for so a log grep instantly answers
+        'did we find the row, and how?'."""
+        import logging as _lg
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        hit = _fake_product(id_=1, title="كريم سم النحل", price=79.0,
+                            external_id="ext-79")
+        db = _wire_db(direct_hit=hit, all_rows=[])
+
+        msg = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "رمز المنتج (SKU): ext-79",
+        ])
+        state = MerchantConversationState()
+        with caplog.at_level(_lg.INFO, logger="nahla.brain.pipeline"):
+            _maybe_pin_catalog_focus(
+                db=db, tenant_id=42, message=msg, state=state,
+            )
+        focus_lines = [
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_FOCUS]" in r.getMessage()
+        ]
+        assert focus_lines, "no [CATALOG_FOCUS] log line emitted"
+        line = focus_lines[-1]
+        assert "db_lookup_matched=True" in line
+        assert "match_strategy=direct" in line
+        assert "tenant=42" in line
+
+    def test_focus_log_records_miss_strategy(self, caplog):
+        import logging as _lg
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        db = _wire_db(direct_hit=None, all_rows=[])
+        msg = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "رمز المنتج (SKU): unknown",
+        ])
+        state = MerchantConversationState()
+        with caplog.at_level(_lg.INFO, logger="nahla.brain.pipeline"):
+            _maybe_pin_catalog_focus(
+                db=db, tenant_id=1, message=msg, state=state,
+            )
+        line = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_FOCUS]" in r.getMessage()
+        )
+        assert "db_lookup_matched=False" in line
+        assert "match_strategy=miss" in line
+
+
+class TestPinIntegrationWithEnhancedLookup:
+    """End-to-end checks at the ``_maybe_pin_catalog_focus`` boundary —
+    the resolver wiring must surface the right title."""
+
+    def test_pin_picks_unique_price_match_when_sku_unknown(self):
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        # The screenshot scenario: WhatsApp gave us a SKU we don't
+        # know, no payload name, but the merchant has exactly ONE
+        # product at 79 SAR — "كريم سم النحل".
+        unique = _fake_product(id_=33, title="كريم سم النحل",
+                               price="79.0", external_id="real-id")
+        db = _wire_db(direct_hit=None, all_rows=[unique])
+        msg = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "رمز المنتج (SKU): bsp-divergent-id",
+        ])
+        state = MerchantConversationState()
+        _maybe_pin_catalog_focus(
+            db=db, tenant_id=1, message=msg, state=state,
+        )
+        f = state.current_product_focus
+        assert f, "focus must be pinned"
+        assert f["title"] == "كريم سم النحل"
+        assert f["id"] == 33
+        assert f["from_catalog_order"] is True
+
+    def test_pin_does_not_use_price_fallback_when_payload_name_exists(self):
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        # Same price collision but payload name was supplied — must
+        # respect the BSP-supplied label, never override via price.
+        row = _fake_product(id_=99, title="DO NOT USE", price="79.0",
+                            external_id="x")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        msg = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "اسم المنتج: كريم سم النحل",
+            "رمز المنتج (SKU): bsp-divergent-id",
+        ])
+        state = MerchantConversationState()
+        _maybe_pin_catalog_focus(
+            db=db, tenant_id=1, message=msg, state=state,
+        )
+        # Title comes from the payload, NOT the unique-price product.
+        assert state.current_product_focus["title"] == "كريم سم النحل"
+
+    def test_pin_uses_normalized_match_for_hyphen_drift(self):
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        row = _fake_product(id_=44, title="كريم سم النحل",
+                            price="79.0", external_id="waext101")
+        db = _wire_db(direct_hit=None, all_rows=[row])
+        msg = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "رمز المنتج (SKU): WA-EXT-101",
+        ])
+        state = MerchantConversationState()
+        _maybe_pin_catalog_focus(
+            db=db, tenant_id=1, message=msg, state=state,
+        )
+        assert state.current_product_focus["title"] == "كريم سم النحل"
+        assert state.current_product_focus["id"] == 44
+
+
+class TestSkuTokenNormalization:
+    def test_strips_punctuation_and_lowercases(self):
+        from modules.ai.brain.pipeline import _normalize_sku_token
+        assert _normalize_sku_token("WA-EXT-101")    == "waext101"
+        assert _normalize_sku_token("  Wa Ext 101  ") == "waext101"
+        assert _normalize_sku_token("wa:ext:101")    == "waext101"
+        assert _normalize_sku_token("waext101")      == "waext101"
+
+    def test_handles_empty_or_none(self):
+        from modules.ai.brain.pipeline import _normalize_sku_token
+        assert _normalize_sku_token("")   == ""
+        assert _normalize_sku_token(None) == ""

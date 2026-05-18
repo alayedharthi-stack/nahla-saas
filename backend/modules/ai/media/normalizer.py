@@ -997,9 +997,21 @@ def _process_catalog_order(
     # field order, ``final_route=brain`` so a grep over server
     # logs immediately answers "did the catalog message reach the
     # brain?".
+    # Diagnostic fields for the focus-pin / DB-lookup investigation
+    # (June 2026 merchant report: SKU 79 SAR didn't resolve to "كريم
+    # سم النحل" because the BSP id format diverged from
+    # ``Product.external_id``).
+    #   raw_retailer_id      — what Meta sent (the SKU we lookup against).
+    #   item_keys            — keys present on ``product_items[0]`` so a
+    #                          future shape change shows up immediately.
+    #   product_names_count  — how many items shipped a human label.
+    first_item_keys: list[str] = []
+    if items and isinstance(items[0], dict):
+        first_item_keys = sorted(items[0].keys())
     logger.info(
         "[CATALOG_MESSAGE_TRACE] wamid=%s item_count=%d total=%s "
-        "currency=%s product_name=%s final_route=brain",
+        "currency=%s product_name=%s raw_retailer_id=%s item_keys=%s "
+        "product_names_count=%d final_route=brain",
         wa_msg_id or "",
         item_count,
         f"{total_price:.2f}" if total_price > 0 else "",
@@ -1008,6 +1020,9 @@ def _process_catalog_order(
         # log line stays informative even when neither side uploaded
         # a title.
         (product_names[0] if product_names else (skus[0] if skus else "")),
+        skus[0] if skus else "",
+        ",".join(first_item_keys),
+        len(product_names),
     )
 
     return MediaNormalizationResult(

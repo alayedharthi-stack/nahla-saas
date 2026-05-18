@@ -480,6 +480,88 @@ class TestCatalogOrderProductNameExtraction:
         assert "اسم المنتج:" not in result.text
 
 
+class TestCatalogTraceDiagnostics:
+    """The merchant asked for richer ``[CATALOG_MESSAGE_TRACE]`` so a
+    log grep instantly answers 'what did Meta send and what keys did
+    we see?' when an SKU fails to resolve in production."""
+
+    def _build(self, items):
+        return {
+            "id":   "wamid.TRACE_001",
+            "type": "order",
+            "order": {
+                "catalog_id": "cat-99",
+                "product_items": items,
+            },
+        }
+
+    def test_trace_includes_raw_retailer_id(self, caplog):
+        with caplog.at_level(logging.INFO, logger="nahla.ai.media"):
+            _normalize(self._build([
+                {
+                    "product_retailer_id": "WA-EXT-101",
+                    "quantity": 1, "item_price": 79, "currency": "SAR",
+                },
+            ]))
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_MESSAGE_TRACE]" in r.getMessage()
+        )
+        assert "raw_retailer_id=WA-EXT-101" in msg
+
+    def test_trace_lists_keys_present_on_first_item(self, caplog):
+        """Future shape changes (BSP adds a new field) should be
+        immediately visible without re-deploying."""
+        with caplog.at_level(logging.INFO, logger="nahla.ai.media"):
+            _normalize(self._build([
+                {
+                    "product_retailer_id": "x",
+                    "name":       "كريم سم النحل",
+                    "quantity":   1,
+                    "item_price": 79,
+                    "currency":   "SAR",
+                },
+            ]))
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_MESSAGE_TRACE]" in r.getMessage()
+        )
+        # Keys are sorted alphabetically for stable diff'ing.
+        assert "item_keys=currency,item_price,name,product_retailer_id,quantity" in msg
+
+    def test_trace_records_product_names_count(self, caplog):
+        with caplog.at_level(logging.INFO, logger="nahla.ai.media"):
+            _normalize(self._build([
+                {
+                    "product_retailer_id": "a", "name": "ربع سمر",
+                    "quantity": 1, "item_price": 79, "currency": "SAR",
+                },
+                {
+                    "product_retailer_id": "b", "name": "ربع طلح",
+                    "quantity": 1, "item_price": 126, "currency": "SAR",
+                },
+            ]))
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_MESSAGE_TRACE]" in r.getMessage()
+        )
+        assert "product_names_count=2" in msg
+
+    def test_trace_records_zero_names_when_payload_lacks_them(self, caplog):
+        with caplog.at_level(logging.INFO, logger="nahla.ai.media"):
+            _normalize(self._build([
+                {
+                    "product_retailer_id": "x",
+                    "quantity": 1, "item_price": 79, "currency": "SAR",
+                },
+            ]))
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_MESSAGE_TRACE]" in r.getMessage()
+        )
+        assert "product_names_count=0" in msg
+
+
 class TestCatalogFocusPinUsesPayloadName:
     """The ``_maybe_pin_catalog_focus`` helper must use the
     payload-supplied name as a fallback title when the merchant's
