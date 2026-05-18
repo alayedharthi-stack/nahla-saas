@@ -322,9 +322,24 @@ export interface DashboardMessageMediaImage {
   error: string | null
 }
 
+export interface DashboardMessageMediaVideo {
+  kind: 'video'
+  message_event_id: number
+  storage_url: string | null
+  mime_type: string | null
+  duration: number | null
+  download_status: string | null
+  caption: string | null
+  filename: string | null
+  forwarded: boolean
+  frequently_forwarded: boolean
+  error: string | null
+}
+
 export type DashboardMessageMedia =
   | DashboardMessageMediaAudio
   | DashboardMessageMediaImage
+  | DashboardMessageMediaVideo
 
 // ── Outbound send status (Meta / 360dialog wire-layer outcome) ──────
 // Surfaced per outbound MessageEvent so the UI can tell the merchant

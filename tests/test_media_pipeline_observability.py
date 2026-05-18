@@ -912,17 +912,17 @@ class TestStaleSkippedTranslation:
     mutated — pure read-time translation."""
 
     def _extract_media_block(self):
-        """The function is defined inline inside the route handler.
-        We re-implement the SAME logic here for testability — and
-        the test will catch any drift against the real one by also
-        importing the source and asserting the override block is
-        present."""
+        """``_media_block`` was inlined inside the route handler for
+        years; May 2026 it was hoisted to module scope as
+        ``_build_media_block`` so the video passthrough could pin
+        the contract under unit tests. We assert against that
+        module-level function source so drift fails CI."""
         # Locate the source so a drifted implementation fails CI.
         import inspect
         from routers import conversations as conv_mod
-        src = inspect.getsource(conv_mod.get_conversation_messages)
+        src = inspect.getsource(conv_mod._build_media_block)
         assert "stale_skipped" in src, (
-            "_media_block lost the stale_skipped translation — "
+            "_build_media_block lost the stale_skipped translation — "
             "frontend will revert to misleading 'OPENAI_API_KEY مفقود' "
             "on historical rows."
         )

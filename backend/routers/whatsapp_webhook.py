@@ -2452,7 +2452,48 @@ async def _dispatch_message(
                     )
             return
 
-        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document"}:
+        # ── INBOUND_MEDIA_TRACE (mandatory pre-ignore audit line) ──
+        # Per the May 2026 spec: emit ONE structured trace line for
+        # every inbound media payload BEFORE the type allow-list
+        # decides whether to drop it. Lets on-call grep production
+        # for "where did this video / audio / sticker go?" without
+        # re-running anything. Never raises.
+        try:
+            _imt_meta = normalized_inbound.metadata or {}
+            logger.info(
+                "[INBOUND_MEDIA_TRACE] provider=%s msg_type=%s "
+                "normalized_type=%s wamid=%s media_id=%s tenant=%s "
+                "phone_number_id=%s sender=%s "
+                "normalized_should_process=%s "
+                "caption=%r mime=%s filename=%r "
+                "message_saved=pending ui_visible=unknown",
+                # Provider hint: 360dialog vs Meta direct. We can't
+                # know definitively here; surface what the route
+                # registered as the source.
+                "wa_cloud_or_360dialog",
+                msg_type,
+                normalized_inbound.normalized_type,
+                msg_id or None,
+                _imt_meta.get("media_id"),
+                resolved_tenant_id,
+                phone_number_id or None,
+                sender,
+                normalized_inbound.should_process,
+                (_imt_meta.get("caption") or "")[:80],
+                _imt_meta.get("mime_type"),
+                _imt_meta.get("filename"),
+            )
+        except Exception:
+            pass
+
+        # Allow-list of normalized types the brain pipeline accepts.
+        # Updated May 2026 to include ``video`` so inbound video
+        # messages flow to the new lightweight passthrough in the
+        # normaliser instead of being silently dropped at
+        # ``INBOUND_IGNORED_UNSUPPORTED``. Video reaches the brain
+        # exactly like a captioned image: the normaliser builds an
+        # Arabic-framed prompt and the brain writes its own reply.
+        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document", "video"}:
             # ── Button-tap rescue: "button" type = customer tapped a template
             # quick-reply.  The normalizer marks it unsupported, but we have
             # already extracted human-readable text via _extract_wa_message_text.

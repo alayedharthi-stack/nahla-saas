@@ -273,3 +273,101 @@ class TestVideoMediaRouteTrace:
                 f"missing required field {fragment!r}\n"
                 f"trace: {trace_line}"
             )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. UI surface — conversations API returns a video media block
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestConversationsApiSurfacesVideo:
+    """Lock the contract between the persisted ``normalized_inbound``
+    metadata (written by ``_handle_merchant_message``) and the
+    ``_media_block`` helper that the conversations messages endpoint
+    uses to populate ``message.media`` for the dashboard.
+
+    Pre-May-2026, ``_media_block`` only matched ``source_type`` in
+    ``{audio, image}`` — a video row therefore came back as a plain
+    text bubble even after the webhook accepted it. These tests pin
+    that a video row produces a ``kind='video'`` block carrying the
+    storage_url + duration + filename the UI expects.
+    """
+
+    def test_video_row_produces_video_media_block(self):
+        from routers import conversations as _conv
+
+        extra_metadata = {
+            "normalized_inbound": {
+                "source_type":          "video",
+                "storage_url":          "/media/inbound/42/abc123.mp4",
+                "mime_type":            "video/mp4",
+                "duration_seconds":     7,
+                "video_download_status": "ok",
+                "caption":              "بارك الله بك",
+                "filename":             "VID_0001.mp4",
+                "forwarded":            True,
+                "frequently_forwarded": False,
+            }
+        }
+
+        block = _conv._build_media_block(
+            message_event_id=1234, meta=extra_metadata,
+        )
+        assert block is not None
+        assert block["kind"]            == "video"
+        assert block["storage_url"]     == "/media/inbound/42/abc123.mp4"
+        assert block["mime_type"]       == "video/mp4"
+        assert block["duration"]        == 7
+        assert block["caption"]         == "بارك الله بك"
+        assert block["filename"]        == "VID_0001.mp4"
+        assert block["forwarded"]       is True
+        assert block["frequently_forwarded"] is False
+        assert block["download_status"] == "ok"
+
+    def test_audio_and_image_blocks_still_work(self):
+        """Regression guard — adding video must NOT break the
+        audio / image branches the dashboard has shipped for a year.
+        """
+        from routers import conversations as _conv
+
+        audio_block = _conv._build_media_block(
+            message_event_id=1,
+            meta={
+                "normalized_inbound": {
+                    "source_type":          "audio",
+                    "storage_url":          "/media/inbound/1/a.ogg",
+                    "mime_type":            "audio/ogg",
+                    "duration_seconds":     3,
+                    "voice":                True,
+                    "transcript_text":      "السلام عليكم",
+                    "transcript_status":    "ok",
+                    "audio_download_status": "ok",
+                    "ai_used_audio":        True,
+                },
+            },
+        )
+        assert audio_block is not None
+        assert audio_block["kind"] == "audio"
+
+        image_block = _conv._build_media_block(
+            message_event_id=2,
+            meta={
+                "normalized_inbound": {
+                    "source_type":          "image",
+                    "storage_url":          "/media/inbound/1/i.jpg",
+                    "mime_type":            "image/jpeg",
+                    "vision_text":          "صورة منتج",
+                    "vision_status":        "ok",
+                    "image_download_status": "ok",
+                    "ai_used_image":        True,
+                },
+            },
+        )
+        assert image_block is not None
+        assert image_block["kind"] == "image"
+
+    def test_unknown_source_type_returns_none(self):
+        from routers import conversations as _conv
+        assert _conv._build_media_block(
+            message_event_id=1, meta={"normalized_inbound": {"source_type": "sticker"}},
+        ) is None

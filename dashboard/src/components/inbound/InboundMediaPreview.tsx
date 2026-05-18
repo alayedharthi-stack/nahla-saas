@@ -44,6 +44,7 @@ import type {
   DashboardMessageMedia,
   DashboardMessageMediaAudio,
   DashboardMessageMediaImage,
+  DashboardMessageMediaVideo,
 } from '../../api/featureReality'
 
 interface BlobUrlState {
@@ -112,9 +113,9 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
         }
         // Defensive: a 200 with a JSON error body (e.g. proxy hijack)
         // would otherwise be bound to <audio src=...> and render a
-        // silent broken player. Reject anything that isn't audio/image.
+        // silent broken player. Reject anything that isn't audio/image/video.
         const contentType = res.headers.get('content-type') || ''
-        if (!/^(audio|image)\//.test(contentType)) {
+        if (!/^(audio|image|video)\//.test(contentType)) {
           if (!cancelled) {
             setState({
               url: null,
@@ -346,8 +347,65 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
   )
 }
 
+function VideoPreview({ media }: { media: DashboardMessageMediaVideo }) {
+  const { url, loading, httpStatus, networkError } = useAuthedMediaBlob(media.storage_url)
+  const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
+
+  return (
+    <div className="flex flex-col gap-1.5 max-w-full">
+      <div className="rounded-xl overflow-hidden bg-slate-50 border border-slate-100">
+        {url ? (
+          <video
+            controls
+            preload="metadata"
+            src={url}
+            className="block max-w-[280px] max-h-[280px] bg-black"
+          />
+        ) : loading ? (
+          <div className="px-3 py-6 text-[12px] text-slate-500 text-center">
+            جاري تحميل الفيديو…
+          </div>
+        ) : downloadFailed && !media.storage_url ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            لم يصل الفيديو من واتساب أثناء الاستقبال.
+          </div>
+        ) : httpStatus ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            تعذر تشغيل الفيديو — {statusLabelAr(httpStatus)}
+          </div>
+        ) : networkError ? (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            تعذر تشغيل الفيديو — {networkError}
+          </div>
+        ) : (
+          <div className="px-3 py-6 text-[12px] text-rose-600 text-center">
+            تعذر تشغيل الفيديو.
+          </div>
+        )}
+      </div>
+
+      {(media.filename || media.duration != null) && (
+        <div className="text-[11px] text-slate-500 flex flex-wrap gap-2">
+          {media.filename && <span>📎 {media.filename}</span>}
+          {media.duration != null && <span>⏱ {media.duration}s</span>}
+          {media.frequently_forwarded && (
+            <span className="text-amber-700">↪ معاد توجيهه كثيراً</span>
+          )}
+        </div>
+      )}
+
+      {media.caption && (
+        <div className="text-[12.5px] text-slate-600 whitespace-pre-wrap break-words">
+          {media.caption}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function InboundMediaPreview({ media }: { media: DashboardMessageMedia }) {
   if (media.kind === 'audio') return <AudioPreview media={media} />
   if (media.kind === 'image') return <ImagePreview media={media} />
+  if (media.kind === 'video') return <VideoPreview media={media} />
   return null
 }

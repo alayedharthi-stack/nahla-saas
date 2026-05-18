@@ -455,8 +455,24 @@ class TestWebhookIntegration:
         src = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(
             encoding="utf-8", errors="replace",
         )
-        assert '{"text", "audio", "image"}' in src, (
+        # The allow-list grew over time (added ``document`` for PDF
+        # receipts, ``video`` for the May 2026 video passthrough).
+        # What we care about for THIS regression guard is that
+        # ``image`` is present — vision pipeline depends on it.
+        import re as _re
+        m = _re.search(
+            r'normalized_inbound\.normalized_type\s+not\s+in\s+\{([^}]+)\}',
+            src,
+        )
+        assert m, "webhook normalized_type allow-list not found"
+        allow_set = m.group(1)
+        assert '"image"' in allow_set, (
             "webhook still gates out image — vision pipeline cannot fire"
+        )
+        # Sanity: the May 2026 video passthrough requires "video" too,
+        # otherwise inbound videos die at INBOUND_IGNORED_UNSUPPORTED.
+        assert '"video"' in allow_set, (
+            "webhook still gates out video — videos cannot reach the UI / brain"
         )
 
 

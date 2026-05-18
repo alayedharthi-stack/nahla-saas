@@ -88,6 +88,15 @@ _MIME_TO_EXT = {
     # Document (PDF, primarily; receipts from Saudi banks)
     "application/pdf":  ".pdf",
     "application/x-pdf": ".pdf",
+    # Video — added May 2026 so videos forwarded into a conversation
+    # land on a stable extension (``.mp4`` / ``.3gp`` / etc.) the
+    # dashboard's ``<video>`` element can play back without extra
+    # mime sniffing. WhatsApp Cloud predominantly sends ``video/mp4``.
+    "video/mp4":        ".mp4",
+    "video/3gpp":       ".3gp",
+    "video/quicktime":  ".mov",
+    "video/x-matroska": ".mkv",
+    "video/webm":       ".webm",
 }
 
 
@@ -107,7 +116,7 @@ class StoredInboundMedia:
     storage_path: str
     storage_url: str
     tenant_id: int
-    kind: str           # "audio" | "image" | "document"
+    kind: str           # "audio" | "image" | "document" | "video"
     dedup: bool         # True when the same sha256 already existed on disk
 
 

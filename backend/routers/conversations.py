@@ -29,6 +29,97 @@ import logging as _logging  # noqa: E402
 _log = _logging.getLogger("nahla-backend")
 
 
+# ── Inbound-media UI block builder (module-scope so it's testable) ──
+# Surfaces inbound media (audio / image / video) so the conversation
+# drawer can render a player / preview with the AI-extracted text
+# rendered underneath. Returns ``None`` for text rows so the
+# frontend falls back to the plain bubble layout.
+def _build_media_block(
+    message_event_id: int,
+    meta: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    ni = (meta or {}).get("normalized_inbound") or {}
+    src = str(ni.get("source_type") or "").lower()
+    if src not in {"audio", "image", "video"}:
+        return None
+
+    if src == "video":
+        return {
+            "kind":              "video",
+            "message_event_id":  message_event_id,
+            "storage_url":       ni.get("storage_url"),
+            "mime_type":         ni.get("mime_type"),
+            "duration":          ni.get("duration_seconds"),
+            "download_status":   ni.get("video_download_status"),
+            "caption":           ni.get("caption"),
+            "filename":          ni.get("filename"),
+            "forwarded":         bool(ni.get("forwarded") or False),
+            "frequently_forwarded": bool(
+                ni.get("frequently_forwarded") or False
+            ),
+            "error":             ni.get("video_error"),
+        }
+
+    # ── Stale `skipped` override ──────────────────────────────
+    # Historical rows that came in BEFORE the OPENAI_API_KEY env
+    # var was added to the worker still carry
+    # ``transcript_status='skipped'`` / ``vision_status='skipped'``
+    # in their `extra_metadata.normalized_inbound`. We translate
+    # the stale `skipped` to `stale_skipped` at read-time so the
+    # UI can show "snapshot from when the key was missing — try
+    # reprocess" instead. We do this only when the status is
+    # exactly 'skipped', the recorded error matches the "not
+    # configured" reason, AND the current runtime env has the
+    # key (so the misleading snapshot is actually fixed now).
+    import os as _os  # noqa: PLC0415
+    _openai_present_now = bool(_os.environ.get("OPENAI_API_KEY", "").strip())
+    if src == "audio":
+        t_status = ni.get("transcript_status")
+        t_error  = ni.get("transcript_error")
+        if (
+            _openai_present_now
+            and t_status == "skipped"
+            and t_error in ("stt_not_configured", "vision_not_configured")
+        ):
+            t_status = "stale_skipped"
+        return {
+            "kind":              "audio",
+            "message_event_id":  message_event_id,
+            "storage_url":       ni.get("storage_url"),
+            "mime_type":         ni.get("mime_type"),
+            "duration":          ni.get("duration_seconds"),
+            "voice":             bool(ni.get("voice")),
+            "transcript":        ni.get("transcript_text"),
+            "transcript_status": t_status,
+            "download_status":   ni.get("audio_download_status"),
+            "ai_used":           bool(ni.get("ai_used_audio") or False),
+            "caption":           ni.get("caption"),
+            "error":             ni.get("transcript_error"),
+        }
+
+    # image
+    v_status = ni.get("vision_status")
+    v_error  = ni.get("vision_error")
+    if (
+        _openai_present_now
+        and v_status == "skipped"
+        and v_error in ("vision_not_configured", "stt_not_configured")
+    ):
+        v_status = "stale_skipped"
+    return {
+        "kind":              "image",
+        "message_event_id":  message_event_id,
+        "storage_url":       ni.get("storage_url"),
+        "mime_type":         ni.get("mime_type"),
+        "description":       ni.get("vision_text"),
+        "vision_status":     v_status,
+        "download_status":   ni.get("image_download_status"),
+        "ai_used":           bool(ni.get("ai_used_image") or False),
+        "caption":           ni.get("caption"),
+        "error":             ni.get("vision_error"),
+    }
+
+
 class ReplyIn(BaseModel):
     customer_phone: str
     message: str
@@ -1207,102 +1298,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
             return "ai"
         return "system"
 
-    def _media_block(message_event_id: int, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Surface inbound media so the conversation drawer can render
-        an audio player / image preview with the transcript / vision
-        text rendered underneath. Returns ``None`` for text rows so
-        the frontend can fall back to the plain bubble layout.
-
-        We include ``download_status`` separately from the AI status
-        so the UI can distinguish three cases that previously all
-        looked like "تعذر عرض ...":
-
-          * download_status='failed' AND storage_url=null
-            → the bytes never landed; reprocess will try to
-              re-download from Meta if the media_id is still valid.
-          * download_status='ok'      AND storage_url=null
-            → impossible by construction (kept for safety).
-          * download_status='ok'      AND ai status='skipped'
-            → bytes are stored, transcript/vision was skipped
-              because OPENAI_API_KEY is missing in this environment.
-        """
-        ni = (meta or {}).get("normalized_inbound") or {}
-        src = str(ni.get("source_type") or "").lower()
-        if src not in {"audio", "image"}:
-            return None
-
-        # ── Stale `skipped` override ──────────────────────────────
-        #
-        # Historical rows that came in BEFORE the OPENAI_API_KEY env
-        # var was added to the worker still carry
-        # ``transcript_status='skipped'`` / ``vision_status='skipped'``
-        # in their `extra_metadata.normalized_inbound`. The frontend's
-        # conditional renders THAT status as
-        #
-        #   "ميزة وصف الصور غير مفعّلة على الخادم (OPENAI_API_KEY مفقود)"
-        #
-        # which is now MISLEADING — the key IS present, only the
-        # historical snapshot was taken before it was. We translate
-        # the stale `skipped` to `stale_skipped` at read-time so the
-        # UI can show "snapshot from when the key was missing — try
-        # reprocess" instead. We do this only when:
-        #
-        #   1. The status is exactly 'skipped', AND
-        #   2. The recorded error matches the "not configured" reason
-        #      (so we don't accidentally override a legitimate future
-        #      'skipped' that means something different), AND
-        #   3. The CURRENT runtime env has the key (i.e. the
-        #      misleading-snapshot condition is actually fixed now).
-        #
-        # We don't mutate the DB row — pure read-time translation.
-        # The reprocess endpoint can still be invoked from the
-        # button; the new ETag is just whether the merchant sees a
-        # legacy "key missing" claim or not.
-        _openai_present_now = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-        if src == "audio":
-            t_status = ni.get("transcript_status")
-            t_error  = ni.get("transcript_error")
-            if (
-                _openai_present_now
-                and t_status == "skipped"
-                and t_error in ("stt_not_configured", "vision_not_configured")
-            ):
-                t_status = "stale_skipped"
-            return {
-                "kind":              "audio",
-                "message_event_id":  message_event_id,
-                "storage_url":       ni.get("storage_url"),
-                "mime_type":         ni.get("mime_type"),
-                "duration":          ni.get("duration_seconds"),
-                "voice":             bool(ni.get("voice")),
-                "transcript":        ni.get("transcript_text"),
-                "transcript_status": t_status,
-                "download_status":   ni.get("audio_download_status"),
-                "ai_used":           bool(ni.get("ai_used_audio") or False),
-                "caption":           ni.get("caption"),
-                "error":             ni.get("transcript_error"),
-            }
-        # image
-        v_status = ni.get("vision_status")
-        v_error  = ni.get("vision_error")
-        if (
-            _openai_present_now
-            and v_status == "skipped"
-            and v_error in ("vision_not_configured", "stt_not_configured")
-        ):
-            v_status = "stale_skipped"
-        return {
-            "kind":              "image",
-            "message_event_id":  message_event_id,
-            "storage_url":       ni.get("storage_url"),
-            "mime_type":         ni.get("mime_type"),
-            "description":       ni.get("vision_text"),
-            "vision_status":     v_status,
-            "download_status":   ni.get("image_download_status"),
-            "ai_used":           bool(ni.get("ai_used_image") or False),
-            "caption":           ni.get("caption"),
-            "error":             ni.get("vision_error"),
-        }
+    _media_block = _build_media_block  # alias keeps inline usage cheap
 
     def _send_status_block(meta: Dict[str, Any], direction: str) -> Dict[str, Any]:
         """Surface the wire-layer outcome stamped onto outbound rows by
@@ -1494,7 +1490,7 @@ async def conversation_media_debug(
             # already; here we only want media diagnostics.
             continue
         source_type = str(ni.get("source_type") or "").lower()
-        if source_type not in {"audio", "image"}:
+        if source_type not in {"audio", "image", "video"}:
             continue
 
         transcript_text = ni.get("transcript_text") or ""
