@@ -72,6 +72,11 @@ _CATALOG_FRAME_MARKER = "[طلب كتالوج من العميل]"
 _CATALOG_SKU_RE      = _re_catalog.compile(r"رمز المنتج \(SKU\):\s*(\S+)")
 _CATALOG_TOTAL_RE    = _re_catalog.compile(r"الإجمالي:\s*([0-9]+(?:\.[0-9]+)?)\s*(\S+)?")
 _CATALOG_QTY_RE      = _re_catalog.compile(r"عدد المنتجات:\s*(\d+)")
+# Captures the human-readable product label the normalizer extracts
+# from the catalog payload when the BSP includes a name field.
+# Stops at end-of-line so a multi-product join (" + ") stays intact
+# but the trailing buying-intent paragraph does not leak in.
+_CATALOG_NAME_RE     = _re_catalog.compile(r"^اسم المنتج:\s*(.+?)\s*$", _re_catalog.MULTILINE)
 
 
 def _maybe_pin_catalog_focus(
@@ -102,10 +107,12 @@ def _maybe_pin_catalog_focus(
     sku_m   = _CATALOG_SKU_RE.search(message)
     total_m = _CATALOG_TOTAL_RE.search(message)
     qty_m   = _CATALOG_QTY_RE.search(message)
+    name_m  = _CATALOG_NAME_RE.search(message)
 
     sku      = (sku_m.group(1).strip() if sku_m else "") or ""
     qty      = int(qty_m.group(1)) if qty_m else 1
     currency = (total_m.group(2).strip() if (total_m and total_m.group(2)) else "")
+    payload_name = (name_m.group(1).strip() if name_m else "") or ""
     try:
         total_price = float(total_m.group(1)) if total_m else None
     except (TypeError, ValueError):
@@ -148,18 +155,26 @@ def _maybe_pin_catalog_focus(
                 tenant_id, sku, exc,
             )
 
+    # Title selection priority:
+    #   1. Real product row resolved from the merchant's catalog DB.
+    #   2. Human-readable name forwarded by WhatsApp / the BSP in the
+    #      order payload (parsed back out of the framed text by the
+    #      ``_CATALOG_NAME_RE`` regex above).
+    #   3. Empty string — let the LLM speak from price + context.
+    final_title = resolved_title or payload_name or ""
+
     state.current_product_focus = {
         "id":           resolved_id if resolved_id is not None else (sku or "catalog_order"),
         "external_id":  sku,
-        "title":        resolved_title,
+        "title":        final_title,
         "price":        resolved_price if resolved_price is not None else unit_price,
         "currency":     currency,
         "from_catalog_order": True,
     }
     logger.info(
         "[CATALOG_FOCUS] pinned current_product_focus from catalog order | "
-        "tenant=%s sku=%r resolved=%s qty=%s total=%s currency=%r",
-        tenant_id, sku, bool(resolved_id), qty, total_price, currency,
+        "tenant=%s sku=%r resolved=%s payload_name=%r qty=%s total=%s currency=%r",
+        tenant_id, sku, bool(resolved_id), payload_name, qty, total_price, currency,
     )
 
 

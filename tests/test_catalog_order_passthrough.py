@@ -324,3 +324,220 @@ class TestCatalogOrderNotDropped:
             f"dropped by the webhook router as INBOUND_IGNORED_"
             f"UNSUPPORTED — catalog orders are silenced again"
         )
+
+
+# ── Product-name extraction (June 2026) ─────────────────────────────
+#
+# Background: the merchant captured a screenshot where the bot said
+# "ما وصلني اسم المنتج بالضبط" even though WhatsApp's catalog card on
+# the customer's phone clearly displayed the product name. Meta's
+# documented order shape only carries ``product_retailer_id``, but
+# many BSPs / 360dialog payloads decorate ``product_items`` with a
+# human-readable label. When that label IS in the payload we MUST
+# forward it to the brain so the LLM uses the real name instead of
+# guessing.
+
+
+class TestCatalogOrderProductNameExtraction:
+
+    def _build(self, items):
+        return {
+            "id":   "wamid.NAME_001",
+            "type": "order",
+            "order": {
+                "catalog_id": "cat-99",
+                "product_items": items,
+            },
+        }
+
+    def test_name_field_per_item_is_forwarded_to_brain(self):
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "honey-samr-quarter",
+                "name":     "ربع كيلو سمر",
+                "quantity": 1,
+                "item_price": 79,
+                "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج: ربع كيلو سمر" in result.text, (
+            f"product name missing from brain text: {result.text!r}"
+        )
+        assert result.metadata.get("product_names") == ["ربع كيلو سمر"]
+
+    def test_title_field_is_used_when_name_missing(self):
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "x",
+                "title":    "بروبوليس بالعسل 250غ",
+                "quantity": 1,
+                "item_price": 69,
+                "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج: بروبوليس بالعسل 250غ" in result.text
+        assert result.metadata["product_names"] == ["بروبوليس بالعسل 250غ"]
+
+    def test_retailer_name_field_is_recognised(self):
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "x",
+                "retailer_name": "كريم سدر",
+                "quantity": 1,
+                "item_price": 50,
+                "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج: كريم سدر" in result.text
+
+    def test_nested_product_subobject_is_unwrapped(self):
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "x",
+                "product": {"name": "عسل طلح فاخر"},
+                "quantity": 1,
+                "item_price": 200,
+                "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج: عسل طلح فاخر" in result.text
+
+    def test_multiple_items_join_distinct_names(self):
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "a",
+                "name": "ربع سمر",
+                "quantity": 1, "item_price": 79, "currency": "SAR",
+            },
+            {
+                "product_retailer_id": "b",
+                "name": "ربع طلح",
+                "quantity": 1, "item_price": 126, "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج: ربع سمر + ربع طلح" in result.text
+        assert result.metadata["product_names"] == ["ربع سمر", "ربع طلح"]
+
+    def test_top_level_product_name_is_used_as_fallback(self):
+        message = {
+            "id": "wamid.TOP_001", "type": "order",
+            "order": {
+                "catalog_id":   "cat-99",
+                "product_name": "كريم نحلة",
+                "product_items": [
+                    {
+                        "product_retailer_id": "x",
+                        "quantity": 1, "item_price": 30, "currency": "SAR",
+                    },
+                ],
+            },
+        }
+        result = _normalize(message)
+        assert "اسم المنتج: كريم نحلة" in result.text
+        assert result.metadata["product_names"] == ["كريم نحلة"]
+
+    def test_missing_name_does_not_emit_empty_line(self):
+        """If no name is anywhere in the payload, the framed text
+        must NOT contain a stray ``اسم المنتج:`` line — that would
+        leak as garbage to the LLM."""
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "x",
+                "quantity": 1, "item_price": 30, "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج:" not in result.text
+        assert result.metadata["product_names"] == []
+
+    def test_trace_log_uses_real_name_when_available(self, caplog):
+        with caplog.at_level(logging.INFO, logger="nahla.ai.media"):
+            _normalize(self._build([
+                {
+                    "product_retailer_id": "honey-samr-quarter",
+                    "name":     "ربع كيلو سمر",
+                    "quantity": 1, "item_price": 79, "currency": "SAR",
+                },
+            ]))
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "[CATALOG_MESSAGE_TRACE]" in r.getMessage()
+        )
+        assert "product_name=ربع كيلو سمر" in msg, (
+            "trace log must surface the real label when present, not the SKU"
+        )
+
+    def test_blank_name_strings_are_ignored(self):
+        """Whitespace-only names must not produce an empty ``اسم
+        المنتج:`` line."""
+        result = _normalize(self._build([
+            {
+                "product_retailer_id": "x",
+                "name":     "   ",
+                "title":    "",
+                "quantity": 1, "item_price": 30, "currency": "SAR",
+            },
+        ]))
+        assert "اسم المنتج:" not in result.text
+
+
+class TestCatalogFocusPinUsesPayloadName:
+    """The ``_maybe_pin_catalog_focus`` helper must use the
+    payload-supplied name as a fallback title when the merchant's
+    catalog DB doesn't yet have a row for the SKU."""
+
+    def test_pin_uses_payload_name_when_db_misses(self):
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        # Re-create the framed text the normalizer would produce
+        # for an order whose item carries a ``name`` field.
+        message = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "اسم المنتج: ربع كيلو سمر",
+            "رمز المنتج (SKU): honey-samr-quarter",
+            "ملاحظة: العميل أرسل طلبًا من كتالوج واتساب.",
+        ])
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.filter.return_value.first.return_value = None
+
+        state = MerchantConversationState()
+        _maybe_pin_catalog_focus(db=db, tenant_id=1, message=message, state=state)
+
+        assert state.current_product_focus, "focus must be pinned"
+        assert state.current_product_focus["title"] == "ربع كيلو سمر", (
+            f"payload name not used as title fallback: "
+            f"{state.current_product_focus!r}"
+        )
+        assert state.current_product_focus["from_catalog_order"] is True
+
+    def test_db_resolved_title_wins_over_payload_name(self):
+        """Real catalog rows are the source of truth — the
+        payload-supplied name is only a fallback."""
+        from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
+        from modules.ai.brain.types import MerchantConversationState
+
+        product = MagicMock()
+        product.id = 11
+        product.title = "ربع كيلو سمر — عبوة فاخرة"
+        product.price = 79.0
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.filter.return_value.first.return_value = product
+
+        message = "\n".join([
+            "[طلب كتالوج من العميل]",
+            "عدد المنتجات: 1",
+            "الإجمالي: 79 SAR",
+            "اسم المنتج: ربع كيلو سمر",
+            "رمز المنتج (SKU): honey-samr-quarter",
+        ])
+
+        state = MerchantConversationState()
+        _maybe_pin_catalog_focus(db=db, tenant_id=1, message=message, state=state)
+
+        assert state.current_product_focus["title"] == "ربع كيلو سمر — عبوة فاخرة", (
+            "DB-resolved title must win over the payload-supplied name"
+        )

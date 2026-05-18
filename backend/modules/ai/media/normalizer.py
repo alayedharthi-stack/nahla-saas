@@ -867,10 +867,41 @@ def _process_catalog_order(
         except (TypeError, ValueError):
             return default
 
+    # Some webhook variants (BSPs, in-app catalog views, ad-replies)
+    # decorate ``product_items`` with a human-readable label even
+    # though Meta's official spec only mandates ``product_retailer_id``
+    # / ``quantity`` / ``item_price`` / ``currency``. WhatsApp itself
+    # renders a name on the catalog card — when ANY of those labels
+    # is present in the payload, we want to forward it to the brain
+    # so the LLM doesn't have to guess.
+    _NAME_KEYS = (
+        "name", "title",
+        "product_name", "product_title",
+        "retailer_name", "retailer_title",
+        "label",
+    )
+
+    def _extract_item_name(it: Dict[str, Any]) -> str:
+        for k in _NAME_KEYS:
+            v = it.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        # Some BSPs nest the catalog card under a ``product`` /
+        # ``catalog_item`` sub-dict — peek one level deep.
+        for sub_key in ("product", "catalog_item", "item"):
+            sub = it.get(sub_key)
+            if isinstance(sub, dict):
+                for k in _NAME_KEYS:
+                    v = sub.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return ""
+
     total_qty: int = 0
     total_price: float = 0.0
     currencies: list[str] = []
     skus: list[str] = []
+    product_names: list[str] = []
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -884,12 +915,25 @@ def _process_catalog_order(
         sku = str(it.get("product_retailer_id") or "").strip()
         if sku:
             skus.append(sku)
+        name = _extract_item_name(it)
+        if name:
+            product_names.append(name)
 
     # ``text`` on the order block is an optional note the customer
     # typed in the catalog cart UI. Treat it as a free-form note
     # the brain should consider.
     customer_note = str(order_payload.get("text") or "").strip()
     catalog_id    = str(order_payload.get("catalog_id") or "").strip()
+
+    # Top-level product name — some BSPs hoist the title up so the
+    # webhook doesn't even need a per-item lookup. Used only when
+    # the per-item scan didn't find anything.
+    if not product_names:
+        for k in ("product_name", "product_title", "title", "name"):
+            v = order_payload.get(k)
+            if isinstance(v, str) and v.strip():
+                product_names.append(v.strip())
+                break
 
     item_count = total_qty if total_qty > 0 else len(items)
     currency = currencies[0] if currencies else ""
@@ -908,6 +952,17 @@ def _process_catalog_order(
             else f"{int(total_price)}"
         )
         lines.append(f"الإجمالي: {total_str} {currency}".strip())
+    if product_names:
+        # Surface the human-readable label to the brain BEFORE the
+        # SKU so the LLM uses the real name in its reply instead of
+        # guessing from price alone. Multiple distinct names are
+        # joined with " + " — keeps the line readable and lets the
+        # brain reason about a multi-product order.
+        seen: list[str] = []
+        for n in product_names:
+            if n not in seen:
+                seen.append(n)
+        lines.append(f"اسم المنتج: {' + '.join(seen)}")
     if skus:
         # First SKU only in the visible line — extra SKUs go to
         # metadata for the merchant audit trail; we don't dump
@@ -930,6 +985,7 @@ def _process_catalog_order(
         "total_price":     total_price if total_price > 0 else None,
         "currency":        currency or None,
         "product_skus":    skus,
+        "product_names":   product_names,
         "customer_note":   customer_note or None,
         # Echo the raw items list so a future audit query can
         # reconstruct exactly what the customer submitted without
@@ -948,7 +1004,10 @@ def _process_catalog_order(
         item_count,
         f"{total_price:.2f}" if total_price > 0 else "",
         currency or "",
-        skus[0] if skus else "",
+        # Prefer real label when available, fall back to SKU so the
+        # log line stays informative even when neither side uploaded
+        # a title.
+        (product_names[0] if product_names else (skus[0] if skus else "")),
     )
 
     return MediaNormalizationResult(
