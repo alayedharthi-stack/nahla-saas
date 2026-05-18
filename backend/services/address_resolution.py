@@ -59,9 +59,15 @@ _MAPS_URL_RE = re.compile(
 _AT_COORDS_RE    = re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)")
 _PAIR_COORDS_RE  = re.compile(r"\b(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\b")
 _BANG_COORDS_RE  = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
-# Apple Maps ?q=lat,lng  /  ?ll=lat,lng  /  Waze ?ll=lat,lng  /  Google ?center=lat,lng
+# Coordinate query params we accept across providers:
+#   * Google           ── ?q=lat,lng / ?center=lat,lng / ?sll=lat,lng / ?daddr=lat,lng
+#   * Apple Maps       ── ?ll=lat,lng / ?q=lat,lng / ?coordinate=lat,lng (newer iOS)
+#   * Waze             ── ?ll=lat,lng
+# ``coordinate`` and ``sll`` are added for Apple's newer share format
+# and Google's "search location" param respectively — both observed in
+# real customer shares but absent from the original regex.
 _QUERY_COORDS_RE = re.compile(
-    r"[?&](?:q|ll|daddr|center)=(-?\d+\.\d+),(-?\d+\.\d+)"
+    r"[?&](?:q|ll|daddr|center|sll|coordinate)=(-?\d+\.\d+),(-?\d+\.\d+)"
 )
 
 
@@ -84,13 +90,44 @@ class ResolvedNationalAddress:
 
 
 def extract_address_signals(text: str) -> Dict[str, Any]:
+    """Extract any address-y signals from a free-form customer message.
+
+    Returns a dict with:
+      * ``short_address_code`` — Saudi national 4-letter+4-digit code
+      * ``google_maps_url``    — a clickable map URL the merchant can
+        open in any browser. When the customer shared a non-Google
+        URL (Apple Maps / Waze / shortened Google) AND we managed to
+        pull coordinates out of it, we synthesise a canonical
+        ``https://maps.google.com/?q=lat,lng`` so staff and dashboards
+        always see a Google-clickable link without having to install
+        the original app. Source URL is preserved when no coords were
+        recovered (so merchant can still open it in Apple/Waze).
+      * ``latitude`` / ``longitude`` — first valid pair found
+
+    The synthesised Google URL is the "internal Google Maps lookup"
+    requested in the merchant brief: NO new dependency, NO reverse
+    geocode network call — we just rebuild a stable URL from the
+    coords we already extracted.
+    """
     raw = text or ""
     short_match = _SHORT_CODE_RE.search(raw)
     map_match = _MAPS_URL_RE.search(raw)
     lat, lng = _extract_coords(raw)
+
+    source_url = map_match.group(1) if map_match else ""
+
+    # Synthesise a Google Maps URL whenever we have real coords AND
+    # the source URL is missing or non-Google. Keeps the rest of the
+    # pipeline (template rendering, merchant dashboard preview, audit
+    # logs) on a single canonical URL shape.
+    google_maps_url = source_url
+    if lat is not None and lng is not None:
+        if not source_url or "google.com" not in source_url.lower():
+            google_maps_url = f"https://maps.google.com/?q={lat},{lng}"
+
     return {
         "short_address_code": short_match.group(1).upper() if short_match else "",
-        "google_maps_url": map_match.group(1) if map_match else "",
+        "google_maps_url": google_maps_url,
         "latitude": lat,
         "longitude": lng,
     }

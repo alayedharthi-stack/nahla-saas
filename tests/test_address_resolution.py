@@ -244,3 +244,153 @@ class TestExtractAddressSignals:
         signals = extract_address_signals(text)
         assert "maps.app.goo.gl" in signals["google_maps_url"]
         assert signals["latitude"] is None   # coords only after expand
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. June 2026 — Apple Maps support hardening
+# ──────────────────────────────────────────────────────────────────────
+# Merchant brief:
+#   * Apple Maps share links must be understood "like Google Maps".
+#   * If we can extract coords from any non-Google source, synthesise
+#     a Google Maps URL internally so staff and dashboards always
+#     have a clickable Google link without installing the original
+#     app — "حوّل الإحداثيات داخليًا إلى Google Maps lookup".
+#   * No new layers, no new templates, no router changes.
+
+
+class TestAppleMapsHardening:
+    """Lock the contract that Apple Maps URLs are first-class:
+    coords extracted, AND a synthesised Google URL is exposed
+    via the same ``google_maps_url`` field."""
+
+    def test_apple_maps_with_ll_synthesises_google_url(self) -> None:
+        text = "موقعي https://maps.apple.com/?ll=21.3891,39.8579&t=m"
+        signals = extract_address_signals(text)
+        # Coords extracted as before.
+        assert abs(signals["latitude"] - 21.3891) < 1e-4
+        assert abs(signals["longitude"] - 39.8579) < 1e-4
+        # ``google_maps_url`` is now a clickable Google URL —
+        # NOT the Apple URL — so staff don't need maps.apple.com.
+        url = signals["google_maps_url"]
+        assert "google.com" in url, (
+            f"expected synthesised Google Maps URL, got {url!r}"
+        )
+        assert "21.3891" in url and "39.8579" in url
+
+    def test_apple_maps_with_q_synthesises_google_url(self) -> None:
+        text = "https://maps.apple.com/?q=24.7136,46.6753"
+        signals = extract_address_signals(text)
+        assert abs(signals["latitude"] - 24.7136) < 1e-4
+        assert "google.com" in signals["google_maps_url"]
+
+    def test_apple_maps_coordinate_param_is_supported(self) -> None:
+        """Apple's newer iOS share format uses ``?coordinate=lat,lng``
+        (rather than the legacy ``?ll=…``). The merchant brief asked
+        us to handle the modern format too so coords aren't dropped."""
+        text = "https://maps.apple.com/?coordinate=24.7,46.7&q=Riyadh"
+        signals = extract_address_signals(text)
+        assert abs(signals["latitude"] - 24.7) < 1e-4
+        assert abs(signals["longitude"] - 46.7) < 1e-4
+        assert "google.com" in signals["google_maps_url"]
+
+    def test_waze_url_also_synthesises_google_url(self) -> None:
+        """Same treatment for Waze — coords on a non-Google host
+        get rewritten to a clickable Google URL."""
+        text = "https://waze.com/ul?ll=24.6877,46.7219"
+        signals = extract_address_signals(text)
+        assert "google.com" in signals["google_maps_url"]
+        assert "24.6877" in signals["google_maps_url"]
+
+    def test_native_google_url_is_not_rewritten(self) -> None:
+        """Don't touch URLs that are ALREADY Google — the original
+        URL often carries richer context (place id, place name,
+        reviews) that the synthesised ``?q=lat,lng`` would discard."""
+        original = "https://www.google.com/maps/place/Riyadh/@24.7136,46.6753,12z"
+        signals = extract_address_signals(f"موقعي: {original}")
+        assert signals["google_maps_url"] == original
+
+    def test_apple_maps_text_query_without_coords_keeps_apple_url(
+        self,
+    ) -> None:
+        """When the customer pastes an Apple URL with a text-only
+        ``?q=Riyadh`` (no coords), we have nothing to synthesise from
+        — keep the Apple URL so the merchant can still click it."""
+        text = "https://maps.apple.com/?q=Riyadh"
+        signals = extract_address_signals(text)
+        assert "maps.apple.com" in signals["google_maps_url"]
+        assert signals["latitude"] is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6. June 2026 — "محفوظ ولن أعيد سؤالك عنه" removed
+# ──────────────────────────────────────────────────────────────────────
+# Merchant brief:
+#   * The line "محفوظ ولن أعيد سؤالك عنه" reads robotic on map /
+#     national-code / location confirmations. Replace with a single
+#     warm sentence ("وصلني ... 🌷") and drop the hardcoded "Google
+#     Maps" label since the source URL may be Apple / Waze.
+#   * No new template, just a wording cleanup of the existing one.
+
+
+class TestAddressStashTemplateCleanup:
+
+    def test_template_no_longer_promises_no_re_ask(self) -> None:
+        from modules.ai.brain.compose.templates import (
+            address_stashed_pre_product,
+        )
+        text = address_stashed_pre_product(
+            short_code="RIYD1234",
+            google_maps_url="https://maps.google.com/?q=24.7,46.7",
+            city="الرياض",
+        )
+        # Forbidden substrings — the old robotic phrasing.
+        for forbidden in (
+            "محفوظ ولن أعيد",
+            "لن أعيد سؤالك",
+            "محفوظ ولن",
+        ):
+            assert forbidden not in text, (
+                f"address_stashed_pre_product still emits the disabled "
+                f"phrase {forbidden!r}: {text!r}"
+            )
+        # Still acknowledges receipt warmly with the natural opener.
+        assert "وصلني" in text
+        # Still nudges the customer to pick a product (the entire
+        # point of this template — without this line, the customer
+        # waits forever).
+        assert "اختر المنتج" in text
+
+    def test_template_does_not_hardcode_google_maps_label(self) -> None:
+        """Apple Maps / Waze URLs end up stored in the same field —
+        the customer-facing label must NOT claim "Google Maps"
+        specifically."""
+        from modules.ai.brain.compose.templates import (
+            address_stashed_pre_product,
+        )
+        text = address_stashed_pre_product(
+            google_maps_url="https://maps.apple.com/?ll=24.7,46.7",
+        )
+        assert "Google Maps" not in text
+        # Still mentions the location was received, in some form.
+        assert "موقع" in text
+
+    def test_template_uses_city_when_provided(self) -> None:
+        from modules.ai.brain.compose.templates import (
+            address_stashed_pre_product,
+        )
+        text = address_stashed_pre_product(city="جدة")
+        assert "جدة" in text
+        assert "محفوظ ولن" not in text
+
+    def test_template_falls_back_to_neutral_phrasing_on_empty_input(
+        self,
+    ) -> None:
+        from modules.ai.brain.compose.templates import (
+            address_stashed_pre_product,
+        )
+        # Defensive: stash dispatched without any populated field
+        # must still yield a polite confirmation, not a broken
+        # "وصلني  🌷" (with a double space).
+        text = address_stashed_pre_product()
+        assert "وصلني" in text
+        assert "  " not in text  # no double-space artefact

@@ -506,20 +506,29 @@ def address_stashed_pre_product(
     city: str = "",
     **_: Any,
 ) -> str:
-    """Customer dropped address info before picking a product. Confirm we
-    saved it so they don't repeat themselves, and ask them to choose a
-    product. The order flow consumes the stash on the next turn, so the
-    bot will NOT ask for the address again."""
+    """Customer dropped address info before picking a product. Confirm
+    receipt softly and nudge them to choose a product. The order flow
+    consumes the stash on the next turn so the bot will NOT ask for
+    the address again — the previous wording ("محفوظ ولن أعيد سؤالك
+    عنه") read robotic and made the bot sound like it was negotiating
+    with the customer; merchants asked us to drop it.
+
+    Two minor wording cleanups (June 2026):
+      * "موقع Google Maps" → "موقعك" — the source URL may be Apple
+        Maps / Waze / Google; the label is now provider-agnostic.
+      * The "محفوظ ولن أعيد سؤالك عنه" line is removed entirely.
+        Confirmation is a single warm sentence.
+    """
     bits: List[str] = []
     if short_code:
         bits.append(f"الرمز الوطني *{short_code}*")
     if google_maps_url:
-        bits.append("موقع Google Maps")
+        bits.append("موقعك")
     if city:
         bits.append(f"المدينة *{city}*")
-    saved = " و ".join(bits) if bits else "بيانات العنوان"
+    saved = " و ".join(bits) if bits else "بيانات عنوانك"
     return (
-        f"وصلني {saved} ✅ — محفوظ ولن أعيد سؤالك عنه.\n\n"
+        f"وصلني {saved} 🌷\n\n"
         "قبل ما نكمّل، اختر المنتج اللي تبغاه من القائمة (أرسل رقمه أو اسمه)."
     )
 
