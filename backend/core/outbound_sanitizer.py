@@ -11,9 +11,18 @@ WhatsApp threads after an out-of-scope question
 ("ايهما حساب كهرباء الشقة"). That broke merchant trust instantly:
 the AI looked like a search engine, not a sales assistant.
 
+A second incident (June 2026) leaked raw planner-field identifiers
+(``response_goal``, ``execute_pending_offer``,
+``resolve_ambiguous_need``) into a customer WhatsApp thread. The
+LLM had quoted its own prompt scaffolding inside an otherwise
+natural Arabic reply — a class of leak that the bracketed-marker
+scrubber (``core.ai_libraries.scrub_internal_markers``) does not
+catch because the identifiers are bare words, not ``[FOO]``-shaped
+tokens.
+
 Defence in depth
 ────────────────
-Three layers protect outbound replies from external-research leakage:
+Layers protecting outbound replies from leakage:
 
   1. ``modules/ai/tools/web_search.search_web`` is hard-gated by
      ``MERCHANT_EXTERNAL_RESEARCH_ENABLED`` (default OFF). Even if a
@@ -21,13 +30,18 @@ Three layers protect outbound replies from external-research leakage:
   2. The decision engine never proposes ``ACTION_WEB_SEARCH`` unless
      the env is opted in; out-of-scope questions route to a canned
      deflection that never calls the LLM.
-  3. *This module*. Right before ``_post_wa`` ships a payload to
-     360dialog / Cloud API, we scan the outbound text for any of the
-     known leakage fingerprints and replace the body with a safe
-     fallback if we find one. Logged as ``[EXTERNAL_RESEARCH_BLOCKED]``.
+  3. ``core.ai_libraries.scrub_internal_markers`` strips bracketed
+     tokens (``[TRANSFER]``, ``[TEMPLATE:foo]``, …) at the brain
+     boundary, persistence layer and wire layer.
+  4. *This module*. Right before ``_post_wa`` ships a payload to
+     360dialog / Cloud API, we scan the outbound text for known
+     leakage fingerprints and either rewrite to a clean segment
+     (planner leak) or replace with a safe fallback (search leak).
+     Logged as ``[EXTERNAL_RESEARCH_BLOCKED]`` /
+     ``[INTERNAL_PLANNER_BLOCKED]``.
 
-The third layer is what makes the guarantee airtight: ANY future code
-path that somehow produces a search-y reply still gets caught here.
+The wire-level guard is what makes the guarantee airtight: ANY
+future code path that produces a leaky reply still gets caught here.
 
 Public surface
 ──────────────
@@ -36,16 +50,26 @@ Public surface
   was_sanitised)``. Handles ``text``, ``interactive.button`` and
   ``interactive.cta_url`` body fields. Anything else passes through
   unchanged.
-* ``contains_leakage_markers(text)`` — pure-function predicate for
-  unit tests and ad-hoc checks.
+* ``contains_leakage_markers(text)`` — predicate for the search-leak
+  fingerprints (returns name or ``None``).
+* ``contains_planner_markers(text)`` — predicate for the
+  internal-planner fingerprints (returns name or ``None``).
+* ``extract_natural_segment(text)`` — best-effort recovery of the
+  clean Arabic part of a reply that was contaminated with planner
+  text. Returns the recovered string or ``None`` when nothing
+  recoverable remains.
 
-The sanitiser is intentionally CONSERVATIVE:
+The sanitiser is intentionally CONSERVATIVE for the search case:
   * Single-host store links like ``mystore.salla.sa/product/123`` are
     fine — only the patterns associated with external-search dumps
     trip the rule.
   * The DuckDuckGo bridge (``html.duckduckgo.com/l/?uddg=…``) is the
     canonical leak source we observed in production; that alone is
     enough to drop the reply.
+
+For the planner case the strategy is RECOVERY-FIRST: we try to keep
+the natural Arabic message the customer was meant to see and only
+fall back to a generic apology when no clean segment can be salvaged.
 """
 from __future__ import annotations
 
@@ -88,6 +112,107 @@ _MAX_URLS_PER_MESSAGE = 2
 
 _URL_RE = re.compile(r"https?://\S+|(?<![A-Za-z0-9])//\S+", re.IGNORECASE)
 
+# ── Internal planner / debug-field fingerprints ──────────────────────────────
+#
+# These are bare identifier tokens copy-pasted out of the brain
+# scaffolding (prompts, decision engine, fallback policy) that have
+# no business appearing in a customer-facing reply. They are NOT
+# bracketed, so ``scrub_internal_markers`` (ASCII-uppercase brackets
+# only) cannot catch them.
+#
+# The identifiers are matched as standalone words / assignment
+# fragments so we don't accidentally strip a customer's own English
+# noun. ``\b`` boundaries + the very specific snake_case shape of
+# planner identifiers keeps false positives low: a customer would
+# not naturally type ``execute_pending_offer`` in Arabic.
+_PLANNER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("response_goal",          re.compile(r"\bresponse_goal\b",                 re.IGNORECASE)),
+    ("execute_pending_offer",  re.compile(r"\bexecute_pending_offer\b",         re.IGNORECASE)),
+    ("resolve_ambiguous_need", re.compile(r"\bresolve_ambiguous_need\b",        re.IGNORECASE)),
+    # ACTION_LLM_REPLY, ACTION_WEB_SEARCH, ACTION_HANDOFF, …
+    ("action_token",           re.compile(r"\bACTION_[A-Z][A-Z0-9_]*\b")),
+    # GOAL_ANSWER, GOAL_RETRY, GOAL_ACK, GOAL_HANDOFF
+    ("goal_constant",          re.compile(r"\bGOAL_[A-Z][A-Z0-9_]*\b")),
+    # FALLBACK_KIND_NEUTRAL_RETRY, …
+    ("fallback_kind_const",    re.compile(r"\bFALLBACK_KIND_[A-Z][A-Z0-9_]*\b")),
+    # Field-style assignments ``intent=...`` / ``decision=...``
+    # / ``stage:exploring``. Both ``=`` and ``:`` are treated as
+    # assignment because the prompt formats it as ``key: value``.
+    ("intent_field",           re.compile(r"\bintent\s*[:=]",                   re.IGNORECASE)),
+    ("decision_field",         re.compile(r"\bdecision\s*[:=]",                 re.IGNORECASE)),
+    ("relational_frame_field", re.compile(r"\brelational_frame\s*[:=]",         re.IGNORECASE)),
+    ("recommended_next_step",  re.compile(r"\brecommended_next_step\s*[:=]",    re.IGNORECASE)),
+    ("fallback_kind_field",    re.compile(r"\bfallback_kind\s*[:=]",            re.IGNORECASE)),
+    # Bare English diagnostic words. A customer-facing Arabic reply
+    # never contains these — their presence is a strong leak signal.
+    ("internal_word",          re.compile(r"\binternal\b",                      re.IGNORECASE)),
+    ("debug_word",             re.compile(r"\bdebug\b",                         re.IGNORECASE)),
+    ("planner_word",           re.compile(r"\bplanner\b",                       re.IGNORECASE)),
+]
+
+
+def contains_planner_markers(text: str) -> Optional[str]:
+    """Return the name of the first matching planner-field
+    fingerprint, or ``None`` when ``text`` is clean. Pure function;
+    safe to call from tests."""
+    if not text or not isinstance(text, str):
+        return None
+    for name, pattern in _PLANNER_PATTERNS:
+        if pattern.search(text):
+            return name
+    return None
+
+
+def extract_natural_segment(text: str) -> Optional[str]:
+    """Best-effort recovery of the clean customer-facing portion of
+    a reply that was contaminated with planner identifiers.
+
+    Strategy
+    ────────
+    1. Split ``text`` on blank lines (``\\n\\n+``). Drop every
+       paragraph that contains a planner marker. If anything
+       survives, return it (joined back with one blank line).
+    2. Otherwise split on single newlines and drop every line that
+       contains a planner marker. If a non-trivial remainder
+       survives, return it.
+    3. Otherwise return ``None``.
+
+    The first strategy handles the common LLM failure mode (one
+    "thinking out loud" paragraph followed by a clean Arabic reply
+    paragraph — exactly the June 2026 leak shape). The second is a
+    fallback for replies that were not double-newline separated.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    # Strategy 1: paragraph-level filtering.
+    paragraphs = re.split(r"\n\s*\n+", text.strip())
+    clean_paragraphs = [
+        p.strip()
+        for p in paragraphs
+        if p.strip() and contains_planner_markers(p) is None
+    ]
+    if clean_paragraphs:
+        recovered = "\n\n".join(clean_paragraphs).strip()
+        if recovered:
+            return recovered
+
+    # Strategy 2: line-level filtering.
+    lines = text.splitlines()
+    clean_lines = [
+        ln.strip()
+        for ln in lines
+        if ln.strip() and contains_planner_markers(ln) is None
+    ]
+    if clean_lines:
+        recovered = "\n".join(clean_lines).strip()
+        # Require at least 3 chars so we don't keep a stray single
+        # punctuation mark that happens to sit on its own line.
+        if len(recovered) >= 3:
+            return recovered
+
+    return None
+
 # ── Safe fallback ────────────────────────────────────────────────────────────
 #
 # Returned to the customer when we drop a leaky reply (URLs, search
@@ -116,11 +241,28 @@ def contains_leakage_markers(text: str) -> Optional[str]:
     return None
 
 
-def _replace_body_in_payload(payload: Dict[str, Any], new_text: str) -> bool:
+def _replace_body_in_payload(
+    payload: Dict[str, Any],
+    new_text: str,
+    *,
+    strip_buttons: bool = True,
+) -> bool:
     """Replace the customer-facing body of a WhatsApp Cloud API
     payload with ``new_text``. Returns True if a replacement was
     performed (we matched a known shape) or False if the payload
     doesn't carry an editable text body.
+
+    ``strip_buttons`` controls what happens to interactive payloads:
+
+    * ``True`` (default, used for search-dump scrubs) drops every
+      ``buttons`` / ``cta_url`` action because those almost certainly
+      pointed at the leaky URL and are no longer meaningful once
+      the body has been replaced with a generic apology.
+    * ``False`` (used for planner-identifier scrubs where we
+      RECOVERED the natural Arabic body) keeps the existing buttons
+      since they were authored for the same reply turn — the buttons
+      reflect the author's intent and stripping them would degrade
+      a perfectly valid customer message.
     """
     if not isinstance(payload, dict):
         return False
@@ -139,19 +281,13 @@ def _replace_body_in_payload(payload: Dict[str, Any], new_text: str) -> bool:
             body_block = interactive.setdefault("body", {})
             if isinstance(body_block, dict):
                 body_block["text"] = new_text
-                # When we scrub a search dump we also drop any
-                # buttons that came with it — there's no clean way
-                # to know if a "اطلب الآن" button still makes sense
-                # when the body has been rewritten.
-                action = interactive.get("action")
-                if isinstance(action, dict) and "buttons" in action:
-                    action["buttons"] = []
-                # Same logic for the cta_url variant — strip the
-                # link so we don't ship a button pointing to a search
-                # result page.
-                if isinstance(action, dict) and action.get("name") == "cta_url":
-                    interactive["type"] = "button"
-                    interactive["action"] = {"buttons": []}
+                if strip_buttons:
+                    action = interactive.get("action")
+                    if isinstance(action, dict) and "buttons" in action:
+                        action["buttons"] = []
+                    if isinstance(action, dict) and action.get("name") == "cta_url":
+                        interactive["type"] = "button"
+                        interactive["action"] = {"buttons": []}
                 return True
 
     return False
@@ -190,6 +326,49 @@ def sanitize_outbound_payload(
         body = _extract_existing_body(payload)
         if not body:
             return payload, False
+
+        # ── Internal-planner leak (June 2026) ───────────────────
+        # Try to recover the natural Arabic part of the reply
+        # rather than dropping the whole message. Only fall back
+        # to the generic apology when nothing recoverable remains.
+        planner_match = contains_planner_markers(body)
+        if planner_match:
+            recovered = extract_natural_segment(body)
+            if (
+                recovered
+                and recovered != body
+                and contains_planner_markers(recovered) is None
+            ):
+                new_text = recovered
+                outcome  = "recovered_natural_segment"
+                strip_buttons = False
+            else:
+                new_text = SAFE_FALLBACK_TEXT
+                outcome  = "fallback_no_clean_segment"
+                strip_buttons = True
+            logger.warning(
+                "[INTERNAL_PLANNER_BLOCKED] tenant=%s to=%s marker=%s "
+                "outcome=%s original_len=%d preview=%r",
+                tenant_id,
+                recipient,
+                planner_match,
+                outcome,
+                len(body),
+                body[:140],
+            )
+            if _replace_body_in_payload(
+                payload, new_text, strip_buttons=strip_buttons
+            ):
+                return payload, True
+            logger.warning(
+                "[INTERNAL_PLANNER_BLOCKED] tenant=%s could not rewrite "
+                "payload type=%r — blanking body",
+                tenant_id, payload.get("type"),
+            )
+            _replace_body_in_payload(payload, "")
+            return payload, True
+
+        # ── External-research leak (May 2026) ───────────────────
         match = contains_leakage_markers(body)
         if not match:
             return payload, False
@@ -219,7 +398,7 @@ def sanitize_outbound_payload(
         # The sanitiser MUST NOT take the send path down. Worst case:
         # we log the exception and let the original payload through.
         logger.exception(
-            "[EXTERNAL_RESEARCH_BLOCKED] sanitizer crashed tenant=%s err=%s — "
+            "[OUTBOUND_SANITIZER] crashed tenant=%s err=%s — "
             "letting payload through",
             tenant_id, exc,
         )
@@ -229,5 +408,7 @@ def sanitize_outbound_payload(
 __all__ = [
     "SAFE_FALLBACK_TEXT",
     "contains_leakage_markers",
+    "contains_planner_markers",
+    "extract_natural_segment",
     "sanitize_outbound_payload",
 ]
