@@ -736,6 +736,28 @@ async def normalize_whatsapp_inbound(
             order_context=order_context,
         )
 
+    if msg_type == "video":
+        # Inbound videos used to fall through to the
+        # ``INBOUND_IGNORED_UNSUPPORTED`` branch and the customer
+        # got NO reply at all — even when the video had a useful
+        # caption (production: "خاص بارك الله بك لاترسل" / a Hajj
+        # dua reel / a beekeeping clip). Per the May 2026 spec, a
+        # video that is NOT a receipt and NOT a map flows to the
+        # brain as ``general_media`` with whatever lightweight
+        # signals we have (caption, filename, mime, duration,
+        # forwarded context) plus an Arabic framing line so GPT
+        # writes the reply naturally — no canned template, no
+        # payment/order/shipping guard.
+        return await _process_video(
+            db=db,
+            wa_conn=wa_conn,
+            tenant_id=tenant_id,
+            video_payload=message.get("video") or {},
+            ts_raw=ts_raw,
+            wa_msg_id=wa_msg_id,
+            context=message.get("context") or {},
+        )
+
     return MediaNormalizationResult(
         normalized_type=msg_type or "unsupported",
         metadata={
@@ -960,6 +982,167 @@ def _audio_with_fallback(
         metadata=base_meta,
         should_process=False,
         fallback_reply_ar=AUDIO_FALLBACK_REPLY_AR,
+    )
+
+
+# ── Video ───────────────────────────────────────────────────────────
+
+
+async def _process_video(
+    *,
+    db: Any,
+    wa_conn: Any,
+    tenant_id: int,
+    video_payload: Dict[str, Any],
+    ts_raw: Any,
+    wa_msg_id: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> MediaNormalizationResult:
+    """Lightweight passthrough for inbound video messages (May 2026).
+
+    Policy (per user spec):
+      * Video that is NOT clearly a receipt or a map MUST flow to
+        the brain as ``general_media`` — no canned template, no
+        payment/order/shipping guards.
+      * We use only the lightweight signals WhatsApp gives us:
+        caption, filename, mime_type, sha256, duration if relayed
+        by the BSP, and the forwarded/in-reply context. NO video
+        frame extraction, NO ffmpeg, NO heavy layer.
+      * Persistent storage best-effort so the merchant drawer can
+        still play the file from the inbox. A storage failure must
+        NOT block the brain reply.
+      * One ``[MEDIA_ROUTE_TRACE]`` log line per call so on-call
+        can grep production for "why did the bot reply X to this
+        video?" without re-running anything.
+
+    Returns a ``MediaNormalizationResult`` with
+    ``normalized_type="video"`` and a brain-facing text already
+    framed in Arabic so the LLM understands it's a video, gets the
+    customer's caption / forward markers, and writes its own
+    reply naturally.
+    """
+    media_id     = str(video_payload.get("id") or "").strip()
+    mime_type    = str(video_payload.get("mime_type") or "").strip()
+    caption      = str(video_payload.get("caption") or "").strip()
+    filename     = str(video_payload.get("filename") or "").strip()
+    sha256       = str(video_payload.get("sha256") or "").strip()
+    duration_raw = video_payload.get("duration")
+    # WhatsApp's forwarding markers — useful tone signal for the
+    # brain ("forwarded many times" usually means a viral
+    # greeting / dua reel, not a customer-specific question).
+    ctx = context or {}
+    forwarded             = bool(ctx.get("forwarded"))
+    frequently_forwarded  = bool(ctx.get("frequently_forwarded"))
+
+    base_meta: Dict[str, Any] = {
+        "source_type":          "video",
+        "media_id":             media_id or None,
+        "mime_type":            mime_type or None,
+        "caption":              caption or None,
+        "filename":             filename or None,
+        "sha256":               sha256 or None,
+        "duration_seconds":     duration_raw,
+        "wa_timestamp":         ts_raw,
+        "wa_message_id":        wa_msg_id or None,
+        "video_download_status": "pending",
+        "storage_url":          None,
+        "storage_sha256":       None,
+        "byte_size":            None,
+        "forwarded":            forwarded,
+        "frequently_forwarded": frequently_forwarded,
+    }
+
+    # Best-effort download + persist so the merchant inbox drawer
+    # can play the file. Skipped silently when no media_id (rare,
+    # only happens on malformed payloads) — the brain still sees
+    # the caption.
+    if media_id:
+        try:
+            downloaded = await _download_meta_media(
+                db=db, wa_conn=wa_conn, tenant_id=tenant_id,
+                media_id=media_id, mime_type=mime_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[VIDEO] download attempt failed tenant=%s "
+                "media_id=%s err=%s",
+                tenant_id, media_id, exc,
+            )
+            downloaded = None
+        if downloaded is not None:
+            stored = _try_persist(
+                tenant_id=tenant_id,
+                file_bytes=downloaded["bytes"],
+                mime_type=downloaded["mime_type"] or mime_type or "video/mp4",
+                kind="video",
+                media_id=media_id,
+            )
+            base_meta["video_download_status"] = "ok"
+            if stored is not None:
+                base_meta["storage_url"]    = stored.storage_url
+                base_meta["storage_sha256"] = stored.sha256
+                base_meta["byte_size"]      = stored.byte_size
+                if not base_meta.get("mime_type"):
+                    base_meta["mime_type"] = stored.mime_type
+        else:
+            base_meta["video_download_status"] = "failed"
+
+    # ── Brain-facing text ─────────────────────────────────────────
+    # Single Arabic framing line + whatever signals we have. The
+    # LLM is the layer that interprets the video. We do NOT add a
+    # canned acknowledgement — the brain writes the reply itself
+    # using its existing persona + conversation context.
+    pieces: list = ["[فيديو من العميل]"]
+    if caption:
+        pieces.append(f"التعليق: {caption}")
+    if filename:
+        pieces.append(f"اسم الملف: {filename}")
+    if mime_type:
+        pieces.append(f"النوع: {mime_type}")
+    if duration_raw not in (None, "", 0):
+        try:
+            pieces.append(f"المدة: {int(duration_raw)} ث")
+        except (TypeError, ValueError):
+            pass
+    if frequently_forwarded:
+        pieces.append("ملاحظة: الفيديو أُعيد توجيهه مرات عديدة "
+                      "(غالباً محتوى عام: دعاء / تهنئة / إعلان).")
+    elif forwarded:
+        pieces.append("ملاحظة: الفيديو معاد توجيهه.")
+    pieces.append(
+        "اقرأ السياق ورد على العميل بأسلوبك الطبيعي حسب محتوى "
+        "الفيديو وسياق المحادثة. ممنوع اقتراح اختيار منتج إلا "
+        "إذا العميل فعلاً يطلب شراءً. إذا الفيديو غير مفهوم، رد "
+        "بلطف بسؤال مفتوح."
+    )
+    combined = "\n".join(pieces)
+
+    # MEDIA_ROUTE_TRACE — grep-target. Never raises.
+    try:
+        # OCR preview placeholder. We don't OCR video frames in this
+        # lightweight path; the field stays empty unless a future
+        # patch wires thumbnail extraction. Caller can always grep
+        # by `ocr_text_preview=''` to find the video-passthrough
+        # path explicitly.
+        logger.info(
+            "[MEDIA_ROUTE_TRACE] media_type=video tenant=%s "
+            "media_id=%s mime=%s filename=%r caption=%r "
+            "duration=%s forwarded=%s frequently_forwarded=%s "
+            "thumbnail_available=False ocr_text_preview='' "
+            "final_route=vision_brain reply_sent=deferred "
+            "block_reason=none",
+            tenant_id, media_id, mime_type, filename,
+            (caption or "")[:80], duration_raw, forwarded,
+            frequently_forwarded,
+        )
+    except Exception:
+        pass
+
+    return MediaNormalizationResult(
+        normalized_type="video",
+        text=combined,
+        metadata=base_meta,
+        should_process=True,
     )
 
 

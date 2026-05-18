@@ -160,10 +160,10 @@ def save_inbound_media(
     """
     if not file_bytes:
         raise ValueError("save_inbound_media: empty payload")
-    if kind not in {"audio", "image", "document"}:
+    if kind not in {"audio", "image", "document", "video"}:
         raise ValueError(
-            f"save_inbound_media: kind must be 'audio', 'image' or "
-            f"'document' (got {kind!r})"
+            f"save_inbound_media: kind must be 'audio', 'image', "
+            f"'document' or 'video' (got {kind!r})"
         )
 
     sha256 = hashlib.sha256(file_bytes).hexdigest()
