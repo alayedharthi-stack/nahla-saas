@@ -988,6 +988,108 @@ def _audio_with_fallback(
 # ── Video ───────────────────────────────────────────────────────────
 
 
+# ── Lightweight video frame extraction (ffmpeg) ────────────────────
+# We extract ONE frame from the inbound video and run the existing
+# image-vision describer on it so the brain receives an actual
+# visual summary ("صورة عيد عليها 'يارب استجب' و 'ذي الحجة'") instead
+# of metadata-only context. The cost is bounded:
+#   * single subprocess (ffmpeg) bounded by 8s timeout,
+#   * scaled to <=640px max width (cheap to vision-call),
+#   * fail-open: any error/exception returns None and the existing
+#     metadata-only path takes over. The video is NEVER dropped.
+async def _extract_video_frame(
+    video_bytes: bytes,
+    *,
+    seek_seconds: float = 0.5,
+    timeout_seconds: float = 8.0,
+) -> Optional[bytes]:
+    """Decode one JPEG frame from a video clip using ffmpeg.
+
+    Strategy:
+      * Write the bytes to a tempfile (MP4 needs a seekable input
+        for the moov atom — piping into ffmpeg's stdin breaks on
+        most consumer MP4s).
+      * Fast-seek to ``seek_seconds`` (default 0.5s — usually past
+        any black-frame intro), grab 1 frame, scale to <=640px wide
+        so the vision call stays cheap.
+      * Return the JPEG bytes, or ``None`` on any failure.
+
+    Never raises. The caller stays defensive — a missing frame
+    must not block the video from reaching the brain.
+    """
+    if not video_bytes:
+        return None
+    if shutil.which("ffmpeg") is None:
+        return None
+
+    import asyncio as _asyncio_local  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    tmp_path: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".bin", delete=False,
+        ) as _f:
+            _f.write(video_bytes)
+            tmp_path = _f.name
+
+        # -ss BEFORE -i = fast seek (input-side). Acceptable
+        # accuracy for thumbnailing; much faster than output-side
+        # seek on long clips.
+        cmd = [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "error",
+            "-y",  # never prompt
+            "-ss", f"{max(0.0, float(seek_seconds)):.2f}",
+            "-i",  tmp_path,
+            "-frames:v", "1",
+            "-vf", "scale='min(640,iw)':-2",
+            "-f", "image2",
+            "-vcodec", "mjpeg",
+            "-q:v", "5",  # decent quality / small size
+            "pipe:1",
+        ]
+
+        proc = await _asyncio_local.create_subprocess_exec(
+            *cmd,
+            stdout=_asyncio_local.subprocess.PIPE,
+            stderr=_asyncio_local.subprocess.PIPE,
+        )
+        try:
+            stdout, _stderr = await _asyncio_local.wait_for(
+                proc.communicate(),
+                timeout=timeout_seconds,
+            )
+        except _asyncio_local.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            logger.warning(
+                "[VIDEO_FRAME] ffmpeg timed out after %.1fs — "
+                "frame extraction skipped",
+                timeout_seconds,
+            )
+            return None
+
+        if proc.returncode != 0 or not stdout:
+            return None
+        return stdout
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[VIDEO_FRAME] frame extraction failed (non-fatal): %s",
+            exc,
+        )
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
 # ── Lightweight video topic inference ──────────────────────────────
 # Pure-string keyword pass over the caption + filename to produce a
 # tiny "topic_hints" list the brain can use to engage with the
@@ -1041,11 +1143,21 @@ def _infer_video_topic_hints(
     *,
     caption: str,
     filename: str,
+    frame_vision_text: str = "",
 ) -> list:
     """Return a short list of topic hints inferred from the textual
     signals attached to a video. ADVISORY ONLY — never used to compose
     a canned reply, only to tell the brain "this seems to be about X
-    so don't reply 'I can't see the video'."
+    so don't reply 'I can't see the video'.
+
+    Signals folded into the haystack (May 2026):
+      * caption — verbatim
+      * filename — only if NOT auto-generated (``VID_xxx``, etc.)
+      * frame_vision_text — the OpenAI vision describer's Arabic
+        summary of the single frame we extracted from the clip,
+        when ffmpeg+vision succeeded. This is the highest-signal
+        source (it includes any visible overlay text the customer
+        sent).
     """
     haystack_parts: list = []
     if caption:
@@ -1058,6 +1170,8 @@ def _infer_video_topic_hints(
         is_auto = any(p in fn_lower for p in _VIDEO_AUTO_FILENAME_PATTERNS)
         if not is_auto:
             haystack_parts.append(fn_lower)
+    if frame_vision_text:
+        haystack_parts.append(frame_vision_text.lower())
     if not haystack_parts:
         return []
     haystack = " ".join(haystack_parts)
@@ -1132,7 +1246,17 @@ async def _process_video(
         "byte_size":            None,
         "forwarded":            forwarded,
         "frequently_forwarded": frequently_forwarded,
+        # ── Frame-vision fields (populated below, best-effort) ──
+        "frame_extracted":      False,
+        "frame_vision_status":  "pending",
+        "frame_vision_text":    None,
+        "frame_vision_error":   None,
     }
+    # Local references the trace + brain-text composer read at the
+    # end of this function. Stay outside the try-blocks so failure
+    # paths still surface the right defaults.
+    frame_bytes: Optional[bytes] = None
+    frame_vision_text: str = ""
 
     # Best-effort download + persist so the merchant inbox drawer
     # can play the file. Skipped silently when no media_id (rare,
@@ -1152,9 +1276,10 @@ async def _process_video(
             )
             downloaded = None
         if downloaded is not None:
+            _bytes_in = downloaded["bytes"]
             stored = _try_persist(
                 tenant_id=tenant_id,
-                file_bytes=downloaded["bytes"],
+                file_bytes=_bytes_in,
                 mime_type=downloaded["mime_type"] or mime_type or "video/mp4",
                 kind="video",
                 media_id=media_id,
@@ -1166,8 +1291,72 @@ async def _process_video(
                 base_meta["byte_size"]      = stored.byte_size
                 if not base_meta.get("mime_type"):
                     base_meta["mime_type"] = stored.mime_type
+
+            # ── Frame extraction + vision ─────────────────────
+            # We have the bytes; try to grab one frame and run the
+            # same OpenAI vision describer the image branch uses.
+            # Everything below is fail-open: any error returns
+            # ``None`` and the video still reaches the brain with
+            # caption/filename/forward markers as before.
+            try:
+                frame_bytes = await _extract_video_frame(_bytes_in)
+            except Exception as _frame_exc:  # noqa: BLE001
+                logger.warning(
+                    "[VIDEO_FRAME] extract raised tenant=%s "
+                    "media_id=%s err=%s",
+                    tenant_id, media_id, _frame_exc,
+                )
+                frame_bytes = None
+
+            if frame_bytes:
+                base_meta["frame_extracted"] = True
+                if not _runtime_openai_key():
+                    base_meta["frame_vision_status"] = "skipped"
+                    base_meta["frame_vision_error"]  = (
+                        "vision_not_configured"
+                    )
+                else:
+                    try:
+                        frame_vision_text = (
+                            await _describe_image_with_openai(
+                                file_bytes=frame_bytes,
+                                mime_type="image/jpeg",
+                                caption_hint=caption,
+                                tenant_id=tenant_id,
+                                media_id=media_id,
+                            )
+                        ) or ""
+                    except Exception as _vis_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[VIDEO_FRAME] vision failed tenant=%s "
+                            "media_id=%s err=%s",
+                            tenant_id, media_id, _vis_exc,
+                        )
+                        base_meta["frame_vision_status"] = "failed"
+                        base_meta["frame_vision_error"]  = (
+                            f"{type(_vis_exc).__name__}: "
+                            f"{str(_vis_exc)[:200]}"
+                        )
+                    else:
+                        if frame_vision_text.strip():
+                            base_meta["frame_vision_status"] = "ok"
+                            base_meta["frame_vision_text"]   = (
+                                frame_vision_text.strip()
+                            )
+                        else:
+                            base_meta["frame_vision_status"] = "empty"
+                            base_meta["frame_vision_error"]  = (
+                                "empty_description"
+                            )
+            else:
+                # ffmpeg missing, bad bytes, or all-black frame. Not
+                # an error — just degrade to metadata-only context.
+                base_meta["frame_vision_status"] = "skipped"
+                base_meta["frame_vision_error"]  = "frame_not_extracted"
         else:
             base_meta["video_download_status"] = "failed"
+            base_meta["frame_vision_status"]   = "skipped"
+            base_meta["frame_vision_error"]    = "video_not_downloaded"
 
     # ── Brain-facing text ─────────────────────────────────────────
     # Single Arabic framing line + whatever signals we have. The
@@ -1192,17 +1381,40 @@ async def _process_video(
     elif forwarded:
         pieces.append("ملاحظة: الفيديو معاد توجيهه.")
 
-    # ── Lightweight topic inference from caption + filename ─────
-    # We DON'T have video frame OCR in this passthrough — we only
-    # have the lightweight signals WhatsApp gives us. But many
-    # videos arrive with enough textual breadcrumbs (caption like
-    # "يارب استجب", filename like "Hajj_dua.mp4", forwarded reels)
-    # that a tiny keyword pass can hint the brain at the topic so
-    # it stops replying "ما أقدر أشوف الفيديو" and instead engages
-    # naturally. The hint is ADVISORY — the brain still owns the
-    # reply, the persona, and the conversation context (orders /
-    # shipping linkage must stay intact).
-    _hints = _infer_video_topic_hints(caption=caption, filename=filename)
+    # ── Frame-vision output (May 2026 video-understanding layer) ──
+    # When ffmpeg + OpenAI vision succeeded, we now have an actual
+    # Arabic description of the frame (e.g. "صورة عيد عليها 'يارب
+    # استجب' و 'ذي الحجة'"). Surface it BEFORE the keyword
+    # inference so the brain treats vision as primary evidence and
+    # the keyword hint as supplementary. Caption + filename remain
+    # available too — none of the earlier signals are removed.
+    if base_meta.get("frame_vision_status") == "ok" and base_meta.get("frame_vision_text"):
+        pieces.append(
+            f"النص الظاهر/الوصف من الفيديو: "
+            f"{base_meta['frame_vision_text']}"
+        )
+    elif base_meta.get("frame_vision_status") in ("skipped", "failed", "empty"):
+        # Honest about what we tried. The brain reads this as
+        # "no visual signal" but the conversation context + caption
+        # still drive the reply.
+        _why = str(base_meta.get("frame_vision_error") or "").strip()
+        if _why:
+            pieces.append(
+                f"ملاحظة: تعذّر استخراج وصف بصري من الفيديو "
+                f"({_why})."
+            )
+
+    # ── Lightweight topic inference ────────────────────────────
+    # Now that we may have frame-vision text, fold it into the
+    # haystack alongside caption + filename. This is still pure
+    # pattern matching — it just helps when the vision text says
+    # things like "يارب" or "ذي الحجة" so the brain gets the
+    # explicit topic hint AND the description.
+    _hints = _infer_video_topic_hints(
+        caption=caption,
+        filename=filename,
+        frame_vision_text=base_meta.get("frame_vision_text") or "",
+    )
     if _hints:
         base_meta["topic_hints"] = list(_hints)
         pieces.append("استنتاج خفيف من النص المتاح: " + "، ".join(_hints))
@@ -1235,22 +1447,45 @@ async def _process_video(
     combined = "\n".join(pieces)
 
     # MEDIA_ROUTE_TRACE — grep-target. Never raises.
+    _vision_preview = (
+        (base_meta.get("frame_vision_text") or "")[:80]
+        if base_meta.get("frame_vision_status") == "ok"
+        else ""
+    )
     try:
-        # OCR preview placeholder. We don't OCR video frames in this
-        # lightweight path; the field stays empty unless a future
-        # patch wires thumbnail extraction. Caller can always grep
-        # by `ocr_text_preview=''` to find the video-passthrough
-        # path explicitly.
         logger.info(
             "[MEDIA_ROUTE_TRACE] media_type=video tenant=%s "
             "media_id=%s mime=%s filename=%r caption=%r "
             "duration=%s forwarded=%s frequently_forwarded=%s "
-            "thumbnail_available=False ocr_text_preview='' "
+            "thumbnail_available=%s ocr_text_preview=%r "
             "final_route=vision_brain reply_sent=deferred "
             "block_reason=none",
             tenant_id, media_id, mime_type, filename,
             (caption or "")[:80], duration_raw, forwarded,
             frequently_forwarded,
+            bool(base_meta.get("frame_extracted")),
+            _vision_preview,
+        )
+    except Exception:
+        pass
+
+    # VIDEO_UNDERSTANDING_TRACE — dedicated grep line for the new
+    # frame-vision layer. On-call can answer "did the brain
+    # actually see the frame?" without re-running anything.
+    try:
+        _vis_text = base_meta.get("frame_vision_text") or ""
+        logger.info(
+            "[VIDEO_UNDERSTANDING_TRACE] tenant=%s media_id=%s "
+            "frame_extracted=%s frame_vision_status=%s "
+            "frame_vision_error=%r ocr_text_preview=%r "
+            "vision_summary=%r topic_hints=%s",
+            tenant_id, media_id,
+            bool(base_meta.get("frame_extracted")),
+            base_meta.get("frame_vision_status"),
+            base_meta.get("frame_vision_error"),
+            _vis_text[:120],
+            _vis_text[:240],
+            list(base_meta.get("topic_hints") or []),
         )
     except Exception:
         pass

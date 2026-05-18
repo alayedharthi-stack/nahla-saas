@@ -505,3 +505,239 @@ class TestVideoTopicHints:
         assert "ما أقدر أشوف الفيديو" in res.text
         assert "حافظ على ربط المحادثة" in res.text
         assert res.metadata.get("topic_hints") in (None, [])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6. Frame extraction + vision — "خفيف" pre-brain understanding layer
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestVideoFrameVision:
+    """The May 2026 video-understanding layer: extract ONE frame via
+    ffmpeg, run the same OpenAI vision describer the image branch
+    uses, and surface the description on the brain-facing text so
+    the brain receives an actual visual summary — not just metadata.
+
+    Fail-open contract:
+      * ffmpeg missing OR extraction fails → ``frame_vision_status``
+        is 'skipped'/'failed', the video STILL reaches the brain.
+      * vision_not_configured → 'skipped', no exception.
+      * vision succeeds → ``frame_vision_text`` lands in the brain
+        text under "النص الظاهر/الوصف من الفيديو: ..." and gets
+        folded into ``topic_hints``.
+    """
+
+    def _patch_download_and_vision(
+        self,
+        monkeypatch,
+        *,
+        downloaded_bytes: bytes = b"FAKE_MP4_BYTES",
+        frame_bytes=b"FAKE_JPEG_BYTES",
+        vision_text: str = "",
+        vision_raises: bool = False,
+        openai_key: str = "sk-test",
+    ):
+        from modules.ai.media import normalizer as _nrm
+
+        monkeypatch.setattr(
+            _nrm, "_download_meta_media",
+            AsyncMock(return_value={
+                "bytes":     downloaded_bytes,
+                "mime_type": "video/mp4",
+            }),
+        )
+        monkeypatch.setattr(
+            _nrm, "_try_persist",
+            lambda **kwargs: None,
+        )
+        monkeypatch.setattr(
+            _nrm, "_extract_video_frame",
+            AsyncMock(return_value=frame_bytes),
+        )
+        monkeypatch.setattr(
+            _nrm, "_runtime_openai_key",
+            lambda: openai_key,
+        )
+
+        async def _desc(**kwargs):
+            if vision_raises:
+                raise RuntimeError("vision blew up")
+            return vision_text
+
+        monkeypatch.setattr(
+            _nrm, "_describe_image_with_openai",
+            AsyncMock(side_effect=_desc),
+        )
+        return _nrm
+
+    def test_frame_vision_text_lands_in_brain_text(self, monkeypatch):
+        _nrm = self._patch_download_and_vision(
+            monkeypatch,
+            vision_text="صورة عيد عليها كتابة «يارب استجب» و «ذي الحجة».",
+        )
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.FV1",
+                    "timestamp": "1715980333",
+                    "video": {
+                        "id": "media-fv",
+                        "mime_type": "video/mp4",
+                    },
+                },
+            )
+
+        res = _run(_go())
+        assert res.metadata["frame_extracted"] is True
+        assert res.metadata["frame_vision_status"] == "ok"
+        assert "ذي الحجة" in res.metadata["frame_vision_text"]
+        # The brain-facing text MUST include the description so the
+        # LLM sees what's in the video.
+        assert "النص الظاهر/الوصف من الفيديو" in res.text
+        assert "يارب استجب" in res.text
+        # Topic hint now folds in vision text so the Hajj video
+        # produces the greeting/dua hint even without a caption.
+        assert "topic_hints" in res.metadata
+        assert "دعاء_أو_تهنئة" in res.metadata["topic_hints"]
+        # Hard rules survived.
+        assert "ما أقدر أشوف الفيديو" in res.text  # the forbidden line is mentioned in the ban
+        assert "حافظ على ربط المحادثة" in res.text
+
+    def test_vision_failure_does_not_drop_video(self, monkeypatch):
+        _nrm = self._patch_download_and_vision(
+            monkeypatch, vision_raises=True,
+        )
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.FV2",
+                    "timestamp": "1715980334",
+                    "video": {
+                        "id": "media-fv2",
+                        "mime_type": "video/mp4",
+                        "caption": "يارب",
+                    },
+                },
+            )
+
+        res = _run(_go())
+        # Video still reaches the brain.
+        assert res.normalized_type == "video"
+        assert res.should_process is True
+        assert res.metadata["frame_extracted"] is True
+        assert res.metadata["frame_vision_status"] == "failed"
+        # Honest error note instead of pretending we saw the video.
+        assert "تعذّر استخراج وصف بصري" in res.text
+        # Caption-driven topic hint still works.
+        assert "دعاء_أو_تهنئة" in res.metadata.get("topic_hints") or []
+
+    def test_no_openai_key_skips_vision_gracefully(self, monkeypatch):
+        _nrm = self._patch_download_and_vision(
+            monkeypatch, openai_key="",
+        )
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.FV3",
+                    "timestamp": "1715980335",
+                    "video": {"id": "media-fv3", "mime_type": "video/mp4"},
+                },
+            )
+
+        res = _run(_go())
+        assert res.metadata["frame_extracted"] is True
+        assert res.metadata["frame_vision_status"] == "skipped"
+        assert res.metadata["frame_vision_error"] == "vision_not_configured"
+        # Brain still receives the video, just without the visual
+        # summary. No exception, no canned excuse.
+        assert res.normalized_type == "video"
+
+    def test_no_frame_extracted_marks_skipped_and_continues(self, monkeypatch):
+        _nrm = self._patch_download_and_vision(
+            monkeypatch, frame_bytes=None,
+        )
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.FV4",
+                    "timestamp": "1715980336",
+                    "video": {"id": "media-fv4", "mime_type": "video/mp4"},
+                },
+            )
+
+        res = _run(_go())
+        assert res.metadata["frame_extracted"] is False
+        assert res.metadata["frame_vision_status"] == "skipped"
+        assert res.metadata["frame_vision_error"] == "frame_not_extracted"
+        # The video is still routed to the brain.
+        assert res.normalized_type == "video"
+        assert res.should_process is True
+
+    def test_video_understanding_trace_is_emitted(self, monkeypatch):
+        _nrm = self._patch_download_and_vision(
+            monkeypatch,
+            vision_text="فيديو لخلية نحل بداخلها ملكة.",
+        )
+
+        records: list = []
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        h = _H(); h.setLevel(logging.DEBUG)
+        prev_level     = _nrm.logger.level
+        prev_propagate = _nrm.logger.propagate
+        _nrm.logger.setLevel(logging.DEBUG)
+        _nrm.logger.propagate = True
+        _nrm.logger.addHandler(h)
+        try:
+            async def _go():
+                return await _nrm.normalize_whatsapp_inbound(
+                    db=MagicMock(), wa_conn=MagicMock(), tenant_id=99,
+                    message={
+                        "type": "video",
+                        "id": "wamid.VUT",
+                        "timestamp": "1715980337",
+                        "video": {
+                            "id": "media-vut",
+                            "mime_type": "video/mp4",
+                        },
+                    },
+                )
+            _run(_go())
+        finally:
+            _nrm.logger.removeHandler(h)
+            _nrm.logger.setLevel(prev_level)
+            _nrm.logger.propagate = prev_propagate
+
+        trace = next(
+            (m for m in records if "[VIDEO_UNDERSTANDING_TRACE]" in m),
+            None,
+        )
+        assert trace is not None, (
+            "expected one [VIDEO_UNDERSTANDING_TRACE] line per inbound video"
+        )
+        for fragment in (
+            "tenant=99",
+            "media_id=media-vut",
+            "frame_extracted=True",
+            "frame_vision_status=ok",
+            "نحل",  # vision text leaked into preview
+            "نحل_أو_عسل",  # topic hint
+        ):
+            assert fragment in trace, (
+                f"missing fragment {fragment!r}\ntrace: {trace}"
+            )
