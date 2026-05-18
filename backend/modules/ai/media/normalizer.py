@@ -800,6 +800,13 @@ async def normalize_whatsapp_inbound(
 
 # ── Catalog order (WhatsApp catalog message) ───────────────────────
 
+# Stable string the brain pipeline pattern-matches on to recognise
+# the catalog-order text we generate below. Public so other modules
+# (currently ``modules.ai.brain.pipeline``) can import it instead of
+# duplicating the magic string. NEVER change this without updating
+# every consumer in the same commit.
+CATALOG_FRAME_MARKER = "[طلب كتالوج من العميل]"
+
 
 def _process_catalog_order(
     *,
@@ -890,7 +897,7 @@ def _process_catalog_order(
     # ── Compose brain-facing text ─────────────────────────────────
     # Frame as a clearly-tagged catalog order so the LLM treats it
     # as a buying intent without us adding a new intent / template.
-    lines: list[str] = ["[طلب كتالوج من العميل]"]
+    lines: list[str] = [CATALOG_FRAME_MARKER]
     if item_count:
         lines.append(f"عدد المنتجات: {item_count}")
     if total_price > 0:

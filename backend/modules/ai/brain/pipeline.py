@@ -63,6 +63,106 @@ from .protocols import (
 logger = logging.getLogger("nahla.brain.pipeline")
 
 
+# ── Catalog-order focus pinning (June 2026) ─────────────────────────────
+# Helpers for ``_maybe_pin_catalog_focus``. Defined at module scope so
+# regex objects compile once and tests can import them directly.
+import re as _re_catalog  # noqa: E402
+
+_CATALOG_FRAME_MARKER = "[طلب كتالوج من العميل]"
+_CATALOG_SKU_RE      = _re_catalog.compile(r"رمز المنتج \(SKU\):\s*(\S+)")
+_CATALOG_TOTAL_RE    = _re_catalog.compile(r"الإجمالي:\s*([0-9]+(?:\.[0-9]+)?)\s*(\S+)?")
+_CATALOG_QTY_RE      = _re_catalog.compile(r"عدد المنتجات:\s*(\d+)")
+
+
+def _maybe_pin_catalog_focus(
+    *,
+    db: Any,
+    tenant_id: int,
+    message: Optional[str],
+    state: MerchantConversationState,
+) -> None:
+    """
+    If ``message`` is a catalog-order frame produced by
+    ``modules.ai.media.normalizer`` AND the conversation does not yet
+    have a ``current_product_focus``, stamp the focus so the decision
+    engine will not collapse into ``ACTION_STASH_ADDRESS_PRE_PRODUCT``
+    on the customer's next address turn.
+
+    Failure to resolve the SKU against the catalog is **not** fatal —
+    we still pin a placeholder focus so the address-stash gate trips.
+    The brain's reply text is not affected by this function in any
+    way; we only set state flags that the existing decision engine
+    already understands.
+    """
+    if not message or _CATALOG_FRAME_MARKER not in message:
+        return
+    if state.current_product_focus:
+        return
+
+    sku_m   = _CATALOG_SKU_RE.search(message)
+    total_m = _CATALOG_TOTAL_RE.search(message)
+    qty_m   = _CATALOG_QTY_RE.search(message)
+
+    sku      = (sku_m.group(1).strip() if sku_m else "") or ""
+    qty      = int(qty_m.group(1)) if qty_m else 1
+    currency = (total_m.group(2).strip() if (total_m and total_m.group(2)) else "")
+    try:
+        total_price = float(total_m.group(1)) if total_m else None
+    except (TypeError, ValueError):
+        total_price = None
+    unit_price: Optional[float] = None
+    if total_price is not None and qty > 0:
+        unit_price = round(total_price / qty, 2)
+
+    # Best-effort lookup against the merchant's catalog so we can populate
+    # title / numeric id. Any failure is swallowed — the placeholder pin
+    # below is enough to gate the address-stash branch.
+    resolved_id: Any = None
+    resolved_title: str = ""
+    resolved_price: Optional[float] = None
+    if sku:
+        try:
+            from database.models import Product  # noqa: PLC0415
+            row = (
+                db.query(Product)
+                  .filter(Product.tenant_id == tenant_id)
+                  .filter(
+                      (Product.external_id      == sku) |
+                      (Product.sku              == sku) |
+                      (Product.meta_retailer_id == sku)
+                  )
+                  .first()
+            )
+            if row is not None:
+                resolved_id    = getattr(row, "id", None)
+                resolved_title = getattr(row, "title", "") or ""
+                _p = getattr(row, "price", None)
+                if _p is not None:
+                    try:
+                        resolved_price = float(_p)
+                    except (TypeError, ValueError):
+                        resolved_price = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[CATALOG_FOCUS] product lookup failed tenant=%s sku=%r: %s",
+                tenant_id, sku, exc,
+            )
+
+    state.current_product_focus = {
+        "id":           resolved_id if resolved_id is not None else (sku or "catalog_order"),
+        "external_id":  sku,
+        "title":        resolved_title,
+        "price":        resolved_price if resolved_price is not None else unit_price,
+        "currency":     currency,
+        "from_catalog_order": True,
+    }
+    logger.info(
+        "[CATALOG_FOCUS] pinned current_product_focus from catalog order | "
+        "tenant=%s sku=%r resolved=%s qty=%s total=%s currency=%r",
+        tenant_id, sku, bool(resolved_id), qty, total_price, currency,
+    )
+
+
 class MerchantBrain:
     """
     Orchestrates all Brain layers for a single customer turn.
@@ -174,6 +274,33 @@ class MerchantBrain:
                 tenant_id,
             )
             state_for_classify.greeted = True
+
+        # ── 1c. Catalog-order product-focus pin (June 2026) ──────────────
+        # When the customer submits a WhatsApp catalog order, the inbound
+        # text is framed by ``modules.ai.media.normalizer`` with a fixed
+        # marker. We use that marker as a deterministic signal that the
+        # customer has already chosen a product, and we pin
+        # ``state.current_product_focus`` BEFORE the decision engine runs.
+        #
+        # Why this exists: without a focus stamp, the very next turn
+        # (e.g. customer shares a national-address code) collapses into
+        # ``ACTION_STASH_ADDRESS_PRE_PRODUCT`` because the decision-engine
+        # gate checks ``not state.current_product_focus``. That branch
+        # tells the customer "اختر المنتج أول" — which is wrong when a
+        # catalog order already declared the product.
+        #
+        # Surgical contract:
+        # • We do NOT inject any reply copy.
+        # • We do NOT add a new intent or template.
+        # • We only flip a state flag the existing decision engine
+        #   already understands, so the brain composes naturally.
+        # • If a focus is already set, we leave it alone.
+        _maybe_pin_catalog_focus(
+            db=db,
+            tenant_id=tenant_id,
+            message=message,
+            state=state_for_classify,
+        )
 
         intent: Intent = await self._classifier.classify(message, history, state_for_classify)
 
