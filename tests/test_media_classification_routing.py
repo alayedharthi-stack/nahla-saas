@@ -428,3 +428,141 @@ class TestMediaClassifyTraceEmission:
             },
             order_context=object(),  # not even a dict
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. Shipping intent after the order exists — must defer to brain
+#
+# The exact production reproducer from the user's screenshot
+# (May 2026): a customer with a paid/processing order asked
+# "اي فرع ارسلتو طلبي في سمسا" — the bot replied with the static
+# ``faq_shipping()`` template ("بعد اختيار المنتج المناسب…") instead
+# of routing the question to the brain with order context.
+#
+# Resolution policy (per the user's explicit instruction):
+#   * DO NOT add a new template / canned reply.
+#   * DO NOT add a new "post-order tracking" intent / route.
+#   * The decision engine simply REFUSES to use the canned shipping
+#     FAQ when the conversation already has a paid / processing /
+#     shipped order, and routes to ACTION_LLM_REPLY so the brain
+#     writes the reply itself using the existing order context.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestShippingIntentDefersToBrainAfterOrder:
+    """Lock-in: ASK_SHIPPING + post-order context → brain, not FAQ."""
+
+    @staticmethod
+    def _build_post_order_ctx(
+        *,
+        payment_receipt_received: bool = False,
+        order_status: str = "",
+        product_focus: bool = False,
+        city: str = "",
+    ):
+        """Build a minimal BrainContext that satisfies the engine
+        check. Avoids importing every collaborator the real
+        pipeline uses — we only need ``state.order_prep`` and
+        ``state.current_product_focus`` for THIS decision branch."""
+        from modules.ai.brain.types import (  # noqa: PLC0415
+            BrainContext, OrderPreparationState,
+            MerchantConversationState,
+            Intent, INTENT_ASK_SHIPPING,
+            CommerceFacts,
+        )
+        op = OrderPreparationState()
+        op.payment_receipt_received = payment_receipt_received
+        op.order_status = order_status
+        if city:
+            op.city = city
+        state = MerchantConversationState()
+        state.order_prep = op
+        if product_focus:
+            state.current_product_focus = {
+                "id": "p1", "title": "عسل سدر", "price": 360,
+                "currency": "SAR",
+            }
+        intent = Intent(
+            name=INTENT_ASK_SHIPPING,
+            confidence=0.90,
+            slots={},
+            raw_message="اي فرع ارسلتو طلبي في سمسا",
+            extraction_method="rules",
+        )
+        return BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000099",
+            message="اي فرع ارسلتو طلبي في سمسا",
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(),
+        )
+
+    def test_paid_order_shipping_question_routes_to_brain_not_faq(self) -> None:
+        """The exact production reproducer: payment_receipt_received=True,
+        customer asks 'اي فرع ارسلتو طلبي في سمسا' → engine MUST NOT
+        route to ACTION_FAQ_REPLY+topic=shipping."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import (
+            ACTION_FAQ_REPLY, ACTION_LLM_REPLY,
+        )
+
+        ctx = self._build_post_order_ctx(payment_receipt_received=True)
+        d = DefaultDecisionEngine().decide(ctx)
+        assert d.action == ACTION_LLM_REPLY, (
+            f"Expected brain handoff (ACTION_LLM_REPLY); got "
+            f"action={d.action!r} args={d.args!r}"
+        )
+        assert d.args.get("topic") == "shipping_post_order"
+        # And, critically, NOT the canned shipping FAQ:
+        assert d.action != ACTION_FAQ_REPLY
+        assert (d.args.get("topic") or "") != "shipping"
+
+    def test_processing_order_shipping_question_routes_to_brain(self) -> None:
+        """``order_status='processing'`` → same guard fires."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import (
+            ACTION_FAQ_REPLY, ACTION_LLM_REPLY,
+        )
+
+        ctx = self._build_post_order_ctx(order_status="processing")
+        d = DefaultDecisionEngine().decide(ctx)
+        assert d.action == ACTION_LLM_REPLY
+        assert d.action != ACTION_FAQ_REPLY
+
+    def test_shipped_order_shipping_question_routes_to_brain(self) -> None:
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+
+        ctx = self._build_post_order_ctx(order_status="shipped")
+        d = DefaultDecisionEngine().decide(ctx)
+        assert d.action == ACTION_LLM_REPLY
+
+    def test_pre_order_shipping_question_still_uses_faq(self) -> None:
+        """Regression-safety: a customer with NO active order asking
+        'كم سعر الشحن؟' MUST still get the canned shipping FAQ —
+        the guard only kicks in AFTER an order exists. Otherwise we'd
+        push the customer into a no-context brain reply for the
+        legitimate 'do you ship?' question."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import (
+            ACTION_FAQ_REPLY, ACTION_LLM_REPLY,
+        )
+
+        ctx = self._build_post_order_ctx()  # no signals at all
+        d = DefaultDecisionEngine().decide(ctx)
+        assert d.action == ACTION_FAQ_REPLY
+        assert d.args.get("topic") == "shipping"
+
+    def test_product_focus_plus_city_also_treated_as_post_order(self) -> None:
+        """Customers who already gave the bot a product + city are
+        effectively mid-order; tracking-style shipping questions
+        should still defer to the brain."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+
+        ctx = self._build_post_order_ctx(
+            product_focus=True, city="المدينة",
+        )
+        d = DefaultDecisionEngine().decide(ctx)
+        assert d.action == ACTION_LLM_REPLY

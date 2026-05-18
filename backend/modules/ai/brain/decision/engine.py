@@ -1102,6 +1102,54 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_SHIPPING:
+            # ── Post-order tracking guard (May 2026 hotfix) ─────────────
+            # Production complaint: customers with a paid/processing
+            # order asking "أي فرع أرسلتو طلبي في سمسا؟" were getting
+            # the static ``faq_shipping()`` template ("بعد اختيار
+            # المنتج المناسب…") even though they have a complete
+            # order. The carrier-name token "سمسا" fires the
+            # ASK_SHIPPING rule at conf 0.90 — but THIS rule is for
+            # "shipping options BEFORE the order"; once the order
+            # exists, the same question is order-tracking and must
+            # flow to the brain with full order context.
+            #
+            # We only suppress the canned FAQ — we do NOT inject any
+            # new copy. The brain receives the message + the full
+            # conversation/order context and writes the reply itself
+            # ("أبشر يا خالد 🌷 أتحقق لك من تفاصيل الشحنة …").
+            _op = getattr(state, "order_prep", None)
+            _post_order = bool(
+                getattr(_op, "payment_receipt_received", False)
+                or str(getattr(_op, "order_status", "") or "").lower()
+                in (
+                    "under_review", "processing", "preparing",
+                    "ready", "shipped", "in_transit", "out_for_delivery",
+                    "delivered", "payment_pending",
+                )
+                or bool(getattr(state, "current_product_focus", None))
+                and bool(getattr(_op, "city", None))
+            )
+            if _post_order:
+                logger.info(
+                    "[SHIPPING_INTENT] post-order context detected — "
+                    "skipping faq_shipping template, deferring to brain "
+                    "| tenant=%s payment_receipt=%s order_status=%r",
+                    ctx.tenant_id,
+                    bool(getattr(_op, "payment_receipt_received", False)),
+                    getattr(_op, "order_status", ""),
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "shipping_post_order",
+                        "intent_hint": "order_tracking",
+                    },
+                    reason=(
+                        "ASK_SHIPPING matched, but conversation has a "
+                        "paid/processing/shipped order — defer to brain "
+                        "with order context instead of canned FAQ"
+                    ),
+                )
             return Decision(
                 action=ACTION_FAQ_REPLY,
                 args={"topic": "shipping"},
