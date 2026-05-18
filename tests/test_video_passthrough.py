@@ -371,3 +371,137 @@ class TestConversationsApiSurfacesVideo:
         assert _conv._build_media_block(
             message_event_id=1, meta={"normalized_inbound": {"source_type": "sticker"}},
         ) is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. Topic inference — light hints from caption + filename only
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestVideoTopicHints:
+    """``_infer_video_topic_hints`` is the lightweight content-aware
+    layer: caption + filename are pattern-matched to short topic
+    labels (دعاء/نحل/منتج/شحنة/شكوى) so the brain can engage with
+    the video instead of replying "ما أقدر أشوف الفيديو". The
+    function is intentionally narrow — auto-generated filenames are
+    ignored, no-signal videos return an empty list, the brain
+    keeps its persona + conversation context."""
+
+    def test_dua_caption_hints_greeting(self, monkeypatch):
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="يارب استجب لنا في عشر ذي الحجة",
+            filename="",
+        )
+        assert "دعاء_أو_تهنئة" in hits
+
+    def test_beekeeping_caption_hints_bees(self, monkeypatch):
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="شوف خلية النحل هذي",
+            filename="",
+        )
+        assert "نحل_أو_عسل" in hits
+
+    def test_product_caption_hints_product(self, monkeypatch):
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="ابي اشتري هذا المنتج بسرعة",
+            filename="",
+        )
+        assert "منتج_أو_شراء" in hits
+
+    def test_shipment_caption_hints_shipment(self, monkeypatch):
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="وين طلبي ومتى تتبع شحنتي؟",
+            filename="",
+        )
+        assert "شحنة_أو_توصيل" in hits
+
+    def test_auto_filename_does_not_create_false_hits(self, monkeypatch):
+        """``VID_20260518_142301.mp4`` is metadata, not content.
+        The inference must NOT use it as a signal."""
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="",
+            filename="VID_20260518_142301.mp4",
+        )
+        assert hits == []
+
+    def test_meaningful_filename_does_drive_hits(self, monkeypatch):
+        """A user-typed filename like ``Hajj_dua_reel.mp4`` DOES carry
+        signal — we should hint at دعاء/تهنئة."""
+        _nrm = _patched_video_normaliser(monkeypatch)
+        hits = _nrm._infer_video_topic_hints(
+            caption="",
+            filename="Hajj_dua_reel.mp4",
+        )
+        assert "دعاء_أو_تهنئة" in hits
+
+    def test_empty_signals_return_no_hits(self, monkeypatch):
+        _nrm = _patched_video_normaliser(monkeypatch)
+        assert _nrm._infer_video_topic_hints(caption="", filename="") == []
+
+    def test_brain_text_forbids_cannot_see_video_phrase(self, monkeypatch):
+        """The brain-facing text must explicitly forbid the canned
+        excuse the bot was producing in production. This is a hard
+        regression guard — if someone removes it, this test fails."""
+        _nrm = _patched_video_normaliser(monkeypatch)
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.HINT",
+                    "timestamp": "1715980111",
+                    "video": {
+                        "id": "media-h",
+                        "mime_type": "video/mp4",
+                        "caption": "يارب استجب",
+                    },
+                },
+            )
+
+        res = _run(_go())
+        assert res.text is not None
+        # Hard ban on the canned excuse phrasing.
+        assert "ما أقدر أشوف الفيديو" in res.text  # = the forbidden line
+        assert "ممنوع قول" in res.text             # = the imperative wrapping it
+        # Topic hint is surfaced.
+        assert "دعاء_أو_تهنئة" in res.text
+        # Context preservation directive is present.
+        assert "حافظ على ربط المحادثة بالطلب أو الشحنة" in res.text
+        # And the topic hint is on the metadata for downstream consumers.
+        assert "topic_hints" in res.metadata
+        assert "دعاء_أو_تهنئة" in res.metadata["topic_hints"]
+
+    def test_brain_text_for_no_signal_video_still_keeps_context(self, monkeypatch):
+        """A bare video (no caption, auto filename) STILL must:
+          1. forbid 'ما أقدر أشوف الفيديو',
+          2. instruct preserving the current conversation topic,
+          3. NOT produce any topic_hints (we don't lie).
+        """
+        _nrm = _patched_video_normaliser(monkeypatch)
+
+        async def _go():
+            return await _nrm.normalize_whatsapp_inbound(
+                db=MagicMock(), wa_conn=MagicMock(), tenant_id=1,
+                message={
+                    "type": "video",
+                    "id": "wamid.BARE",
+                    "timestamp": "1715980222",
+                    "video": {
+                        "id": "media-b",
+                        "mime_type": "video/mp4",
+                        "filename": "VID_20260518_142301.mp4",
+                    },
+                },
+            )
+
+        res = _run(_go())
+        assert res.text is not None
+        assert "ما أقدر أشوف الفيديو" in res.text
+        assert "حافظ على ربط المحادثة" in res.text
+        assert res.metadata.get("topic_hints") in (None, [])

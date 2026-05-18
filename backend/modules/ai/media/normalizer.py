@@ -988,6 +988,88 @@ def _audio_with_fallback(
 # ── Video ───────────────────────────────────────────────────────────
 
 
+# ── Lightweight video topic inference ──────────────────────────────
+# Pure-string keyword pass over the caption + filename to produce a
+# tiny "topic_hints" list the brain can use to engage with the
+# video's content instead of falling back to "ما أقدر أشوف الفيديو".
+# This is ADVISORY only — the brain owns the reply, the persona,
+# and the conversation context. It also handles auto-generated
+# filenames (``VID_xxx.mp4``, ``WhatsApp Video 2026-05-18...``)
+# by NOT treating them as content evidence.
+#
+# Topics are intentionally broad — we never want to lie to the
+# brain. Either we hint at a confident topic OR we hint at nothing
+# and let the brain ask politely.
+_VIDEO_TOPIC_KEYWORDS: Dict[str, tuple] = {
+    "دعاء_أو_تهنئة": (
+        "يارب", "يا رب", "اللهم", "اللّهم", "دعاء", "ادعية", "أدعية",
+        "تهنئة", "تهاني", "مبروك", "مبارك", "بارك", "تقبل الله",
+        "العشر", "ذي الحجة", "ذو الحجة", "عيد", "الأضحى", "الاضحى",
+        "رمضان", "كل عام", "حج", "الحج",
+        "dua", "hajj", "eid", "ramadan", "greeting", "mubarak",
+    ),
+    "نحل_أو_عسل": (
+        "نحل", "النحل", "خلية", "خلايا", "منحل", "مناحل",
+        "عسل", "العسل", "ملكة", "ملكات", "شمع", "bee", "honey", "hive",
+    ),
+    "منتج_أو_شراء": (
+        "منتج", "المنتج", "اشتري", "أبي اشتري", "ابي اشتري",
+        "كم سعر", "السعر", "موجود", "متوفر",
+        "product", "buy", "price",
+    ),
+    "شحنة_أو_توصيل": (
+        "شحنة", "الشحنة", "طلب", "طلبي", "توصيل", "التوصيل",
+        "تتبع", "تتبعها", "اين شحنتي", "وين طلبي",
+        "shipment", "tracking", "delivery",
+    ),
+    "شكوى_أو_مشكلة": (
+        "مشكلة", "مشكلتي", "تالف", "كسر", "مكسور", "ناقص",
+        "ما يعمل", "ما يشتغل", "خراب",
+        "broken", "damaged", "issue", "problem",
+    ),
+}
+
+# Auto-generated filename patterns the inference MUST ignore as
+# content evidence — they're not content, just metadata.
+_VIDEO_AUTO_FILENAME_PATTERNS: tuple = (
+    "vid_", "video_", "whatsapp video", "whatsapp-video", "img_",
+    "movie_", "mov_", "rec_", "capture_",
+)
+
+
+def _infer_video_topic_hints(
+    *,
+    caption: str,
+    filename: str,
+) -> list:
+    """Return a short list of topic hints inferred from the textual
+    signals attached to a video. ADVISORY ONLY — never used to compose
+    a canned reply, only to tell the brain "this seems to be about X
+    so don't reply 'I can't see the video'."
+    """
+    haystack_parts: list = []
+    if caption:
+        haystack_parts.append(caption.lower())
+    if filename:
+        fn_lower = filename.lower()
+        # Don't let auto-generated filenames pollute the inference —
+        # they're not content. ``VID_20260518_142301.mp4`` looks
+        # interesting to a substring matcher but says nothing.
+        is_auto = any(p in fn_lower for p in _VIDEO_AUTO_FILENAME_PATTERNS)
+        if not is_auto:
+            haystack_parts.append(fn_lower)
+    if not haystack_parts:
+        return []
+    haystack = " ".join(haystack_parts)
+    hits: list = []
+    for label, keywords in _VIDEO_TOPIC_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in haystack:
+                hits.append(label)
+                break
+    return hits
+
+
 async def _process_video(
     *,
     db: Any,
@@ -1109,11 +1191,46 @@ async def _process_video(
                       "(غالباً محتوى عام: دعاء / تهنئة / إعلان).")
     elif forwarded:
         pieces.append("ملاحظة: الفيديو معاد توجيهه.")
+
+    # ── Lightweight topic inference from caption + filename ─────
+    # We DON'T have video frame OCR in this passthrough — we only
+    # have the lightweight signals WhatsApp gives us. But many
+    # videos arrive with enough textual breadcrumbs (caption like
+    # "يارب استجب", filename like "Hajj_dua.mp4", forwarded reels)
+    # that a tiny keyword pass can hint the brain at the topic so
+    # it stops replying "ما أقدر أشوف الفيديو" and instead engages
+    # naturally. The hint is ADVISORY — the brain still owns the
+    # reply, the persona, and the conversation context (orders /
+    # shipping linkage must stay intact).
+    _hints = _infer_video_topic_hints(caption=caption, filename=filename)
+    if _hints:
+        base_meta["topic_hints"] = list(_hints)
+        pieces.append("استنتاج خفيف من النص المتاح: " + "، ".join(_hints))
+
+    # Hard rules for the brain (NOT canned replies — the brain
+    # composes the actual words). These mirror the user spec:
+    #   * Don't say "I can't see the video" — interpret what you
+    #     can from caption/filename/forward markers/topic hints.
+    #   * Keep the existing conversation context: if it's about
+    #     an order or shipment, the natural reply may keep the
+    #     thread (e.g. "ووصلتك الشحنة؟"). Do NOT discard memory.
+    #   * Only suggest product selection if the customer actually
+    #     asks to buy — viral content / dua / greeting reels MUST
+    #     NOT route to product picking.
+    #   * If the video genuinely carries zero textual signal AND
+    #     no topic hint matched, reply politely and ask an open
+    #     question while preserving the active topic — never use
+    #     "ما أقدر أشوف الفيديو" or "لا أستطيع مشاهدة الفيديو".
     pieces.append(
         "اقرأ السياق ورد على العميل بأسلوبك الطبيعي حسب محتوى "
-        "الفيديو وسياق المحادثة. ممنوع اقتراح اختيار منتج إلا "
-        "إذا العميل فعلاً يطلب شراءً. إذا الفيديو غير مفهوم، رد "
-        "بلطف بسؤال مفتوح."
+        "الفيديو وسياق المحادثة الحالية. ممنوع قول «ما أقدر "
+        "أشوف الفيديو» أو «لا أستطيع مشاهدة الفيديو». استخدم "
+        "أي إشارة متاحة (التعليق، اسم الملف، علامات إعادة "
+        "التوجيه، الاستنتاج أعلاه) لفهم محتواه والرد عليه "
+        "بطبيعية. حافظ على ربط المحادثة بالطلب أو الشحنة إذا "
+        "كانت مفتوحة. ممنوع اقتراح اختيار منتج إلا إذا العميل "
+        "فعلاً يطلب شراءً. إذا لم يتضح المحتوى نهائياً، رد "
+        "بلطف بسؤال مفتوح يحافظ على السياق الحالي."
     )
     combined = "\n".join(pieces)
 
