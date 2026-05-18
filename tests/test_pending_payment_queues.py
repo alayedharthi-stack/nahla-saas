@@ -676,3 +676,142 @@ def test_disabled_unpaid_automation_is_noop() -> None:
         assert emitted == 0
     finally:
         db.close(); engine.dispose()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. Classifier — Arabic aliases, mixed case, NULL safety
+#     (regression cover for the Salla meeting fix where orders with status
+#     stored as the Arabic display name "في انتظار الدفع" never appeared in
+#     the "بانتظار الدفع" tab and were never picked up by the sweeper.)
+# ═════════════════════════════════════════════════════════════════════════════
+
+from core.order_queue_classifier import (  # noqa: E402
+    classify_order_queue,
+    is_pending_confirmation_status,
+    is_pending_payment_status,
+)
+
+
+@pytest.mark.parametrize("status", [
+    "pending", "PENDING", "Pending",
+    "pending_payment", "payment_pending", "awaiting_payment",
+    "draft", "new",
+    "في انتظار الدفع",
+    "بانتظار الدفع",
+    "بإنتظار الدفع",
+    "قيد الانتظار",
+    "بانتظار السداد",
+])
+def test_classifier_recognises_pending_payment(status: str) -> None:
+    assert is_pending_payment_status(status), (
+        f"{status!r} should be classified as pending-payment"
+    )
+    assert classify_order_queue(status) == "pending_payment"
+
+
+@pytest.mark.parametrize("status", [
+    "pending_confirmation", "AWAITING_CONFIRMATION",
+    "under_review", "in_review",
+    "بانتظار التأكيد",
+    "بإنتظار التأكيد",
+    "قيد المراجعة",
+    "بإنتظار المراجعة",
+])
+def test_classifier_recognises_pending_confirmation(status: str) -> None:
+    assert is_pending_confirmation_status(status), (
+        f"{status!r} should be classified as pending-confirmation"
+    )
+    assert classify_order_queue(status) == "pending_confirmation"
+
+
+@pytest.mark.parametrize("status", [
+    "paid", "completed", "delivered", "shipped", "cancelled", "refunded",
+    "تم التوصيل", "ملغي", "", None,
+])
+def test_classifier_rejects_terminal_statuses(status) -> None:
+    assert not is_pending_payment_status(status)
+    assert not is_pending_confirmation_status(status)
+    assert classify_order_queue(status) == ""
+
+
+def test_emitter_picks_up_arabic_status_label() -> None:
+    """
+    Regression: a Salla webhook that drops the slug and leaves only the
+    localised name in ``Order.status`` (e.g. ``"في انتظار الدفع"``) used
+    to silently bypass the sweeper. After the classifier rewrite the
+    Arabic label is treated identically to ``payment_pending``.
+    """
+    db, engine = _make_db()
+    try:
+        t = _tenant(db)
+        _customer(db, t.id)
+        _unpaid_automation(db, t.id)
+        _order(db, tenant_id=t.id, status="في انتظار الدفع",
+               age=timedelta(hours=2), is_abandoned=False)
+
+        emitted = automation_emitters.scan_unpaid_orders(db, t.id)
+        assert emitted == 1
+        ev = db.query(AutomationEvent).one()
+        assert ev.event_type == AutomationTrigger.ORDER_PAYMENT_PENDING.value
+    finally:
+        db.close(); engine.dispose()
+
+
+@pytest.mark.parametrize("status", ["PENDING", "Pending", "Payment_Pending"])
+def test_emitter_is_case_insensitive(status: str) -> None:
+    """A mixed-case status from a non-Salla adapter must still be picked up."""
+    db, engine = _make_db()
+    try:
+        t = _tenant(db)
+        _customer(db, t.id)
+        _unpaid_automation(db, t.id)
+        _order(db, tenant_id=t.id, status=status, age=timedelta(hours=2))
+
+        emitted = automation_emitters.scan_unpaid_orders(db, t.id)
+        assert emitted == 1
+    finally:
+        db.close(); engine.dispose()
+
+
+def test_emitter_treats_null_is_abandoned_as_not_abandoned() -> None:
+    """
+    Legacy Order rows can have ``is_abandoned=NULL`` (the column default
+    is False but pre-default rows were never backfilled). Using
+    ``IS NOT TRUE`` instead of ``IS FALSE`` means those rows are still
+    picked up by the sweeper.
+    """
+    db, engine = _make_db()
+    try:
+        t = _tenant(db)
+        _customer(db, t.id)
+        _unpaid_automation(db, t.id)
+        o = _order(db, tenant_id=t.id, status="pending", age=timedelta(hours=2))
+        # Force the legacy-NULL shape.
+        o.is_abandoned = None
+        db.commit()
+
+        emitted = automation_emitters.scan_unpaid_orders(db, t.id)
+        assert emitted == 1
+    finally:
+        db.close(); engine.dispose()
+
+
+def test_cod_emitter_accepts_under_review_and_arabic() -> None:
+    """
+    ``scan_cod_confirmations`` used to be hard-pinned to
+    ``status == "pending_confirmation"``. Salla also exposes
+    ``under_review`` / ``بإنتظار المراجعة`` for the same lifecycle stage
+    — the sweeper now handles both.
+    """
+    for status in ("under_review", "بإنتظار المراجعة"):
+        db, engine = _make_db()
+        try:
+            t = _tenant(db)
+            _customer(db, t.id)
+            _cod_automation(db, t.id)
+            _order(db, tenant_id=t.id, status=status, age=timedelta(hours=7))
+
+            emitted = automation_emitters.scan_cod_confirmations(db, t.id)
+            assert emitted == 1, f"COD sweeper missed status={status!r}"
+        finally:
+            db.close(); engine.dispose()

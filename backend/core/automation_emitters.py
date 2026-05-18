@@ -73,17 +73,21 @@ from sqlalchemy.orm import Session
 from core.automation_engine import emit_automation_event
 from core.automation_triggers import AutomationTrigger
 from core.calendar_events import events_for_date
+from core.order_queue_classifier import (
+    PENDING_PAYMENT_SLUGS,
+    is_pending_confirmation_status,
+    is_pending_payment_status,
+    normalize_status,
+)
 
 logger = logging.getLogger("nahla.automation_emitters")
 
 POLL_INTERVAL_SECONDS = 5 * 60  # 5 minutes — same cadence as webhook guardian
 
-# Order statuses we treat as "still owes us money".
-_PENDING_PAYMENT_STATUSES = frozenset({
-    "pending",
-    "pending_payment", "payment_pending", "awaiting_payment",
-    "draft", "new",
-})
+# Re-exported for backward compatibility with tests that imported the
+# private constant directly. The authoritative source is now
+# ``core.order_queue_classifier.PENDING_PAYMENT_SLUGS``.
+_PENDING_PAYMENT_STATUSES = PENDING_PAYMENT_SLUGS
 
 
 # ── Unpaid order reminders ───────────────────────────────────────────────────
@@ -131,17 +135,31 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
         return 0
 
     # Pending orders for this tenant.
-    # is_abandoned=False guard is critical: abandoned carts are stored as
-    # Order rows with is_abandoned=True and may carry status values from
-    # _PENDING_PAYMENT_STATUSES before the normaliser sets them to "abandoned".
-    # Without this filter a cart could receive both an abandoned-cart reminder
-    # AND an unpaid-order reminder — exactly the duplication we must prevent.
+    #
+    # Two safety nets applied at fetch time:
+    #
+    # 1. ``is_abandoned IS NOT TRUE`` (matches FALSE *and* NULL). Critical
+    #    because abandoned carts are stored as Order rows with
+    #    is_abandoned=True and may carry status values from
+    #    PENDING_PAYMENT_SLUGS before the normaliser sets them to
+    #    "abandoned". Using ``IS NOT TRUE`` (instead of ``IS FALSE``) also
+    #    rescues legacy rows where the column is NULL — without this a
+    #    pre-flag-default order would never reach the sweeper.
+    #
+    # 2. Status filter is widened to "anything not obviously completed/
+    #    cancelled" rather than the strict slug whitelist. The slug
+    #    whitelist is then applied in Python via
+    #    ``is_pending_payment_status`` so we also catch Arabic display
+    #    names ("في انتظار الدفع") that Salla occasionally drops into
+    #    Order.status when the slug field is missing from the webhook
+    #    payload. Fetching the wider set is cheap (one extra index scan
+    #    per tenant) and the Python filter is O(rows) — well under a
+    #    millisecond per tenant in practice.
     orders = (
         db.query(Order)
         .filter(
             Order.tenant_id == tenant_id,
-            Order.status.in_(_PENDING_PAYMENT_STATUSES),
-            Order.is_abandoned.is_(False),
+            Order.is_abandoned.isnot(True),
         )
         .all()
     )
@@ -150,8 +168,19 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
 
     emitted = 0
     for order in orders:
+        if not is_pending_payment_status(order.status):
+            logger.debug(
+                "[Emitter:unpaid] tenant=%s order=%s skipped — status=%r not in pending-payment set",
+                tenant_id, order.id, order.status,
+            )
+            continue
+
         created_at = _read_order_created_at(order)
         if created_at is None:
+            logger.debug(
+                "[Emitter:unpaid] tenant=%s order=%s skipped — created_at unresolved",
+                tenant_id, order.id,
+            )
             continue
         if created_at.tzinfo is not None:
             created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
@@ -163,7 +192,15 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
         # Resolve the customer (needed by the engine to send a message).
         customer = _resolve_order_customer(db, tenant_id, order)
         if customer is None:
+            logger.info(
+                "[Emitter:unpaid] tenant=%s order=%s skipped — no customer phone match",
+                tenant_id, order.id,
+            )
             continue
+        logger.debug(
+            "[Emitter:unpaid] tenant=%s order=%s eligible — status=%r customer=%s already_steps=%s",
+            tenant_id, order.id, order.status, customer.id, sorted(already_sent_steps),
+        )
 
         for step_idx, step in enumerate(steps):
             if step_idx in already_sent_steps:
@@ -517,18 +554,28 @@ def scan_cod_confirmations(
         # fires.
         cancel_after = schedule[-1] + max(60, schedule[-1])
 
-    # Defensive is_abandoned=False guard — COD orders are always real store
-    # orders (Salla requires a phone + address before confirming COD), but the
-    # guard ensures a mis-flagged row can never land in two queues at once.
-    pending_orders = (
+    # Defensive ``is_abandoned IS NOT TRUE`` guard — COD orders are always
+    # real store orders (Salla requires a phone + address before confirming
+    # COD), but the guard ensures a mis-flagged row can never land in two
+    # queues at once. Using ``IS NOT TRUE`` also handles legacy rows where
+    # ``is_abandoned`` is NULL.
+    #
+    # The status filter is widened to "all non-abandoned orders" with the
+    # canonical match delegated to ``is_pending_confirmation_status`` so we
+    # catch Arabic localisations like "بإنتظار المراجعة" that Salla emits
+    # when the slug field is missing.
+    candidate_orders = (
         db.query(Order)
         .filter(
             Order.tenant_id == tenant_id,
-            Order.status == "pending_confirmation",
-            Order.is_abandoned.is_(False),
+            Order.is_abandoned.isnot(True),
         )
         .all()
     )
+    pending_orders = [
+        o for o in candidate_orders
+        if is_pending_confirmation_status(o.status)
+    ]
     if not pending_orders:
         return 0
 
@@ -536,6 +583,10 @@ def scan_cod_confirmations(
     for order in pending_orders:
         created_at = _read_order_created_at(order)
         if created_at is None:
+            logger.debug(
+                "[Emitter:cod] tenant=%s order=%s skipped — created_at unresolved",
+                tenant_id, order.id,
+            )
             continue
         if created_at.tzinfo is not None:
             created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
@@ -544,6 +595,11 @@ def scan_cod_confirmations(
         meta: Dict[str, Any] = dict(order.extra_metadata or {})
         progress: List[Dict[str, Any]] = list(meta.get("cod_reminders") or [])
         already_sent_steps = {int(p.get("step_idx", -1)) for p in progress}
+        logger.debug(
+            "[Emitter:cod] tenant=%s order=%s status=%r elapsed_min=%d already_steps=%s",
+            tenant_id, order.id, order.status,
+            int(elapsed.total_seconds() // 60), sorted(already_sent_steps),
+        )
 
         # ── Auto-cancel ──────────────────────────────────────────────
         if elapsed >= timedelta(minutes=cancel_after):

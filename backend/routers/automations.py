@@ -1734,26 +1734,36 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
 
     # ── Pending payment orders ───────────────────────────────────────────────
     # Real orders (not abandoned carts) whose payment has not been completed.
-    # Mirrors the status set used by the `unpaid_order_reminder` sweeper in
-    # automation_emitters so the queue and the automation act on the same rows.
-    # A 15-minute grace period keeps freshly created orders off the list.
-    _PENDING_PAY_STATUSES = frozenset({
-        "pending", "pending_payment", "payment_pending",
-        "awaiting_payment", "draft", "new",
-    })
+    # Mirrors the status helper used by the ``unpaid_order_reminder`` sweeper
+    # in ``automation_emitters`` so the queue and the automation act on the
+    # same rows. A 15-minute grace period keeps freshly created orders off
+    # the list.
+    #
+    # ``is_abandoned IS NOT TRUE`` (not ``IS FALSE``) so legacy rows with a
+    # NULL flag are still picked up. The status itself is matched via
+    # ``is_pending_payment_status`` which recognises both English slugs
+    # (``pending`` / ``payment_pending`` / ``awaiting_payment`` / …) AND the
+    # Arabic display names Salla occasionally drops into ``Order.status``
+    # when the slug is missing (e.g. ``"في انتظار الدفع"``).
+    from core.order_queue_classifier import (  # noqa: PLC0415
+        classify_order_queue,
+        is_pending_confirmation_status,
+        is_pending_payment_status,
+    )
+
     grace = timedelta(minutes=15)
 
     pending_payment_items = []
     for o in (
         db.query(Order)
-        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.is_(False))
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.isnot(True))
         .order_by(Order.id.desc())
         .limit(100)
         .all()
     ):
-        raw = (o.status or "").strip().lower()
-        if raw not in _PENDING_PAY_STATUSES:
+        if not is_pending_payment_status(o.status):
             continue
+        raw = (o.status or "").strip().lower()
         meta = o.extra_metadata or {}
         cstr = meta.get("created_at")
         if cstr:
@@ -1805,19 +1815,19 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
     # ── Order confirmation queue ──────────────────────────────────────────────
     # Shows orders waiting for the WhatsApp confirmation to be sent.
     # Includes:
-    #   • Classic COD-specific statuses (under_review, pending_confirmation…)
+    #   • Classic confirmation-pending statuses (under_review,
+    #     pending_confirmation, awaiting_confirmation, in_review)
+    #     plus their Arabic localisations ("بإنتظار المراجعة" etc.) —
+    #     matched by ``is_pending_confirmation_status``.
     #   • ALL recent orders (last 48 h) in in_progress / new / pending status,
     #     regardless of payment method — every order needs a confirmation.
-    _COD_PENDING_STATUSES = frozenset({
-        "pending_confirmation", "awaiting_confirmation",
-        "under_review", "in_review",
-    })
-    # Threshold: show recent orders placed within last 48 h.
+    #
+    # ``is_abandoned IS NOT TRUE`` so NULL-flagged legacy rows still surface.
     _cod_recent_threshold = datetime.now(timezone.utc) - timedelta(hours=48)
     cod_pending_items = []
     for o in (
         db.query(Order)
-        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.is_(False))
+        .filter(Order.tenant_id == tenant_id, Order.is_abandoned.isnot(True))
         .order_by(Order.id.desc())
         .limit(200)
         .all()
@@ -1825,8 +1835,8 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
         raw = (o.status or "").strip().lower()
         meta = o.extra_metadata or {}
 
-        # Classic confirmation-pending statuses — always show.
-        in_classic_pending = raw in _COD_PENDING_STATUSES
+        # Classic confirmation-pending statuses (slug or Arabic) — always show.
+        in_classic_pending = is_pending_confirmation_status(o.status)
 
         # Recent in_progress / new / pending orders (any payment method).
         if not in_classic_pending:
@@ -1878,6 +1888,212 @@ async def autopilot_queues(request: Request, db: Session = Depends(get_db)):
         "pending_payment_orders": pending_payment_items,
         "cod_pending_orders":     cod_pending_items,
     }
+
+
+@router.get("/autopilot/queues/debug")
+async def autopilot_queues_debug(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 200,
+):
+    """
+    Per-order classification trace for the operational-queue page.
+
+    Returns one row per recent order with the exact answer to the four
+    questions support needs to answer when a merchant says "this order
+    should be in 'بانتظار الدفع' but I don't see it":
+
+      * ``raw_status``         — the literal value stored in ``Order.status``
+                                 (may be a Salla Arabic name like
+                                 "في انتظار الدفع").
+      * ``normalized_status``  — lowercased + stripped.
+      * ``payment_method``     — from ``extra_metadata.payment_method``.
+      * ``queue_detected``     — one of ``"pending_payment"``,
+                                 ``"pending_confirmation"`` or ``""``.
+      * ``reminder_eligible``  — whether the unpaid/COD sweeper would emit
+                                 a new reminder event for this order on its
+                                 next sweep (status matches + grace passed +
+                                 not all steps already sent + non-abandoned +
+                                 customer resolvable).
+      * ``last_reminder_at``   — ISO timestamp of the most recent emitted
+                                 reminder (unpaid first, COD fallback).
+      * ``reminders_sent``     — number of reminder stages already emitted.
+      * ``exclusion_reason``   — short tag explaining why we'd skip this
+                                 order if ``reminder_eligible`` is false
+                                 (``"abandoned"``, ``"status_not_pending"``,
+                                 ``"grace_period"``, ``"no_customer"``,
+                                 ``"all_steps_sent"``, ``"completed"``).
+
+    Read-only — never emits events, never mutates DB rows. Safe to call
+    from a dashboard or curl while debugging a live tenant. Returns the
+    most recent ``limit`` orders ordered by id desc (default 200).
+    """
+    from core.order_queue_classifier import (  # noqa: PLC0415
+        classify_order_queue,
+        is_pending_confirmation_status,
+        is_pending_payment_status,
+        normalize_status,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    now = datetime.now(timezone.utc)
+    grace = timedelta(minutes=15)
+    limit = max(1, min(int(limit or 200), 1000))
+
+    # Resolve enabled automations once so the eligibility column reflects
+    # the same configuration the sweeper would see.
+    unpaid_auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "unpaid_order_reminder",
+            SmartAutomation.enabled.is_(True),
+        )
+        .first()
+    )
+    cod_auto = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "cod_confirmation",
+            SmartAutomation.enabled.is_(True),
+        )
+        .first()
+    )
+    unpaid_steps = list(((unpaid_auto.config if unpaid_auto else {}) or {}).get("steps") or [])
+    cod_cfg: Dict[str, Any] = (cod_auto.config if cod_auto else {}) or {}
+    cod_schedule: List[int] = []
+    for step in (cod_cfg.get("steps") or []):
+        try:
+            d = int(step.get("delay_minutes") or 0)
+        except (TypeError, ValueError):
+            d = 0
+        if d > 0:
+            cod_schedule.append(d)
+    if not cod_schedule:
+        cod_schedule = [int(cod_cfg.get("reminder_after_minutes") or 360)]
+    cod_schedule.sort()
+
+    rows = (
+        db.query(Order)
+        .filter(Order.tenant_id == tenant_id)
+        .order_by(Order.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    out: List[Dict[str, Any]] = []
+    counts = {"pending_payment": 0, "pending_confirmation": 0, "other": 0}
+
+    for o in rows:
+        raw_status = o.status if o.status is not None else ""
+        norm = normalize_status(raw_status)
+        meta = o.extra_metadata or {}
+        payment_method = str(meta.get("payment_method") or "")
+        queue = classify_order_queue(raw_status)
+
+        # Phone resolution mirrors the sweeper so we mark unreachable rows.
+        ci = o.customer_info or {}
+        phone = (ci.get("phone") or ci.get("mobile") or "").strip()
+
+        created_at = _ts_from_meta(meta.get("created_at"))
+
+        # Reminder progress for both flows.
+        unpaid_reminders = list(meta.get("unpaid_reminders") or [])
+        cod_reminders = list(meta.get("cod_reminders") or [])
+        last_reminder_at: Optional[str] = None
+        for r in reversed(unpaid_reminders + cod_reminders):
+            if r.get("emitted_at"):
+                last_reminder_at = r["emitted_at"]
+                break
+
+        # Eligibility — what would the sweeper do right now?
+        eligible = False
+        exclusion: str = ""
+        if o.is_abandoned is True:
+            exclusion = "abandoned"
+        elif queue == "pending_payment":
+            counts["pending_payment"] += 1
+            if not unpaid_auto:
+                exclusion = "automation_disabled"
+            elif not phone:
+                exclusion = "no_customer"
+            elif created_at and (now - created_at) < grace:
+                exclusion = "grace_period"
+            else:
+                already = {int(r.get("step_idx", -1)) for r in unpaid_reminders}
+                if unpaid_steps and len(already) >= len(unpaid_steps):
+                    exclusion = "all_steps_sent"
+                else:
+                    eligible = True
+        elif queue == "pending_confirmation":
+            counts["pending_confirmation"] += 1
+            if not cod_auto:
+                exclusion = "automation_disabled"
+            elif not phone:
+                exclusion = "no_customer"
+            else:
+                already = {int(r.get("step_idx", -1)) for r in cod_reminders}
+                if len(already) >= len(cod_schedule):
+                    exclusion = "all_steps_sent"
+                else:
+                    eligible = True
+        else:
+            counts["other"] += 1
+            exclusion = "status_not_pending"
+
+        out.append({
+            "order_id":            o.id,
+            "external_id":         o.external_id,
+            "order_number":        o.external_order_number or o.external_id or f"#{o.id}",
+            "raw_status":          raw_status,
+            "normalized_status":   norm,
+            "payment_status":      norm or "unknown",
+            "order_status":        raw_status,
+            "payment_method":      payment_method,
+            "is_abandoned":        bool(o.is_abandoned),
+            "queue_detected":      queue,
+            "reminder_eligible":   eligible,
+            "exclusion_reason":    exclusion if not eligible else "",
+            "reminders_sent":      len(unpaid_reminders) + len(cod_reminders),
+            "last_reminder_at":    last_reminder_at,
+            "customer_phone":      phone,
+            "created_at":          meta.get("created_at"),
+        })
+
+    return {
+        "tenant_id": tenant_id,
+        "now":       now.isoformat(),
+        "limit":     limit,
+        "counts":    {
+            "pending_payment":      counts["pending_payment"],
+            "pending_confirmation": counts["pending_confirmation"],
+            "other":                counts["other"],
+            "total_scanned":        len(rows),
+        },
+        "automations": {
+            "unpaid_order_reminder_enabled": bool(unpaid_auto),
+            "cod_confirmation_enabled":      bool(cod_auto),
+            "unpaid_steps_count":            len(unpaid_steps),
+            "cod_schedule_minutes":          cod_schedule,
+        },
+        "orders": out,
+    }
+
+
+def _ts_from_meta(value: Any) -> Optional[datetime]:
+    """Parse an ISO-ish timestamp from extra_metadata; returns aware UTC dt."""
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 @router.get("/autopilot/abandoned-carts/debug-events")
