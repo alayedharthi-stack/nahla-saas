@@ -693,6 +693,35 @@ async def normalize_whatsapp_inbound(
             should_process=True,
         )
 
+    # ── Catalog order (June 2026) ──────────────────────────────────
+    # When a customer submits a WhatsApp catalog order ("طلب عبر
+    # الكتالوج" — see screenshot in the merchant's report), Meta
+    # delivers an inbound webhook with ``type="order"`` and an
+    # ``order`` block that carries item count, total price,
+    # currency and the catalog SKU per line. Before this branch
+    # existed the normalizer fell through to the
+    # ``INBOUND_IGNORED_UNSUPPORTED`` path at the webhook router,
+    # so the customer got NO acknowledgement at all — they had
+    # just placed an order and the bot stayed silent.
+    #
+    # Strategy (per the merchant's surgical-fix instruction): do
+    # NOT build a real catalog system, do NOT add an intent layer,
+    # do NOT depend on Meta catalog import approval. Just unpack
+    # the order metadata into a structured Arabic text framed as
+    # "[طلب كتالوج من العميل]" and ride the standard text path
+    # to the brain (``normalized_type="text"``). The brain treats
+    # it as a buying-intent message and asks for whatever is
+    # missing (name, city, address) using the same flow it uses
+    # for any other product mention. Telemetry is preserved via
+    # ``metadata["source_type"]="catalog_order"`` and the
+    # ``[CATALOG_MESSAGE_TRACE]`` log line.
+    if msg_type == "order":
+        return _process_catalog_order(
+            order_payload=message.get("order") or {},
+            ts_raw=ts_raw,
+            wa_msg_id=wa_msg_id,
+        )
+
     if msg_type in {"audio", "voice"}:
         return await _process_audio(
             db=db,
@@ -766,6 +795,160 @@ async def normalize_whatsapp_inbound(
             "wa_message_id": wa_msg_id or None,
         },
         should_process=False,
+    )
+
+
+# ── Catalog order (WhatsApp catalog message) ───────────────────────
+
+
+def _process_catalog_order(
+    *,
+    order_payload: Dict[str, Any],
+    ts_raw: Any,
+    wa_msg_id: str,
+) -> MediaNormalizationResult:
+    """Convert a WhatsApp ``type="order"`` payload into a
+    brain-facing text on the standard text path.
+
+    WhatsApp's order shape (Cloud API + 360dialog, identical):
+
+        {
+          "catalog_id": "<meta_catalog_id>",
+          "text":       "<optional customer note>",
+          "product_items": [
+            {
+              "product_retailer_id": "<merchant SKU>",
+              "quantity":            <int>,
+              "item_price":          <float>,
+              "currency":            "<ISO code>",
+            },
+            ...
+          ]
+        }
+
+    We do NOT need (or have) the human-readable product titles in
+    this payload — Meta only sends the merchant's SKU
+    (``product_retailer_id``). The brain will ask the customer to
+    confirm what they ordered if necessary; this path's only job is
+    to STOP DROPPING the message and turn the available metadata
+    into a buying-intent text so the existing order-flow asks for
+    whatever is missing (name / city / address / payment).
+
+    The returned ``normalized_type`` is ``"text"`` on purpose: the
+    webhook router's allow-list (``{"text","audio","image",
+    "document","video"}``) and the standard text → brain path
+    handle this without any router changes. Telemetry is preserved
+    via ``metadata["source_type"]="catalog_order"`` and the
+    ``[CATALOG_MESSAGE_TRACE]`` log line.
+    """
+    items = order_payload.get("product_items") or []
+    if not isinstance(items, list):
+        items = []
+
+    # Quantity totals — sum of per-line quantities when present, else
+    # one unit per listed line. Defensive against string types.
+    def _as_float(v: Any) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _as_int(v: Any, *, default: int = 1) -> int:
+        try:
+            n = int(float(v))
+            return n if n > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    total_qty: int = 0
+    total_price: float = 0.0
+    currencies: list[str] = []
+    skus: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        qty = _as_int(it.get("quantity"), default=1)
+        price = _as_float(it.get("item_price"))
+        total_qty += qty
+        total_price += price * qty
+        cur = str(it.get("currency") or "").strip()
+        if cur and cur not in currencies:
+            currencies.append(cur)
+        sku = str(it.get("product_retailer_id") or "").strip()
+        if sku:
+            skus.append(sku)
+
+    # ``text`` on the order block is an optional note the customer
+    # typed in the catalog cart UI. Treat it as a free-form note
+    # the brain should consider.
+    customer_note = str(order_payload.get("text") or "").strip()
+    catalog_id    = str(order_payload.get("catalog_id") or "").strip()
+
+    item_count = total_qty if total_qty > 0 else len(items)
+    currency = currencies[0] if currencies else ""
+
+    # ── Compose brain-facing text ─────────────────────────────────
+    # Frame as a clearly-tagged catalog order so the LLM treats it
+    # as a buying intent without us adding a new intent / template.
+    lines: list[str] = ["[طلب كتالوج من العميل]"]
+    if item_count:
+        lines.append(f"عدد المنتجات: {item_count}")
+    if total_price > 0:
+        # Drop trailing zeros without forcing scientific notation.
+        total_str = (
+            f"{total_price:.2f}".rstrip("0").rstrip(".")
+            if total_price != int(total_price)
+            else f"{int(total_price)}"
+        )
+        lines.append(f"الإجمالي: {total_str} {currency}".strip())
+    if skus:
+        # First SKU only in the visible line — extra SKUs go to
+        # metadata for the merchant audit trail; we don't dump
+        # 50 codes at the LLM.
+        lines.append(f"رمز المنتج (SKU): {skus[0]}")
+    if customer_note:
+        lines.append(f"ملاحظة العميل: {customer_note}")
+    lines.append(
+        "ملاحظة: العميل أرسل طلبًا من كتالوج واتساب. تعامل معه "
+        "كنية شراء، واسأله فقط عن البيانات الناقصة لإكمال الطلب."
+    )
+    text = "\n".join(lines)
+
+    metadata: Dict[str, Any] = {
+        "source_type":     "catalog_order",
+        "wa_timestamp":    ts_raw,
+        "wa_message_id":   wa_msg_id or None,
+        "catalog_id":      catalog_id or None,
+        "item_count":      item_count,
+        "total_price":     total_price if total_price > 0 else None,
+        "currency":        currency or None,
+        "product_skus":    skus,
+        "customer_note":   customer_note or None,
+        # Echo the raw items list so a future audit query can
+        # reconstruct exactly what the customer submitted without
+        # re-parsing the webhook log.
+        "product_items":   items,
+    }
+
+    # Trace contract (per merchant request): one log line, fixed
+    # field order, ``final_route=brain`` so a grep over server
+    # logs immediately answers "did the catalog message reach the
+    # brain?".
+    logger.info(
+        "[CATALOG_MESSAGE_TRACE] wamid=%s item_count=%d total=%s "
+        "currency=%s product_name=%s final_route=brain",
+        wa_msg_id or "",
+        item_count,
+        f"{total_price:.2f}" if total_price > 0 else "",
+        currency or "",
+        skus[0] if skus else "",
+    )
+
+    return MediaNormalizationResult(
+        normalized_type="text",
+        text=text,
+        metadata=metadata,
+        should_process=True,
     )
 
 
