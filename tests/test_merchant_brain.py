@@ -174,13 +174,22 @@ class TestDecisionEngine:
         assert d.action == ACTION_FAQ_REPLY
         assert d.args["topic"] == "identity"
 
-    def test_shipping_goes_to_faq(self):
+    def test_shipping_goes_to_brain_with_topic_hint(self):
+        """``faq_shipping()`` template was disabled (June 2026) — the
+        canned "بالنسبة للشحن: …" reply read robotic on simple
+        questions like "تتوصلون للقصيم؟". Every ASK_SHIPPING decision
+        now routes to ``ACTION_LLM_REPLY`` with a ``topic_hint`` so
+        the brain composes the reply itself."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_ASK_SHIPPING, _make_state(greeted=True), _make_facts())
         d = eng.decide(ctx)
-        assert d.action == ACTION_FAQ_REPLY
-        assert d.args["topic"] == "shipping"
+        assert d.action == ACTION_LLM_REPLY
+        assert d.args.get("topic_hint") == "shipping"
+        # Legacy ``topic='shipping'`` arg (the FAQ-template trigger)
+        # MUST be absent so the composer never short-circuits into
+        # ``T.faq_shipping(...)``.
+        assert d.args.get("topic") != "shipping"
 
     def test_start_order_with_focus(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine

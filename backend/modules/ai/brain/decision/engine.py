@@ -1102,21 +1102,26 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_SHIPPING:
-            # ── Post-order tracking guard (May 2026 hotfix) ─────────────
-            # Production complaint: customers with a paid/processing
-            # order asking "أي فرع أرسلتو طلبي في سمسا؟" were getting
-            # the static ``faq_shipping()`` template ("بعد اختيار
-            # المنتج المناسب…") even though they have a complete
-            # order. The carrier-name token "سمسا" fires the
-            # ASK_SHIPPING rule at conf 0.90 — but THIS rule is for
-            # "shipping options BEFORE the order"; once the order
-            # exists, the same question is order-tracking and must
-            # flow to the brain with full order context.
+            # ── Shipping intent → ALWAYS the brain (June 2026) ───────────
+            # The static ``faq_shipping()`` template ("بالنسبة للشحن: …
+            # أقدر أتحقق لك من خيارات الشحن المتاحة بعد اختيار المنتج
+            # المناسب") was producing unnatural answers even on the
+            # simplest questions ("تتوصلون للقصيم؟", "كم مدة الشحن؟",
+            # "بكم الشحن؟"). The merchant explicitly asked us to remove
+            # the canned template entirely and route every shipping
+            # question to the brain so the AI writes the reply itself
+            # using the full conversation + store-knowledge context.
             #
-            # We only suppress the canned FAQ — we do NOT inject any
-            # new copy. The brain receives the message + the full
-            # conversation/order context and writes the reply itself
-            # ("أبشر يا خالد 🌷 أتحقق لك من تفاصيل الشحنة …").
+            # ``faq_shipping`` is now a ROUTING HINT, not an outbound
+            # template: we set ``topic_hint="shipping"`` on the LLM
+            # decision so observers (logging, telemetry, future
+            # orchestration) still see what the rule classifier matched,
+            # but the customer-facing copy is composed by the brain.
+            #
+            # Post-order context (paid/processing/shipped order, or
+            # product-in-focus + known city) gets a sharper hint so the
+            # brain frames the reply as order tracking rather than a
+            # shipping-policy answer — without injecting any new copy.
             _op = getattr(state, "order_prep", None)
             _post_order = bool(
                 getattr(_op, "payment_receipt_received", False)
@@ -1131,8 +1136,7 @@ class DefaultDecisionEngine:
             )
             if _post_order:
                 logger.info(
-                    "[SHIPPING_INTENT] post-order context detected — "
-                    "skipping faq_shipping template, deferring to brain "
+                    "[SHIPPING_INTENT] post-order context — defer to brain "
                     "| tenant=%s payment_receipt=%s order_status=%r",
                     ctx.tenant_id,
                     bool(getattr(_op, "payment_receipt_received", False)),
@@ -1142,18 +1146,27 @@ class DefaultDecisionEngine:
                     action=ACTION_LLM_REPLY,
                     args={
                         "topic": "shipping_post_order",
+                        "topic_hint": "shipping",
                         "intent_hint": "order_tracking",
                     },
                     reason=(
-                        "ASK_SHIPPING matched, but conversation has a "
-                        "paid/processing/shipped order — defer to brain "
-                        "with order context instead of canned FAQ"
+                        "ASK_SHIPPING matched, paid/processing/shipped "
+                        "order present — defer to brain with order context"
                     ),
                 )
+            logger.info(
+                "[SHIPPING_INTENT] pre-order — defer to brain "
+                "(faq_shipping template disabled) | tenant=%s",
+                ctx.tenant_id,
+            )
             return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "shipping"},
-                reason="customer asked about shipping / delivery",
+                action=ACTION_LLM_REPLY,
+                args={"topic_hint": "shipping"},
+                reason=(
+                    "customer asked about shipping / delivery — let the "
+                    "brain compose the reply (faq_shipping template "
+                    "disabled June 2026)"
+                ),
             )
 
         if intent.name == INTENT_ASK_STORE_INFO:

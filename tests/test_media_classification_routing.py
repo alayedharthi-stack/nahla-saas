@@ -433,24 +433,34 @@ class TestMediaClassifyTraceEmission:
 # ──────────────────────────────────────────────────────────────────────
 # 5. Shipping intent after the order exists — must defer to brain
 #
-# The exact production reproducer from the user's screenshot
-# (May 2026): a customer with a paid/processing order asked
-# "اي فرع ارسلتو طلبي في سمسا" — the bot replied with the static
-# ``faq_shipping()`` template ("بعد اختيار المنتج المناسب…") instead
-# of routing the question to the brain with order context.
+# The original (May 2026) reproducer: a customer with a
+# paid/processing order asked "اي فرع ارسلتو طلبي في سمسا" — the bot
+# replied with the static ``faq_shipping()`` template ("بعد اختيار
+# المنتج المناسب…") instead of routing to the brain with order
+# context. The first fix routed POST-ORDER shipping questions to the
+# brain.
 #
-# Resolution policy (per the user's explicit instruction):
+# A second reproducer (June 2026) showed the same canned template
+# ("بالنسبة للشحن: أقدر أتحقق لك من خيارات الشحن المتاحة بعد اختيار
+# المنتج المناسب") still firing on simple PRE-ORDER questions like
+# "تتوصلون للقصيم العسل" — which read robotic and unhelpful. The
+# merchant asked us to remove the canned shipping template entirely.
+#
+# Resolution policy (per the merchant's explicit instruction):
 #   * DO NOT add a new template / canned reply.
-#   * DO NOT add a new "post-order tracking" intent / route.
-#   * The decision engine simply REFUSES to use the canned shipping
-#     FAQ when the conversation already has a paid / processing /
-#     shipped order, and routes to ACTION_LLM_REPLY so the brain
-#     writes the reply itself using the existing order context.
+#   * DO NOT add a new intent / new routing layer.
+#   * ``faq_shipping`` becomes a ROUTING HINT, not an outbound
+#     template. EVERY ``INTENT_ASK_SHIPPING`` decision now routes to
+#     ``ACTION_LLM_REPLY`` with ``topic_hint='shipping'`` so the brain
+#     composes the reply itself using the customer's actual question +
+#     full store-knowledge context.
 # ──────────────────────────────────────────────────────────────────────
 
 
 class TestShippingIntentDefersToBrainAfterOrder:
-    """Lock-in: ASK_SHIPPING + post-order context → brain, not FAQ."""
+    """Lock-in: every ASK_SHIPPING decision goes to the brain
+    (post-order tightens the hint with ``intent_hint='order_tracking'``,
+    pre-order carries ``topic_hint='shipping'`` only)."""
 
     @staticmethod
     def _build_post_order_ctx(
@@ -538,12 +548,18 @@ class TestShippingIntentDefersToBrainAfterOrder:
         d = DefaultDecisionEngine().decide(ctx)
         assert d.action == ACTION_LLM_REPLY
 
-    def test_pre_order_shipping_question_still_uses_faq(self) -> None:
-        """Regression-safety: a customer with NO active order asking
-        'كم سعر الشحن؟' MUST still get the canned shipping FAQ —
-        the guard only kicks in AFTER an order exists. Otherwise we'd
-        push the customer into a no-context brain reply for the
-        legitimate 'do you ship?' question."""
+    def test_pre_order_shipping_question_routes_to_brain_with_topic_hint(
+        self,
+    ) -> None:
+        """June 2026 update — the static ``faq_shipping()`` template
+        is disabled. Even pre-order shipping questions (no order yet)
+        now route to ``ACTION_LLM_REPLY`` so the brain composes a
+        natural reply per the merchant's actual question
+        ("تتوصلون للقصيم؟" → "نعم نوصل للقصيم 🌷", "كم مدة الشحن؟" →
+        store-policy answer, "بكم الشحن؟" → asks for the city).
+
+        ``faq_shipping`` is now a routing hint (``topic_hint='shipping'``)
+        rather than an outbound template."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         from modules.ai.brain.decision.actions import (
             ACTION_FAQ_REPLY, ACTION_LLM_REPLY,
@@ -551,8 +567,16 @@ class TestShippingIntentDefersToBrainAfterOrder:
 
         ctx = self._build_post_order_ctx()  # no signals at all
         d = DefaultDecisionEngine().decide(ctx)
-        assert d.action == ACTION_FAQ_REPLY
-        assert d.args.get("topic") == "shipping"
+        assert d.action == ACTION_LLM_REPLY, (
+            f"Expected brain handoff (faq_shipping disabled); got "
+            f"action={d.action!r} args={d.args!r}"
+        )
+        # Routing hint MUST be present so observers / telemetry can
+        # still see the rule classifier matched ASK_SHIPPING.
+        assert d.args.get("topic_hint") == "shipping"
+        # And, critically, NOT the canned shipping FAQ branch:
+        assert d.action != ACTION_FAQ_REPLY
+        assert (d.args.get("topic") or "") != "shipping"
 
     def test_product_focus_plus_city_also_treated_as_post_order(self) -> None:
         """Customers who already gave the bot a product + city are
@@ -566,3 +590,114 @@ class TestShippingIntentDefersToBrainAfterOrder:
         )
         d = DefaultDecisionEngine().decide(ctx)
         assert d.action == ACTION_LLM_REPLY
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Regression — June 2026
+# ──────────────────────────────────────────────────────────────────────
+# The merchant's three reference questions:
+#
+#   1. "تتوصلون للقصيم؟"  → brain answers "نعم نوصل للقصيم بإذن الله"
+#   2. "كم مدة الشحن؟"     → brain answers from store policy
+#   3. "بكم الشحن؟"        → brain answers per city / asks for city
+#
+# The contract this regression block locks: each of these inputs,
+# when classified as ``INTENT_ASK_SHIPPING``, is routed to the brain
+# with ``topic_hint='shipping'`` — NEVER to ``ACTION_FAQ_REPLY`` and
+# NEVER carrying the legacy ``topic='shipping'`` arg that triggered
+# the canned ``faq_shipping()`` template.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestShippingTemplateDisabled:
+
+    @staticmethod
+    def _ctx_for(message: str):
+        from modules.ai.brain.types import (  # noqa: PLC0415
+            BrainContext,
+            CommerceFacts,
+            Intent,
+            INTENT_ASK_SHIPPING,
+            MerchantConversationState,
+            OrderPreparationState,
+        )
+        state = MerchantConversationState()
+        state.order_prep = OrderPreparationState()
+        intent = Intent(
+            name=INTENT_ASK_SHIPPING,
+            confidence=0.92,
+            slots={},
+            raw_message=message,
+            extraction_method="rules",
+        )
+        return BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000200",
+            message=message,
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(),
+        )
+
+    def test_three_example_shipping_questions_all_route_to_brain(self) -> None:
+        """The exact phrasings the merchant asked us to fix: each
+        must go to the brain with ``topic_hint='shipping'`` — never
+        to the canned FAQ template."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import (
+            ACTION_FAQ_REPLY, ACTION_LLM_REPLY,
+        )
+
+        engine = DefaultDecisionEngine()
+        for msg in (
+            "تتوصلون للقصيم؟",
+            "كم مدة الشحن؟",
+            "بكم الشحن؟",
+        ):
+            d = engine.decide(self._ctx_for(msg))
+            assert d.action == ACTION_LLM_REPLY, (
+                f"input={msg!r} routed to {d.action!r} (expected "
+                f"ACTION_LLM_REPLY); args={d.args!r}"
+            )
+            assert d.action != ACTION_FAQ_REPLY, (
+                f"input={msg!r} hit the disabled FAQ branch"
+            )
+            assert d.args.get("topic_hint") == "shipping", (
+                f"input={msg!r} missing topic_hint='shipping'; "
+                f"args={d.args!r}"
+            )
+            # The legacy ``topic='shipping'`` arg is what the
+            # composer's FAQ branch keys off — its absence is the
+            # contract that disables the canned template.
+            assert d.args.get("topic") != "shipping", (
+                f"input={msg!r} still carries legacy topic='shipping' "
+                f"arg that triggers faq_shipping(): args={d.args!r}"
+            )
+
+    def test_responder_no_longer_renders_faq_shipping_for_llm_decision(
+        self,
+    ) -> None:
+        """Belt-and-suspenders: even if some upstream code mistakenly
+        hands the responder a Decision shaped like the disabled
+        FAQ-shipping branch (``ACTION_LLM_REPLY`` with the LEGACY
+        ``topic='shipping'`` arg), the composer's FAQ branch is
+        action-gated on ``ACTION_FAQ_REPLY`` so the leg never reaches
+        ``T.faq_shipping(...)``. This test inspects the responder
+        source to lock that invariant."""
+        from modules.ai.brain.compose import responder
+        src = Path(responder.__file__).read_text(encoding="utf-8")
+        # The faq_shipping template call MUST sit INSIDE the
+        # ACTION_FAQ_REPLY branch (action-gated). If a future refactor
+        # moves the call outside that gate, this assertion catches it.
+        faq_action_idx  = src.find("if action == ACTION_FAQ_REPLY:")
+        faq_template_idx = src.find("T.faq_shipping(")
+        # Either the call was deleted entirely (preferred) or it is
+        # still nested under the action gate.
+        assert (
+            faq_template_idx == -1
+            or (faq_action_idx != -1 and faq_action_idx < faq_template_idx)
+        ), (
+            "T.faq_shipping(...) is no longer gated by "
+            "`if action == ACTION_FAQ_REPLY:` — a future refactor "
+            "moved the canned template out of its action branch"
+        )
