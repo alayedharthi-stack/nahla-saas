@@ -19,6 +19,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 
 // Signal Salla host frame immediately — this page may be loaded in the top
 // context after breaking out of the iframe so the signal is a no-op there,
@@ -29,6 +30,7 @@ import { API_BASE } from '../api/client'
 
 export default function SallaLaunch() {
   const navigate = useNavigate()
+  const { isRTL, t } = useEmbeddedLocale()
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   useEffect(() => {
@@ -37,7 +39,7 @@ export default function SallaLaunch() {
     const nextPath  = params.get('next')  || '/overview'
 
     if (!token) {
-      setErrorMsg('رابط الدخول غير صالح أو منتهي الصلاحية، حاول فتح التطبيق من سلة مجدداً.')
+      setErrorMsg(t.launch.errorInvalidLink)
       return
     }
 
@@ -108,13 +110,11 @@ export default function SallaLaunch() {
         navigate(nextPath, { replace: true })
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
-        // If the backend returned the Arabic error string, show it directly.
-        const isArabic = /[\u0600-\u06FF]/.test(msg)
-        setErrorMsg(
-          isArabic
-            ? msg
-            : 'تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.',
-        )
+        // If the backend already returned a localized error string (Arabic
+        // diacritics or Latin letters) surface it verbatim.  Otherwise fall
+        // back to a generic, locale-aware message.
+        const looksLocalized = msg.length > 0 && /[\u0600-\u06FFa-zA-Z]/.test(msg)
+        setErrorMsg(looksLocalized ? msg : t.launch.errorGeneric)
       }
     })()
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -124,7 +124,7 @@ export default function SallaLaunch() {
   if (!errorMsg) {
     return (
       <div
-        dir="rtl"
+        dir={isRTL ? 'rtl' : 'ltr'}
         style={{
           minHeight:      '100dvh',
           display:        'flex',
@@ -138,17 +138,17 @@ export default function SallaLaunch() {
       >
         <img
           src="/logo.png"
-          alt="Nahla"
+          alt={t.app.brand}
           width={56}
           height={56}
           style={{ borderRadius: 14, boxShadow: '0 4px 14px rgba(0,0,0,0.10)' }}
           onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
         />
         <p style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', margin: 0 }}>
-          جارٍ تسجيل الدخول…
+          {t.launch.loadingTitle}
         </p>
         <p style={{ fontSize: 12, color: '#94a3b8', margin: 0 }}>
-          سيتم توجيهك تلقائياً خلال لحظات
+          {t.launch.loadingSubtitle}
         </p>
         {/* Spinner */}
         <div
@@ -169,7 +169,7 @@ export default function SallaLaunch() {
   // ── Error state ───────────────────────────────────────────────────────────────
   return (
     <div
-      dir="rtl"
+      dir={isRTL ? 'rtl' : 'ltr'}
       style={{
         minHeight:      '100dvh',
         display:        'flex',
@@ -185,7 +185,7 @@ export default function SallaLaunch() {
     >
       <span style={{ fontSize: 40 }}>⚠️</span>
       <p style={{ fontSize: 15, fontWeight: 700, color: '#0f172a', margin: 0 }}>
-        تعذر تسجيل الدخول
+        {t.launch.errorTitle}
       </p>
       <p style={{ fontSize: 13, color: '#64748b', margin: 0, maxWidth: 340, lineHeight: 1.6 }}>
         {errorMsg}
@@ -205,7 +205,7 @@ export default function SallaLaunch() {
           fontFamily:   'inherit',
         }}
       >
-        العودة إلى سلة
+        {t.launch.btnBackToSalla}
       </button>
     </div>
   )

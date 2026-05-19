@@ -50,9 +50,43 @@ merchant dashboard follow the merchant's host preferences:
 | Check | Command | Result |
 | --- | --- | --- |
 | TypeScript | `npx tsc --noEmit` | ✅ Pass (no errors) |
-| Production build | `npm run build` | ✅ Pass — 2612 modules, CSS 133 kB, JS 2.1 MB (~541 kB gz) |
-| i18n parity | `npm run check:i18n` | ✅ Pass — `OK i18n parity — 82 keys x 2 langs (ar, en)` |
+| Production build | `npm run build` | ✅ Pass — 2612 modules, CSS 133 kB, JS 2.1 MB (~542 kB gz) |
+| i18n parity | `npm run check:i18n` | ✅ Pass — `OK i18n parity — 123 keys x 2 langs (ar, en)` |
+| Resolver smoke test | `npm run check:resolvers` | ✅ Pass — 13/13 cases (URL→storage→user→system priority, EN/AR normalization, persistence bug fix) |
 | Linter | Cursor `ReadLints` on all touched files | ✅ No errors introduced |
+
+### 3.1 Post-merge follow-up patch (2026-05-19, second iteration)
+
+**Reported regression:** `/app/salla?lang=en` translated successfully, but
+after the auth bootstrap finished and React Router navigated to `/app/entry`
+the page reverted to Arabic.
+
+**Root cause:** `navigate()` strips the original query string, and the URL
+resolver in `useEmbeddedLocale` / `useEmbeddedTheme` didn't persist the
+URL-resolved value. On the next render under `/app/entry` the chain dropped
+through to the user-preference fallback (`ar` default) and the page
+re-rendered in Arabic.
+
+**Fix (two-layer):**
+1. **Persistence layer** — `useEmbeddedLocale` and `useEmbeddedTheme` now
+   write any URL-resolved value into `localStorage` (`nahla-embedded-lang`
+   / `nahla-embedded-theme`) inside the resolver. Subsequent renders read
+   the stickied value even when the URL no longer carries the parameter.
+2. **Forwarding layer** — `SallaEmbedded` now reads `?lang` / `?theme` from
+   its own URL and appends them to the `/app/entry` URL passed to
+   `navigate(...)`, so the URL-source takes priority again on the next page
+   and stays correct even in private-mode iframes where storage is wiped.
+
+**Coverage extended to all Salla flow pages:**
+* `SallaLaunch.tsx` — loader + error
+* `SallaOAuthSuccess.tsx`
+* `SallaOAuthError.tsx` (reasons dictionary in both langs)
+* `SallaCallback.tsx` — post-install confirmation
+* `SallaSetup.tsx` — already auto-redirects to `/app/entry`, no user-visible
+  copy left to translate (verified by reading the component flow).
+
+Skipped (out of scope): `SallaPricing.tsx` — public marketing page, not part
+of the embedded iframe surface.
 
 ---
 

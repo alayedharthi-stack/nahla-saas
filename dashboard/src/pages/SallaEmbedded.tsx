@@ -185,6 +185,25 @@ export default function SallaEmbedded() {
   const storeId    = paramsRef.current.get('store_id') || ''
   const appId      = paramsRef.current.get('app_id')   || ''
 
+  // Build the /app/entry path while preserving Salla's UI preferences
+  // (?lang and ?theme).  React Router's navigate() strips the query
+  // string by default, which would otherwise lose Salla's host language
+  // on the very first navigation after auth.  useEmbeddedLocale /
+  // useEmbeddedTheme also persist to localStorage as a secondary
+  // safety net — this URL forwarding is the primary path so even
+  // private-mode iframes (where storage is wiped) stay consistent.
+  const entryUrlRef = useRef<string>('')
+  if (entryUrlRef.current === '') {
+    const forwarded = new URLSearchParams()
+    const lang  = paramsRef.current.get('lang')  || paramsRef.current.get('locale') || paramsRef.current.get('language')
+    const theme = paramsRef.current.get('theme') || paramsRef.current.get('color_scheme') || paramsRef.current.get('mode')
+    if (lang)  forwarded.set('lang',  lang)
+    if (theme) forwarded.set('theme', theme)
+    const qs = forwarded.toString()
+    entryUrlRef.current = qs ? `/app/entry?${qs}` : '/app/entry'
+  }
+  const entryUrl = entryUrlRef.current
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   const clearWatchdog = useCallback(() => {
@@ -218,9 +237,9 @@ export default function SallaEmbedded() {
     setTimeout(() => {
       setPhase('success')
       setStatusText(t.loader.entering)
-      setTimeout(() => navigate('/app/entry', { replace: true }), 150)
+      setTimeout(() => navigate(entryUrl, { replace: true }), 150)
     }, WELCOME_HOLD_MS)
-  }, [clearWatchdog, navigate, t])
+  }, [clearWatchdog, navigate, t, entryUrl])
 
   // ── goToDashboard: kept for the explicit "Open dashboard" button on the
   //            welcome card — lets impatient merchants skip the 1.4 s hold.
@@ -228,8 +247,8 @@ export default function SallaEmbedded() {
     setPhase('success')
     console.info('[SallaEmbedded] user pressed CTA → navigating to /app/entry')
     setStatusText(t.loader.entering)
-    setTimeout(() => navigate('/app/entry', { replace: true }), 150)
-  }, [navigate, t])
+    setTimeout(() => navigate(entryUrl, { replace: true }), 150)
+  }, [navigate, t, entryUrl])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
 

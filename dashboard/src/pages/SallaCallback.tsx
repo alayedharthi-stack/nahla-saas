@@ -23,8 +23,10 @@
  *   return to Salla, or click the "اذهب إلى تطبيقاتي" link below.
  */
 import { useEffect, useState } from 'react'
+import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 
 export default function SallaCallback() {
+  const { isRTL, t } = useEmbeddedLocale()
   const [error,     setError]     = useState('')
   const [storeName, setStoreName] = useState('')
   const [isNew,     setIsNew]     = useState(false)
@@ -102,17 +104,25 @@ export default function SallaCallback() {
     try { window.history.back() } catch { /* noop */ }
   }
 
+  // Split the localized body around the two emphasized labels so we can keep
+  // them visually highlighted while staying language-agnostic.
+  const bodyTpl   = t.callback.howToStartBody
+  const appsLabel = t.callback.howToStartAppsLabel
+  const useLabel  = t.callback.howToStartUseAppLabel
+  const [pre, midPlusEnd] = bodyTpl.split('{appsLabel}')
+  const [mid, post]       = (midPlusEnd ?? '').split('{useAppLabel}')
+
   return (
     <div
-      dir="rtl"
+      dir={isRTL ? 'rtl' : 'ltr'}
       className="min-h-dvh flex flex-col items-center justify-center bg-slate-900 gap-6 px-5"
     >
       {error ? (
         /* ── Error state ─────────────────────────────────────── */
         <div className="text-center space-y-3 max-w-sm">
           <div className="text-4xl">⚠️</div>
-          <p className="text-white font-semibold">حدث خطأ أثناء ربط المتجر</p>
-          <p className="text-slate-400 text-sm">يمكنك إعادة المحاولة من متجر تطبيقات سلة.</p>
+          <p className="text-white font-semibold">{t.callback.errorTitle}</p>
+          <p className="text-slate-400 text-sm">{t.callback.errorBody}</p>
           <code className="text-amber-400 text-xs block bg-slate-800 rounded px-2 py-1">{error}</code>
         </div>
       ) : (
@@ -121,26 +131,26 @@ export default function SallaCallback() {
           <div className="text-6xl">✅</div>
           <div>
             <p className="text-white font-bold text-2xl leading-snug">
-              {isNew ? 'تم تثبيت نحلة بنجاح!' : 'تم تجديد الربط بنجاح!'}
+              {isNew ? t.callback.successInstalled : t.callback.successRenewed}
             </p>
             {storeName && (
               <p className="text-slate-300 text-sm mt-2">
-                المتجر: <span className="text-amber-400 font-semibold">{storeName}</span>
+                {t.callback.storePrefix}: <span className="text-amber-400 font-semibold">{storeName}</span>
               </p>
             )}
           </div>
 
-          <div className="bg-slate-800/60 border border-amber-400/20 rounded-2xl p-5 text-right">
+          <div className={`bg-slate-800/60 border border-amber-400/20 rounded-2xl p-5 ${isRTL ? 'text-right' : 'text-left'}`}>
             <p className="text-amber-300 text-sm font-bold mb-2 flex items-center gap-2">
               <span>📌</span>
-              للبدء باستخدام نحلة:
+              {t.callback.howToStartTitle}
             </p>
             <p className="text-slate-200 text-sm leading-relaxed">
-              عُد إلى متجرك في سلة، وستجد نحلة الآن في قسم
-              <span className="text-amber-400 font-bold"> «تطبيقاتي» </span>
-              مع زر
-              <span className="text-amber-400 font-bold"> «استخدام التطبيق» </span>
-              جاهزاً للضغط.
+              {pre}
+              <span className="text-amber-400 font-bold"> {appsLabel} </span>
+              {mid}
+              <span className="text-amber-400 font-bold"> {useLabel} </span>
+              {post}
             </p>
           </div>
 
@@ -148,7 +158,7 @@ export default function SallaCallback() {
             onClick={tryClose}
             className="text-slate-400 hover:text-slate-300 text-xs font-semibold underline underline-offset-4 transition-colors"
           >
-            إغلاق هذه الصفحة
+            {t.callback.closePage}
           </button>
         </div>
       )}

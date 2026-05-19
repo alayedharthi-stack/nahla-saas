@@ -75,7 +75,14 @@ export interface UseEmbeddedLocaleReturn<S extends EmbeddedStrings = EmbeddedStr
 
 export function useEmbeddedLocale(): UseEmbeddedLocaleReturn {
   const resolve = useCallback((): { lang: EmbeddedLang; source: UseEmbeddedLocaleReturn['source'] } => {
-    const url = readUrlLang();        if (url)        return { lang: url,        source: 'url' }
+    const url = readUrlLang()
+    if (url) {
+      // CRITICAL: persist URL-resolved locale to embed storage so that subsequent
+      // React Router navigations within the Salla iframe (e.g. /app/salla → /app/entry)
+      // keep the same language, even though navigate() strips the original query string.
+      try { localStorage.setItem(EMBED_STORAGE_KEY, url) } catch { /* ignore */ }
+      return { lang: url, source: 'url' }
+    }
     const stored = readStoredEmbed(); if (stored)     return { lang: stored,     source: 'stored' }
     const user = readUserPref();      if (user)       return { lang: user,       source: 'user' }
     const ref = readReferrer();       if (ref)        return { lang: ref,        source: 'referrer' }

@@ -67,7 +67,14 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
   const embedded = isInsideIframe()
 
   const resolve = useCallback((): { theme: Resolved; source: UseEmbeddedThemeReturn['source'] } => {
-    const url = readUrlTheme();    if (url)        return { theme: url,    source: 'url' }
+    const url = readUrlTheme()
+    if (url) {
+      // CRITICAL: persist URL-resolved theme to embed storage so that subsequent
+      // React Router navigations within the Salla iframe (e.g. /app/salla → /app/entry)
+      // keep the same theme, even though navigate() strips the original query string.
+      try { localStorage.setItem(EMBED_STORAGE_KEY, url) } catch { /* ignore */ }
+      return { theme: url, source: 'url' }
+    }
     const stored = readStoredEmbed(); if (stored) return { theme: stored, source: 'stored' }
     if (userTheme === 'dark' || userTheme === 'light') {
       // Only treat as "user" choice when they have an explicit preference.

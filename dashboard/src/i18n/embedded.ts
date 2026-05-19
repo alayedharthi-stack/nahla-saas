@@ -115,6 +115,67 @@ export interface EmbeddedStrings {
   footer: {
     saudi:         string
   }
+  /** /salla-callback — after Salla App Store install */
+  callback: {
+    successInstalled:   string
+    successRenewed:     string
+    storePrefix:        string
+    howToStartTitle:    string
+    /** With placeholders {appsLabel} and {useAppLabel} inlined as <b>. */
+    howToStartBody:     string
+    howToStartAppsLabel:    string
+    howToStartUseAppLabel:  string
+    errorTitle:         string
+    errorBody:          string
+    closePage:          string
+  }
+  /** /integrations/salla/success — OAuth Sync success landing */
+  oauthSuccess: {
+    title:       string
+    /** "Linked store {storeName} to Nahla AI" */
+    subtitleWithStore: string
+    storeIdLabel:string
+    whatNow:     string
+    bullet1:     string
+    bullet2:     string
+    bullet3:     string
+    btnSettings: string
+    btnHome:     string
+  }
+  /** /integrations/salla/error — OAuth Sync error landing */
+  oauthError: {
+    title:       string
+    /** Used when the reason code is unknown — placeholder is appended verbatim. */
+    fallbackReason: string
+    reasons: {
+      missing_code:          string
+      token_exchange_failed: string
+      app_not_configured:    string
+      db_save_failed:        string
+      network_error:         string
+      access_denied:         string
+    }
+    howToFixTitle: string
+    fix1:        string
+    fix2:        string
+    fix3:        string
+    btnBack:     string
+    btnRetry:    string
+  }
+  /** /app/salla/launch — short-lived launch token consumer */
+  launch: {
+    loadingTitle:    string
+    loadingSubtitle: string
+    errorTitle:      string
+    errorInvalidLink:string
+    errorGeneric:    string
+    btnBackToSalla:  string
+  }
+  /** /app/salla/setup — currently auto-redirects, kept for completeness */
+  setup: {
+    brand:    string
+    skip:     string
+  }
 }
 
 const ar: EmbeddedStrings = {
@@ -222,6 +283,59 @@ const ar: EmbeddedStrings = {
   footer: {
     saudi: 'فريق سعودي 100% 🇸🇦 · Nahla AI',
   },
+  callback: {
+    successInstalled:      'تم تثبيت نحلة بنجاح!',
+    successRenewed:        'تم تجديد الربط بنجاح!',
+    storePrefix:           'المتجر',
+    howToStartTitle:       'للبدء باستخدام نحلة:',
+    howToStartBody:        'عُد إلى متجرك في سلة، وستجد نحلة الآن في قسم {appsLabel} مع زر {useAppLabel} جاهزاً للضغط.',
+    howToStartAppsLabel:   '«تطبيقاتي»',
+    howToStartUseAppLabel: '«استخدام التطبيق»',
+    errorTitle:            'حدث خطأ أثناء ربط المتجر',
+    errorBody:             'يمكنك إعادة المحاولة من متجر تطبيقات سلة.',
+    closePage:             'إغلاق هذه الصفحة',
+  },
+  oauthSuccess: {
+    title:             'تم ربط المتجر بنجاح',
+    subtitleWithStore: 'تم ربط متجر {storeName} بنحلة AI',
+    storeIdLabel:      'معرّف المتجر:',
+    whatNow:           'ماذا يمكنك الآن؟',
+    bullet1:           '• جلب المنتجات والطلبات مباشرة من سلة',
+    bullet2:           '• إنشاء طلبات حقيقية عبر وكيل المبيعات',
+    bullet3:           '• التحقق من رموز الخصم تلقائياً',
+    btnSettings:       'إعدادات الربط',
+    btnHome:           'الصفحة الرئيسية',
+  },
+  oauthError: {
+    title:          'فشل ربط المتجر',
+    fallbackReason: 'حدث خطأ أثناء ربط المتجر.',
+    reasons: {
+      missing_code:          'لم يتم استلام رمز التفويض من سلة.',
+      token_exchange_failed: 'فشل تبادل رمز التفويض مع سلة. تأكد من صحة بيانات التطبيق.',
+      app_not_configured:    'التطبيق غير مهيأ بالكامل. تواصل مع الدعم.',
+      db_save_failed:        'فشل حفظ بيانات الربط في قاعدة البيانات.',
+      network_error:         'حدث خطأ في الشبكة أثناء التواصل مع سلة. حاول مرة أخرى.',
+      access_denied:         'رفض المستخدم منح الصلاحيات لنحلة AI.',
+    },
+    howToFixTitle: 'خطوات لحل المشكلة:',
+    fix1:          '• تأكد أن التطبيق مفعّل في لوحة تحكم سلة',
+    fix2:          '• تأكد أن Redirect URI صحيح: api.nahlah.ai/oauth/salla/callback',
+    fix3:          '• تواصل مع الدعم إذا استمرت المشكلة',
+    btnBack:       'العودة',
+    btnRetry:      'حاول مجدداً',
+  },
+  launch: {
+    loadingTitle:    'جارٍ تسجيل الدخول…',
+    loadingSubtitle: 'سيتم توجيهك تلقائياً خلال لحظات',
+    errorTitle:      'تعذر تسجيل الدخول',
+    errorInvalidLink:'رابط الدخول غير صالح أو منتهي الصلاحية، حاول فتح التطبيق من سلة مجدداً.',
+    errorGeneric:    'تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.',
+    btnBackToSalla:  'العودة إلى سلة',
+  },
+  setup: {
+    brand: 'نحلة AI',
+    skip:  'تخطي الإعداد والدخول للوحة التحكم',
+  },
 }
 
 const en: EmbeddedStrings = {
@@ -328,6 +442,59 @@ const en: EmbeddedStrings = {
   },
   footer: {
     saudi: 'Saudi team 100% 🇸🇦 · Nahla AI',
+  },
+  callback: {
+    successInstalled:      'Nahla installed successfully!',
+    successRenewed:        'Connection renewed successfully!',
+    storePrefix:           'Store',
+    howToStartTitle:       'To start using Nahla:',
+    howToStartBody:        'Go back to your store on Salla — Nahla is now under {appsLabel} with the {useAppLabel} button ready to click.',
+    howToStartAppsLabel:   '"My Apps"',
+    howToStartUseAppLabel: '"Use App"',
+    errorTitle:            'Something went wrong while linking your store',
+    errorBody:             'You can retry from the Salla App Store.',
+    closePage:             'Close this page',
+  },
+  oauthSuccess: {
+    title:             'Store linked successfully',
+    subtitleWithStore: 'Store {storeName} is now linked to Nahla AI',
+    storeIdLabel:      'Store ID:',
+    whatNow:           'What can you do now?',
+    bullet1:           '• Pull products and orders directly from Salla',
+    bullet2:           '• Create real orders through the sales agent',
+    bullet3:           '• Verify discount codes automatically',
+    btnSettings:       'Integration settings',
+    btnHome:           'Go to dashboard',
+  },
+  oauthError: {
+    title:          'Store link failed',
+    fallbackReason: 'Something went wrong while linking the store.',
+    reasons: {
+      missing_code:          'Salla did not return an authorization code.',
+      token_exchange_failed: 'Token exchange with Salla failed. Verify your app credentials.',
+      app_not_configured:    'The app is not fully configured. Contact support.',
+      db_save_failed:        'Failed to save the link in the database.',
+      network_error:         'A network error occurred while talking to Salla. Try again.',
+      access_denied:         'The user denied granting permissions to Nahla AI.',
+    },
+    howToFixTitle: 'Steps to fix it:',
+    fix1:          '• Make sure the app is enabled in your Salla partner dashboard',
+    fix2:          '• Confirm the redirect URI is: api.nahlah.ai/oauth/salla/callback',
+    fix3:          '• Contact support if the issue persists',
+    btnBack:       'Back',
+    btnRetry:      'Try again',
+  },
+  launch: {
+    loadingTitle:    'Signing you in…',
+    loadingSubtitle: "You'll be redirected automatically in a moment",
+    errorTitle:      'Sign-in failed',
+    errorInvalidLink:'The sign-in link is invalid or expired. Reopen the app from Salla.',
+    errorGeneric:    'Could not sign you in via Salla. Try opening the app again.',
+    btnBackToSalla:  'Back to Salla',
+  },
+  setup: {
+    brand: 'Nahla AI',
+    skip:  'Skip setup and go to the dashboard',
   },
 }
 
