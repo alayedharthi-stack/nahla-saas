@@ -41,6 +41,7 @@ const ar: Translations = {
       deliveryQuality:  'جودة الإرسال',
       billing:          'الاشتراك والفوترة',
       settings:         'الإعدادات',
+      security:         'الأمان والمصادقة',
     },
     adminItems: {
       dashboard:       'لوحة التحكم',
@@ -55,6 +56,7 @@ const ar: Translations = {
       tools:           'أدوات التنظيف',
       catalog:         'كتالوج المنتجات',
       settings:        'الإعدادات',
+      security:        'الأمان والمصادقة',
     },
     adminTagline: 'لوحة المالك',
     adminOwner:   'مالك المنصة',

@@ -45,6 +45,7 @@ export interface Translations {
       deliveryQuality:  string
       billing:          string
       settings:         string
+      security:         string
     }
     adminItems: {
       dashboard:       string
@@ -59,6 +60,7 @@ export interface Translations {
       tools:           string
       catalog:         string
       settings:        string
+      security:        string
     }
     adminTagline:  string
     adminOwner:    string

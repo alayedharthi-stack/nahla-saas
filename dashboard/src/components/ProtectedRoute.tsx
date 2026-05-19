@@ -24,6 +24,11 @@ const OWNER_ALLOWED_PREFIXES = [
   '/admin',
   '/merchants',          // owner-side tenant directory
   '/system-status',
+  // ▸ Account-level security surface (Phase 2A Sprint 1) — TOTP enrol /
+  //   disable + recovery codes. This is a personal-account page (it acts
+  //   on the *owner's* own user_id, never on a merchant's), so it must
+  //   stay reachable when the owner is NOT impersonating any tenant.
+  '/settings/security',
 ] as const
 
 function isOwnerAllowedPath(pathname: string): boolean {

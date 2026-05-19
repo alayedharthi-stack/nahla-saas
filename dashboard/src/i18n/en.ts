@@ -37,6 +37,7 @@ const en: Translations = {
       deliveryQuality:  'Delivery Quality',
       billing:          'Billing',
       settings:         'Settings',
+      security:         'Security & 2FA',
     },
     adminItems: {
       dashboard:       'Control Panel',
@@ -51,6 +52,7 @@ const en: Translations = {
       tools:           'Cleanup Tools',
       catalog:         'Product Catalog',
       settings:        'Settings',
+      security:        'Security & 2FA',
     },
     adminTagline: 'Owner Panel',
     adminOwner:   'Platform Owner',

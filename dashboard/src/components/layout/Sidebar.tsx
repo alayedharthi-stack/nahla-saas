@@ -32,6 +32,7 @@ import {
   BookOpen,
   Gauge,
   Package,
+  ShieldCheck,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -72,7 +73,10 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: tr => tr.nav.groups.adminSettings,
     items: [
-      { to: '/settings', icon: Settings, label: tr => tr.nav.adminItems.settings },
+      { to: '/settings',          icon: Settings,     label: tr => tr.nav.adminItems.settings },
+      // Phase 2A Sprint 1 — direct entry to the owner's personal 2FA
+      // surface. Whitelisted in ProtectedRoute.OWNER_ALLOWED_PREFIXES.
+      { to: '/settings/security', icon: ShieldCheck,  label: tr => tr.nav.adminItems.security },
     ],
   },
 ]
@@ -125,6 +129,8 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/delivery-quality',           icon: Gauge,        label: tr => tr.nav.items.deliveryQuality  },
       { to: '/billing',                    icon: CreditCard,   label: tr => tr.nav.items.billing          },
       { to: '/settings',                   icon: Settings,     label: tr => tr.nav.items.settings         },
+      // Phase 2A Sprint 1 — TOTP 2FA enrol, recovery codes, disable.
+      { to: '/settings/security',          icon: ShieldCheck,  label: tr => tr.nav.items.security         },
     ],
   },
 ]
