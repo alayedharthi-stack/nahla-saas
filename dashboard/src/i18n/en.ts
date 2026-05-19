@@ -111,6 +111,7 @@ const en: Translations = {
     support:         'Support — Temporary Access',
     defaultOwner:    'Owner',
     defaultMerchant: 'Merchant',
+    nahlaAdmin:      'Nahla AI Admin',
   },
 
   actions: {

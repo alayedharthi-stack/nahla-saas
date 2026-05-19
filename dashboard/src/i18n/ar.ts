@@ -115,6 +115,7 @@ const ar: Translations = {
     support:         'دعم فني — وصول مؤقت',
     defaultOwner:    'المالك',
     defaultMerchant: 'التاجر',
+    nahlaAdmin:      'أدمن نحلة',
   },
 
   actions: {

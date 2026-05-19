@@ -32,6 +32,7 @@ Benefits:
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -46,9 +47,11 @@ from core.auth import (
     JWT_AVAILABLE,
     JWT_ALGORITHM,
     JWT_SECRET,
+    PLATFORM_ADMIN_ROLES,
     get_current_user,
     verify_password,
 )
+from core.config import ADMIN_EMAIL, ADMIN_PASSWORD
 from core.database import get_db
 from core.rate_limit import check_rate_limit_or_429
 from core.totp_crypto import (
@@ -76,18 +79,111 @@ def _client_ip(request: Request) -> str:
     )
 
 
-def _require_user_id(user: Dict[str, Any]) -> int:
-    """JWT user payload → DB user.id. 401 if claim is missing."""
-    uid = user.get("user_id")
-    if not uid:
-        raise HTTPException(
-            status_code=401,
-            detail="هذه العملية تحتاج حساب مستخدم مرتبط بسجل في قاعدة البيانات.",
-        )
+def _is_env_admin_payload(user: Dict[str, Any]) -> bool:
+    """
+    True when the caller is logged in via the env-var admin fallback in
+    ``routers/auth.py`` (no ``user_id`` claim, role in PLATFORM_ADMIN_ROLES,
+    sub == ADMIN_EMAIL).
+
+    Why this case is special
+    ────────────────────────
+    The env-admin path was originally a *credentials-only* login: it never
+    inserts a row in ``users``, so the JWT carries no ``user_id``. Every
+    account-level feature (2FA, recovery codes, …) is keyed by ``user_id``
+    so without auto-provisioning, the very first 2FA request would either
+    401 (no claim) or 500 (FK violation). For 2FA this is unacceptable —
+    the platform owner must be able to enrol like any other user.
+    """
+    sub = str(user.get("sub") or "").strip().lower()
+    role = str(user.get("role") or "").strip()
+    return (
+        not user.get("user_id")
+        and role in PLATFORM_ADMIN_ROLES
+        and sub == ADMIN_EMAIL.strip().lower()
+    )
+
+
+def _provision_env_admin_user(db: Session) -> User:
+    """
+    Find-or-create a ``users`` row for the env-fallback platform admin so
+    every per-user feature (2FA, recovery codes, audit links, …) has a
+    real foreign key to attach to.
+
+    The row is created with ``password_hash = NULL`` because the canonical
+    password lives in the ``ADMIN_PASSWORD`` env var, NOT in the DB. The
+    ``/disable`` endpoint below special-cases this and verifies against the
+    env var via constant-time compare when ``password_hash`` is NULL and
+    the caller is the env admin.
+
+    Idempotent: returns the existing row when one already exists.
+    """
+    email = ADMIN_EMAIL.strip().lower()
+    row = db.query(User).filter(User.email == email).first()
+    if row is not None:
+        return row
+
+    # Username must be unique → derive from email local-part with a
+    # collision-resistant suffix only when needed.
+    base_username = (email.split("@", 1)[0] or "admin") + "-platform-admin"
+    username = base_username
+    suffix = 0
+    while db.query(User).filter(User.username == username).first() is not None:
+        suffix += 1
+        username = f"{base_username}-{suffix}"
+
+    row = User(
+        username=username,
+        email=email,
+        password_hash=None,           # password lives in ADMIN_PASSWORD env var
+        role="admin",
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+        tenant_id=1,                  # platform tenant — matches issued JWT
+    )
+    db.add(row)
     try:
-        return int(uid)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="معرف المستخدم في التوكن غير صالح.") from exc
+        db.commit()
+        db.refresh(row)
+    except Exception:                 # noqa: BLE001
+        db.rollback()
+        # Re-fetch in case a concurrent request won the race.
+        row = db.query(User).filter(User.email == email).first()
+        if row is None:
+            raise
+    audit("2fa.env_admin_provisioned", user_id=row.id, sub=email)
+    return row
+
+
+def _resolve_user_id(user: Dict[str, Any], db: Session) -> int:
+    """
+    JWT user payload → DB ``users.id``.
+
+    Resolution order:
+    1. ``user_id`` claim present → use it directly (normal merchant /
+       support / owner-with-DB-row case).
+    2. Env-admin fallback (no claim, sub == ADMIN_EMAIL, role in
+       PLATFORM_ADMIN_ROLES) → find-or-create a real row and use that id.
+    3. Otherwise → 401 with a clear message (a token without ``user_id``
+       cannot enrol in 2FA; this only happens for legacy tokens).
+    """
+    uid = user.get("user_id")
+    if uid:
+        try:
+            return int(uid)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="معرف المستخدم في التوكن غير صالح.",
+            ) from exc
+
+    if _is_env_admin_payload(user):
+        row = _provision_env_admin_user(db)
+        return int(row.id)
+
+    raise HTTPException(
+        status_code=401,
+        detail="هذه العملية تحتاج حساب مستخدم مرتبط بسجل في قاعدة البيانات.",
+    )
 
 
 def _load_db_user(db: Session, user_id: int) -> User:
@@ -95,6 +191,27 @@ def _load_db_user(db: Session, user_id: int) -> User:
     if not row:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
     return row
+
+
+def _verify_account_password(db_user: User, supplied: str) -> bool:
+    """
+    Verify the account password for /disable.
+
+    Two cases:
+    * Normal users: hash is in ``users.password_hash`` → bcrypt verify.
+    * Env-admin auto-provisioned row: ``password_hash`` is NULL because
+      the canonical secret lives in the ``ADMIN_PASSWORD`` env var.
+      Compare via :func:`hmac.compare_digest` (constant-time).
+    """
+    if db_user.password_hash:
+        return bool(verify_password(supplied, db_user.password_hash))
+    is_env_admin = (
+        db_user.email.lower() == ADMIN_EMAIL.strip().lower()
+        and db_user.role in PLATFORM_ADMIN_ROLES
+    )
+    if is_env_admin and ADMIN_PASSWORD:
+        return hmac.compare_digest(supplied, ADMIN_PASSWORD)
+    return False
 
 
 def _is_enabled(totp_row: Optional[UserTotp]) -> bool:
@@ -153,7 +270,7 @@ async def two_factor_status(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Cheap read used by the dashboard to render the right control state."""
-    user_id = _require_user_id(user)
+    user_id = _resolve_user_id(user, db)
     row = db.query(UserTotp).filter(UserTotp.user_id == user_id).first()
     enabled = _is_enabled(row)
     return {
@@ -182,7 +299,7 @@ async def two_factor_setup_start(
     to the DB yet — the secret travels back to the user inside a signed
     ``setup_token`` they MUST submit with the first OTP in /setup/confirm.
     """
-    user_id = _require_user_id(user)
+    user_id = _resolve_user_id(user, db)
 
     # Per-user rate limit: 5 starts / hour. Prevents abuse generating
     # endless QR codes / spamming the dashboard with fresh secrets.
@@ -241,7 +358,7 @@ async def two_factor_setup_confirm(
     On success: persist ``user_totp`` + 10 bcrypt-hashed recovery codes,
     return the plaintext codes ONCE. Failure leaves nothing behind.
     """
-    user_id = _require_user_id(user)
+    user_id = _resolve_user_id(user, db)
 
     # OTP confirmation rate limit — 5 attempts / 15 min per user.
     check_rate_limit_or_429(
@@ -355,7 +472,7 @@ async def two_factor_disable(
     surface is correct even if the dashboard later gets compromised
     by a logged-in but un-trusted device.
     """
-    user_id = _require_user_id(user)
+    user_id = _resolve_user_id(user, db)
 
     check_rate_limit_or_429(
         bucket="2fa_disable",
@@ -370,7 +487,7 @@ async def two_factor_disable(
     if not _is_enabled(row):
         raise HTTPException(status_code=409, detail="التحقق بخطوتين غير مفعّل.")
 
-    if not db_user.password_hash or not verify_password(body.password, db_user.password_hash):
+    if not _verify_account_password(db_user, body.password):
         audit(
             "2fa.disable_failed",
             user_id=user_id, sub=db_user.email, ip=_client_ip(request),

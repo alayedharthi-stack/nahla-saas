@@ -275,10 +275,22 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const impersonating = isImpersonating()
   const impersonInfo  = getImpersonation()
 
-  const rawName      = _displayName(email, storeName)
+  // ── Display-name resolution ────────────────────────────────────────────────
+  // Platform-admin sessions (admin / owner / super_admin) MUST NOT show a
+  // merchant's store name as the owner's identity. The token issued by the
+  // env-fallback admin login carries `tenant_id=1`, which makes /settings
+  // return that tenant's store_name; if we render it here, the owner header
+  // ends up advertising tenant 1's brand ("آل عايد للعسل البلدي") as the
+  // platform owner's name. Always show a generic Nahla-admin label instead.
+  // For impersonation sessions, the existing impersonation banner already
+  // surfaces the merchant being acted on, so the header stays neutral.
+  const isPlatformAdmin = role === 'admin' || role === 'owner' || role === 'super_admin'
+  const rawName      = isPlatformAdmin
+    ? ''  // force the fallback below — never use storeName for owners
+    : _displayName(email, storeName)
   const displayName  = rawName || (
-    (role === 'admin' || role === 'owner')
-      ? t(tr => tr.roles.defaultOwner)
+    isPlatformAdmin
+      ? t(tr => tr.roles.nahlaAdmin)
       : t(tr => tr.roles.defaultMerchant)
   )
   const avatarLetter = _avatarLetter(displayName)

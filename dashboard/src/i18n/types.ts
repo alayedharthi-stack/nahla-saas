@@ -84,6 +84,13 @@ export interface Translations {
     support:       string
     defaultOwner:  string
     defaultMerchant: string
+    /**
+     * Platform-admin display name shown in the header / account
+     * widgets when the caller is a Nahla platform owner. Used instead
+     * of the merchant store name so the owner UI never advertises a
+     * specific tenant's brand as the owner's identity.
+     */
+    nahlaAdmin:    string
   }
 
   /** Page titles & subtitles */
