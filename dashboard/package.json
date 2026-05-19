@@ -11,7 +11,7 @@
     "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts"
   },
   "dependencies": {
-    "@sentry/react": "^8.30.0",
+    "@sentry/react": "^10.53.1",
     "lucide-react": "^0.321.0",
     "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
