@@ -210,6 +210,89 @@ def test_social_does_not_fire_on_commercial(message: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2b. Practical-question disqualifier (May 2026 #11)
+# ─────────────────────────────────────────────────────────────────────────────
+# Merchant report: "الله يسعدك في طريقة للاستعمال" → bot replied
+# "الله يعافيك ويسعدك 🌷 أي وقت" and dropped the real question.
+# The fix: when a courtesy phrase is paired with a substantive
+# how-to / dosage / suitability ask (or any "؟" / "?"), the social
+# classifier must yield to the brain pipeline so the LLM answers
+# the practical question. We do NOT want a canned response here.
+
+@pytest.mark.parametrize("message", [
+    # The exact merchant reproducer.
+    "الله يسعدك في طريقة للاستعمال",
+    "الله يسعدك في طريقة الاستخدام",
+    # Bare practical questions — should not classify as social.
+    "كيف الاستخدام؟",
+    "وش طريقة الاستعمال؟",
+    "وش الجرعة المناسبة",
+    "كم جرعة في اليوم",
+    "كم حبة في اليوم؟",
+    "كيف استعمله",
+    "كيف استخدمه",
+    "كيف اشربه",
+    "كيف اخذه",
+    "متى اشربه",
+    "هل ينفع للأطفال",
+    "هل يصلح للحامل",
+    "ينفع لمشاكل البطن؟",
+    # Courtesy + question mark alone — the question mark always wins.
+    "تسلم، عندك توصيل بكرة؟",
+    "الله يعافيك، متى يصير عندك ضهيان؟",
+])
+def test_social_yields_on_practical_question(message: str) -> None:
+    """Mixed turn: courtesy + how-to / dosage / "?" must NOT classify
+    as social. The brain pipeline answers the practical ask."""
+    m = classify_social(message)
+    assert m is None, (
+        f"expected social classifier to YIELD on practical question, "
+        f"got {m!r} for message {message!r}"
+    )
+
+
+@pytest.mark.parametrize("message,expected_category", [
+    # Pure social phrases must STILL classify — the new disqualifier
+    # is conservative: bare "كيف" without a practical anchor doesn't
+    # disqualify (we never want "كيف الحال" routed to LLM as a fake
+    # how-to question).
+    ("الله يسعدك",        SOCIAL_BLESSING),
+    ("جزاك الله خير",     SOCIAL_THANKS),
+    ("الله يعافيك",       SOCIAL_BLESSING),
+    ("شكراً جزيلاً",      SOCIAL_THANKS),
+    ("تسلم يا غالي",      SOCIAL_THANKS),
+    ("الله يبارك فيك",    SOCIAL_BLESSING),
+])
+def test_pure_social_still_classifies_after_disqualifier_added(
+    message: str, expected_category: str,
+) -> None:
+    """Belt-and-suspenders: the new practical-question disqualifier
+    must NOT shrink the social-classifier's coverage on genuinely
+    social messages."""
+    m = classify_social(message)
+    assert m is not None, f"expected social match for: {message!r}"
+    assert m.category == expected_category
+
+
+def test_disqualifier_helper_is_exposed_for_diagnostics():
+    """The helper is module-private but importable. Future regression
+    diagnostics (e.g. a brain-pipeline log) may want to call it
+    directly to explain why a turn was routed away from
+    ACTION_SOCIAL_REPLY."""
+    from modules.ai.brain.intent.social_classifier import (
+        _has_practical_question_signal,
+        _norm,
+    )
+    assert _has_practical_question_signal(_norm("الله يسعدك في طريقة للاستعمال"))
+    assert _has_practical_question_signal(_norm("كم جرعة في اليوم"))
+    assert _has_practical_question_signal(_norm("شكراً، متى يصير؟"))
+    # Pure social must NOT trigger the helper.
+    assert not _has_practical_question_signal(_norm("الله يسعدك"))
+    assert not _has_practical_question_signal(_norm("جزاك الله خير"))
+    assert not _has_practical_question_signal(_norm("كيف الحال"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3. Platform classifier — topic-level
 # ─────────────────────────────────────────────────────────────────────────────
 

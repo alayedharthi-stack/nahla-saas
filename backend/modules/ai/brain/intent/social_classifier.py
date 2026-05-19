@@ -335,6 +335,64 @@ def _has_relational_non_social_signal(norm: str) -> bool:
     return any(kw in norm for kw in _RELATIONAL_NON_SOCIAL_SIGNALS)
 
 
+# ── Practical / how-to question signals (May 2026 #11) ──────────────────────
+# Merchant report: customer sent "الله يسعدك في طريقة للاستعمال" (a
+# blessing followed by a substantive how-to question) and the bot
+# replied with a pure social ack — "الله يعافيك ويسعدك" — dropping the
+# real question entirely. Same shape as the relational-deferral
+# disqualifier above: when a courtesy phrase is paired with a clear
+# operational ask (usage / dosage / "how do I..." / question mark),
+# the social classifier yields to the brain pipeline so the LLM
+# composes a substantive answer.
+#
+# Conservative list on purpose. Each token MUST mark a genuine
+# practical question — never a casual social phrase. We never want
+# "كيف الحال؟" disqualified, but "كيف الاستخدام؟" / "وش طريقة الجرعة"
+# / a bare "؟" attached to a blessing always must yield.
+_PRACTICAL_QUESTION_SIGNALS = (
+    # Direct interrogative punctuation — a question mark always means
+    # the customer wants an answer, even when the message also opens
+    # with a blessing.
+    "؟", "?",
+    # "Method of" / usage / dosage anchors. After ``_norm`` strips
+    # ة → ه, both spellings collapse, but we keep both forms in the
+    # source so a future pre-norm change doesn't silently drop matches.
+    "طريقه الاس", "طريقة الاس",
+    "طريقه الاستعمال", "طريقة الاستعمال",
+    "طريقه الاستخدام", "طريقة الاستخدام",
+    "في طريقه", "في طريقة",
+    "وش طريقه", "وش طريقة",
+    "وش الطريقه", "وش الطريقة",
+    # Standalone usage / dosage tokens — only practical contexts use
+    # these in conversation, so even bare "الجرعة؟" is operational.
+    "الاستعمال", "الاستخدام",
+    "الجرعه", "الجرعة",
+    "كم جرعه", "كم جرعة",
+    "كم حبه", "كم حبة",
+    "كم مره في", "كم مرة في",
+    # "How" + verb — anchored stems so we never catch "كيف الحال".
+    "كيف اس",      # كيف استعمل / كيف استخدم / كيف اشرب (post-norm)
+    "كيف اخذ",
+    "كيف اشرب", "كيف اكل", "كيف افتح", "كيف اضيف",
+    "كيف استعمل", "كيف استخدم",
+    "كيف اعمل", "كيف اسوي",
+    "وش اسوي", "وش اسويه", "وش اسويها",
+    # "When" + verb — practical timing question.
+    "متي اخذ", "متى اخذ",
+    "متي اشرب", "متى اشرب",
+    "متي اكل", "متى اكل",
+    # Suitability — "does it work for...".
+    "ينفع ل", "هل ينفع", "هل يصلح", "يصلح ل", "هل يفيد",
+)
+
+
+def _has_practical_question_signal(norm: str) -> bool:
+    """Return True when a courtesy phrase is paired with a substantive
+    practical / how-to question. Lets the brain pipeline answer the
+    operational ask instead of dispatching a canned social reply."""
+    return any(kw in norm for kw in _PRACTICAL_QUESTION_SIGNALS)
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 def classify_social(message: str) -> Optional[SocialMatch]:
     """Classify a message as social / courtesy / religious or return
@@ -370,6 +428,13 @@ def classify_social(message: str) -> Optional[SocialMatch]:
         # brain pipeline so the stance detector reads it as
         # DEFERRED / SUPPORT_REQUEST and the LLM honours the real
         # frame instead of canning a generic blessing reply.
+        return None
+    if _has_practical_question_signal(norm):
+        # Mixed turn: courtesy + how-to / dosage / "?". Yield to the
+        # brain pipeline so the LLM answers the practical question.
+        # The reply usually still opens with a soft blessing and then
+        # delivers the substantive guidance — "الله يعافيك 🌷
+        # بالنسبة لطريقة الاستعمال..." — without us scripting it.
         return None
 
     # Strong praise — the heavy reciprocal pool ("الله يبيض وجهك ...")
