@@ -68,7 +68,101 @@ from models import User, UserRecoveryCode, UserTotp
 
 logger = logging.getLogger("nahla.twofa")
 
+# ── Build marker ───────────────────────────────────────────────────────────────
+# Bumped manually whenever we ship a 2FA backend change. Lets ops verify
+# from Railway logs that the running container is on the latest commit
+# without having to ssh-exec into it. Grep:  rg "TWOFA_BUILD_MARKER" logs
+#
+# When debugging a 500: if you DON'T see this line in the logs after a
+# fresh deploy, the new container hasn't started yet (or rollback is
+# still active).
+TWOFA_BUILD_MARKER = "2026-05-19_b9b84c07_diag1"
+logger.info("[twofa] module loaded build_marker=%s", TWOFA_BUILD_MARKER)
+
 router = APIRouter(prefix="/auth/2fa", tags=["auth-2fa"])
+
+
+# ── GET /auth/2fa/__diag ──────────────────────────────────────────────────────
+# Read-only zero-side-effect diagnostic. Returns the resolved JWT claims,
+# the build marker, DB connectivity, and whether the user_totp /
+# user_recovery_codes tables exist on the deployed schema. Does NOT touch
+# any 2FA secret material. Open to any authenticated user so the dashboard
+# can fall back to it when /status 500s.
+@router.get("/__diag")
+async def two_factor_diag(
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    sub = user.get("sub")
+    role = user.get("role")
+    has_uid = user.get("user_id") is not None
+    is_env = _is_env_admin_payload(user)
+
+    table_check: Dict[str, Any] = {}
+    for tname in ("user_totp", "user_recovery_codes", "users", "tenants"):
+        try:
+            row = db.execute(
+                _text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name=:t LIMIT 1"
+                ),
+                {"t": tname},
+            ).first()
+            table_check[tname] = bool(row)
+        except Exception as exc:                          # noqa: BLE001
+            table_check[tname] = f"ERR:{type(exc).__name__}"
+            try: db.rollback()
+            except Exception: pass
+
+    tenant1_present: Any = None
+    try:
+        row = db.execute(_text("SELECT 1 FROM tenants WHERE id = 1 LIMIT 1")).first()
+        tenant1_present = bool(row)
+    except Exception as exc:                              # noqa: BLE001
+        tenant1_present = f"ERR:{type(exc).__name__}"
+        try: db.rollback()
+        except Exception: pass
+
+    env_admin_row: Dict[str, Any] = {"present": None, "id": None, "password_hash_null": None}
+    try:
+        u = db.query(User).filter(User.email == ADMIN_EMAIL.strip().lower()).first()
+        if u is not None:
+            env_admin_row = {
+                "present": True,
+                "id": int(u.id),
+                "password_hash_null": (u.password_hash is None),
+                "role": u.role,
+                "tenant_id": u.tenant_id,
+                "username": u.username,
+            }
+        else:
+            env_admin_row["present"] = False
+    except Exception as exc:                              # noqa: BLE001
+        env_admin_row = {"present": f"ERR:{type(exc).__name__}"}
+        try: db.rollback()
+        except Exception: pass
+
+    logger.info(
+        "[twofa] __diag sub=%s role=%s has_uid=%s is_env=%s tables=%s tenant1=%s admin_row=%s",
+        sub, role, has_uid, is_env, table_check, tenant1_present,
+        {k: v for k, v in env_admin_row.items() if k != "username"},
+    )
+
+    return {
+        "build_marker":      TWOFA_BUILD_MARKER,
+        "jwt_claims": {
+            "sub":          sub,
+            "role":         role,
+            "has_user_id":  has_uid,
+            "is_env_admin": is_env,
+        },
+        "admin_email_config": ADMIN_EMAIL,
+        "tables":            table_check,
+        "tenant_1_present":  tenant1_present,
+        "env_admin_user":    env_admin_row,
+    }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -116,10 +210,27 @@ def _provision_env_admin_user(db: Session) -> User:
     the caller is the env admin.
 
     Idempotent: returns the existing row when one already exists.
+
+    Diagnostics: every branch logs a structured ``provision:`` line so a
+    failure surfaces in Railway logs WITHOUT leaking secrets (no token,
+    password, OTP, or TOTP secret is ever logged here).
     """
     email = ADMIN_EMAIL.strip().lower()
-    row = db.query(User).filter(User.email == email).first()
+    logger.info("[twofa] provision: lookup_start email=%s", email)
+    try:
+        row = db.query(User).filter(User.email == email).first()
+    except Exception as exc:                              # noqa: BLE001
+        logger.exception(
+            "[twofa] provision: lookup FAILED exc=%s email=%s",
+            type(exc).__name__, email,
+        )
+        raise
+
     if row is not None:
+        logger.info(
+            "[twofa] provision: existing_row_found id=%s username=%s role=%s tenant_id=%s",
+            row.id, row.username, row.role, row.tenant_id,
+        )
         return row
 
     # Username must be unique → derive from email local-part with a
@@ -127,10 +238,23 @@ def _provision_env_admin_user(db: Session) -> User:
     base_username = (email.split("@", 1)[0] or "admin") + "-platform-admin"
     username = base_username
     suffix = 0
-    while db.query(User).filter(User.username == username).first() is not None:
-        suffix += 1
-        username = f"{base_username}-{suffix}"
+    try:
+        while db.query(User).filter(User.username == username).first() is not None:
+            suffix += 1
+            username = f"{base_username}-{suffix}"
+            if suffix > 1000:                             # paranoid bound
+                raise RuntimeError("username suffix overflow")
+    except Exception as exc:                              # noqa: BLE001
+        logger.exception(
+            "[twofa] provision: username probe FAILED exc=%s",
+            type(exc).__name__,
+        )
+        raise
 
+    logger.info(
+        "[twofa] provision: insert_start username=%s tenant_id=1 role=admin",
+        username,
+    )
     row = User(
         username=username,
         email=email,
@@ -144,12 +268,24 @@ def _provision_env_admin_user(db: Session) -> User:
     try:
         db.commit()
         db.refresh(row)
-    except Exception:                 # noqa: BLE001
+        logger.info("[twofa] provision: insert_OK id=%s", row.id)
+    except Exception as exc:                              # noqa: BLE001
+        logger.exception(
+            "[twofa] provision: insert FAILED exc=%s — trying race re-fetch",
+            type(exc).__name__,
+        )
         db.rollback()
         # Re-fetch in case a concurrent request won the race.
         row = db.query(User).filter(User.email == email).first()
         if row is None:
+            logger.error(
+                "[twofa] provision: race re-fetch ALSO empty — surfacing"
+            )
             raise
+        logger.info(
+            "[twofa] provision: race re-fetch found id=%s — recovered",
+            row.id,
+        )
     audit("2fa.env_admin_provisioned", user_id=row.id, sub=email)
     return row
 
@@ -165,21 +301,42 @@ def _resolve_user_id(user: Dict[str, Any], db: Session) -> int:
        PLATFORM_ADMIN_ROLES) → find-or-create a real row and use that id.
     3. Otherwise → 401 with a clear message (a token without ``user_id``
        cannot enrol in 2FA; this only happens for legacy tokens).
+
+    Every branch logs a structured ``resolve:`` line to make 500-debugging
+    deterministic. Secrets (tokens, passwords, OTPs) are NEVER logged —
+    only claim metadata (presence flags, role, sub).
     """
     uid = user.get("user_id")
+    sub = user.get("sub")
+    role = user.get("role")
+    has_uid = uid is not None
+    is_env = _is_env_admin_payload(user)
+    logger.info(
+        "[twofa] resolve: has_user_id=%s role=%s sub=%s is_env_admin=%s build=%s",
+        has_uid, role, sub, is_env, TWOFA_BUILD_MARKER,
+    )
+
     if uid:
         try:
             return int(uid)
         except (TypeError, ValueError) as exc:
+            logger.warning(
+                "[twofa] resolve: invalid user_id claim type=%s value_repr=%r",
+                type(uid).__name__, uid,
+            )
             raise HTTPException(
                 status_code=400,
                 detail="معرف المستخدم في التوكن غير صالح.",
             ) from exc
 
-    if _is_env_admin_payload(user):
+    if is_env:
         row = _provision_env_admin_user(db)
         return int(row.id)
 
+    logger.info(
+        "[twofa] resolve: 401_no_user_id sub=%s role=%s admin_email=%s",
+        sub, role, ADMIN_EMAIL,
+    )
     raise HTTPException(
         status_code=401,
         detail="هذه العملية تحتاج حساب مستخدم مرتبط بسجل في قاعدة البيانات.",
@@ -269,22 +426,61 @@ async def two_factor_status(
     user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Cheap read used by the dashboard to render the right control state."""
-    user_id = _resolve_user_id(user, db)
-    row = db.query(UserTotp).filter(UserTotp.user_id == user_id).first()
-    enabled = _is_enabled(row)
-    return {
-        "enabled":       enabled,
-        "enrolled_at":   row.confirmed_at.isoformat() if (row and row.confirmed_at) else None,
-        "last_used_at":  row.last_used_at.isoformat() if (row and row.last_used_at) else None,
-        # Recovery codes count helps the UI nudge "regenerate" when low.
-        "recovery_codes_remaining": (
-            db.query(UserRecoveryCode)
-              .filter(UserRecoveryCode.user_id == user_id, UserRecoveryCode.used_at.is_(None))
-              .count()
-            if enabled else 0
-        ),
-    }
+    """
+    Cheap read used by the dashboard to render the right control state.
+
+    Wrapped in a defensive try/except so any DB / schema / provisioning
+    failure surfaces in Railway logs with full traceback AND in the
+    dashboard alert with the exception class (no secrets). This makes
+    500s diagnosable from either side without another deploy cycle.
+    """
+    try:
+        user_id = _resolve_user_id(user, db)
+        logger.info("[twofa] status: user_id=%s — query user_totp", user_id)
+        row = db.query(UserTotp).filter(UserTotp.user_id == user_id).first()
+        enabled = _is_enabled(row)
+        recovery_remaining = 0
+        if enabled:
+            recovery_remaining = (
+                db.query(UserRecoveryCode)
+                  .filter(UserRecoveryCode.user_id == user_id, UserRecoveryCode.used_at.is_(None))
+                  .count()
+            )
+        logger.info(
+            "[twofa] status: OK user_id=%s enabled=%s recovery_remaining=%s",
+            user_id, enabled, recovery_remaining,
+        )
+        return {
+            "enabled":       enabled,
+            "enrolled_at":   row.confirmed_at.isoformat() if (row and row.confirmed_at) else None,
+            "last_used_at":  row.last_used_at.isoformat() if (row and row.last_used_at) else None,
+            "recovery_codes_remaining": recovery_remaining,
+            "build_marker":  TWOFA_BUILD_MARKER,
+        }
+    except HTTPException:
+        # Already a clean HTTP error (401/400/…) — let FastAPI propagate.
+        raise
+    except Exception as exc:                              # noqa: BLE001
+        # Full traceback to Railway. Detail to client carries the exception
+        # CLASS NAME only (never the message — psycopg2 errors can echo
+        # column values back). Pair with the build_marker so ops can
+        # confirm the running container.
+        logger.exception(
+            "[twofa] status: UNHANDLED exc_class=%s build=%s",
+            type(exc).__name__, TWOFA_BUILD_MARKER,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "twofa_status_failed",
+                "exc_class": type(exc).__name__,
+                "build_marker": TWOFA_BUILD_MARKER,
+                "message": (
+                    "تعذّر قراءة حالة التحقق بخطوتين. "
+                    "تواصل مع الدعم وأرسل لهم رمز الخطأ أعلاه."
+                ),
+            },
+        ) from exc
 
 
 # ── POST /auth/2fa/setup/start ─────────────────────────────────────────────────

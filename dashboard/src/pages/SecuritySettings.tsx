@@ -59,8 +59,32 @@ export default function SecuritySettings() {
         setPhase(s.enabled ? 'enabled' : 'notEnrolled')
       } catch (e: any) {
         if (!alive) return
-        setErr(e?.message || tr.errorGeneric)
+        // Surface diagnostic fields from the structured backend payload
+        // so support / ops can copy them straight from the UI without
+        // needing Railway access. The backend's defensive wrapper on
+        // /auth/2fa/status (twofa.py) attaches `code`, `exc_class`,
+        // and `build_marker` to the 500 response — see commit b9b84c07+.
+        const baseMsg = e?.message || tr.errorGeneric
+        const diagBits: string[] = []
+        if (e?.code) diagBits.push(`code=${e.code}`)
+        if (e?.exc_class) diagBits.push(`exc=${e.exc_class}`)
+        if (e?.build_marker) diagBits.push(`build=${e.build_marker}`)
+        if (typeof e?.status === 'number') diagBits.push(`http=${e.status}`)
+        const composed = diagBits.length > 0
+          ? `${baseMsg}  [${diagBits.join(' · ')}]`
+          : baseMsg
+        setErr(composed)
         setPhase('notEnrolled')
+        // Also echo to console — devtools is the fastest paste-back for ops.
+        // eslint-disable-next-line no-console
+        console.error('[2fa] /status failed', {
+          message: e?.message,
+          code:    e?.code,
+          status:  e?.status,
+          exc_class:    e?.exc_class,
+          build_marker: e?.build_marker,
+          detail:  e?.detail,
+        })
       }
     })()
     return () => { alive = false }

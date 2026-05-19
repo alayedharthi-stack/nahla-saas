@@ -10,6 +10,8 @@ export interface TwoFactorStatus {
   enrolled_at:               string | null
   last_used_at:              string | null
   recovery_codes_remaining:  number
+  /** Backend build marker — present on success and on the structured 500 body too. */
+  build_marker?:             string
 }
 
 export interface TwoFactorSetupStart {
