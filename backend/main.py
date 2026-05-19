@@ -390,6 +390,8 @@ from routers.catalog           import (                                     # no
     merchant_router as _merchant_catalog_router,
 )
 from routers.support_access    import router as _support_access_router     # noqa: E402
+# Phase 2A Sprint 1 — TOTP 2FA enrol/confirm/disable + status.
+from routers.twofa             import router as _twofa_router               # noqa: E402
 from routers.notification_logs import router as _notification_logs_router  # noqa: E402
 from routers.addons            import router as _addons_router               # noqa: E402
 from routers.widgets           import router as _widgets_router              # noqa: E402
@@ -410,6 +412,7 @@ app.include_router(_admin_salla_token_router)
 from routers.admin_webhook_security import router as _admin_webhook_security_router  # noqa: E402
 app.include_router(_admin_webhook_security_router)
 app.include_router(_auth_router)
+app.include_router(_twofa_router)
 app.include_router(_settings_router)
 app.include_router(_templates_router)
 app.include_router(_campaigns_router)

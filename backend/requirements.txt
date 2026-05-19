@@ -22,6 +22,14 @@ python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
 bcrypt==4.1.3
 
+# ── TOTP 2FA (Phase 2A Sprint 1) ────────────────────────────────────────────
+# pyotp generates + verifies RFC 6238 TOTP codes (Google Authenticator etc.).
+# cryptography is already a transitive dep of python-jose[cryptography] above,
+# pinned explicitly here because core.totp_crypto uses Fernet to encrypt the
+# per-user TOTP secret at rest with TOTP_ENC_KEY.
+pyotp>=2.9.0,<3.0.0
+cryptography>=42.0.0,<46.0.0
+
 # ── Rate limiting + JWT revocation (Phase 1A) ────────────────────────────────
 redis>=5.0.0,<6.0.0
 

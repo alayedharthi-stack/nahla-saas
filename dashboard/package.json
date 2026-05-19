@@ -7,12 +7,13 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 3000",
-    "check:i18n":      "npx --yes tsx@4 scripts/check-embedded-i18n.mts",
+    "check:i18n": "npx --yes tsx@4 scripts/check-embedded-i18n.mts",
     "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts"
   },
   "dependencies": {
     "@sentry/react": "^8.30.0",
     "lucide-react": "^0.321.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.22.0",

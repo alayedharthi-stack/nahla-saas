@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -128,6 +129,39 @@ class User(Base):
     created_at    = Column(DateTime, nullable=True)
     tenant_id     = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant        = relationship('Tenant', back_populates='users')
+
+
+# ── Phase 2A Sprint 1 — TOTP 2FA ──────────────────────────────────────────────
+# One row per user that has *started* 2FA enrolment. The row is created on
+# /auth/2fa/setup/confirm AFTER the first OTP has been proven; pending
+# enrolments live in a short-lived JWT (type=2fa_setup), not in this table.
+class UserTotp(Base):
+    __tablename__ = 'user_totp'
+    user_id         = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), primary_key=True)
+    # Fernet-encrypted base32 TOTP secret. Plaintext NEVER touches the DB.
+    secret_enc      = Column(LargeBinary, nullable=False)
+    confirmed_at    = Column(DateTime(timezone=True), nullable=True)
+    last_used_at    = Column(DateTime(timezone=True), nullable=True)
+    # Soft-lock counter; rate limiting at the router layer is the first
+    # line of defence — this exists so a sustained attack on a single
+    # user's OTP eventually trips a row-level lock visible to ops.
+    failed_attempts = Column(Integer, nullable=False, default=0, server_default='0')
+    locked_until    = Column(DateTime(timezone=True), nullable=True)
+    created_at      = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at      = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class UserRecoveryCode(Base):
+    __tablename__ = 'user_recovery_codes'
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    user_id     = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    # bcrypt hash of the plaintext code. We never store the code itself —
+    # the user gets it ONCE in the enrolment response and is told to
+    # download/copy. Lost codes can only be regenerated via the
+    # /auth/2fa/recovery/regenerate endpoint (Sprint 2).
+    code_hash   = Column(String(255), nullable=False)
+    created_at  = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    used_at     = Column(DateTime(timezone=True), nullable=True)
 
 class WhatsAppNumber(Base):
     __tablename__ = 'whatsapp_numbers'

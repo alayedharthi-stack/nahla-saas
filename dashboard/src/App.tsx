@@ -22,6 +22,7 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
+import SecuritySettings from './pages/SecuritySettings'
 import AiSalesLogs from './pages/AiSalesLogs'
 import StoreIntegration from './pages/StoreIntegration'
 import HandoffQueue from './pages/HandoffQueue'
@@ -146,6 +147,7 @@ export default function App() {
             <Route path="integrations"       element={<Integrations />} />
             <Route path="analytics"          element={<Analytics />} />
             <Route path="settings"           element={<Settings />} />
+            <Route path="settings/security"  element={<SecuritySettings />} />
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />
             <Route path="whatsapp-connect"   element={<WhatsAppConnect />} />

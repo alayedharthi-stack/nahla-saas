@@ -491,6 +491,59 @@ export interface Translations {
     phonePh:      string
     creating:     string
   }
+
+  /** Security & 2FA — Phase 2A Sprint 1 (/settings/security) */
+  security: {
+    pageTitle:                string
+    pageSubtitle:             string
+    twoFactorTitle:           string
+    twoFactorDesc:            string
+    statusEnabled:            string
+    statusDisabled:           string
+    enrolledAt:               string
+    lastUsedAt:               string
+    recoveryRemaining:        string
+    /** Enable / setup flow */
+    enableBtn:                string
+    setupStep1:               string
+    setupStep1Desc:           string
+    setupStep2:               string
+    setupStep2Desc:           string
+    setupStep3:               string
+    setupStep3Desc:           string
+    scanQr:                   string
+    cantScan:                 string
+    manualSecretLabel:        string
+    copySecret:               string
+    secretCopied:             string
+    otpLabel:                 string
+    otpPlaceholder:           string
+    verifyBtn:                string
+    verifying:                string
+    /** Recovery codes panel (shown ONCE) */
+    recoveryTitle:            string
+    recoveryDesc:             string
+    recoveryWarning:          string
+    copyAll:                  string
+    downloadTxt:              string
+    iSavedThem:               string
+    codesCopied:              string
+    /** Disable flow */
+    disableBtn:               string
+    disableTitle:             string
+    disableDesc:              string
+    currentPassword:          string
+    otpOrRecovery:            string
+    confirmDisable:           string
+    cancel:                   string
+    disabling:                string
+    /** Generic errors / hints */
+    errorGeneric:             string
+    errorBadOtp:              string
+    errorBadPassword:         string
+    successEnabled:           string
+    successDisabled:          string
+  }
 }
 
 /** Supported language codes */
