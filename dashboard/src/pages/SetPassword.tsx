@@ -158,6 +158,13 @@ export default function SetPassword() {
   }
 
   // ── Valid token — show the form ──────────────────────────────────────────
+  // The early returns above narrowed `verify.status` to all error states +
+  // 'loading'. TypeScript can't always carry that narrowing through to here
+  // when the union has more than two non-valid variants chained with `||`,
+  // so we capture the email in a local `const` after one explicit check.
+  // Falling back to '' is purely a typescript-soothing default — control
+  // flow guarantees we only reach this block when status === 'valid'.
+  const accountEmail = verify.status === 'valid' ? verify.email : ''
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir="rtl">
       <div className="w-full max-w-sm">
@@ -181,7 +188,7 @@ export default function SetPassword() {
               <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 flex items-center gap-2">
                 <Mail className="w-4 h-4 text-amber-600 shrink-0" />
                 <span className="text-xs text-slate-700">
-                  الحساب: <span className="font-mono text-slate-900">{verify.email}</span>
+                  الحساب: <span className="font-mono text-slate-900">{accountEmail}</span>
                 </span>
               </div>
 

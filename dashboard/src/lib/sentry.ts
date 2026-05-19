@@ -41,7 +41,10 @@ function scrubObject<T>(input: T): T {
   // Don't mutate the original; clone shallowly and replace sensitive
   // keys. Sentry already deep-clones before send, but we add another
   // pass so a future SDK upgrade can't regress this.
-  const out: Record<string, unknown> = Array.isArray(input) ? [...(input as unknown as unknown[])] : { ...(input as Record<string, unknown>) }
+  if (Array.isArray(input)) {
+    return input.map((item) => scrubObject(item)) as unknown as T
+  }
+  const out: Record<string, unknown> = { ...(input as Record<string, unknown>) }
   for (const key of Object.keys(out)) {
     const lower = key.toLowerCase()
     if (SENSITIVE_KEYS.some(s => lower.includes(s))) {
@@ -92,7 +95,9 @@ export function initSentry(): void {
             event.request.headers = scrubObject(event.request.headers)
           }
           if (event.request.cookies) {
-            event.request.cookies = '[scrubbed]'
+            // Sentry types `cookies` as `{ [k: string]: string }`; replace
+            // every value with the scrub marker so the keys disappear.
+            event.request.cookies = { _scrubbed: '[scrubbed]' }
           }
           if (event.request.data) {
             event.request.data = scrubObject(event.request.data)
