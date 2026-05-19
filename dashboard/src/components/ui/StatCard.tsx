@@ -25,8 +25,8 @@ export default function StatCard({
     <div className="card p-5">
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{label}</p>
-          <p className="text-3xl font-bold text-slate-900 mt-1 tracking-tight">{value}</p>
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{label}</p>
+          <p className="text-3xl font-bold text-slate-900 dark:text-slate-100 mt-1 tracking-tight">{value}</p>
           {change !== undefined && (
             <div className="flex items-center gap-1 mt-2">
               {isPositive ? (
@@ -34,10 +34,10 @@ export default function StatCard({
               ) : (
                 <TrendingDown className="w-3.5 h-3.5 text-red-500" />
               )}
-              <span className={`text-xs font-medium ${isPositive ? 'text-emerald-600' : 'text-red-600'}`}>
+              <span className={`text-xs font-medium ${isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                 {isPositive ? '+' : ''}{change}%
               </span>
-              <span className="text-xs text-slate-400">{changeLabel}</span>
+              <span className="text-xs text-slate-400 dark:text-slate-500">{changeLabel}</span>
             </div>
           )}
         </div>

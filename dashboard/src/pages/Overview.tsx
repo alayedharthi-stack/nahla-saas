@@ -357,9 +357,12 @@ export default function Overview() {
                 <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
               </linearGradient>
             </defs>
+            {/* Grid stroke uses a class on the CartesianGrid line so the
+                global dark layer (`html.dark .recharts-cartesian-grid line`)
+                can flip it to slate-700 without prop tweaks per chart. */}
             <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-            <XAxis dataKey="day" tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} />
+            <XAxis dataKey="day" tick={{ fontSize: 11, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-slate-400 dark:text-slate-500" />
+            <YAxis tick={{ fontSize: 11, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-slate-400 dark:text-slate-500" />
             <Tooltip
               contentStyle={{ fontSize: 12, border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 6px -1px rgb(0 0 0 / .1)' }}
               formatter={(v: number) => [`${v.toLocaleString('ar-SA')} ر.س`, 'الإيرادات']}
