@@ -69,9 +69,32 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     root.dir  = dir
   }, [lang, dir])
 
+  // Cross-context sync: stay in step with the embedded Salla surface (which
+  // dispatches `nahla:lang-change`) and with other tabs (`storage` event).
+  // Without this, switching language inside the Salla iframe would not
+  // re-render an open dashboard tab even though localStorage is updated.
+  useEffect(() => {
+    const handleCustom = (e: Event) => {
+      const next = (e as CustomEvent<unknown>).detail
+      if (next === 'ar' || next === 'en') setLangState(next)
+    }
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY) return
+      if (e.newValue === 'ar' || e.newValue === 'en') setLangState(e.newValue)
+    }
+    window.addEventListener('nahla:lang-change', handleCustom)
+    window.addEventListener('storage', handleStorage)
+    return () => {
+      window.removeEventListener('nahla:lang-change', handleCustom)
+      window.removeEventListener('storage', handleStorage)
+    }
+  }, [])
+
   const setLang = (next: Lang) => {
     setLangState(next)
     try { localStorage.setItem(STORAGE_KEY, next) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('nahla:lang-change', { detail: next })) }
+    catch { /* ignore */ }
   }
 
   const t = <T,>(selector: (tr: Translations) => T) => selector(tr)

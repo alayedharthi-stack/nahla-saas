@@ -4,12 +4,14 @@ import App from './App'
 import './index.css'
 import { logNahlaRuntimeBoot } from './lib/logRuntimeBoot'
 import { initSentry } from './lib/sentry'
-import { applyThemeEarly } from './hooks/useTheme'
+import { bootstrapPreferences } from './lib/bootstrapPreferences'
 
-// Apply the persisted theme (light/dark/system) BEFORE React mounts so the
-// first paint matches the merchant's preference — eliminates flash of wrong
-// theme when reopening the dashboard in dark mode.
-applyThemeEarly()
+// Apply theme + locale BEFORE React mounts so the first paint matches the
+// merchant's preference — eliminates flash-of-wrong-theme and flash-of-wrong-
+// direction.  Also consumes the Salla embedded handoff (`?theme=…&lang=…`)
+// emitted by SallaEntryScreen's "Open Nahla dashboard" CTA, persisting the
+// values to localStorage and stripping them from the URL.
+bootstrapPreferences()
 
 // Initialise Sentry FIRST so any error during app bootstrap (router
 // registration, lazy imports, etc.) is captured. No-op when

@@ -18,7 +18,25 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useTheme, type ThemeMode } from './useTheme'
 
-const EMBED_STORAGE_KEY = 'nahla-embedded-theme'
+const EMBED_STORAGE_KEY  = 'nahla-embedded-theme'
+const GLOBAL_STORAGE_KEY = 'nahla-theme'   // also written by useTheme — kept in sync
+
+/**
+ * Cross-propagate a Salla-resolved theme into the global Nahla preference so
+ * that when the merchant clicks "Open Nahla dashboard" (which leaves the
+ * embedded surface and lands on a fresh dashboard page) the same theme is
+ * already in effect.  We only write explicit 'dark' / 'light' values — we
+ * never overwrite a user-chosen 'system' mode.
+ */
+function propagateThemeToGlobal(theme: Resolved): void {
+  try {
+    localStorage.setItem(GLOBAL_STORAGE_KEY, theme)
+  } catch { /* localStorage blocked */ }
+  // Notify any live useTheme() hook in another tab/iframe in this origin so
+  // the dashboard reflects the new value without a page reload.
+  try { window.dispatchEvent(new CustomEvent('nahla:theme-change', { detail: theme })) }
+  catch { /* ignore */ }
+}
 
 type Resolved = 'light' | 'dark'
 
@@ -73,9 +91,19 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
       // React Router navigations within the Salla iframe (e.g. /app/salla → /app/entry)
       // keep the same theme, even though navigate() strips the original query string.
       try { localStorage.setItem(EMBED_STORAGE_KEY, url) } catch { /* ignore */ }
+      // Also propagate to the global Nahla preference so that when the
+      // merchant opens the full dashboard the theme matches.
+      propagateThemeToGlobal(url)
       return { theme: url, source: 'url' }
     }
-    const stored = readStoredEmbed(); if (stored) return { theme: stored, source: 'stored' }
+    const stored = readStoredEmbed()
+    if (stored) {
+      // The stored embed value was originally set by a URL / postMessage
+      // resolution — propagate it once more in case the global key was
+      // cleared by another flow (logout, etc.).
+      propagateThemeToGlobal(stored)
+      return { theme: stored, source: 'stored' }
+    }
     if (userTheme === 'dark' || userTheme === 'light') {
       // Only treat as "user" choice when they have an explicit preference.
       // useTheme resolves 'system' → light/dark, but we can't distinguish here.
@@ -106,6 +134,7 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
         null
       if (!next) return
       try { localStorage.setItem(EMBED_STORAGE_KEY, next) } catch { /* ignore */ }
+      propagateThemeToGlobal(next)
       setState({ theme: next, source: 'salla' })
     }
     window.addEventListener('message', onMsg)

@@ -18,6 +18,29 @@ import { EMBEDDED_STRINGS, type EmbeddedLang, type EmbeddedStrings } from '../i1
 const EMBED_STORAGE_KEY = 'nahla-embedded-lang'
 const USER_STORAGE_KEY  = 'nahla-lang'
 
+/**
+ * Cross-propagate a Salla-resolved locale into the global Nahla preference
+ * (`nahla-lang`, owned by `i18n/context.tsx`) so that when the merchant
+ * leaves the embedded surface and opens the main dashboard the same language
+ * is already in effect — including the RTL/LTR flip.
+ *
+ * We also reflect on <html lang/dir> immediately so any non-React code (e.g.
+ * date inputs, native dialogs) renders correctly without waiting for a
+ * LanguageProvider render cycle.
+ */
+function propagateLocaleToGlobal(lang: EmbeddedLang): void {
+  try { localStorage.setItem(USER_STORAGE_KEY, lang) } catch { /* localStorage blocked */ }
+  try {
+    const root = document.documentElement
+    root.lang = lang
+    root.dir  = lang === 'ar' ? 'rtl' : 'ltr'
+  } catch { /* DOM not ready */ }
+  // Custom event so a live LanguageProvider in another tab/iframe re-renders
+  // without a hard reload.
+  try { window.dispatchEvent(new CustomEvent('nahla:lang-change', { detail: lang })) }
+  catch { /* ignore */ }
+}
+
 function normalize(raw: string | null | undefined): EmbeddedLang | null {
   if (!raw) return null
   const lower = String(raw).toLowerCase().trim()
@@ -81,9 +104,18 @@ export function useEmbeddedLocale(): UseEmbeddedLocaleReturn {
       // React Router navigations within the Salla iframe (e.g. /app/salla → /app/entry)
       // keep the same language, even though navigate() strips the original query string.
       try { localStorage.setItem(EMBED_STORAGE_KEY, url) } catch { /* ignore */ }
+      // Also propagate to the global Nahla preference so the dashboard
+      // matches once the merchant leaves the embedded surface.
+      propagateLocaleToGlobal(url)
       return { lang: url, source: 'url' }
     }
-    const stored = readStoredEmbed(); if (stored)     return { lang: stored,     source: 'stored' }
+    const stored = readStoredEmbed()
+    if (stored) {
+      // Stored embed value originally came from a URL / postMessage —
+      // mirror it to the global key in case it was cleared elsewhere.
+      propagateLocaleToGlobal(stored)
+      return { lang: stored, source: 'stored' }
+    }
     const user = readUserPref();      if (user)       return { lang: user,       source: 'user' }
     const ref = readReferrer();       if (ref)        return { lang: ref,        source: 'referrer' }
     const nav = readNavigatorLang();  if (nav)        return { lang: nav,        source: 'navigator' }
@@ -104,6 +136,7 @@ export function useEmbeddedLocale(): UseEmbeddedLocaleReturn {
       const next = normalize(d.lang || d.locale || d.language || d.value || d?.payload?.locale || d?.payload?.lang)
       if (!next) return
       try { localStorage.setItem(EMBED_STORAGE_KEY, next) } catch { /* ignore */ }
+      propagateLocaleToGlobal(next)
       setState({ lang: next, source: 'salla' })
     }
     window.addEventListener('message', onMsg)

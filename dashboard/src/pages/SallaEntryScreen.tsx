@@ -428,6 +428,16 @@ export default function SallaEntryScreen() {
   // Calls the backend to generate a short-lived launch token, then opens the
   // resulting URL via window.top so the merchant lands in the full dashboard
   // already logged in — no registration screen.
+  //
+  // UX continuity: the merchant has just been using Nahla in dark mode / EN
+  // inside Salla.  We forward both preferences along the full redirect chain
+  // so the dashboard greets them in the same theme & language.  Three carriers
+  // (defence in depth):
+  //   1. Encoded into the `next` path  → survives /app/salla/launch and lands
+  //      on /overview?theme=...&lang=...
+  //   2. Appended to launch_url itself → /app/salla/launch sees them too,
+  //      so its loading screen renders in the right language.
+  //   3. localStorage already populated by useEmbeddedTheme/Locale earlier.
   const openWithAutoLogin = useCallback(async (kind: 'dashboard' | 'whatsapp') => {
     setLaunching(kind)
     const token = getToken()
@@ -435,13 +445,17 @@ export default function SallaEntryScreen() {
     // open /landing here — that's the public marketing page and would
     // log the merchant out.  /app/whatsapp-connect is the in-app
     // WhatsApp linking flow (Layout-rendered, also auth-gated).
-    const next  = kind === 'whatsapp' ? '/whatsapp-connect' : '/overview'
+    const basePath = kind === 'whatsapp' ? '/whatsapp-connect' : '/overview'
+    const nextParams = new URLSearchParams()
+    nextParams.set('theme', isDark ? 'dark' : 'light')
+    nextParams.set('lang',  lang)
+    const next = `${basePath}?${nextParams.toString()}`
 
     let tenantId = ''
     try { tenantId = localStorage.getItem('nahla_tenant_id') || '' } catch { /* noop */ }
     console.info(
-      '[SallaEntry] open advanced dashboard clicked | target=%s | hasToken=%s | tenant_id=%s',
-      next, !!token, tenantId || '(missing)',
+      '[SallaEntry] open advanced dashboard clicked | target=%s | hasToken=%s | tenant_id=%s | theme=%s | lang=%s',
+      next, !!token, tenantId || '(missing)', isDark ? 'dark' : 'light', lang,
     )
 
     if (!token) {
@@ -468,17 +482,32 @@ export default function SallaEntryScreen() {
         return
       }
       const { launch_url } = await res.json() as { launch_url: string }
+
+      // Append theme/lang to launch_url itself so /app/salla/launch's
+      // loading screen renders in the right language too.  URL is absolute
+      // so use URL() to merge correctly with any existing query string.
+      let finalUrl = launch_url
+      try {
+        const u = new URL(launch_url, window.location.origin)
+        u.searchParams.set('theme', isDark ? 'dark' : 'light')
+        u.searchParams.set('lang',  lang)
+        finalUrl = u.toString()
+      } catch {
+        // Malformed launch_url — open it verbatim rather than blocking the
+        // merchant.  The encoded `next` still carries the preferences.
+      }
+
       if (window.top) {
-        window.top.location.href = launch_url
+        window.top.location.href = finalUrl
       } else {
-        window.location.href = launch_url
+        window.location.href = finalUrl
       }
     } catch (e) {
       console.error('[OpenAdvanced] network error:', e)
       alert(t.errors.network)
       setLaunching(null)
     }
-  }, [navigate, t])
+  }, [navigate, t, isDark, lang])
 
   // ── Open the dedicated "Sync" OAuth flow (Dual Integration Architecture) ──
   // Opens accounts.salla.sa at the TOP window — Salla's OAuth provider does

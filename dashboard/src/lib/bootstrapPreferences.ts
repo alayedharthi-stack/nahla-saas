@@ -1,0 +1,168 @@
+/**
+ * bootstrapPreferences — early init for theme + locale.
+ * ─────────────────────────────────────────────────────
+ * Runs synchronously in `main.tsx` BEFORE React renders so:
+ *   • the very first paint matches the merchant's preference (no FOUC)
+ *   • <html dir/lang/class> are correct before the LanguageProvider mounts
+ *   • Salla → Nahla preference handoff (?theme=… &lang=…) lands instantly
+ *
+ * Priority on first load (highest first):
+ *   1. URL query params (`?theme=…`, `?lang=…`) — used when the merchant
+ *      arrives from /app/salla/launch after the embedded handoff.
+ *   2. localStorage (`nahla-theme`, `nahla-lang`) — the merchant's last
+ *      explicit choice, set by either Header toggle or earlier propagation.
+ *   3. System (`prefers-color-scheme` for theme; AR default for locale).
+ *
+ * After applying we strip the consumed params from the URL via
+ * `history.replaceState` so a manual refresh doesn't keep re-applying them
+ * (the values already live in localStorage at that point).
+ */
+
+type ThemeMode = 'light' | 'dark' | 'system'
+type Lang      = 'ar' | 'en'
+
+const THEME_KEY = 'nahla-theme'
+const LANG_KEY  = 'nahla-lang'
+
+function normTheme(raw: string | null | undefined): 'light' | 'dark' | null {
+  if (!raw) return null
+  const v = raw.toLowerCase().trim()
+  if (v === 'dark' || v === 'night') return 'dark'
+  if (v === 'light' || v === 'day')  return 'light'
+  return null
+}
+
+function normLang(raw: string | null | undefined): Lang | null {
+  if (!raw) return null
+  const v = raw.toLowerCase().trim()
+  if (v.startsWith('ar')) return 'ar'
+  if (v.startsWith('en')) return 'en'
+  return null
+}
+
+function systemPrefersDark(): boolean {
+  try { return window.matchMedia('(prefers-color-scheme: dark)').matches }
+  catch { return false }
+}
+
+function readStoredTheme(): ThemeMode {
+  try {
+    const v = localStorage.getItem(THEME_KEY)
+    if (v === 'light' || v === 'dark' || v === 'system') return v
+  } catch { /* ignore */ }
+  return 'system'
+}
+
+function readStoredLang(): Lang | null {
+  try {
+    const v = localStorage.getItem(LANG_KEY)
+    if (v === 'ar' || v === 'en') return v
+  } catch { /* ignore */ }
+  return null
+}
+
+function resolveTheme(mode: ThemeMode): 'light' | 'dark' {
+  if (mode === 'system') return systemPrefersDark() ? 'dark' : 'light'
+  return mode
+}
+
+function applyTheme(resolved: 'light' | 'dark'): void {
+  try {
+    const root = document.documentElement
+    root.classList.toggle('dark', resolved === 'dark')
+    root.setAttribute('data-theme', resolved)
+    root.style.colorScheme = resolved
+  } catch { /* DOM not ready */ }
+}
+
+function applyLang(lang: Lang): void {
+  try {
+    const root = document.documentElement
+    root.lang = lang
+    root.dir  = lang === 'ar' ? 'rtl' : 'ltr'
+  } catch { /* DOM not ready */ }
+}
+
+/**
+ * Reads both preferences from URL + storage, applies them to <html>, and
+ * persists URL-resolved values back to localStorage.  Returns a brief
+ * summary for logging.
+ */
+export function bootstrapPreferences(): {
+  theme: 'light' | 'dark'
+  lang:  Lang
+  source: { theme: 'url' | 'stored' | 'system'; lang: 'url' | 'stored' | 'default' }
+} {
+  // ── URL ──
+  let urlTheme: 'light' | 'dark' | null = null
+  let urlLang:  Lang | null = null
+  let consumedAny = false
+
+  try {
+    const sp = new URLSearchParams(window.location.search)
+    urlTheme = normTheme(sp.get('theme') || sp.get('color_scheme') || sp.get('mode'))
+    urlLang  = normLang(sp.get('lang')   || sp.get('locale')       || sp.get('language'))
+
+    // Strip the consumed keys but keep everything else (next=, token=, …).
+    if (urlTheme || urlLang) {
+      consumedAny = true
+      ;['theme', 'color_scheme', 'mode', 'lang', 'locale', 'language']
+        .forEach(k => sp.delete(k))
+      const qs = sp.toString()
+      const cleanUrl =
+        window.location.pathname +
+        (qs ? `?${qs}` : '') +
+        window.location.hash
+      try { window.history.replaceState(null, '', cleanUrl) } catch { /* ignore */ }
+    }
+  } catch { /* URL parsing failed */ }
+
+  // ── Theme resolution ──
+  let themeSource: 'url' | 'stored' | 'system'
+  let resolvedTheme: 'light' | 'dark'
+  if (urlTheme) {
+    // URL wins, also persist so the next reload still matches.
+    themeSource    = 'url'
+    resolvedTheme  = urlTheme
+    try { localStorage.setItem(THEME_KEY, urlTheme) } catch { /* ignore */ }
+  } else {
+    const storedMode = readStoredTheme()
+    resolvedTheme    = resolveTheme(storedMode)
+    themeSource      = storedMode === 'system' ? 'system' : 'stored'
+  }
+  applyTheme(resolvedTheme)
+
+  // ── Lang resolution ──
+  let langSource: 'url' | 'stored' | 'default'
+  let resolvedLang: Lang
+  if (urlLang) {
+    langSource   = 'url'
+    resolvedLang = urlLang
+    try { localStorage.setItem(LANG_KEY, urlLang) } catch { /* ignore */ }
+  } else {
+    const stored = readStoredLang()
+    if (stored) {
+      langSource   = 'stored'
+      resolvedLang = stored
+    } else {
+      // Saudi market default — same as i18n/context.tsx
+      langSource   = 'default'
+      resolvedLang = 'ar'
+    }
+  }
+  applyLang(resolvedLang)
+
+  if (consumedAny) {
+    // eslint-disable-next-line no-console
+    console.info(
+      '[bootstrap] applied Salla handoff preferences | theme=%s (%s) | lang=%s (%s)',
+      resolvedTheme, themeSource, resolvedLang, langSource,
+    )
+  }
+
+  return {
+    theme:  resolvedTheme,
+    lang:   resolvedLang,
+    source: { theme: themeSource, lang: langSource },
+  }
+}
