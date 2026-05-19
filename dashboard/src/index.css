@@ -81,10 +81,35 @@
  */
 :root {
   --font-ui: 'Cairo', system-ui, sans-serif;
+
+  /* Surface tokens — used by components that need dark-mode awareness
+     without rewriting every Tailwind class.  Light defaults match the
+     existing slate palette. */
+  --surface-bg:        #f8fafc; /* slate-50 */
+  --surface-card:      #ffffff;
+  --surface-card-alt:  #f1f5f9; /* slate-100 */
+  --surface-border:    #e2e8f0; /* slate-200 */
+  --surface-text:      #0f172a; /* slate-900 */
+  --surface-text-mute: #64748b; /* slate-500 */
 }
 
 [dir="ltr"] {
   --font-ui: 'Inter', system-ui, sans-serif;
+}
+
+/* ── Dark theme tokens ─────────────────────────────────────────────────────
+ * Driven by the `dark` class on <html> (set by useTheme / useEmbeddedTheme).
+ * We keep the contrast close to Salla's own dark dashboard so the embedded
+ * surface visually nests inside the host without a jarring colour seam.
+ */
+html.dark {
+  --surface-bg:        #0f172a; /* slate-900 */
+  --surface-card:      #1e293b; /* slate-800 */
+  --surface-card-alt:  #334155; /* slate-700 */
+  --surface-border:    #334155; /* slate-700 */
+  --surface-text:      #f1f5f9; /* slate-100 */
+  --surface-text-mute: #94a3b8; /* slate-400 */
+  color-scheme: dark;
 }
 
 @layer base {
@@ -99,6 +124,16 @@
 
   body {
     @apply bg-slate-50 text-slate-900 font-sans antialiased;
+    transition: background-color 0.18s ease, color 0.18s ease;
+  }
+
+  /* Dark-mode body — applied via the `dark` class on <html>.  We intentionally
+   * use direct selectors (not @apply) so this also covers pages that hard-code
+   * `bg-white` on top-level wrappers (they fade into the dark surface via the
+   * card-style overrides further down). */
+  html.dark body {
+    background-color: #020617; /* slate-950 */
+    color:            #e2e8f0; /* slate-200 */
   }
 
   /*
@@ -125,6 +160,13 @@
 
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-slate-400;
+  }
+
+  html.dark ::-webkit-scrollbar-thumb {
+    background-color: #334155; /* slate-700 */
+  }
+  html.dark ::-webkit-scrollbar-thumb:hover {
+    background-color: #475569; /* slate-600 */
   }
 }
 

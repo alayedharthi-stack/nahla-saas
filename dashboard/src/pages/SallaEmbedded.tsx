@@ -21,6 +21,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -170,9 +171,10 @@ function persistSession(data: LoginResponse | SessionResponse) {
 
 export default function SallaEmbedded() {
   const navigate = useNavigate()
+  const { isRTL, t } = useEmbeddedLocale()
 
   const [phase, setPhase]               = useState<Phase>('init')
-  const [statusText, setStatusText]     = useState('جاري تهيئة الاتصال...')
+  const [statusText, setStatusText]     = useState(t.loader.initializing)
   const [errorDetail, setErrorDetail]   = useState('')
   const bootedRef                       = useRef(false)
   const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -215,19 +217,19 @@ export default function SallaEmbedded() {
     console.info('[SallaEmbedded] ✓ auth complete → showing welcome, auto-entering /app/entry in', WELCOME_HOLD_MS, 'ms')
     setTimeout(() => {
       setPhase('success')
-      setStatusText('جاري الدخول...')
+      setStatusText(t.loader.entering)
       setTimeout(() => navigate('/app/entry', { replace: true }), 150)
     }, WELCOME_HOLD_MS)
-  }, [clearWatchdog, navigate])
+  }, [clearWatchdog, navigate, t])
 
   // ── goToDashboard: kept for the explicit "Open dashboard" button on the
   //            welcome card — lets impatient merchants skip the 1.4 s hold.
   const goToDashboard = useCallback(() => {
     setPhase('success')
     console.info('[SallaEmbedded] user pressed CTA → navigating to /app/entry')
-    setStatusText('جاري الدخول...')
+    setStatusText(t.loader.entering)
     setTimeout(() => navigate('/app/entry', { replace: true }), 150)
-  }, [navigate])
+  }, [navigate, t])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
 
@@ -257,7 +259,7 @@ export default function SallaEmbedded() {
 
     console.info('[SallaEmbedded] checking existing session...')
     setPhase('checking')
-    setStatusText('جاري التحقق من جلستك...')
+    setStatusText(t.loader.checking)
 
     try {
       const ctrl = new AbortController()
@@ -286,7 +288,7 @@ export default function SallaEmbedded() {
       console.warn('[SallaEmbedded] session check failed (will try token-login):', e)
     }
     return false
-  }, [storeId, markReady])
+  }, [storeId, markReady, t])
 
   // ── Step 2: token exchange with Salla ─────────────────────────────────────
 
@@ -294,16 +296,12 @@ export default function SallaEmbedded() {
     console.info('[SallaEmbedded] token-login start | token present:', !!sallaToken)
 
     if (!sallaToken) {
-      showError(
-        'لم يتم استقبال رمز المصادقة من سلة.\n' +
-        'تأكد من أن رابط التطبيق في بوابة الشركاء يشير إلى:\n' +
-        'https://app.nahlah.ai/app/salla',
-      )
+      showError(t.errors.noAuthToken)
       return
     }
 
     setPhase('login')
-    setStatusText('جاري التحقق من هويتك...')
+    setStatusText(t.loader.verifying)
 
     try {
       const ctrl = new AbortController()
@@ -324,14 +322,14 @@ export default function SallaEmbedded() {
       try {
         data = await res.json()
       } catch {
-        showError('الخادم أرجع استجابة غير صالحة. حاول مجدداً.')
+        showError(t.errors.invalidResponse)
         return
       }
 
       if (!res.ok || !data.access_token) {
         const detail = data?.detail || `HTTP ${res.status}`
         console.error('[SallaEmbedded] token-login failed:', detail, data)
-        showError(data?.detail || 'تعذّر التحقق من هويتك. أغلق التطبيق وأعد فتحه.')
+        showError(data?.detail || t.errors.verifyFailed)
         return
       }
 
@@ -365,7 +363,7 @@ export default function SallaEmbedded() {
           // will populate refresh_token when Salla delivers it.
         } else {
           console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
-          setStatusText('جاري إكمال الربط مع سلة...')
+          setStatusText(t.loader.completingLink)
           if (window.top) {
             window.top.location.href = data.oauth_url
           } else {
@@ -379,13 +377,9 @@ export default function SallaEmbedded() {
     } catch (e) {
       const isAbort = e instanceof DOMException && e.name === 'AbortError'
       console.error('[SallaEmbedded] token-login exception:', e)
-      showError(
-        isAbort
-          ? 'استغرق الخادم وقتاً طويلاً. تحقق من اتصالك وأعد المحاولة.'
-          : 'تعذر الوصول إلى الخادم. تحقق من اتصالك بالإنترنت.',
-      )
+      showError(isAbort ? t.errors.timeout : t.errors.network)
     }
-  }, [sallaToken, appId, storeId, showError, markReady])
+  }, [sallaToken, appId, storeId, showError, markReady, t])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -393,7 +387,7 @@ export default function SallaEmbedded() {
     // Global watchdog: if still loading after WATCHDOG_TIMEOUT → show error
     watchdogRef.current = setTimeout(() => {
       console.error('[SallaEmbedded] ⏱ watchdog triggered — still loading after', WATCHDOG_TIMEOUT, 'ms')
-      showError('استغرق التحميل وقتاً طويلاً. أعد فتح التطبيق أو تواصل مع الدعم.')
+      showError(t.errors.watchdog)
     }, WATCHDOG_TIMEOUT)
 
     // Load SDK in background — do NOT await before checking session/token
@@ -416,7 +410,7 @@ export default function SallaEmbedded() {
     // Last resort: try doLogin() in case Salla token is missing (might still
     // work if Salla SDK fills it in via postMessage), otherwise show error.
     await doLogin()
-  }, [sallaToken, checkSession, doLogin, showError])
+  }, [sallaToken, checkSession, doLogin, showError, t])
 
   // ── Mount effect ──────────────────────────────────────────────────────────
   // IMPORTANT: signalReady is called synchronously on mount, before any async.
@@ -453,13 +447,13 @@ export default function SallaEmbedded() {
     console.info('[SallaEmbedded] retry triggered')
     bootedRef.current = false
     setPhase('init')
-    setStatusText('جاري إعادة المحاولة...')
+    setStatusText(t.loader.retrying)
     setErrorDetail('')
     bootedRef.current = true
     // Re-signal and retry login
     signalReady()
     doLogin()
-  }, [doLogin])
+  }, [doLogin, t])
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -467,7 +461,7 @@ export default function SallaEmbedded() {
 
   return (
     <div
-      dir="rtl"
+      dir={isRTL ? 'rtl' : 'ltr'}
       className="min-h-dvh flex flex-col items-center justify-center px-4 py-6"
       style={{
         fontFamily:      "'Cairo', system-ui, sans-serif",
@@ -480,7 +474,7 @@ export default function SallaEmbedded() {
         <div className="relative w-20 h-20 mb-3">
           <img
             src="https://app.nahlah.ai/logo.png"
-            alt="نحلة"
+            alt={t.app.brand}
             className="w-full h-full object-contain"
             style={{ filter: 'drop-shadow(0 0 18px rgba(245,158,11,0.4))' }}
             onError={(e) => {
@@ -497,7 +491,7 @@ export default function SallaEmbedded() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <h1 className="text-2xl font-black text-slate-100 tracking-tight">نحلة</h1>
+          <h1 className="text-2xl font-black text-slate-100 tracking-tight">{t.app.brand}</h1>
           <span
             className="text-xs font-black px-2 py-0.5 rounded-md"
             style={{
@@ -508,7 +502,7 @@ export default function SallaEmbedded() {
               letterSpacing: '0.5px',
             }}
           >
-            AI
+            {t.app.badgeAI}
           </span>
         </div>
       </div>
@@ -526,7 +520,7 @@ export default function SallaEmbedded() {
         {phase === 'error' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">⚠️</div>
-            <p className="text-white font-semibold text-base">تعذّر الاتصال بسلة</p>
+            <p className="text-white font-semibold text-base">{t.errors.title}</p>
             <p className="text-slate-400 text-sm leading-relaxed whitespace-pre-line">{errorDetail}</p>
             <div className="flex flex-col gap-3 pt-2">
               <button
@@ -534,13 +528,13 @@ export default function SallaEmbedded() {
                 className="w-full py-3 px-6 rounded-xl font-bold text-sm"
                 style={{ background: '#f59e0b', color: '#0f172a', boxShadow: '0 4px 20px rgba(245,158,11,0.35)' }}
               >
-                إعادة المحاولة
+                {t.errors.retry}
               </button>
               <a
                 href="mailto:support@nahlah.ai"
                 className="text-slate-500 text-xs text-center hover:text-slate-400"
               >
-                تواصل مع الدعم
+                {t.errors.contactSupport}
               </a>
             </div>
           </div>
@@ -551,16 +545,16 @@ export default function SallaEmbedded() {
           <div className="text-center space-y-4">
             <div className="text-5xl">🎉</div>
             <p className="text-white font-bold text-lg leading-snug">
-              تم ربط متجرك بنجاح!
+              {t.welcome.title}
             </p>
             <p className="text-slate-300 text-sm">
-              جاري فتح لوحة نحلة...
+              {t.welcome.openingNahla}
             </p>
             <button
               onClick={goToDashboard}
               className="text-amber-400 hover:text-amber-300 text-xs font-semibold underline underline-offset-4 transition-colors"
             >
-              تخطي
+              {t.welcome.skip}
             </button>
           </div>
         )}
@@ -570,7 +564,7 @@ export default function SallaEmbedded() {
           <div className="text-center space-y-4">
             <div className="text-5xl">✅</div>
             <p className="text-white font-semibold text-base">{statusText}</p>
-            <p className="text-slate-400 text-sm">جاري تحويلك...</p>
+            <p className="text-slate-400 text-sm">{t.loader.redirecting}</p>
           </div>
         )}
 
@@ -598,7 +592,7 @@ export default function SallaEmbedded() {
       </div>
 
       <p className="mt-5 text-xs" style={{ color: '#334155' }}>
-        بأيدي سعودية 100% 🇸🇦 · Nahla AI
+        {t.app.tagline}
       </p>
     </div>
   )

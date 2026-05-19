@@ -199,7 +199,7 @@ export default function Layout() {
   const meta = t(metaSelector)
 
   return (
-    <div className="min-h-dvh flex bg-slate-50 overflow-x-hidden">
+    <div className="min-h-dvh flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-x-hidden transition-colors">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
       {/*

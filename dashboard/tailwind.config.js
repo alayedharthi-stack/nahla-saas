@@ -1,6 +1,11 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  // Class-based dark mode — driven by `<html class="dark">` from useTheme.
+  // The merchant explicitly toggles light/dark/system in the Header; setting
+  // this to 'class' (instead of 'media') lets that choice override the OS
+  // preference and stay consistent inside Salla's embedded iframe.
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {

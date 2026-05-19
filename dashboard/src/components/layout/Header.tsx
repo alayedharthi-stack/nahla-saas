@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle, Headphones, AlertCircle } from 'lucide-react'
+import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle, Headphones, AlertCircle, Sun, Moon, Monitor } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
+import { useTheme, type ThemeMode } from '../../hooks/useTheme'
 import {
   logout,
   getEmail,
@@ -259,6 +260,7 @@ function useMerchantNotifs(role: string) {
 
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
+  const { mode: themeMode, setMode: setThemeMode } = useTheme()
   const navigate = useNavigate()
   const [profileOpen, setProfileOpen] = useState(false)
   const [bellOpen, setBellOpen]       = useState(false)
@@ -335,21 +337,35 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const setTtl = (reqId: string, v: number) =>
     setTtlChoice(prev => ({ ...prev, [reqId]: v }))
 
+  // Cycle: light → dark → system → light
+  const nextThemeMode: Record<ThemeMode, ThemeMode> = {
+    light:  'dark',
+    dark:   'system',
+    system: 'light',
+  }
+  const themeIcon = themeMode === 'light' ? <Sun className="w-4 h-4" />
+                  : themeMode === 'dark'  ? <Moon className="w-4 h-4" />
+                  :                          <Monitor className="w-4 h-4" />
+  const themeAriaLabel =
+    lang === 'ar'
+      ? `الوضع الحالي: ${themeMode === 'light' ? 'فاتح' : themeMode === 'dark' ? 'داكن' : 'تلقائي حسب النظام'} — اضغط للتبديل`
+      : `Current theme: ${themeMode === 'light' ? 'light' : themeMode === 'dark' ? 'dark' : 'system'} — click to toggle`
+
   return (
-    <header className="h-14 md:h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 md:px-6 sticky top-0 z-20 pt-safe-top">
+    <header className="h-14 md:h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-3 md:px-6 sticky top-0 z-20 pt-safe-top">
 
       {/* Left side */}
       <div className="flex items-center gap-3">
         <button
-          className="lg:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 text-slate-500 transition-colors"
+          className="lg:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-300 transition-colors"
           onClick={onMenuClick}
           aria-label="فتح القائمة"
         >
           <Menu className="w-5 h-5" />
         </button>
         <div>
-          <h1 className="text-base font-semibold text-slate-900 leading-none">{title}</h1>
-          {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+          <h1 className="text-base font-semibold text-slate-900 dark:text-slate-100 leading-none">{title}</h1>
+          {subtitle && <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{subtitle}</p>}
         </div>
       </div>
 
@@ -357,7 +373,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
       <div className="flex items-center gap-2">
 
         {impersonating && (
-          <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-lg text-xs font-medium text-amber-700">
+          <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg text-xs font-medium text-amber-700 dark:text-amber-300">
             <Shield className="w-3.5 h-3.5" />
             دعم فني: {impersonInfo?.storeName || 'متجر'}
           </div>
@@ -369,13 +385,24 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           <input
             type="text"
             placeholder={t(tr => tr.topbar.searchPlaceholder)}
-            className="ps-9 pe-4 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg w-52
+            className="ps-9 pe-4 py-1.5 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 dark:text-slate-100 dark:placeholder:text-slate-500 rounded-lg w-52
                        focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
           />
         </div>
 
+        {/* Theme toggle */}
+        <button
+          type="button"
+          onClick={() => setThemeMode(nextThemeMode[themeMode])}
+          aria-label={themeAriaLabel}
+          title={themeAriaLabel}
+          className="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+        >
+          {themeIcon}
+        </button>
+
         {/* Language toggle */}
-        <div className="flex items-center rounded-lg border border-slate-200 overflow-hidden">
+        <div className="flex items-center rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
           {(['ar', 'en'] as Lang[]).map((code) => (
             <button
               key={code}
@@ -384,7 +411,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
               className={`px-2.5 py-1.5 text-xs font-semibold transition-colors ${
                 lang === code
                   ? 'bg-brand-500 text-white'
-                  : 'text-slate-500 hover:bg-slate-50'
+                  : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
             >
               {code === 'ar' ? 'AR' : 'EN'}

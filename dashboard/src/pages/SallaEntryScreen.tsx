@@ -11,10 +11,17 @@
  *   5. Metrics cards (2×2) — today's stats (graceful fallback to "--")
  *   6. Primary CTA  — فتح لوحة نحلة المتقدمة  (target="_top")
  *   7. Secondary CTA — ربط واتساب الآن         (target="_top")
+ *
+ * Theme & locale: this screen lives inside Salla's iframe, so it follows
+ * Salla's preferences first (via useEmbeddedTheme / useEmbeddedLocale),
+ * then the merchant's Nahla preference, then the OS.
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
+import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
+import type { EmbeddedStrings } from '../i18n/embedded'
 
 // ── Immediate ready re-signal ─────────────────────────────────────────────────
 // /app/entry is navigated to INSIDE the Salla iframe after auth. Re-signalling
@@ -93,40 +100,109 @@ interface MetricPresence {
   aiRate:        boolean
 }
 
-// ── Design tokens (inline styles for iframe compatibility) ─────────────────────
+// ── Design tokens (theme-aware, inline-style friendly) ─────────────────────────
 
-const C = {
-  amber:       '#f59e0b',
-  amberLight:  '#fff7ed',
-  amberBorder: '#fed7aa',
-  green:       '#22c55e',
-  greenLight:  '#f0fdf4',
-  greenText:   '#15803d',
-  slate50:     '#f8fafc',
-  slate100:    '#f1f5f9',
-  slate200:    '#e2e8f0',
-  slate300:    '#cbd5e1',
-  slate400:    '#94a3b8',
-  slate500:    '#64748b',
-  slate900:    '#0f172a',
-  white:       '#ffffff',
-  red50:       '#fef2f2',
-  redBorder:   '#fecaca',
-  redText:     '#dc2626',
-  bg:          '#f9fafb',
-} as const
+interface Palette {
+  amber:       string
+  amberLight:  string
+  amberBorder: string
+  green:       string
+  greenLight:  string
+  greenText:   string
+  slate50:     string  // page surface "row separator"
+  slate100:    string  // borders / very subtle bg
+  slate200:    string  // borders
+  slate300:    string  // muted text / disabled
+  slate400:    string  // secondary text
+  slate500:    string  // body text muted
+  slate900:    string  // primary text
+  white:       string  // card background
+  red50:       string
+  redBorder:   string
+  redText:     string
+  bg:          string  // page background
+  warnBg:      string
+  warnBorder:  string
+  warnText:    string
+  warnTextStrong: string
+  ctaPrimary:  string
+  ctaPrimaryText: string
+  ctaSecondaryText: string
+}
+
+function buildPalette(isDark: boolean): Palette {
+  if (!isDark) {
+    return {
+      amber:           '#f59e0b',
+      amberLight:      '#fff7ed',
+      amberBorder:     '#fed7aa',
+      green:           '#22c55e',
+      greenLight:      '#f0fdf4',
+      greenText:       '#15803d',
+      slate50:         '#f8fafc',
+      slate100:        '#f1f5f9',
+      slate200:        '#e2e8f0',
+      slate300:        '#cbd5e1',
+      slate400:        '#94a3b8',
+      slate500:        '#64748b',
+      slate900:        '#0f172a',
+      white:           '#ffffff',
+      red50:           '#fef2f2',
+      redBorder:       '#fecaca',
+      redText:         '#dc2626',
+      bg:              '#f9fafb',
+      warnBg:          '#fff7ed',
+      warnBorder:      '#fed7aa',
+      warnText:        '#c2410c',
+      warnTextStrong:  '#9a3412',
+      ctaPrimary:      '#f59e0b',
+      ctaPrimaryText:  '#0f172a',
+      ctaSecondaryText:'#f59e0b',
+    }
+  }
+  // Dark palette — tuned to nest comfortably inside Salla's dark dashboard.
+  return {
+    amber:           '#fbbf24',
+    amberLight:      'rgba(245,158,11,0.12)',
+    amberBorder:     'rgba(245,158,11,0.35)',
+    green:           '#22c55e',
+    greenLight:      'rgba(34,197,94,0.12)',
+    greenText:       '#86efac',
+    slate50:         'rgba(255,255,255,0.04)',
+    slate100:        'rgba(255,255,255,0.08)',
+    slate200:        'rgba(255,255,255,0.12)',
+    slate300:        '#64748b',
+    slate400:        '#94a3b8',
+    slate500:        '#cbd5e1',
+    slate900:        '#f1f5f9',
+    white:           '#1e293b', // card surface in dark mode
+    red50:           'rgba(239,68,68,0.10)',
+    redBorder:       'rgba(239,68,68,0.35)',
+    redText:         '#fca5a5',
+    bg:              '#0f172a',
+    warnBg:          'rgba(249,115,22,0.10)',
+    warnBorder:      'rgba(249,115,22,0.35)',
+    warnText:        '#fdba74',
+    warnTextStrong:  '#fed7aa',
+    ctaPrimary:      '#f59e0b',
+    ctaPrimaryText:  '#0f172a',
+    ctaSecondaryText:'#fbbf24',
+  }
+}
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
 function MiniStatusCard({
-  icon, label, active, activeText, inactiveText, warning = false,
+  icon, label, active, activeText, inactiveText, warning = false, C,
 }: {
-  icon: string; label: string; active: boolean; activeText: string; inactiveText: string; warning?: boolean
+  icon: string; label: string; active: boolean
+  activeText: string; inactiveText: string; warning?: boolean
+  C: Palette
 }) {
-  const borderColor = active ? '#bbf7d0' : warning ? '#fed7aa' : C.slate100
-  const dotColor    = active ? C.green   : warning ? '#f97316' : C.slate200
+  const borderColor = active ? '#bbf7d0' : warning ? C.amberBorder : C.slate100
+  const dotColor    = active ? C.green   : warning ? '#f97316'     : C.slate200
   const dotGlow     = active ? `0 0 6px rgba(34,197,94,0.4)` : warning ? `0 0 6px rgba(249,115,22,0.4)` : 'none'
-  const textColor   = active ? C.greenText : warning ? '#c2410c' : C.slate300
+  const textColor   = active ? C.greenText : warning ? C.warnText  : C.slate300
   return (
     <div
       style={{
@@ -160,9 +236,10 @@ function MiniStatusCard({
 }
 
 function OnboardingStep({
-  num, title, description, state, isLast,
+  num, title, description, state, isLast, C, t,
 }: {
   num: number; title: string; description: string; state: StepState; isLast: boolean
+  C: Palette; t: EmbeddedStrings
 }) {
   const isDone    = state === 'completed'
   const isCurrent = state === 'current'
@@ -198,7 +275,7 @@ function OnboardingStep({
             : isCurrent
             ? `2px solid ${C.amber}`
             : `2px solid ${C.slate200}`,
-          color:          isDone ? C.slate900 : isCurrent ? C.amber : C.slate300,
+          color:          isDone ? C.ctaPrimaryText : isCurrent ? C.amber : C.slate300,
         }}
       >
         {isDone ? '✓' : num}
@@ -229,7 +306,7 @@ function OnboardingStep({
                 border:       `1px solid ${C.amberBorder}`,
               }}
             >
-              الخطوة التالية
+              {t.steps.nextStep}
             </span>
           )}
 
@@ -244,7 +321,7 @@ function OnboardingStep({
                 color:        C.greenText,
               }}
             >
-              مكتمل ✓
+              {t.steps.completed}
             </span>
           )}
         </div>
@@ -257,9 +334,10 @@ function OnboardingStep({
 }
 
 function MetricCard({
-  icon, label, rawValue, hasData,
+  icon, label, rawValue, hasData, C, isRTL,
 }: {
   icon: string; label: string; rawValue: string; hasData: boolean
+  C: Palette; isRTL: boolean
 }) {
   return (
     <div
@@ -280,7 +358,7 @@ function MetricCard({
           color:      hasData ? C.slate900 : C.slate300,
           margin:     0,
           direction:  'ltr',
-          textAlign:  'right',
+          textAlign:  isRTL ? 'right' : 'left',
         }}
       >
         {hasData ? rawValue : '--'}
@@ -289,9 +367,11 @@ function MetricCard({
   )
 }
 
-function LoadingSkeleton() {
+function LoadingSkeleton({ isDark }: { isDark: boolean }) {
   const pulse: React.CSSProperties = {
-    background: 'linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%)',
+    background: isDark
+      ? 'linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.10) 50%, rgba(255,255,255,0.05) 75%)'
+      : 'linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%)',
     backgroundSize: '200% 100%',
     animation: 'shimmer 1.4s infinite',
     borderRadius: 16,
@@ -316,6 +396,13 @@ export default function SallaEntryScreen() {
   const navigate  = useNavigate()
   const bootedRef = useRef(false)
   const [logoErr, setLogoErr]   = useState(false)
+
+  // Theme + locale resolution (Salla-aware).
+  const { isDark }            = useEmbeddedTheme()
+  const { lang, isRTL, t }    = useEmbeddedLocale()
+  const C                     = useMemo(() => buildPalette(isDark), [isDark])
+  const numberLocale          = lang === 'ar' ? 'ar-SA' : 'en-US'
+  const sarSuffix             = lang === 'ar' ? 'ر.س' : 'SAR'
 
   const [status,      setStatus]      = useState<EmbeddedStatus | null>(null)
   const [sub,         setSub]         = useState<Subscription | null>(null)
@@ -358,7 +445,7 @@ export default function SallaEntryScreen() {
     )
 
     if (!token) {
-      alert('انتهت الجلسة، أعد فتح التطبيق من سلة.')
+      alert(t.errors.sessionExpired)
       setLaunching(null)
       navigate('/app/salla', { replace: true })
       return
@@ -376,7 +463,7 @@ export default function SallaEntryScreen() {
           if (err?.detail) detail = err.detail
         } catch { /* ignore */ }
         console.error('[OpenAdvanced] launch-dashboard failed:', detail)
-        alert(`تعذر فتح لوحة نحلة: ${detail}`)
+        alert(`${t.errors.title}: ${detail}`)
         setLaunching(null)
         return
       }
@@ -388,10 +475,10 @@ export default function SallaEntryScreen() {
       }
     } catch (e) {
       console.error('[OpenAdvanced] network error:', e)
-      alert('تعذر الاتصال بالخادم، تحقق من الإنترنت وحاول مجدداً.')
+      alert(t.errors.network)
       setLaunching(null)
     }
-  }, [navigate])
+  }, [navigate, t])
 
   // ── Open the dedicated "Sync" OAuth flow (Dual Integration Architecture) ──
   // Opens accounts.salla.sa at the TOP window — Salla's OAuth provider does
@@ -404,7 +491,7 @@ export default function SallaEntryScreen() {
       console.warn('[SallaEntry] aborted: no JWT in localStorage/sessionStorage/cookie')
       console.info('  has_token     :', false)
       console.info('  start_url     : (not opened — token missing)')
-      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
+      alert(t.errors.sessionExpired)
       navigate('/app/salla', { replace: true })
       return
     }
@@ -421,7 +508,7 @@ export default function SallaEntryScreen() {
     // Defensive sanity check — never open the URL without ?token=
     if (!/[?&]token=/.test(url)) {
       console.error('[SallaEntry] refusing to open OAuth URL without ?token=')
-      alert('انتهت الجلسة، الرجاء تسجيل الدخول مرة أخرى')
+      alert(t.errors.sessionExpired)
       return
     }
     if (window.top) {
@@ -429,7 +516,7 @@ export default function SallaEntryScreen() {
     } else {
       window.location.href = url
     }
-  }, [navigate])
+  }, [navigate, t])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -521,11 +608,11 @@ export default function SallaEntryScreen() {
         })
       }
     } catch {
-      setError('تعذّر تحميل البيانات. تحقق من اتصالك وأعد المحاولة.')
+      setError(t.errors.network)
     } finally {
       setLoading(false)
     }
-  }, [navigate, storedName])
+  }, [navigate, storedName, t])
 
   useEffect(() => {
     // Re-signal Salla's host frame in case it missed the module-level signal.
@@ -561,17 +648,21 @@ export default function SallaEntryScreen() {
     if (!status) return
     if (status === 'success') {
       console.info('[SallaEntry] OAuth API sync success — reloading integration status')
-      alert('تم ربط المتجر عبر OAuth بنجاح. تم تفعيل المزامنة الكاملة.')
+      alert(lang === 'ar'
+        ? 'تم ربط المتجر عبر OAuth بنجاح. تم تفعيل المزامنة الكاملة.'
+        : 'Store linked via OAuth. Full sync is now active.')
     } else {
       const reason = params.get('reason') || 'unknown'
       console.warn('[SallaEntry] OAuth API sync failed | reason=%s', reason)
-      alert(`تعذّر إكمال ربط OAuth: ${reason}. أعد المحاولة من زر "ربط المتجر".`)
+      alert(lang === 'ar'
+        ? `تعذّر إكمال ربط OAuth: ${reason}. أعد المحاولة من زر "ربط المتجر".`
+        : `OAuth link failed: ${reason}. Retry from the "Link store" button.`)
     }
     // Strip the query so a manual refresh doesn't re-show the alert.
     const cleanUrl = window.location.pathname + window.location.hash
     window.history.replaceState({}, '', cleanUrl)
     load()
-  }, [load])
+  }, [load, lang])
 
   // ── Derived state ────────────────────────────────────────────────────────────
 
@@ -590,11 +681,11 @@ export default function SallaEntryScreen() {
   const subStatus    = sub?.billing_status ?? 'none'
   const trialBlocked = subStatus === 'trial_blocked'
   const subActive    = subStatus === 'active' || subStatus === 'trial'
-  const subLabel     = subStatus === 'active'        ? 'نشط'
-                     : subStatus === 'trial'         ? 'تجريبي'
-                     : subStatus === 'trial_blocked' ? 'تجربة مستخدمة'
-                     : subStatus === 'cancelled'     ? 'ملغى'
-                     : 'غير نشط'
+  const subLabel     = subStatus === 'active'        ? t.sub.active
+                     : subStatus === 'trial'         ? t.sub.trial
+                     : subStatus === 'trial_blocked' ? t.sub.trialBlocked
+                     : subStatus === 'cancelled'     ? t.sub.cancelled
+                     : t.sub.none
 
   const m        = metrics
   const hasConv  = metricPresence.conversations
@@ -603,8 +694,8 @@ export default function SallaEntryScreen() {
   const hasRate  = metricPresence.aiRate
   const noData   = !hasConv && !hasOrd && !hasRev && !hasRate
 
-  const fmt    = (n: number) => n.toLocaleString('ar-SA')
-  const fmtSAR = (n: number) => `${n.toLocaleString('ar-SA')} ر.س`
+  const fmt    = (n: number) => n.toLocaleString(numberLocale)
+  const fmtSAR = (n: number) => `${n.toLocaleString(numberLocale)} ${sarSuffix}`
   const fmtPct = (n: number) => `${Math.round(n * 100)}%`
 
   // Onboarding steps: each entry is true when that step is done.
@@ -631,7 +722,7 @@ export default function SallaEntryScreen() {
 
   return (
     <div
-      dir="rtl"
+      dir={isRTL ? 'rtl' : 'ltr'}
       style={{
         minHeight:   '100dvh',
         display:     'flex',
@@ -660,7 +751,7 @@ export default function SallaEntryScreen() {
         {!logoErr ? (
           <img
             src="https://app.nahlah.ai/logo.png"
-            alt="نحلة"
+            alt={t.app.brand}
             style={{ width: 30, height: 30, objectFit: 'contain' }}
             onError={() => setLogoErr(true)}
           />
@@ -685,7 +776,7 @@ export default function SallaEntryScreen() {
 
         {/* Brand + store */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{ fontSize: 14, fontWeight: 900, color: C.slate900, margin: 0 }}>نحلة AI</p>
+          <p style={{ fontSize: 14, fontWeight: 900, color: C.slate900, margin: 0 }}>{t.app.brand}</p>
           {status?.store_name && (
             <p style={{ fontSize: 10, color: C.slate400, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {status.store_name}
@@ -709,7 +800,7 @@ export default function SallaEntryScreen() {
             opacity:      loading ? 0.5 : 1,
           }}
         >
-          {loading ? '...' : 'تحديث'}
+          {loading ? t.status.refreshing : t.status.refresh}
         </button>
       </header>
 
@@ -730,15 +821,15 @@ export default function SallaEntryScreen() {
         {/* ─ Welcome ─ */}
         <div style={{ textAlign: 'center', paddingTop: 4 }}>
           <h1 style={{ fontSize: 22, fontWeight: 900, color: C.slate900, margin: '0 0 6px' }}>
-            مرحباً بك في نحلة 👋
+            {t.welcome.headline}
           </h1>
           <p style={{ fontSize: 13, color: C.slate500, margin: 0, lineHeight: 1.6 }}>
-            اربط واتساب وابدأ الرد الذكي لزيادة مبيعات متجرك
+            {t.welcome.subhead}
           </p>
         </div>
 
         {/* ─ Loading ─ */}
-        {loading && <LoadingSkeleton />}
+        {loading && <LoadingSkeleton isDark={isDark} />}
 
         {/* ─ Error ─ */}
         {error && !loading && (
@@ -768,7 +859,7 @@ export default function SallaEntryScreen() {
                 textDecoration: 'underline',
               }}
             >
-              إعادة المحاولة
+              {t.errors.retry}
             </button>
           </div>
         )}
@@ -787,28 +878,30 @@ export default function SallaEntryScreen() {
                   margin:        '0 0 10px',
                 }}
               >
-                الحالة
+                {t.status.section}
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <MiniStatusCard
+                  C={C}
                   icon="🏪"
-                  label="سلة Embedded"
+                  label={t.status.sallaEmbedded}
                   active={embeddedOk}
-                  activeText="متصل"
-                  inactiveText="غير متصل"
+                  activeText={t.status.connected}
+                  inactiveText={t.status.notConnected}
                 />
                 <MiniStatusCard
+                  C={C}
                   icon="🔑"
-                  label="ربط API الكامل"
+                  label={t.status.apiFull}
                   active={apiSyncCounts}
-                  activeText={apiSyncEasy && !apiSyncOk ? 'Easy Mode' : 'مكتمل'}
-                  inactiveText="غير مكتمل"
+                  activeText={apiSyncEasy && !apiSyncOk ? t.status.easyMode : t.status.complete}
+                  inactiveText={t.status.incomplete}
                   warning={!apiSyncCounts}
                 />
-                <MiniStatusCard icon="💬" label="واتساب"    active={waOk}      activeText="متصل"        inactiveText="غير متصل" />
-                <MiniStatusCard icon="💳" label="الاشتراك"  active={subActive} activeText={subLabel}    inactiveText={subLabel} warning={trialBlocked} />
+                <MiniStatusCard C={C} icon="💬" label={t.status.whatsapp}    active={waOk}      activeText={t.status.connected} inactiveText={t.status.notConnected} />
+                <MiniStatusCard C={C} icon="💳" label={t.subscription.name}  active={subActive} activeText={subLabel}            inactiveText={subLabel} warning={trialBlocked} />
                 <div style={{ gridColumn: '1 / span 2' }}>
-                  <MiniStatusCard icon="🤖" label="نحلة" active={nahlaOk} activeText="تعمل" inactiveText="متوقفة" />
+                  <MiniStatusCard C={C} icon="🤖" label={t.status.nahla} active={nahlaOk} activeText={t.status.running} inactiveText={t.status.stopped} />
                 </div>
               </div>
             </section>
@@ -817,8 +910,8 @@ export default function SallaEntryScreen() {
             {!apiSyncCounts && (
               <div
                 style={{
-                  background:    '#fff7ed',
-                  border:        '1.5px solid #fed7aa',
+                  background:    C.warnBg,
+                  border:        `1.5px solid ${C.warnBorder}`,
                   borderRadius:  14,
                   padding:       '14px 16px',
                   display:       'flex',
@@ -826,12 +919,11 @@ export default function SallaEntryScreen() {
                   gap:           10,
                 }}
               >
-                <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: '#9a3412' }}>
-                  🔑 لتمكين المزامنة الكاملة للمنتجات والطلبات والعملاء
+                <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: C.warnTextStrong }}>
+                  {t.cta.storeLinkLead}
                 </p>
-                <p style={{ margin: 0, fontSize: 12, color: '#c2410c', lineHeight: 1.7 }}>
-                  اربط متجرك عبر OAuth لتفعيل: مزامنة المنتجات والعملاء، إنشاء الطلبات من المحادثة،
-                  تتبع الطلبات، وتشغيل الأتمتة في الخلفية بدون انقطاع.
+                <p style={{ margin: 0, fontSize: 12, color: C.warnText, lineHeight: 1.7 }}>
+                  {t.cta.storeLinkBlurb}
                 </p>
                 <button
                   type="button"
@@ -853,11 +945,11 @@ export default function SallaEntryScreen() {
                     fontFamily:     'inherit',
                   }}
                 >
-                  ربط المتجر لتفعيل جميع الميزات
+                  {t.cta.connectStore}
                 </button>
                 {!syncAppReady && (
-                  <p style={{ margin: 0, fontSize: 11, color: '#9a3412', lineHeight: 1.6 }}>
-                    لم يتم تكوين تطبيق المزامنة بعد. تواصل مع الدعم لإكمال الإعداد.
+                  <p style={{ margin: 0, fontSize: 11, color: C.warnTextStrong, lineHeight: 1.6 }}>
+                    {t.cta.syncAppNotReady}
                   </p>
                 )}
               </div>
@@ -867,8 +959,8 @@ export default function SallaEntryScreen() {
             {trialBlocked && (
               <div
                 style={{
-                  background:    '#fff7ed',
-                  border:        '1.5px solid #fed7aa',
+                  background:    C.warnBg,
+                  border:        `1.5px solid ${C.warnBorder}`,
                   borderRadius:  14,
                   padding:       '12px 16px',
                   display:       'flex',
@@ -878,11 +970,11 @@ export default function SallaEntryScreen() {
               >
                 <span style={{ fontSize: 20, flexShrink: 0 }}>🔔</span>
                 <div>
-                  <p style={{ margin: 0, fontWeight: 700, fontSize: 13, color: '#9a3412' }}>
-                    الردود التلقائية والأتمتة مقفلة
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: 13, color: C.warnTextStrong }}>
+                    {t.sub.blockedTitle}
                   </p>
-                  <p style={{ margin: '4px 0 0', fontSize: 12, color: '#c2410c', lineHeight: 1.6 }}>
-                    يمكنك رؤية المحادثات الواردة والفرص والسلات المتروكة، لكن لن يرد نحلة تلقائياً ولن تُنفَّذ أي إجراءات حتى تفعيل الاشتراك.
+                  <p style={{ margin: '4px 0 0', fontSize: 12, color: C.warnText, lineHeight: 1.6 }}>
+                    {t.sub.blockedBody}
                   </p>
                   <a
                     href={appStoreUrl}
@@ -903,7 +995,7 @@ export default function SallaEntryScreen() {
                       border:         'none',
                     }}
                   >
-                    💳 اشترك الآن
+                    {t.sub.subscribeNow}
                   </a>
                 </div>
               </div>
@@ -935,37 +1027,13 @@ export default function SallaEntryScreen() {
                     margin:        0,
                   }}
                 >
-                  خطوات البدء
+                  {t.steps.section}
                 </p>
               </div>
-              <OnboardingStep
-                num={1}
-                title="ربط واتساب"
-                description="اربط حساب واتساب بزنس بمتجرك"
-                state={stepState(0)}
-                isLast={false}
-              />
-              <OnboardingStep
-                num={2}
-                title="تفعيل الرد الذكي"
-                description="فعّل نحلة لترد على عملائك تلقائياً"
-                state={stepState(1)}
-                isLast={false}
-              />
-              <OnboardingStep
-                num={3}
-                title="تجربة أول محادثة"
-                description="ابدأ محادثة واتساب مع عميل أول"
-                state={stepState(2)}
-                isLast={false}
-              />
-              <OnboardingStep
-                num={4}
-                title="متابعة النتائج"
-                description="راقب الإحصائيات ومعدلات الرد الذكي"
-                state={stepState(3)}
-                isLast={true}
-              />
+              <OnboardingStep C={C} t={t} num={1} title={t.steps.s1Title} description={t.steps.s1Desc} state={stepState(0)} isLast={false} />
+              <OnboardingStep C={C} t={t} num={2} title={t.steps.s2Title} description={t.steps.s2Desc} state={stepState(1)} isLast={false} />
+              <OnboardingStep C={C} t={t} num={3} title={t.steps.s3Title} description={t.steps.s3Desc} state={stepState(2)} isLast={false} />
+              <OnboardingStep C={C} t={t} num={4} title={t.steps.s4Title} description={t.steps.s4Desc} state={stepState(3)} isLast={true} />
             </section>
 
             {/* ─ 3. Metrics (2×2) ─ */}
@@ -980,25 +1048,28 @@ export default function SallaEntryScreen() {
                   margin:        '0 0 10px',
                 }}
               >
-                إحصائيات اليوم
+                {t.metrics.section}
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <MetricCard
+                  C={C} isRTL={isRTL}
                   icon="💬"
-                  label="المحادثات اليوم"
+                  label={t.metrics.conversations}
                   rawValue={fmt(m?.conversations_today ?? 0)}
                   hasData={hasConv}
                 />
-                <MetricCard icon="🛍️" label="طلبات واتساب اليوم" rawValue={fmt(m?.orders_today ?? 0)} hasData={hasOrd} />
+                <MetricCard C={C} isRTL={isRTL} icon="🛍️" label={t.metrics.waOrders} rawValue={fmt(m?.orders_today ?? 0)} hasData={hasOrd} />
                 <MetricCard
+                  C={C} isRTL={isRTL}
                   icon="💰"
-                  label="إيرادات واتساب اليوم"
+                  label={t.metrics.waRevenue}
                   rawValue={fmtSAR(m?.whatsapp_revenue_today ?? 0)}
                   hasData={hasRev}
                 />
                 <MetricCard
+                  C={C} isRTL={isRTL}
                   icon="🤖"
-                  label="معدل الرد بالذكاء"
+                  label={t.metrics.aiReplyRate}
                   rawValue={fmtPct(m?.ai_reply_rate ?? 0)}
                   hasData={hasRate}
                 />
@@ -1021,7 +1092,7 @@ export default function SallaEntryScreen() {
                     fontFamily:    'inherit',
                   }}
                 >
-                  تعذر تحميل بعض البيانات، اضغط تحديث.
+                  {t.metrics.partialFallback}
                 </button>
               )}
 
@@ -1035,7 +1106,7 @@ export default function SallaEntryScreen() {
                     lineHeight: 1.6,
                   }}
                 >
-                  ستظهر الإحصائيات بعد أول محادثات واتساب
+                  {t.metrics.noDataYet}
                 </p>
               )}
             </section>
@@ -1055,8 +1126,8 @@ export default function SallaEntryScreen() {
                   borderRadius:   16,
                   fontSize:       15,
                   fontWeight:     900,
-                  background:     launching ? C.slate200 : C.amber,
-                  color:          C.slate900,
+                  background:     launching ? C.slate200 : C.ctaPrimary,
+                  color:          C.ctaPrimaryText,
                   border:         'none',
                   boxShadow:      launching ? 'none' : '0 4px 20px rgba(245,158,11,0.28)',
                   cursor:         launching ? 'not-allowed' : 'pointer',
@@ -1065,7 +1136,7 @@ export default function SallaEntryScreen() {
                   transition:     'background 0.2s',
                 }}
               >
-                {launching === 'dashboard' ? '⏳ جارٍ الفتح...' : '🚀 فتح لوحة نحلة المتقدمة'}
+                {launching === 'dashboard' ? t.cta.opening : t.cta.openAdvanced}
               </button>
 
               {/* Secondary — Auto-login to WhatsApp connect page */}
@@ -1082,7 +1153,7 @@ export default function SallaEntryScreen() {
                   fontSize:       14,
                   fontWeight:     700,
                   background:     C.white,
-                  color:          launching ? C.slate300 : C.amber,
+                  color:          launching ? C.slate300 : C.ctaSecondaryText,
                   border:         `1.5px solid ${launching ? C.slate200 : C.amber}`,
                   cursor:         launching ? 'not-allowed' : 'pointer',
                   width:          '100%',
@@ -1090,15 +1161,15 @@ export default function SallaEntryScreen() {
                   transition:     'color 0.2s, border-color 0.2s',
                 }}
               >
-                {launching === 'whatsapp' ? '⏳ جارٍ الفتح...' : '💬 ربط واتساب الآن'}
+                {launching === 'whatsapp' ? t.cta.opening : t.cta.connectWhatsapp}
               </button>
 
               {/* Trial-blocked notice — soft banner below CTAs, not a wall */}
               {trialBlocked && (
                 <div
                   style={{
-                    background:    '#fff7ed',
-                    border:        '1.5px solid #fed7aa',
+                    background:    C.warnBg,
+                    border:        `1.5px solid ${C.warnBorder}`,
                     borderRadius:  14,
                     padding:       '14px 16px',
                     display:       'flex',
@@ -1107,11 +1178,11 @@ export default function SallaEntryScreen() {
                     marginTop:     4,
                   }}
                 >
-                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#9a3412' }}>
-                    ⚠️ تم استخدام التجربة المجانية — الرد التلقائي متوقف
+                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.warnTextStrong }}>
+                    {t.sub.blockedHeadline}
                   </p>
-                  <p style={{ margin: 0, fontSize: 12, color: '#c2410c', lineHeight: 1.6 }}>
-                    يمكنك الاطلاع على المحادثات الواردة، لكن نحلة لن ترد تلقائياً حتى تفعيل الاشتراك.
+                  <p style={{ margin: 0, fontSize: 12, color: C.warnText, lineHeight: 1.6 }}>
+                    {t.sub.blockedHeadlineSub}
                   </p>
                   <a
                     href={appStoreUrl}
@@ -1132,7 +1203,7 @@ export default function SallaEntryScreen() {
                       border:         'none',
                     }}
                   >
-                    💳 اشترك الآن من سلة
+                    {t.sub.subscribeNow}
                   </a>
                 </div>
               )}
@@ -1144,7 +1215,7 @@ export default function SallaEntryScreen() {
       {/* ── Footer ─────────────────────────────────────────────────────────── */}
       <footer style={{ textAlign: 'center', padding: '12px 16px', borderTop: `1px solid ${C.slate100}` }}>
         <p style={{ fontSize: 10, color: C.slate300, margin: 0 }}>
-          فريق سعودي 100% 🇸🇦 · Nahla AI
+          {t.footer.saudi}
         </p>
       </footer>
     </div>
