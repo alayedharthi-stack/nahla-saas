@@ -22,9 +22,27 @@ _ENVIRONMENT_RAW = os.environ.get("ENVIRONMENT", "development").strip().lower()
 _IS_PRODUCTION = _ENVIRONMENT_RAW == "production"
 
 
+_SKIP_PREFLIGHT = (os.environ.get("NAHLA_SKIP_PREFLIGHT", "") or "").strip() == "1"
+
+
 def _fatal_or_warn(message: str) -> None:
-    """Refuse to boot in production; warn loudly elsewhere."""
+    """Refuse to boot in production; warn loudly elsewhere.
+
+    Escape hatch: ``NAHLA_SKIP_PREFLIGHT=1`` downgrades the fatal to a
+    loud CRITICAL log and lets the worker boot. This matches the
+    semantics of the same flag in ``start.sh`` so a single env var
+    bypasses BOTH the outer shell-level preflight script AND this
+    inner import-time gate. Use ONLY for emergency boots while you
+    coordinate the secret rotation with the upstream provider (Meta,
+    Salla, etc.). Never leave this flag enabled in steady state.
+    """
     if _IS_PRODUCTION:
+        if _SKIP_PREFLIGHT:
+            _cfg_logger.critical(
+                "[BOOT/secrets] %s — NAHLA_SKIP_PREFLIGHT=1 set, allowing boot. "
+                "Rotate the secret ASAP and unset the flag.", message,
+            )
+            return
         _cfg_logger.critical("[BOOT/secrets] %s — refusing to boot in production.", message)
         raise RuntimeError(f"SECURITY: {message}")
     _cfg_logger.warning("[BOOT/secrets] %s (allowed in non-production).", message)
