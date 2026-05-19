@@ -2855,3 +2855,52 @@ class AIMediaItem(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+
+class PasswordSetupToken(Base):
+    """Single-use, hashed token for "set your password" links.
+
+    Issued automatically when a merchant lands in Nahla through a Salla /
+    Zid OAuth flow that auto-creates a local User with a random password
+    hash they cannot know. The token is emailed to the merchant; clicking
+    the link routes them through ``/set-password?token=...`` in the
+    dashboard which calls the backend to consume the token and set a
+    local password.
+
+    Security model
+    ──────────────
+    * Token is 32 random bytes encoded as 43-char base64url (256 bits).
+    * Only the SHA-256 hash is stored; the raw value is sent in the email
+      and never persisted. A DB leak therefore cannot be replayed.
+    * ``used_at`` enforces single-use — a consumed token cannot be reused
+      even if intercepted.
+    * ``expires_at`` defaults to 7 days for "welcome" purpose and 1 hour
+      for "reset" purpose (caller decides). The verifier rejects expired
+      rows even if ``used_at`` is null.
+    * One active (non-used, non-expired) token per (user, purpose) at
+      a time — issuing a new one invalidates prior unconsumed tokens for
+      that user+purpose. Prevents inbox-spray flow confusion.
+    * Indexed ``token_hash`` column for O(1) verification lookup.
+    """
+    __tablename__ = 'password_setup_tokens'
+
+    id          = Column(Integer, primary_key=True)
+    user_id     = Column(
+        Integer,
+        ForeignKey('users.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True,
+    )
+    # SHA-256 of the raw token value, hex-encoded (64 chars).
+    token_hash  = Column(String(64), nullable=False, unique=True, index=True)
+    purpose     = Column(String(32), nullable=False, default='welcome')  # welcome | reset
+    expires_at  = Column(DateTime(timezone=True), nullable=False)
+    used_at     = Column(DateTime(timezone=True), nullable=True)
+    created_at  = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    # Audit metadata captured at issue time. Never includes the raw token.
+    issued_via  = Column(String(64), nullable=True)   # e.g. "salla_oauth", "manual_admin"
+    consumed_ip = Column(String(64), nullable=True)   # filled at consume time

@@ -19,8 +19,21 @@ python-dotenv==1.0.1
 
 # ── Security ─────────────────────────────────────────────────────────────────
 python-multipart==0.0.9   # required by FastAPI for form data (OAuth token exchange)
-python-jose[cryptography]==3.3.0   # JWT signing and verification
+python-jose[cryptography]==3.3.0   # JWT signing and verification (Phase 2: migrate to PyJWT)
 passlib[bcrypt]==1.7.4             # password hashing (available for future use)
+
+# ── Rate limiting + JWT revocation (Phase 1A) ────────────────────────────────
+# redis-py is the shared store for /auth/* per-IP and per-email rate limits
+# AND the JWT revocation list backing POST /auth/logout. Falls back to an
+# in-process counter when REDIS_URL is empty (dev convenience only).
+redis>=5.0.0,<6.0.0
+
+# ── Error monitoring (Phase 1A) ──────────────────────────────────────────────
+# Sentry SDK with the FastAPI / Starlette integration. PII scrubbing is
+# configured in backend/main.py (Authorization, Cookie, X-Nahla-Key,
+# X-Hub-Signature-256 headers are dropped before any event leaves the
+# worker).
+sentry-sdk[fastapi]>=2.10.0,<3.0.0
 
 # ── Payment gateways ──────────────────────────────────────────────────────────
 stripe==9.12.0             # Stripe subscription billing

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -21,6 +22,7 @@ from core.config import (
     INVITE_EXPIRE_H,
 )
 from core.audit import audit
+from core.token_revocation import is_jti_revoked
 
 _support_audit = logging.getLogger("nahla.support_audit")
 
@@ -70,6 +72,11 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── Token creation ─────────────────────────────────────────────────────────────
 
+def _new_jti() -> str:
+    """Cryptographically random token id used for revocation lookups."""
+    return _secrets.token_urlsafe(16)
+
+
 def create_token(
     email: str,
     role: str,
@@ -87,18 +94,31 @@ def create_token(
     tenant_id  — immutable tenant scope (every merchant call must be scoped to this)
     user_id    — database user.id
     exp        — expiry timestamp
+    iat        — issued-at timestamp (UTC)
+    jti        — opaque token id used by ``core.token_revocation`` so a
+                 leaked JWT can be invalidated before its natural exp via
+                 ``POST /auth/logout``.
     extra_claims — any additional structured claims (e.g. impersonation metadata)
     """
+    now = datetime.now(timezone.utc)
     payload: Dict[str, Any] = {
         "sub":       email,
         "role":      role,
         "tenant_id": tenant_id,
-        "exp":       datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_H),
+        "iat":       now,
+        "exp":       now + timedelta(hours=JWT_EXPIRE_H),
+        "jti":       _new_jti(),
     }
     if user_id is not None:
         payload["user_id"] = user_id
     if extra_claims:
-        payload.update(extra_claims)
+        # Never let extra_claims overwrite the security-critical claims
+        # we just set (jti / exp / iat). A caller that *really* wants a
+        # custom jti must use create_support_token / create_*_token.
+        for k, v in extra_claims.items():
+            if k in ("jti", "exp", "iat"):
+                continue
+            payload[k] = v
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -130,7 +150,8 @@ def create_support_token(
     - Frontend can show a visible "support mode" banner
     """
     actual_ttl = min(ttl_hours, 4)          # hard cap
-    exp = datetime.now(timezone.utc) + timedelta(hours=actual_ttl)
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(hours=actual_ttl)
     payload: Dict[str, Any] = {
         "sub":             merchant_email,
         "role":            "support_impersonation",
@@ -140,7 +161,9 @@ def create_support_token(
         "actor_sub":       actor_email,
         "actor_user_id":   actor_user_id,
         "session_version": session_version,
+        "iat":             now,
         "exp":             exp,
+        "jti":             _new_jti(),
     }
     _support_audit.info(
         "SUPPORT_TOKEN_ISSUED actor=%s → tenant=%s merchant=%s sv=%d exp=%s",
@@ -186,12 +209,33 @@ def create_reset_token(email: str) -> str:
 
 
 def decode_token(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Verify and decode a JWT. Returns ``None`` for any of:
+
+    * Library not installed (extremely rare — surfaced at /auth/login).
+    * Invalid signature / malformed payload / expired token.
+    * Token whose ``jti`` is on the Redis revocation list (logout).
+
+    Revocation lookup is best-effort: if Redis is briefly unreachable
+    the in-process fallback in ``core.token_revocation`` answers; if
+    that is also empty the token is treated as live until exp. Phase 2
+    moves to refresh-token rotation which removes this dependency on
+    a denylist entirely.
+    """
     if not JWT_AVAILABLE:
         return None
     try:
-        return _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
         return None
+    # Reset / verify / invite tokens never go through the revocation
+    # list — they are short-lived and bound to a one-shot purpose
+    # (``type`` claim). Only session tokens are denylisted.
+    if payload.get("type") in ("password_reset", "verify_email", "invite"):
+        return payload
+    if is_jti_revoked(payload.get("jti")):
+        return None
+    return payload
 
 
 # ── FastAPI dependencies ───────────────────────────────────────────────────────

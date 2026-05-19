@@ -12,8 +12,6 @@ Routes
   POST /billing/subscribe
   POST /billing/checkout
   GET  /billing/payment-result
-  POST /billing/stripe/setup-intent
-  POST /billing/stripe/subscribe
   POST /billing/hyperpay/payment-link
 """
 from __future__ import annotations

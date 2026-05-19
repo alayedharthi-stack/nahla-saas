@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1A — gitleaks secret-scanning workflow
+# ─────────────────────────────────────────────────────────────────────────────
+# Why
+# ───
+# GitHub's native Secret Scanning only catches a curated list of provider
+# tokens (AWS, Stripe, etc.). Nahla also handles a handful of tokens whose
+# patterns are NOT on that list: Salla / Zid OAuth secrets, Meta App secret,
+# 360dialog partner key, internal Nahla API key, JWT signing key. ``gitleaks``
+# augments the native scanner with a configurable rule set so a bad commit
+# is caught at PR review time rather than after merge.
+#
+# What it runs
+# ────────────
+# * Every PR — incremental scan of the diff (``--no-git`` is NOT used; we
+#   want history scope so a sneaky rebase doesn't smuggle a secret in).
+# * Push to ``main`` / ``master`` — full scan, in case Dependabot or a
+#   bot ever lands a leak before a human reviewer sees it.
+# * Manual dispatch — convenient for security drills.
+#
+# CI behaviour
+# ────────────
+# * ``continue-on-error: false`` — a finding fails the check.
+# * SARIF output uploaded to GitHub Code Scanning so findings appear in
+#   the Security tab alongside CodeQL / Dependabot alerts.
+name: gitleaks
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+jobs:
+  scan:
+    name: Scan repository for leaked secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the action can reason about the commit graph,
+          # not just HEAD. Required for the diff-aware mode used on PRs.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # GITHUB_TOKEN required so SARIF uploads to Code Scanning succeed
+          # AND so PR comments are posted on findings.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the upstream default config for now; once we publish a
+          # custom ``.gitleaks.toml`` (Phase 2) we'll pin it here.
+          GITLEAKS_ENABLE_COMMENTS: "true"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+          GITLEAKS_ENABLE_SUMMARY: "true"

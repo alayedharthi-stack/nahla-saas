@@ -1,3 +1,5 @@
+import { setSentryUser, clearSentryUser } from './lib/sentry'
+
 // Defined locally to avoid circular dependency with api/client.ts.
 //
 // Resolution order (first wins):
@@ -188,6 +190,17 @@ function _persistSession(
   if (overrides.store_name) {
     localStorage.setItem(STORE_NAME_KEY, overrides.store_name)
   }
+
+  // Phase 1A — attach minimal, PII-free user context to Sentry. Never
+  // include the email; we only need an opaque identifier to group
+  // events. No-op when Sentry is disabled.
+  try {
+    setSentryUser({
+      userId:   overrides.user_id    ?? (payload.user_id    as number | string | undefined) ?? null,
+      tenantId: overrides.tenant_id  ?? (payload.tenant_id  as number | string | undefined) ?? null,
+      role:     String(overrides.role ?? payload.role ?? 'merchant'),
+    })
+  } catch { /* ignore */ }
 }
 
 export interface LoginResult {
@@ -354,6 +367,25 @@ export async function login(email: string, password: string): Promise<boolean> {
 }
 
 export function logout(): void {
+  // Best-effort revoke the JWT on the backend so a stolen token (e.g.
+  // from a shared device) cannot continue authenticating after logout.
+  // Phase 1A: we don't await — even if the request fails we still want
+  // to clear the local session immediately. The backend revocation is
+  // backed by Redis (with in-process fallback) — see
+  // ``backend/core/token_revocation.py``.
+  try {
+    const token = localStorage.getItem(TOKEN_KEY)
+    if (token) {
+      void fetch(`${getApiBase()}/auth/logout`, {
+        method:      'POST',
+        headers:     { 'Authorization': `Bearer ${token}` },
+        credentials: 'omit',
+        cache:       'no-store',
+        keepalive:   true,
+      }).catch(() => { /* ignore — local cleanup below is the source of truth */ })
+    }
+  } catch { /* ignore */ }
+
   localStorage.removeItem(AUTH_KEY)
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(ROLE_KEY)
@@ -361,6 +393,8 @@ export function logout(): void {
   localStorage.removeItem(TENANT_ID_KEY)
   localStorage.removeItem(USER_ID_KEY)
   localStorage.removeItem(STORE_NAME_KEY)
+
+  try { clearSentryUser() } catch { /* ignore */ }
 }
 
 export function isAuthenticated(): boolean {

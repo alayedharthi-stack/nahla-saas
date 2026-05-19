@@ -135,6 +135,80 @@ def email_reset(reset_url: str) -> str:
 </div>"""
 
 
+def email_set_password(
+    *,
+    store_name: str,
+    email: str,
+    set_password_url: str,
+    dashboard_url: str,
+    source_label: str = "سلة",
+) -> str:
+    """Welcome + set-password email body.
+
+    Sent automatically when a merchant is auto-created via OAuth (Salla
+    today, Zid in a follow-up). Two CTAs: a primary "set password"
+    button that consumes a single-use ``PasswordSetupToken``, and a
+    secondary "open dashboard" link for merchants who prefer to keep
+    using the in-Salla iframe and never set a local password.
+
+    The email explicitly tells the merchant their account is ALREADY
+    LIVE — the password is just a way to log in directly without going
+    through Salla. Setting (or never setting) a local password does
+    not affect Salla-iframe login. This wording matters: merchants
+    panicking that they "must" set a password to keep using Nahla is a
+    support ticket we want to avoid.
+    """
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
+  <h3>أهلاً بك في نحلة، <strong>{store_name}</strong>!</h3>
+  <p>
+    تم إنشاء حسابك في نحلة بنجاح وربطه بمتجرك على {source_label}.
+    يمكنك البدء بالعمل من داخل {source_label} مباشرة في أي وقت.
+  </p>
+
+  <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:14px 18px;margin:18px 0">
+    <p style="margin:0 0 6px 0"><strong>بيانات حسابك في نحلة</strong></p>
+    <p style="margin:0;color:#475569">
+      البريد الإلكتروني: <span style="font-family:monospace">{email}</span>
+    </p>
+  </div>
+
+  <p>
+    لو تحب تدخل لوحة نحلة مباشرة (بدون المرور من سلة)،
+    عيِّن كلمة مرور للحساب من خلال الرابط التالي:
+  </p>
+
+  <a href="{set_password_url}"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    تعيين كلمة المرور
+  </a>
+
+  <p style="color:#64748b;font-size:13px">
+    الرابط صالح لمدة 7 أيام، ويُستخدم مرة واحدة فقط لأسباب أمنية.
+  </p>
+
+  <p style="margin-top:22px">
+    أو افتح لوحة نحلة مباشرة عبر هذا الرابط:
+    <a href="{dashboard_url}" style="color:#f59e0b">{dashboard_url}</a>
+  </p>
+
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+  <p style="color:#475569;font-size:13px;margin:0 0 4px 0">
+    <strong>هل تستطيع الدخول من سلة بدون كلمة مرور؟</strong>
+  </p>
+  <p style="color:#64748b;font-size:13px;margin:0">
+    نعم — الدخول من داخل {source_label} يعمل دائماً وبدون كلمة مرور،
+    حتى لو لم تُعيّن واحدة، أو غيّرتها لاحقاً، أو نسيتها.
+    تعيين كلمة المرور خطوة اختيارية فقط لتسجيل الدخول المباشر إلى لوحة نحلة.
+  </p>
+
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+</div>"""
+
+
 def email_subscription(store_name: str, plan_name: str, ends_at: str) -> str:
     return f"""
 <div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">

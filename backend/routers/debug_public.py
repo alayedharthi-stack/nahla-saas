@@ -55,10 +55,24 @@ _FAKE_ADMIN: Dict[str, Any] = {
 
 
 def _check_token(debug_token: Optional[str]) -> None:
-    """Constant-time comparison against ``DEBUG_ADMIN_TOKEN``.
+    """Gate the public ``/debug/*`` surface.
 
-    Returns nothing on success; raises ``HTTPException`` otherwise.
+    Phase 1A hardening
+    ──────────────────
+    * **Production refuses the surface entirely.** ``ENVIRONMENT=production``
+      → 404, regardless of ``DEBUG_ADMIN_TOKEN``. This matches the plan's
+      "tighten /debug/* to staging-only" requirement: production-only ops
+      use the JWT-gated ``/admin/debug/*`` surface (which itself requires
+      ``ENABLE_ADMIN_DEBUG``).
+    * **Staging / dev** still honour ``DEBUG_ADMIN_TOKEN`` with a
+      constant-time compare. Missing env var ⇒ 503 (closed by default).
     """
+    env = (os.getenv("ENVIRONMENT", "") or "").strip().lower()
+    if env == "production":
+        # 404, not 403/503 — production doesn't acknowledge the surface
+        # exists. Lowers signal to attackers scanning for /debug routes.
+        raise HTTPException(status_code=404, detail="Not found")
+
     expected = os.getenv("DEBUG_ADMIN_TOKEN") or ""
     if not expected:
         # Fail closed: missing env var means the operator has not opted

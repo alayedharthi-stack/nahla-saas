@@ -55,6 +55,13 @@ from core.middleware import (  # noqa: E402
     support_session_middleware,
 )
 
+# ── Sentry (Phase 1A) ──────────────────────────────────────────────────────────
+# Initialised BEFORE FastAPI() so any exception raised during app setup
+# (router import, middleware registration) is captured. Setup is a no-op
+# when SENTRY_DSN is unset, so this is safe in dev.
+from core.observability_sentry import init_sentry  # noqa: E402
+init_sentry()
+
 # ── App init ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Nahla SaaS Backend",
@@ -400,6 +407,8 @@ app.include_router(_debug_public_router)
 app.include_router(_admin_router)
 app.include_router(_admin_debug_router)
 app.include_router(_admin_salla_token_router)
+from routers.admin_webhook_security import router as _admin_webhook_security_router  # noqa: E402
+app.include_router(_admin_webhook_security_router)
 app.include_router(_auth_router)
 app.include_router(_settings_router)
 app.include_router(_templates_router)
@@ -1361,28 +1370,37 @@ async def app(scope, receive, send):  # noqa: A001 — intentional uvicorn expor
 
 
 # ── Production startup guard ───────────────────────────────────────────────────
-# Fail fast if critical secrets are missing in production.
-_REQUIRED_PROD_VARS = ("JWT_SECRET", "ADMIN_EMAIL", "ADMIN_PASSWORD")
-
+# Phase 1A: the heavy lifting moved to two layers that run BEFORE this
+# module imports:
+#
+#   1. ``scripts/preflight_check.py`` — invoked from start.sh before
+#      uvicorn binds. Refuses to start the worker if any critical
+#      secret is missing or matches a known placeholder.
+#   2. ``core/config.py`` — raises ``RuntimeError`` at import time in
+#      production when JWT_SECRET / ADMIN_PASSWORD / WHATSAPP_VERIFY_TOKEN
+#      are unsafe.
+#
+# By the time we reach this line in production, the secrets are known
+# good. We keep a single soft warning here for non-blocking hygiene
+# checks (e.g. ENABLE_ADMIN_DEBUG flagged on, REDIS_URL missing).
 if IS_PRODUCTION:
-    _missing = [v for v in _REQUIRED_PROD_VARS if not os.environ.get(v)]
-    if _missing:
+    if (os.environ.get("ENABLE_ADMIN_DEBUG", "") or "").strip().lower() == "true":
         logger.warning(
-            "SECURITY WARNING — required env vars not configured: %s\n"
-            "Set them in Railway → Variables.",
-            ", ".join(_missing),
+            "SECURITY — ENABLE_ADMIN_DEBUG is TRUE in production. "
+            "Turn it off as soon as the recovery action is complete."
         )
-    if os.environ.get("ADMIN_PASSWORD") == "nahla-admin-2026":
+    if not (os.environ.get("REDIS_URL", "") or "").strip():
         logger.warning(
-            "SECURITY WARNING — default ADMIN_PASSWORD 'nahla-admin-2026' is in use. "
-            "Change it in Railway → Variables."
+            "OBSERVABILITY — REDIS_URL is not set in production. "
+            "Rate limiting and JWT revocation fall back to per-worker "
+            "in-process counters (not shared across workers)."
         )
-    if os.environ.get("JWT_SECRET", "").startswith("dev-"):
+    if not (os.environ.get("SENTRY_DSN", "") or "").strip():
         logger.warning(
-            "SECURITY WARNING — JWT_SECRET looks like a dev placeholder. "
-            "Set a random 64-char secret in Railway → Variables."
+            "OBSERVABILITY — SENTRY_DSN is not set in production. "
+            "Backend errors will not be reported to Sentry."
         )
-    logger.info("Production startup completed — check warnings above if any.")
+    logger.info("Production startup hygiene checks complete.")
 else:
     logger.info("Running in %s mode", ENVIRONMENT)
 

@@ -3,12 +3,32 @@ core/config.py
 ──────────────
 All environment variable reads and module-level constants for the Nahla backend.
 Import from here — never call os.environ.get() scattered across route files.
+
+Phase 1A security: critical secrets fail-fast in production. The
+``preflight_check.py`` script ALSO validates these before uvicorn binds,
+so a misconfigured deploy never serves a single request.
 """
 import os
 import secrets as _secrets_mod
 
 import logging as _logging
 _cfg_logger = _logging.getLogger("nahla-backend")
+
+# ── Environment posture (read first — used by guards below) ────────────────────
+# Defined here so the security guards can fail-fast in production without
+# blocking local dev. Re-exported at the bottom of the file as the
+# canonical ENVIRONMENT / IS_PRODUCTION constants.
+_ENVIRONMENT_RAW = os.environ.get("ENVIRONMENT", "development").strip().lower()
+_IS_PRODUCTION = _ENVIRONMENT_RAW == "production"
+
+
+def _fatal_or_warn(message: str) -> None:
+    """Refuse to boot in production; warn loudly elsewhere."""
+    if _IS_PRODUCTION:
+        _cfg_logger.critical("[BOOT/secrets] %s — refusing to boot in production.", message)
+        raise RuntimeError(f"SECURITY: {message}")
+    _cfg_logger.warning("[BOOT/secrets] %s (allowed in non-production).", message)
+
 
 # ── JWT ────────────────────────────────────────────────────────────────────────
 def _safe_token_hex(nbytes: int = 32) -> str:
@@ -18,16 +38,32 @@ def _safe_token_hex(nbytes: int = 32) -> str:
     return os.urandom(nbytes).hex()
 
 
-_jwt_secret_env = os.environ.get("JWT_SECRET", "")
-if not _jwt_secret_env:
-    _cfg_logger.critical(
-        "SECURITY: JWT_SECRET is not set in environment. "
-        "Generating a random secret — all sessions will be invalidated on restart. "
-        "Set JWT_SECRET in Railway environment variables immediately."
+# Recognised dev/placeholder values that MUST never reach production. Keeping
+# this list central so preflight_check.py and config.py agree on what counts
+# as "still the example value".
+_FORBIDDEN_JWT_SECRETS = frozenset({
+    "",
+    "change-me",
+    "change-me-to-a-long-random-string",
+    "secret",
+    "dev",
+    "dev-secret",
+    "nahla-dev",
+})
+
+_jwt_secret_env = (os.environ.get("JWT_SECRET", "") or "").strip()
+if (not _jwt_secret_env) or _jwt_secret_env.lower() in _FORBIDDEN_JWT_SECRETS:
+    _fatal_or_warn(
+        "JWT_SECRET is missing or set to a known dev placeholder. "
+        "Set a 64-char random value in Railway → Variables."
     )
+# In non-production we generate an ephemeral random secret so the worker
+# boots, but warn loudly that all sessions die on restart.
 JWT_SECRET    = _jwt_secret_env or _safe_token_hex(32)
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))  # 7 days
+# Phase 1A: tightened from 168h (7 days) to 24h. Refresh-token rotation
+# arrives in Phase 2 and will let us drop access tokens to 15 minutes.
+JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
 
 # ── Registration gate ──────────────────────────────────────────────────────────
 REQUIRE_INVITE  = os.environ.get("REQUIRE_INVITE", "true").lower() != "false"
@@ -35,11 +71,24 @@ INVITE_EXPIRE_H = 168  # 7 days
 
 # ── Admin bootstrap credentials ────────────────────────────────────────────────
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL",    "admin@nahlah.ai")
-_admin_pass_env = os.environ.get("ADMIN_PASSWORD", "")
-if not _admin_pass_env:
-    _cfg_logger.critical(
-        "SECURITY: ADMIN_PASSWORD is not set in environment. "
-        "Set ADMIN_PASSWORD in Railway environment variables immediately."
+_admin_pass_env = (os.environ.get("ADMIN_PASSWORD", "") or "").strip()
+
+# Forbidden defaults — anything that has shipped in docs / .env.example or
+# has been flagged in the past as a placeholder. Production refuses to boot
+# when ADMIN_PASSWORD matches one of these.
+_FORBIDDEN_ADMIN_PASSWORDS = frozenset({
+    "",
+    "change-me",
+    "nahla-admin-2026",
+    "12345678",
+    "admin",
+    "password",
+})
+if _admin_pass_env.lower() in _FORBIDDEN_ADMIN_PASSWORDS:
+    _fatal_or_warn(
+        "ADMIN_PASSWORD is empty or matches a forbidden placeholder. "
+        "Set a strong, random ADMIN_PASSWORD in Railway → Variables. "
+        "Until 2FA ships in Phase 2 the admin login is single-factor."
     )
 ADMIN_PASSWORD = _admin_pass_env or ""
 
@@ -75,7 +124,18 @@ else:
 WA_TOKEN           = os.environ.get("WHATSAPP_TOKEN", "")
 # WA_PHONE_ID: Nahla's own phone — only for platform-to-merchant notifications.
 WA_PHONE_ID        = os.environ.get("PHONE_NUMBER_ID", "")
-WA_VERIFY_TOKEN    = os.environ.get("WHATSAPP_VERIFY_TOKEN", "nahla2025")
+_wa_verify_env = (os.environ.get("WHATSAPP_VERIFY_TOKEN", "") or "").strip()
+# Forbidden defaults: the 2025 placeholder that previously shipped in
+# docs / .env.example. Anyone hitting Meta with this value would be
+# trivially impersonating Nahla, so production refuses to boot with it.
+_FORBIDDEN_WA_VERIFY_TOKENS = frozenset({"", "nahla2025", "verify-me", "test"})
+if _wa_verify_env.lower() in _FORBIDDEN_WA_VERIFY_TOKENS:
+    _fatal_or_warn(
+        "WHATSAPP_VERIFY_TOKEN is empty or set to a known placeholder. "
+        "Generate a long random string in Railway → Variables and re-register "
+        "the webhook in the Meta Business app dashboard."
+    )
+WA_VERIFY_TOKEN    = _wa_verify_env or "dev-verify-token-do-not-use-in-prod"
 # WA_BUSINESS_ACCOUNT_ID: kept for the legacy "direct" connection flow only.
 # Embedded Signup tenants use their own WABA stored in whatsapp_connections.
 WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "")
@@ -160,8 +220,8 @@ API_SECRET_KEY = os.environ.get("API_SECRET_KEY", "")
 
 # ── AI orchestrator ────────────────────────────────────────────────────────────
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8016")
-ENVIRONMENT      = os.environ.get("ENVIRONMENT", "development")
-IS_PRODUCTION    = ENVIRONMENT == "production"
+ENVIRONMENT      = _ENVIRONMENT_RAW or "development"
+IS_PRODUCTION    = _IS_PRODUCTION
 
 # ── Moyasar ────────────────────────────────────────────────────────────────────
 MOYASAR_SECRET_KEY      = os.environ.get("MOYASAR_SECRET_KEY", "")
@@ -287,6 +347,44 @@ D360_WEBHOOK_INTERNAL_SECRET = os.environ.get("D360_WEBHOOK_INTERNAL_SECRET", ""
 # Beta rollout flags
 D360_COHOST_ENABLED = os.environ.get("D360_COHOST_ENABLED", "false").lower() == "true"
 D360_COHOST_ALLOW_SELF_REQUEST = os.environ.get("D360_COHOST_ALLOW_SELF_REQUEST", "true").lower() == "true"
+
+# ── Phase 1B — webhook signature enforcement flags ─────────────────────────────
+# Default for every new flag is "audit-only" (verify + record telemetry but do
+# NOT reject). After 7 days of clean audit telemetry per provider, ops promote
+# the flag to ENFORCE=true via Railway env. See
+# `docs/security/WEBHOOK_SECURITY.md` (added in Phase 1B-cleanup) for the
+# operator runbook.
+def _bool_env(name: str, default: str = "false") -> bool:
+    return (os.environ.get(name, default) or default).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+META_WEBHOOK_ENFORCE_SIGNATURE       = _bool_env("META_WEBHOOK_ENFORCE_SIGNATURE", "false")
+META_WEBHOOK_ALLOW_MISSING_SIGNATURE = _bool_env("META_WEBHOOK_ALLOW_MISSING_SIGNATURE", "true")
+
+# Zid: handler is a no-op stub today, so we ship audit-only first and only
+# require ZID_WEBHOOK_SECRET at boot once Phase 2 lights up real ingest.
+ZID_WEBHOOK_ENFORCE_SIGNATURE = _bool_env("ZID_WEBHOOK_ENFORCE_SIGNATURE", "false")
+ZID_WEBHOOK_REQUIRED_AT_BOOT  = _bool_env("ZID_WEBHOOK_REQUIRED_AT_BOOT", "false")
+
+# Moyasar / HyperPay default to false until audit windows close.
+MOYASAR_WEBHOOK_REQUIRE_VERIFIED  = _bool_env("MOYASAR_WEBHOOK_REQUIRE_VERIFIED", "false")
+HYPERPAY_WEBHOOK_REQUIRE_VERIFIED = _bool_env("HYPERPAY_WEBHOOK_REQUIRE_VERIFIED", "false")
+
+# Replay protection: opt-in only — staged per provider once ops confirm
+# legitimate retry rates. See core.webhook_security.check_replay.
+#
+# Two-stage rollout:
+#   * WEBHOOK_REPLAY_PROTECTION_ENABLED=true → run the body-hash dedup
+#     and record audit telemetry, but DO NOT reject duplicates. Operators
+#     watch the resulting "replay" counter to confirm legitimate retry
+#     rate is below the rejection threshold (typically <1% per merchant).
+#   * WEBHOOK_REPLAY_REJECT_ENABLED=true → in addition to logging, actually
+#     drop replays with a 200 "ignored" response. Both flags must be true
+#     for rejection.
+WEBHOOK_REPLAY_PROTECTION_ENABLED = _bool_env("WEBHOOK_REPLAY_PROTECTION_ENABLED", "false")
+WEBHOOK_REPLAY_REJECT_ENABLED     = _bool_env("WEBHOOK_REPLAY_REJECT_ENABLED",     "false")
 
 # ── Store Sync ─────────────────────────────────────────────────────────────────
 STORE_SYNC_MAX_PRODUCTS  = int(os.environ.get("STORE_SYNC_MAX_PRODUCTS", "500"))

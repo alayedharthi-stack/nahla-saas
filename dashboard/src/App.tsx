@@ -63,6 +63,7 @@ import Contact        from './pages/Contact'
 import VerifyEmail from './pages/VerifyEmail'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
+import SetPassword from './pages/SetPassword'
 import MerchantWidgets from './pages/MerchantWidgets'
 import Customers from './pages/Customers'
 import CustomersImport from './pages/CustomersImport'
@@ -94,6 +95,9 @@ export default function App() {
           <Route path="/verify-email"               element={<VerifyEmail />} />
           <Route path="/forgot-password"            element={<ForgotPassword />} />
           <Route path="/reset-password"             element={<ResetPassword />} />
+          {/* Set-password — landed from welcome email after Salla OAuth auto-create. */}
+          {/* Token is single-use + DB-backed (see backend/core/password_setup.py).   */}
+          <Route path="/set-password"               element={<SetPassword />} />
           <Route path="/integrations/salla/success" element={<SallaOAuthSuccess />} />
           <Route path="/integrations/salla/error"   element={<SallaOAuthError />} />
           <Route path="/salla-callback"             element={<SallaCallback />} />

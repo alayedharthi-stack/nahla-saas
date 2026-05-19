@@ -5,19 +5,19 @@ Unified webhook handler for all payment and platform webhooks.
 
 Routes
   POST /webhook/salla
+  POST /webhook/salla-oauth
   POST /payments/webhook/moyasar
   POST /billing/webhook/moyasar/subscription
-  POST /webhook/stripe
   POST /webhook/hyperpay
 """
 from __future__ import annotations
 
-import hmac
 import json as _json
 import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -45,10 +45,17 @@ from core.config import (
 )
 from core.database import get_db
 from core.obs import EVENTS, log_event
+from core.webhook_audit import record_result as _record_signature_audit
+from core.webhook_enforcement import resolve_enforce
 from core.webhook_events import (
     STATUS_FAILED,
     STATUS_RECEIVED,
     persist_event,
+)
+from core.webhook_security import (
+    SignatureStatus,
+    evaluate_replay,
+    verify_salla_signature,
 )
 
 logger = logging.getLogger("nahla-backend")
@@ -59,78 +66,167 @@ _MOYASAR_FAIL_STATUSES = frozenset({"failed", "expired", "canceled", "voided", "
 _BILLING_ACTIVATABLE   = frozenset({"pending_payment"})
 
 
-def _verify_salla_signature(raw_body: bytes, request_headers) -> tuple[bool, str]:
-    """Verify Salla webhook HMAC-SHA256 signature.
+def _resolve_salla_tenant_id(db: Session, store_id: Optional[str]) -> Optional[int]:
+    """Best-effort: map a Salla ``store_id`` to a Nahla ``tenant_id``.
 
-    Returns ``(should_accept, log_reason)``.
+    Used to look up per-tenant webhook enforcement overrides BEFORE we
+    decide whether to reject. Returns ``None`` when the mapping cannot
+    be resolved — callers fall back to the global flag.
 
-    Behaviour matrix (controlled by env vars):
-      ENFORCE=false  → always accept, log only
-      ENFORCE=true + valid sig   → accept
-      ENFORCE=true + missing sig → accept/reject per ALLOW_MISSING_SIGNATURE
-      ENFORCE=true + invalid sig → reject
+    We import lazily and swallow every error: webhook ingress must NEVER
+    fail because a tenant lookup blew up.
     """
-    sig_header = request_headers.get("x-salla-signature", "")
-    has_secret = bool(SALLA_WEBHOOK_SECRET)
+    if not store_id:
+        return None
+    try:
+        from database.models import Integration  # noqa: PLC0415
+        row = (
+            db.query(Integration)
+            .filter(
+                Integration.provider == "salla",
+                Integration.external_id == str(store_id),
+            )
+            .first()
+        )
+        return int(row.tenant_id) if row and row.tenant_id else None
+    except Exception:  # noqa: BLE001
+        return None
 
-    if not has_secret:
-        return True, "SIG_SKIP: no SALLA_WEBHOOK_SECRET configured"
 
-    if not sig_header:
-        if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+def _peek_salla_store_id(raw_body: bytes) -> Optional[str]:
+    """Extract ``store_id`` / ``merchant`` from a raw Salla payload.
+
+    The body has not been HMAC-verified yet, so we only use this for
+    looking up the tenant's per-tenant enforcement flag — we do NOT
+    trust the value for any business logic.
+    """
+    try:
+        peek = _json.loads(raw_body or b"{}") if raw_body else {}
+    except Exception:
+        return None
+    if not isinstance(peek, dict):
+        return None
+    sid = (
+        peek.get("store_id")
+        or peek.get("merchant")
+        or (peek.get("data") or {}).get("store_id")
+        or (peek.get("data") or {}).get("merchant")
+    )
+    return str(sid) if sid else None
+
+
+def _decide_salla(
+    *,
+    result,
+    enforce: bool,
+) -> tuple[bool, str]:
+    """Translate ``VerificationResult`` + enforce flag into ``(accept, reason)``.
+
+    Behaviour matrix (matches the legacy logic so existing call sites are
+    unaffected):
+
+    ``SECRET_NOT_CONFIGURED`` → accept, log SIG_SKIP (we have nothing to
+                                verify against — flagging would break every
+                                webhook in deployments that haven't set the
+                                secret yet).
+    ``MISSING``               → accept when ``enforce=false`` OR
+                                ``ALLOW_MISSING=true``; reject otherwise.
+    ``VALID``                 → accept.
+    ``INVALID``               → accept when ``enforce=false``; reject when
+                                ``enforce=true``.
+    """
+    status = result.status
+    if status == SignatureStatus.SECRET_NOT_CONFIGURED:
+        return True, f"SIG_SKIP: {result.detail}"
+    if status == SignatureStatus.VALID:
+        return True, "SIG_PASS: valid signature"
+    if status == SignatureStatus.MISSING:
+        if not enforce:
             return True, "SIG_SKIP: signature missing, enforcement OFF"
         if SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE:
             return True, "SIG_WARN: signature missing, allowed by ALLOW_MISSING_SIGNATURE"
         return False, "SIG_REJECT: signature missing, enforcement ON + ALLOW_MISSING=false"
-
-    expected = hmac.new(SALLA_WEBHOOK_SECRET.encode(), raw_body, "sha256").hexdigest()
-    sig_ok = hmac.compare_digest(expected, sig_header)
-
-    if sig_ok:
-        return True, "SIG_PASS: valid signature"
-
-    if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
+    # INVALID
+    if not enforce:
         return True, "SIG_WARN: invalid signature, enforcement OFF — accepted anyway"
-
     return False, "SIG_REJECT: invalid signature"
 
 
-def _verify_salla_oauth_signature(raw_body: bytes, request_headers) -> tuple[bool, str]:
-    """Verify Salla webhook signature for the SECOND ("Sync") OAuth app.
+def _verify_salla_signature(
+    raw_body: bytes,
+    request_headers,
+    *,
+    db: Session,
+    tenant_id: Optional[int] = None,
+    request_meta: Optional[dict] = None,
+) -> tuple[bool, str]:
+    """Verify Salla Communication-app webhook HMAC-SHA256 signature.
 
-    Identical algorithm to ``_verify_salla_signature`` but uses the dedicated
-    ``SALLA_OAUTH_WEBHOOK_SECRET``.  Per the Dual Integration Architecture we
-    NEVER mix secrets across the two endpoints — this function is wired
-    exclusively to ``POST /webhook/salla-oauth``.
-
-    The global enforcement flags (``SALLA_WEBHOOK_ENFORCE_SIGNATURE`` and
-    ``SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE``) are reused intentionally —
-    they describe the deployment's overall webhook policy, not a per-app
-    setting.
+    Returns ``(should_accept, log_reason)``. Per-tenant override via
+    ``TenantSettings.extra_metadata.webhook_enforcement.salla.enforce``
+    takes precedence over the global ``SALLA_WEBHOOK_ENFORCE_SIGNATURE``
+    env flag — ops can flip merchants individually after Partner Portal
+    config is verified.
     """
-    sig_header = request_headers.get("x-salla-signature", "")
-    has_secret = bool(SALLA_OAUTH_WEBHOOK_SECRET)
+    sig_header = request_headers.get("x-salla-signature", "") or request_headers.get(
+        "X-Salla-Signature", "",
+    )
+    result = verify_salla_signature(
+        raw_body=raw_body,
+        header_value=sig_header,
+        secret=SALLA_WEBHOOK_SECRET or None,
+        provider_label="salla",
+    )
+    try:
+        meta = dict(request_meta or {})
+        meta.setdefault("signature_header_sample", sig_header)
+        _record_signature_audit(result, tenant_id=tenant_id, request_meta=meta)
+    except Exception:  # noqa: silent-ok — audit is best-effort
+        pass
 
-    if not has_secret:
-        return True, "SIG_SKIP: no SALLA_OAUTH_WEBHOOK_SECRET configured"
+    enforce = resolve_enforce(
+        db, tenant_id, "salla",
+        global_default=SALLA_WEBHOOK_ENFORCE_SIGNATURE,
+    )
+    return _decide_salla(result=result, enforce=enforce)
 
-    if not sig_header:
-        if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
-            return True, "SIG_SKIP: signature missing, enforcement OFF"
-        if SALLA_WEBHOOK_ALLOW_MISSING_SIGNATURE:
-            return True, "SIG_WARN: signature missing, allowed by ALLOW_MISSING_SIGNATURE"
-        return False, "SIG_REJECT: signature missing, enforcement ON + ALLOW_MISSING=false"
 
-    expected = hmac.new(SALLA_OAUTH_WEBHOOK_SECRET.encode(), raw_body, "sha256").hexdigest()
-    sig_ok = hmac.compare_digest(expected, sig_header)
+def _verify_salla_oauth_signature(
+    raw_body: bytes,
+    request_headers,
+    *,
+    db: Session,
+    tenant_id: Optional[int] = None,
+    request_meta: Optional[dict] = None,
+) -> tuple[bool, str]:
+    """Verify Salla Sync OAuth-app webhook signature.
 
-    if sig_ok:
-        return True, "SIG_PASS: valid signature (oauth-app secret)"
+    Same algorithm as ``_verify_salla_signature`` but uses the dedicated
+    ``SALLA_OAUTH_WEBHOOK_SECRET``. Per-tenant override is checked under
+    the ``salla_oauth`` provider key so ops can stage Communication-app
+    enforcement independently of Sync-app enforcement.
+    """
+    sig_header = request_headers.get("x-salla-signature", "") or request_headers.get(
+        "X-Salla-Signature", "",
+    )
+    result = verify_salla_signature(
+        raw_body=raw_body,
+        header_value=sig_header,
+        secret=SALLA_OAUTH_WEBHOOK_SECRET or None,
+        provider_label="salla_oauth",
+    )
+    try:
+        meta = dict(request_meta or {})
+        meta.setdefault("signature_header_sample", sig_header)
+        _record_signature_audit(result, tenant_id=tenant_id, request_meta=meta)
+    except Exception:  # noqa: silent-ok — audit is best-effort
+        pass
 
-    if not SALLA_WEBHOOK_ENFORCE_SIGNATURE:
-        return True, "SIG_WARN: invalid signature, enforcement OFF — accepted anyway"
-
-    return False, "SIG_REJECT: invalid signature (oauth-app secret)"
+    enforce = resolve_enforce(
+        db, tenant_id, "salla_oauth",
+        global_default=SALLA_WEBHOOK_ENFORCE_SIGNATURE,
+    )
+    return _decide_salla(result=result, enforce=enforce)
 
 
 # ── Salla ─────────────────────────────────────────────────────────────────────
@@ -206,7 +302,21 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     )
 
     # ── 1. Signature verification ────────────────────────────────────────────
-    sig_accepted, sig_reason = _verify_salla_signature(raw_body, request.headers)
+    # Resolve tenant_id BEFORE verifying so a per-tenant enforcement
+    # override applies to this request (Phase 1B per-merchant rollout).
+    _peek_store_id = _peek_salla_store_id(raw_body)
+    _peek_tenant_id = _resolve_salla_tenant_id(db, _peek_store_id)
+    sig_accepted, sig_reason = _verify_salla_signature(
+        raw_body,
+        request.headers,
+        db=db,
+        tenant_id=_peek_tenant_id,
+        request_meta={
+            "ip": client_ip,
+            "user_agent": (request.headers.get("user-agent", "") or "")[:120],
+            "store_id": _peek_store_id,
+        },
+    )
     signature_valid = sig_accepted
 
     if not sig_accepted:
@@ -231,6 +341,20 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         except Exception as _exc:
             logger.exception("[Salla WH] Could not persist rejected event: %s", _exc)
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Replay protection (Phase 1B-5) — flag-gated; no-op by default.
+    # Salla legitimate retries arrive with the same body for hours, so the
+    # default replay TTL of 24h could reject genuine retries — we run this
+    # ONLY when ops have flipped both flags after observing actual retry
+    # rate. Salla also has app-level dedup via ``external_event_id`` which
+    # remains the primary defense.
+    if evaluate_replay(
+        "salla",
+        raw_body,
+        tenant_id=_peek_tenant_id,
+        request_meta={"ip": client_ip, "store_id": _peek_store_id},
+    ):
+        return JSONResponse({"status": "ignored", "reason": "replay"})
 
     # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
     parsed_payload: dict | None = None
@@ -378,7 +502,19 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
     )
 
     # ── 1. Signature verification (USES THE OAUTH-APP SECRET ONLY) ───────────
-    sig_accepted, sig_reason = _verify_salla_oauth_signature(raw_body, request.headers)
+    _peek_store_id = _peek_salla_store_id(raw_body)
+    _peek_tenant_id = _resolve_salla_tenant_id(db, _peek_store_id)
+    sig_accepted, sig_reason = _verify_salla_oauth_signature(
+        raw_body,
+        request.headers,
+        db=db,
+        tenant_id=_peek_tenant_id,
+        request_meta={
+            "ip": client_ip,
+            "user_agent": (request.headers.get("user-agent", "") or "")[:120],
+            "store_id": _peek_store_id,
+        },
+    )
     signature_valid = sig_accepted
 
     if not sig_accepted:
@@ -401,6 +537,15 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
         except Exception as _exc:
             logger.exception("[Salla OAuth WH] Could not persist rejected event: %s", _exc)
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Replay protection (Phase 1B-5) — flag-gated; no-op by default.
+    if evaluate_replay(
+        "salla_oauth",
+        raw_body,
+        tenant_id=_peek_tenant_id,
+        request_meta={"ip": client_ip, "store_id": _peek_store_id},
+    ):
+        return JSONResponse({"status": "ignored", "reason": "replay"})
 
     # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
     parsed_payload: dict | None = None

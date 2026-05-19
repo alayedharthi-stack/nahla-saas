@@ -35,8 +35,17 @@ from core.config import (
     MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK,
     MERCHANT_BRAIN_ENABLED,
     MERCHANT_BRAIN_TENANT_IDS,
+    META_APP_SECRET,
+    META_WEBHOOK_ALLOW_MISSING_SIGNATURE,
+    META_WEBHOOK_ENFORCE_SIGNATURE,
     ORCHESTRATOR_URL,
     WA_VERIFY_TOKEN,
+)
+from core.webhook_audit import record_result as _record_signature_audit
+from core.webhook_security import (
+    SignatureStatus,
+    evaluate_replay,
+    verify_meta_signature,
 )
 from core.conversation_lock import conversation_lock
 from core.conversation_engine import (
@@ -428,12 +437,87 @@ async def whatsapp_incoming(request: Request):
     Hardened with the same safety contract as the 360dialog routes —
     ALWAYS returns 200 even on parse / spawn / cancellation, so the
     middleware chain never ends with "No response returned".
+
+    Phase 1B — Meta HMAC audit-mode
+    ───────────────────────────────
+    We now read the raw body BEFORE parsing JSON so we can verify
+    ``X-Hub-Signature-256`` against ``META_APP_SECRET``. The verification
+    result is recorded to ``core.webhook_audit`` for the operator
+    dashboard. Whether to actually reject on a bad signature is gated by
+    ``META_WEBHOOK_ENFORCE_SIGNATURE`` + ``META_WEBHOOK_ALLOW_MISSING_SIGNATURE``
+    so we can ship audit-only first and only flip to enforce after a
+    7-day clean window.
     """
     import asyncio as _asyncio  # noqa: PLC0415
     body: Dict[str, Any] = {}
     try:
+        # Read raw body first — required for HMAC verification and still
+        # parseable as JSON below.
         try:
-            body = await request.json()
+            raw_body = await request.body()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[webhook/meta] raw-body read failed (returning 200): %s", exc)
+            raw_body = b""
+
+        sig_header = request.headers.get("X-Hub-Signature-256") or request.headers.get(
+            "x-hub-signature-256"
+        )
+        result = verify_meta_signature(
+            raw_body=raw_body,
+            header_value=sig_header,
+            secret=META_APP_SECRET or None,
+        )
+        try:
+            _record_signature_audit(
+                result,
+                tenant_id=None,  # Meta inbound is platform-shared; tenant resolved later
+                request_meta={
+                    "ip": (request.headers.get("X-Real-IP")
+                           or (request.client.host if request.client else None)),
+                    "user_agent": request.headers.get("user-agent", "")[:120],
+                    "signature_header_sample": sig_header,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — audit is best-effort
+            logger.warning("[webhook/meta] audit record failed: %s", exc)
+
+        if _meta_should_reject(result):
+            logger.warning(
+                "[webhook/meta] rejecting request: status=%s detail=%s",
+                result.status.value, result.detail,
+            )
+            # Even a "rejected" Meta webhook returns 200 to stop Meta's
+            # retry storm — but we DO NOT process the body. Meta's retry
+            # behaviour escalates aggressively on 4xx/5xx and an attacker
+            # could DoS our logs by spamming 401s.
+            return JSONResponse(
+                {"status": "ignored", "reason": "signature_rejected"},
+                status_code=200,
+            )
+
+        # Replay protection (Phase 1B-5) — flag-gated. ``evaluate_replay``
+        # is a no-op until ``WEBHOOK_REPLAY_PROTECTION_ENABLED=true``, and
+        # only returns True when ``WEBHOOK_REPLAY_REJECT_ENABLED`` is ALSO
+        # true (the audit-then-reject staging).
+        if evaluate_replay(
+            "meta",
+            raw_body,
+            request_meta={
+                "ip": (request.headers.get("X-Real-IP")
+                       or (request.client.host if request.client else None)),
+                "user_agent": request.headers.get("user-agent", "")[:120],
+            },
+        ):
+            return JSONResponse(
+                {"status": "ignored", "reason": "replay"},
+                status_code=200,
+            )
+
+        try:
+            import json as _json  # noqa: PLC0415
+            body = _json.loads(raw_body) if raw_body else {}
+            if not isinstance(body, dict):
+                body = {}
         except Exception as exc:  # noqa: BLE001
             logger.warning("[webhook/meta] body parse failed (returning 200): %s", exc)
             body = {}
@@ -450,6 +534,30 @@ async def whatsapp_incoming(request: Request):
     except Exception as exc:  # noqa: BLE001
         logger.exception("[webhook/meta] unexpected handler error (returning 200): %s", exc)
     return JSONResponse({"status": "ok"}, status_code=200)
+
+
+def _meta_should_reject(result) -> bool:
+    """Decide whether to drop a Meta webhook based on its verification
+    result and the audit-mode flags.
+
+    Audit-mode (the default) NEVER rejects — we only log. Once
+    ``META_WEBHOOK_ENFORCE_SIGNATURE`` is true:
+      * VALID                 → process
+      * INVALID               → reject
+      * MISSING               → reject UNLESS ``META_WEBHOOK_ALLOW_MISSING_SIGNATURE`` is true
+      * SECRET_NOT_CONFIGURED → process (single-secret deploy with empty env;
+                                ops will see this in audit telemetry and
+                                set the secret before flipping enforce)
+    """
+    if not META_WEBHOOK_ENFORCE_SIGNATURE:
+        return False
+    if result.status == SignatureStatus.VALID:
+        return False
+    if result.status == SignatureStatus.SECRET_NOT_CONFIGURED:
+        return False
+    if result.status == SignatureStatus.MISSING and META_WEBHOOK_ALLOW_MISSING_SIGNATURE:
+        return False
+    return True
 
 
 # ── 360dialog Channel Webhook ────────────────────────────────────────────────

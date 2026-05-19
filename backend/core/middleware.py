@@ -32,15 +32,21 @@ logger = logging.getLogger("nahla-backend")
 # webhook ack-first path.
 #
 # Webhook paths are matched by prefix (``/webhook/``) further below;
-# only exact-match liveness/login paths live here.
+# only exact-match liveness paths live here.
+#
+# Phase 1A note (security): ``/auth/login`` and ``/auth/login-form``
+# were previously listed here so login stayed snappy under load. That
+# also meant the global per-IP rate limiter NEVER ran on them — every
+# credential-stuffing burst hit the bcrypt verify path directly. The
+# Redis-backed per-IP/per-email limiter installed on those routes
+# (see ``backend.core.rate_limit`` + ``backend.routers.auth``) is the
+# replacement; ``/auth/ping`` is still exempt because it does no DB
+# work and is used by the dashboard for connectivity checks.
 ULTRA_LIGHT_PATHS = frozenset({
     "/",
     "/alive",
     "/healthz",
     "/auth/ping",
-    "/auth/login",        # JSON login — same DB/hot path as login-form
-    "/auth/login-form",   # form-encoded login (no preflight); must
-                          # stay snappy when the JSON path is blocked
 })
 
 
@@ -238,7 +244,17 @@ async def api_key_middleware(request: Request, call_next):
 
 
 async def global_rate_limit_middleware(request: Request, call_next):
-    """300 requests per minute per IP — exempts /health and /auth."""
+    """
+    300 requests per minute per IP — exempts /health and /alive only.
+
+    Phase 1A note: the previous ``/auth`` blanket exemption made the
+    login surface immune to even the coarse global throttle. The
+    granular per-IP/per-email limiter on the login routes
+    (see ``backend.core.rate_limit``) is the primary defense; this
+    middleware is the wide-net second line, so ``/auth/*`` now passes
+    through it. Only ``/auth/ping`` is treated as a liveness probe via
+    ``ULTRA_LIGHT_PATHS`` (covered by ``_is_bypass_path`` above).
+    """
     if request.method == "OPTIONS":
         return await _safe_call_next(request, call_next, name="global_rate_limit")
     # Webhooks + liveness paths are exempted explicitly — providers
@@ -250,7 +266,6 @@ async def global_rate_limit_middleware(request: Request, call_next):
         request.url.path.startswith("/health")
         or request.url.path.startswith("/alive")
         or request.url.path.startswith("/healthz")
-        or request.url.path.startswith("/auth")
     ):
         sys.path.insert(
             0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../observability"))
@@ -586,6 +601,20 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         )
 
     request.state.tenant_id = str(int(tid))
+
+    # Phase 1A — attach minimal, PII-free user context to Sentry so any
+    # error captured downstream is grouped by tenant + user_id (never
+    # email / phone). No-op when Sentry is disabled.
+    try:
+        from core.observability_sentry import set_request_user  # noqa: PLC0415
+        set_request_user(
+            user_id=payload.get("user_id"),
+            tenant_id=tid,
+            role=payload.get("role"),
+        )
+    except Exception:
+        pass
+
     return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
 

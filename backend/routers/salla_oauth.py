@@ -25,6 +25,7 @@ OAuth Flow:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets as _secrets
@@ -42,6 +43,7 @@ from models import Integration, Product, SmartAutomation, Tenant, User, WhatsApp
 
 from core.audit import audit
 from core.auth import create_token, decode_token, get_jwt_tenant_id, hash_password
+from core.merchant_provisioning import get_or_create_merchant_user
 from core.config import (
     DASHBOARD_URL,
     SALLA_OAUTH_CLIENT_ID,
@@ -128,6 +130,47 @@ def _error_url(reason: str, detail: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # PUBLIC ROUTES — OAuth flow (no JWT required)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Welcome + set-password email helper (Salla auto-create) ────────────────────
+async def _send_welcome_set_password_email(
+    *,
+    email: str,
+    store_name: str,
+    set_password_url: str,
+    dashboard_url: str,
+) -> None:
+    """Fire-and-forget welcome email for newly auto-created merchants.
+
+    Wrapped in a try/except: an SMTP outage must NOT propagate into the
+    OAuth handler. We surface success/failure as ``audit()`` events so
+    operators can chase down delivery problems via the structured audit
+    log without grepping container output.
+    """
+    from core.notifications import email_set_password, send_email  # noqa: PLC0415
+    from core.audit import audit  # noqa: PLC0415
+
+    try:
+        ok = await send_email(
+            to      = email,
+            subject = "أهلاً بك في نحلة — اضبط كلمة مرورك",
+            html    = email_set_password(
+                store_name       = store_name,
+                email            = email,
+                set_password_url = set_password_url,
+                dashboard_url    = dashboard_url,
+                source_label     = "سلة",
+            ),
+        )
+        if ok:
+            audit("password_setup_email_sent", sub=email)
+            logger.info("[SallaLogin] welcome+set-password email sent to %s", email)
+        else:
+            audit("password_setup_email_failed", sub=email, reason="provider_returned_failure")
+            logger.warning("[SallaLogin] welcome email NOT sent (provider failure) email=%s", email)
+    except Exception as exc:  # noqa: BLE001 — silent-ok: email is best-effort, never fails OAuth
+        audit("password_setup_email_failed", sub=email, reason="exception")
+        logger.exception("[SallaLogin] welcome email crashed: %s | email=%s", exc, email)
 
 
 # ── Salla Embedded Token Login ─────────────────────────────────────────────────
@@ -304,160 +347,64 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # STEP 4 — Find or create isolated Tenant + User
     # ══════════════════════════════════════════════════════════════
     #
-    # RULE: salla_store_id (merchant_id_str) is the AUTHORITATIVE key
-    # for tenant resolution.  Email is a secondary fallback ONLY when
-    # no store_id is available.  Two stores that share the same partner
-    # email MUST get separate tenants.
+    # All identity resolution lives in core.merchant_provisioning.
+    # That module guarantees:
+    #   * salla_store_id is the AUTHORITATIVE lookup key
+    #   * Email fallback only fires when introspect gave us no store_id
+    #   * Returning stores never produce a duplicate User row
+    #   * If a User row is auto-created, a single-use set-password
+    #     token is issued and returned in ``provision.set_password_token``
     #
-    # Priority:
-    #   1. Integration by external_store_id  → tenant_id
-    #   2. Integration by config JSONB       → tenant_id  (legacy repair)
-    #   3. Email lookup                      → tenant_id  (ONLY if no store_id)
-    #   4. Create new Tenant                 → new tenant_id
+    # The OAuth path NEVER touches User.password_hash — local password
+    # changes therefore cannot break Salla iframe login (the spec).
     try:
-        existing_integration = None
+        provision = get_or_create_merchant_user(
+            db,
+            provider          = "salla",
+            external_store_id = merchant_id_str,
+            owner_email       = owner_email,
+            store_name        = store_name,
+            is_email_derived  = email_is_derived,
+            issued_via        = "salla_token_login",
+            request_ip        = client_ip,
+        )
+        tenant_id   = provision.tenant_id
+        owner_email = provision.email   # canonical, may have been remapped
+        role        = provision.role
+        is_new      = provision.is_brand_new
 
-        # ── Priority 1-3: store_id-based Integration lookup ──────────────
-        if merchant_id_str:
-            existing_integration = db.query(Integration).filter(
-                Integration.provider == "salla",
-                Integration.external_store_id == str(merchant_id_str),
-            ).first()
-
-            if not existing_integration:
-                existing_integration = db.query(Integration).filter(
-                    Integration.provider == "salla",
-                    Integration.config["store_id"].as_string() == str(merchant_id_str),
-                ).first()
-                if existing_integration:
-                    existing_integration.external_store_id = str(merchant_id_str)
-                    logger.info(
-                        "[SallaLogin]    Repaired external_store_id for integration id=%s "
-                        "tenant=%s store=%s",
-                        existing_integration.id, existing_integration.tenant_id, merchant_id_str,
-                    )
-
-            if not existing_integration:
-                existing_integration = db.query(Integration).filter(
-                    Integration.provider == "salla",
-                    Integration.config["salla_merchant_id_alt"].as_string() == str(merchant_id_str),
-                ).first()
-                if existing_integration:
-                    logger.info(
-                        "[SallaLogin]    Matched via salla_merchant_id_alt=%s "
-                        "tenant=%s integration=%s",
-                        merchant_id_str, existing_integration.tenant_id, existing_integration.id,
-                    )
-
-        if existing_integration:
-            # ── Returning store — tenant already exists ─────────────────────
-            tenant_id = existing_integration.tenant_id
-            role      = "merchant"
-            is_new    = False
-
-            stored_email = (
-                (existing_integration.config or {}).get("salla_owner_email")
+        if provision.linked_existing:
+            audit(
+                "salla_oauth_linked_existing",
+                sub=owner_email,
+                tenant_id=tenant_id,
+                store_id=merchant_id_str,
             )
-            canonical_email = stored_email or owner_email
-
-            linked_user = (
-                db.query(User)
-                .filter(
-                    User.tenant_id == tenant_id,
-                    User.email     == canonical_email,
-                )
-                .first()
-            )
-            if linked_user:
-                owner_email = linked_user.email
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — Linked user found by store email | "
-                    "store_id=%s tenant_id=%s user=%s",
-                    merchant_id_str, tenant_id, owner_email,
-                )
-            else:
-                owner_email = canonical_email
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT FOUND, creating user | "
-                    "store_id=%s tenant_id=%s email=%s",
-                    merchant_id_str, tenant_id, owner_email,
-                )
-
-        elif not merchant_id_str and not email_is_derived:
-            # ── Fallback: no store_id available, try email ─────────────────
-            # This path only fires when Salla introspect failed to return
-            # a merchant/store ID.  Email is the last resort.
-            existing_user = db.query(User).filter(User.email == owner_email).first()
-            if existing_user:
-                tenant_id = existing_user.tenant_id
-                role      = existing_user.role or "merchant"
-                is_new    = False
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT FOUND (email fallback, no store_id) | "
-                    "email=%s tenant_id=%s",
-                    owner_email, tenant_id,
-                )
-            else:
-                # No store_id AND no user — create new tenant
-                unique_name = store_name or "متجر سلة"
-                new_tenant  = Tenant(name=unique_name)
-                db.add(new_tenant)
-                db.flush()
-                tenant_id = new_tenant.id
-                role      = "merchant"
-                is_new    = True
-
-                db.add(User(
-                    username      = owner_email.split("@")[0],
-                    email         = owner_email,
-                    password_hash = hash_password(_secrets.token_urlsafe(16)),
-                    role          = role,
-                    tenant_id     = tenant_id,
-                    is_active     = True,
-                ))
-                db.flush()
-                logger.info(
-                    "[SallaLogin] ✅ STEP 4 — TENANT CREATED (no store_id, email-only) | "
-                    "email=%s tenant_id=%s",
-                    owner_email, tenant_id,
-                )
-
-        else:
-            # ── First-time store: create isolated Tenant + User ────────────
-            unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
-            new_tenant = Tenant(name=unique_name)
-            db.add(new_tenant)
-            db.flush()
-            tenant_id = new_tenant.id
-            role      = "merchant"
-            is_new    = True
-
-            # Ensure unique email per tenant — if a user with this email
-            # already exists in another tenant, derive a store-scoped email.
-            if db.query(User).filter(User.email == owner_email).first():
-                safe_name   = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-                owner_email = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlah.ai"
-                logger.info(
-                    "[SallaLogin]    Email already exists in another tenant — "
-                    "using store-scoped email: %s",
-                    owner_email,
-                )
-
-            new_user = User(
-                username      = owner_email.split("@")[0],
-                email         = owner_email,
-                password_hash = hash_password(_secrets.token_urlsafe(16)),
-                role          = role,
-                tenant_id     = tenant_id,
-                is_active     = True,
-            )
-            db.add(new_user)
-            db.flush()
-
             logger.info(
-                "[SallaLogin] ✅ STEP 4 — TENANT CREATED (new store) | "
-                "email=%s tenant_id=%s store=%r store_id=%s",
-                owner_email, tenant_id, store_name, merchant_id_str,
+                "[SallaLogin] ✅ STEP 4 — linked existing | tenant_id=%s user_id=%s store_id=%s",
+                tenant_id, provision.user_id, merchant_id_str,
+            )
+        elif provision.filled_gap:
+            audit(
+                "salla_oauth_user_filled_gap",
+                sub=owner_email,
+                tenant_id=tenant_id,
+                store_id=merchant_id_str,
+            )
+            logger.info(
+                "[SallaLogin] ✅ STEP 4 — filled missing user row | tenant_id=%s user_id=%s store_id=%s",
+                tenant_id, provision.user_id, merchant_id_str,
+            )
+        elif provision.created_user:
+            audit(
+                "salla_oauth_merchant_auto_created",
+                sub=owner_email,
+                tenant_id=tenant_id,
+                store_id=merchant_id_str,
+            )
+            logger.info(
+                "[SallaLogin] ✅ STEP 4 — merchant auto-created | tenant_id=%s user_id=%s store_id=%s store=%r",
+                tenant_id, provision.user_id, merchant_id_str, store_name,
             )
 
         # ── Save / update Salla integration record ────────────────────────────
@@ -577,12 +524,47 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Database error during account setup")
 
     # ══════════════════════════════════════════════════════════════
+    # STEP 4.5 — Welcome + set-password email (auto-create only)
+    # ══════════════════════════════════════════════════════════════
+    #
+    # Dispatch is fire-and-forget so a slow Resend API call never
+    # blocks the OAuth handshake. Failures are logged + audited but do
+    # NOT fail the login — the merchant can always click "forgot
+    # password" later, and the operator runbook describes how to
+    # re-issue the welcome link via CLI if it never arrived.
+    #
+    # We deliberately skip the email when:
+    #   * the user already existed (linked_existing) — they've seen this before
+    #   * the auto-derived address is a @salla-merchant.nahlah.ai placeholder
+    #     (no real inbox to deliver to)
+    if provision.set_password_token and provision.email and (
+        not provision.email.endswith("@salla-merchant.nahlah.ai")
+        and not provision.email.endswith("@zid-merchant.nahlah.ai")
+    ):
+        asyncio.ensure_future(_send_welcome_set_password_email(
+            email             = provision.email,
+            store_name        = store_name or "متجرك",
+            set_password_url  = f"{_DASHBOARD_ORIGIN}/set-password?token={provision.set_password_token}",
+            dashboard_url     = _DASHBOARD_ORIGIN,
+        ))
+        logger.info(
+            "[SallaLogin] ▶ Welcome+set-password email queued | user_id=%s tenant=%s",
+            provision.user_id, provision.tenant_id,
+        )
+
+    # ══════════════════════════════════════════════════════════════
     # STEP 5 — Issue Nahla JWT (must carry user_id for tenant isolation)
     # ══════════════════════════════════════════════════════════════
-    db_user   = db.query(User).filter(User.email == owner_email).first()
-    db_user_id = db_user.id if db_user else None
+    db_user_id = provision.user_id
     nahla_jwt = create_token(
         email=owner_email, role=role, tenant_id=tenant_id, user_id=db_user_id
+    )
+    audit(
+        "salla_oauth_login_success",
+        sub=owner_email,
+        tenant_id=tenant_id,
+        user_id=db_user_id,
+        is_new=is_new,
     )
 
     # Check WhatsApp connection status for smart redirect
@@ -2688,120 +2670,77 @@ async def salla_oauth_callback(
                 safe_store = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
                 salla_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlah.ai"
 
+            email_is_derived_legacy = salla_email.endswith("@salla-merchant.nahlah.ai")
             salla_email = salla_email.strip().lower()
             logger.info("[Salla OAuth] Merchant email resolved: %s", salla_email)
 
-            # ── store_id is the AUTHORITATIVE key for tenant resolution ──
-            # Email is a fallback ONLY when no store_id is available.
-            existing_integ = None
-            if salla_store_id:
-                existing_integ = db.query(Integration).filter(
-                    Integration.provider == "salla",
-                    Integration.external_store_id == str(salla_store_id),
-                ).first()
-                if not existing_integ:
-                    existing_integ = db.query(Integration).filter(
-                        Integration.provider == "salla",
-                        Integration.config["store_id"].as_string() == str(salla_store_id),
-                    ).first()
-                    if existing_integ:
-                        existing_integ.external_store_id = str(salla_store_id)
-
-            if existing_integ:
-                tenant_id = existing_integ.tenant_id
-                logger.info("[Salla OAuth] Found existing tenant by store_id=%s → tenant=%s", salla_store_id, tenant_id)
-                existing_user2 = db.query(User).filter(User.tenant_id == tenant_id).first()
-                if existing_user2:
-                    auto_jwt = create_token(
-                        email=existing_user2.email,
-                        role=existing_user2.role or "merchant",
-                        tenant_id=tenant_id,
-                        user_id=existing_user2.id,
-                    )
-                    logger.info(
-                        "[Salla OAuth] Reusing existing user for tenant | email=%s tenant=%s",
-                        existing_user2.email, tenant_id,
-                    )
-                else:
-                    temp_password = _secrets.token_urlsafe(16)
-                    new_user = User(
-                        username=salla_email.split("@")[0],
-                        email=salla_email,
-                        password_hash=hash_password(temp_password),
-                        role="merchant",
-                        tenant_id=tenant_id,
-                        is_active=True,
-                    )
-                    db.add(new_user)
-                    db.flush()
-                    auto_jwt = create_token(
-                        email=salla_email,
-                        role="merchant",
-                        tenant_id=tenant_id,
-                        user_id=new_user.id,
-                    )
-                    logger.info(
-                        "[Salla OAuth] Created user for existing tenant | email=%s tenant=%s",
-                        salla_email, tenant_id,
-                    )
-            elif not salla_store_id:
-                # No store_id available — fall back to email lookup
-                existing_user = db.query(User).filter(User.email == salla_email).first()
-                if existing_user:
-                    tenant_id = existing_user.tenant_id
-                    logger.info(
-                        "[Salla OAuth] Found existing account (email fallback, no store_id) | "
-                        "email=%s tenant=%s",
-                        salla_email, tenant_id,
-                    )
-                    auto_jwt = create_token(
-                        email=existing_user.email,
-                        role=existing_user.role or "merchant",
-                        tenant_id=tenant_id,
-                        user_id=existing_user.id,
-                    )
-                else:
-                    # No store_id, no user — create new tenant
-                    new_tenant = Tenant(name=store_name or "متجر سلة")
-                    db.add(new_tenant)
-                    db.flush()
-                    tenant_id = new_tenant.id
-            else:
-                # New store_id not seen before — create new Tenant
-                unique_name = f"{store_name or 'متجر سلة'}-{salla_store_id}"
-                new_tenant = Tenant(name=unique_name)
-                db.add(new_tenant)
-                db.flush()
-                tenant_id = new_tenant.id
-
-                # Derive a store-scoped email if the email is already taken
-                # by a user in a different tenant (shared partner emails).
-                if db.query(User).filter(User.email == salla_email).first():
-                    safe_store = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-                    salla_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlah.ai"
-                    logger.info("[Salla OAuth] Email conflict — using store-scoped: %s", salla_email)
-
-                temp_password = _secrets.token_urlsafe(16)
-                new_user = User(
-                    username=salla_email.split("@")[0],
-                    email=salla_email,
-                    password_hash=hash_password(temp_password),
-                    role="merchant",
-                    tenant_id=tenant_id,
-                    is_active=True,
+            # All identity resolution lives in the shared provisioning
+            # helper. See core.merchant_provisioning for the lookup
+            # priority and the password-decoupling guarantee.
+            try:
+                provision_legacy = get_or_create_merchant_user(
+                    db,
+                    provider          = "salla",
+                    external_store_id = str(salla_store_id or ""),
+                    owner_email       = salla_email,
+                    store_name        = store_name or "",
+                    is_email_derived  = email_is_derived_legacy,
+                    issued_via        = "salla_oauth_callback",
                 )
-                db.add(new_user)
-                db.flush()
+            except Exception as exc:
+                logger.exception("[Salla OAuth] provisioning helper failed: %s", exc)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                return HTMLResponse(content=_install_error_html("registration_failed"), status_code=500)
 
-                auto_jwt = create_token(
-                    email=salla_email,
-                    role="merchant",
-                    tenant_id=tenant_id,
-                    user_id=new_user.id,
-                )
+            tenant_id   = provision_legacy.tenant_id
+            salla_email = provision_legacy.email   # canonical, may be remapped
+
+            if provision_legacy.linked_existing:
+                audit("salla_oauth_linked_existing", sub=salla_email,
+                      tenant_id=tenant_id, store_id=salla_store_id)
                 logger.info(
-                    "[Salla OAuth] Auto-registered new merchant | email=%s tenant=%s user_id=%s",
-                    salla_email, tenant_id, new_user.id,
+                    "[Salla OAuth] linked existing | tenant=%s user_id=%s store_id=%s",
+                    tenant_id, provision_legacy.user_id, salla_store_id,
+                )
+            elif provision_legacy.filled_gap:
+                audit("salla_oauth_user_filled_gap", sub=salla_email,
+                      tenant_id=tenant_id, store_id=salla_store_id)
+            elif provision_legacy.created_user:
+                audit("salla_oauth_merchant_auto_created", sub=salla_email,
+                      tenant_id=tenant_id, store_id=salla_store_id)
+                logger.info(
+                    "[Salla OAuth] merchant auto-created | tenant=%s user_id=%s store_id=%s",
+                    tenant_id, provision_legacy.user_id, salla_store_id,
+                )
+
+            # Issue the embedded JWT used by SallaCallback.tsx — no
+            # change to behaviour, just reuses the resolved identity.
+            auto_jwt = create_token(
+                email     = salla_email,
+                role      = provision_legacy.role,
+                tenant_id = tenant_id,
+                user_id   = provision_legacy.user_id,
+            )
+
+            # Welcome + set-password email — only on a brand-new auto-create
+            # AND only when the email is real (not a derived placeholder).
+            if (
+                provision_legacy.set_password_token
+                and not email_is_derived_legacy
+                and not salla_email.endswith("@salla-merchant.nahlah.ai")
+            ):
+                asyncio.ensure_future(_send_welcome_set_password_email(
+                    email             = salla_email,
+                    store_name        = store_name or "متجرك",
+                    set_password_url  = f"{_DASHBOARD_ORIGIN}/set-password?token={provision_legacy.set_password_token}",
+                    dashboard_url     = _DASHBOARD_ORIGIN,
+                ))
+                logger.info(
+                    "[Salla OAuth] welcome+set-password email queued | user_id=%s tenant=%s",
+                    provision_legacy.user_id, tenant_id,
                 )
 
         except Exception as exc:

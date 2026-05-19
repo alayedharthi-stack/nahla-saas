@@ -22,8 +22,6 @@ Webhook events:
   POST /webhook/zid  — receives store events (orders, products, …)
 """
 
-import hashlib
-import hmac
 import logging
 import secrets as _secrets
 from datetime import datetime, timezone
@@ -40,10 +38,17 @@ from core.config import (
     ZID_CLIENT_ID,
     ZID_CLIENT_SECRET,
     ZID_REDIRECT_URI,
+    ZID_WEBHOOK_ENFORCE_SIGNATURE,
     ZID_WEBHOOK_SECRET,
 )
 from core.auth import create_token, hash_password
 from core.database import get_db
+from core.webhook_audit import record_result as _record_signature_audit
+from core.webhook_security import (
+    SignatureStatus,
+    evaluate_replay,
+    verify_zid_signature,
+)
 
 logger = logging.getLogger("nahla.zid")
 router = APIRouter(tags=["Zid"])
@@ -462,18 +467,60 @@ async def zid_token_login(request: Request, db: Session = Depends(get_db)):
 async def zid_webhook(request: Request, db: Session = Depends(get_db)):
     """
     Receive webhook events from Zid (orders, products, customers, …).
-    Verifies HMAC signature when ZID_WEBHOOK_SECRET is configured.
+
+    Phase 1B — Zid HMAC audit-mode
+    ──────────────────────────────
+    Signature is verified through ``core.webhook_security.verify_zid_signature``
+    and the result recorded to ``core.webhook_audit``. Whether to actually
+    reject on a bad signature is gated by ``ZID_WEBHOOK_ENFORCE_SIGNATURE``
+    so we ship audit-only first; ops will promote the flag after a 7-day
+    clean window. ``ZID_WEBHOOK_REQUIRED_AT_BOOT`` (read by start.sh /
+    preflight) is the second-stage hardening that refuses to start when
+    the secret is missing in production.
     """
     body_bytes = await request.body()
+    sig_header = request.headers.get("X-Zid-Signature", "") or request.headers.get(
+        "x-zid-signature", "",
+    )
 
-    # Signature verification
-    if ZID_WEBHOOK_SECRET:
-        sig_header = request.headers.get("X-Zid-Signature", "")
-        mac      = hmac.new(ZID_WEBHOOK_SECRET.encode(), body_bytes, hashlib.sha256)
-        expected = mac.hexdigest()
-        if not hmac.compare_digest(sig_header, expected):
-            logger.warning("[Zid Webhook] Invalid signature")
-            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    result = verify_zid_signature(
+        raw_body=body_bytes,
+        header_value=sig_header,
+        secret=ZID_WEBHOOK_SECRET or None,
+    )
+    try:
+        _record_signature_audit(
+            result,
+            tenant_id=None,  # tenant resolved later from store_id
+            request_meta={
+                "ip": (request.headers.get("X-Real-IP")
+                       or (request.client.host if request.client else None)),
+                "user_agent": request.headers.get("user-agent", "")[:120],
+                "signature_header_sample": sig_header,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("[Zid Webhook] audit record failed: %s", exc)
+
+    if ZID_WEBHOOK_ENFORCE_SIGNATURE and result.status in (
+        SignatureStatus.INVALID,
+        SignatureStatus.MISSING,
+    ):
+        logger.warning("[Zid Webhook] rejecting request: %s", result.detail)
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    # Replay protection (Phase 1B-5) — flag-gated; no-op by default.
+    if evaluate_replay(
+        "zid",
+        body_bytes,
+        request_meta={
+            "ip": (request.headers.get("X-Real-IP")
+                   or (request.client.host if request.client else None)),
+            "user_agent": request.headers.get("user-agent", "")[:120],
+        },
+    ):
+        logger.info("[Zid Webhook] dropping duplicate body (replay)")
+        return JSONResponse({"status": "ignored", "reason": "replay"})
 
     try:
         payload = await request.json()

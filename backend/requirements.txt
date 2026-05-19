@@ -22,6 +22,12 @@ python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
 bcrypt==4.1.3
 
+# ── Rate limiting + JWT revocation (Phase 1A) ────────────────────────────────
+redis>=5.0.0,<6.0.0
+
+# ── Error monitoring (Phase 1A) ──────────────────────────────────────────────
+sentry-sdk[fastapi]>=2.10.0,<3.0.0
+
 # ── Phone normalization ───────────────────────────────────────────────────────
 phonenumbers>=8.13.0
 

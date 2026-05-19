@@ -4,20 +4,23 @@ routers/auth.py
 Authentication endpoints — JWT login, registration, invite flow, and password reset.
 
 Routes:
-  POST /auth/login            — exchange email + password for a JWT
-  GET  /auth/me               — return identity of the authenticated caller
-  POST /auth/logout           — client-side logout acknowledgement
-  GET  /auth/invite/{token}   — validate an invitation token
-  POST /auth/register         — register a new merchant (invite-gated in production)
-  GET  /auth/verify-email     — verify email address via signed link
-  POST /auth/forgot-password  — request a password-reset email
-  POST /auth/reset-password   — apply a new password using a reset token
+  POST /auth/login                  — exchange email + password for a JWT
+  GET  /auth/me                     — return identity of the authenticated caller
+  POST /auth/logout                 — client-side logout acknowledgement
+  GET  /auth/invite/{token}         — validate an invitation token
+  POST /auth/register               — register a new merchant (invite-gated in production)
+  GET  /auth/verify-email           — verify email address via signed link
+  POST /auth/forgot-password        — request a password-reset email
+  POST /auth/reset-password         — apply a new password using a reset token
+  GET  /auth/set-password/verify    — validate a single-use set-password token (no consume)
+  POST /auth/set-password           — consume a set-password token + set local password
 
 Security notes:
   • Admin credentials are compared with hmac.compare_digest (timing-safe).
   • Merchant passwords are verified via bcrypt (core/auth.verify_password).
   • /auth/forgot-password always returns 200 to prevent email enumeration.
-  • All tokens are signed JWTs (python-jose); bcrypt handles password storage.
+  • Reset tokens are signed JWTs (legacy, NOT single-use).
+  • Set-password tokens are DB-backed, hashed, single-use — see core.password_setup.
 """
 from __future__ import annotations
 
@@ -56,7 +59,103 @@ from core.config import (
 )
 from core.database import get_db
 from core.notifications import email_reset, email_verify, email_welcome, send_email
+from core.password_setup import (
+    ExpiredToken,
+    InvalidToken,
+    UsedToken,
+    WeakPassword,
+    consume_token as consume_set_password_token,
+    verify_token as verify_set_password_token,
+)
+from core.rate_limit import check_rate_limit_or_429, hash_email
+from core.token_revocation import revoke_jti
 from core.wa_notify import notify_welcome
+
+
+def _client_ip(request: Request) -> str:
+    """First-of-trust IP for rate-limit keys. Mirrors core.auth.get_client_ip."""
+    return (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or (request.client.host if request.client else "unknown")
+    )
+
+
+def _enforce_login_rate_limits(request: Request, email: str) -> None:
+    """Per-IP + per-email caps on /auth/login* — Phase 1A.
+
+    * IP:    5 attempts / 15 minutes  — blocks distributed brute force
+    * Email: 10 attempts / 1 hour     — blocks targeted credential stuffing
+
+    The ``Retry-After`` header is set by ``check_rate_limit_or_429``.
+    """
+    ip = _client_ip(request)
+    check_rate_limit_or_429(
+        bucket="login_ip",
+        key=ip,
+        max_count=5,
+        window_seconds=15 * 60,
+        audit_metadata={"path": "/auth/login", "ip": ip},
+    )
+    if email:
+        check_rate_limit_or_429(
+            bucket="login_email",
+            key=hash_email(email),
+            max_count=10,
+            window_seconds=60 * 60,
+            audit_metadata={"path": "/auth/login", "email_hash": hash_email(email), "ip": ip},
+        )
+
+
+def _enforce_forgot_password_rate_limits(request: Request, email: str) -> None:
+    """Per-IP + per-email caps on /auth/forgot-password — Phase 1A."""
+    ip = _client_ip(request)
+    check_rate_limit_or_429(
+        bucket="forgot_ip",
+        key=ip,
+        max_count=10,
+        window_seconds=60 * 60,
+        audit_metadata={"path": "/auth/forgot-password", "ip": ip},
+    )
+    if email:
+        check_rate_limit_or_429(
+            bucket="forgot_email",
+            key=hash_email(email),
+            max_count=3,
+            window_seconds=60 * 60,
+            audit_metadata={"path": "/auth/forgot-password", "email_hash": hash_email(email), "ip": ip},
+        )
+
+
+def _enforce_reset_password_rate_limits(request: Request) -> None:
+    """Per-IP cap on /auth/reset-password — Phase 1A."""
+    ip = _client_ip(request)
+    check_rate_limit_or_429(
+        bucket="reset_ip",
+        key=ip,
+        max_count=5,
+        window_seconds=60 * 60,
+        audit_metadata={"path": "/auth/reset-password", "ip": ip},
+    )
+
+
+def _enforce_set_password_rate_limits(request: Request, *, bucket_suffix: str) -> None:
+    """Per-IP cap on /auth/set-password*. Same envelope as reset-password.
+
+    The set-password verify+consume pair runs on the same IP, so we keep
+    the bucket size sized for "human clicks email link, types password,
+    submits, retries on typo a few times". 10/hour is generous enough
+    for legitimate use and tight enough that a token-guessing attacker
+    is forced to spread across IPs (where Cloudflare bot rules apply).
+    """
+    ip = _client_ip(request)
+    check_rate_limit_or_429(
+        bucket=f"setpw_{bucket_suffix}_ip",
+        key=ip,
+        max_count=10,
+        window_seconds=60 * 60,
+        audit_metadata={"path": f"/auth/set-password/{bucket_suffix}", "ip": ip},
+    )
 
 logger = logging.getLogger("nahla.auth")
 router = APIRouter()
@@ -82,6 +181,11 @@ class ForgotPasswordIn(BaseModel):
 
 
 class ResetPasswordIn(BaseModel):
+    token:    str
+    password: str
+
+
+class SetPasswordIn(BaseModel):
     token:    str
     password: str
 
@@ -138,6 +242,13 @@ def _auth_login_impl(
     client_ip  = request.headers.get("X-Real-IP") or (
         request.client.host if request.client else "unknown"
     )
+
+    # Phase 1A: per-IP + per-email rate limits — applied BEFORE any DB
+    # work so a credential-stuffing burst never reaches bcrypt.
+    # ``check_rate_limit_or_429`` raises HTTPException(429) on
+    # violation; all the work below only runs when we're under the cap.
+    _enforce_login_rate_limits(request, email)
+
     logger.info("[AUTH LOGIN] start email=%s ip=%s transport=%s", email, client_ip, transport)
 
     if not JWT_AVAILABLE:
@@ -372,8 +483,29 @@ async def auth_me_full(
 
 
 @router.post("/auth/logout")
-async def auth_logout():
-    """Client-side logout — token invalidation is handled by the frontend."""
+async def auth_logout(request: Request, user: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Revoke the caller's JWT by adding its ``jti`` to the Redis revocation
+    list (TTL = remaining ``exp``). Subsequent ``decode_token`` calls
+    return ``None`` for the revoked token, so middleware rejects it
+    with HTTP 401.
+
+    Phase 1A: this is the only revocation surface; Phase 2 introduces
+    refresh-token rotation which deprecates the denylist for normal
+    sessions and lets us drop access-token TTL to 15 minutes.
+    """
+    jti = user.get("jti")
+    exp = user.get("exp")
+    if jti and exp:
+        revoke_jti(str(jti), int(exp))
+    audit(
+        "logout",
+        sub=user.get("sub"),
+        role=user.get("role"),
+        tenant_id=user.get("tenant_id"),
+        ip=_client_ip(request),
+        jti=jti,
+    )
     return {"detail": "logged out"}
 
 
@@ -553,9 +685,15 @@ async def verify_email(token: str, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/forgot-password")
-async def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db)):
+async def forgot_password(
+    body: ForgotPasswordIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Send a password reset link to the given email if it exists."""
     email = body.email.strip().lower()
+    # Phase 1A rate limits: 3/hour per email + 10/hour per IP.
+    _enforce_forgot_password_rate_limits(request, email)
     user  = db.query(User).filter(User.email == email, User.is_active == True).first()  # noqa: E712
     # Always return 200 to prevent email enumeration
     if user:
@@ -572,8 +710,14 @@ async def forgot_password(body: ForgotPasswordIn, db: Session = Depends(get_db))
 
 
 @router.post("/auth/reset-password")
-async def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
+async def reset_password(
+    body: ResetPasswordIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Reset password using a signed token from the email link."""
+    # Phase 1A rate limit: 5 attempts / hour per IP.
+    _enforce_reset_password_rate_limits(request)
     if not JWT_AVAILABLE or not BCRYPT_AVAILABLE:
         raise HTTPException(status_code=503, detail="Auth service unavailable")
     payload = decode_token(body.token)
@@ -590,3 +734,112 @@ async def reset_password(body: ResetPasswordIn, db: Session = Depends(get_db)):
     audit("password_reset_done", sub=email)
     logger.info("Password reset completed for %s", email)
     return {"detail": "تم تغيير كلمة المرور بنجاح"}
+
+
+# ── Set-password (single-use, DB-backed token) ────────────────────────────────
+#
+# This pair of endpoints powers the "أهلاً بك في نحلة" welcome email sent
+# on Salla / Zid auto-create. The merchant clicks /set-password?token=...
+# in the dashboard, the page calls verify, then submits the new password
+# which calls set-password proper. The token is single-use and stored as
+# SHA-256 hash — see core.password_setup for the security model.
+#
+# Decoupled from /auth/forgot-password on purpose:
+#   • forgot-password issues a JWT (not single-use) — Phase 1A legacy
+#   • set-password issues a DB row (single-use, hashed)             — new
+# This separation means an OAuth-issued welcome link can never be
+# replayed by an attacker who later compromises the merchant's email
+# account, even if they re-trigger forgot-password — different secret
+# space, different revocation surface.
+
+@router.get("/auth/set-password/verify")
+async def set_password_verify(
+    token: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Validate a set-password token without consuming it.
+
+    Used by the dashboard set-password page to render a friendly
+    "Set password for foo@bar.com" form before the user types. We
+    return the email so the page can echo it back; we never return
+    anything that could be used to authenticate.
+
+    Failure modes are surfaced as ``{"valid": false, "reason": "..."}``
+    with HTTP 200 — the page renders a tailored error UI per reason.
+    """
+    _enforce_set_password_rate_limits(request, bucket_suffix="verify")
+    raw = (token or "").strip()
+    if not raw:
+        return {"valid": False, "reason": "missing"}
+
+    row = verify_set_password_token(db, raw)
+    if row is None:
+        # Distinguish expired/used/missing for the UI by looking up the
+        # row directly (verify_set_password_token returns None for all
+        # three).
+        from models import PasswordSetupToken  # noqa: PLC0415
+        import hashlib  # noqa: PLC0415
+        h = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        existing = (
+            db.query(PasswordSetupToken)
+            .filter(PasswordSetupToken.token_hash == h)
+            .first()
+        )
+        if existing is None:
+            return {"valid": False, "reason": "invalid"}
+        if existing.used_at is not None:
+            return {"valid": False, "reason": "used"}
+        return {"valid": False, "reason": "expired"}
+
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if user is None or not user.is_active:
+        return {"valid": False, "reason": "invalid"}
+
+    return {
+        "valid":      True,
+        "email":      user.email,
+        "purpose":    row.purpose,
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+    }
+
+
+@router.post("/auth/set-password")
+async def set_password(
+    body: SetPasswordIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Consume a set-password token and apply the merchant's new password.
+
+    On success the local password is set and the token is invalidated
+    in a single DB transaction (see core.password_setup.consume_token).
+    The response intentionally does not issue a session JWT — the
+    merchant is sent to /login to sign in normally, which proves they
+    actually know the password they just set.
+    """
+    if not BCRYPT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    _enforce_set_password_rate_limits(request, bucket_suffix="apply")
+    ip = _client_ip(request)
+
+    try:
+        user = consume_set_password_token(
+            db,
+            (body.token or "").strip(),
+            body.password,
+            ip=ip,
+        )
+    except WeakPassword as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "كلمة المرور ضعيفة")
+    except UsedToken:
+        raise HTTPException(status_code=410, detail="الرابط مستخدم من قبل")
+    except ExpiredToken:
+        raise HTTPException(status_code=410, detail="الرابط منتهي الصلاحية")
+    except InvalidToken:
+        raise HTTPException(status_code=400, detail="الرابط غير صالح")
+
+    audit("password_setup_token_consumed", sub=user.email, ip=ip)
+    logger.info("[set-password] consumed | user_id=%s email=%s", user.id, user.email)
+    return {"detail": "تم تعيين كلمة المرور بنجاح", "email": user.email}
