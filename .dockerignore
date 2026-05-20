@@ -1,8 +1,9 @@
-# Version control
+# ── Version control ──────────────────────────────────────────────────────────
 .git
 .gitignore
+.gitattributes
 
-# Python caches
+# ── Python caches ─────────────────────────────────────────────────────────────
 __pycache__
 *.pyc
 *.pyo
@@ -13,27 +14,72 @@ dist/
 build/
 .eggs/
 
-# Virtual environments
+# ── Virtual environments ─────────────────────────────────────────────────────
 venv/
 .venv/
 env/
 .env/
 
-# Secrets — never bake into image
+# ── Secrets — never bake into image ──────────────────────────────────────────
 .env
 *.env
+*.pem
+*.key
 
-# Node / dashboard (built separately in its own stage)
-dashboard/node_modules
-dashboard/dist
+# ── Node / dashboard (built separately on `creative-intuition` service) ──────
+# Defensive: exclude the ENTIRE dashboard tree from the backend image. The
+# backend (nahla-saas) does not import a single line from dashboard/. It is
+# served by Cloudflare → creative-intuition (Vite preview), never by the
+# FastAPI process.  Anti-pattern reminder: NEVER commit `dashboard/node_modules`
+# or `dashboard/dist`. They were tracked once and caused Railway build sandboxes
+# to fill up with a Windows-only `esbuild.exe` and >100 MB of source maps.
+# See: docs/runbooks/hardening/ANTI_PATTERNS.md
+dashboard/
 
-# IDE / OS
-.vscode/
-.idea/
-*.DS_Store
-Thumbs.db
+# ── Root-level node tooling (playwright etc., used only for local E2E) ──────
+node_modules/
 
-# Test artifacts
+# ── Unrelated parallel codebases co-located on disk ──────────────────────────
+shawahid-service/
+stable-diffusion-webui/
+
+# ── Tests (image is production runtime, not the test runner) ─────────────────
+tests/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# ── Documentation (image does not serve docs; saves a few MB) ────────────────
+docs/
+
+# ── Migration / cutover artifacts (contain DSNs and operational metadata) ────
+# These live locally for rollback evidence; they MUST NEVER reach an image.
+_*.json
+_*.txt
+_*.log
+_*.err
+nahla-backups/
+*.dump
+*.sql
+
+# ── Standalone audit/trace outputs ────────────────────────────────────────────
+audit_*.txt
+pg_logs_*.txt
+trace_*.txt
+
+# ── Editor / IDE / OS metadata ───────────────────────────────────────────────
+.vscode/
+.idea/
+.cursor/
+terminals/
+*.DS_Store
+Thumbs.db
+
+# ── CI metadata that has no value at runtime ─────────────────────────────────
+.github/
+
+# ── Backup files written by editors ─────────────────────────────────────────
+*.bak
+*.swp
+*.swo
+*~
