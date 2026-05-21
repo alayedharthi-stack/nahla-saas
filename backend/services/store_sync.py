@@ -2789,8 +2789,15 @@ class StoreSyncService:
             "customer_count":  customer_count,
         }
 
-    def get_status(self) -> Dict:
-        """Return current sync status + real-time dashboard KPIs."""
+    def get_status(self, period: str = "today") -> Dict:
+        """Return current sync status + real-time dashboard KPIs.
+
+        ``period`` is forwarded to :meth:`_compute_dashboard_kpis` so the
+        Overview page can pivot all four KPI cards + recent lists between
+        ``today`` / ``last_7_days`` / ``this_month`` from one query param
+        without each card hitting its own endpoint. Default stays
+        ``"today"`` so existing callers see no behavioural change.
+        """
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
             .filter_by(tenant_id=self.tenant_id)
@@ -2833,7 +2840,7 @@ class StoreSyncService:
         # These are shown in the Overview page (revenue, orders, conversations).
         # We reuse the same date-extraction logic as the orders router so the
         # numbers match exactly what the merchant sees in /orders.
-        dashboard_kpis = self._compute_dashboard_kpis()
+        dashboard_kpis = self._compute_dashboard_kpis(period=period)
 
         # Source of truth: live counts from the same tables that /orders,
         # /coupons and /products read from. The snapshot deltas are kept
@@ -2865,19 +2872,52 @@ class StoreSyncService:
             **dashboard_kpis,
         }
 
-    def _compute_dashboard_kpis(self) -> Dict:
+    def _compute_dashboard_kpis(self, period: str = "today") -> Dict:
         """
-        Compute real-time KPIs for the Overview page.
+        Compute real-time KPIs for the Overview page over a chosen window.
 
-        Returns the same field names the frontend expects from /store-sync/status:
-          revenue_today, orders_today, conversations_today,
-          ai_rate, ai_revenue, ai_orders,
-          recent_orders, recent_conversations, revenue_chart
+        ``period`` accepts:
+          * ``"today"``        — current day in UTC (default; matches legacy
+                                  behaviour exactly so old callers see the
+                                  same numbers they always did).
+          * ``"last_7_days"``  — rolling 7-day window ending NOW.
+          * ``"this_month"``   — calendar-month window starting from day 1
+                                  of the current UTC month.
+
+        Returns the legacy field names (``revenue_today`` / ``orders_today``
+        / ``conversations_today``) so callers that don't yet pass ``period``
+        keep working unchanged — but ALSO returns clean, period-agnostic
+        aliases (``revenue`` / ``orders`` / ``conversations``) plus the
+        chosen ``period`` and an Arabic ``period_label_ar`` so the new UI
+        can render the timeframe context without re-deriving it on the
+        frontend. The ``revenue_chart`` always covers the same 7 buckets
+        because the chart's "last 7 days" framing is independent of the
+        KPI selector — keeping it stable across period switches makes
+        scanning the area chart predictable.
         """
         from models import Conversation, ConversationTrace  # noqa: PLC0415
 
         now   = datetime.now(timezone.utc)
         today = now.date()
+
+        # ── Resolve window bounds + Arabic label ──────────────────────────────
+        # ``window_start`` is the inclusive lower bound for "this period".
+        # We keep ``today_start`` separately because the conversations and
+        # AI-rate paths previously bucketed strictly by today; the new
+        # window replaces ``today_start`` everywhere those numbers feed
+        # the response. Period strings outside the allowlist fall back to
+        # "today" rather than raising — a malformed query param shouldn't
+        # break the Overview page.
+        if period == "last_7_days":
+            window_start    = now - timedelta(days=7)
+            period_label_ar = "آخر 7 أيام"
+        elif period == "this_month":
+            window_start    = datetime(today.year, today.month, 1, tzinfo=timezone.utc)
+            period_label_ar = "هذا الشهر"
+        else:
+            period          = "today"
+            window_start    = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+            period_label_ar = "اليوم"
 
         # ── Helpers reused from the orders router ─────────────────────────────
         PAID = frozenset({
@@ -2942,8 +2982,13 @@ class StoreSyncService:
             revenue_by_day[key] = 0.0
             chart_days.append((key, label))
 
-        revenue_today   = 0.0
-        orders_today    = 0
+        # Window-scoped totals (the legacy ``*_today`` names are kept for
+        # response shape compatibility; the values reflect the SELECTED
+        # period, not literally today). AI-attributed revenue/orders count
+        # WhatsApp-sourced orders inside the same window — previously this
+        # was lifetime, which masked recent performance.
+        revenue_period  = 0.0
+        orders_period   = 0
         ai_revenue      = 0.0
         ai_orders       = 0
         recent_orders_out: list = []
@@ -2955,12 +3000,13 @@ class StoreSyncService:
             odate  = _order_date(order)
             odate_local = odate.date()
 
-            if odate_local == today:
-                revenue_today += amt
-                orders_today  += 1
-            if src == "whatsapp":
-                ai_revenue += amt
-                ai_orders  += 1
+            in_window = odate >= window_start
+            if in_window:
+                revenue_period += amt
+                orders_period  += 1
+                if src == "whatsapp":
+                    ai_revenue += amt
+                    ai_orders  += 1
             if odate_local.isoformat() in revenue_by_day:
                 revenue_by_day[odate_local.isoformat()] += amt
 
@@ -2990,26 +3036,27 @@ class StoreSyncService:
             for key, label in chart_days
         ]
 
-        # ── Conversations today via ConversationTrace ─────────────────────────
-        today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-        conversations_today = 0
+        # ── Conversations within the selected window via ConversationTrace ───
+        conversations_period = 0
         recent_conversations_out: list = []
         try:
-            today_traces = (
+            window_traces = (
                 self.db.query(ConversationTrace)
                 .filter(
                     ConversationTrace.tenant_id == self.tenant_id,
-                    ConversationTrace.created_at >= today_start,
+                    ConversationTrace.created_at >= window_start,
                 )
                 .order_by(ConversationTrace.created_at.desc())
                 .all()
             )
-            # Unique customer phones today
-            phones_today: set = set()
-            for tr in today_traces:
+            # Unique customer phones in the selected window — this is the
+            # number the merchant cares about ("how many distinct people
+            # talked to us in the chosen period"), not message count.
+            phones_in_window: set = set()
+            for tr in window_traces:
                 if tr.customer_phone:
-                    phones_today.add(tr.customer_phone)
-            conversations_today = len(phones_today)
+                    phones_in_window.add(tr.customer_phone)
+            conversations_period = len(phones_in_window)
 
             # Recent conversations (last 5 unique phones)
             seen_phones: set = set()
@@ -3039,14 +3086,27 @@ class StoreSyncService:
         except Exception as exc:
             logger.debug("[StoreSync] conversations KPI failed: %s", exc)
 
-        # ── AI rate (% of messages handled by AI today) ───────────────────────
-        total_msgs   = len(today_traces) if 'today_traces' in dir() else 0
+        # ── AI rate (% of messages handled by AI in this window) ──────────────
+        total_msgs   = len(window_traces) if 'window_traces' in dir() else 0
         ai_rate      = round((total_msgs / max(total_msgs, 1)) * 100, 1) if total_msgs > 0 else 0.0
 
         return {
-            "revenue_today":          round(revenue_today, 2),
-            "orders_today":           orders_today,
-            "conversations_today":    conversations_today,
+            # Period descriptor — lets the UI label every card consistently
+            # without re-deriving the timeframe from query params.
+            "period":                 period,
+            "period_label_ar":        period_label_ar,
+            # Legacy aliases kept verbatim so callers that haven't been
+            # updated to pass ``period`` continue to see the same field
+            # names. Values now reflect the SELECTED period; that's
+            # backward compatible because the default period stays
+            # ``"today"`` — old behaviour unchanged.
+            "revenue_today":          round(revenue_period, 2),
+            "orders_today":           orders_period,
+            "conversations_today":    conversations_period,
+            # Period-agnostic names — the new dashboard consumes these.
+            "revenue":                round(revenue_period, 2),
+            "orders":                 orders_period,
+            "conversations":          conversations_period,
             "ai_rate":                ai_rate,
             "ai_revenue":             round(ai_revenue, 2),
             "ai_orders":              ai_orders,

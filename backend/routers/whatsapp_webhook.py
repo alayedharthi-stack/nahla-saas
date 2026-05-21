@@ -4070,6 +4070,19 @@ async def _handle_merchant_message(
                     pass
             return
 
+        # Surface a single structured log line right at the entry to the
+        # brain pipeline when Human-Priority Mode is taking over this
+        # turn. Lets the rollout dashboard (manual ``grep`` for now) count
+        # how often the new mode fires without scraping the whole pipeline
+        # log output.
+        if _skip_reason == "human_priority":
+            logger.info(
+                "[HUMAN_PRIORITY] webhook=enter tenant=%s convo=%s to=%s — "
+                "brain pipeline will run in clamped mode "
+                "(no payment_link / draft_order / coupon / addon)",
+                tenant_id, convo.id, to,
+            )
+
         if inbound_metadata:
             try:
                 latest_event = (
@@ -4394,6 +4407,14 @@ async def _handle_merchant_message(
                     len(history or []),
                 )
                 _trace.brain_called = True
+                # ``_skip_reason`` from the pre-LLM guard threads the
+                # Human-Priority Mode flag into the brain pipeline so the
+                # PolicyGate can clamp aggressive actions + the composer
+                # can append a reassurance suffix. This is the ONLY place
+                # the flag is set per-turn — it's never persisted on the
+                # Conversation row, so the next turn re-derives it from
+                # the live ``ai_paused_reason`` + ``taken_over_at`` state.
+                _human_priority_turn = (_skip_reason == "human_priority")
                 brain_result = await brain.process(
                     db=db,
                     tenant_id=tenant_id,
@@ -4403,6 +4424,7 @@ async def _handle_merchant_message(
                     profile=profile,
                     customer_id=profile.get("id"),
                     conversation_id=convo.id,
+                    human_priority=_human_priority_turn,
                 )
                 # process() returns dict {"reply": str, "buttons": list, "handoff": bool}
                 if isinstance(brain_result, dict):

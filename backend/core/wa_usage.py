@@ -68,9 +68,10 @@ Public API
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional, Tuple
+from typing import Any, Literal, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -522,18 +523,33 @@ def check_limit(
     return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=pct)
 
 
+# Meta phone-number `messaging_limit_tier` enum → numeric cap + Arabic-leaning
+# label. Source of truth: Meta Graph API field ``messaging_limit_tier`` on
+# /<phone_number_id>. We accept BOTH legacy ("UNLIMITED") and current
+# ("TIER_UNLIMITED") spellings because Meta has shipped both over time and
+# different WABAs can return either depending on when they were provisioned.
+#
+# Any tier value Meta returns that isn't in this map will be displayed verbatim
+# in the UI (e.g. "TIER_FOO") instead of being hidden — that surfaces the
+# mismatch instead of silently showing a wrong number.
 META_TIER_MAP = {
-    "TIER_1K":    1_000,
-    "TIER_10K":  10_000,
-    "TIER_100K": 100_000,
-    "UNLIMITED":       -1,
+    "TIER_50":          50,
+    "TIER_250":        250,
+    "TIER_1K":       1_000,
+    "TIER_10K":     10_000,
+    "TIER_100K":   100_000,
+    "TIER_UNLIMITED":   -1,
+    "UNLIMITED":        -1,   # legacy spelling, still seen on older WABAs
 }
 
 META_TIER_LABEL = {
-    "TIER_1K":    "Tier 1 — 1,000",
-    "TIER_10K":   "Tier 2 — 10,000",
-    "TIER_100K":  "Tier 3 — 100,000",
-    "UNLIMITED":  "Tier 4 — Unlimited",
+    "TIER_50":         "Tier 0 — 50 محادثة / 24س",
+    "TIER_250":        "Tier 0 — 250 محادثة / 24س",
+    "TIER_1K":         "Tier 1 — 1,000",
+    "TIER_10K":        "Tier 2 — 10,000",
+    "TIER_100K":       "Tier 3 — 100,000",
+    "TIER_UNLIMITED":  "Tier 4 — غير محدود",
+    "UNLIMITED":       "Tier 4 — غير محدود",
 }
 
 
@@ -579,8 +595,36 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
     }
 
 
+# Tier "stale" horizon. After this many hours without a successful sync from
+# the provider we surface ``meta_tier_is_stale=True`` so the UI can show a
+# "تحديث الآن" button and a subdued tone instead of pretending the cached
+# value is fresh. Default is INTENTIONALLY tight (6h) because tier changes
+# happen unannounced from Meta's side and merchants must see the new ceiling
+# before sending a campaign that could trip rate limits.
+_META_TIER_STALE_HOURS = int(os.environ.get("NAHLA_META_TIER_STALE_HOURS", "6"))
+
+
+def _meta_tier_source(conn: Any) -> str:
+    """Best-effort label for which provider the cached tier came from.
+
+    Reads ``WhatsAppConnection.provider`` (``'meta'`` or ``'dialog360'``).
+    Does NOT promise the value is fresh — that's what ``last_synced_at`` and
+    ``is_stale`` are for. The string is only displayed to the merchant for
+    debuggability ("من أين هذا الرقم؟"), never used as a routing decision.
+    """
+    provider = (getattr(conn, "provider", None) or "meta").strip().lower()
+    if provider in ("dialog360", "360dialog", "d360"):
+        return "dialog360"
+    return "meta_graph"
+
+
 def _get_meta_tier(db: Session, tenant_id: int) -> dict:
-    """Return Meta messaging tier info for the tenant's WhatsApp connection."""
+    """Return Meta messaging tier info for the tenant's WhatsApp connection.
+
+    Includes ``meta_tier_source`` / ``meta_tier_last_synced_at`` /
+    ``meta_tier_is_stale`` so the dashboard can show "from where" and "how
+    fresh", and trigger a force-refresh when needed without guessing.
+    """
     try:
         from models import WhatsAppConnection  # noqa: PLC0415
         conn = (
@@ -590,10 +634,20 @@ def _get_meta_tier(db: Session, tenant_id: int) -> dict:
         )
         if conn and conn.meta_messaging_limit:
             tier_key = conn.meta_messaging_limit
+            last = getattr(conn, "meta_tier_updated_at", None)
+            last_iso: str | None = None
+            is_stale = True
+            if last is not None:
+                ts = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
+                last_iso = ts.isoformat()
+                is_stale = (datetime.now(timezone.utc) - ts).total_seconds() > _META_TIER_STALE_HOURS * 3600
             return {
                 "meta_messaging_limit":     tier_key,
                 "meta_messaging_limit_num": META_TIER_MAP.get(tier_key, 0),
                 "meta_tier_label":          META_TIER_LABEL.get(tier_key, tier_key),
+                "meta_tier_source":         _meta_tier_source(conn),
+                "meta_tier_last_synced_at": last_iso,
+                "meta_tier_is_stale":       is_stale,
                 "meta_quality_rating":      conn.meta_quality_rating,
             }
     except Exception as exc:
@@ -602,6 +656,9 @@ def _get_meta_tier(db: Session, tenant_id: int) -> dict:
         "meta_messaging_limit":     None,
         "meta_messaging_limit_num": None,
         "meta_tier_label":          None,
+        "meta_tier_source":         None,
+        "meta_tier_last_synced_at": None,
+        "meta_tier_is_stale":       True,
         "meta_quality_rating":      None,
     }
 

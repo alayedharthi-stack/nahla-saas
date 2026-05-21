@@ -1276,6 +1276,16 @@ async def on_startup() -> None:
         return run_template_sync_scheduler()
     _start("template_sync", _f_template_sync, 40)
 
+    # Meta phone-tier sync — keeps WhatsAppConnection.meta_messaging_limit
+    # fresh for every connected tenant on a fixed cadence (default 6h via
+    # NAHLA_META_TIER_SYNC_INTERVAL_SEC) so the dashboard's "حد Meta" card
+    # never shows a stale tier just because nobody happened to open the
+    # usage page recently.
+    def _f_meta_tier_sync():
+        from core.scheduler import run_meta_tier_sync_scheduler  # noqa: PLC0415
+        return run_meta_tier_sync_scheduler()
+    _start("meta_tier_sync", _f_meta_tier_sync, 45)
+
     def _f_wa_refresh():
         from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415
         return run_wa_token_refresh_scheduler()

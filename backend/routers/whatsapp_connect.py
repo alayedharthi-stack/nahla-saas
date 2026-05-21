@@ -3325,7 +3325,8 @@ async def get_usage(
     """
     Return this month's WhatsApp conversation usage for the tenant.
 
-    Also auto-refreshes Meta tier data when stale (>24 h) or missing.
+    Also auto-refreshes Meta tier data when stale (configurable via
+    ``NAHLA_META_TIER_STALE_HOURS``, default 6 h) or missing.
     """
     from core.wa_usage import get_usage_this_month, get_daily_breakdown  # noqa: PLC0415
 
@@ -3344,7 +3345,12 @@ async def get_usage(
     return data
 
 
-_META_TIER_STALE_HOURS = 24
+# NOTE: the canonical stale horizon lives in ``core.wa_usage``. We keep a local
+# reference here so the legacy `_maybe_refresh_meta_tier` path (which runs
+# inline on /whatsapp/usage requests) stays in lockstep with the value the
+# UI reads from the response. Override via ``NAHLA_META_TIER_STALE_HOURS``.
+import os as _os  # noqa: PLC0415
+_META_TIER_STALE_HOURS = int(_os.environ.get("NAHLA_META_TIER_STALE_HOURS", "6"))
 
 
 async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:

@@ -1846,6 +1846,28 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
     convo.status = "human"
     convo.is_human_handoff = True
     convo.paused_by_human = True
+    # Stamp ``taken_over_at`` on the FIRST manual reply only. This is the
+    # signal Human-Priority Mode reads in ``_is_human_actually_active``
+    # to flip from "AI replies in clamped mode" to the legacy hard-stop
+    # (AI fully silent because a human is engaging now). Stamping only
+    # on the first reply preserves the original takeover time so the
+    # dashboard can show "تم الاستلام منذ ..." accurately even if the
+    # agent sends multiple messages.
+    if not getattr(convo, "taken_over_at", None):
+        try:
+            from core.auth import get_jwt_user_id  # noqa: PLC0415
+            _actor = get_jwt_user_id(request)
+        except Exception:  # noqa: BLE001
+            _actor = None
+        convo.taken_over_at = datetime.now(timezone.utc)
+        convo.taken_over_by = (
+            f"user:{_actor}" if _actor is not None else "dashboard:reply"
+        )
+        _log.info(
+            "[HUMAN_PRIORITY] takeover stamped tenant=%s convo=%s phone=%s by=%s — "
+            "AI now fully silent on this conversation",
+            tenant_id, convo.id, customer_phone, convo.taken_over_by,
+        )
     db.add(convo)
     db.commit()
 

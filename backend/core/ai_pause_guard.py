@@ -52,7 +52,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
@@ -73,6 +73,33 @@ REASON_RATE_LIMIT = "rate_limit"
 REASON_INTERNAL_NUMBER = "internal_number"
 REASON_MANUAL_TAKEOVER = "manual_takeover"
 REASON_SUPPORT_ESCALATION = "support_escalation"
+
+# Synthetic "skip reason" returned by ``should_skip_ai`` when the AI is
+# allowed to keep replying in a RESTRICTED capacity — i.e. the customer
+# asked for a human, no staff has actually picked up the conversation
+# yet, and ``NAHLA_AI_HUMAN_PRIORITY_MODE`` is enabled. This is NOT a
+# valid value for ``Conversation.ai_paused_reason`` (it never gets
+# persisted); it's only used as a turn-local signal forwarded to the
+# Brain pipeline so the policy gate can clamp aggressive actions.
+REASON_HUMAN_PRIORITY = "human_priority"
+
+# Feature flag for the new "human-priority" mode. Default OFF so any
+# rollout has to be explicit per environment. Set via
+# ``NAHLA_AI_HUMAN_PRIORITY_MODE=1`` for the internal tenant first,
+# then ramp once observability shows AI stops nudging sales after a
+# handoff request.
+HUMAN_PRIORITY_MODE_ENABLED = (
+    os.environ.get("NAHLA_AI_HUMAN_PRIORITY_MODE", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+# How recently a manual outbound counts as "the human is actively
+# typing on this conversation right now". Used by
+# ``_is_human_actually_active`` to flip from human_priority (AI replies
+# with restrictions) back to the legacy hard-stop (AI fully silent).
+_HUMAN_ACTIVE_RECENT_MANUAL_SEC = int(
+    os.environ.get("NAHLA_HUMAN_ACTIVE_RECENT_MANUAL_SEC", "60")
+)
 
 VALID_REASONS = frozenset(
     {
@@ -551,6 +578,30 @@ def should_skip_ai(
     # 1) Conversation already paused.
     if convo is not None and getattr(convo, "ai_paused", False):
         reason = getattr(convo, "ai_paused_reason", None) or REASON_MANUAL
+
+        # ── Human-Priority Mode (env-flagged) ────────────────────────────
+        # When the pause is a "customer asked for human" handoff AND
+        # no staff has actually engaged yet AND the feature flag is on,
+        # we DON'T fully silence the AI. Instead we return the synthetic
+        # ``"human_priority"`` reason so the webhook can keep the brain
+        # active in a clamped capacity (no sales push, no payment link,
+        # no upsell — just answer questions + reassure that the team
+        # is on the way). The moment a human starts replying or hits
+        # the takeover button, ``_is_human_actually_active`` returns
+        # True and we fall through to the hard-stop below — exactly the
+        # legacy behaviour from that point on.
+        if (
+            HUMAN_PRIORITY_MODE_ENABLED
+            and reason in HUMAN_PRESENCE_REASONS
+            and not _is_human_actually_active(db, convo)
+        ):
+            logger.info(
+                "[HUMAN_PRIORITY] gate=allow convo=%s tenant=%s phone=%s "
+                "pause_reason=%s — letting brain reply in restricted mode",
+                convo.id, tenant_id, customer_phone, reason,
+            )
+            return False, REASON_HUMAN_PRIORITY
+
         logger.info(
             "[AI_GUARD] skip reason=%s source=already_paused convo=%s tenant=%s phone=%s",
             reason, convo.id, tenant_id, customer_phone,
@@ -587,6 +638,72 @@ def should_skip_ai(
             return True, REASON_BOT_LOOP
 
     return False, None
+
+
+def _is_human_actually_active(
+    db: Session,
+    convo: Conversation,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when a human is unmistakably engaged on this convo NOW.
+
+    Two evidence sources, ORed:
+
+      1. ``Conversation.taken_over_at`` is set — the merchant clicked
+         "استلام" or hit ``/handoff`` so we already know they own this
+         thread regardless of whether they've typed yet.
+      2. The most recent outbound MessageEvent within the last
+         :data:`_HUMAN_ACTIVE_RECENT_MANUAL_SEC` seconds is a manual
+         reply (``event_type='manual_reply'`` or ``extra_metadata.is_ai
+         IS False``). This catches the natural flow where staff just
+         starts typing without clicking the takeover button first.
+
+    Falling back: any DB error returns False so the caller treats the
+    conversation as "human still pending, AI may keep helping" — that's
+    the safer mistake direction for the human-priority mode (worst case
+    AI sends one polite line during the few seconds before we re-classify).
+    """
+    if convo is None:
+        return False
+    if getattr(convo, "taken_over_at", None) is not None:
+        return True
+
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(seconds=_HUMAN_ACTIVE_RECENT_MANUAL_SEC)
+    try:
+        last_out = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id       == convo.tenant_id,
+                MessageEvent.conversation_id == convo.id,
+                MessageEvent.direction       == "outbound",
+            )
+            .order_by(MessageEvent.id.desc())
+            .first()
+        )
+    except Exception:
+        return False
+    if not last_out:
+        return False
+    ts = getattr(last_out, "created_at", None)
+    if ts is None:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if ts < cutoff:
+        return False
+    # A recent outbound — is it manual? Two independent hints because
+    # different code paths populate the metadata differently:
+    #   * ``event_type='manual_reply'`` is the canonical marker emitted
+    #     by ``/conversations/reply``.
+    #   * Older / non-router send paths may only flip
+    #     ``extra_metadata.is_ai=False`` without changing event_type.
+    if (last_out.event_type or "").startswith("manual"):
+        return True
+    meta = last_out.extra_metadata or {}
+    if isinstance(meta, dict) and meta.get("is_ai") is False:
+        return True
+    return False
 
 
 def _count_recent_automated_inbound(
@@ -929,8 +1046,11 @@ __all__ = [
     "REASON_INTERNAL_NUMBER",
     "REASON_MANUAL_TAKEOVER",
     "REASON_SUPPORT_ESCALATION",
+    "REASON_HUMAN_PRIORITY",
+    "HUMAN_PRIORITY_MODE_ENABLED",
     "HUMAN_PRESENCE_REASONS",
     "VALID_REASONS",
+    "_is_human_actually_active",
     "LOOP_SCORE_RECOVERY",
     "LOOP_SCORE_PAUSE",
     "SIMILARITY_HIGH",

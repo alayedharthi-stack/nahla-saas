@@ -27,6 +27,9 @@ _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 h
 _SALLA_TOKEN_REFRESH_SECONDS = 24 * 3600  # Salla token refresh daily (smart conditions)
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 _TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
+_META_TIER_SYNC_INTERVAL_SECONDS = int(
+    os.environ.get("NAHLA_META_TIER_SYNC_INTERVAL_SEC", str(6 * 3600))
+)  # default: refresh Meta phone-tier every 6 hours for all connected tenants
 _CAMPAIGN_POLL_SECONDS = 30  # check for scheduled/delayed campaigns every 30s
 _STUCK_IMMEDIATE_THRESHOLD_SECONDS = 60  # rescue immediate campaigns whose
                                           # in-process asyncio task vanished
@@ -943,6 +946,93 @@ async def run_ai_quality_scheduler() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.error("[AI Quality Scheduler] Error: %s", exc, exc_info=True)
         await asyncio.sleep(interval)
+
+
+async def run_meta_tier_sync_scheduler() -> None:
+    """Periodically refresh Meta ``messaging_limit_tier`` for every connected tenant.
+
+    The dashboard's "حد Meta الحالي" surface relies on
+    ``WhatsAppConnection.meta_messaging_limit`` being a recent read from
+    Meta — but the lazy ``_maybe_refresh_meta_tier`` only fires when a
+    merchant happens to open /whatsapp/usage. That means a tier change
+    Meta announces overnight can sit invisible for hours.
+
+    This loop reproduces the same logic for every connected tenant on a
+    fixed cadence (default 6h, see ``NAHLA_META_TIER_SYNC_INTERVAL_SEC``)
+    so the cached tier is never older than that window for any active
+    merchant — without forcing them to refresh the page.
+
+    Failures per tenant are absorbed (logged + counted); we never
+    propagate so a single broken token cannot stall the loop.
+    """
+    await asyncio.sleep(120)  # let lifespan + token refresher settle first
+    logger.info(
+        "[Meta Tier Sync] Started — refreshing every %ss",
+        _META_TIER_SYNC_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            await _sync_meta_tier_all_tenants()
+        except Exception as exc:
+            logger.error("[Meta Tier Sync] cycle error: %s", exc, exc_info=True)
+        await asyncio.sleep(_META_TIER_SYNC_INTERVAL_SECONDS)
+
+
+async def _sync_meta_tier_all_tenants() -> None:
+    """Single cycle of the tier-sync loop. Pulls one row at a time so a
+    slow tenant cannot block the rest, commits per-tenant so a crash
+    mid-cycle preserves the work done so far."""
+    from core.database import SessionLocal  # noqa: PLC0415
+    from database.models import WhatsAppConnection  # noqa: PLC0415
+
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.error("[Meta Tier Sync] cannot open DB: %s", exc)
+        return
+
+    refreshed = 0
+    skipped = 0
+    failed = 0
+    try:
+        connections = (
+            db.query(WhatsAppConnection)
+            .filter(
+                WhatsAppConnection.status == "connected",
+                WhatsAppConnection.phone_number_id.isnot(None),
+            )
+            .all()
+        )
+
+        # Lazy imports keep this module light at boot.
+        from routers.whatsapp_connect import _maybe_refresh_meta_tier  # noqa: PLC0415
+
+        for conn in connections:
+            tid = conn.tenant_id
+            try:
+                # ``_maybe_refresh_meta_tier`` already honours the
+                # ``NAHLA_META_TIER_STALE_HOURS`` short-circuit, so calling
+                # it here on every cycle is cheap when the row is fresh
+                # and only hits Meta when the cached value is genuinely
+                # stale — exactly the behaviour we want for the
+                # background sweep.
+                await _maybe_refresh_meta_tier(db, tid)
+                refreshed += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("[Meta Tier Sync] tenant=%s failed: %s", tid, exc)
+        if not connections:
+            skipped = 1
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    logger.info(
+        "[Meta Tier Sync] cycle done — refreshed=%d failed=%d skipped=%d",
+        refreshed, failed, skipped,
+    )
 
 
 async def run_template_sync_scheduler() -> None:

@@ -39,6 +39,9 @@ from .actions import (
     ACTION_LLM_REPLY,
     ACTION_HANDOFF,
     ACTION_SUGGEST_COUPON,
+    ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEND_PAYMENT_LINK,
+    ACTION_RECOMMEND_ADDON,
 )
 
 logger = logging.getLogger("nahla.brain.policy")
@@ -80,9 +83,89 @@ class RealPolicyGate:
             decision = self._price_range(decision, ctx)
             decision = self._max_order_value(decision, ctx)
             decision = self._auto_escalate(decision, ctx)
+            # Human-Priority clamp MUST run last — it always reads the final
+            # action a previous rule may have produced. Putting it first
+            # would let a later rule (e.g. auto-escalate) re-introduce a
+            # sales-heavy action after we already softened it.
+            decision = self._human_priority_clamp(decision, ctx)
         except Exception as exc:
             logger.warning("[PolicyGate] unexpected error: %s — returning original decision", exc)
         return decision
+
+    # ── Rule 6 (LAST): human-priority clamp ───────────────────────────────────
+
+    # Actions the AI is NOT allowed to take while the customer is waiting on
+    # a human reply. These are the "aggressive sales" / "transactional" paths
+    # — they compete with the agent or push the conversation forward in a
+    # direction the agent might want to handle differently. We deliberately
+    # KEEP ACTION_HANDOFF in here as an allowed action (it's still useful
+    # to escalate further e.g. to a supervisor), and KEEP ACTION_LLM_REPLY
+    # / ACTION_FAQ_REPLY / ACTION_SEARCH_PRODUCTS / ACTION_GREET / clarify /
+    # narrow which are informational and safe.
+    _HUMAN_PRIORITY_BLOCKED_ACTIONS = frozenset({
+        ACTION_PROPOSE_DRAFT_ORDER,
+        ACTION_SEND_PAYMENT_LINK,
+        ACTION_SUGGEST_COUPON,
+        ACTION_RECOMMEND_ADDON,
+    })
+
+    def _human_priority_clamp(self, decision: Decision, ctx: BrainContext) -> Decision:
+        """Clamp the AI to non-aggressive, non-transactional actions while
+        the customer is in a "human requested but not picked up yet" state.
+
+        Behaviour matrix:
+          * ``ctx.human_priority is False`` → no-op.
+          * Action is in :data:`_HUMAN_PRIORITY_BLOCKED_ACTIONS` → downgrade
+            to :data:`ACTION_LLM_REPLY` and stamp
+            ``args['human_priority']=True`` so the composer knows to add
+            a brief reassurance line and skip any "shall I prepare the
+            order?" closer.
+          * Action is anything else (greet, FAQ, search, clarify, llm_reply,
+            handoff, …) → keep as-is but still stamp
+            ``args['human_priority']=True`` so the composer adds the
+            reassurance suffix.
+
+        Why "stamp + keep" instead of "downgrade everything to llm_reply":
+        the customer may still legitimately ask a factual question ("هل
+        المنتج متوفر؟") and downgrading every action would force the LLM
+        to re-derive answers the executor already produced. We want the
+        AI to KEEP being helpful — just not closing the sale.
+        """
+        if not getattr(ctx, "human_priority", False):
+            return decision
+
+        original_action = decision.action
+        new_args = dict(decision.args or {})
+        new_args["human_priority"] = True
+
+        if original_action in self._HUMAN_PRIORITY_BLOCKED_ACTIONS:
+            logger.info(
+                "[HUMAN_PRIORITY] clamp tenant=%s phone=%s action_in=%s → llm_reply "
+                "reason=block_aggressive_sales",
+                ctx.tenant_id, (ctx.customer_phone or "")[-4:], original_action,
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args=new_args,
+                reason=(
+                    f"human_priority:clamp original={original_action} — "
+                    "customer is waiting on a human; switch to informational "
+                    "reply only, no sales push, no payment link, no coupon"
+                ),
+                confidence=decision.confidence,
+            )
+
+        logger.info(
+            "[HUMAN_PRIORITY] clamp tenant=%s phone=%s action=%s pass=true "
+            "(reassurance suffix will be appended by composer)",
+            ctx.tenant_id, (ctx.customer_phone or "")[-4:], original_action,
+        )
+        return Decision(
+            action=original_action,
+            args=new_args,
+            reason=decision.reason,
+            confidence=decision.confidence,
+        )
 
     # ── Rule 0: block list ────────────────────────────────────────────────────
 

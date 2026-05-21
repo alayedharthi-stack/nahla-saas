@@ -3,6 +3,10 @@ import { LucideIcon, TrendingUp, TrendingDown } from 'lucide-react'
 interface StatCardProps {
   label: string
   value: string
+  /** Optional secondary line under the label — used to render the active
+   *  timeframe ("اليوم" / "آخر 7 أيام" / "هذا الشهر") next to the metric so
+   *  it's never ambiguous which window the number is computed over. */
+  subLabel?: string
   change?: number      // percentage change, positive = up, negative = down
   changeLabel?: string
   icon: LucideIcon
@@ -13,6 +17,7 @@ interface StatCardProps {
 export default function StatCard({
   label,
   value,
+  subLabel,
   change,
   changeLabel = 'مقارنة بالأمس',
   icon: Icon,
@@ -25,7 +30,14 @@ export default function StatCard({
     <div className="card p-5">
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{label}</p>
+          <div className="flex items-baseline gap-1.5 flex-wrap">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">{label}</p>
+            {subLabel && (
+              <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500 normal-case tracking-normal">
+                · {subLabel}
+              </span>
+            )}
+          </div>
           <p className="text-3xl font-bold text-slate-900 dark:text-slate-100 mt-1 tracking-tight">{value}</p>
           {change !== undefined && (
             <div className="flex items-center gap-1 mt-2">

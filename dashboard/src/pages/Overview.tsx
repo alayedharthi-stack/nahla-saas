@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
-  Sparkles, Clock, AlertTriangle,
+  Sparkles, Clock, AlertTriangle, RefreshCw,
 } from 'lucide-react'
 
 const ArrowUp = TrendingUp
@@ -31,7 +31,24 @@ const statusVariant = (s: string) =>
   s === 'pending' ? 'amber'  :
   s === 'failed'  ? 'red'    : 'slate'
 
+type Period = 'today' | 'last_7_days' | 'this_month'
+
+const PERIOD_LABEL_AR: Record<Period, string> = {
+  today:        'اليوم',
+  last_7_days:  'آخر 7 أيام',
+  this_month:   'هذا الشهر',
+}
+
 interface OverviewStats {
+  /** Backend echoes the requested period so the UI never re-derives it. */
+  period?: Period
+  period_label_ar?: string
+  /** Period-agnostic field names (preferred). */
+  conversations?: number
+  orders?: number
+  revenue?: number
+  /** Legacy names — still returned by backend for backwards compat; the
+   *  values now reflect the SELECTED period, not literally today. */
   conversations_today: number
   orders_today: number
   revenue_today: number
@@ -57,7 +74,30 @@ interface WaUsage {
   meta_messaging_limit?:     string | null
   meta_messaging_limit_num?: number | null
   meta_tier_label?:          string | null
+  meta_tier_source?:         string | null   // 'meta_graph' | 'dialog360'
+  meta_tier_last_synced_at?: string | null   // ISO timestamp from provider sync
+  meta_tier_is_stale?:       boolean
   meta_quality_rating?:      string | null
+}
+
+const TIER_SOURCE_LABEL: Record<string, string> = {
+  meta_graph: 'Meta Cloud API',
+  dialog360:  '360dialog (Coexistence)',
+}
+
+function formatSyncedAt(iso: string | null | undefined): string {
+  if (!iso) return 'لم تتم المزامنة بعد'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'غير متاح'
+    const diffMin = Math.round((Date.now() - d.getTime()) / 60_000)
+    if (diffMin < 1)   return 'قبل لحظات'
+    if (diffMin < 60)  return `قبل ${diffMin} دقيقة`
+    if (diffMin < 1440) return `قبل ${Math.round(diffMin / 60)} ساعة`
+    return d.toLocaleString('ar-SA', { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return 'غير متاح'
+  }
 }
 
 export default function Overview() {
@@ -66,36 +106,77 @@ export default function Overview() {
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
+  const [tierRefreshing, setTierRefreshing] = useState(false)
+  // Single timeframe controller — every KPI card + the recent lists
+  // re-fetch when this changes. We keep ``today`` as the default so the
+  // first paint matches the legacy behaviour exactly (and the merchant
+  // doesn't see a number flicker if they previously memorised "today").
+  const [period, setPeriod] = useState<Period>('today')
+
+  const refreshMetaTier = async () => {
+    if (tierRefreshing) return
+    setTierRefreshing(true)
+    try {
+      await apiCall('/whatsapp/refresh-meta-tier', { method: 'POST' })
+      const fresh = await apiCall<WaUsage>('/whatsapp/usage').catch(() => null)
+      if (fresh) setWaUsage(fresh)
+    } catch {
+      // silent — UI already shows "stale" state; merchant can retry
+    } finally {
+      setTierRefreshing(false)
+    }
+  }
 
   useEffect(() => {
-    // Load WhatsApp usage stats
+    // WhatsApp usage is timeframe-independent (always "this month" per
+    // Meta's billing window), so we fetch it once on mount only.
     apiCall<WaUsage>('/whatsapp/usage').then(setWaUsage).catch(() => null)
+  }, [])
 
-    // Try to load real stats; gracefully ignore errors (no store connected yet)
+  useEffect(() => {
+    // Re-fetch KPIs whenever the merchant changes the timeframe. We
+    // keep the loading state truthy only when we have NO prior data so
+    // switching periods doesn't blank the cards mid-fetch — the numbers
+    // update in place instead, which is less jarring.
+    if (stats === null) setLoading(true)
     Promise.all([
-      apiCall<any>('/store-sync/status').catch(() => null),
+      apiCall<any>(`/store-sync/status?period=${encodeURIComponent(period)}`).catch(() => null),
       apiCall<any>('/store-sync/knowledge').catch(() => null),
     ]).then(([syncStatus]) => {
       if (syncStatus) {
         setStats({
-          conversations_today: syncStatus.conversations_today ?? 0,
-          orders_today:        syncStatus.orders_today        ?? 0,
-          revenue_today:       syncStatus.revenue_today       ?? 0,
-          ai_rate:             syncStatus.ai_rate             ?? 0,
-          ai_revenue:          syncStatus.ai_revenue          ?? 0,
-          ai_orders:           syncStatus.ai_orders           ?? 0,
+          period:               (syncStatus.period as Period) ?? period,
+          period_label_ar:      syncStatus.period_label_ar ?? PERIOD_LABEL_AR[period],
+          conversations:        syncStatus.conversations  ?? syncStatus.conversations_today ?? 0,
+          orders:               syncStatus.orders         ?? syncStatus.orders_today        ?? 0,
+          revenue:              syncStatus.revenue        ?? syncStatus.revenue_today       ?? 0,
+          conversations_today:  syncStatus.conversations_today ?? 0,
+          orders_today:         syncStatus.orders_today        ?? 0,
+          revenue_today:        syncStatus.revenue_today       ?? 0,
+          ai_rate:              syncStatus.ai_rate             ?? 0,
+          ai_revenue:           syncStatus.ai_revenue          ?? 0,
+          ai_orders:            syncStatus.ai_orders           ?? 0,
           recent_conversations: syncStatus.recent_conversations ?? [],
           recent_orders:        syncStatus.recent_orders        ?? [],
           revenue_chart:        syncStatus.revenue_chart        ?? PLACEHOLDER_CHART,
         })
       }
     }).finally(() => setLoading(false))
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period])
 
   const revenueData         = stats?.revenue_chart        ?? PLACEHOLDER_CHART
   const recentConversations = stats?.recent_conversations ?? []
   const recentOrders        = stats?.recent_orders        ?? []
   const hasRealData         = (stats?.orders_today ?? 0) > 0 || recentOrders.length > 0
+
+  // Pull from the period-agnostic field with a fallback to the legacy
+  // ``_today`` aliases so the page still renders correctly against an
+  // older backend during a partial deploy.
+  const kpiRevenue       = stats?.revenue       ?? stats?.revenue_today       ?? 0
+  const kpiConversations = stats?.conversations ?? stats?.conversations_today ?? 0
+  const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
+  const periodLabelAr    = stats?.period_label_ar ?? PERIOD_LABEL_AR[period]
 
   const statusLabel = (s: string) => {
     if (s === 'paid')    return ov.statusPaid
@@ -279,56 +360,134 @@ export default function Overview() {
             </p>
           )}
 
-          {/* Meta Tier Card */}
+          {/* Meta Tier Card — source-of-truth + last-synced + force-refresh.
+              We deliberately surface ``meta_tier_source`` + ``last_synced_at``
+              + ``is_stale`` so the merchant can tell whether the cached
+              value is fresh OR a stale read from when the connection was
+              first wired. Hides the "stale" badge for unlimited tiers
+              where the exact value doesn't matter as much. */}
           {waUsage.meta_tier_label && (
-            <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold text-slate-600">حد Meta الحالي</p>
-                <p className="text-sm font-bold text-slate-800 mt-0.5">{waUsage.meta_tier_label}</p>
-              </div>
-              {waUsage.meta_quality_rating && (
-                <div className="text-center">
-                  <p className="text-xs text-slate-500">جودة الرقم</p>
-                  <span className={`inline-block mt-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${
-                    waUsage.meta_quality_rating === 'GREEN'  ? 'bg-emerald-100 text-emerald-700'
-                    : waUsage.meta_quality_rating === 'YELLOW' ? 'bg-amber-100 text-amber-700'
-                    : 'bg-red-100 text-red-700'
-                  }`}>
-                    {waUsage.meta_quality_rating === 'GREEN' ? 'ممتازة' : waUsage.meta_quality_rating === 'YELLOW' ? 'متوسطة' : 'منخفضة'}
-                  </span>
+            <div className={`mt-3 rounded-xl p-3 border ${
+              waUsage.meta_tier_is_stale
+                ? 'bg-amber-50 border-amber-200'
+                : 'bg-slate-50 border-slate-200'
+            }`}>
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-xs font-semibold text-slate-600">حد Meta الحالي</p>
+                    {waUsage.meta_tier_is_stale && (
+                      <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full">
+                        قيمة قديمة
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm font-bold text-slate-800 mt-0.5">{waUsage.meta_tier_label}</p>
+                  <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500 flex-wrap">
+                    {waUsage.meta_tier_source && (
+                      <span>
+                        المصدر: <strong className="text-slate-700">
+                          {TIER_SOURCE_LABEL[waUsage.meta_tier_source] || waUsage.meta_tier_source}
+                        </strong>
+                      </span>
+                    )}
+                    <span>
+                      آخر مزامنة: <strong className="text-slate-700">{formatSyncedAt(waUsage.meta_tier_last_synced_at)}</strong>
+                    </span>
+                  </div>
                 </div>
-              )}
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {waUsage.meta_quality_rating && (
+                    <div className="text-center">
+                      <p className="text-[10px] text-slate-500">جودة الرقم</p>
+                      <span className={`inline-block mt-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${
+                        waUsage.meta_quality_rating === 'GREEN'  ? 'bg-emerald-100 text-emerald-700'
+                        : waUsage.meta_quality_rating === 'YELLOW' ? 'bg-amber-100 text-amber-700'
+                        : 'bg-red-100 text-red-700'
+                      }`}>
+                        {waUsage.meta_quality_rating === 'GREEN' ? 'ممتازة' : waUsage.meta_quality_rating === 'YELLOW' ? 'متوسطة' : 'منخفضة'}
+                      </span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={refreshMetaTier}
+                    disabled={tierRefreshing}
+                    className="flex items-center gap-1 text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label="تحديث حد Meta الآن"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${tierRefreshing ? 'animate-spin' : ''}`} />
+                    {tierRefreshing ? 'جاري التحديث…' : 'تحديث الآن'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
         )
       })()}
 
+      {/* Unified Timeframe Selector — single source of truth for every KPI
+          below + the revenue chart + the "recent" lists. Switching the
+          pill re-fetches /store-sync/status with the new ``period`` query
+          param; the cards re-render with the response in place (no full
+          spinner) to keep scanning smooth. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h2 className="text-sm font-bold text-slate-700">نظرة عامة</h2>
+        <div
+          role="tablist"
+          aria-label="نطاق زمني"
+          className="inline-flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1 text-xs font-medium"
+        >
+          {(['today', 'last_7_days', 'this_month'] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              role="tab"
+              aria-selected={period === p}
+              onClick={() => setPeriod(p)}
+              className={`px-3 py-1.5 rounded-lg transition-colors ${
+                period === p
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              {PERIOD_LABEL_AR[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label={ov.kpiRevenue}
-          value={loading ? '—' : `${(stats?.revenue_today ?? 0).toLocaleString('ar-SA')} ر.س`}
+          subLabel={periodLabelAr}
+          value={loading ? '—' : `${kpiRevenue.toLocaleString('ar-SA')} ر.س`}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={ov.kpiConversations}
-          value={loading ? '—' : String(stats?.conversations_today ?? 0)}
+          subLabel={periodLabelAr}
+          value={loading ? '—' : String(kpiConversations)}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
         <StatCard
           label={ov.kpiOrders}
-          value={loading ? '—' : String(stats?.orders_today ?? 0)}
+          subLabel={periodLabelAr}
+          value={loading ? '—' : String(kpiOrders)}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
         />
         <StatCard
           label={ov.kpiAiRate}
+          subLabel={periodLabelAr}
           value={loading ? '—' : `${(stats?.ai_rate ?? 0).toFixed(1)}%`}
           icon={TrendingUp}
           iconColor="text-purple-600"
@@ -336,18 +495,17 @@ export default function Overview() {
         />
       </div>
 
-      {/* Revenue Chart */}
+      {/* Revenue Chart — always 7-day rolling regardless of the KPI
+          timeframe above. The framing here is intentionally fixed: the
+          area chart's job is "how did the last week feel", not "answer
+          the same question the KPI cards do". A separate selector here
+          would invite two timeframes drifting out of sync. */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">الإيرادات — آخر 7 أيام</h2>
-            <p className="text-xs text-slate-400 mt-0.5">آخر 7 أيام</p>
+            <p className="text-xs text-slate-400 mt-0.5">رسم بياني ثابت — مستقل عن النطاق أعلاه</p>
           </div>
-          <select className="text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-600 focus:outline-none">
-            <option>آخر 7 أيام</option>
-            <option>آخر 30 يوم</option>
-            <option>هذا الشهر</option>
-          </select>
         </div>
         <ResponsiveContainer width="100%" height={220}>
           <AreaChart data={revenueData} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>

@@ -684,6 +684,14 @@ class BrainContext:
     # Full merchant context snapshot from `build_merchant_context(...)`.
     # Empty dict when the call failed (pipeline degrades silently).
     merchant_context: Dict[str, Any] = field(default_factory=dict)
+    # Human-Priority Mode flag (forwarded by the webhook when
+    # ``should_skip_ai`` returns ``"human_priority"``). When True the
+    # PolicyGate clamps aggressive actions (no payment links, no order
+    # creation, no coupon push, no upsell) and the responder appends a
+    # short reassurance line so the customer knows the team is on the
+    # way without the AI competing with them. Strictly turn-local —
+    # NOT persisted on the Conversation row.
+    human_priority: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -660,6 +660,18 @@ export default function Conversations() {
     return matchFilter && matchSearch
   })
 
+  // Priority ordering: rows where the customer is currently waiting on a
+  // human reply float to the top of EVERY filter view (including "الكل")
+  // so the merchant never has to switch tabs to spot a pending takeover.
+  // Stable sort — same-priority rows keep their server order (most-recent
+  // first) so this only re-positions the awaiting bucket without
+  // scrambling the rest of the list.
+  const sortedFiltered = [...filtered].sort((a, b) => {
+    const pa = _isAwaitingAgent(a) ? 1 : 0
+    const pb = _isAwaitingAgent(b) ? 1 : 0
+    return pb - pa
+  })
+
   const initials = (name: string) =>
     name.split(' ').map(n => n[0]).join('').slice(0, 2)
 
@@ -802,87 +814,120 @@ export default function Conversations() {
 
         {/* Conversation list */}
         <ul className="flex-1 overflow-y-auto divide-y divide-slate-100">
-          {filtered.length === 0 && (
+          {sortedFiltered.length === 0 && (
             <li className="py-20 text-center">
               <Bot className="w-10 h-10 text-slate-200 mx-auto mb-3" />
               <p className="text-sm text-slate-400">لا توجد محادثات</p>
             </li>
           )}
-          {filtered.map((c) => (
-            <li
-              key={c.id}
-              onClick={() => selectConversation(c)}
-              className={`flex items-start gap-3 px-4 py-3.5 cursor-pointer active:bg-slate-100 transition-colors ${
-                selected?.id === c.id ? 'bg-brand-50 border-e-2 border-brand-400' : 'hover:bg-slate-50'
-              }`}
-            >
-              {/* Avatar */}
-              <div className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 font-semibold text-sm ${
-                c.isAI ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
-              }`}>
-                {initials(c.customer)}
-              </div>
+          {sortedFiltered.map((c) => {
+            // ``awaitingAgent`` is the single source of truth for the
+            // "row needs human attention RIGHT NOW" visual treatment
+            // (red unread badge, subtle red row tint, red end-border,
+            // and the pulsing "يطلب موظف" pill below). Using the same
+            // helper as the filter tab + the priority sort above keeps
+            // the three signals in sync — toggling a server-side
+            // ``needs_human`` / ``handoff_active`` row will update the
+            // badge AND its position AND its row chrome together.
+            const awaitingAgent = _isAwaitingAgent(c)
+            const isSelected    = selected?.id === c.id
+            return (
+              <li
+                key={c.id}
+                onClick={() => selectConversation(c)}
+                className={`flex items-start gap-3 px-4 py-3.5 cursor-pointer active:bg-slate-100 transition-colors ${
+                  isSelected
+                    ? 'bg-brand-50 border-e-2 border-brand-400'
+                    : awaitingAgent
+                      ? 'bg-red-50/40 border-e-2 border-red-300 hover:bg-red-50/60'
+                      : 'hover:bg-slate-50'
+                }`}
+              >
+                {/* Avatar — red dot indicator when this row is waiting
+                    on a human reply, layered on top of the existing
+                    initials circle so it's visible at glance even when
+                    the badge below is scrolled off the row. */}
+                <div className="relative shrink-0">
+                  <div className={`w-11 h-11 rounded-full flex items-center justify-center font-semibold text-sm ${
+                    c.isAI ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    {initials(c.customer)}
+                  </div>
+                  {awaitingAgent && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute -top-0.5 -end-0.5 w-3 h-3 rounded-full bg-red-500 ring-2 ring-white animate-pulse"
+                    />
+                  )}
+                </div>
 
-              {/* Content */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
-                  <p className="text-sm font-semibold text-slate-900 truncate">{c.customer}</p>
-                  <span className="text-xs text-slate-400 shrink-0 ms-2">{formatRiyadh(c.time)}</span>
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <p className="text-sm font-semibold text-slate-900 truncate">{c.customer}</p>
+                    <span className="text-xs text-slate-400 shrink-0 ms-2">{formatRiyadh(c.time)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-500 truncate flex-1">{c.lastMsg}</p>
+                    {c.unread > 0 && (
+                      <span className={`ms-2 min-w-[18px] h-[18px] px-1 text-white text-xs rounded-full flex items-center justify-center shrink-0 ${
+                        awaitingAgent ? 'bg-red-500' : 'bg-brand-500'
+                      }`}>
+                        {c.unread}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                    {/* "يطلب موظف" — highest-priority visual signal.
+                        Driven by the same _isAwaitingAgent helper as
+                        the filter + sort + row chrome above so the
+                        three never disagree. Rendered FIRST so it
+                        wins the limited horizontal space on narrow
+                        widths. The pulse stays on the pill only — the
+                        row itself doesn't animate so scanning the list
+                        isn't fatiguing. */}
+                    {awaitingAgent && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300 shadow-sm animate-pulse">
+                        <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
+                      </span>
+                    )}
+                    {c.lastPaymentConfirmedAt && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
+                        <PackageCheck className="w-2.5 h-2.5" /> دفع مؤكد
+                      </span>
+                    )}
+                    {/* Unsubscribe badges */}
+                    {c.isUnsubscribed ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300">
+                        <BellOff className="w-2.5 h-2.5" /> ألغى الاشتراك
+                      </span>
+                    ) : c.pendingUnsubscribe ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-200">
+                        <BellOff className="w-2.5 h-2.5" /> بانتظار تأكيد الإلغاء
+                      </span>
+                    ) : null}
+                    {/* Secondary status — only shown if the row is NOT
+                        already flagged as awaiting (the red pill above
+                        already conveys the strongest signal we have). */}
+                    {!awaitingAgent && c.status === 'human' ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-200">
+                        <User className="w-3 h-3" /> رد بشري
+                      </span>
+                    ) : !awaitingAgent && !c.isUnsubscribed && !c.pendingUnsubscribe && c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
+                        {EVENT_BADGE[c.lastMsgType].icon}
+                        {EVENT_BADGE[c.lastMsgType].label}
+                      </span>
+                    ) : !awaitingAgent && !c.isUnsubscribed && !c.pendingUnsubscribe && c.unread > 0 ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">
+                        <MessageSquare className="w-2.5 h-2.5" /> رسالة عميل
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-slate-500 truncate flex-1">{c.lastMsg}</p>
-                  {c.unread > 0 && (
-                    <span className="ms-2 min-w-[18px] h-[18px] px-1 bg-brand-500 text-white text-xs rounded-full flex items-center justify-center shrink-0">
-                      {c.unread}
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                  {/* Paid badge — surfaces the most recent confirmed
-                      payment for this conversation so the merchant can
-                      spot completed transfers without opening the
-                      drawer. Shown first so the green is the most
-                      prominent signal even when other status badges
-                      apply (e.g. the customer keeps chatting after
-                      paying). */}
-                  {c.lastPaymentConfirmedAt && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
-                      <PackageCheck className="w-2.5 h-2.5" /> دفع مؤكد
-                    </span>
-                  )}
-                  {/* Unsubscribe badges — shown next, high priority */}
-                  {c.isUnsubscribed ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300">
-                      <BellOff className="w-2.5 h-2.5" /> ألغى الاشتراك
-                    </span>
-                  ) : c.pendingUnsubscribe ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-200">
-                      <BellOff className="w-2.5 h-2.5" /> بانتظار تأكيد الإلغاء
-                    </span>
-                  ) : null}
-                  {/* Status badges */}
-                  {c.status === 'human' && c.handoffReason === 'customer_request' && c.lastMsgType !== 'manual' ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-200 animate-pulse">
-                      <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
-                    </span>
-                  ) : c.status === 'human' ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-200">
-                      <User className="w-3 h-3" /> رد بشري
-                    </span>
-                  ) : !c.isUnsubscribed && !c.pendingUnsubscribe && c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
-                    <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
-                      {EVENT_BADGE[c.lastMsgType].icon}
-                      {EVENT_BADGE[c.lastMsgType].label}
-                    </span>
-                  ) : !c.isUnsubscribed && !c.pendingUnsubscribe && c.unread > 0 ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">
-                      <MessageSquare className="w-2.5 h-2.5" /> رسالة عميل
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-            </li>
-          ))}
+              </li>
+            )
+          })}
         </ul>
         {hasMoreServer && (
           <div className="border-t border-slate-100 p-2 bg-white shrink-0">

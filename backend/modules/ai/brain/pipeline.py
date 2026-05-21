@@ -351,6 +351,8 @@ class MerchantBrain:
         customer_id: Optional[int] = None,
         conversation_id: Optional[int] = None,
         tenant_context: Optional[Any] = None,
+        *,
+        human_priority: bool = False,
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
 
@@ -500,7 +502,15 @@ class MerchantBrain:
             sales_context  = sales_context,
             tenant_context = tenant_ctx,
             merchant_context = merchant_context,
+            human_priority = bool(human_priority),
         )
+        if human_priority:
+            logger.info(
+                "[HUMAN_PRIORITY] pipeline=enter tenant=%s phone=%s convo=%s — "
+                "policy gate will clamp aggressive actions; "
+                "composer will append reassurance",
+                tenant_id, customer_phone, conversation_id,
+            )
         # Attach db for handlers that need it (avoids threading Session issues)
         ctx._db = db  # type: ignore[attr-defined]
 
@@ -939,6 +949,39 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        # ── 7a. Human-Priority reassurance suffix ─────────────────────────
+        # When the turn is being handled under Human-Priority Mode (the
+        # customer asked for a human and the team hasn't picked up yet),
+        # we append a SHORT reassurance line so the customer never feels
+        # the AI is trying to win the conversation back. The line is
+        # appended ONLY when:
+        #   * ``ctx.human_priority`` is True, AND
+        #   * the composer actually produced text (no point appending
+        #     to an empty reply), AND
+        #   * the composed text doesn't already mention "موظف" /
+        #     "الفريق" / "إنسان" — the brain may have already
+        #     reassured organically (e.g. handoff acknowledgement)
+        #     and double-reassurance is awkward.
+        if getattr(ctx, "human_priority", False) and reply:
+            already_reassures = any(
+                kw in reply for kw in ("موظف", "الفريق", "إنسان", "نتواصل", "نرد قريب")
+            )
+            if not already_reassures:
+                reassurance = "\n\n🌿 فريقنا وصلته رسالتك وراح يرد عليك قريب."
+                logger.info(
+                    "[HUMAN_PRIORITY] suffix appended tenant=%s phone=%s "
+                    "reply_len_in=%d action=%s",
+                    ctx.tenant_id, (ctx.customer_phone or "")[-4:],
+                    len(reply), decision.action,
+                )
+                reply = reply + reassurance
+            else:
+                logger.info(
+                    "[HUMAN_PRIORITY] suffix skipped tenant=%s phone=%s "
+                    "reason=already_reassures action=%s",
+                    ctx.tenant_id, (ctx.customer_phone or "")[-4:], decision.action,
+                )
 
         # ── 7b. Sync candidates with EXACTLY what the composer displayed ──────
         # The composer filters `result.data["products"]` to `safe_products`

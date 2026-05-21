@@ -102,16 +102,25 @@ async def trigger_full_sync(
 async def sync_status(
     request: Request,
     db: Session = Depends(get_db),
+    period: str = "today",
     _scope: dict = Depends(require_merchant_scope),
 ):
-    """Return current sync status and entity counts."""
+    """Return current sync status and entity counts.
+
+    ``period`` controls the timeframe for the dashboard KPIs returned
+    alongside (revenue / orders / conversations / AI rate). Accepts
+    ``today`` (default — preserves legacy behaviour), ``last_7_days``,
+    or ``this_month``. Any other value is normalised to ``today`` by
+    the service layer rather than raising, so a stale frontend cannot
+    break the Overview page.
+    """
     tenant_id = resolve_tenant_id(request)
 
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from services.store_sync import StoreSyncService  # noqa: PLC0415
 
     svc = StoreSyncService(db, tenant_id)
-    return svc.get_status()
+    return svc.get_status(period=period)
 
 
 @router.get("/knowledge")

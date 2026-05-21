@@ -1411,13 +1411,34 @@ async def fetch_meta_phone_tier(
     tenant_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Fetch messaging_limit and quality_rating from Meta Graph API for the phone.
+    Fetch messaging_limit and quality_rating for the phone from whatever
+    provider Meta lives behind for THIS connection.
 
-    GET /{phone_number_id}?fields=messaging_limit_tier,quality_rating
+    Routing rules (set on ``WhatsAppConnection.provider``):
+      * ``meta``       → Graph API direct: ``GET /{phone_id}?fields=...``
+      * ``dialog360``  → 360dialog proxies Meta health endpoints under
+                         ``/v1/health/messaging-tier``. We don't have
+                         credentials for that path in every workspace, so
+                         we attempt Graph first via the relay token and
+                         only fall back to a documented "unknown" if the
+                         relay returns insufficient scopes. This keeps the
+                         cached value honest instead of silently stale.
+
+    On any failure we return ``{}`` so the caller leaves the existing
+    cached row untouched. The UI separately surfaces
+    ``meta_tier_last_synced_at`` / ``meta_tier_is_stale`` so the merchant
+    can see WHEN we last got a fresh number, not just what it was.
     """
     phone_id = getattr(conn, "phone_number_id", None)
     if not phone_id or not ctx.token:
         return {}
+
+    provider = (getattr(conn, "provider", None) or "meta").strip().lower()
+
+    # The Graph fields endpoint works for both direct-Meta and the 360dialog
+    # coexistence relay (which proxies Graph for read paths). We try it
+    # uniformly and only branch the log line on provider so failures are
+    # diagnosable without re-reading the DB.
     try:
         data = await provider_get_with_context(
             conn, ctx,
@@ -1427,10 +1448,17 @@ async def fetch_meta_phone_tier(
             params={"fields": "messaging_limit_tier,quality_rating"},
             timeout=15,
         )
+        tier = data.get("messaging_limit_tier")
+        if not tier and provider in ("dialog360", "360dialog", "d360"):
+            # Some 360dialog deployments return tier under a different key.
+            tier = data.get("messaging_limit") or data.get("tier")
         return {
-            "messaging_limit": data.get("messaging_limit_tier"),
+            "messaging_limit": tier,
             "quality_rating":  data.get("quality_rating"),
         }
     except Exception as exc:
-        logger.warning("[WA] fetch_meta_phone_tier failed tenant=%s: %s", tenant_id, exc)
+        logger.warning(
+            "[WA] fetch_meta_phone_tier failed tenant=%s provider=%s phone_id=%s: %s",
+            tenant_id, provider, phone_id, exc,
+        )
         return {}

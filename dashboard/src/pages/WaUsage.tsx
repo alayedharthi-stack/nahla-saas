@@ -36,7 +36,30 @@ interface WaUsageDetail {
   daily_breakdown:               DailyRow[]
   meta_messaging_limit?:         string | null
   meta_tier_label?:              string | null
+  meta_tier_source?:             string | null
+  meta_tier_last_synced_at?:     string | null
+  meta_tier_is_stale?:           boolean
   meta_quality_rating?:          string | null
+}
+
+const TIER_SOURCE_LABEL_WA: Record<string, string> = {
+  meta_graph: 'Meta Cloud API',
+  dialog360:  '360dialog (Coexistence)',
+}
+
+function formatSyncedAtWa(iso: string | null | undefined): string {
+  if (!iso) return 'لم تتم المزامنة بعد'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'غير متاح'
+    const diffMin = Math.round((Date.now() - d.getTime()) / 60_000)
+    if (diffMin < 1)    return 'قبل لحظات'
+    if (diffMin < 60)   return `قبل ${diffMin} دقيقة`
+    if (diffMin < 1440) return `قبل ${Math.round(diffMin / 60)} ساعة`
+    return d.toLocaleString('ar-SA', { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return 'غير متاح'
+  }
 }
 
 interface DailyRow {
@@ -171,6 +194,7 @@ export default function WaUsage() {
   const [data, setData]       = useState<WaUsageDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState(false)
+  const [tierRefreshing, setTierRefreshing] = useState(false)
 
   const load = () => {
     setLoading(true)
@@ -178,6 +202,20 @@ export default function WaUsage() {
       .then(d => { setData(d); setError(false) })
       .catch(() => setError(true))
       .finally(() => setLoading(false))
+  }
+
+  const refreshMetaTier = async () => {
+    if (tierRefreshing) return
+    setTierRefreshing(true)
+    try {
+      await apiCall('/whatsapp/refresh-meta-tier', { method: 'POST' })
+      const fresh = await apiCall<WaUsageDetail>('/whatsapp/usage?breakdown=true').catch(() => null)
+      if (fresh) setData(fresh)
+    } catch {
+      // silent — the stale badge stays visible so the merchant can retry
+    } finally {
+      setTierRefreshing(false)
+    }
   }
 
   useEffect(() => { load() }, [])
@@ -382,17 +420,51 @@ export default function WaUsage() {
           </div>
 
           {/* ── Meta tier card ──────────────────────────────────────────── */}
+          {/* Shows: current tier label · provider source · last synced ·
+              quality rating · refresh button. The "قيمة قديمة" pill +
+              amber container appear ONLY when meta_tier_is_stale is
+              true, so a healthy fresh sync stays visually quiet. */}
           {data.meta_tier_label && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <ShieldCheck className="w-4 h-4 text-slate-600" />
-                <h3 className="text-sm font-semibold text-slate-700">حد Meta للمحادثات</h3>
+            <div className={`rounded-2xl border p-5 ${
+              data.meta_tier_is_stale ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white'
+            }`}>
+              <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-slate-600" />
+                  <h3 className="text-sm font-semibold text-slate-700">حد Meta للمحادثات</h3>
+                  {data.meta_tier_is_stale && (
+                    <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full">
+                      قيمة قديمة
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshMetaTier}
+                  disabled={tierRefreshing}
+                  className="flex items-center gap-1.5 text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${tierRefreshing ? 'animate-spin' : ''}`} />
+                  {tierRefreshing ? 'جاري التحديث…' : 'تحديث الآن'}
+                </button>
               </div>
               <div className="flex items-center justify-between gap-4 flex-wrap">
-                <div>
+                <div className="flex-1 min-w-0">
                   <p className="text-xs text-slate-500 mb-1">المستوى الحالي من Meta</p>
                   <p className="text-lg font-bold text-slate-800">{data.meta_tier_label}</p>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <div className="flex items-center gap-3 mt-1 text-xs text-slate-500 flex-wrap">
+                    {data.meta_tier_source && (
+                      <span>
+                        المصدر: <strong className="text-slate-700">
+                          {TIER_SOURCE_LABEL_WA[data.meta_tier_source] || data.meta_tier_source}
+                        </strong>
+                      </span>
+                    )}
+                    <span>
+                      آخر مزامنة: <strong className="text-slate-700">{formatSyncedAtWa(data.meta_tier_last_synced_at)}</strong>
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
                     يتم ترقية المستوى تلقائياً من Meta عند استيفاء شروط الجودة
                   </p>
                 </div>
