@@ -133,6 +133,26 @@ def record_status_event(
         logger.warning("[delivery_quality] models unavailable: %s", exc)
         return None
 
+    # Defense-in-depth: ``message_delivery_events.tenant_id`` is NOT
+    # NULL (intentional — every analytics row must be attributable to
+    # a tenant). Historically callers passed ``None`` when the wamid
+    # didn't match a CampaignSendLog (e.g. AI replies, manual agent
+    # outbound), which raised a psycopg2 NotNullViolation mid-flush
+    # and poisoned the surrounding transaction — taking down the
+    # whole status webhook handler. Refuse to attempt the insert at
+    # this layer too so a future caller forgetting to resolve the
+    # tenant cannot break the session again. The webhook layer logs
+    # the skipped wamid so coverage gaps remain observable in ops.
+    if tenant_id is None:
+        logger.warning(
+            "[delivery_quality] tenant_id is None — refusing to insert "
+            "(wamid=%s status=%s phone=%s source=%s). "
+            "Resolve tenant upstream (CampaignSendLog / MessageEvent / "
+            "conversations) before calling record_status_event.",
+            (wamid or "")[:24], status, _mask_phone(phone_e164), source,
+        )
+        return None
+
     if not wamid:
         # Synthesise a wamid so we still capture the event for
         # analytics without colliding with the uniqueness constraint

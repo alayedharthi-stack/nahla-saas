@@ -830,16 +830,48 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             .filter(CampaignSendLog.provider_message_id == wamid)
             .first()
         )
+
+        # ── Resolve tenant_id BEFORE calling the quality recorder ──
+        # message_delivery_events.tenant_id is NOT NULL. Three resolution
+        # layers, fail-open at the end:
+        #   1. CampaignSendLog.tenant_id     (campaign sends)
+        #   2. MessageEvent.tenant_id        (AI replies + manual agent
+        #                                     outbound; wamid lives in
+        #                                     extra_metadata.wa_message_id)
+        #   3. None                          → skip the analytics insert
+        #                                     entirely (defensive guard
+        #                                     inside record_status_event
+        #                                     also enforces this).
+        #
+        # We materialise evt_row here so Layer 2 can also reuse it below
+        # without a second query. Layer 2 was previously fetched AFTER
+        # the quality recorder ran, which caused every non-campaign
+        # delivery webhook to trigger a NotNullViolation that poisoned
+        # the entire transaction (logged as `[StatusWebhook] error
+        # processing status: ... null value in column "tenant_id" of
+        # relation "message_delivery_events"`).
+        evt_row = (
+            db.query(MessageEvent)
+            .filter(MessageEvent.extra_metadata["wa_message_id"].astext == wamid)
+            .first()
+        )
+        resolved_tenant_id: Optional[int] = None
+        if log_row and log_row.tenant_id:
+            resolved_tenant_id = log_row.tenant_id
+        elif evt_row and evt_row.tenant_id:
+            resolved_tenant_id = evt_row.tenant_id
+
         # ── Delivery Quality Intelligence Layer (May 2026) ──
         # Best-effort append-only event capture. NEVER let this fail
         # the existing dispatcher flow — wrapped in try/except, runs
         # against the same `db` session so commit/rollback below
-        # naturally cleans up if needed.
+        # naturally cleans up if needed. Skips silently when no tenant
+        # can be resolved (the service refuses None defensively).
         try:
             from services.delivery_quality import record_status_event  # noqa: PLC0415
             record_status_event(
                 db=db,
-                tenant_id=(log_row.tenant_id if log_row else None),
+                tenant_id=resolved_tenant_id,
                 wamid=wamid,
                 status=st,
                 phone_e164=(log_row.phone_e164 if log_row else None),
@@ -849,6 +881,13 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             )
         except Exception as exc:
             logger.debug("[StatusWebhook] quality recorder failed: %s", exc)
+            # Defensive: a flush inside record_status_event that managed
+            # to poison the session would block every downstream query
+            # in this handler. Roll back to a clean state and reopen.
+            try:
+                db.rollback()
+            except Exception:
+                pass
         log_touched = False
         log_campaign_id: Optional[int] = None
         if log_row:
@@ -887,12 +926,10 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
                         log_touched = True
         # ── Layer 2: aggregate counters on Campaign + idempotency on
         #            MessageEvent (legacy path; updates the dashboard
-        #            tiles that read .delivered_count / .read_count) ─
-        evt_row = (
-            db.query(MessageEvent)
-            .filter(MessageEvent.extra_metadata["wa_message_id"].astext == wamid)
-            .first()
-        )
+        #            tiles that read .delivered_count / .read_count).
+        # evt_row was already materialised at the top of the handler
+        # so the quality recorder could resolve a fallback tenant_id
+        # for non-campaign sends.
         if evt_row:
             meta = dict(evt_row.extra_metadata or {})
             campaign_id = meta.get("campaign_id") or log_campaign_id
