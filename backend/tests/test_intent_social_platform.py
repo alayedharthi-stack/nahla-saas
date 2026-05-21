@@ -161,11 +161,16 @@ def test_social_basmala(message: str) -> None:
     # were promoted to SOCIAL_STRONG_PRAISE in May 2026 #8 so the
     # template pool routes them to the reciprocal heavy reply. See
     # test_strong_praise_phrasing.py for their coverage.
+    #
+    # May 2026 #14 — REMOVED "ممتاز" from this bucket. The bare
+    # adjective is too ambiguous: customers use it both as a
+    # standalone compliment and inside product questions ("هل ممتاز
+    # للأطفال؟"). We trust the brain pipeline to read it in context
+    # now — see `test_ambiguous_adjective_yields_to_brain` below.
     "والنعم",
     "أحسنت",
     "ما شاء الله",
     "تبارك الله",
-    "ممتاز",
 ])
 def test_social_compliment(message: str) -> None:
     m = classify_social(message)
@@ -237,17 +242,6 @@ def test_social_does_not_fire_on_commercial(message: str) -> None:
     "هل ينفع للأطفال",
     "هل يصلح للحامل",
     "ينفع لمشاكل البطن؟",
-    # May 2026 #14 — merchant reproducer. The customer asked whether
-    # the product is good for stomach issues; the bot canned a
-    # "تسلم 🤍 وهذا كله من لطفك" compliment reply because "ممتاز"
-    # matched _COMPLIMENT_KEYWORDS. The interrogative particle "هل"
-    # in front of the adjective must yield to the brain.
-    "هو هل ممتاز لمشاكل البطن والجهاز الهضمي",
-    "هل ممتاز للأطفال",
-    "هل هو ممتاز لمشاكل القولون",
-    "هل ممتازه للحامل",
-    "هل يفيد في تخفيف الوزن",
-    "هل يساعد في النوم",
     # Courtesy + question mark alone — the question mark always wins.
     "تسلم، عندك توصيل بكرة؟",
     "الله يعافيك، متى يصير عندك ضهيان؟",
@@ -273,11 +267,6 @@ def test_social_yields_on_practical_question(message: str) -> None:
     ("شكراً جزيلاً",      SOCIAL_THANKS),
     ("تسلم يا غالي",      SOCIAL_THANKS),
     ("الله يبارك فيك",    SOCIAL_BLESSING),
-    # May 2026 #14 — verify that ``ممتاز`` ALONE still classifies as
-    # a compliment. The new "هل ممتاز" disqualifier must only fire on
-    # the question shape, never on the bare adjective compliment.
-    ("ممتاز",              SOCIAL_COMPLIMENT),
-    ("ممتاز يا غالي",      SOCIAL_COMPLIMENT),
 ])
 def test_pure_social_still_classifies_after_disqualifier_added(
     message: str, expected_category: str,
@@ -288,6 +277,47 @@ def test_pure_social_still_classifies_after_disqualifier_added(
     m = classify_social(message)
     assert m is not None, f"expected social match for: {message!r}"
     assert m.category == expected_category
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# May 2026 #14 — Ambiguous descriptive adjectives must go to the brain
+# ─────────────────────────────────────────────────────────────────────────────
+# Philosophy: classifier short-circuits ONLY on phrases that are
+# unambiguously aimed at the merchant. Adjectives like "ممتاز" /
+# "زين" / "حلو" doubled as compliments AND as product descriptors,
+# and were leaking real product questions into a canned compliment
+# reply. Rather than grow an ever-longer "هل + ADJ" disqualifier
+# list (which would make the bot more rigid, not smarter), we trust
+# the brain pipeline to read these adjectives in context — it has
+# the customer profile, product knowledge, and conversational state
+# the classifier deliberately doesn't.
+@pytest.mark.parametrize("message", [
+    # The exact merchant reproducer.
+    "هو هل ممتاز لمشاكل البطن والجهاز الهضمي",
+    # Sibling shapes that previously canned-replied on "ممتاز".
+    "هل ممتاز للأطفال",
+    "هل هو ممتاز لمشاكل القولون",
+    "العسل ممتاز للقولون؟",
+    # Other ambiguous adjectives that left the list — same logic.
+    "هل طعمه حلو",
+    "هل زين للحامل",
+    # Bare adjectives — also yield. The brain composes a short
+    # contextual reply (a blessing for a real compliment, a clarifier
+    # for an ambiguous one). The classifier no longer pre-judges.
+    "ممتاز",
+    "حلو",
+    "زين",
+])
+def test_ambiguous_adjective_yields_to_brain(message: str) -> None:
+    """Customers use ``ممتاز`` / ``زين`` / ``حلو`` both as a
+    standalone compliment AND inside product questions. The
+    classifier no longer short-circuits on them; the brain pipeline
+    decides what kind of turn this is from context."""
+    m = classify_social(message)
+    assert m is None, (
+        f"expected classifier to YIELD on ambiguous adjective so the "
+        f"brain can interpret context, got {m!r} for {message!r}"
+    )
 
 
 def test_disqualifier_helper_is_exposed_for_diagnostics():

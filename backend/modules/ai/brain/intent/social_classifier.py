@@ -232,19 +232,37 @@ def _is_strong_praise(norm: str) -> bool:
 
 
 # ── Compliments / "you've done well" ─────────────────────────────────────────
-# Tightened May 2026 #8 — the strong-praise tokens above are now their
-# OWN category. Generic compliments here stay routed to the lighter
-# compliment pool. We deliberately leave overlapping words ("كفو" /
-# "ما قصرت") out of THIS list now; if they appear the strong-praise
-# branch wins because it runs first.
+# Compliment SHORT-CIRCUITS the brain pipeline into a canned reply. The
+# bar for triggering it is therefore intentionally narrow: the keyword
+# must be a phrase the customer uses to EVALUATE THE MERCHANT
+# (vocative direction), not a descriptive adjective they could equally
+# use to ASK ABOUT A PRODUCT (referential direction).
+#
+# May 2026 #14 — REMOVED ambiguous descriptive adjectives:
+#   * "ممتاز" / "زين" / "زينه" / "حلو"
+# These doubled as compliments AND as product descriptors. A customer
+# asking "هل ممتاز لمشاكل البطن؟" / "هل العسل زين للأطفال؟" / "هل طعمه
+# حلو؟" was being canned as "تسلم 🤍 وهذا كله من لطفك" because the
+# substring "ممتاز" matched here. The right behaviour is for the LLM
+# to UNDERSTAND the question from context and answer it — not for the
+# classifier to grow ever-longer disqualifier lists trying to catch
+# every "هل + adjective" shape (that path makes the bot more rigid,
+# not smarter).
+#
+# What stays here: phrases that are unambiguously DIRECTED at the
+# merchant — "احسنت", "ابدعت", "والنعم", "ما شاء الله", "سلمت",
+# "روعه", "تحفه". The bare adjectives that left the list will now
+# flow to the brain pipeline, which has the customer context, product
+# knowledge, and conversational state to compose a contextual reply
+# (a brief blessing for a real compliment, or a substantive answer
+# for a product question).
 _COMPLIMENT_KEYWORDS = (
     "والنعم", "نعم الرد",
     "سلمت", "سلمتي", "سلمتو",
     "احسنت", "احسنتم", "ابدعت", "ابدعتو", "ابدعتم",
-    "ممتاز", "روعه", "تحفه",
+    "روعه", "تحفه",
     "ما شاء الله",
     "تبارك الله",
-    "زين", "زينه", "حلو",   # standalone-style only via length guard below
 )
 
 
@@ -383,20 +401,6 @@ _PRACTICAL_QUESTION_SIGNALS = (
     "متي اكل", "متى اكل",
     # Suitability — "does it work for...".
     "ينفع ل", "هل ينفع", "هل يصلح", "يصلح ل", "هل يفيد",
-    # "Is it good for X?" — same shape but using ``ممتاز`` (excellent)
-    # as the adjective instead of ``ينفع`` / ``يصلح`` / ``يفيد``.
-    # Merchant reproducer (May 2026 #14): the customer asked
-    # "هو هل ممتاز لمشاكل البطن والجهاز الهضمي" and the bot replied
-    # "تسلم 🤍 وهذا كله من لطفك" — the substring "ممتاز" matched
-    # `_COMPLIMENT_KEYWORDS` and the message was canned as a generic
-    # compliment, dropping the real product question. These ``هل ...``
-    # prefixes are unambiguous yes/no question shapes and they all
-    # require the interrogative particle to be present, so bare
-    # "ممتاز" / "ممتاز يا غالي" / "خدمتكم ممتازة" (real compliments)
-    # still classify as SOCIAL_COMPLIMENT.
-    "هل ممتاز", "هل هو ممتاز", "هل هي ممتاز", "هل هي ممتازه",
-    "هل ممتازه", "هل ينفع ل", "هل يساعد ل", "هل يساعد في", "هل يفيد ل",
-    "هل يفيد في",
 )
 
 

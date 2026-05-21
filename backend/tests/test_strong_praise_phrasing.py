@@ -226,6 +226,15 @@ def test_kfo_routes_to_strong_praise_not_compliment() -> None:
 
 def test_generic_compliment_still_works() -> None:
     """The generic compliment bucket stays functional for tokens that
-    are NOT strong-praise triggers."""
-    r = classify_social("ممتاز")
+    are NOT strong-praise triggers.
+
+    May 2026 #14 — bare ``ممتاز`` was moved OUT of
+    ``_COMPLIMENT_KEYWORDS`` because customers also use it as a
+    product descriptor ("هل ممتاز للأطفال؟"). The brain pipeline now
+    reads the adjective in context. To keep this test honest about
+    the generic-compliment path we switch to ``والنعم`` — an
+    unambiguous compliment that has no descriptive double-life and
+    stays in the classifier's bucket.
+    """
+    r = classify_social("والنعم")
     assert r is not None and r.category == SOCIAL_COMPLIMENT
