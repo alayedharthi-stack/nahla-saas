@@ -51,6 +51,7 @@ const en: Translations = {
       system:          'System Status',
       tools:           'Cleanup Tools',
       catalog:         'Product Catalog',
+      aiQuality:       'AI Quality Monitor',
       settings:        'Settings',
       security:        'Security & 2FA',
     },
@@ -101,6 +102,7 @@ const en: Translations = {
     system:          { title: 'System Status',       subtitle: 'Overall health, dependencies & events' },
     coexistence:     { title: 'Mobile & AI Requests',subtitle: 'Orders created outside AI operating hours' },
     tools:           { title: 'Cleanup Tools',       subtitle: 'Data maintenance utilities' },
+    aiQuality:       { title: 'AI Quality Monitor',   subtitle: 'Replies that did not match the last customer message' },
   },
 
   roles: {

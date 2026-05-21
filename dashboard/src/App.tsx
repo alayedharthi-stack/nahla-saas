@@ -40,6 +40,7 @@ import AdminCoexistence from './pages/AdminCoexistence'
 import AdminSystemStatus from './pages/AdminSystemStatus'
 import AdminTools from './pages/AdminTools'
 import AdminWebhookHealth from './pages/AdminWebhookHealth'
+import AdminAiQuality from './pages/AdminAiQuality'
 import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
 import AdminSallaActivations from './pages/AdminSallaActivations'
 import AdminSallaTokenStatus from './pages/AdminSallaTokenStatus'
@@ -175,6 +176,7 @@ export default function App() {
             <Route path="admin/system"       element={<AdminSystemStatus />} />
             <Route path="admin/tools"          element={<AdminTools />} />
             <Route path="admin/webhook-health"    element={<AdminWebhookHealth />} />
+            <Route path="admin/ai-quality"        element={<AdminAiQuality />} />
             <Route path="admin/tenant-integrity" element={<AdminTenantIntegrity />} />
             <Route path="admin/catalog"           element={<AdminCatalog />} />
             <Route path="admin/salla-activations" element={<AdminSallaActivations />} />

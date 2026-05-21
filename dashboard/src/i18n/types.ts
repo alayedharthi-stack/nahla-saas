@@ -59,6 +59,7 @@ export interface Translations {
       system:          string
       tools:           string
       catalog:         string
+      aiQuality:       string
       settings:        string
       security:        string
     }
@@ -130,6 +131,7 @@ export interface Translations {
     system:          { title: string; subtitle: string }
     coexistence:     { title: string; subtitle: string }
     tools:           { title: string; subtitle: string }
+    aiQuality:       { title: string; subtitle: string }
   }
 
   /** Common reusable action labels */

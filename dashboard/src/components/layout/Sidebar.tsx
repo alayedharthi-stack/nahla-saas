@@ -68,6 +68,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/system',           icon: Activity,     label: tr => tr.nav.adminItems.system          },
       { to: '/admin/tools',            icon: Wrench,       label: tr => tr.nav.adminItems.tools           },
       { to: '/admin/catalog',          icon: Package,      label: tr => tr.nav.adminItems.catalog         },
+      { to: '/admin/ai-quality',       icon: ShieldCheck,  label: tr => tr.nav.adminItems.aiQuality       },
     ],
   },
   {

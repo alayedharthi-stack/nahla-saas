@@ -55,6 +55,7 @@ const ar: Translations = {
       system:          'حالة النظام',
       tools:           'أدوات التنظيف',
       catalog:         'كتالوج المنتجات',
+      aiQuality:       'مراقبة جودة الذكاء',
       settings:        'الإعدادات',
       security:        'الأمان والمصادقة',
     },
@@ -105,6 +106,7 @@ const ar: Translations = {
     system:          { title: 'حالة النظام',        subtitle: 'الصحة العامة والتبعيات والأحداث' },
     coexistence:     { title: 'طلبات الجوال + AI',  subtitle: 'طلبات التسوق المنشأة خارج أوقات الذكاء' },
     tools:           { title: 'أدوات التنظيف',      subtitle: 'أدوات صيانة البيانات' },
+    aiQuality:       { title: 'مراقبة جودة الذكاء',  subtitle: 'حالات اختلاف الرد عن آخر رسالة العميل' },
   },
 
   roles: {

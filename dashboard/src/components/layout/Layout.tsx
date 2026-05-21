@@ -188,6 +188,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/admin/system':              tr => tr.adminPages.system,
   '/admin/coexistence':         tr => tr.adminPages.coexistence,
   '/admin/tools':               tr => tr.adminPages.tools,
+  '/admin/ai-quality':          tr => tr.adminPages.aiQuality,
 }
 
 export default function Layout() {
