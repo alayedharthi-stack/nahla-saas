@@ -208,6 +208,19 @@ export interface LoginResult {
   reason?:  'timeout' | 'network' | 'http' | 'unauthorized' | 'parse'
   status?:  number
   message?: string
+  /**
+   * Set to true when the password was correct but the user has 2FA
+   * enabled. The dashboard must then prompt for the OTP and call
+   * `verifyTwoFactorLogin(challengeToken, otp)` to complete the
+   * sign-in. No session is persisted yet at this point.
+   */
+  requires2fa?:     boolean
+  /** Short-lived (5 min) JWT carrying the pending session claims. */
+  challengeToken?:  string
+  /** Time in seconds until the challenge token expires. */
+  challengeTtlSec?: number
+  /** Echo of the email the user typed — useful to show on the OTP screen. */
+  email?:           string
 }
 
 /**
@@ -288,13 +301,40 @@ async function _loginAttempt(
       return { ok: false, reason: 'http', status: res.status, message: bodyText || `HTTP ${res.status}` }
     }
 
-    let data: { access_token?: string; role?: string; tenant_id?: number; user_id?: number }
+    let data: {
+      access_token?:    string
+      role?:            string
+      tenant_id?:       number
+      user_id?:         number
+      requires_2fa?:    boolean
+      challenge_token?: string
+      challenge_ttl?:   number
+      email?:           string
+    }
     try {
       data = await res.json()
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[auth] login response JSON parse failed', e)
       return { ok: false, reason: 'parse', status: res.status, message: 'Bad server response' }
+    }
+
+    // ── 2FA gate ─────────────────────────────────────────────────────────
+    // The backend returned a challenge token instead of an access token.
+    // We must NOT persist any session yet — the user has only proven the
+    // password. Bubble the challenge up to the Login page so it can
+    // render an OTP input and exchange the token via /auth/2fa/login/verify.
+    if (data.requires_2fa && data.challenge_token) {
+      // eslint-disable-next-line no-console
+      console.info('[auth] 2FA challenge issued transport=%s email=%s', transport, data.email)
+      return {
+        ok:              true,
+        status:          res.status,
+        requires2fa:     true,
+        challengeToken:  data.challenge_token,
+        challengeTtlSec: typeof data.challenge_ttl === 'number' ? data.challenge_ttl : 300,
+        email:           data.email,
+      }
     }
 
     _persistSession(data.access_token ?? '', {
@@ -363,7 +403,92 @@ export async function loginDetailed(email: string, password: string): Promise<Lo
 /** Backwards-compatible wrapper — most callers just need a boolean. */
 export async function login(email: string, password: string): Promise<boolean> {
   const r = await loginDetailed(email, password)
-  return r.ok
+  return r.ok && !r.requires2fa
+}
+
+export interface TwoFactorLoginResult {
+  ok:       boolean
+  /** Structured failure reason; populated only when ok is false. */
+  reason?:  'unauthorized' | 'locked' | 'expired' | 'network' | 'timeout' | 'parse' | 'http'
+  status?:  number
+  /** Human-friendly message localised by the backend. */
+  message?: string
+  /** Set when the server signals a temporary row-level lock; seconds. */
+  secondsRemaining?: number
+  /** Backend sets this true when the OTP we just consumed was a recovery code. */
+  usedRecoveryCode?: boolean
+}
+
+/**
+ * Exchange a /auth/login challenge_token + OTP for a real access_token.
+ * On success, persists the session exactly like a normal login would
+ * (same _persistSession call) so the rest of the dashboard doesn't need
+ * a separate code path. On failure, surfaces a structured reason the
+ * Login page can localise.
+ */
+export async function verifyTwoFactorLogin(
+  challengeToken: string,
+  otp: string,
+): Promise<TwoFactorLoginResult> {
+  const controller = new AbortController()
+  const timeoutId  = setTimeout(() => controller.abort(), 20_000)
+  try {
+    const res = await fetch(`${getApiBase()}/auth/2fa/login/verify`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ challenge_token: challengeToken, otp }),
+      signal:  controller.signal,
+    })
+
+    if (!res.ok) {
+      let body: any = null
+      try { body = await res.json() } catch { /* ignore */ }
+      const detail = body?.detail
+      if (res.status === 429 && detail?.code === 'totp_locked') {
+        return {
+          ok: false, reason: 'locked', status: 429,
+          message: typeof detail.message === 'string' ? detail.message : 'تم القفل المؤقت.',
+          secondsRemaining: typeof detail.seconds_remaining === 'number' ? detail.seconds_remaining : undefined,
+        }
+      }
+      if (res.status === 401) {
+        const msg = typeof detail === 'string'
+          ? detail
+          : (detail?.message ?? 'انتهت صلاحية جلسة التحقق. سجّل الدخول من جديد.')
+        return { ok: false, reason: msg.includes('انتهت') ? 'expired' : 'unauthorized', status: 401, message: msg }
+      }
+      const msg = typeof detail === 'string' ? detail : (detail?.message ?? `HTTP ${res.status}`)
+      return { ok: false, reason: 'http', status: res.status, message: msg }
+    }
+
+    let data: {
+      access_token?:        string
+      role?:                string
+      tenant_id?:           number
+      user_id?:             number
+      email?:               string
+      used_recovery_code?:  boolean
+    }
+    try {
+      data = await res.json()
+    } catch {
+      return { ok: false, reason: 'parse', status: res.status, message: 'Bad server response' }
+    }
+
+    _persistSession(data.access_token ?? '', {
+      role:      data.role,
+      tenant_id: data.tenant_id,
+      user_id:   data.user_id,
+    })
+    return { ok: true, status: res.status, usedRecoveryCode: !!data.used_recovery_code }
+  } catch (e) {
+    if (e instanceof Error && e.name === 'AbortError') {
+      return { ok: false, reason: 'timeout', message: 'Verify timed out.' }
+    }
+    return { ok: false, reason: 'network', message: e instanceof Error ? e.message : String(e) }
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 export function logout(): void {

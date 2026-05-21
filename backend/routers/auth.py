@@ -43,6 +43,8 @@ from core.audit import audit
 from core.auth import (
     BCRYPT_AVAILABLE,
     JWT_AVAILABLE,
+    JWT_ALGORITHM,
+    JWT_SECRET,
     create_reset_token,
     create_token,
     create_verify_token,
@@ -70,6 +72,74 @@ from core.password_setup import (
 from core.rate_limit import check_rate_limit_or_429, hash_email
 from core.token_revocation import revoke_jti
 from core.wa_notify import notify_welcome
+
+
+# ── 2FA login gate ───────────────────────────────────────────────────────────
+# A successful password verify no longer issues an access_token directly
+# when the user has 2FA enabled. Instead we issue a short-lived (5 min)
+# JWT of `type=2fa_challenge` carrying the would-be session claims, and
+# the dashboard must exchange it via POST /auth/2fa/login/verify by
+# proving possession of the TOTP code or a recovery code.
+
+_CHALLENGE_TYPE = "2fa_challenge"
+_CHALLENGE_TTL_SEC = 5 * 60
+
+
+def _make_2fa_challenge_token(
+    *,
+    user_id: int | None,
+    email: str,
+    role: str,
+    tenant_id: int,
+) -> str:
+    """Sign a 5-minute JWT that carries the pending session claims.
+
+    The dashboard CANNOT use this token against any normal endpoint —
+    `get_current_user` rejects anything whose `type` claim is set
+    (only access tokens omit `type` entirely). Its only valid use is
+    `/auth/2fa/login/verify`, which decodes it, verifies the TOTP,
+    then mints the real access_token.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+    from jose import jwt as _jwt  # noqa: PLC0415
+
+    now = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "type":      _CHALLENGE_TYPE,
+        "sub":       email,
+        "role":      role,
+        "tenant_id": int(tenant_id),
+        "iat":       int(now.timestamp()),
+        "exp":       int((now + timedelta(seconds=_CHALLENGE_TTL_SEC)).timestamp()),
+    }
+    if user_id is not None:
+        payload["user_id"] = int(user_id)
+    return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _user_has_2fa_enabled(db: Session, user_id: int | None) -> bool:
+    """Best-effort lookup; soft-fail to False on any error.
+
+    We never want a flaky DB read on a half-deployed environment to
+    block a login completely. A missing user_totp table (pre-migration)
+    or a transient DB blip returns False, which means the user logs in
+    as if 2FA were off. Once the migration is in place and a row
+    exists with confirmed_at NOT NULL, the gate kicks in.
+    """
+    if user_id is None:
+        return False
+    try:
+        from models import UserTotp  # noqa: PLC0415
+
+        row = db.query(UserTotp).filter(UserTotp.user_id == int(user_id)).first()
+        return bool(row and getattr(row, "confirmed_at", None) is not None
+                    and getattr(row, "secret_enc", None))
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("nahla-backend").warning(
+            "[auth/login] 2FA lookup failed user_id=%s err=%s — defaulting to disabled",
+            user_id, exc,
+        )
+        return False
 
 
 def _client_ip(request: Request) -> str:
@@ -316,6 +386,36 @@ def _auth_login_impl(
                         ),
                     )
 
+                # ── 2FA gate (merchant path) ───────────────────────────────
+                # If this user has confirmed 2FA, we DO NOT issue a
+                # session token. We issue a 5-minute challenge token
+                # that the dashboard must redeem at /auth/2fa/login/verify.
+                if _user_has_2fa_enabled(db, user.id):
+                    challenge = _make_2fa_challenge_token(
+                        user_id=user.id,
+                        email=user.email,
+                        role=role,
+                        tenant_id=tenant_id,
+                    )
+                    audit(
+                        "login_2fa_required",
+                        role=role, sub=user.email, tenant_id=tenant_id, ip=client_ip,
+                    )
+                    _ms = int((_time.monotonic() - _t0) * 1000)
+                    logger.info(
+                        "[AUTH LOGIN] 2FA challenge issued email=%s role=%s tenant_id=%s ms=%s",
+                        user.email, role, tenant_id, _ms,
+                    )
+                    return {
+                        "requires_2fa":     True,
+                        "challenge_token":  challenge,
+                        "challenge_ttl":    _CHALLENGE_TTL_SEC,
+                        "email":            user.email,
+                        # Role/tenant_id deliberately NOT returned here —
+                        # the dashboard learns them only after a successful
+                        # verify. Email is fine (the user just typed it).
+                    }
+
                 token = create_token(
                     email=user.email,
                     role=role,
@@ -347,6 +447,43 @@ def _auth_login_impl(
     email_ok    = hmac.compare_digest(email,        ADMIN_EMAIL.lower())
     password_ok = hmac.compare_digest(raw_password, ADMIN_PASSWORD)
     if email_ok and password_ok:
+        # ── 2FA gate (admin path) ──────────────────────────────────────────
+        # The env admin may also have enrolled 2FA via the dashboard's
+        # security settings. /auth/2fa/setup/confirm calls
+        # _provision_env_admin_user() which materialises a real User row
+        # with the admin email, so we can look up UserTotp by that user
+        # without having to hard-code a magic admin id.
+        admin_user_id: int | None = None
+        try:
+            admin_user = (
+                db.query(User)
+                  .filter(User.email == ADMIN_EMAIL.lower())
+                  .first()
+            )
+            admin_user_id = int(admin_user.id) if admin_user else None
+        except Exception:  # noqa: BLE001
+            admin_user_id = None
+
+        if _user_has_2fa_enabled(db, admin_user_id):
+            challenge = _make_2fa_challenge_token(
+                user_id=admin_user_id,
+                email=ADMIN_EMAIL,
+                role="admin",
+                tenant_id=1,
+            )
+            audit("login_2fa_required", role="admin", sub=ADMIN_EMAIL, tenant_id=1, ip=client_ip)
+            _ms = int((_time.monotonic() - _t0) * 1000)
+            logger.info(
+                "[AUTH LOGIN] 2FA challenge issued admin email=%s ms=%s",
+                ADMIN_EMAIL, _ms,
+            )
+            return {
+                "requires_2fa":     True,
+                "challenge_token":  challenge,
+                "challenge_ttl":    _CHALLENGE_TTL_SEC,
+                "email":            ADMIN_EMAIL,
+            }
+
         token = create_token(email=ADMIN_EMAIL, role="admin", tenant_id=1)
         logger.info("[AUTH LOGIN] token issued email=%s tenant_id=1 role=admin", ADMIN_EMAIL)
         audit("login_success", role="admin", sub=ADMIN_EMAIL, ip=client_ip)

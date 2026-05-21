@@ -926,3 +926,202 @@ async def two_factor_disable(
     )
 
     return {"enabled": False, "disabled_at": int(time.time())}
+
+
+# ── POST /auth/2fa/login/verify ────────────────────────────────────────────────
+# Second factor of the login flow. The dashboard hits this after /auth/login
+# returns `requires_2fa: True` + a 5-minute `challenge_token`.
+#
+# Inputs:
+#   - challenge_token: JWT with type=2fa_challenge carrying user_id, email,
+#                      role, tenant_id (signed at /auth/login time).
+#   - otp:             6-digit TOTP code from the authenticator app, OR a
+#                      12-char recovery code formatted XXXX-XXXX-XXXX.
+#
+# On success: returns the SAME shape /auth/login normally returns
+# (access_token / role / tenant_id / email / user_id) so the dashboard's
+# session-persistence path doesn't need a second code branch.
+#
+# Lockout: 5 wrong attempts in 5 minutes → user_totp.locked_until set
+# 15 minutes ahead. Rate limit on the bucket adds another layer at the
+# infrastructure level (independent of the row lock).
+class TwoFactorLoginVerifyBody(BaseModel):
+    challenge_token: str = Field(..., min_length=10)
+    otp:             str = Field(..., min_length=6, max_length=20)
+
+
+def _decode_2fa_challenge(token: str) -> Dict[str, Any]:
+    """Return the challenge payload or raise an appropriate HTTPException."""
+    if not JWT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="JWT layer غير متاح.")
+    from jose import jwt as _jwt, JWTError  # noqa: PLC0415
+
+    try:
+        payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="انتهت صلاحية جلسة التحقق. سجّل الدخول من جديد.",
+        ) from exc
+
+    if payload.get("type") != "2fa_challenge":
+        raise HTTPException(status_code=400, detail="challenge_token غير صالح (نوع خاطئ).")
+    if not payload.get("sub") or not payload.get("role") or not payload.get("tenant_id"):
+        raise HTTPException(status_code=400, detail="challenge_token ناقص.")
+    return payload
+
+
+@router.post("/login/verify")
+def two_factor_login_verify(
+    body: TwoFactorLoginVerifyBody,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Exchange a valid challenge_token + OTP for a real access_token."""
+    from core.auth import create_token  # noqa: PLC0415
+
+    # ── 0. Rate-limit the verify endpoint independently ────────────────────
+    # Keyed on the challenge_token (sub) so a stuffer can't burn through
+    # /auth/login + /login/verify in a loop. 10 / 5 min.
+    payload = _decode_2fa_challenge(body.challenge_token)
+    sub      = payload.get("sub") or ""
+    email    = str(sub).lower()
+    role     = str(payload.get("role") or "merchant")
+    tenant_id = int(payload.get("tenant_id"))
+    user_id   = payload.get("user_id")
+    user_id_int = int(user_id) if user_id is not None else None
+
+    check_rate_limit_or_429(
+        bucket="2fa_login_verify",
+        key=email or "anon",
+        max_count=10,
+        window_seconds=5 * 60,
+        audit_metadata={"path": "/auth/2fa/login/verify", "email": email, "ip": _client_ip(request)},
+    )
+
+    if user_id_int is None:
+        raise HTTPException(status_code=400, detail="challenge_token بدون user_id — أعد تسجيل الدخول.")
+
+    row = db.query(UserTotp).filter(UserTotp.user_id == user_id_int).first()
+    if not _is_enabled(row):
+        # 2FA was disabled between /auth/login and this call. Refuse —
+        # the user should retry the password login (which will now skip
+        # the challenge step entirely).
+        raise HTTPException(
+            status_code=409,
+            detail="التحقق بخطوتين لم يعد مفعّلاً لهذا الحساب. سجّل الدخول من جديد.",
+        )
+
+    # ── 1. Lockout check ───────────────────────────────────────────────────
+    now = datetime.now(timezone.utc)
+    if row.locked_until is not None and row.locked_until > now:
+        seconds_remaining = int((row.locked_until - now).total_seconds())
+        audit(
+            "2fa.login_locked", user_id=user_id_int, sub=email, ip=_client_ip(request),
+            seconds_remaining=seconds_remaining,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "totp_locked",
+                "message": (
+                    f"تم قفل حساب 2FA بسبب محاولات خاطئة متعددة. "
+                    f"حاول بعد {max(1, seconds_remaining // 60)} دقيقة."
+                ),
+                "seconds_remaining": seconds_remaining,
+            },
+        )
+
+    # ── 2. Verify the OTP — TOTP first, then recovery codes ────────────────
+    secret = decrypt_secret(row.secret_enc)
+    otp_clean = (body.otp or "").strip()
+
+    # /verify uses the tighter ±30s window (valid_window=1) because the
+    # user is already in front of the device and has just typed a code
+    # they can see right now. Enrolment widened to ±60s; steady-state
+    # login should not.
+    otp_ok = verify_totp(secret, otp_clean, valid_window=1)
+
+    recovery_row: Optional[UserRecoveryCode] = None
+    if not otp_ok:
+        # Only iterate recovery codes if the input LOOKS like one (12
+        # alphanumeric chars ignoring hyphens) — saves a bcrypt loop for
+        # every typo'd 6-digit code.
+        cleaned = "".join(ch for ch in otp_clean.upper() if ch.isalnum())
+        if len(cleaned) == 12:
+            for rc in db.query(UserRecoveryCode).filter(
+                UserRecoveryCode.user_id == user_id_int,
+                UserRecoveryCode.used_at.is_(None),
+            ).all():
+                if verify_recovery_code(otp_clean, rc.code_hash):
+                    recovery_row = rc
+                    break
+
+    if not otp_ok and recovery_row is None:
+        # ── Failure path: bump counter + maybe lock ────────────────────
+        row.failed_attempts = int(row.failed_attempts or 0) + 1
+        if row.failed_attempts >= 5:
+            row.locked_until = now + timedelta(minutes=15)
+            row.failed_attempts = 0  # reset so the next attempt after unlock isn't pre-poisoned
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        audit(
+            "2fa.login_failed", user_id=user_id_int, sub=email, ip=_client_ip(request),
+            failed_attempts=row.failed_attempts,
+            locked=bool(row.locked_until and row.locked_until > now),
+        )
+        logger.warning(
+            "[twofa] login verify failed: user_id=%s email=%s code_len=%d locked=%s",
+            user_id_int, email, len(otp_clean),
+            bool(row.locked_until and row.locked_until > now),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="رمز التحقق غير صحيح. تأكد من الوقت في جهازك ثم أعد المحاولة.",
+        )
+
+    # ── 3. Success path: reset counters, mint the real session token ───────
+    row.failed_attempts = 0
+    row.locked_until = None
+    row.last_used_at = now
+    row.updated_at = now
+    if recovery_row is not None:
+        recovery_row.used_at = now
+    try:
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        # Don't refuse the login over a counter-update failure. The
+        # security check passed; degraded persistence is logged elsewhere.
+
+    access_token = create_token(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=user_id_int,
+    )
+
+    audit(
+        "2fa.login_success",
+        user_id=user_id_int, sub=email, role=role, tenant_id=tenant_id,
+        ip=_client_ip(request),
+        used_recovery_code=bool(recovery_row),
+    )
+    logger.info(
+        "[twofa] login verified: user_id=%s email=%s role=%s tenant_id=%s recovery=%s",
+        user_id_int, email, role, tenant_id, bool(recovery_row),
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type":   "bearer",
+        "role":         role,
+        "email":        email,
+        "tenant_id":    tenant_id,
+        "user_id":      user_id_int,
+        # Surface so the dashboard can warn the user when a recovery
+        # code was just consumed (one less code available next time).
+        "used_recovery_code": bool(recovery_row),
+    }

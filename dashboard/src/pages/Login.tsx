@@ -4,6 +4,7 @@ import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
 import {
   loginDetailed, getDefaultRoute, pingAuth,
   getApiBase, hasRuntimeApiBaseOverride, setApiBaseOverride, clearServiceWorkersAndCaches,
+  verifyTwoFactorLogin,
 } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
@@ -30,6 +31,16 @@ export default function Login() {
   const [showPw,   setShowPw]   = useState(false)
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
+
+  // ── 2FA challenge state ─────────────────────────────────────────────────
+  // Populated when /auth/login returns requires_2fa=true. While these
+  // are set, the password card is hidden and a TOTP / recovery-code
+  // input is shown in its place. No session has been persisted yet.
+  const [challengeToken, setChallengeToken] = useState<string | null>(null)
+  const [challengeExpiresAt, setChallengeExpiresAt] = useState<number | null>(null)
+  const [otp, setOtp] = useState('')
+  const [otpBusy, setOtpBusy] = useState(false)
+  const [otpError, setOtpError] = useState('')
 
   // ── Diagnostics gating ──────────────────────────────────────────────────
   // The connection-diagnostics box used to ship to every merchant's
@@ -131,9 +142,21 @@ export default function Login() {
     // eslint-disable-next-line no-console
     console.info('[auth] login submit', { apiBase: getApiBase() })
     setError('')
+    setOtpError('')
     setLoading(true)
     try {
       const r = await loginDetailed(email, password)
+      if (r.ok && r.requires2fa && r.challengeToken) {
+        // Password OK; user has 2FA enabled — switch to the OTP screen.
+        // No session is stored yet.
+        setChallengeToken(r.challengeToken)
+        const ttl = typeof r.challengeTtlSec === 'number' ? r.challengeTtlSec : 300
+        setChallengeExpiresAt(Date.now() + ttl * 1000)
+        setOtp('')
+        // eslint-disable-next-line no-console
+        console.info('[auth] 2FA challenge presented', { email: r.email, ttl })
+        return
+      }
       if (r.ok) {
         // Route strictly by role — owners never land on merchant /overview, which
         // would call merchant-scoped endpoints with the owner JWT.
@@ -182,6 +205,60 @@ export default function Login() {
     }
   }
 
+  const handleVerifyOtp = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!challengeToken) return
+    setOtpError('')
+    setOtpBusy(true)
+    try {
+      const r = await verifyTwoFactorLogin(challengeToken, otp.trim())
+      if (r.ok) {
+        // eslint-disable-next-line no-console
+        console.info('[auth] 2FA verified', { usedRecoveryCode: r.usedRecoveryCode })
+        navigate(getDefaultRoute(), { replace: true })
+        return
+      }
+      switch (r.reason) {
+        case 'locked':
+          setOtpError(r.message || (lang === 'ar'
+            ? 'تم القفل المؤقت بسبب محاولات خاطئة متعددة.'
+            : 'Temporarily locked after too many wrong attempts.'))
+          break
+        case 'expired':
+          setOtpError(lang === 'ar'
+            ? 'انتهت صلاحية جلسة التحقق. أعد إدخال كلمة المرور.'
+            : 'Verification session expired. Please re-enter your password.')
+          // After expiry, drop the challenge state and let the user
+          // start over from the password card.
+          setChallengeToken(null)
+          setChallengeExpiresAt(null)
+          break
+        case 'unauthorized':
+          setOtpError(r.message || (lang === 'ar'
+            ? 'الرمز غير صحيح. أعد المحاولة.'
+            : 'The code is incorrect. Try again.'))
+          break
+        case 'timeout':
+          setOtpError(lang === 'ar' ? 'تأخر الخادم في الرد.' : 'Server timed out.')
+          break
+        case 'network':
+          setOtpError(lang === 'ar' ? 'تعذّر الاتصال بالخادم.' : 'Could not reach the server.')
+          break
+        default:
+          setOtpError(r.message || (lang === 'ar' ? 'فشل التحقق.' : 'Verification failed.'))
+      }
+    } finally {
+      setOtpBusy(false)
+    }
+  }
+
+  const cancelTwoFactor = () => {
+    setChallengeToken(null)
+    setChallengeExpiresAt(null)
+    setOtp('')
+    setOtpError('')
+  }
+
   return (
     <div className="bg-slate-900" dir={dir}>
       <div
@@ -220,16 +297,91 @@ export default function Login() {
         {/* Card */}
         <div className="bg-white rounded-2xl shadow-xl p-6 space-y-5">
           <h2 className="text-base font-semibold text-slate-800 text-center">
-            {t(tr => tr.login.submitBtn)}
+            {challengeToken
+              ? (lang === 'ar' ? 'التحقق بخطوتين' : 'Two-factor verification')
+              : t(tr => tr.login.submitBtn)}
           </h2>
 
-          {error && (
+          {error && !challengeToken && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2.5 text-sm">
               <AlertCircle className="w-4 h-4 shrink-0" />
               {error}
             </div>
           )}
 
+          {challengeToken && (
+            <form onSubmit={handleVerifyOtp} className="space-y-4">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {lang === 'ar'
+                  ? 'افتح تطبيق المصادقة (مثل Google Authenticator) وأدخل الرمز الظاهر الآن. يمكنك أيضاً استخدام أحد أكواد الاسترداد المحفوظة.'
+                  : 'Open your authenticator app (e.g. Google Authenticator) and enter the code shown right now. You can also use one of your saved recovery codes.'}
+              </p>
+
+              {otpError && (
+                <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2.5 text-sm">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{otpError}</span>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1.5">
+                  {lang === 'ar' ? 'رمز التحقق' : 'Verification code'}
+                </label>
+                <input
+                  type="text"
+                  inputMode="text"
+                  autoFocus
+                  required
+                  value={otp}
+                  onChange={e => {
+                    // Allow either a 6-digit TOTP or a 12-char alphanumeric
+                    // recovery code (with optional hyphens).
+                    const raw = e.target.value.toUpperCase()
+                    const stripped = raw.replace(/[^A-Z0-9-]/g, '').slice(0, 20)
+                    setOtp(stripped)
+                  }}
+                  placeholder={lang === 'ar' ? '123456 أو رمز استرداد' : '123456 or recovery code'}
+                  dir="ltr"
+                  className="w-full px-3 py-2.5 text-base font-mono tracking-widest text-center
+                             border border-slate-200 rounded-lg focus:outline-none focus:ring-2
+                             focus:ring-brand-500 focus:border-transparent placeholder:text-slate-300"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={otpBusy || otp.trim().length < 6}
+                className="w-full bg-brand-500 hover:bg-brand-600 disabled:opacity-60 disabled:cursor-not-allowed
+                           text-white font-semibold py-2.5 rounded-lg text-sm transition-colors
+                           flex items-center justify-center gap-2"
+              >
+                {otpBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                {otpBusy
+                  ? (lang === 'ar' ? 'جارٍ التحقق…' : 'Verifying…')
+                  : (lang === 'ar' ? 'تأكيد ودخول' : 'Verify and sign in')}
+              </button>
+
+              <button
+                type="button"
+                onClick={cancelTwoFactor}
+                disabled={otpBusy}
+                className="w-full text-xs text-slate-500 hover:text-slate-700 disabled:opacity-60"
+              >
+                {lang === 'ar' ? 'استخدام حساب آخر' : 'Use a different account'}
+              </button>
+
+              {challengeExpiresAt && (
+                <p className="text-[11px] text-slate-400 text-center">
+                  {lang === 'ar'
+                    ? 'الجلسة تنتهي بعد 5 دقائق من بداية التحقق.'
+                    : 'This verification session expires 5 minutes after sign-in.'}
+                </p>
+              )}
+            </form>
+          )}
+
+          {!challengeToken && (
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email */}
             <div>
@@ -295,6 +447,7 @@ export default function Login() {
               {loading ? t(tr => tr.login.submitting) : t(tr => tr.login.submitBtn)}
             </button>
           </form>
+          )}
         </div>
 
         <p className="text-center text-slate-500 text-xs mt-4">
