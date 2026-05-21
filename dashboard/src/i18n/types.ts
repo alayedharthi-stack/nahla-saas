@@ -527,6 +527,15 @@ export interface Translations {
     setupStep2Desc:           string
     setupStep3:               string
     setupStep3Desc:           string
+    pickerHint:               string
+    pickerBadgePrev:          string
+    pickerBadgeNow:           string
+    pickerBadgeNext:          string
+    pickerExpired:            string
+    pickerRefresh:            string
+    pickerRefreshing:         string
+    pickerOrType:             string
+    pickerSecurityNote:       string
     scanQr:                   string
     cantScan:                 string
     manualSecretLabel:        string

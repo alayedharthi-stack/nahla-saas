@@ -117,6 +117,39 @@ def main() -> int:
     else:
         results.append((True, "[ ok ] DATABASE_URL"))
 
+    # ── Phase 2A: TOTP encryption key (2FA) ──────────────────────────────────
+    # Persisting a TOTP secret in production REQUIRES a valid Fernet key.
+    # Without it, /auth/2fa/setup/start succeeds (no encryption needed yet)
+    # but /auth/2fa/setup/confirm crashes with RuntimeError the moment it
+    # tries to encrypt the secret — leaving 2FA enrolment permanently
+    # broken until ops sets the key. Catch it here at boot so the failure
+    # is loud, traceable, and never reaches a user.
+    totp_key = (os.environ.get("TOTP_ENC_KEY", "") or "").strip()
+    if not totp_key:
+        results.append((False, (
+            "[FAIL] TOTP_ENC_KEY is missing. Required for 2FA enrolment "
+            "in production. Generate a key with:\n"
+            "         python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\"\n"
+            "       Then set TOTP_ENC_KEY in Railway -> Variables and redeploy."
+        )))
+    else:
+        # Validate it's actually a Fernet key (urlsafe base64 of 32 bytes).
+        # We import cryptography here, not at module top, so the script
+        # still runs even if the optional dep is missing — the failure
+        # message stays actionable instead of dying mid-import.
+        try:
+            from cryptography.fernet import Fernet  # noqa: PLC0415
+            Fernet(totp_key.encode("utf-8"))
+            results.append((True, "[ ok ] TOTP_ENC_KEY"))
+        except Exception as exc:  # noqa: BLE001
+            results.append((False, (
+                f"[FAIL] TOTP_ENC_KEY is set but invalid: {type(exc).__name__}. "
+                f"Must be a Fernet key (urlsafe base64 of 32 bytes). Regenerate with:\n"
+                f"         python -c \"from cryptography.fernet import Fernet; "
+                f"print(Fernet.generate_key().decode())\""
+            )))
+
     # Phase 1B: Zid webhook secret is OPTIONAL by default (audit-only)
     # but PROMOTED to required at boot when ZID_WEBHOOK_REQUIRED_AT_BOOT=true.
     # This lets ops dial up enforcement after the audit window closes.

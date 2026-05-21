@@ -14,6 +14,17 @@ export interface TwoFactorStatus {
   build_marker?:             string
 }
 
+export interface TotpCandidateCode {
+  /** -1 = previous 30s window, 0 = current, +1 = next. */
+  t_offset:         number
+  /** 6-digit code valid for this specific window. */
+  code:             string
+  /** Unix time when this code becomes valid (start of its window). */
+  valid_from_unix:  number
+  /** Unix time when this code stops being valid (start of next window). */
+  valid_until_unix: number
+}
+
 export interface TwoFactorSetupStart {
   /** Short-lived (10 min) JWT carrying the pending secret. */
   setup_token:  string
@@ -35,6 +46,19 @@ export interface TwoFactorSetupStart {
   time_step_sec?: number
   /** Number of ±steps the server accepts at confirm (we widen this at enrolment). */
   valid_window?:  number
+  /**
+   * Three TOTP codes around `now` (t-1, t, t+1). The merchant taps the
+   * one matching their authenticator app instead of typing it manually.
+   * Only emitted during enrolment, never at login — see backend
+   * `_build_candidate_codes` docstring for the security rationale.
+   */
+  candidate_codes?: TotpCandidateCode[]
+}
+
+export interface TwoFactorSetupCandidates {
+  candidate_codes: TotpCandidateCode[]
+  server_unix:     number
+  time_step_sec:   number
 }
 
 export interface TwoFactorSetupConfirm {
@@ -56,6 +80,15 @@ export async function getTwoFactorStatus(): Promise<TwoFactorStatus> {
 
 export async function startTwoFactorSetup(): Promise<TwoFactorSetupStart> {
   return apiCall<TwoFactorSetupStart>('/auth/2fa/setup/start', { method: 'POST' })
+}
+
+export async function refreshTwoFactorSetupCandidates(
+  setupToken: string,
+): Promise<TwoFactorSetupCandidates> {
+  return apiCall<TwoFactorSetupCandidates>('/auth/2fa/setup/candidates', {
+    method: 'POST',
+    body: JSON.stringify({ setup_token: setupToken }),
+  })
 }
 
 export async function confirmTwoFactorSetup(args: {

@@ -76,10 +76,56 @@ logger = logging.getLogger("nahla.twofa")
 # When debugging a 500: if you DON'T see this line in the logs after a
 # fresh deploy, the new container hasn't started yet (or rollback is
 # still active).
-TWOFA_BUILD_MARKER = "2026-05-19_b9b84c07_diag1"
+TWOFA_BUILD_MARKER = "2026-05-22_picker_v1"
 logger.info("[twofa] module loaded build_marker=%s", TWOFA_BUILD_MARKER)
 
 router = APIRouter(prefix="/auth/2fa", tags=["auth-2fa"])
+
+
+# ── Helper: TOTP candidate codes for the enrolment picker ─────────────────────
+#
+# Generates the three TOTP codes that are simultaneously "close enough" to
+# the current 30-second window:
+#
+#     • t-1  →  the code that was valid up to 30s ago
+#     • t    →  the code visible in the authenticator app RIGHT NOW
+#     • t+1  →  the code that will become valid 30s from now
+#
+# The merchant taps the one that matches what they see in Google
+# Authenticator instead of typing it. Because we widened the confirm
+# window to ±60s, any of the three is accepted by `verify_totp`.
+#
+# Security note (intentionally documented at the call site too):
+#   * These three codes leak ~90s of valid TOTP material — BUT the raw
+#     secret (`secret_b32`) is already returned in the same response so
+#     users who can't scan can enter it manually. An attacker who can
+#     read `candidate_codes` can also read `secret_b32` and generate
+#     codes indefinitely. So this endpoint exposes strictly less
+#     information than what's already on the wire.
+#   * Only emitted from /setup/start (and a paired refresh endpoint),
+#     both gated by `get_current_user` and a short-lived (10 min)
+#     `setup_token`. Never from /verify, /disable or any login path.
+def _build_candidate_codes(secret_b32: str, now_unix: Optional[int] = None) -> list:
+    """Return three TOTP codes around `now_unix` with their validity windows."""
+    import pyotp  # noqa: PLC0415
+
+    if now_unix is None:
+        now_unix = int(datetime.now(timezone.utc).timestamp())
+
+    step = 30
+    totp = pyotp.TOTP(secret_b32)
+    # current window starts at floor(now / step) * step
+    window_start = (now_unix // step) * step
+    out = []
+    for offset in (-1, 0, 1):
+        center_unix = window_start + offset * step
+        out.append({
+            "t_offset":         offset,
+            "code":             totp.at(center_unix),
+            "valid_from_unix":  center_unix,
+            "valid_until_unix": center_unix + step,
+        })
+    return out
 
 
 # ── GET /auth/2fa/__diag ──────────────────────────────────────────────────────
@@ -526,6 +572,8 @@ async def two_factor_setup_start(
         ip=_client_ip(request),
     )
 
+    now_unix = int(datetime.now(timezone.utc).timestamp())
+
     return {
         "setup_token":   setup_token,
         "secret_b32":    secret,        # shown next to the QR for users who can't scan
@@ -538,9 +586,62 @@ async def two_factor_setup_start(
         # compares `server_unix` with `Date.now()/1000` and warns the
         # user if the difference is > 30s — the #1 cause of "invalid
         # code" rejections at enrolment.
-        "server_unix":   int(datetime.now(timezone.utc).timestamp()),
+        "server_unix":   now_unix,
         "time_step_sec": 30,
         "valid_window":  2,
+        # Three-code picker payload. See _build_candidate_codes docstring
+        # for the security rationale (in short: strictly less info than
+        # secret_b32 which is on the same response). Frontend renders
+        # these as buttons and the merchant taps the one matching their
+        # authenticator app — eliminating typo + boundary-crossing errors.
+        "candidate_codes": _build_candidate_codes(secret, now_unix),
+    }
+
+
+# ── POST /auth/2fa/setup/candidates ────────────────────────────────────────────
+class CandidatesBody(BaseModel):
+    setup_token: str = Field(..., min_length=10)
+
+
+@router.post("/setup/candidates")
+async def two_factor_setup_candidates(
+    body: CandidatesBody,
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Refresh the three TOTP candidate codes for an active enrolment session.
+
+    The codes returned by /setup/start expire after roughly 60-90 seconds.
+    When a merchant lingers on the picker (reading the QR, fumbling with
+    their phone, switching apps) the three buttons go stale and clicking
+    any of them would now be rejected. This endpoint hands out a fresh
+    triple without regenerating the underlying secret (which would also
+    invalidate the QR they already scanned).
+
+    Security: gated by get_current_user AND by a valid setup_token that
+    only the same user can decode. No DB writes, no secret rotation,
+    no audit emission (light operation). Rate-limited to 60 calls / 10
+    min per user — effectively one refresh every ~10s which is plenty
+    given the 30-sec TOTP step.
+    """
+    user_id = _resolve_user_id(user, db)
+
+    check_rate_limit_or_429(
+        bucket="2fa_setup_candidates",
+        key=str(user_id),
+        max_count=60,
+        window_seconds=10 * 60,
+        audit_metadata={"path": "/auth/2fa/setup/candidates", "user_id": user_id, "ip": _client_ip(request)},
+    )
+
+    secret = _decode_setup_token(body.setup_token, expected_user_id=user_id)
+    now_unix = int(datetime.now(timezone.utc).timestamp())
+    return {
+        "candidate_codes": _build_candidate_codes(secret, now_unix),
+        "server_unix":     now_unix,
+        "time_step_sec":   30,
     }
 
 
@@ -648,8 +749,44 @@ async def two_factor_setup_confirm(
     plaintext_codes = generate_recovery_codes(10)
     now = datetime.now(timezone.utc)
 
+    # Encrypt the secret BEFORE doing anything else with the DB session.
+    # `_fernet()` raises RuntimeError when TOTP_ENC_KEY is missing or
+    # malformed in production — without the catch, that RuntimeError
+    # bubbles all the way out to the multi_tenant middleware and the
+    # user sees a generic "middleware_fallback" 500 with no actionable
+    # info. Catching here lets us return a clear operator-facing error
+    # that names the missing env var and the fix.
+    try:
+        secret_enc_blob = encrypt_secret(secret)
+    except RuntimeError as exc:
+        logger.error(
+            "[twofa] confirm: TOTP_ENC_KEY missing/invalid — user_id=%s build=%s err=%s",
+            user_id, TWOFA_BUILD_MARKER, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "totp_enc_key_missing",
+                "exc_class": "RuntimeError",
+                "build_marker": TWOFA_BUILD_MARKER,
+                "message": (
+                    "تعذّر تفعيل التحقق بخطوتين: مفتاح تشفير الرموز السرية غير مضبوط على الخادم.\n"
+                    "هذه ليست مشكلة في الرمز الذي أدخلته — التحقق نجح، لكن الخادم لا يستطيع حفظ السر بأمان.\n"
+                    "أبلغ فريق الدعم برمز الخطأ: totp_enc_key_missing."
+                ),
+                # Operator-facing hint (rendered as a separate code block on the
+                # dashboard for admins). Names the exact env var so the fix is
+                # a one-line Railway change, not a guessing game.
+                "operator_hint": (
+                    "Set TOTP_ENC_KEY in Railway → Variables. Generate with:\n"
+                    "  python -c \"from cryptography.fernet import Fernet; "
+                    "print(Fernet.generate_key().decode())\""
+                ),
+            },
+        ) from exc
+
     if existing is not None:
-        existing.secret_enc = encrypt_secret(secret)
+        existing.secret_enc = secret_enc_blob
         existing.confirmed_at = now
         existing.last_used_at = now
         existing.failed_attempts = 0
@@ -658,7 +795,7 @@ async def two_factor_setup_confirm(
     else:
         db.add(UserTotp(
             user_id=user_id,
-            secret_enc=encrypt_secret(secret),
+            secret_enc=secret_enc_blob,
             confirmed_at=now,
             last_used_at=now,
             failed_attempts=0,

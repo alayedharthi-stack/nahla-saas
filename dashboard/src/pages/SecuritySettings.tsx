@@ -24,7 +24,9 @@ import {
   confirmTwoFactorSetup,
   disableTwoFactor,
   getTwoFactorStatus,
+  refreshTwoFactorSetupCandidates,
   startTwoFactorSetup,
+  type TotpCandidateCode,
   type TwoFactorSetupStart,
   type TwoFactorStatus,
 } from '../api/twofa'
@@ -81,12 +83,22 @@ export default function SecuritySettings() {
     timeStepSec?:   number
     buildMarker?:   string
     clockSkewSec?:  number
+    /** Set when the server reports a config issue (e.g. TOTP_ENC_KEY missing). */
+    serverConfigCode?: string
+    /** Operator-facing hint surfaced by the backend for admin-only errors. */
+    operatorHint?:     string
   } | null>(null)
   // Soft clock-skew warning shown the moment the QR appears. We compare
   // the server timestamp returned by /setup/start with the local clock
   // and tell the user upfront if their phone clock is likely drifted —
   // this prevents the 6-digit code from ever being accepted otherwise.
   const [clockSkewSec, setClockSkewSec] = useState<number | null>(null)
+  // Three-code picker: candidates from the server + a local ticking
+  // clock used to compute remaining validity per button and to trigger
+  // a refresh just before they expire.
+  const [candidates, setCandidates]       = useState<TotpCandidateCode[]>([])
+  const [refreshingCands, setRefreshingCands] = useState(false)
+  const [nowUnix, setNowUnix]             = useState<number>(() => Math.floor(Date.now() / 1000))
   const [codesCopied, setCodesCopied]   = useState(false)
   const [disableOpen, setDisableOpen]   = useState(false)
   const [disablePwd, setDisablePwd]     = useState('')
@@ -114,6 +126,47 @@ export default function SecuritySettings() {
     probeError?: string
   } | null>(null)
   const [showDiag, setShowDiag]       = useState(false)
+
+  // ── Picker tick: drives countdowns + expiry detection ──────────────────
+  // 1Hz is plenty — the visual changes per second (remaining countdown)
+  // and the auto-refresh decision triggers off whole-second boundaries.
+  // We only tick while the picker is actually visible to avoid an idle
+  // setInterval running for the entire dashboard session.
+  useEffect(() => {
+    if (phase !== 'setup' || candidates.length === 0) return
+    const id = window.setInterval(() => {
+      setNowUnix(Math.floor(Date.now() / 1000))
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [phase, candidates.length])
+
+  // ── Auto-refresh candidates just before they all expire ─────────────────
+  // The latest button (t+1) stays valid until valid_until_unix. Once we're
+  // within 3 seconds of every candidate expiring, fetch a fresh triple so
+  // the picker never goes dark in front of the user.
+  useEffect(() => {
+    if (phase !== 'setup' || !setup || candidates.length === 0) return
+    const maxValid = Math.max(...candidates.map(c => c.valid_until_unix))
+    if (nowUnix < maxValid - 3) return
+    if (refreshingCands) return
+    let alive = true
+    ;(async () => {
+      setRefreshingCands(true)
+      try {
+        const fresh = await refreshTwoFactorSetupCandidates(setup.setup_token)
+        if (alive) setCandidates(fresh.candidate_codes || [])
+      } catch {
+        // Soft failure — user can still type the code manually. We log
+        // to the console so an ops person can grep but don't surface
+        // an error banner that would distract from the main flow.
+        // eslint-disable-next-line no-console
+        console.warn('[2fa] candidate refresh failed; manual entry still works')
+      } finally {
+        if (alive) setRefreshingCands(false)
+      }
+    })()
+    return () => { alive = false }
+  }, [nowUnix, candidates, phase, setup, refreshingCands])
 
   // ── Initial status load ──────────────────────────────────────────────────
   useEffect(() => {
@@ -198,14 +251,20 @@ export default function SecuritySettings() {
     setInfo(null)
     setSecretCopied(false)
     setCodesCopied(false)
+    setCandidates([])
+    setRefreshingCands(false)
+    setConfirmDiag(null)
+    setClockSkewSec(null)
   }
 
   async function onStartSetup() {
-    setBusy(true); setErr(null); setInfo(null); setConfirmDiag(null); setClockSkewSec(null)
+    setBusy(true); setErr(null); setInfo(null); setConfirmDiag(null); setClockSkewSec(null); setCandidates([])
     try {
       const data = await startTwoFactorSetup()
       setSetup(data)
       setPhase('setup')
+      setCandidates(data.candidate_codes || [])
+      setNowUnix(Math.floor(Date.now() / 1000))
       // Detect device-vs-server clock skew the moment we get the QR.
       // The server returned its own unix timestamp; anything > 25s of
       // drift means the 6-digit code is almost guaranteed to fail.
@@ -221,11 +280,13 @@ export default function SecuritySettings() {
     }
   }
 
-  async function onConfirmSetup() {
+  async function onConfirmSetup(overrideCode?: string) {
     if (!setup) return
+    const submittedCode = (overrideCode ?? otp).trim()
+    if (submittedCode.length < 6) return
     setBusy(true); setErr(null); setConfirmDiag(null)
     try {
-      const data = await confirmTwoFactorSetup({ setupToken: setup.setup_token, otp })
+      const data = await confirmTwoFactorSetup({ setupToken: setup.setup_token, otp: submittedCode })
       setCodes(data.recovery_codes)
       setPhase('showCodes')
       setOtp('')
@@ -237,7 +298,9 @@ export default function SecuritySettings() {
       const serverUnix = typeof e?.server_unix === 'number' ? e.server_unix : undefined
       const localUnix  = Math.floor(Date.now() / 1000)
       const skew       = typeof serverUnix === 'number' ? (localUnix - serverUnix) : undefined
+      const isServerConfigError = e?.code === 'totp_enc_key_missing'
       if (
+        isServerConfigError ||
         e?.code === 'totp_invalid' ||
         typeof e?.server_unix === 'number' ||
         typeof e?.setup_age_sec === 'number'
@@ -250,6 +313,8 @@ export default function SecuritySettings() {
           timeStepSec:  typeof e?.time_step_sec === 'number' ? e.time_step_sec : undefined,
           buildMarker:  typeof e?.build_marker === 'string' ? e.build_marker : undefined,
           clockSkewSec: skew,
+          serverConfigCode: isServerConfigError ? e.code : undefined,
+          operatorHint:     typeof e?.operator_hint === 'string' ? e.operator_hint : undefined,
         })
       }
     } finally {
@@ -600,8 +665,105 @@ export default function SecuritySettings() {
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{tr.setupStep3Desc}</p>
                 </div>
 
-                <label className="block mt-3">
-                  <span className="text-xs font-medium text-slate-500 dark:text-slate-400">{tr.otpLabel}</span>
+                {candidates.length > 0 && (
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-slate-500 dark:text-slate-400">{tr.pickerHint}</p>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!setup || refreshingCands) return
+                          setRefreshingCands(true)
+                          try {
+                            const fresh = await refreshTwoFactorSetupCandidates(setup.setup_token)
+                            setCandidates(fresh.candidate_codes || [])
+                          } catch { /* picker stays as-is; manual entry still works */ }
+                          finally { setRefreshingCands(false) }
+                        }}
+                        disabled={refreshingCands || busy}
+                        className="text-[11px] text-brand-600 dark:text-brand-400 hover:text-brand-700 dark:hover:text-brand-300 disabled:opacity-60 font-medium"
+                      >
+                        {refreshingCands ? tr.pickerRefreshing : tr.pickerRefresh}
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      {candidates.map((c) => {
+                        const remaining = c.valid_until_unix - nowUnix
+                        const expired   = remaining <= 0
+                        const isNow     = c.t_offset === 0
+                        const badgeText =
+                          c.t_offset === -1 ? tr.pickerBadgePrev :
+                          c.t_offset === 0  ? tr.pickerBadgeNow  :
+                                              tr.pickerBadgeNext
+                        const pct = expired
+                          ? 0
+                          : Math.max(0, Math.min(100, Math.round(((c.valid_until_unix - nowUnix) / 30) * 100)))
+                        return (
+                          <button
+                            key={c.t_offset}
+                            type="button"
+                            disabled={busy || expired}
+                            onClick={() => {
+                              setOtp(c.code)
+                              onConfirmSetup(c.code)
+                            }}
+                            className={[
+                              'group relative overflow-hidden rounded-xl border px-2 py-3 text-center transition',
+                              expired
+                                ? 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 text-slate-400 cursor-not-allowed'
+                                : isNow
+                                  ? 'border-brand-400 dark:border-brand-500 bg-brand-50 dark:bg-brand-900/30 text-slate-900 dark:text-slate-100 hover:border-brand-500 hover:shadow-sm'
+                                  : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 text-slate-900 dark:text-slate-100 hover:border-brand-400 dark:hover:border-brand-500 hover:shadow-sm',
+                            ].join(' ')}
+                          >
+                            <span
+                              className={[
+                                'absolute top-1 inline-flex items-center text-[9px] font-semibold uppercase tracking-wide rounded-full px-1.5 py-0.5',
+                                isRTL ? 'end-1' : 'start-1',
+                                isNow
+                                  ? 'bg-brand-500 text-white'
+                                  : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300',
+                              ].join(' ')}
+                            >
+                              {badgeText}
+                            </span>
+
+                            <p
+                              className="font-mono text-base sm:text-lg font-bold tracking-[0.18em] mt-3 mb-1.5"
+                              style={{ direction: 'ltr' }}
+                            >
+                              {expired ? '——————' : `${c.code.slice(0, 3)} ${c.code.slice(3)}`}
+                            </p>
+
+                            <div className="h-1 w-full bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full transition-all duration-1000 ease-linear ${
+                                  isNow ? 'bg-brand-500' : 'bg-slate-400 dark:bg-slate-500'
+                                }`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                              {expired
+                                ? tr.pickerExpired
+                                : `${Math.max(0, remaining)}s`}
+                            </p>
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    <p className="mt-2 text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
+                      {tr.pickerSecurityNote}
+                    </p>
+                  </div>
+                )}
+
+                <label className="block mt-4">
+                  <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                    {candidates.length > 0 ? tr.pickerOrType : tr.otpLabel}
+                  </span>
                   <input
                     type="text"
                     inputMode="numeric"
@@ -616,7 +778,7 @@ export default function SecuritySettings() {
                 <div className="mt-4 flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={onConfirmSetup}
+                    onClick={() => onConfirmSetup()}
                     disabled={busy || otp.length < 6}
                     className="bg-brand-600 hover:bg-brand-500 disabled:opacity-60 text-white text-sm font-semibold px-4 py-2 rounded-xl"
                   >
@@ -652,7 +814,36 @@ export default function SecuritySettings() {
                   </div>
                 )}
 
-                {confirmDiag && (
+                {confirmDiag?.serverConfigCode === 'totp_enc_key_missing' && (
+                  <div className="mt-4 rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/25 px-3 py-3 text-xs">
+                    <div className="flex items-start gap-2 mb-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <p className="font-semibold text-amber-900 dark:text-amber-100">
+                        {isRTL ? 'إعداد الخادم ناقص (ليس خطأ منك)' : 'Server configuration missing (not your fault)'}
+                      </p>
+                    </div>
+                    <p className="ms-6 text-amber-900 dark:text-amber-100 leading-relaxed mb-2">
+                      {isRTL
+                        ? 'الرمز الذي أدخلته صحيح، لكن الخادم لا يستطيع حفظ السر بأمان لأنّ مفتاح التشفير غير مضبوط.'
+                        : 'Your code is correct, but the server can\'t store the secret because the encryption key isn\'t configured.'}
+                    </p>
+                    {confirmDiag.operatorHint && (
+                      <pre
+                        className="ms-6 mt-1 p-2 rounded-lg bg-slate-900 text-slate-100 dark:bg-slate-950 dark:text-slate-200 text-[11px] leading-relaxed overflow-auto whitespace-pre-wrap"
+                        dir="ltr"
+                      >
+                        {confirmDiag.operatorHint}
+                      </pre>
+                    )}
+                    {confirmDiag.buildMarker && (
+                      <p className="ms-6 mt-2 text-[10px] text-amber-700 dark:text-amber-300 font-mono">
+                        build: {confirmDiag.buildMarker}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {confirmDiag && confirmDiag.serverConfigCode !== 'totp_enc_key_missing' && (
                   <div className="mt-4 rounded-xl border border-rose-200 dark:border-rose-800/60 bg-rose-50 dark:bg-rose-900/20 px-3 py-2.5 text-xs">
                     <div className="flex items-start gap-2 mb-2">
                       <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
