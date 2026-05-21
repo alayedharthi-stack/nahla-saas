@@ -237,6 +237,17 @@ def test_social_does_not_fire_on_commercial(message: str) -> None:
     "هل ينفع للأطفال",
     "هل يصلح للحامل",
     "ينفع لمشاكل البطن؟",
+    # May 2026 #14 — merchant reproducer. The customer asked whether
+    # the product is good for stomach issues; the bot canned a
+    # "تسلم 🤍 وهذا كله من لطفك" compliment reply because "ممتاز"
+    # matched _COMPLIMENT_KEYWORDS. The interrogative particle "هل"
+    # in front of the adjective must yield to the brain.
+    "هو هل ممتاز لمشاكل البطن والجهاز الهضمي",
+    "هل ممتاز للأطفال",
+    "هل هو ممتاز لمشاكل القولون",
+    "هل ممتازه للحامل",
+    "هل يفيد في تخفيف الوزن",
+    "هل يساعد في النوم",
     # Courtesy + question mark alone — the question mark always wins.
     "تسلم، عندك توصيل بكرة؟",
     "الله يعافيك، متى يصير عندك ضهيان؟",
@@ -262,6 +273,11 @@ def test_social_yields_on_practical_question(message: str) -> None:
     ("شكراً جزيلاً",      SOCIAL_THANKS),
     ("تسلم يا غالي",      SOCIAL_THANKS),
     ("الله يبارك فيك",    SOCIAL_BLESSING),
+    # May 2026 #14 — verify that ``ممتاز`` ALONE still classifies as
+    # a compliment. The new "هل ممتاز" disqualifier must only fire on
+    # the question shape, never on the bare adjective compliment.
+    ("ممتاز",              SOCIAL_COMPLIMENT),
+    ("ممتاز يا غالي",      SOCIAL_COMPLIMENT),
 ])
 def test_pure_social_still_classifies_after_disqualifier_added(
     message: str, expected_category: str,

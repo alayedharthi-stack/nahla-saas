@@ -383,6 +383,20 @@ _PRACTICAL_QUESTION_SIGNALS = (
     "متي اكل", "متى اكل",
     # Suitability — "does it work for...".
     "ينفع ل", "هل ينفع", "هل يصلح", "يصلح ل", "هل يفيد",
+    # "Is it good for X?" — same shape but using ``ممتاز`` (excellent)
+    # as the adjective instead of ``ينفع`` / ``يصلح`` / ``يفيد``.
+    # Merchant reproducer (May 2026 #14): the customer asked
+    # "هو هل ممتاز لمشاكل البطن والجهاز الهضمي" and the bot replied
+    # "تسلم 🤍 وهذا كله من لطفك" — the substring "ممتاز" matched
+    # `_COMPLIMENT_KEYWORDS` and the message was canned as a generic
+    # compliment, dropping the real product question. These ``هل ...``
+    # prefixes are unambiguous yes/no question shapes and they all
+    # require the interrogative particle to be present, so bare
+    # "ممتاز" / "ممتاز يا غالي" / "خدمتكم ممتازة" (real compliments)
+    # still classify as SOCIAL_COMPLIMENT.
+    "هل ممتاز", "هل هو ممتاز", "هل هي ممتاز", "هل هي ممتازه",
+    "هل ممتازه", "هل ينفع ل", "هل يساعد ل", "هل يساعد في", "هل يفيد ل",
+    "هل يفيد في",
 )
 
 
