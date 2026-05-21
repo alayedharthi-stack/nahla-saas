@@ -411,6 +411,8 @@ app.include_router(_admin_debug_router)
 app.include_router(_admin_salla_token_router)
 from routers.admin_webhook_security import router as _admin_webhook_security_router  # noqa: E402
 app.include_router(_admin_webhook_security_router)
+from routers.admin_ai_quality import router as _admin_ai_quality_router  # noqa: E402
+app.include_router(_admin_ai_quality_router)
 app.include_router(_auth_router)
 app.include_router(_twofa_router)
 app.include_router(_settings_router)
