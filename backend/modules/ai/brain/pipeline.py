@@ -1055,101 +1055,23 @@ class MerchantBrain:
         self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
         pending_buttons: List[Dict[str, Any]] = list(result.data.get("pending_buttons") or [])
 
-        # ── 10. Structured turn trace (searchable in Railway logs) ────────
-        try:
-            logger.info(
-                "[BrainTurn] %s",
-                json.dumps({
-                    "tenant_id":     tenant_id,
-                    "phone":         customer_phone[-4:] if len(customer_phone) >= 4 else "****",
-                    "turn":          new_state.turn,
-                    "message_len":   len(message),
-                    # Intent layer
-                    "detected_intent": intent.name,
-                    "confidence":    round(intent.confidence, 2),
-                    "slots":         intent.slots,
-                    "method":        intent.extraction_method,
-                    # State transition
-                    "stage_before":  stage_before,
-                    "stage_after":   new_state.stage,
-                    "greeted":       new_state.greeted,
-                    "product_focus": (new_state.current_product_focus or {}).get("title"),
-                    "draft_order":   new_state.draft_order_id,
-                    "order_prep_missing": list(getattr(new_state.order_prep, "missing_fields", []) or []),
-                    # Commerce facts snapshot
-                    "facts": {
-                        "products":      facts.product_count,
-                        "in_stock":      getattr(facts, "in_stock_count", None),
-                        "orderable":     getattr(facts, "orderable", facts.has_products and facts.has_active_integration),
-                        "coupons":       facts.has_coupons,
-                        "integration":   facts.has_active_integration,
-                        "platform":      getattr(facts, "integration_platform", "unknown"),
-                        "store":         facts.store_name,
-                    },
-                    # Decision layer
-                    "action":             decision.action,
-                    "chosen_path":        result.data.get("chosen_path"),
-                    "reason":             decision.reason,
-                    "policy_modified":    decision.reason != reason_before_policy,
-                    "whether_coupon_logic_considered": suggestion.coupon_logic_considered,
-                    "suggested_next_step": suggestion.suggested_next_step,
-                    "customer_goal":      new_state.customer_goal,
-                    "selected_product":   (new_state.current_product_focus or {}).get("title"),
-                    "checkout_city":      getattr(new_state.order_prep, "city", ""),
-                    "short_address_code": getattr(new_state.order_prep, "short_address_code", ""),
-                    # Execution + response
-                    "exec_success":     result.success,
-                    "exec_error":       result.error,
-                    "response_mode":    "llm" if result.data.get("chosen_path", "").startswith("llm") else "template",
-                    "reply_len":        len(reply),
-                    "latency_ms":       latency_ms,
-                }, ensure_ascii=False),
-            )
-        except Exception:
-            pass   # trace logging must never break the reply path
-
-        # ── Marker scrub at the brain boundary ──────────────────
+        # ── 9b. Marker scrub at the brain boundary ─────────────────
         #
-        # This is the SINGLE chokepoint every downstream consumer
-        # (DB persistence via StateManager.save_message + TurnLog +
-        # webhook send path + dashboard render) reads from. Scrub
-        # here so:
-        #
-        #   * The MessageEvent row written by StateManager.save_message
-        #     never contains `[TEMPLATE:contact_owner]` /
-        #     `[TRANSFER]` / `[DEBUG]` / `[ACTION]` / `[INTERNAL]`
-        #     — dashboard preview stays clean.
-        #   * The wire-layer scrub in
-        #     `services.whatsapp_platform.service._scrub_outbound_payload`
-        #     becomes a no-op for AI-generated replies (defense in
-        #     depth, not load-bearing).
-        #   * Downstream string transforms (handoff prefix, CTA
-        #     extraction, etc.) never operate on hallucinated
-        #     placeholder text.
-        #
-        # Why brain-boundary AND wire-layer?
-        # ----------------------------------
-        # The brain boundary catches AI hallucinations at the
-        # earliest possible moment in this process. The wire layer
-        # catches markers from OTHER outbound paths (manual
-        # /conversations/reply, automation engine, orders, cart
-        # recovery, admin direct-send) that don't pass through the
-        # brain. Two scrubs, two different blast radii — no
-        # single path can leak markers to Meta OR the DB.
-        #
-        # Error policy: scrub is defense-in-depth. If the import
-        # or scrub itself fails (e.g. unicode-level regex bug),
-        # log and return the un-scrubbed reply — better to send
-        # ugly text than fail the whole reply.
+        # Run scrub BEFORE the alignment check + structured trace
+        # log so the validator + log see the SAME text the
+        # downstream consumers (DB row, webhook, dashboard) receive.
+        # This is the single chokepoint that strips internal
+        # planner / debug / action markers — see
+        # ``core.ai_libraries.scrub_internal_markers``.
         try:
             from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
-            _orig = reply
+            _orig_scrub = reply
             reply = scrub_internal_markers(reply or "")
-            if reply != _orig:
+            if reply != _orig_scrub:
                 logger.info(
                     "[BRAIN_SCRUB] stripped markers from reply "
                     "tenant=%s len_before=%d len_after=%d",
-                    tenant_id, len(_orig or ""), len(reply or ""),
+                    tenant_id, len(_orig_scrub or ""), len(reply or ""),
                 )
         except Exception as _scrub_exc:  # noqa: BLE001
             logger.warning(
@@ -1157,16 +1079,16 @@ class MerchantBrain:
                 _scrub_exc,
             )
 
-        # ── Final semantic alignment check (May 2026 #12) ──────────
+        # ── 10a. Single per-turn audit fields (May 2026 #12) ──────────────
         #
-        # Defense-in-depth catch for the four mismatch shapes pulled
-        # from real merchant screenshots (product question → social
-        # ack, polite close → "وش الخدمة", religious dua → out-of-
-        # scope template, delivery confirmation → payment receipt).
-        # Default is LOG-ONLY — we collect baseline misfire data in
-        # ``[ALIGN_MISMATCH]`` lines first, then flip the
-        # ``BRAIN_ALIGNMENT_REGEN`` env to ``"1"`` once the signal
-        # looks clean. Never raises into the reply path.
+        # Compute the answer-alignment outcome BEFORE the structured
+        # log so it can ship in the same line. Default mode is
+        # log-only — see ``postprocess.answer_alignment.regen_enabled``
+        # for the opt-in env flag. Wrapped in try/except so a
+        # validator bug never breaks a turn.
+        _align_passed: bool = True
+        _align_mismatch: str = ""
+        _align_regen_fired: bool = False
         try:
             from modules.ai.brain.postprocess.answer_alignment import (  # noqa: PLC0415
                 check_alignment, regen_enabled, emit_mismatch_log,
@@ -1181,8 +1103,10 @@ class MerchantBrain:
                     getattr(new_state.order_prep, "awaiting_payment_receipt", False)
                 ),
             )
+            _align_passed = _align_result.passed
+            _align_mismatch = _align_result.mismatch_type
             if not _align_result.passed:
-                _regen = regen_enabled()
+                _align_regen_fired = regen_enabled()
                 emit_mismatch_log(
                     tenant_id=tenant_id,
                     phone=customer_phone or "",
@@ -1196,14 +1120,9 @@ class MerchantBrain:
                     awaiting_payment_receipt=bool(
                         getattr(new_state.order_prep, "awaiting_payment_receipt", False)
                     ),
-                    regen_will_fire=_regen,
+                    regen_will_fire=_align_regen_fired,
                 )
-                # ``BRAIN_ALIGNMENT_REGEN`` opt-in: when set, blank
-                # the reply so the existing duplicate-guard / wire-
-                # layer fallback rebuilds via ACTION_LLM_REPLY. We
-                # deliberately do NOT compose anything here — the
-                # contract is "no new templates".
-                if _regen:
+                if _align_regen_fired:
                     logger.info(
                         "[ALIGN_MISMATCH] regen requested — clearing "
                         "reply for downstream rebuild | tenant=%s "
@@ -1217,6 +1136,111 @@ class MerchantBrain:
                 "returning reply unchanged",
                 _align_exc,
             )
+
+        # Derive observability hints used by the audit log:
+        # * ``social_category`` — set by classify_social via intent.slots.
+        # * ``fallback_used``   — chosen_path begins with "llm_fallback"
+        #   / "fallback" / template-only paths the composer flags.
+        # * ``model_used``      — composer / classifier may stash this
+        #   on result.data; absent → "" (still logged so dashboards
+        #   can detect the gap).
+        _chosen_path = str(result.data.get("chosen_path") or "")
+        _fallback_used = bool(
+            "fallback" in _chosen_path
+            or "timeout" in _chosen_path
+            or "duplicate" in _chosen_path
+        )
+        _social_category = ""
+        try:
+            slots = getattr(intent, "slots", None) or {}
+            _social_category = str(slots.get("social_category") or "")
+        except Exception:
+            pass
+        _model_used = str(
+            result.data.get("model_used")
+            or result.data.get("llm_model")
+            or ""
+        )
+
+        # ── 10. Structured turn trace (searchable in Railway logs) ────────
+        #
+        # Single per-turn record — every field the merchant's audit
+        # request asked for. Existing dashboards read ``[BrainTurn]``
+        # so we extend the same line rather than introducing a
+        # parallel log channel.
+        try:
+            logger.info(
+                "[BrainTurn] %s",
+                json.dumps({
+                    "tenant_id":     tenant_id,
+                    "phone":         customer_phone[-4:] if len(customer_phone) >= 4 else "****",
+                    "turn":          new_state.turn,
+                    "message_len":   len(message),
+                    # Inbound preview — truncated for log volume; the
+                    # full body lives in MessageEvent. The merchant's
+                    # audit explicitly asked for ``last_user_message``
+                    # so a misclassification can be traced without
+                    # joining tables.
+                    "inbound_preview": (message or "")[:160],
+                    # Intent layer
+                    "detected_intent": intent.name,
+                    "confidence":    round(intent.confidence, 2),
+                    "slots":         intent.slots,
+                    "method":        intent.extraction_method,
+                    "social_category": _social_category,
+                    # State transition
+                    "stage_before":  stage_before,
+                    "stage_after":   new_state.stage,
+                    "greeted":       new_state.greeted,
+                    "product_focus": (new_state.current_product_focus or {}).get("title"),
+                    "draft_order":   new_state.draft_order_id,
+                    "order_prep_missing": list(getattr(new_state.order_prep, "missing_fields", []) or []),
+                    # Order / payment state — for post-order context
+                    # disambiguation (delivery vs receipt).
+                    "order_status":  str(getattr(new_state.order_prep, "order_status", "") or ""),
+                    "awaiting_payment_receipt": bool(
+                        getattr(new_state.order_prep, "awaiting_payment_receipt", False)
+                    ),
+                    "payment_receipt_received": bool(
+                        getattr(new_state.order_prep, "payment_receipt_received", False)
+                    ),
+                    # Commerce facts snapshot
+                    "facts": {
+                        "products":      facts.product_count,
+                        "in_stock":      getattr(facts, "in_stock_count", None),
+                        "orderable":     getattr(facts, "orderable", facts.has_products and facts.has_active_integration),
+                        "coupons":       facts.has_coupons,
+                        "integration":   facts.has_active_integration,
+                        "platform":      getattr(facts, "integration_platform", "unknown"),
+                        "store":         facts.store_name,
+                    },
+                    # Decision layer
+                    "action":             decision.action,
+                    "chosen_path":        _chosen_path,
+                    "reason":             decision.reason,
+                    "policy_modified":    decision.reason != reason_before_policy,
+                    "whether_coupon_logic_considered": suggestion.coupon_logic_considered,
+                    "suggested_next_step": suggestion.suggested_next_step,
+                    "customer_goal":      new_state.customer_goal,
+                    "selected_product":   (new_state.current_product_focus or {}).get("title"),
+                    "checkout_city":      getattr(new_state.order_prep, "city", ""),
+                    "short_address_code": getattr(new_state.order_prep, "short_address_code", ""),
+                    # Execution + response
+                    "exec_success":     result.success,
+                    "exec_error":       result.error,
+                    "response_mode":    "llm" if _chosen_path.startswith("llm") else "template",
+                    "fallback_used":    _fallback_used,
+                    "model_used":       _model_used,
+                    "reply_len":        len(reply or ""),
+                    # Final answer-alignment outcome.
+                    "alignment_passed":   _align_passed,
+                    "alignment_mismatch": _align_mismatch,
+                    "alignment_regen":    _align_regen_fired,
+                    "latency_ms":       latency_ms,
+                }, ensure_ascii=False),
+            )
+        except Exception:
+            pass   # trace logging must never break the reply path
 
         return {
             "reply": reply,
