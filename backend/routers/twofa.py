@@ -533,6 +533,14 @@ async def two_factor_setup_start(
         "issuer":        "Nahla AI",
         "account":       db_user.email,
         "expires_in":    10 * 60,
+        # Diagnostic helpers so the dashboard can detect clock skew with
+        # the user's device BEFORE they try to confirm. The frontend
+        # compares `server_unix` with `Date.now()/1000` and warns the
+        # user if the difference is > 30s — the #1 cause of "invalid
+        # code" rejections at enrolment.
+        "server_unix":   int(datetime.now(timezone.utc).timestamp()),
+        "time_step_sec": 30,
+        "valid_window":  2,
     }
 
 
@@ -571,17 +579,69 @@ async def two_factor_setup_confirm(
         raise HTTPException(status_code=409, detail="التحقق بخطوتين مفعّل مسبقاً.")
 
     secret = _decode_setup_token(body.setup_token, expected_user_id=user_id)
-    if not verify_totp(secret, body.otp):
+
+    # ── Confirm-time TOTP verification ──────────────────────────────────────
+    # We deliberately widen the acceptance window to ±60s (valid_window=2)
+    # ONLY at first enrolment. Reasons:
+    #   * The user is reading a 6-digit code from a phone, typing it on a
+    #     desktop, then clicking submit. Any of those 3 steps can eat up
+    #     20-30s, and pyotp's default ±30s window (valid_window=1) is
+    #     unforgiving once you cross a 30-sec boundary.
+    #   * Several enrolment failures we've seen in production are NOT
+    #     wrong codes — they're stale codes (the screen showed the next
+    #     30s window by the time submit fired).
+    #   * Steady-state login (`/auth/2fa/verify`) keeps the tighter
+    #     ±30s window. Widening only at enrolment doesn't weaken the
+    #     long-term authentication surface — the user must still prove
+    #     possession of the freshly-scanned secret right now.
+    # If even ±60s rejects the code, we surface structured diagnostics
+    # (server clock, code length, setup-token age) so the dashboard can
+    # tell the user EXACTLY what's wrong instead of a generic prompt.
+    code_clean = (body.otp or "").strip()
+    now_unix = int(datetime.now(timezone.utc).timestamp())
+    setup_age_sec: Optional[int] = None
+    try:
+        from jose import jwt as _jwt  # noqa: PLC0415
+        _payload = _jwt.decode(body.setup_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        _iat = int(_payload.get("iat") or 0)
+        if _iat > 0:
+            setup_age_sec = max(0, now_unix - _iat)
+    except Exception:  # noqa: BLE001
+        setup_age_sec = None
+
+    if not verify_totp(secret, code_clean, valid_window=2):
         audit(
             "2fa.verify_failed",
             user_id=user_id,
             sub=db_user.email,
             ip=_client_ip(request),
             stage="setup_confirm",
+            code_len=len(code_clean),
+            server_unix=now_unix,
+            setup_age_sec=setup_age_sec,
+        )
+        logger.warning(
+            "[twofa] confirm rejected: user_id=%s code_len=%d server_unix=%d "
+            "time_step=30 valid_window=2 setup_age_sec=%s",
+            user_id, len(code_clean), now_unix, setup_age_sec,
         )
         raise HTTPException(
             status_code=400,
-            detail="رمز التحقق غير صحيح. تأكد من الوقت في جهازك ثم أعد المحاولة.",
+            detail={
+                "code": "totp_invalid",
+                "message": (
+                    "الرمز غير صحيح أو انتهت صلاحيته. تأكد من:\n"
+                    "• اختيار حساب \"Nahla AI\" داخل تطبيق المصادقة (ليس حساباً آخر).\n"
+                    "• ضبط ساعة الجوّال على \"تلقائي/Network time\".\n"
+                    "• إدخال الرمز بسرعة قبل أن يتغيّر — الأمان يدور كل 30 ثانية."
+                ),
+                "server_unix":     now_unix,
+                "time_step_sec":   30,
+                "valid_window":    2,
+                "code_length":     len(code_clean),
+                "setup_age_sec":   setup_age_sec,
+                "build_marker":    TWOFA_BUILD_MARKER,
+            },
         )
 
     # ── Persist ──────────────────────────────────────────────────────────────

@@ -24,6 +24,17 @@ export interface TwoFactorSetupStart {
   issuer:       string
   account:      string
   expires_in:   number
+  /**
+   * Server unix time at the moment the secret was generated. The dashboard
+   * compares this with the local clock to warn the user about clock-skew
+   * BEFORE they try to confirm — most enrolment failures are clock-drift,
+   * not wrong codes.
+   */
+  server_unix?:   number
+  /** TOTP time step in seconds (always 30 for RFC 6238). */
+  time_step_sec?: number
+  /** Number of ±steps the server accepts at confirm (we widen this at enrolment). */
+  valid_window?:  number
 }
 
 export interface TwoFactorSetupConfirm {

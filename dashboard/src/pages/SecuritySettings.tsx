@@ -15,7 +15,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { Shield, ShieldCheck, ShieldAlert, Copy, Download, AlertTriangle, Check, KeyRound, X, ChevronDown, ChevronUp } from 'lucide-react'
+import { Shield, ShieldCheck, ShieldAlert, Copy, Download, AlertTriangle, Check, KeyRound, X, ChevronDown, ChevronUp, Smartphone, Apple, ExternalLink, Star } from 'lucide-react'
 
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
@@ -70,6 +70,23 @@ export default function SecuritySettings() {
   const [err, setErr]           = useState<string | null>(null)
   const [info, setInfo]         = useState<string | null>(null)
   const [secretCopied, setSecretCopied] = useState(false)
+  // Structured diagnostics surfaced by /setup/confirm when the OTP is
+  // rejected. Carries server_unix, code_length, setup_age_sec, etc. —
+  // populated only on failure so the user can see exactly what's off.
+  const [confirmDiag, setConfirmDiag] = useState<{
+    serverUnix?:    number
+    codeLength?:    number
+    setupAgeSec?:   number
+    validWindow?:   number
+    timeStepSec?:   number
+    buildMarker?:   string
+    clockSkewSec?:  number
+  } | null>(null)
+  // Soft clock-skew warning shown the moment the QR appears. We compare
+  // the server timestamp returned by /setup/start with the local clock
+  // and tell the user upfront if their phone clock is likely drifted —
+  // this prevents the 6-digit code from ever being accepted otherwise.
+  const [clockSkewSec, setClockSkewSec] = useState<number | null>(null)
   const [codesCopied, setCodesCopied]   = useState(false)
   const [disableOpen, setDisableOpen]   = useState(false)
   const [disablePwd, setDisablePwd]     = useState('')
@@ -184,11 +201,19 @@ export default function SecuritySettings() {
   }
 
   async function onStartSetup() {
-    setBusy(true); setErr(null); setInfo(null)
+    setBusy(true); setErr(null); setInfo(null); setConfirmDiag(null); setClockSkewSec(null)
     try {
       const data = await startTwoFactorSetup()
       setSetup(data)
       setPhase('setup')
+      // Detect device-vs-server clock skew the moment we get the QR.
+      // The server returned its own unix timestamp; anything > 25s of
+      // drift means the 6-digit code is almost guaranteed to fail.
+      if (typeof data.server_unix === 'number') {
+        const localUnix = Math.floor(Date.now() / 1000)
+        const skew = localUnix - data.server_unix
+        setClockSkewSec(skew)
+      }
     } catch (e: any) {
       setErr(e?.message || tr.errorGeneric)
     } finally {
@@ -198,7 +223,7 @@ export default function SecuritySettings() {
 
   async function onConfirmSetup() {
     if (!setup) return
-    setBusy(true); setErr(null)
+    setBusy(true); setErr(null); setConfirmDiag(null)
     try {
       const data = await confirmTwoFactorSetup({ setupToken: setup.setup_token, otp })
       setCodes(data.recovery_codes)
@@ -207,6 +232,26 @@ export default function SecuritySettings() {
     } catch (e: any) {
       const msg = e?.message || tr.errorBadOtp
       setErr(msg)
+      // Pull structured fields the server sent in `detail` — apiCall
+      // copies scalar keys directly onto the Error object.
+      const serverUnix = typeof e?.server_unix === 'number' ? e.server_unix : undefined
+      const localUnix  = Math.floor(Date.now() / 1000)
+      const skew       = typeof serverUnix === 'number' ? (localUnix - serverUnix) : undefined
+      if (
+        e?.code === 'totp_invalid' ||
+        typeof e?.server_unix === 'number' ||
+        typeof e?.setup_age_sec === 'number'
+      ) {
+        setConfirmDiag({
+          serverUnix:   serverUnix,
+          codeLength:   typeof e?.code_length === 'number' ? e.code_length : undefined,
+          setupAgeSec:  typeof e?.setup_age_sec === 'number' ? e.setup_age_sec : undefined,
+          validWindow:  typeof e?.valid_window === 'number' ? e.valid_window : undefined,
+          timeStepSec:  typeof e?.time_step_sec === 'number' ? e.time_step_sec : undefined,
+          buildMarker:  typeof e?.build_marker === 'string' ? e.build_marker : undefined,
+          clockSkewSec: skew,
+        })
+      }
     } finally {
       setBusy(false)
     }
@@ -428,6 +473,93 @@ export default function SecuritySettings() {
               <li>
                 <p className="font-semibold text-slate-900 dark:text-slate-100">{tr.setupStep1}</p>
                 <p className="text-slate-500 dark:text-slate-400 mt-0.5">{tr.setupStep1Desc}</p>
+                <ul className="mt-4 grid gap-3 sm:grid-cols-3">
+                  {[
+                    {
+                      key: 'google',
+                      name: tr.setupStep1AppGoogle,
+                      recommended: true,
+                      initial: 'G',
+                      iconBg: 'bg-gradient-to-br from-blue-500 via-emerald-500 to-amber-500',
+                      ring: 'ring-2 ring-amber-400 dark:ring-amber-500',
+                      ios: 'https://apps.apple.com/app/google-authenticator/id388497605',
+                      android: 'https://play.google.com/store/apps/details?id=com.google.android.apps.authenticator2',
+                    },
+                    {
+                      key: 'microsoft',
+                      name: tr.setupStep1AppMicrosoft,
+                      recommended: false,
+                      initial: 'M',
+                      iconBg: 'bg-gradient-to-br from-sky-500 to-blue-700',
+                      ring: '',
+                      ios: 'https://apps.apple.com/app/microsoft-authenticator/id983156458',
+                      android: 'https://play.google.com/store/apps/details?id=com.azure.authenticator',
+                    },
+                    {
+                      key: 'authy',
+                      name: tr.setupStep1AppAuthy,
+                      recommended: false,
+                      initial: 'A',
+                      iconBg: 'bg-gradient-to-br from-rose-500 to-red-700',
+                      ring: '',
+                      ios: 'https://apps.apple.com/app/twilio-authy/id494168017',
+                      android: 'https://play.google.com/store/apps/details?id=com.authy.authy',
+                    },
+                  ].map((app) => (
+                    <li
+                      key={app.key}
+                      className={`relative rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/40 p-4 shadow-sm hover:shadow-md hover:border-slate-300 dark:hover:border-slate-600 transition ${app.ring}`}
+                    >
+                      {app.recommended && (
+                        <span className="absolute -top-2 start-3 inline-flex items-center gap-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold px-2 py-0.5 shadow">
+                          <Star className="w-3 h-3 fill-current" />
+                          {isRTL ? 'الأنسب' : 'Recommended'}
+                        </span>
+                      )}
+
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className={`shrink-0 w-10 h-10 rounded-xl ${app.iconBg} text-white font-bold text-lg flex items-center justify-center shadow-sm`}>
+                          {app.initial}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900 dark:text-slate-100 text-sm leading-tight truncate">
+                            {app.name}
+                          </p>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {isRTL ? 'تطبيق مصادقة' : 'Authenticator app'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-1.5">
+                        <a
+                          href={app.ios}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900/70 hover:border-slate-300 dark:hover:border-slate-600 transition"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <Apple className="w-4 h-4" />
+                            {tr.setupStep1AppStoreIOS}
+                          </span>
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </a>
+                        <a
+                          href={app.android}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-900/70 hover:border-slate-300 dark:hover:border-slate-600 transition"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <Smartphone className="w-4 h-4" />
+                            {tr.setupStep1AppStoreAndroid}
+                          </span>
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </a>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               </li>
               <li>
                 <p className="font-semibold text-slate-900 dark:text-slate-100">{tr.setupStep2}</p>
@@ -499,6 +631,92 @@ export default function SecuritySettings() {
                     {tr.cancel}
                   </button>
                 </div>
+
+                {clockSkewSec !== null && Math.abs(clockSkewSec) > 25 && (
+                  <div className="mt-4 rounded-xl border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <div className="text-xs text-amber-900 dark:text-amber-100 leading-relaxed">
+                        <p className="font-semibold mb-0.5">
+                          {isRTL
+                            ? `يبدو أن ساعة جهازك مختلفة عن ساعة الخادم بـ ${Math.abs(clockSkewSec)} ثانية تقريباً.`
+                            : `Your device clock is ~${Math.abs(clockSkewSec)} seconds off from the server.`}
+                        </p>
+                        <p className="text-amber-800 dark:text-amber-200">
+                          {isRTL
+                            ? 'لكي يقبل الخادم رمز المصادقة، فعّل "الوقت التلقائي" / Network time في إعدادات جوّالك، ثم أعد توليد رمز جديد من التطبيق.'
+                            : 'Enable "Automatic / Network time" on your phone, then read a freshly generated code from the authenticator.'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {confirmDiag && (
+                  <div className="mt-4 rounded-xl border border-rose-200 dark:border-rose-800/60 bg-rose-50 dark:bg-rose-900/20 px-3 py-2.5 text-xs">
+                    <div className="flex items-start gap-2 mb-2">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                      <p className="font-semibold text-rose-900 dark:text-rose-100">
+                        {isRTL ? 'تشخيص فشل التحقق' : 'Verification diagnostics'}
+                      </p>
+                    </div>
+                    <ul className="ms-6 space-y-0.5 text-rose-900/90 dark:text-rose-100/90 font-mono">
+                      {typeof confirmDiag.codeLength === 'number' && (
+                        <li>
+                          {isRTL ? 'طول الرمز المدخل: ' : 'Entered code length: '}
+                          <span className="font-semibold">{confirmDiag.codeLength}</span>
+                          {confirmDiag.codeLength !== 6 && (
+                            <span className="text-rose-700 dark:text-rose-300">
+                              {' '}{isRTL ? '← يجب أن يكون 6 أرقام' : '← must be 6 digits'}
+                            </span>
+                          )}
+                        </li>
+                      )}
+                      {typeof confirmDiag.clockSkewSec === 'number' && (
+                        <li>
+                          {isRTL ? 'فرق الساعة (جهازك − الخادم): ' : 'Clock skew (device − server): '}
+                          <span className={`font-semibold ${Math.abs(confirmDiag.clockSkewSec) > 25 ? 'text-rose-700 dark:text-rose-300' : ''}`}>
+                            {confirmDiag.clockSkewSec >= 0 ? '+' : ''}{confirmDiag.clockSkewSec}s
+                          </span>
+                          {Math.abs(confirmDiag.clockSkewSec) > 25 && (
+                            <span className="text-rose-700 dark:text-rose-300">
+                              {' '}{isRTL ? '← الفرق كبير' : '← out of range'}
+                            </span>
+                          )}
+                        </li>
+                      )}
+                      {typeof confirmDiag.setupAgeSec === 'number' && (
+                        <li>
+                          {isRTL ? 'عمر جلسة الإعداد: ' : 'Setup session age: '}
+                          <span className="font-semibold">{confirmDiag.setupAgeSec}s</span>
+                          {confirmDiag.setupAgeSec > 9 * 60 && (
+                            <span className="text-rose-700 dark:text-rose-300">
+                              {' '}{isRTL ? '← اقتربت من الانتهاء (10 دقائق)' : '← near 10 min limit'}
+                            </span>
+                          )}
+                        </li>
+                      )}
+                      {typeof confirmDiag.validWindow === 'number' && typeof confirmDiag.timeStepSec === 'number' && (
+                        <li>
+                          {isRTL ? 'نافذة القبول: ' : 'Acceptance window: '}
+                          <span className="font-semibold">
+                            ±{confirmDiag.validWindow * confirmDiag.timeStepSec}s
+                          </span>
+                        </li>
+                      )}
+                      {confirmDiag.buildMarker && (
+                        <li className="text-rose-700/80 dark:text-rose-300/80">
+                          build: <span>{confirmDiag.buildMarker}</span>
+                        </li>
+                      )}
+                    </ul>
+                    <p className="mt-2 ms-6 text-rose-800/90 dark:text-rose-200/90">
+                      {isRTL
+                        ? 'الأكثر شيوعاً: حساب خاطئ داخل التطبيق (تأكد من اختيار "Nahla AI") أو رمز انتهى للتو — أعد قراءة الرمز الجديد من التطبيق ثم أدخله بسرعة.'
+                        : 'Most common causes: wrong account in your authenticator (pick "Nahla AI") or a code that just rotated — read a fresh one and submit it quickly.'}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>

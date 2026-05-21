@@ -518,6 +518,11 @@ export interface Translations {
     enableBtn:                string
     setupStep1:               string
     setupStep1Desc:           string
+    setupStep1AppGoogle:      string
+    setupStep1AppMicrosoft:   string
+    setupStep1AppAuthy:       string
+    setupStep1AppStoreIOS:    string
+    setupStep1AppStoreAndroid:string
     setupStep2:               string
     setupStep2Desc:           string
     setupStep3:               string
