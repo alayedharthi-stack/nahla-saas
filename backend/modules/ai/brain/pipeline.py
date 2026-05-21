@@ -1122,6 +1122,58 @@ class MerchantBrain:
                     ),
                     regen_will_fire=_align_regen_fired,
                 )
+                # ── AI Quality Monitor — append-only DB row ─────
+                # Mirrors the log line into ``ai_quality_events``
+                # so the admin dashboard can browse misclassifications
+                # without grepping Railway. Never raises into the
+                # turn — persistence is best-effort observability.
+                try:
+                    from core.ai_quality_events import (  # noqa: PLC0415
+                        persist_alignment_mismatch,
+                    )
+                    _slots = getattr(intent, "slots", None) or {}
+                    _social_cat = str(_slots.get("social_category") or "")
+                    _chosen_path_for_q = str(result.data.get("chosen_path") or "")
+                    _model_for_q = str(
+                        result.data.get("model_used")
+                        or result.data.get("llm_model")
+                        or ""
+                    )
+                    _fb_used = bool(
+                        "fallback" in _chosen_path_for_q
+                        or "timeout" in _chosen_path_for_q
+                        or "duplicate" in _chosen_path_for_q
+                    )
+                    persist_alignment_mismatch(
+                        db,
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        customer_phone=customer_phone or "",
+                        inbound_text=message or "",
+                        reply_text=reply or "",
+                        mismatch_type=_align_result.mismatch_type,
+                        mismatch_reason=_align_result.reason,
+                        detected_intent=getattr(intent, "name", "") or "",
+                        social_category=_social_cat,
+                        action_taken=getattr(decision, "action", "") or "",
+                        chosen_path=_chosen_path_for_q,
+                        fallback_used=_fb_used,
+                        order_status=str(
+                            getattr(new_state.order_prep, "order_status", "") or ""
+                        ),
+                        awaiting_payment_receipt=bool(
+                            getattr(new_state.order_prep, "awaiting_payment_receipt", False)
+                        ),
+                        model_used=_model_for_q,
+                        turn=getattr(new_state, "turn", 0),
+                        alignment_passed=False,
+                        regen_fired=_align_regen_fired,
+                    )
+                except Exception as _persist_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AI_QUALITY] persistence skipped err=%s",
+                        _persist_exc,
+                    )
                 if _align_regen_fired:
                     logger.info(
                         "[ALIGN_MISMATCH] regen requested — clearing "

@@ -2023,6 +2023,60 @@ class StoreKnowledgeSnapshot(Base):
     tenant = relationship('Tenant', back_populates='store_knowledge')
 
 
+class AiQualityEvent(Base):
+    """Per-turn answer-alignment mismatch event (May 2026 #12).
+
+    Append-only audit trail written by the brain pipeline whenever
+    ``modules.ai.brain.postprocess.answer_alignment.check_alignment``
+    detects a reply that does not actually answer the customer's
+    last message. Powers the in-product "AI Quality Monitor" so
+    merchants can see misclassifications in their own dashboard
+    instead of grepping Railway logs.
+
+    Privacy contract:
+      * ``customer_phone`` stores a MASKED form (e.g. ``+9665***430``).
+        Never write the full E.164 number here — full numbers live on
+        ``conversations.customer_id → customers.phone`` only.
+      * ``inbound_preview`` / ``reply_preview`` are truncated to 200
+        chars. Full bodies live on ``message_events``.
+      * ``resolved_status`` is one of: ``open`` (default), ``reviewed``,
+        ``ignored``, ``fixed``.
+    """
+    __tablename__ = 'ai_quality_events'
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    conversation_id = Column(Integer, ForeignKey('conversations.id'), nullable=True, index=True)
+    # ── Privacy-safe identifiers ────────────────────────────────────
+    customer_phone_masked = Column(String, nullable=False, index=True)
+    # ── Mismatch classification ─────────────────────────────────────
+    mismatch_type = Column(String, nullable=False, index=True)
+    mismatch_reason = Column(Text, nullable=True)
+    # ── Brain context snapshot ──────────────────────────────────────
+    detected_intent = Column(String, nullable=True)
+    social_category = Column(String, nullable=True)
+    action_taken = Column(String, nullable=True)
+    chosen_path = Column(String, nullable=True)
+    fallback_used = Column(Boolean, nullable=True, default=False)
+    order_status = Column(String, nullable=True)
+    awaiting_payment_receipt = Column(Boolean, nullable=True, default=False)
+    model_used = Column(String, nullable=True)
+    turn = Column(Integer, nullable=True)
+    # ── Truncated content (privacy-safe) ────────────────────────────
+    inbound_preview = Column(Text, nullable=True)
+    reply_preview = Column(Text, nullable=True)
+    # ── Validator outcome (mirrors AlignmentResult) ─────────────────
+    alignment_passed = Column(Boolean, nullable=False, default=False)
+    regen_fired = Column(Boolean, nullable=False, default=False)
+    # ── Operator triage state ───────────────────────────────────────
+    resolved_status = Column(String, nullable=False, default='open', index=True)
+    resolved_by = Column(String, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_note = Column(Text, nullable=True)
+    # ── Append-only timestamps ──────────────────────────────────────
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    tenant = relationship('Tenant')
+
+
 class ConversationTrace(Base):
     """Per-turn debug trace for every AI Sales conversation step."""
     __tablename__ = 'conversation_traces'
