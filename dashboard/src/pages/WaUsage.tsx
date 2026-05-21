@@ -11,7 +11,7 @@ import {
 } from 'recharts'
 import {
   MessageSquare, AlertTriangle, CheckCircle, TrendingUp, Calendar,
-  RefreshCw, ShieldCheck, Megaphone, HeadphonesIcon,
+  RefreshCw, ShieldCheck, Megaphone, HeadphonesIcon, ExternalLink,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { apiCall } from '../api/client'
@@ -195,6 +195,17 @@ export default function WaUsage() {
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState(false)
   const [tierRefreshing, setTierRefreshing] = useState(false)
+  // Last refresh result — surfaced as a diagnostic panel so the
+  // merchant can see exactly what the provider returned (or didn't).
+  // Provider-agnostic: works whether the connection is direct-Meta
+  // or via a relay like 360dialog.
+  const [tierDiagnostics, setTierDiagnostics] = useState<{
+    updated: boolean
+    provider?: string
+    reason?: string | null
+    diagnostics?: Array<{ path: string; status?: any; error?: string | null; body?: any }>
+  } | null>(null)
+  const [showTierDiag, setShowTierDiag] = useState(false)
 
   const load = () => {
     setLoading(true)
@@ -208,7 +219,13 @@ export default function WaUsage() {
     if (tierRefreshing) return
     setTierRefreshing(true)
     try {
-      await apiCall('/whatsapp/refresh-meta-tier', { method: 'POST' })
+      const result = await apiCall<{
+        updated: boolean
+        provider?: string
+        reason?: string | null
+        diagnostics?: any[]
+      }>('/whatsapp/refresh-meta-tier', { method: 'POST' }).catch(() => null)
+      if (result) setTierDiagnostics(result as any)
       const fresh = await apiCall<WaUsageDetail>('/whatsapp/usage?breakdown=true').catch(() => null)
       if (fresh) setData(fresh)
     } catch {
@@ -476,6 +493,18 @@ export default function WaUsage() {
                     عدد العملاء الجدد الذين يمكنك بدء محادثة معهم خلال 24 ساعة عبر القوالب (Marketing / Utility / Authentication).
                     لا يعنى الحد الشهري للباقة — الحد الشهري معروض في "استخدام واتساب هذا الشهر" بالأعلى.
                   </div>
+                  {/* Provider-agnostic verify link. Meta Business Manager
+                      is the source of truth regardless of how the
+                      merchant connected. */}
+                  <a
+                    href="https://business.facebook.com/wa/manage/phone-numbers/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-brand-600 hover:text-brand-700"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    تحقق من القيمة الفعلية في Meta Business Manager
+                  </a>
                   <p className="text-xs text-slate-400 mt-1.5">
                     يتم ترقية المستوى تلقائياً من Meta عند استيفاء شروط الجودة وتسجيل حركة منتظمة.
                   </p>
@@ -493,6 +522,64 @@ export default function WaUsage() {
                   </div>
                 )}
               </div>
+
+              {/* ── Diagnostic panel ─────────────────────────────────────
+                  Shows the raw provider response from the last refresh,
+                  so the merchant can verify whether the cached tier is
+                  fresh OR a stale read the provider didn't update.
+                  Provider-agnostic. */}
+              {tierDiagnostics && (
+                <div className="mt-3 border-t border-slate-200 pt-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 flex-wrap text-xs">
+                      {tierDiagnostics.updated ? (
+                        <span className="font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          ✓ تم تحديث القيمة من المزوّد
+                        </span>
+                      ) : (
+                        <span className="font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                          ⚠ المزوّد لم يُعد قيمة tier — القيمة من التخزين المؤقت
+                        </span>
+                      )}
+                      {tierDiagnostics.provider && (
+                        <span className="text-slate-500">
+                          المزوّد: <strong className="text-slate-700">{tierDiagnostics.provider}</strong>
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowTierDiag(v => !v)}
+                      className="text-xs font-medium text-brand-600 hover:text-brand-700"
+                    >
+                      {showTierDiag ? 'إخفاء التفاصيل التقنية' : 'عرض التفاصيل التقنية'}
+                    </button>
+                  </div>
+                  {showTierDiag && (
+                    <div className="mt-2 space-y-1.5">
+                      {(tierDiagnostics.diagnostics || []).map((entry, idx) => (
+                        <div
+                          key={idx}
+                          className="text-xs bg-slate-900/95 text-slate-100 rounded-lg p-2.5 font-mono leading-relaxed overflow-x-auto"
+                        >
+                          <div className="text-emerald-300 break-all">{entry.path}</div>
+                          {entry.error ? (
+                            <div className="text-red-300 mt-1">error: {entry.error}</div>
+                          ) : (
+                            <pre className="text-slate-300 mt-1 whitespace-pre-wrap break-all">
+                              {JSON.stringify(entry.body, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        إذا لم يظهر <code className="bg-slate-100 px-1 rounded">messaging_limit_tier</code> في أي رد،
+                        فإن المزوّد لا يكشف هذه القيمة عبر API، وعليك التحقق مباشرة من Meta Business Manager.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

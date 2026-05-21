@@ -3399,7 +3399,14 @@ async def refresh_meta_tier(
     db:      Session = Depends(get_db),
     _scope:  dict    = Depends(require_merchant_scope),
 ):
-    """Fetch the current messaging_limit tier and quality_rating from Meta."""
+    """Fetch the current messaging_limit tier and quality_rating from Meta.
+
+    Returns both the resolved value AND a ``diagnostics`` array so the
+    UI can show the raw provider response when the merchant wants to
+    verify what's actually being returned. This is provider-agnostic —
+    works for direct Meta (single call) and for 360dialog (multi-path
+    probe) without any branching at the UI layer.
+    """
     from services.whatsapp_platform.service import fetch_meta_phone_tier  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
@@ -3412,21 +3419,34 @@ async def refresh_meta_tier(
         return {"updated": False, "reason": "no_token"}
 
     tier_data = await fetch_meta_phone_tier(conn, ctx, tenant_id=tenant_id)
-    if not tier_data:
-        return {"updated": False, "reason": "meta_api_error"}
+    diagnostics = (tier_data or {}).get("_diagnostics") or []
+    fresh_tier   = (tier_data or {}).get("messaging_limit")
+    fresh_qual   = (tier_data or {}).get("quality_rating")
 
+    # We always commit a fresh ``meta_tier_updated_at`` even when the
+    # provider returned nothing — that way the UI knows the LAST attempt
+    # time (so "قبل لحظات" is honest) even when the value didn't change.
     from datetime import datetime, timezone as tz  # noqa: PLC0415
-    if tier_data.get("messaging_limit"):
-        conn.meta_messaging_limit = tier_data["messaging_limit"]
-    if tier_data.get("quality_rating"):
-        conn.meta_quality_rating = tier_data["quality_rating"]
+    updated = False
+    if fresh_tier:
+        conn.meta_messaging_limit = fresh_tier
+        updated = True
+    if fresh_qual:
+        conn.meta_quality_rating = fresh_qual
+        updated = True
     conn.meta_tier_updated_at = datetime.now(tz.utc)
     db.commit()
 
     return {
-        "updated":          True,
+        "updated":          updated,
         "messaging_limit":  conn.meta_messaging_limit,
         "quality_rating":   conn.meta_quality_rating,
+        "provider":         (getattr(conn, "provider", None) or "meta"),
+        # Surfacing the diagnostics empowers merchants to verify
+        # "is this number coming from the provider or is it cached?"
+        # without us needing to ship a separate admin endpoint.
+        "diagnostics":      diagnostics,
+        "reason":           None if updated else "provider_returned_no_tier",
     }
 
 

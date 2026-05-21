@@ -1416,29 +1416,64 @@ async def fetch_meta_phone_tier(
 
     Routing rules (set on ``WhatsAppConnection.provider``):
       * ``meta``       → Graph API direct: ``GET /{phone_id}?fields=...``
-      * ``dialog360``  → 360dialog proxies Meta health endpoints under
-                         ``/v1/health/messaging-tier``. We don't have
-                         credentials for that path in every workspace, so
-                         we attempt Graph first via the relay token and
-                         only fall back to a documented "unknown" if the
-                         relay returns insufficient scopes. This keeps the
-                         cached value honest instead of silently stale.
+      * ``dialog360``  → 360dialog Cloud API. The Coexistence relay only
+                         proxies a *subset* of Graph fields; in particular
+                         ``messaging_limit_tier`` is NOT consistently
+                         exposed. We probe three paths in order and
+                         return the first one that yields a non-empty
+                         tier:
+                           1. ``GET /{phone_id}?fields=messaging_limit_tier,quality_rating``
+                              — works for direct Meta, sometimes for d360.
+                           2. ``GET /v1/configs`` — d360 channel config
+                              endpoint; some accounts surface the tier
+                              under ``messaging_limit`` here.
+                           3. ``GET /v1/health/messaging-tier`` —
+                              d360 health proxy where it exists.
 
-    On any failure we return ``{}`` so the caller leaves the existing
-    cached row untouched. The UI separately surfaces
-    ``meta_tier_last_synced_at`` / ``meta_tier_is_stale`` so the merchant
-    can see WHEN we last got a fresh number, not just what it was.
+    Return shape now ALWAYS includes a ``_diagnostics`` block listing
+    each path tried, the HTTP status (best-effort), and a redacted
+    snippet of the response. The UI surfaces this so the merchant can
+    see WHY we still show e.g. ``TIER_250`` after Meta granted them a
+    higher tier — usually because the provider's read path doesn't
+    expose the field and we're rendering a stale cached value.
+
+    On any failure we leave the cached row untouched (return empty
+    ``messaging_limit``); the UI flags it as stale.
     """
     phone_id = getattr(conn, "phone_number_id", None)
-    if not phone_id or not ctx.token:
-        return {}
-
     provider = (getattr(conn, "provider", None) or "meta").strip().lower()
+    is_d360 = provider in ("dialog360", "360dialog", "d360")
 
-    # The Graph fields endpoint works for both direct-Meta and the 360dialog
-    # coexistence relay (which proxies Graph for read paths). We try it
-    # uniformly and only branch the log line on provider so failures are
-    # diagnosable without re-reading the DB.
+    diagnostics: list = []
+
+    def _record(path: str, status: Any, body: Any, error: Optional[str] = None) -> None:
+        # Truncate huge bodies — we just need the shape, not megabytes
+        # of HTML. Strings beyond 600 chars rarely add diagnostic value
+        # and would bloat the API response.
+        snippet: Any
+        if isinstance(body, (dict, list)):
+            try:
+                import json as _json  # noqa: PLC0415
+                snippet = _json.loads(_json.dumps(body, default=str))
+            except Exception:
+                snippet = str(body)[:600]
+        else:
+            snippet = (str(body)[:600]) if body is not None else None
+        diagnostics.append({
+            "path":   path,
+            "status": status,
+            "error":  error,
+            "body":   snippet,
+        })
+
+    if not phone_id or not ctx.token:
+        return {
+            "messaging_limit": None,
+            "quality_rating":  None,
+            "_diagnostics":    [{"path": "(skipped)", "error": "no phone_id or token"}],
+        }
+
+    # ── 1) Graph-style ``GET /{phone_id}`` — works for direct Meta, sometimes d360
     try:
         data = await provider_get_with_context(
             conn, ctx,
@@ -1448,17 +1483,89 @@ async def fetch_meta_phone_tier(
             params={"fields": "messaging_limit_tier,quality_rating"},
             timeout=15,
         )
-        tier = data.get("messaging_limit_tier")
-        if not tier and provider in ("dialog360", "360dialog", "d360"):
-            # Some 360dialog deployments return tier under a different key.
+        _record(f"GET /{phone_id}?fields=messaging_limit_tier,quality_rating", "2xx?", data)
+        tier = data.get("messaging_limit_tier") if isinstance(data, dict) else None
+        quality = data.get("quality_rating") if isinstance(data, dict) else None
+        if not tier and is_d360 and isinstance(data, dict):
             tier = data.get("messaging_limit") or data.get("tier")
-        return {
-            "messaging_limit": tier,
-            "quality_rating":  data.get("quality_rating"),
-        }
+        if tier:
+            return {
+                "messaging_limit": tier,
+                "quality_rating":  quality,
+                "_diagnostics":    diagnostics,
+            }
     except Exception as exc:
+        _record(f"GET /{phone_id}", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
         logger.warning(
-            "[WA] fetch_meta_phone_tier failed tenant=%s provider=%s phone_id=%s: %s",
-            tenant_id, provider, phone_id, exc,
+            "[WA] fetch_meta_phone_tier phone_id path failed tenant=%s provider=%s: %s",
+            tenant_id, provider, exc,
         )
-        return {}
+
+    # ── 2 & 3) 360dialog-specific fallbacks ───────────────────────────────────
+    if is_d360:
+        # ``GET /v1/configs`` — channel-level metadata. Some d360 tenants
+        # see ``messaging_limit`` on this object (legacy product).
+        try:
+            data = await provider_get_with_context(
+                conn, ctx,
+                tenant_id=tenant_id,
+                operation="fetch_phone_tier_v1_configs",
+                path="v1/configs",
+                params=None,
+                timeout=15,
+            )
+            _record("GET /v1/configs", "2xx?", data)
+            if isinstance(data, dict):
+                tier = (
+                    data.get("messaging_limit_tier")
+                    or data.get("messaging_limit")
+                    or (data.get("phone") or {}).get("messaging_limit_tier") if isinstance(data.get("phone"), dict) else None
+                )
+                quality = (
+                    data.get("quality_rating")
+                    or ((data.get("phone") or {}).get("quality_rating") if isinstance(data.get("phone"), dict) else None)
+                )
+                if tier:
+                    return {
+                        "messaging_limit": tier,
+                        "quality_rating":  quality,
+                        "_diagnostics":    diagnostics,
+                    }
+        except Exception as exc:
+            _record("GET /v1/configs", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
+            logger.warning(
+                "[WA] fetch_meta_phone_tier v1/configs failed tenant=%s: %s",
+                tenant_id, exc,
+            )
+
+        # ``GET /v1/health/messaging-tier`` — d360 health proxy. Returns
+        # 404 for tenants without the feature; that's fine, we record it
+        # in diagnostics and return empty.
+        try:
+            data = await provider_get_with_context(
+                conn, ctx,
+                tenant_id=tenant_id,
+                operation="fetch_phone_tier_health",
+                path="v1/health/messaging-tier",
+                params=None,
+                timeout=15,
+            )
+            _record("GET /v1/health/messaging-tier", "2xx?", data)
+            if isinstance(data, dict):
+                tier = data.get("messaging_limit_tier") or data.get("tier") or data.get("messaging_limit")
+                if tier:
+                    return {
+                        "messaging_limit": tier,
+                        "quality_rating":  data.get("quality_rating"),
+                        "_diagnostics":    diagnostics,
+                    }
+        except Exception as exc:
+            _record("GET /v1/health/messaging-tier", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
+
+    # Nothing worked. Return the diagnostics so the UI can render them
+    # and the merchant can see WHY we don't have a fresh tier value.
+    return {
+        "messaging_limit": None,
+        "quality_rating":  None,
+        "_diagnostics":    diagnostics,
+    }

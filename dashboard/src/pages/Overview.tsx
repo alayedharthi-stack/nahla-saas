@@ -116,12 +116,30 @@ export default function Overview() {
   // first paint matches the legacy behaviour exactly (and the merchant
   // doesn't see a number flicker if they previously memorised "today").
   const [period, setPeriod] = useState<Period>('today')
+  // Diagnostics returned by /refresh-meta-tier. We surface this in a
+  // collapsible panel so merchants can see WHY the cached tier doesn't
+  // match what Meta Business Manager shows them. Provider-agnostic —
+  // works the same whether we're talking to Meta directly or via a
+  // relay like 360dialog.
+  const [tierDiagnostics, setTierDiagnostics] = useState<{
+    updated: boolean
+    provider?: string
+    reason?: string | null
+    diagnostics?: Array<{ path: string; status?: any; error?: string | null; body?: any }>
+  } | null>(null)
+  const [showTierDiag, setShowTierDiag] = useState(false)
 
   const refreshMetaTier = async () => {
     if (tierRefreshing) return
     setTierRefreshing(true)
     try {
-      await apiCall('/whatsapp/refresh-meta-tier', { method: 'POST' })
+      const result = await apiCall<{
+        updated: boolean
+        provider?: string
+        reason?: string | null
+        diagnostics?: any[]
+      }>('/whatsapp/refresh-meta-tier', { method: 'POST' }).catch(() => null)
+      if (result) setTierDiagnostics(result as any)
       const fresh = await apiCall<WaUsage>('/whatsapp/usage').catch(() => null)
       if (fresh) setWaUsage(fresh)
     } catch {
@@ -399,6 +417,24 @@ export default function Overview() {
                   <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
                     عدد العملاء الجدد الذين يمكنك بدء محادثة معهم خلال 24 ساعة (حد Meta للحساب) — وليس الحد الشهري للباقة.
                   </p>
+                  {/* Direct verification link to Meta WhatsApp Manager.
+                      Provider-agnostic: whether the merchant connected
+                      via Meta direct or a relay (360dialog today, others
+                      tomorrow), the source of truth for the actual tier
+                      always lives in Meta Business Manager. Surfacing
+                      this link removes any "but I trust Meta more than
+                      this dashboard" objection — and lets the merchant
+                      report back the canonical number if the cached
+                      value is wrong. */}
+                  <a
+                    href="https://business.facebook.com/wa/manage/phone-numbers/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 mt-1 text-[11px] font-medium text-brand-600 hover:text-brand-700"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    تحقق مباشرة من Meta Business Manager
+                  </a>
                   <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500 flex-wrap">
                     {waUsage.meta_tier_source && (
                       <span>
@@ -438,6 +474,67 @@ export default function Overview() {
                   </button>
                 </div>
               </div>
+
+              {/* ── Diagnostic panel ─────────────────────────────────────
+                  Surfaces the raw provider response so the merchant
+                  can see EXACTLY what came back when they hit "تحديث
+                  الآن". This is the difference between guessing and
+                  knowing: if the provider returned no tier field at
+                  all, we surface that here instead of silently keeping
+                  a stale cached value. Provider-agnostic — works the
+                  same regardless of how the connection was made. */}
+              {tierDiagnostics && (
+                <div className="mt-3 border-t border-slate-200 pt-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                      {tierDiagnostics.updated ? (
+                        <span className="font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                          ✓ تم تحديث القيمة من المزوّد
+                        </span>
+                      ) : (
+                        <span className="font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                          ⚠ المزوّد لم يُعد قيمة tier — القيمة المعروضة من التخزين المؤقت
+                        </span>
+                      )}
+                      {tierDiagnostics.provider && (
+                        <span className="text-slate-500">
+                          المزوّد: <strong className="text-slate-700">{tierDiagnostics.provider}</strong>
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowTierDiag(v => !v)}
+                      className="text-[11px] font-medium text-brand-600 hover:text-brand-700"
+                    >
+                      {showTierDiag ? 'إخفاء التفاصيل' : 'تفاصيل تقنية'}
+                    </button>
+                  </div>
+                  {showTierDiag && (
+                    <div className="mt-2 space-y-1.5">
+                      {(tierDiagnostics.diagnostics || []).map((entry, idx) => (
+                        <div
+                          key={idx}
+                          className="text-[11px] bg-slate-900/95 text-slate-100 rounded-lg p-2 font-mono leading-relaxed overflow-x-auto"
+                        >
+                          <div className="text-emerald-300 break-all">{entry.path}</div>
+                          {entry.error ? (
+                            <div className="text-red-300 mt-0.5">error: {entry.error}</div>
+                          ) : (
+                            <div className="text-slate-300 mt-0.5">
+                              <pre className="whitespace-pre-wrap break-all">{JSON.stringify(entry.body, null, 2)}</pre>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        إذا لم يحتوِ أي رد على <code className="bg-slate-100 px-1 rounded">messaging_limit_tier</code>،
+                        فإن المزوّد لا يكشف هذه القيمة وعليك التحقق مباشرة من Meta Business Manager أعلاه.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
