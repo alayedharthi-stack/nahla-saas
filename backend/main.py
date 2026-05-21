@@ -172,6 +172,14 @@ from fastapi.responses import JSONResponse as _JSONResponse  # noqa: E402
 import re as _re  # noqa: E402
 
 
+# Global build marker — bump whenever we ship a fix that needs ops
+# verification from a 500 body without ssh-execing into the container.
+# This is intentionally checked into source so a deployed image can be
+# attributed to a commit just by reading a failed response.
+BACKEND_BUILD_MARKER = "2026-05-21_500diag_v2"
+logger.info("[main] backend loaded build_marker=%s", BACKEND_BUILD_MARKER)
+
+
 @app.exception_handler(Exception)
 async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResponse:
     """
@@ -193,23 +201,35 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
        return HTTP 200 with ``ok=false`` so retries do NOT happen,
        while keeping the failure visible in the logs and audit
        trail. Non-webhook paths still get the canonical 500.
+
+    Diagnostic exposure (2026-05-21 #500diag): the response body now
+    always carries ``code``, ``exc_class``, ``path``, ``build_marker``
+    and a per-request ``incident_id`` so the dashboard can render an
+    actionable error instead of a generic "Internal server error".
+    NO exception MESSAGE is exposed — only the type name — to avoid
+    leaking row values from psycopg2/SQLAlchemy errors.
     """
+    import uuid as _uuid  # noqa: PLC0415
+
     path = _req.url.path or ""
+    method = _req.method or "GET"
     is_no_response = isinstance(exc, RuntimeError) and "No response returned" in str(exc)
     is_webhook = path.startswith("/webhook/")
+    incident_id = _uuid.uuid4().hex[:12]
+    exc_class = type(exc).__name__
 
     if is_no_response:
         logger.error(
-            "[GlobalExceptionHandler] 'No response returned' on %s "
+            "[GlobalExceptionHandler] incident=%s 'No response returned' on %s %s "
             "(BaseHTTPMiddleware end-of-chain w/o response, usually a "
             "client disconnect). Returning safe response.",
-            path,
+            incident_id, method, path,
             exc_info=True,
         )
     else:
         logger.error(
-            "[GlobalExceptionHandler] Unhandled exception on %s: %s",
-            path, exc, exc_info=True,
+            "[GlobalExceptionHandler] incident=%s exc=%s on %s %s: %s",
+            incident_id, exc_class, method, path, exc, exc_info=True,
         )
 
     from core.config import CORS_ORIGINS as _co, CORS_ORIGIN_REGEX as _cr  # noqa: E402
@@ -232,13 +252,36 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
         # above.
         return _JSONResponse(
             status_code=200,
-            content={"ok": False, "error": "webhook_processing_error"},
+            content={
+                "ok": False,
+                "error": "webhook_processing_error",
+                "incident_id": incident_id,
+            },
             headers=cors_headers,
         )
 
+    # ``detail`` is a structured object so frontend ApiClient picks up
+    # every field (it walks `detail` and copies scalar keys onto the
+    # Error object — see dashboard/src/api/client.ts:buildApiError).
     return _JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "code": "internal_error"},
+        content={
+            "detail": {
+                "code":         "internal_error_unhandled",
+                "exc_class":    exc_class,
+                "path":         path,
+                "method":       method,
+                "build_marker": BACKEND_BUILD_MARKER,
+                "incident_id":  incident_id,
+                "message": (
+                    "حدث خطأ غير متوقع. "
+                    "تواصل مع الدعم وأرسل لهم رقم الحادثة وفئة الخطأ المعروضين."
+                ),
+            },
+            # Top-level ``code`` kept for backwards compat with the
+            # frontend ApiClient's older error-code path.
+            "code": "internal_error_unhandled",
+        },
         headers=cors_headers,
     )
 

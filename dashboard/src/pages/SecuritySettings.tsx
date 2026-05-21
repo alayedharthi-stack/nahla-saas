@@ -15,10 +15,11 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { Shield, ShieldCheck, ShieldAlert, Copy, Download, AlertTriangle, Check, KeyRound, X } from 'lucide-react'
+import { Shield, ShieldCheck, ShieldAlert, Copy, Download, AlertTriangle, Check, KeyRound, X, ChevronDown, ChevronUp } from 'lucide-react'
 
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
+import { apiCall } from '../api/client'
 import {
   confirmTwoFactorSetup,
   disableTwoFactor,
@@ -27,6 +28,32 @@ import {
   type TwoFactorSetupStart,
   type TwoFactorStatus,
 } from '../api/twofa'
+
+// Shape of the read-only diagnostic endpoint /auth/2fa/__diag. We
+// intentionally don't import this from the api module so the rest of
+// the app doesn't gain a `__diag` surface — it's only used here as a
+// fallback when /status 500s, to show the operator what's actually
+// going wrong without another deploy cycle.
+type TwoFactorDiag = {
+  build_marker?:      string
+  jwt_claims?: {
+    sub?:           string | null
+    role?:          string | null
+    has_user_id?:   boolean
+    is_env_admin?:  boolean
+  }
+  admin_email_config?: string
+  tables?:             Record<string, boolean | string>
+  tenant_1_present?:   boolean | string
+  env_admin_user?: {
+    present?:           boolean | string
+    id?:                number | null
+    password_hash_null?: boolean | null
+    role?:              string | null
+    tenant_id?:         number | null
+    username?:          string | null
+  }
+}
 
 type Phase = 'loading' | 'notEnrolled' | 'setup' | 'showCodes' | 'enabled'
 
@@ -48,6 +75,29 @@ export default function SecuritySettings() {
   const [disablePwd, setDisablePwd]     = useState('')
   const [disableOtp, setDisableOtp]     = useState('')
 
+  // Diagnostic surface — populated only when /status fails. Holds the
+  // structured error fields the backend attaches to a 500 (via main.py's
+  // global handler, twofa.py's wrapper, or middleware fallback) plus the
+  // contents of the zero-side-effect /auth/2fa/__diag endpoint when we
+  // can reach it. The collapsible panel is the operator's main signal
+  // when "Internal server error" shows up.
+  const [diag, setDiag]               = useState<{
+    error?: {
+      message?:     string
+      code?:        string
+      exc_class?:   string
+      build_marker?: string
+      incident_id?: string
+      middleware?:  string
+      path?:        string
+      method?:      string
+      status?:      number
+    }
+    probe?: TwoFactorDiag | null
+    probeError?: string
+  } | null>(null)
+  const [showDiag, setShowDiag]       = useState(false)
+
   // ── Initial status load ──────────────────────────────────────────────────
   useEffect(() => {
     let alive = true
@@ -61,13 +111,19 @@ export default function SecuritySettings() {
         if (!alive) return
         // Surface diagnostic fields from the structured backend payload
         // so support / ops can copy them straight from the UI without
-        // needing Railway access. The backend's defensive wrapper on
-        // /auth/2fa/status (twofa.py) attaches `code`, `exc_class`,
-        // and `build_marker` to the 500 response — see commit b9b84c07+.
+        // needing Railway access. The backend now attaches structured
+        // fields on EVERY 500 path:
+        //   * twofa.py /status route-level wrapper       → code/exc_class/build_marker
+        //   * main.py global Exception handler           → incident_id + exc_class
+        //   * middleware.py _safe_fallback_response      → middleware + exc_class
+        // The api client (buildApiError) copies all scalar keys from
+        // `detail` onto the Error object so `e?.exc_class` etc. work
+        // without an extra `.detail` hop.
         const baseMsg = e?.message || tr.errorGeneric
         const diagBits: string[] = []
         if (e?.code) diagBits.push(`code=${e.code}`)
         if (e?.exc_class) diagBits.push(`exc=${e.exc_class}`)
+        if (e?.incident_id) diagBits.push(`incident=${e.incident_id}`)
         if (e?.build_marker) diagBits.push(`build=${e.build_marker}`)
         if (typeof e?.status === 'number') diagBits.push(`http=${e.status}`)
         const composed = diagBits.length > 0
@@ -75,15 +131,41 @@ export default function SecuritySettings() {
           : baseMsg
         setErr(composed)
         setPhase('notEnrolled')
+
+        // Auto-fall back to the zero-side-effect /__diag endpoint so the
+        // operator can see (a) which tables exist on the deployed schema,
+        // (b) whether the env-admin row is provisioned, and (c) the JWT
+        // claims actually arriving at the route. This makes the failure
+        // self-explanatory without another deploy.
+        const errorBlock = {
+          message:      e?.message,
+          code:         e?.code,
+          exc_class:    e?.exc_class,
+          build_marker: e?.build_marker,
+          incident_id:  e?.incident_id,
+          middleware:   e?.middleware,
+          path:         e?.path,
+          method:       e?.method,
+          status:       typeof e?.status === 'number' ? e.status : undefined,
+        }
+        let probe: TwoFactorDiag | null = null
+        let probeError: string | undefined
+        try {
+          probe = await apiCall<TwoFactorDiag>('/auth/2fa/__diag', { method: 'GET' })
+        } catch (pe: any) {
+          probeError = pe?.message || 'فشل فحص التشخيص'
+        }
+        if (!alive) return
+        setDiag({ error: errorBlock, probe, probeError })
+        setShowDiag(true)
+
         // Also echo to console — devtools is the fastest paste-back for ops.
         // eslint-disable-next-line no-console
         console.error('[2fa] /status failed', {
-          message: e?.message,
-          code:    e?.code,
-          status:  e?.status,
-          exc_class:    e?.exc_class,
-          build_marker: e?.build_marker,
-          detail:  e?.detail,
+          ...errorBlock,
+          detail: e?.detail,
+          probe,
+          probeError,
         })
       }
     })()
@@ -203,7 +285,74 @@ export default function SecuritySettings() {
       {err && (
         <div className="card p-4 border-red-200 bg-red-50 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
-          <p className="text-sm text-red-700">{err}</p>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-red-700">{err}</p>
+            {diag && (
+              <button
+                type="button"
+                onClick={() => setShowDiag(v => !v)}
+                className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-red-700 hover:text-red-800"
+              >
+                {showDiag ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                {showDiag
+                  ? (lang === 'ar' ? 'إخفاء التشخيص' : 'Hide diagnostics')
+                  : (lang === 'ar' ? 'عرض التشخيص التفصيلي' : 'Show detailed diagnostics')}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Diagnostic panel — operator-facing details from the structured
+          500 body + /auth/2fa/__diag probe. Renders ONLY when /status
+          fails. Read-only; nothing here triggers a write. */}
+      {diag && showDiag && (
+        <div className="card p-4 border-amber-200 bg-amber-50/60 dark:bg-amber-950/20 space-y-3">
+          <p className="text-xs font-semibold text-amber-800 dark:text-amber-200">
+            {lang === 'ar' ? 'تشخيص الخطأ (للدعم الفني)' : 'Diagnostic snapshot (for support)'}
+          </p>
+
+          {/* Error block */}
+          {diag.error && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-xs">
+              {Object.entries(diag.error).map(([k, v]) =>
+                v == null || v === '' ? null : (
+                  <div key={k} className="contents">
+                    <span className="text-slate-500 dark:text-slate-400">{k}</span>
+                    <code className="col-span-1 sm:col-span-2 break-all text-slate-800 dark:text-slate-100 font-mono">
+                      {String(v)}
+                    </code>
+                  </div>
+                )
+              )}
+            </div>
+          )}
+
+          {/* Probe block */}
+          <div className="pt-2 border-t border-amber-200/60 dark:border-amber-800/40">
+            <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+              {lang === 'ar' ? 'نتيجة الفحص:' : 'Probe result:'}
+            </p>
+            {diag.probeError ? (
+              <p className="text-xs text-red-700 dark:text-red-300 font-mono">
+                {diag.probeError}
+              </p>
+            ) : diag.probe ? (
+              <pre className="text-xs leading-relaxed bg-white/70 dark:bg-slate-900/40 border border-amber-200/60 dark:border-amber-800/40 rounded-lg p-2 overflow-auto max-h-72 text-slate-800 dark:text-slate-100 text-left" dir="ltr">
+{JSON.stringify(diag.probe, null, 2)}
+              </pre>
+            ) : (
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {lang === 'ar' ? 'لم يصل أي تشخيص.' : 'No probe data.'}
+              </p>
+            )}
+          </div>
+
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+            {lang === 'ar'
+              ? 'انسخ المحتوى أعلاه وأرفقه عند مراسلة الدعم — لا تحتوي هذه البيانات على أي معلومات سرية (لا توكنات ولا أسرار TOTP).'
+              : 'Copy the block above when contacting support — it contains no secrets (no tokens, no TOTP material).'}
+          </p>
         </div>
       )}
       {info && phase !== 'showCodes' && (

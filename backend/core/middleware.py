@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 import time as _time
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -109,25 +109,25 @@ async def _safe_call_next(
     """
     try:
         return await call_next(request)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
         logger.warning(
             "[%s] CancelledError on %s %s — client disconnected",
             name, request.method, request.url.path,
         )
-        return _safe_fallback_response(request, 499)
+        return _safe_fallback_response(request, 499, exc=exc, middleware_name=name)
     except RuntimeError as exc:
         if "No response returned" in str(exc):
             logger.error(
                 "[%s] BaseHTTPMiddleware end-of-chain w/o response on %s %s: %s",
                 name, request.method, request.url.path, exc,
             )
-            return _safe_fallback_response(request, 500)
+            return _safe_fallback_response(request, 500, exc=exc, middleware_name=name)
         # Other RuntimeErrors are real bugs — keep the stack trace.
         logger.exception(
             "[%s] RuntimeError on %s %s",
             name, request.method, request.url.path,
         )
-        return _safe_fallback_response(request, 500)
+        return _safe_fallback_response(request, 500, exc=exc, middleware_name=name)
     except BaseException as exc:  # noqa: BLE001
         # Catch BaseException so anyio.EndOfStream (which subclasses
         # Exception today but may evolve) and other low-level cancel
@@ -140,12 +140,12 @@ async def _safe_call_next(
                 "[%s] anyio.EndOfStream on %s %s — client gone",
                 name, request.method, request.url.path,
             )
-            return _safe_fallback_response(request, 499)
+            return _safe_fallback_response(request, 499, exc=exc, middleware_name=name)
         logger.exception(
             "[%s] downstream raised %s on %s %s",
             name, type(exc).__name__, request.method, request.url.path,
         )
-        return _safe_fallback_response(request, 500)
+        return _safe_fallback_response(request, 500, exc=exc, middleware_name=name)
 
 # Public path prefixes that never require a JWT token.
 # Keep these as specific as possible — broad prefixes can accidentally
@@ -439,7 +439,13 @@ async def salla_iframe_middleware(request: Request, call_next):
     return response
 
 
-def _safe_fallback_response(request: Request, status_code: int) -> JSONResponse:
+def _safe_fallback_response(
+    request: Request,
+    status_code: int,
+    *,
+    exc: Optional[BaseException] = None,
+    middleware_name: Optional[str] = None,
+) -> JSONResponse:
     """
     Build a JSONResponse with CORS headers as a last-resort fallback
     when a middleware would otherwise exit without a response.
@@ -448,7 +454,15 @@ def _safe_fallback_response(request: Request, status_code: int) -> JSONResponse:
     200 so upstream providers (360dialog, Meta) do not enter their
     retry loop on what is almost always a transient cancellation.
     The actual processing error (if any) has already been logged.
+
+    Diagnostic exposure (2026-05-21 #500diag): when called with an
+    exception (the BaseException branch in ``_safe_call_next``) the
+    body carries ``exc_class`` and ``middleware`` so the frontend can
+    show actionable info instead of a generic "Internal server error".
+    NO exception MESSAGE is exposed.
     """
+    import uuid as _uuid  # noqa: PLC0415
+
     path = request.url.path or ""
     if path.startswith("/webhook/"):
         return JSONResponse(
@@ -456,9 +470,26 @@ def _safe_fallback_response(request: Request, status_code: int) -> JSONResponse:
             content={"ok": False, "error": "webhook_processing_error"},
             headers=_cors_error_headers(request),
         )
+
+    incident_id = _uuid.uuid4().hex[:12]
+    exc_class = type(exc).__name__ if exc is not None else None
     return JSONResponse(
         status_code=status_code,
-        content={"detail": "Internal server error", "code": "internal_error"},
+        content={
+            "detail": {
+                "code":         "middleware_fallback",
+                "exc_class":    exc_class,
+                "middleware":   middleware_name,
+                "path":         path,
+                "method":       request.method,
+                "incident_id":  incident_id,
+                "message": (
+                    "حدث خطأ غير متوقع داخل الطبقة الوسيطة. "
+                    "تواصل مع الدعم وأرسل لهم رقم الحادثة وفئة الخطأ."
+                ),
+            },
+            "code": "middleware_fallback",
+        },
         headers=_cors_error_headers(request),
     )
 
