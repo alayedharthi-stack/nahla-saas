@@ -228,6 +228,201 @@ _GENERIC_FALLBACK_MARKERS: Tuple[str, ...] = (
 )
 
 
+# ── Post-shipment delivery-confirmation gate (May 2026 #12) ─────────
+# Real merchant screenshot: customer sent
+#     "وصل الله يوصل في عمرك بوهشام اليوم اخذته"
+# RIGHT after the merchant pushed a tracking-link / shipment update,
+# and the bot replied with payment-receipt copy ("وصل الإيصال،
+# وسيتم تجهيز الشحن…"). The customer was confirming the package
+# arrived — not claiming a transfer.
+#
+# We solve this without new intents or templates: when the recent
+# outbound history shows a shipment notice was already sent AND the
+# inbound reads as a soft delivery confirmation (no explicit transfer
+# / receipt / amount tokens), we suppress the payment-claim short
+# circuit + the awaiting-receipt dedup re-prompt. The brain LLM then
+# composes a natural "wishing you good health, glad it arrived"-style
+# reply on its own.
+#
+# Soft-delivery tokens — "I got it", "it arrived", "I took it",
+# "received today". Stay narrow: never include explicit
+# transfer / payment / receipt language so a real "وصل التحويل"
+# never gets disqualified.
+_DELIVERY_CONFIRMATION_TOKENS = (
+    "وصل اليوم", "وصلت اليوم", "وصلتني اليوم", "وصلني اليوم",
+    "اخذت الطلب", "اخذته اليوم", "اخذته",
+    "استلمت الطلب", "استلمته", "استلمناه", "استلمتها",
+    "تسلمت الطلب", "تسلمته",
+    "وصل الله يوصل",  # culturally-specific delivery blessing
+    "وصل بوقته", "وصل بحاله", "وصل بسلامه", "وصل بسلامة",
+    "وصل قبل شويه", "وصل قبل شوي", "وصل قبل قليل",
+    "وصلني قبل قليل",
+    "بوصل اليوم", "وصلتني الشحنه", "وصلتني الشحنة",
+    "وصل البكج",
+)
+
+# When ANY of these appear, treat the message as explicitly
+# transfer-related and DO NOT apply the delivery gate. Listed in
+# normalised form (post ``_normalise_arabic``).
+_EXPLICIT_PAYMENT_TOKENS = (
+    "تحويل",   # تحويل / التحويل / تحويلك / حوالة-related
+    "حواله", "حوالة",
+    "ايصال", "إيصال",
+    "دفعت", "ادفع", "السداد", "سددت",
+    "بنك", "البنك", "حسابك",
+    "ايبان", "iban",
+    "مبلغ", "المبلغ",
+    "ريال",  # often paired with a price in transfer claims
+)
+
+
+def looks_like_delivery_confirmation(text: Optional[str]) -> bool:
+    """Return True when the inbound reads as a soft delivery / package
+    arrival confirmation that is *not* a payment claim.
+
+    Very conservative: any explicit transfer / receipt / bank /
+    amount token disqualifies. The caller is expected to also check
+    the recent outbound history for a shipment notification — both
+    sides must align before we trust this signal.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    raw = text.strip()
+    if not raw or len(raw) > 240:
+        return False
+    norm = _normalise_arabic(raw)
+    if not norm:
+        return False
+    # Must NOT carry any explicit payment vocabulary — prevents
+    # hijacking real receipt claims like "وصل التحويل" / "ايصال
+    # مدفوع" that share the "وصل" prefix.
+    for tok in _EXPLICIT_PAYMENT_TOKENS:
+        if tok in norm:
+            return False
+    for tok in _DELIVERY_CONFIRMATION_TOKENS:
+        if tok in norm:
+            return True
+    return False
+
+
+# Outbound text markers that prove we already pushed a shipment /
+# tracking notice on this conversation. Drawn from the actual
+# template / automation copy in the production code:
+#   * services/whatsapp_templates/nahla_templates.py shipping_update,
+#     order_out_for_delivery
+#   * services/store_sync.py order_shipped automation
+# Plus a few generic Arabic markers a merchant might type manually.
+_SHIPMENT_OUTBOUND_MARKERS = (
+    "تم شحن", "تم شحنه", "تم الشحن",
+    "في طريقه إليك", "في طريقه اليك", "في طريقها إليك",
+    "خارج للتوصيل", "تم التسليم",
+    "متابعة حالة الشحن", "تتبع الشحن", "تتبع الشحنه", "تتبع الشحنة",
+    "رقم التتبع", "رابط التتبع",
+    "تجهيز الشحن", "جاهز للشحن", "تم التجهيز",
+    # English equivalents merchants paste in (Aramex / SMSA tracking pages)
+    "tracking", "out for delivery", "shipped", "delivered",
+)
+
+
+def _outbound_carries_shipment_marker(body: Any) -> bool:
+    """Return True when an outbound message body contains any of the
+    documented shipment / tracking markers. Pure helper so tests can
+    exercise the marker list without spinning up a DB session."""
+    if not body:
+        return False
+    body_str = body if isinstance(body, str) else str(body)
+    for marker in _SHIPMENT_OUTBOUND_MARKERS:
+        if marker in body_str:
+            return True
+    return False
+
+
+def is_post_shipment_context(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    lookback: int = 12,
+) -> bool:
+    """Scan the last ``lookback`` outbound message events for shipment
+    / tracking markers. Returns True when at least one matches.
+
+    Read-only and exception-safe. We never raise into the caller —
+    the gate degrades to "no shipment context detected" on any DB or
+    import failure, which is the existing pre-fix behaviour.
+
+    Conversation lookup reuses ``order_flow._find_conversation_by_phone``
+    so the customer-phone resolution logic stays in one place
+    (Customer.normalized_phone / Customer.phone JOIN with the legacy
+    ``extra_metadata['customer_phone']`` fallback).
+    """
+    try:
+        from database.models import (  # noqa: PLC0415
+            Conversation as _Conv,
+            Customer as _Customer,
+            MessageEvent as _Msg,
+        )
+        from core.order_flow import _find_conversation_by_phone  # noqa: PLC0415
+    except Exception:
+        return False
+    try:
+        conv = _find_conversation_by_phone(
+            db,
+            tenant_id=int(tenant_id),
+            phones=(phone,),
+            Conversation=_Conv,
+            Customer=_Customer,
+        )
+    except Exception:
+        return False
+    if conv is None:
+        return False
+    try:
+        rows = (
+            db.query(_Msg.body, _Msg.direction)
+              .filter(_Msg.conversation_id == conv.id)
+              .filter(_Msg.tenant_id == int(tenant_id))
+              .order_by(_Msg.id.desc())
+              .limit(lookback * 2)  # x2 because outbound + inbound interleave
+              .all()
+        )
+    except Exception:
+        return False
+    seen_outbound = 0
+    for row in rows:
+        try:
+            body = row[0]
+            direction = row[1]
+        except Exception:
+            continue
+        d = str(direction or "").lower()
+        if d not in {"out", "outbound"}:
+            continue
+        if _outbound_carries_shipment_marker(body):
+            return True
+        seen_outbound += 1
+        if seen_outbound >= lookback:
+            break
+    return False
+
+
+def is_post_shipment_delivery_confirmation(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    inbound_text: str,
+) -> bool:
+    """Convenience combiner: True iff the inbound is a soft delivery
+    confirmation AND the recent outbound history already carried a
+    shipment notice. The caller can use this to suppress payment /
+    receipt deterministic short-circuits.
+    """
+    if not looks_like_delivery_confirmation(inbound_text):
+        return False
+    return is_post_shipment_context(db, tenant_id=tenant_id, phone=phone)
+
+
 def detect_payment_confirmation_text(text: Optional[str]) -> bool:
     """Return True when the inbound message reads as a "I paid /
     I transferred / here is the receipt" claim.
@@ -362,6 +557,21 @@ def maybe_handle_payment_claim(
     if has_attached_media:
         return None
     if not detect_payment_confirmation_text(inbound_text):
+        return None
+
+    # ── Post-shipment delivery-confirmation gate (May 2026 #12) ──────
+    # A recent outbound shipment notice + a soft "اخذته / استلمته /
+    # وصل اليوم" inbound means the customer is confirming PACKAGE
+    # delivery, NOT a money transfer. Suppress the deterministic
+    # payment ACK so the brain composes a natural reply.
+    if is_post_shipment_delivery_confirmation(
+        db, tenant_id=tenant_id, phone=phone, inbound_text=inbound_text,
+    ):
+        logger.info(
+            "[PAYMENT_INTENT] skip — post-shipment delivery confirmation "
+            "tenant=%s phone=*%s text=%r",
+            tenant_id, (phone or "")[-4:], (inbound_text or "")[:60],
+        )
         return None
 
     try:

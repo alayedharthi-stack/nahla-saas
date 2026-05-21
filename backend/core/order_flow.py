@@ -812,6 +812,7 @@ def context_aware_dedup_fallback(
     phone: str,
     history: List[Any],
     default_fallback: str,
+    inbound_text: Optional[str] = None,
 ) -> str:
     """Return a context-relevant fallback when the brain's reply
     tripped the near-duplicate guard. Without this, the merchant
@@ -843,10 +844,44 @@ def context_aware_dedup_fallback(
             )
 
         if s.get("awaiting_payment_receipt"):
-            return (
-                "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
-                "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
-            )
+            # Post-shipment delivery-confirmation gate (May 2026 #12):
+            # if a tracking notice was already pushed and the customer
+            # is now confirming PACKAGE arrival ("اخذته / استلمته /
+            # وصل اليوم"), the awaiting-receipt re-prompt is wrong —
+            # the order has clearly moved past payment. Fall through
+            # to the default fallback so the brain replies naturally.
+            if inbound_text:
+                try:
+                    from core.payment_intent import (  # noqa: PLC0415
+                        is_post_shipment_delivery_confirmation,
+                    )
+                    if is_post_shipment_delivery_confirmation(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=phone,
+                        inbound_text=inbound_text,
+                    ):
+                        logger.info(
+                            "[ORDER_FLOW_STATE] suppressing receipt re-prompt "
+                            "— post-shipment delivery confirmation detected "
+                            "tenant=%s phone=*%s",
+                            tenant_id, (phone or "")[-4:],
+                        )
+                    else:
+                        return (
+                            "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
+                            "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
+                        )
+                except Exception:
+                    return (
+                        "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
+                        "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
+                    )
+            else:
+                return (
+                    "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
+                    "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
+                )
 
         if s.get("selected_product") and s.get("price") is not None:
             price_str = _format_price(s["price"], s.get("currency") or "SAR")

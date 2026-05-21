@@ -5128,6 +5128,7 @@ async def _handle_merchant_message(
                     phone=to,
                     history=history,
                     default_fallback=_default_short,
+                    inbound_text=text,
                 )
             except Exception as _ctx_exc:  # noqa: BLE001
                 logger.debug(
