@@ -1216,16 +1216,32 @@ class DefaultDecisionEngine:
             STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT,
         )
         if not _greet_locked:
-            if intent.name == INTENT_GREETING and not state.greeted:
-                return Decision(
-                    action=ACTION_GREET,
-                    reason="explicit greeting on first turn",
-                )
-            if not state.greeted and intent.name == INTENT_GENERAL:
-                return Decision(
-                    action=ACTION_GREET,
-                    reason="first-turn general help",
-                )
+            # ── Embedded-greeting escape hatch (May 2026 #19) ───────────
+            # The rules layer marks ``slots["embedded_greeting"]=True``
+            # when the salaam was just a wrapper around a real question
+            # (handled in rules.py via the welcome gate + residue test).
+            # In that case the ACTION_GREET short-circuit below would
+            # render a canned welcome card and silently drop the
+            # customer's actual ask — exactly the regression the merchant
+            # reported on "مساء الخير نحلة وش نشاطهم". Skip the greet
+            # branch so the rest of the engine routes the actionable
+            # half to ACTION_LLM_REPLY (or a more specific action when
+            # one matches). The pipeline's welcome-gate step then
+            # prepends a brief warm acknowledgement to the LLM reply
+            # so the salaam is still honoured.
+            _intent_slots = getattr(intent, "slots", None) or {}
+            _embedded_greeting = bool(_intent_slots.get("embedded_greeting"))
+            if not _embedded_greeting:
+                if intent.name == INTENT_GREETING and not state.greeted:
+                    return Decision(
+                        action=ACTION_GREET,
+                        reason="explicit greeting on first turn",
+                    )
+                if not state.greeted and intent.name == INTENT_GENERAL:
+                    return Decision(
+                        action=ACTION_GREET,
+                        reason="first-turn general help",
+                    )
             if intent.name == INTENT_GREETING and state.greeted:
                 # Composer reads `re_greet=True` and renders the short
                 # `re_greeting` template instead of the full onboarding

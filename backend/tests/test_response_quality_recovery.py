@@ -174,24 +174,39 @@ def _ctx(
 # substituted with the hard-coded text when the brain didn't actually
 # go through the greet path. Here we verify rules + decision parts.
 
-def test_case1_greeting_plus_offers_routes_to_greet_for_now() -> None:
-    """Documents current behaviour for case 1.
+def test_case1_greeting_plus_offers_demotes_to_brain() -> None:
+    """Case 1: greeting + open-ended "any offers?" question.
 
-    The brain's intent regex does NOT yet recognise "فيه عروض على X"
-    as ASK_PRODUCT. So the welcome-gate cannot demote and we return
-    INTENT_GREETING. This test pins the EXPECTED next-step behaviour
-    for the second-round fix (regex expansion in P5):
-    when this test starts failing, P5 has been deployed and case 1 is
-    properly routed to ASK_PRODUCT.
+    Original P3 behaviour (Apr 2026): the rule layer recognised the
+    greeting alone, no actionable rule matched "فيه عروض على X", and
+    the welcome gate fell back to INTENT_GREETING — the customer's
+    question was dropped and the bot rendered the canned welcome card.
+
+    May 2026 #19 fix: instead of adding regex patterns for every offer
+    phrasing (the rigid-robot path the merchant explicitly rejected),
+    the welcome gate now uses a STRUCTURAL residue test. After peeling
+    the leading "السلام عليكم", the residue "فيه عروض على العسل"
+    survives → the gate demotes to INTENT_GENERAL with
+    ``embedded_greeting=True`` and the LLM brain composes the answer.
+
+    What must NOT happen on this input is INTENT_GREETING — that's
+    the dropped-question regression. Accept either INTENT_GENERAL
+    (residue path) or INTENT_ASK_PRODUCT (if a future rule expansion
+    catches "فيه عروض" earlier) as forward states.
     """
     message = "السلام عليكم فيه عروض على العسل"
     result = intent_rules.match(message)
     assert result is not None
-    # Current state: we recognise GREETING only.
-    assert result.name == INTENT_GREETING, (
-        f"Once P5 adds 'فيه عروض' to INTENT_ASK_PRODUCT regex, this "
-        f"assertion should be flipped to INTENT_ASK_PRODUCT and "
-        f"embedded_greeting=True. Got {result.name!r}."
+    assert result.name != INTENT_GREETING, (
+        "regression: greeting + 'فيه عروض على العسل' must NOT short-circuit "
+        "to INTENT_GREETING — the customer's question would be dropped. "
+        f"Got {result.name!r}."
+    )
+    # The residue path also sets embedded_greeting so the pipeline
+    # prepends a warm salaam to the LLM reply.
+    assert result.slots.get("embedded_greeting") is True, (
+        f"expected embedded_greeting=True (so the pipeline still "
+        f"acknowledges the salaam), got slots={result.slots!r}"
     )
 
 

@@ -614,6 +614,24 @@ def match(message: str) -> Optional[Intent]:
                 raw_message=message,
                 extraction_method="rules+welcome_gate",
             )
+        # May 2026 #19 — open-ended question hidden behind the salaam.
+        # When no specific rule (price/product/order/…) matched but the
+        # message still carries substantive content beyond the greeting
+        # phrase ("مساء الخير نحلة وش نشاطهم"), demote to INTENT_GENERAL
+        # so the LLM brain gets to see and answer the embedded ask.
+        # Pure salaams (residue ≤ 2 chars) keep the greeting card.
+        if _has_substantive_residue(message):
+            return Intent(
+                name=INTENT_GENERAL,
+                # Confidence intentionally lower than the original
+                # greeting (0.95) but still above the LLM-fallback
+                # floor — the downstream pipeline reads this as
+                # "needs LLM interpretation" without short-circuiting.
+                confidence=0.80,
+                slots={"embedded_greeting": True},
+                raw_message=message,
+                extraction_method="rules+welcome_gate+residue",
+            )
         return best_intent
 
     if has_greeting and best_intent.name in _FIRST_CONTACT_ACTIONABLE_INTENTS:
@@ -678,3 +696,221 @@ def _pick_embedded_actionable(
         return None
     actionable.sort(key=lambda x: x[0], reverse=True)
     return actionable[0][1]
+
+
+# ── Greeting-residue detector (May 2026 #19) ───────────────────────────────────
+# Customer reported: "مساء الخير نحلة كيف حالك بسألك عن العايد وش نشاطهم"
+# was classified purely as INTENT_GREETING and the bot replied with the
+# generic welcome card — completely ignoring the embedded question
+# "وش نشاطهم". The existing welcome-gate code only demoted the greeting
+# when ANOTHER rule (price/product/order/…) ALSO matched. Questions that
+# don't trip a specific rule (open-ended "what do you sell?", store
+# nature questions, broad about-us asks) fell through and the customer
+# was canned.
+#
+# Design choice (per merchant directive — no keyword→reply rules):
+# instead of adding regex patterns for "وش نشاطكم" / "ايش تبيعون" /
+# "نشاط المتجر" etc., we use a STRUCTURAL test:
+#
+#   1. Iteratively strip leading greeting / vocative / honorific tokens
+#      (using the SAME phrases already declared in INTENT_GREETING
+#      patterns above — no new vocabulary).
+#   2. Strip the bot's own name ("نحلة" + variants), since customers
+#      routinely tag the bot in their salaam.
+#   3. Strip pleasant-question filler ("كيف حالك" / "كيف الحال").
+#   4. Whatever is LEFT — if it has any substantive content
+#      (≥ 3 Arabic/Latin characters after the strip pass) — is a real
+#      question the LLM should see.
+#
+# When residue is non-trivial AND no actionable rule matched, we
+# demote the intent to INTENT_GENERAL with ``embedded_greeting=True``.
+# The pipeline (pipeline.py:1060) already knows how to handle that
+# flag — it prepends a brief warm acknowledgement and lets the LLM
+# answer the substantive part.
+#
+# This is the OPPOSITE of adding rigid rules: we widened the LLM's
+# reach by removing a short-circuit. The bot stays warm on pure
+# salaam ("السلام عليكم" → still INTENT_GREETING) and gets smarter
+# on mixed turns ("salaam + open question" → INTENT_GENERAL).
+
+# Greeting / courtesy tokens used by the residue stripper. Source-of-
+# truth is the INTENT_GREETING patterns above; this list mirrors them
+# in plain-text form so we can iteratively peel them off the front of
+# the message. Keep in sync if those patterns ever change. Anchored
+# from the START only — the stripper walks the message left-to-right.
+_GREETING_RESIDUE_LEAD_TOKENS = (
+    # ── Religious / formal greetings ──
+    "السلام عليكم ورحمة الله وبركاته",
+    "السلام عليكم ورحمة الله",
+    "السلام عليكم",
+    "وعليكم السلام ورحمة الله وبركاته",
+    "وعليكم السلام ورحمة الله",
+    "وعليكم السلام",
+    # ── Time-of-day ──
+    "صباح الخير", "صباح النور", "صباح الفل", "صباح الورد",
+    "مساء الخير", "مساء النور", "مساء الفل", "مساء الورد",
+    # ── Casual ──
+    "أهلاً وسهلاً", "أهلا وسهلا", "اهلا وسهلا", "أهلين", "اهلين",
+    "أهلاً", "أهلا", "اهلاً", "اهلا",
+    "مرحباً", "مرحبا", "مرحبًا",
+    "هلا والله", "هلا وغلا", "يا هلا", "يا مية هلا",
+    "هلاً", "هلا", "هلأ", "هلو",
+    # ── How-are-you fillers — these are still pure courtesy, NOT
+    #    substantive questions. The stripper removes them so the
+    #    residue check only sees REAL content. ──
+    "كيف حالك", "كيف الحال", "كيف الحال اليوم", "كيفك", "كيف أحوالك",
+    "كيف انت", "كيف أنت", "كيف الأحوال", "كيف الاحوال",
+    "ان شاء الله بخير", "إن شاء الله بخير", "ان شالله بخير",
+    "اخبارك", "أخبارك", "وش الأخبار", "وش الاخبار", "ايش الاخبار",
+    # ── English ──
+    "good morning", "good afternoon", "good evening", "good day",
+    "hello", "hi there", "hi", "hey there", "hey",
+    "how are you", "how are u", "how r u",
+)
+
+# Bot name tags & informal vocatives customers add to the salaam.
+# Stripping these is mandatory — the residue check would otherwise
+# treat "نحلة" itself as substantive content and route every greeting
+# to the LLM. We deliberately do NOT strip personal vocatives like
+# "يا غالي" / "يا محمد" — those carry no question content, so the
+# residue length check below filters them out via the min-character
+# threshold instead of needing a token list.
+_GREETING_RESIDUE_BOT_TAGS = (
+    "يا نحلة", "يا نحله", "نحلة", "نحله",
+    "نحلتي", "يا نحلتي",
+)
+
+
+def _strip_greeting_residue(message: str) -> str:
+    """Iteratively strip leading greeting / courtesy / bot-tag tokens.
+
+    Returns whatever substantive content is LEFT after one greeting-
+    pass over the front of the message. Robust to common punctuation
+    (commas, ellipses, exclamation marks, emojis) between tokens.
+
+    Examples
+    ────────
+    "مساء الخير نحلة كيف حالك بسألك عن العايد وش نشاطهم"
+       → "بسألك عن العايد وش نشاطهم"   (non-trivial residue → LLM)
+
+    "السلام عليكم"
+       → ""                              (pure greeting → keep INTENT_GREETING)
+
+    "صباح الخير يا نحلة كيف حالك"
+       → ""                              (pure greeting → keep INTENT_GREETING)
+
+    "hello"
+       → ""
+
+    "hi how are you i need honey"
+       → "i need honey"                  (residue → LLM)
+    """
+    if not message:
+        return ""
+    text = str(message).strip()
+    # Lowercase + drop diacritics + collapse hamza variants so the
+    # stripper matches the same surface forms regardless of input
+    # orthography. We do NOT normalise the RETURN value — callers
+    # need the original characters in case downstream wants to log /
+    # re-render the residual.
+    norm = re.sub(r"[\u064B-\u0652\u0670\u0640]", "", text)
+    norm = (
+        norm.replace("أ", "ا")
+            .replace("إ", "ا")
+            .replace("آ", "ا")
+            .replace("ة", "ه")
+            .replace("ؤ", "و")
+            .replace("ئ", "ي")
+            .replace("ى", "ي")
+    )
+    norm = norm.lower()
+
+    # Same normalisation applied to the token lists so the comparison
+    # is apples-to-apples regardless of how the customer typed it.
+    def _normalise_token(tok: str) -> str:
+        s = re.sub(r"[\u064B-\u0652\u0670\u0640]", "", tok)
+        s = (
+            s.replace("أ", "ا")
+             .replace("إ", "ا")
+             .replace("آ", "ا")
+             .replace("ة", "ه")
+             .replace("ؤ", "و")
+             .replace("ئ", "ي")
+             .replace("ى", "ي")
+        )
+        return s.lower()
+
+    # Sort longest-first so "السلام عليكم ورحمة الله" wins over
+    # "السلام عليكم" on the same prefix.
+    lead_norm = sorted(
+        {_normalise_token(t) for t in _GREETING_RESIDUE_LEAD_TOKENS},
+        key=len, reverse=True,
+    )
+    tag_norm = sorted(
+        {_normalise_token(t) for t in _GREETING_RESIDUE_BOT_TAGS},
+        key=len, reverse=True,
+    )
+
+    # Punctuation / whitespace / emoji separator we peel between tokens.
+    _SEP_RE = re.compile(r"^[\s,.،؛!?؟…\-—\u2000-\u206F\U0001F300-\U0001FAFF]+")
+
+    def _peel(buf: str) -> Tuple[str, bool]:
+        """Try to peel one greeting / vocative token off the front.
+
+        Returns ``(remainder, peeled)`` where ``peeled`` is True if
+        anything was removed this round.
+        """
+        # Leading punctuation / whitespace / emoji
+        m = _SEP_RE.match(buf)
+        if m:
+            buf = buf[m.end():]
+            if not buf:
+                return buf, True
+        for tok in lead_norm:
+            if buf.startswith(tok):
+                return buf[len(tok):], True
+        for tag in tag_norm:
+            if buf.startswith(tag):
+                return buf[len(tag):], True
+        return buf, False
+
+    cur = norm
+    # Bounded loop — there are at most a handful of greeting/vocative
+    # tokens on the front in real customer messages. 6 iterations is
+    # comfortable without risking a runaway on adversarial input.
+    for _ in range(6):
+        cur, peeled = _peel(cur)
+        if not peeled:
+            break
+
+    # Drop any trailing leading separators after the last peel.
+    m = _SEP_RE.match(cur)
+    if m:
+        cur = cur[m.end():]
+
+    return cur.strip()
+
+
+# Minimum residue size (in word characters) that counts as "substantive
+# trailing content". Three characters is a fair floor — "هل" alone is
+# only 2 chars and is rarely a complete question on its own, but a
+# residue like "وش" or "ايش" or "كيف اشتري" is unambiguously a real
+# ask. Counted after the stripper drops punctuation, so tiny ack
+# tokens ("👋", "🌹", "!") never trigger a demotion.
+_GREETING_RESIDUE_MIN_CHARS = 3
+_GREETING_RESIDUE_WORD_CHARS_RE = re.compile(r"[\w\u0600-\u06FF]")
+
+
+def _has_substantive_residue(message: str) -> bool:
+    """True when stripping the leading greeting leaves real content.
+
+    Used by ``classify`` to decide whether a customer's salaam was a
+    pure greeting (keep INTENT_GREETING) or a mixed turn with an
+    embedded open question (demote to INTENT_GENERAL so the LLM sees
+    the actual ask). See `_strip_greeting_residue` for the strategy.
+    """
+    residue = _strip_greeting_residue(message)
+    if not residue:
+        return False
+    n = len(_GREETING_RESIDUE_WORD_CHARS_RE.findall(residue))
+    return n >= _GREETING_RESIDUE_MIN_CHARS

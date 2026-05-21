@@ -228,17 +228,36 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
     return False
 
 
-# Replacement set after the May 2026 #2 merchant feedback ("no loops,
-# no clown tone"). The dedup fallback runs ONLY when the brain
-# produces a near-duplicate of its previous outbound, and the
-# customer would otherwise see the same line twice. We keep the lines
-# short, calm, no laughter, no "أرشح لك عسل؟" funnel-opener. Rotated
-# by outbound-turn count so the customer doesn't see the same line
-# back-to-back either.
+# Dedup fallback replies (May 2026 #19 — re-tuned tone).
+#
+# History
+# ───────
+# v1 (May 2026 #2): closed-tone set —
+#   "تأمر بشي ثاني؟ / إذا في شي ثاني تحتاجه أنا معك. / خبرني لو احتجت شي ثاني."
+# All three implicitly say "we're done". But the dedup guard fires
+# EXACTLY when the customer is still engaged and the brain repeated
+# itself (typically because the customer just asked for elaboration
+# like "تفاصيل اكثر" / "اشرح اكثر"). The closed tone read as the bot
+# dismissing the customer mid-question.
+#
+# v2 (this set): clarification-tone — instead of farewell phrases we
+# invite the customer to specify what aspect they want clarified. The
+# brain's near-duplicate is treated as a signal that we don't have NEW
+# substantive content to add, but we leave the conversation open and
+# put the next move in the customer's hands. No emojis (calm tone),
+# no laughter, no funnel-opener.
+#
+# Why this is NOT a keyword→reply rule:
+# the trigger is STRUCTURAL (overlap ≥ 60% with a recent outbound,
+# computed lexically) — the substitute lines just acknowledge the
+# repetition transparently and ask the customer to point at the
+# specific gap. The brain's understanding of context is still the
+# layer doing the work; this is only a graceful-degradation prompt
+# when the brain ran out of new content.
 _DEDUP_FALLBACK_REPLIES = [
-    "تأمر بشي ثاني؟",
-    "إذا في شي ثاني تحتاجه أنا معك.",
-    "خبرني لو احتجت شي ثاني.",
+    "ذكرت لك للتو نفس النقطة 🌷 وش الجزء اللي تبيني أوضحه أكثر؟",
+    "هذي نفس الإجابة قبل قليل — قلي على وجه التحديد إيش الناقص.",
+    "تكلمنا عنها فوق، شف وش الجانب اللي تبي تعرف عنه أكثر.",
 ]
 
 
