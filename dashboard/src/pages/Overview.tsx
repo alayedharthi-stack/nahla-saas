@@ -47,6 +47,10 @@ interface OverviewStats {
   conversations?: number
   orders?: number
   revenue?: number
+  /** Total marketing-campaign template sends in the selected window —
+   *  surfaced as its own KPI so a big blast is visible even when the
+   *  conversation counter barely moves (recipients with open windows). */
+  messages_sent?: number
   /** Legacy names — still returned by backend for backwards compat; the
    *  values now reflect the SELECTED period, not literally today. */
   conversations_today: number
@@ -150,6 +154,7 @@ export default function Overview() {
           conversations:        syncStatus.conversations  ?? syncStatus.conversations_today ?? 0,
           orders:               syncStatus.orders         ?? syncStatus.orders_today        ?? 0,
           revenue:              syncStatus.revenue        ?? syncStatus.revenue_today       ?? 0,
+          messages_sent:        syncStatus.messages_sent  ?? 0,
           conversations_today:  syncStatus.conversations_today ?? 0,
           orders_today:         syncStatus.orders_today        ?? 0,
           revenue_today:        syncStatus.revenue_today       ?? 0,
@@ -176,6 +181,7 @@ export default function Overview() {
   const kpiRevenue       = stats?.revenue       ?? stats?.revenue_today       ?? 0
   const kpiConversations = stats?.conversations ?? stats?.conversations_today ?? 0
   const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
+  const kpiMessagesSent  = stats?.messages_sent ?? 0
   const periodLabelAr    = stats?.period_label_ar ?? PERIOD_LABEL_AR[period]
 
   const statusLabel = (s: string) => {
@@ -383,6 +389,16 @@ export default function Overview() {
                     )}
                   </div>
                   <p className="text-sm font-bold text-slate-800 mt-0.5">{waUsage.meta_tier_label}</p>
+                  {/* Hint: explain what the tier actually means.
+                      Merchants often confuse Meta's TIER_X with a
+                      monthly cap — it's not. It's the number of NEW
+                      customers you can business-initiate with per 24h.
+                      Surfacing the real semantics here cuts the
+                      "why does it say 250 when Meta gave me 100k?"
+                      support load to zero. */}
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                    عدد العملاء الجدد الذين يمكنك بدء محادثة معهم خلال 24 ساعة (حد Meta للحساب) — وليس الحد الشهري للباقة.
+                  </p>
                   <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500 flex-wrap">
                     {waUsage.meta_tier_source && (
                       <span>
@@ -459,8 +475,17 @@ export default function Overview() {
         </div>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* KPI Cards.
+          Layout note: we promote ``رسائل مُرسلة`` (campaign throughput)
+          to a top-level card only when the merchant actually ran a
+          campaign in the window. Showing a permanent zero-stat to a
+          merchant who never sent a campaign would just add visual
+          noise; gating it on ``kpiMessagesSent > 0`` keeps the grid
+          tidy and turns the 5th column into a "live signal" that a
+          blast is going out. */}
+      <div className={`grid grid-cols-2 gap-4 ${
+        kpiMessagesSent > 0 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
+      }`}>
         <StatCard
           label={ov.kpiRevenue}
           subLabel={periodLabelAr}
@@ -472,11 +497,21 @@ export default function Overview() {
         <StatCard
           label={ov.kpiConversations}
           subLabel={periodLabelAr}
-          value={loading ? '—' : String(kpiConversations)}
+          value={loading ? '—' : kpiConversations.toLocaleString('ar-SA')}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
+        {kpiMessagesSent > 0 && (
+          <StatCard
+            label="رسائل مُرسلة"
+            subLabel={`${periodLabelAr} • حملات Meta`}
+            value={loading ? '—' : kpiMessagesSent.toLocaleString('ar-SA')}
+            icon={MessageSquare}
+            iconColor="text-amber-600"
+            iconBg="bg-amber-50"
+          />
+        )}
         <StatCard
           label={ov.kpiOrders}
           subLabel={periodLabelAr}

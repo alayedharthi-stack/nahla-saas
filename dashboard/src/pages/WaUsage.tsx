@@ -464,8 +464,20 @@ export default function WaUsage() {
                       آخر مزامنة: <strong className="text-slate-700">{formatSyncedAtWa(data.meta_tier_last_synced_at)}</strong>
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-1">
-                    يتم ترقية المستوى تلقائياً من Meta عند استيفاء شروط الجودة
+                  {/* Plain-language explanation of what TIER_X actually
+                      means. Merchants frequently confuse this with a
+                      monthly cap — clearing that up here saves a lot of
+                      support tickets like "Meta gave me 100k why does
+                      Nahla say 250?". The 100k figure is usually the
+                      *plan* limit; Meta's tier is a per-24h cap on
+                      business-initiated chats. */}
+                  <div className="mt-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2.5 leading-relaxed">
+                    <p className="font-semibold text-slate-700 mb-0.5">ما معنى هذا الرقم؟</p>
+                    عدد العملاء الجدد الذين يمكنك بدء محادثة معهم خلال 24 ساعة عبر القوالب (Marketing / Utility / Authentication).
+                    لا يعنى الحد الشهري للباقة — الحد الشهري معروض في "استخدام واتساب هذا الشهر" بالأعلى.
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1.5">
+                    يتم ترقية المستوى تلقائياً من Meta عند استيفاء شروط الجودة وتسجيل حركة منتظمة.
                   </p>
                 </div>
                 {data.meta_quality_rating && (

@@ -49,6 +49,7 @@ def _strip_html(html: str, max_length: int = 500) -> str:
     text = _WHITESPACE_RE.sub(" ", text).strip()
     return text[:max_length]
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 # Allow importing from project root
@@ -2895,7 +2896,12 @@ class StoreSyncService:
         KPI selector — keeping it stable across period switches makes
         scanning the area chart predictable.
         """
-        from models import Conversation, ConversationTrace  # noqa: PLC0415
+        from models import (  # noqa: PLC0415
+            CampaignSendLog,
+            Conversation,
+            ConversationLog,
+            ConversationTrace,
+        )
 
         now   = datetime.now(timezone.utc)
         today = now.date()
@@ -3036,8 +3042,60 @@ class StoreSyncService:
             for key, label in chart_days
         ]
 
-        # ── Conversations within the selected window via ConversationTrace ───
+        # ── Conversations within the selected window (Meta-billable) ─────────
+        # We count NEW 24h conversation windows opened — this matches
+        # what Meta actually bills and is the same source as the
+        # "WhatsApp usage this month" widget. ``ConversationLog`` rows
+        # include:
+        #   * inbound replies (source=inbound, category=service)
+        #   * manual marketing campaigns (source=campaign, category=marketing)
+        #   * one-off templates / API sends
+        # so a campaign that opens 8,000 marketing windows is reflected
+        # in this counter — unlike the previous implementation which
+        # only counted AI-traced inbound sessions and silently ignored
+        # outbound campaigns.
+        #
+        # ``ConversationLog.conversation_started_at`` is stored as
+        # naive UTC, while ``window_start`` is timezone-aware. Strip
+        # the tz for the comparison so SQLAlchemy doesn't coerce the
+        # filter into a "naive vs aware" mismatch on Postgres.
+        window_start_naive = window_start.replace(tzinfo=None)
         conversations_period = 0
+        try:
+            conversations_period = (
+                self.db.query(func.count(ConversationLog.id))
+                .filter(
+                    ConversationLog.tenant_id == self.tenant_id,
+                    ConversationLog.conversation_started_at >= window_start_naive,
+                )
+                .scalar()
+            ) or 0
+        except Exception as exc:
+            logger.debug("[StoreSync] ConversationLog count failed: %s", exc)
+
+        # ── Messages sent (campaign throughput) in the selected window ───────
+        # Campaign template sends are the single biggest signal merchants
+        # look for when they ask "did my blast actually go out?". We
+        # surface a dedicated counter instead of folding it into
+        # conversations because a campaign of 8,000 sends to recipients
+        # who already have an open marketing window should still be
+        # visible — even though it opened 0 new billable windows.
+        messages_sent_period = 0
+        try:
+            messages_sent_period = (
+                self.db.query(func.count(CampaignSendLog.id))
+                .filter(
+                    CampaignSendLog.tenant_id == self.tenant_id,
+                    CampaignSendLog.status == "sent",
+                    CampaignSendLog.sent_at != None,  # noqa: E711
+                    CampaignSendLog.sent_at >= window_start_naive,
+                )
+                .scalar()
+            ) or 0
+        except Exception as exc:
+            logger.debug("[StoreSync] CampaignSendLog count failed: %s", exc)
+
+        # ── Recent AI sessions (for the "Recent conversations" widget) ───────
         recent_conversations_out: list = []
         try:
             window_traces = (
@@ -3049,14 +3107,6 @@ class StoreSyncService:
                 .order_by(ConversationTrace.created_at.desc())
                 .all()
             )
-            # Unique customer phones in the selected window — this is the
-            # number the merchant cares about ("how many distinct people
-            # talked to us in the chosen period"), not message count.
-            phones_in_window: set = set()
-            for tr in window_traces:
-                if tr.customer_phone:
-                    phones_in_window.add(tr.customer_phone)
-            conversations_period = len(phones_in_window)
 
             # Recent conversations (last 5 unique phones)
             seen_phones: set = set()
@@ -3107,6 +3157,12 @@ class StoreSyncService:
             "revenue":                round(revenue_period, 2),
             "orders":                 orders_period,
             "conversations":          conversations_period,
+            # Total marketing-campaign template sends in the window —
+            # surfaced as its own counter so merchants can verify that
+            # a big blast actually went out, even when most recipients
+            # already had an open 24h window (so the conversation
+            # counter barely moves).
+            "messages_sent":          messages_sent_period,
             "ai_rate":                ai_rate,
             "ai_revenue":             round(ai_revenue, 2),
             "ai_orders":              ai_orders,

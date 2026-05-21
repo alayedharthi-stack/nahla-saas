@@ -2165,6 +2165,32 @@ async def _dispatch_queued_rows(
                                 phone, template, rendered,
                                 wa_message_id=wa_msg_id,
                             )
+                        # Open / refresh the 24h marketing conversation
+                        # window so the Meta-billable counter and the
+                        # ConversationLog audit log reflect this campaign
+                        # send. Without this hook the merchant ships
+                        # thousands of templates but the dashboard never
+                        # updates — they only learn the real cost from
+                        # Meta's monthly bill. The function is idempotent
+                        # against an already-open window for the same
+                        # phone (no double-counting on resends within
+                        # 24h) and runs inside the same transaction we
+                        # commit below.
+                        try:
+                            from core.wa_usage import track_conversation  # noqa: PLC0415
+                            track_conversation(
+                                db,
+                                campaign.tenant_id,
+                                phone,
+                                source="campaign",
+                                category="marketing",
+                            )
+                        except Exception as _track_exc:
+                            logger.warning(
+                                "[campaign_dispatcher] track_conversation failed "
+                                "campaign=%d phone=***%s err=%s",
+                                campaign.id, phone[-4:] if phone else "?", _track_exc,
+                            )
                         logger.info(
                             "[campaign_dispatcher] campaign=%d sent OK to %s wamid=%s",
                             campaign.id, phone, wa_msg_id,
