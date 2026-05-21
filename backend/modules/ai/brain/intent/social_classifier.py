@@ -393,6 +393,49 @@ def _has_practical_question_signal(norm: str) -> bool:
     return any(kw in norm for kw in _PRACTICAL_QUESTION_SIGNALS)
 
 
+# ── Closing / wrap-up signals (May 2026 #12) ────────────────────────────────
+# Merchant report: customer sends "على خير إن شاء الله" (a polite
+# closing) and the bot replies "الله يحييك 🌹 وش الخدمة؟" — re-opening
+# the sales conversation as if the customer just landed. The right
+# behaviour is to mirror the closing tone briefly and stop. The
+# brain's ``stance_detector`` already detects ``STANCE_POLITE_CLOSE``
+# and tells the LLM not to push a follow-up nudge; we just need the
+# social classifier to YIELD on these turns so the brain pipeline
+# actually runs instead of short-circuiting into the
+# ``general_courtesy`` template pool.
+#
+# Conservative on purpose. Each token must read as a clear
+# conversation wrap-up rather than a generic blessing — generic
+# blessings still belong in the social pool. Tokens are listed in
+# normalised form (``ة`` → ``ه``, ``أ/إ/آ`` → ``ا``).
+_CLOSING_SIGNALS = (
+    # "Goodbye / take care" wrap-ups.
+    "علي خير", "على خير",
+    "في امان الله", "بامان الله", "بحفظ الله",
+    "مع السلامه", "مع السلامة",
+    "تصبح علي خير", "تصبح على خير",
+    "تصبحين علي خير", "تصبحين على خير",
+    "اسعد الله مساءك",
+    # "We are done / good for now" — explicit wrap.
+    "خلاص شكرا", "خلاص شكراً",
+    "تكفينا الحين", "كفايه الحين",
+    "تمام كذا", "تمام بكذا",
+    "بس كذا شكرا", "بس كذا شكراً",
+    "هذا كل شي شكرا", "هذا كل شي شكراً",
+    # "Until next time" — soft farewell.
+    "نشوفكم", "نلتقي",
+    "الي اللقاء", "إلى اللقاء",
+)
+
+
+def _has_closing_signal(norm: str) -> bool:
+    """Return True when the message reads as a polite close / wrap-up
+    rather than a fresh greeting. Yields to the brain pipeline so the
+    stance layer marks it ``STANCE_POLITE_CLOSE`` and the LLM mirrors
+    the closing tone instead of re-opening the sales prompt."""
+    return any(kw in norm for kw in _CLOSING_SIGNALS)
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 def classify_social(message: str) -> Optional[SocialMatch]:
     """Classify a message as social / courtesy / religious or return
@@ -435,6 +478,12 @@ def classify_social(message: str) -> Optional[SocialMatch]:
         # The reply usually still opens with a soft blessing and then
         # delivers the substantive guidance — "الله يعافيك 🌷
         # بالنسبة لطريقة الاستعمال..." — without us scripting it.
+        return None
+    if _has_closing_signal(norm):
+        # Polite close / wrap-up — yield so the stance detector reads
+        # it as ``STANCE_POLITE_CLOSE`` and the LLM mirrors the
+        # closing tone briefly without re-opening the sales prompt
+        # ("وش الخدمة؟" was the merchant-reported regression).
         return None
 
     # Strong praise — the heavy reciprocal pool ("الله يبيض وجهك ...")

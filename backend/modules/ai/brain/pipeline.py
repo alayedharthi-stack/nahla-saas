@@ -1157,6 +1157,67 @@ class MerchantBrain:
                 _scrub_exc,
             )
 
+        # ── Final semantic alignment check (May 2026 #12) ──────────
+        #
+        # Defense-in-depth catch for the four mismatch shapes pulled
+        # from real merchant screenshots (product question → social
+        # ack, polite close → "وش الخدمة", religious dua → out-of-
+        # scope template, delivery confirmation → payment receipt).
+        # Default is LOG-ONLY — we collect baseline misfire data in
+        # ``[ALIGN_MISMATCH]`` lines first, then flip the
+        # ``BRAIN_ALIGNMENT_REGEN`` env to ``"1"`` once the signal
+        # looks clean. Never raises into the reply path.
+        try:
+            from modules.ai.brain.postprocess.answer_alignment import (  # noqa: PLC0415
+                check_alignment, regen_enabled, emit_mismatch_log,
+            )
+            _align_result = check_alignment(
+                last_user_message=message or "",
+                reply=reply or "",
+                intent_name=getattr(intent, "name", "") or "",
+                action=getattr(decision, "action", "") or "",
+                order_status=str(getattr(new_state.order_prep, "order_status", "") or ""),
+                awaiting_payment_receipt=bool(
+                    getattr(new_state.order_prep, "awaiting_payment_receipt", False)
+                ),
+            )
+            if not _align_result.passed:
+                _regen = regen_enabled()
+                emit_mismatch_log(
+                    tenant_id=tenant_id,
+                    phone=customer_phone or "",
+                    turn=getattr(new_state, "turn", 0),
+                    last_user_message=message or "",
+                    reply=reply or "",
+                    result=_align_result,
+                    intent_name=getattr(intent, "name", "") or "",
+                    action=getattr(decision, "action", "") or "",
+                    order_status=str(getattr(new_state.order_prep, "order_status", "") or ""),
+                    awaiting_payment_receipt=bool(
+                        getattr(new_state.order_prep, "awaiting_payment_receipt", False)
+                    ),
+                    regen_will_fire=_regen,
+                )
+                # ``BRAIN_ALIGNMENT_REGEN`` opt-in: when set, blank
+                # the reply so the existing duplicate-guard / wire-
+                # layer fallback rebuilds via ACTION_LLM_REPLY. We
+                # deliberately do NOT compose anything here — the
+                # contract is "no new templates".
+                if _regen:
+                    logger.info(
+                        "[ALIGN_MISMATCH] regen requested — clearing "
+                        "reply for downstream rebuild | tenant=%s "
+                        "mismatch=%s",
+                        tenant_id, _align_result.mismatch_type,
+                    )
+                    reply = ""
+        except Exception as _align_exc:  # noqa: BLE001
+            logger.warning(
+                "[ALIGN_MISMATCH] post-compose check failed err=%s — "
+                "returning reply unchanged",
+                _align_exc,
+            )
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
