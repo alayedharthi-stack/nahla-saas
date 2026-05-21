@@ -22,6 +22,16 @@ python-multipart==0.0.9   # required by FastAPI for form data (OAuth token excha
 python-jose[cryptography]==3.3.0   # JWT signing and verification (Phase 2: migrate to PyJWT)
 passlib[bcrypt]==1.7.4             # password hashing (available for future use)
 
+# ── 2FA / TOTP (Phase 2A) ────────────────────────────────────────────────────
+# pyotp generates + verifies RFC 6238 TOTP codes (Google Authenticator etc.).
+# Imported lazily inside backend/core/totp_crypto.py so the rest of the app
+# boots even if this pin slips, but every 2FA endpoint (/auth/2fa/*) needs
+# it at request time — without this line POST /auth/2fa/setup/start raises
+# ModuleNotFoundError and the middleware fallback returns a 500.
+# `cryptography` is already a transitive dep of python-jose[cryptography]
+# above; we let pip resolve the shared pin to avoid a conflict.
+pyotp>=2.9.0,<3.0.0
+
 # ── Rate limiting + JWT revocation (Phase 1A) ────────────────────────────────
 # redis-py is the shared store for /auth/* per-IP and per-email rate limits
 # AND the JWT revocation list backing POST /auth/logout. Falls back to an
