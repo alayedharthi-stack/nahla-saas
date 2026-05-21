@@ -146,7 +146,38 @@ def build_tenant_overlay_split(
     # so that Salla-synced data (loaded via core.store_knowledge.build_
     # merchant_context) always wins on those fields, even if the merchant
     # accidentally pasted stale prices in here.
-    knowledge_base = str(settings.get("manual_knowledge_base") or "").strip()
+    #
+    # MERCHANT-MODE PLATFORM SCOPE (May 2026 #20):
+    # Nahla SaaS is built on top of آل عايد للعسل البلدي and merchants are
+    # encouraged to keep a short Nahla-platform brief inside their KB so
+    # platform-curious customers / peers can be answered. That info is
+    # great for platform-intent turns and a footgun for product-intent
+    # turns — without filtering, the model sees "باقات نحلة 899 ريال"
+    # next to honey copy and quotes the SaaS plans when the customer
+    # asks "اسعار الباقات" of the store. The platform-intent path
+    # (`extract_platform_kb_excerpt`) reads the raw KB directly from
+    # `merchant_context.ai_settings.manual_knowledge_base`, so stripping
+    # pure-platform paragraphs from the `facts` bucket here does NOT
+    # affect that path — it only protects the default merchant flow.
+    knowledge_base_raw = str(settings.get("manual_knowledge_base") or "").strip()
+    knowledge_base = knowledge_base_raw
+    if knowledge_base_raw:
+        try:
+            from modules.ai.brain.knowledge_platform_slice import (  # noqa: PLC0415
+                extract_merchant_kb_excerpt,
+            )
+            filtered_kb, dropped = extract_merchant_kb_excerpt(knowledge_base_raw)
+            if filtered_kb:
+                knowledge_base = filtered_kb
+            if dropped > 0:
+                logger.info(
+                    "[MERCHANT_KB_SCOPE] dropped_platform_chunks=%d "
+                    "(kept_chars=%d / raw_chars=%d)",
+                    dropped, len(knowledge_base), len(knowledge_base_raw),
+                )
+        except Exception as exc:  # noqa: BLE001 — never break overlay build
+            logger.warning("[MERCHANT_KB_SCOPE] filter failed: %s", exc)
+
     if knowledge_base:
         buckets["facts"] = (
             "قاعدة المعرفة (معلومات المتجر — Facts فقط):\n"

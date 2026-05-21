@@ -80,6 +80,11 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # Tenant overlay is now split into structured buckets. The legacy
     # `state.tenant_overlay` string is parsed via the merchant_context
     # ai_settings on the way in, so the pipeline doesn't have to change.
+    # `build_tenant_overlay_split` strips pure-platform paragraphs from
+    # the `facts` bucket so platform-only KB copy (Nahla SaaS plans,
+    # subscription tiers, embedded WhatsApp signup…) never leaks into
+    # merchant-intent turns. Platform-intent turns bypass `facts` and
+    # use `extract_platform_kb_excerpt` against the raw KB instead.
     settings_for_overlay = _extract_ai_settings_from_state(state)
     overlay_buckets = build_tenant_overlay_split(settings_for_overlay)
 

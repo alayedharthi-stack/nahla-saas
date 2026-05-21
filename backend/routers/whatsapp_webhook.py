@@ -58,6 +58,7 @@ from core.conversation_engine import (
     SEND_CHECKOUT_LINK,
     SEND_FOUNDER_LINK,
     SEND_TRIAL_LINK,
+    SHOW_PLAN_DETAILS,
     SHOW_PLANS,
     SHOW_WELCOME_MENU,
     # Classes
@@ -3300,6 +3301,12 @@ async def _dispatch_message(
         elif action == SHOW_PLANS:
             await _send_plans_message(phone_id=used_pid, to=sender, db=db,
                                       _tenant_id=effective_tenant_id)
+
+        elif action == SHOW_PLAN_DETAILS:
+            await _send_plan_details_message(
+                phone_id=used_pid, to=sender, db=db,
+                _tenant_id=effective_tenant_id,
+            )
 
         elif action == SEND_FOUNDER_LINK:
             response_text = "زين! تقدر تتواصل مع المؤسس مباشرةً على واتساب 👇\nhttps://wa.me/966555906901"
@@ -8219,13 +8226,21 @@ async def _send_plans_message(
     phone_id: str, to: str, db=None,
     _tenant_id: Optional[int] = None,
 ) -> None:
+    """Send the public price card.
+
+    May 2026 #21 — prices shown are the *launch promo* (50% off for two
+    months). Original full prices are not shown to the customer to avoid
+    early sticker shock; the launch banner is explicit so it doesn't read
+    as the steady-state price. Plan names mirror ``recommend_plan``.
+    """
     plans_text = (
-        "🐝 باقات نحلة AI:\n\n"
-        "Starter   — 899 ريال/شهر\n"
-        "Pro       — 1,499 ريال/شهر\n"
-        "Business  — 2,499 ريال/شهر\n\n"
-        "كل الباقات: تجربة مجانية 14 يوم — بدون بطاقة.\n\n"
-        "متجرك صغير ولا كبير؟ أساعدك تختار الأنسب."
+        "أكيد 🐝\n"
+        "أسعار عرض الإطلاق حاليًا:\n\n"
+        "Starter — 449 ريال شهريًا\n"
+        "Growth  — 849 ريال شهريًا\n"
+        "Scale   — 1,499 ريال شهريًا\n\n"
+        "العرض بخصم 50٪ لمدة شهرين، وقد يتم تمديده لاحقًا. "
+        "وكل الباقات تبدأ بتجربة مجانية 14 يوم بدون بطاقة 🌷"
     )
     await _send_whatsapp_message(
         phone_id=phone_id, to=to, text=plans_text,
@@ -8233,9 +8248,37 @@ async def _send_plans_message(
     )
     await _send_cta_url(
         phone_id=phone_id, to=to,
-        body_text="شوف كل التفاصيل والمقارنة بين الباقات 💎",
+        body_text="شوف المقارنة الكاملة بين الباقات 💎",
         btn_label="عرض الباقات كاملة",
         btn_url="https://app.nahlah.ai/billing",
+        _tenant_id=_tenant_id, _db=db,
+    )
+
+
+async def _send_plan_details_message(
+    phone_id: str, to: str, db=None,
+    _tenant_id: Optional[int] = None,
+) -> None:
+    """Long-form plan descriptions sent on follow-up ("تفاصيل أكثر").
+
+    Reached from DecisionEngine when ``state.last_action == SHOW_PLANS``
+    and the customer asks to elaborate. We intentionally do NOT repeat
+    the price table here — the customer just saw it — and we end with an
+    open question instead of a closing line so the conversation stays
+    alive (May 2026 #21).
+    """
+    details_text = (
+        "أكيد 🌷\n"
+        "Starter مناسبة للبداية والردود الأساسية على عملاء واتساب وتشمل "
+        "الذكاء الاصطناعي وردود الكتالوج والتذكيرات الأساسية.\n\n"
+        "Growth للمتاجر النشطة، وتضيف الحملات والأتمتة واسترجاع السلات "
+        "المتروكة بشكل أقوى ودعم أوسع للقوالب.\n\n"
+        "Scale للعلامات الأكبر، وتشمل مزايا التوسع ودعم أولوية وتكاملات "
+        "متقدمة مع سلة وزد وأكثر.\n\n"
+        "تبي أرشّح لك الأنسب لمتجرك؟"
+    )
+    await _send_whatsapp_message(
+        phone_id=phone_id, to=to, text=details_text,
         _tenant_id=_tenant_id, _db=db,
     )
 

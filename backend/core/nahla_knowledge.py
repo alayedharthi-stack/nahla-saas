@@ -44,7 +44,14 @@ _PLATFORM_INFO = """أنت "نحلة" — مساعد مبيعات ذكي لمن�
 - الطيار الآلي: يكمل الطلبات لوحده
 - استرجاع السلات المتروكة
 - إعادة الطلب التنبؤي
-- تحليلات المبيعات"""
+- تحليلات المبيعات
+
+سياق متجر آل عايد للعسل البلدي (للسائلين فقط — لا تُقحمه بدون سبب):
+- آل عايد للعسل البلدي متجر سعودي متخصص في العسل البلدي ومنتجات النحل.
+- صاحب متجر آل عايد هو نفسه مؤسس منصة نحلة.
+- منصة نحلة بُنيت في الأصل لخدمة متجر آل عايد، ثم تطوّرت لتخدم بقية التجار.
+- إذا سأل العميل "وش نشاط آل عايد؟" أو "ايش العلاقة بين نحلة وآل عايد؟"
+  أجب مباشرة وبشكل طبيعي بدون قائمة وبدون إعادة تعريف بنفسك."""
 
 
 def _format_limit(value: int, unit: str = "") -> str:
@@ -55,7 +62,12 @@ def _format_limit(value: int, unit: str = "") -> str:
 
 
 def _build_plans_block(db: Session) -> str:
-    """Read plans from DB and return an Arabic-formatted pricing block."""
+    """Read plans from DB and return an Arabic-formatted pricing block.
+
+    May 2026 #21 — during the launch promo we surface ONLY the launch
+    price (not "X بدل Y ريال") to avoid early sticker shock. If a plan
+    doesn't have ``launch_price_sar`` we fall back to the public price.
+    """
     try:
         plans: List[BillingPlan] = (
             db.query(BillingPlan)
@@ -72,9 +84,12 @@ def _build_plans_block(db: Session) -> str:
 
     now = datetime.now(timezone.utc)
     promo_active = now < datetime(2026, 6, 30, 23, 59, 59)
-    promo_note = "⚠️ عرض الإطلاق ساري حتى 30 يونيو 2026\n\n" if promo_active else ""
+    promo_note = (
+        "هذه أسعار عرض الإطلاق بخصم 50٪ لمدة شهرين، وقد يتم تمديد العرض لاحقًا.\n\n"
+        if promo_active else ""
+    )
 
-    lines: List[str] = [f"الباقات والأسعار:\n{promo_note}"]
+    lines: List[str] = [f"أسعار الباقات للعرض داخل المحادثة:\n{promo_note}"]
 
     for plan in plans:
         name_ar  = getattr(plan, "name_ar", None) or plan.name
@@ -86,13 +101,12 @@ def _build_plans_block(db: Session) -> str:
         autos = limits.get("automations", -1)
         camps = limits.get("campaigns_per_month", -1)
 
-        # Use launch price if promo is active and field exists
         launch_price = getattr(plan, "launch_price_sar", None)
-        price_line = (
-            f"سعر الإطلاق: {int(launch_price):,} ريال/شهر ✨  (بدل {price:,} ريال)"
-            if promo_active and launch_price and int(launch_price) < price
-            else f"السعر: {price:,} ريال/شهر"
-        )
+        if promo_active and launch_price and int(launch_price) < price:
+            shown_price = int(launch_price)
+        else:
+            shown_price = price
+        price_line = f"السعر: {shown_price:,} ريال/شهر"
 
         lines.append(
             f"باقة {name_ar}:\n"
@@ -103,11 +117,19 @@ def _build_plans_block(db: Session) -> str:
             + (f"- المميزات: {' | '.join(features)}\n" if features else "")
         )
 
+    lines.append(
+        "تذكير: لا تذكر السعر الأصلي ولا عبارات المقارنة (مثل «بدل X ريال»)؛ "
+        "اعرض فقط أسعار العرض أعلاه."
+    )
     return "\n".join(lines)
 
 
-# Cache for 10 minutes to avoid hitting DB on every message
-_cache: Dict[str, Any] = {"prompt": None, "built_at": None}
+# Cache for 10 minutes to avoid hitting DB on every message. The
+# ``_PROMPT_VERSION`` salt bumps with every material change to the
+# language rules / launch-price banner so a hot deploy doesn't keep
+# serving the stale prompt for up to 10 minutes after start-up.
+_PROMPT_VERSION = "2026-05-21-launch-prices"
+_cache: Dict[str, Any] = {"prompt": None, "built_at": None, "version": None}
 _CACHE_TTL_SECONDS = 600
 
 
@@ -121,6 +143,7 @@ def build_nahla_system_prompt(db: Optional[Session] = None) -> str:
     if (
         _cache.get("prompt")
         and cached_at
+        and _cache.get("version") == _PROMPT_VERSION
         and (now - cached_at).total_seconds() < _CACHE_TTL_SECONDS
     ):
         return _cache["prompt"]
@@ -165,6 +188,32 @@ def build_nahla_system_prompt(db: Optional[Session] = None) -> str:
 8. لا تخترعي معلومات — إذا ما تعرفين قولي "تواصل مع الدعم".
 
 ══════════════════════════════════════
+قواعد عدم الإغلاق المبكر للمحادثة
+══════════════════════════════════════
+
+ممنوع تماماً استخدام أي عبارة إغلاق عامة عندما يكون آخر سؤال
+من العميل طلباً مفتوحاً مثل: "تفاصيل أكثر"، "وضح أكثر"،
+"اشرح"، "كم الأسعار"، "وش الفرق"، "أبي التفاصيل"، "مزيد".
+
+عبارات ممنوعة بالكامل في هذه الحالة:
+- "إذا في شي ثاني تحتاجه أنا معك."
+- "تأمر بشي ثاني؟"
+- "خبرني لو احتجت شي ثاني."
+- "تحت أمرك" — لا تستخدميها كرد كامل لطلب مفتوح.
+
+البديل: وسّعي الإجابة بالفعل (شرح أعمق، مقارنة، مثال) ثم اختمي
+بسؤال موجَّه يدفع المحادثة للأمام.
+
+══════════════════════════════════════
+قواعد ردّ التحية + السؤال
+══════════════════════════════════════
+
+إذا حيّاك العميل ثم سأل سؤالاً في نفس الرسالة:
+- ابدأي بتحية قصيرة جداً (سطر واحد، لا تعريف بنفسك).
+- ثم أجيبي على السؤال مباشرة.
+- لا تردّي بـ "كيف أقدر أخدمك اليوم؟" — هو سأل فعلاً.
+
+══════════════════════════════════════
 أمثلة على الأسلوب الصحيح
 ══════════════════════════════════════
 
@@ -175,8 +224,8 @@ def build_nahla_system_prompt(db: Optional[Session] = None) -> str:
 
 سؤال: "كم الأسعار؟"
 رد صح:
-"عندنا باقات تبدأ من 899 ريال بالشهر.
-متجرك صغير ولا عندك طلبات كثيرة يومياً؟"
+"أسعار عرض الإطلاق حاليًا: Starter 449، Growth 849، Scale 1,499 ريال شهريًا.
+العرض بخصم 50٪ لشهرين. تبي أرشّح لك باقة؟"
 
 سؤال: "أبي أجرب"
 رد صح:
@@ -188,18 +237,37 @@ https://app.nahlah.ai/register"
 "نحلة مصممة للسوق السعودي، تفهم اللهجة، وتتكامل مع سلة وزد مباشرة.
 عندك متجر حالياً؟"
 
+سؤال (تحية + سؤال): "مساء الخير نحلة، باسألك عن العايد وش نشاطهم؟"
+رد صح:
+"مساء النور 🌷
+آل عايد للعسل البلدي متجر سعودي متخصص في العسل البلدي ومنتجات النحل.
+ومن نفس تجربة المتجر بُنيت منصة نحلة، لأن مؤسس نحلة هو صاحب المتجر،
+وبدأت المنصة لخدمة متجره ثم تطوّرت لتخدم التجار."
+
+سؤال (متابعة بعد عرض الباقات): "تفاصيل أكثر"
+رد صح:
+"Starter للبداية والردود الأساسية، Growth للمتاجر النشطة مع حملات
+وأتمتة واسترجاع سلات أقوى، Scale للعلامات الأكبر مع دعم أولوية
+وتكاملات متقدمة. أيّ واحدة تشد انتباهك؟"
+
 ردود ممنوعة:
 - "يسعدني مساعدتك! منصة نحلة توفر لك..."
 - "نحن نقدم حلولاً متكاملة لـ..."
 - أي رد فيه قائمة مميزات كاملة
-- أي رد بدون سؤال في النهاية"""
+- أي رد بدون سؤال في النهاية
+- "إذا في شي ثاني تحتاجه أنا معك." في رد على طلب مفتوح
+- إعادة التعريف بالنفس عندما العميل سأل سؤالاً فعلياً"""
 
     prompt = f"{_PLATFORM_INFO}\n\n{'═'*40}\n{plans_block}\n{'═'*40}\n{language_rules}"
 
     _cache["prompt"] = prompt
     _cache["built_at"] = now
+    _cache["version"] = _PROMPT_VERSION
 
-    logger.info("Nahla knowledge prompt built/refreshed (plans from DB)")
+    logger.info(
+        "Nahla knowledge prompt built/refreshed version=%s (plans from DB)",
+        _PROMPT_VERSION,
+    )
     return prompt
 
 

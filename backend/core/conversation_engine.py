@@ -187,15 +187,22 @@ class FactGuard:
     """
 
     # These are injected from DB at startup via build_nahla_system_prompt,
-    # but this block acts as a hard fallback that ALWAYS appears in the prompt.
+    # but this block acts as a hard fallback that ALWAYS appears in the
+    # prompt. May 2026 #21 — prices are the *launch promo* (50% off for
+    # two months). Original prices are intentionally NOT shown to the
+    # customer; only the launch line is surfaced so the bot doesn't
+    # parade the steady-state price early in the funnel.
     STATIC_FACTS = {
         "trial_days":           14,
         "trial_requires_card":  False,
         "plans": {
-            "Starter":  {"price_sar": 899,  "monthly": True},
-            "Pro":      {"price_sar": 1499, "monthly": True},
-            "Business": {"price_sar": 2499, "monthly": True},
+            "Starter": {"price_sar": 449,  "monthly": True},
+            "Growth":  {"price_sar": 849,  "monthly": True},
+            "Scale":   {"price_sar": 1499, "monthly": True},
         },
+        "launch_promo_note":
+            "هذه أسعار عرض الإطلاق بخصم 50٪ لمدة شهرين، وقد يتم تمديد "
+            "العرض لاحقًا.",
         "integrations":    ["سلة", "زد"],
         "register_url":    "https://app.nahlah.ai/register",
         "billing_url":     "https://app.nahlah.ai/billing",
@@ -227,10 +234,12 @@ class FactGuard:
 ══════════════════════════════════════════════════════
 التجربة المجانية: {cls.STATIC_FACTS['trial_days']} يوم — بدون بطاقة ائتمان.
 
-الباقات والأسعار:
-  • Starter  — {p['Starter']['price_sar']} ريال/شهر
-  • Pro      — {p['Pro']['price_sar']} ريال/شهر
-  • Business — {p['Business']['price_sar']} ريال/شهر
+أسعار عرض الإطلاق (هذه التي تذكرها للعميل — لا تذكر الأسعار الأصلية):
+  • Starter — {p['Starter']['price_sar']} ريال شهريًا
+  • Growth  — {p['Growth']['price_sar']} ريال شهريًا
+  • Scale   — {p['Scale']['price_sar']:,} ريال شهريًا
+
+{cls.STATIC_FACTS['launch_promo_note']}
 
 التكاملات المدعومة: سلة وزد فقط (الآن).
 
@@ -243,6 +252,8 @@ class FactGuard:
   • الدعم:   {cls.STATIC_FACTS['support_email']}
 
 قاعدة صارمة: لا تذكر أرقاماً أو مميزات أو تواريخ غير مذكورة أعلاه.
+ممنوع ذكر أي سعر آخر غير أسعار العرض المذكورة في هذا الجدول، وممنوع
+عبارات المقارنة من نوع «بدل كذا ريال» — نعرض فقط أسعار العرض.
 إذا لم تعرف الإجابة اكتب: "تواصل مع الدعم: support@nahlah.ai"
 ══════════════════════════════════════════════════════
 """
@@ -257,8 +268,15 @@ class FactGuard:
         issues: List[str] = []
         valid_prices = {str(v["price_sar"]) for v in cls.STATIC_FACTS["plans"].values()}
         import re
-        prices_in_reply = set(re.findall(r"\b(\d{3,5})\b", reply))
-        suspicious = prices_in_reply - valid_prices - {"14", "24", "30", "60", "90", "1", "7", "3"}
+        # Strip commas/spaces inside numbers so "1,499" lands as "1499"
+        # (matching the canonical STATIC_FACTS value) and we don't end
+        # up with spurious "499" fragments to whitelist.
+        normalised = re.sub(r"(?<=\d)[,\s](?=\d{3}\b)", "", reply)
+        prices_in_reply = set(re.findall(r"\b(\d{3,5})\b", normalised))
+        allowed = valid_prices | {
+            "14", "24", "30", "60", "90", "1", "7", "3", "2", "50",
+        }
+        suspicious = prices_in_reply - allowed
         if suspicious:
             issues.append(f"suspicious_numbers:{suspicious}")
         return (len(issues) == 0, issues)
@@ -457,6 +475,41 @@ class IntentEngine:
         "hi", "hello", "hey", "good morning", "good evening",
     )
 
+    # 11. Elaborate / follow-up request — fires when the customer asks for
+    # more detail on whatever the bot just said. Without this rule a turn
+    # like "تفاصيل أكثر" or "اشرح" falls through to "general"/conf=0.3 and
+    # the LLM (lacking explicit prior-topic context) often emits a generic
+    # closing line. With this rule the DecisionEngine inspects the prior
+    # action (e.g. SHOW_PLANS) and continues that topic instead of closing.
+    _ELABORATE = (
+        "تفاصيل اكثر", "تفاصيل أكثر", "مزيد من التفاصيل", "مزيد",
+        "وضح اكثر", "وضح أكثر", "وضح", "وضّح", "اشرح", "اشرح اكثر",
+        "اشرح أكثر", "اشرح لي", "ابي التفاصيل", "أبي التفاصيل",
+        "ابغى التفاصيل", "أبغى التفاصيل", "ابغى اعرف اكثر",
+        "أبغى أعرف أكثر", "اعرف اكثر", "أعرف أكثر", "اكثر", "أكثر",
+        "وش الفرق", "ايش الفرق", "الفرق بينهم", "الفرق بينها",
+        "more details", "more info", "elaborate", "tell me more",
+        "explain more", "explain", "details please", "more",
+    )
+
+    # Tokens that are "greeting residue" — stripped while testing whether
+    # a message that *also* contains a salaam carries a real question on
+    # top. Mirrors ``brain.intent.rules._GREETING_RESIDUE_LEAD_TOKENS``
+    # but lives here so the platform classifier is self-contained.
+    _GREET_RESIDUE = (
+        "السلام", "عليكم", "وعليكم", "سلام", "هلا", "هلو", "هاي",
+        "مرحبا", "مرحباً", "مرحبتين", "صباح", "مساء", "الخير",
+        "الخيرات", "النور", "أهلا", "أهلاً", "أهلين", "حياك",
+        "حياكم", "الله", "كيف", "حالك", "حالكم", "اخبارك", "أخبارك",
+        "شخبارك", "شلونك", "نحلة", "نحله", "بوت", "البوت",
+        "hi", "hello", "hey", "good", "morning", "evening", "afternoon",
+        "ya", "يا",
+    )
+
+    # Single-word punctuation/connector tokens we collapse before checking
+    # whether the message has substantive content left.
+    _GREET_NOISE_CHARS = ".,!؟?:؛ـ-—…"
+
     @classmethod
     def classify(cls, text: str, state: ConversationState) -> Tuple[str, float]:
         """
@@ -470,6 +523,15 @@ class IntentEngine:
         if cls._m(t, cls._TRIAL):     return "request_trial",         1.0
 
         if cls._m(t, cls._PRICE):    return "ask_price",        1.0
+
+        # Elaborate / follow-up MUST be checked before ``_HOW`` so a
+        # generic "tell me more" / "explain" / "اشرح" doesn't accidentally
+        # collide with the "how does it work?" rule. We also keep it
+        # ahead of the greeting branch so a short "تفاصيل أكثر" never
+        # gets eaten by greeting matching on a longer history line.
+        if cls._m(t, cls._ELABORATE):
+            return "ask_elaborate", 0.95
+
         if cls._m(t, cls._HOW):      return "ask_how_it_works", 0.9
         if cls._m(t, cls._FEATURES): return "ask_features",     0.9
 
@@ -483,14 +545,43 @@ class IntentEngine:
         if cls._m(t, cls._FOUNDER): return "contact_founder",  1.0
         if cls._m(t, cls._SUPPORT): return "request_support",  0.9
 
-        if len(text) <= 60 and cls._m(t, cls._GREET):
-            return "greeting", 0.9
+        # Greeting gate: a message qualifies as a *pure* greeting only when
+        # there is nothing actionable left after stripping the salaam
+        # tokens. Mixed turns ("مساء الخير نحلة باسألك عن العايد وش
+        # نشاطهم") fall through to "general" so the brain answers the
+        # actual question instead of replaying the welcome card.
+        if len(text) <= 80 and cls._m(t, cls._GREET):
+            if not cls._has_substantive_residue(t):
+                return "greeting", 0.9
+            # Mixed greeting + actionable content — let the LLM handle it
+            # with full context. Confidence 0.7 lets downstream logging
+            # distinguish "real question" turns from low-conf fallbacks.
+            return "general", 0.7
 
         return "general", 0.3
 
     @staticmethod
     def _m(text: str, kws: tuple) -> bool:
         return any(kw in text for kw in kws)
+
+    @classmethod
+    def _has_substantive_residue(cls, normalised_text: str) -> bool:
+        """True iff stripping greeting / courtesy / bot-name tokens leaves
+        a chunk of real characters (≥ 3 Arabic/Latin word chars). Used to
+        demote 'greeting' to 'general' on mixed turns so the welcome card
+        never overrides a real question."""
+        if not normalised_text:
+            return False
+        cleaned = normalised_text
+        for tok in cls._GREET_RESIDUE:
+            cleaned = cleaned.replace(tok, " ")
+        for ch in cls._GREET_NOISE_CHARS:
+            cleaned = cleaned.replace(ch, " ")
+        residue = "".join(c for c in cleaned if c.isalnum() or c == " ").strip()
+        if not residue:
+            return False
+        # Require at least one token of length >= 3 to count as substantive.
+        return any(len(tok) >= 3 for tok in residue.split())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -567,6 +658,7 @@ class StageTransitionEngine:
 SEND_CHECKOUT_LINK = "SEND_CHECKOUT_LINK"
 SEND_TRIAL_LINK    = "SEND_TRIAL_LINK"
 SHOW_PLANS         = "SHOW_PLANS"
+SHOW_PLAN_DETAILS  = "SHOW_PLAN_DETAILS"
 SHOW_WELCOME_MENU  = "SHOW_WELCOME_MENU"
 FILL_SLOT_PLATFORM = "FILL_SLOT_PLATFORM"
 FILL_SLOT_SIZE     = "FILL_SLOT_SIZE"
@@ -579,6 +671,7 @@ DETERMINISTIC_ACTIONS = {
     SEND_CHECKOUT_LINK,
     SEND_TRIAL_LINK,
     SHOW_PLANS,
+    SHOW_PLAN_DETAILS,
     SHOW_WELCOME_MENU,
     FILL_SLOT_PLATFORM,
     FILL_SLOT_SIZE,
@@ -618,6 +711,23 @@ class DecisionEngine:
         if intent == "ask_price":
             return SHOW_PLANS, "price_inquiry_rule"
 
+        if intent == "ask_elaborate":
+            # Follow-up "تفاصيل أكثر / اشرح / مزيد" — anchor to the prior
+            # topic instead of asking the LLM cold. When the immediately
+            # previous action was SHOW_PLANS we hand off to the dedicated
+            # SHOW_PLAN_DETAILS template (deterministic, on-brand prices).
+            # Otherwise let the brain elaborate with an explicit hint so
+            # it does NOT emit a generic closing line.
+            if state.last_action == SHOW_PLANS:
+                return SHOW_PLAN_DETAILS, "elaborate_after_show_plans"
+            if state.last_action == SHOW_PLAN_DETAILS:
+                # Already showed the long form once — escalate to founder
+                # contact so the customer doesn't get a third repeat.
+                return SEND_FOUNDER_LINK, "elaborate_after_plan_details"
+            return GENERATE_AI_REPLY, (
+                f"elaborate_after:{state.last_action or 'none'}"
+            )
+
         if intent == "contact_founder":
             return SEND_FOUNDER_LINK, "founder_contact_rule"
 
@@ -631,6 +741,11 @@ class DecisionEngine:
             # are routed to the LLM with full context so the bot acknowledges
             # without restarting the conversation. Mirrors the MerchantBrain
             # composer's defense-in-depth guard.
+            #
+            # NOTE: The classifier itself already demotes "greeting +
+            # actionable question" turns to ``intent="general"`` (conf 0.7)
+            # via ``_has_substantive_residue``. By the time we reach this
+            # branch the message is a *pure* salaam.
             if state.greeted or state.stage != S_DISCOVERY:
                 return GENERATE_AI_REPLY, (
                     f"greeting_after_first_turn:greeted={state.greeted}:stage={state.stage}"
@@ -748,6 +863,7 @@ class ContextBuilder:
         GENERATE_AI_REPLY: "أجب عن سؤال التاجر بناءً على حالة المحادثة، بدون تكرار الترحيب.",
         SHOW_WELCOME_MENU: "رحّب بالتاجر للمرة الأولى واعرض قائمة البداية.",
         SHOW_PLANS: "اعرض الباقات والأسعار الرسمية فقط.",
+        SHOW_PLAN_DETAILS: "وسّع شرح الباقات الثلاث بدون تكرار جدول الأسعار، وبدون إغلاق المحادثة.",
         SEND_CHECKOUT_LINK: "وجّه التاجر مباشرة إلى رابط الاشتراك بدون أسئلة إضافية.",
         SEND_TRIAL_LINK: "أرسل رابط التجربة المجانية وشجّع التاجر على البدء.",
         SEND_FOUNDER_LINK: "زوّد التاجر برابط التواصل المباشر مع المؤسس.",
@@ -1184,12 +1300,17 @@ class StateManager:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def recommend_plan(state: ConversationState) -> str:
+    """Map the resolved store size onto the current public plan ladder.
+
+    Plan names (May 2026): Starter / Growth / Scale. ``Pro`` / ``Business``
+    were the May 2025 names and have been retired — old states that still
+    carry them are migrated lazily on next load.
+    """
     if state.slots.store_size == "large":
-        return "Business"
-    elif state.slots.store_size == "medium":
-        return "Pro"
-    else:
-        return "Starter"
+        return "Scale"
+    if state.slots.store_size == "medium":
+        return "Growth"
+    return "Starter"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

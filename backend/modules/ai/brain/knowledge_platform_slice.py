@@ -105,6 +105,29 @@ _CATALOG_NOISE: FrozenSet[str] = frozenset({
     "نصف", "علبه", "قرص", "شمع", "خلطه", "خلطة",
 })
 
+# Strong, *unambiguous* platform anchors used by the *merchant-mode* filter
+# below. These are tokens that almost only appear in copy describing the
+# Nahla SaaS platform itself (its name, that it is a SaaS, embedded WhatsApp
+# signup, dashboard/SaaS plan tiers). We intentionally do NOT include generic
+# tokens like "خدمه/تطبيق/نظام/رقم/ربط" — those appear in normal merchant copy
+# (contact phone, "ربط الطلب", "تطبيق الكوبون"…) and would cause merchant
+# paragraphs to be hidden by accident.
+_PLATFORM_HARD_ANCHORS: FrozenSet[str] = frozenset({
+    "نحله",          # ‹نحلة› platform brand (the merchant's own bee imagery
+                     # is in _CATALOG_NOISE so we still keep "نحلتنا تنتج عسل")
+    "منصه", "منصة", "المنصه", "المنصة",
+    "saas", "ساس",
+    "waba",
+    "360dialog", "ثري سيكستي", "embedded signup",
+})
+
+# Plan-tier vocabulary that only appears in the platform's pricing copy.
+_PLATFORM_PLAN_WORDS: FrozenSet[str] = frozenset({
+    "starter", "growth", "business", "enterprise", "pro",
+    "الاشتراك الشهري", "اشتراك شهري", "تجربه مجاني", "تجربة مجانية",
+    "تجربه مجانيه",
+})
+
 
 def _split_chunks(kb: str) -> List[str]:
     raw = (kb or "").strip()
@@ -206,4 +229,80 @@ def extract_platform_kb_excerpt(
     return "\n\n".join(out_parts).strip()
 
 
-__all__ = ["extract_platform_kb_excerpt"]
+def _chunk_is_pure_platform(chunk_norm: str) -> bool:
+    """
+    Decide whether a paragraph is *purely* about the Nahla SaaS platform.
+
+    A paragraph qualifies when it:
+      * names the platform / SaaS brand explicitly via ``_PLATFORM_HARD_ANCHORS``
+        *or* references a paid plan tier via ``_PLATFORM_PLAN_WORDS``, **AND**
+      * contains zero merchant catalogue signals (``_CATALOG_NOISE``).
+
+    Mixed paragraphs (merchant copy that incidentally mentions "نحلتنا" or
+    a SaaS-ish noun) are preserved by design — merchant context dominates.
+    """
+    if not chunk_norm:
+        return False
+    catalog_hits = sum(1 for w in _CATALOG_NOISE if w in chunk_norm)
+    if catalog_hits > 0:
+        return False
+    anchor_hits = sum(1 for w in _PLATFORM_HARD_ANCHORS if w in chunk_norm)
+    plan_hits = sum(1 for w in _PLATFORM_PLAN_WORDS if w in chunk_norm)
+    return (anchor_hits >= 1) or (plan_hits >= 1)
+
+
+def extract_merchant_kb_excerpt(
+    manual_knowledge_base: str,
+    *,
+    max_chars: int = 8000,
+) -> Tuple[str, int]:
+    """
+    Return the merchant-store view of the manual KB.
+
+    The same flat KB is used for two audiences:
+      * merchant customers (honey buyers)  → must NOT see Nahla SaaS plans
+      * platform inquirers (merchants/peers asking how it works) → must see
+        them (handled by ``extract_platform_kb_excerpt`` instead)
+
+    This filter is intentionally one-sided: in merchant mode we DROP pure
+    platform paragraphs and keep everything else (merchant copy + mixed
+    paragraphs). The dropped chunks are NOT deleted from storage — they
+    remain available the next turn if the customer actually asks about the
+    platform.
+
+    Returns ``(filtered_text, dropped_count)``. ``dropped_count`` is exposed
+    for observability so the pipeline can log how many platform paragraphs
+    were suppressed this turn.
+    """
+    chunks = _split_chunks(manual_knowledge_base)
+    if not chunks:
+        return "", 0
+
+    kept: List[str] = []
+    dropped = 0
+    total = 0
+    for ch in chunks:
+        ch_n = _norm(ch)
+        if len(ch_n) < 4:
+            continue
+        if _chunk_is_pure_platform(ch_n):
+            dropped += 1
+            continue
+        piece = ch.strip()
+        if not piece:
+            continue
+        if total + len(piece) + 2 > max_chars:
+            remain = max_chars - total - 50
+            if remain < 80:
+                break
+            piece = piece[:remain].rsplit(" ", 1)[0] + "…"
+        kept.append(piece)
+        total += len(piece) + 2
+
+    return "\n\n".join(kept).strip(), dropped
+
+
+__all__ = [
+    "extract_platform_kb_excerpt",
+    "extract_merchant_kb_excerpt",
+]
