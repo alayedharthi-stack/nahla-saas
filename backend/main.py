@@ -1296,6 +1296,11 @@ async def on_startup() -> None:
         return run_daily_report_scheduler()
     _start("daily_report", _f_daily_report, 60)
 
+    def _f_ai_quality_monitor():
+        from core.scheduler import run_ai_quality_scheduler  # noqa: PLC0415
+        return run_ai_quality_scheduler()
+    _start("ai_quality_monitor", _f_ai_quality_monitor, 65)
+
     def _f_startup_health():
         from core.webhook_guardian import run_startup_webhook_health_check  # noqa: PLC0415
         return run_startup_webhook_health_check()

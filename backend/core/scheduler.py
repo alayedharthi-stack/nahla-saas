@@ -851,6 +851,100 @@ async def run_salla_token_refresh_scheduler() -> None:
         await asyncio.sleep(_SALLA_TOKEN_REFRESH_SECONDS)
 
 
+# ── AI Quality Monitor scheduler ─────────────────────────────────────────────
+
+
+_AI_QUALITY_DEFAULT_INTERVAL_SECONDS = 6 * 3600  # check every 6 hours by default
+
+
+def _ai_quality_interval_seconds() -> int:
+    """Resolve the cadence for the periodic alert job.
+
+    Override via ``AI_QUALITY_CHECK_INTERVAL_SECONDS`` (e.g. ``43200``
+    for 12 hours). Falls back to 6 hours when the env var is missing
+    or non-numeric. Bounded to a 5 min minimum so a misconfigured
+    deployment cannot DoS the DB.
+    """
+    raw = (os.environ.get("AI_QUALITY_CHECK_INTERVAL_SECONDS") or "").strip()
+    if raw.isdigit():
+        return max(300, int(raw))
+    return _AI_QUALITY_DEFAULT_INTERVAL_SECONDS
+
+
+def _run_ai_quality_threshold_check() -> Dict[str, Any]:
+    """Single tick of the AI Quality Monitor aggregation.
+
+    Opens its own short-lived ``Session``, calls
+    ``check_threshold_and_alert`` (which emits ``[AI_QUALITY_ALERT]``
+    warnings for any breached mismatch type), and returns a small
+    dict with the breach summary so callers / tests can introspect.
+
+    Never raises — alerting is best-effort observability.
+    """
+    try:
+        from core.ai_quality_events import check_threshold_and_alert  # noqa: PLC0415
+        from core.database import SessionLocal  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AI_QUALITY] threshold check could not import deps: %s", exc)
+        return {"breaches": [], "ok": False, "error": "import_failed"}
+
+    db: Any = None
+    try:
+        db = SessionLocal()
+        breaches = check_threshold_and_alert(db)
+        return {
+            "breaches": [
+                {"mismatch_type": t, "count": n, "threshold": thr}
+                for (t, n, thr) in breaches
+            ],
+            "ok": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AI_QUALITY] threshold tick failed: %s", exc)
+        return {"breaches": [], "ok": False, "error": str(exc)[:200]}
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+async def run_ai_quality_scheduler() -> None:
+    """Periodic ``[AI_QUALITY_ALERT]`` aggregation loop.
+
+    Every ``AI_QUALITY_CHECK_INTERVAL_SECONDS`` (default 6 h) we
+    aggregate the last ``AI_QUALITY_LOOKBACK_HOURS`` (default 6 h) of
+    ``ai_quality_events`` rows and emit one warning per type that
+    breached its threshold:
+
+        question_to_social  → default threshold 10
+        delivery_to_receipt → default threshold  5
+        closing_to_reopen   → default threshold  8
+        religious_to_oos    → default threshold  3
+
+    Thresholds are overridable via ``AI_QUALITY_THRESHOLDS``
+    (e.g. ``question_to_social:20,delivery_to_receipt:8``).
+
+    Surgical contract: this scheduler never mutates Brain state, never
+    triggers regen, and never sends a customer message. It only emits
+    log lines + structured warnings that the in-product dashboard
+    surfaces.
+    """
+    await asyncio.sleep(45)  # let DB / migrations settle first
+    interval = _ai_quality_interval_seconds()
+    logger.info(
+        "[AI Quality Scheduler] Started — interval=%ss",
+        interval,
+    )
+    while True:
+        try:
+            await asyncio.to_thread(_run_ai_quality_threshold_check)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[AI Quality Scheduler] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(interval)
+
+
 async def run_template_sync_scheduler() -> None:
     """Auto-sync WhatsApp templates from Meta for every connected tenant.
 
