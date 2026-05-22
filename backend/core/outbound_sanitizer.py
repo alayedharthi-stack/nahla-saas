@@ -527,12 +527,267 @@ def maybe_scrub_handoff_promise(
     return _HANDOFF_NEUTRAL_TEXT, True
 
 
+# ── Promised-asset leak (May 2026 P1, Tenant 33) ───────────────────────────
+#
+# Independent of all the above. Bug shape: the LLM, after the
+# progressive-selling rewrite, started producing replies like:
+#   - "أرسل لك الرابط بعد التأكد منه"   (no URL in the reply)
+#   - "تفضل رقم أبو هشام"                 (no phone digits / call card)
+#   - "امسح الباركود من تطبيق الراجحي"   (no [MEDIA_KEY:...] attached)
+#   - "تفضل الموقع على الخريطة"          (no maps link)
+#
+# Each is a FALSE promise: the customer is told an asset is about
+# to arrive but no asset is actually queued. Three upstream things
+# already help (media_key safety net for barcodes, product safety
+# net for store links, staff-contact safety net for phones), but
+# they catch the cases where the customer's INBOUND is recognisable.
+# When the LLM volunteers a promise out of nowhere ("سأرسل لك
+# الرابط" inside an answer about working hours), none of those nets
+# trigger because the customer never asked.
+#
+# This sanitizer is the wire-layer net: scan the outbound TEXT for a
+# small library of promise patterns, ask the caller whether the
+# matching asset class is actually present in the outbound dispatch,
+# and rewrite the promise span when it's NOT. We do not attempt to
+# SYNTHESISE the asset here — that's not our job; the upstream
+# resolvers are responsible. Our job is to keep the AI honest.
+#
+# Pattern library is intentionally small (~25 patterns) and the
+# matcher returns the first hit per asset class — false negatives
+# are fine (the original promise stays), false positives are not
+# (we'd over-edit a perfectly valid reply). The verbs are anchored
+# on the imperative future ("سأرسل" / "أرسل لك" / "تفضل" / "هذا") so
+# generic Arabic prose like "أرسلت لكم سابقًا الباركود" doesn't
+# trip the rule.
+
+# Asset classes we detect promises for.
+ASSET_LINK     = "link"
+ASSET_BARCODE  = "barcode"
+ASSET_PHONE    = "phone"
+ASSET_LOCATION = "location"
+
+
+# Verbs that, taken together with an object noun below, signal an
+# active promise ("I will send you …" / "here is …"). We allow
+# small inflection windows (س + future / تفضل + ك + ل / هذا /
+# أعطيك) without enumerating every possible morphological form.
+_PROMISE_VERB = (
+    r"(?:"
+    r"(?:س|سـ|سأ|راح\s*[أا]?)?\s*[أا]?رسل\s*(?:ل|إل)ك(?:م)?|"
+    r"(?:س|سـ)?[أا]?رفق\s*(?:ل|إل)ك(?:م)?|"
+    r"[أا]?رسل\s*(?:ل|إل)ك(?:م)?|"
+    r"(?:س|سـ)?[أا]?عطي?ك(?:م)?|"
+    r"تفضّ?ل(?:ي)?|"
+    r"هذا|هذه|"
+    r"[أا]?بعث\s*(?:ل|إل)ك(?:م)?"
+    r")"
+)
+
+
+# Object nouns per asset class. Each is checked WITH the promise
+# verb in a short window (≤ 30 chars) so we anchor on actual
+# imperative-future constructions.
+_LINK_NOUN     = r"(?:ال)?(?:رابط|لينك|link|url|صفحة\s*المتجر|رابط\s*المتجر)"
+_BARCODE_NOUN  = (
+    r"(?:ال)?(?:باركود|بار\s*كود|qr|كيوار|كيو\s*ار|"
+    r"رمز\s*(?:الدفع|التحويل|السداد))"
+)
+_PHONE_NOUN    = r"(?:ال)?(?:رقم|جوال|هاتف|تواصل)"
+_LOCATION_NOUN = (
+    r"(?:ال)?(?:موقع|عنوان|خريطة|location|map|"
+    r"موقع\s*(?:الفرع|المتجر))"
+)
+
+
+def _compile_pair(noun: str) -> re.Pattern[str]:
+    # Verb on the left within 0-15 chars before the noun.
+    return re.compile(
+        rf"{_PROMISE_VERB}[\s\S]{{0,30}}?{noun}",
+        re.IGNORECASE | re.UNICODE,
+    )
+
+
+# Standalone shorthand: "الرابط:" / "الباركود:" / "الرقم:" / "الموقع:"
+# on their own line introduces an asset. Without the verb context
+# these are still promises ("here is X: __").
+_STANDALONE_INTRO = re.compile(
+    r"(?:^|\n)\s*"
+    r"(?P<class>الرابط|الباركود|الرقم|الموقع|اللينك)"
+    r"\s*[:：]\s*$",
+    re.IGNORECASE | re.UNICODE | re.MULTILINE,
+)
+
+
+_PROMISE_PATTERNS: Dict[str, tuple] = {
+    ASSET_LINK:     (_compile_pair(_LINK_NOUN),),
+    ASSET_BARCODE:  (_compile_pair(_BARCODE_NOUN),),
+    ASSET_PHONE:    (_compile_pair(_PHONE_NOUN),),
+    ASSET_LOCATION: (_compile_pair(_LOCATION_NOUN),),
+}
+
+
+# Phone shape — Saudi mobile (05XXXXXXXX / +9665XXXXXXXX / 9665XXXXXXXX),
+# plus generic international (+\d{7,15}) as a permissive fallback.
+_PHONE_DIGITS_RE = re.compile(
+    r"(?:\+?966|00966|0)?5\d{8}|\+\d{7,15}",
+)
+
+
+def _contains_url(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_URL_RE.search(text))
+
+
+def _contains_phone(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_PHONE_DIGITS_RE.search(text))
+
+
+# Neutral replacements per asset class. We rewrite the OFFENDING
+# SPAN only (not the whole reply) so the customer still receives
+# whatever else the LLM said in the same turn. Replacement copy is
+# conservative — no clown tone, no automated escalation, no false
+# bullet of "I will follow up". Each replacement either (a) admits
+# the asset isn't ready and ASKS what the customer needs, or
+# (b) acknowledges the request without committing to a delivery
+# this turn.
+_PROMISE_REPLACEMENTS: Dict[str, str] = {
+    ASSET_LINK:     "تكفي لحظة وأجيب لك التفاصيل الكاملة 🌷",
+    ASSET_BARCODE:  "للتحويل البنكي، خبّرنا بالمبلغ وسنرسل لك الطريقة المناسبة 🌷",
+    ASSET_PHONE:    "للتواصل المباشر، خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷",
+    ASSET_LOCATION: "خبّرنا بالفرع أو المنطقة وسنرسل تفاصيل الموقع المناسبة 🌷",
+}
+
+
+def contains_promised_asset(text: str) -> Optional[str]:
+    """Return the asset class of the first detected promise, or ``None``.
+
+    Pure predicate. Useful for tests + log annotations. Order is
+    deterministic — we check link → barcode → phone → location.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    for asset_class, patterns in _PROMISE_PATTERNS.items():
+        for pattern in patterns:
+            if pattern.search(text):
+                return asset_class
+    m = _STANDALONE_INTRO.search(text)
+    if m:
+        token = (m.group("class") or "").strip()
+        if token in ("الرابط", "اللينك"):
+            return ASSET_LINK
+        if token == "الباركود":
+            return ASSET_BARCODE
+        if token == "الرقم":
+            return ASSET_PHONE
+        if token == "الموقع":
+            return ASSET_LOCATION
+    return None
+
+
+def maybe_scrub_unkept_asset_promise(
+    text: str,
+    *,
+    has_url: bool,
+    has_media: bool,
+    has_phone: bool,
+    has_product_card: bool = False,
+    tenant_id: Optional[int] = None,
+    recipient: Optional[str] = None,
+) -> Tuple[str, bool, Optional[str]]:
+    """Return ``(text_out, was_scrubbed, asset_class)``.
+
+    Inputs:
+      * ``text``       — final outbound text (post marker extraction).
+      * ``has_url``    — at least one ``https?://`` URL in ``text``
+                          OR a product card / CTA URL is queued.
+      * ``has_media``  — at least one media attachment queued
+                          (image / video / document).
+      * ``has_phone``  — explicit phone digits in ``text`` OR a
+                          ``[CALL:...]`` contact card is queued.
+      * ``has_product_card`` — kept distinct because product cards
+                          carry both a URL AND an image; useful for
+                          the location class which wants either.
+
+    Behaviour:
+      * If no promise pattern matches → ``(text, False, None)``.
+      * If promise matches AND the matching asset is present →
+        ``(text, False, asset_class)``. We still report the class so
+        upstream can log "promise honoured" if it wants.
+      * If promise matches AND the asset is MISSING → we replace the
+        offending SPAN (not the whole text) with the neutral copy
+        and return ``(rewritten, True, asset_class)``. Logged as
+        ``[ASSET_PROMISE_SCRUBBED]`` so production can audit.
+
+    The caller is responsible for collecting ``has_url`` / ``has_media``
+    / ``has_phone`` / ``has_product_card`` from the actual outbound
+    state. We deliberately don't read the conversation model here —
+    keeps the sanitizer pure and unit-testable.
+    """
+    if not text or not isinstance(text, str):
+        return text or "", False, None
+
+    asset_class = contains_promised_asset(text)
+    if not asset_class:
+        return text, False, None
+
+    asset_present = {
+        ASSET_LINK:     (has_url or has_product_card),
+        ASSET_BARCODE:  has_media,
+        ASSET_PHONE:    has_phone,
+        ASSET_LOCATION: (has_url or has_product_card),
+    }.get(asset_class, True)
+
+    if asset_present:
+        # Honest promise — let it through. We don't log here on
+        # purpose; the success path is the common case and the
+        # existing ``[OUTBOUND_MEDIA_ATTACH]`` / CTA logs already
+        # tell the operator the asset went out.
+        return text, False, asset_class
+
+    # Replace each matching span. We keep the rest of the reply
+    # intact so a useful "thanks + ask question" turn isn't lost
+    # just because one promise sentence wasn't honoured.
+    replacement = _PROMISE_REPLACEMENTS.get(asset_class) or ""
+    rewritten = text
+    matched_any = False
+    for pattern in _PROMISE_PATTERNS.get(asset_class, ()):
+        if pattern.search(rewritten):
+            rewritten = pattern.sub(replacement, rewritten)
+            matched_any = True
+    if not matched_any:
+        # Standalone intro shape ("الرابط:") — replace the whole
+        # intro+line.
+        rewritten = _STANDALONE_INTRO.sub("\n" + replacement, rewritten)
+
+    # Collapse any double-blank-lines that the substitution opened.
+    rewritten = re.sub(r"\n{3,}", "\n\n", rewritten).strip()
+
+    logger.warning(
+        "[ASSET_PROMISE_SCRUBBED] tenant=%s to=%s asset_class=%s "
+        "has_url=%s has_media=%s has_phone=%s has_product_card=%s "
+        "original_len=%d preview=%r",
+        tenant_id, recipient, asset_class,
+        bool(has_url), bool(has_media), bool(has_phone), bool(has_product_card),
+        len(text), text[:140],
+    )
+    return rewritten, True, asset_class
+
+
 __all__ = [
     "SAFE_FALLBACK_TEXT",
+    "ASSET_LINK",
+    "ASSET_BARCODE",
+    "ASSET_PHONE",
+    "ASSET_LOCATION",
     "contains_leakage_markers",
     "contains_planner_markers",
     "contains_handoff_promise",
+    "contains_promised_asset",
     "extract_natural_segment",
     "maybe_scrub_handoff_promise",
+    "maybe_scrub_unkept_asset_promise",
     "sanitize_outbound_payload",
 ]

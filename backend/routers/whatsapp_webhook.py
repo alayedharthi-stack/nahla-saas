@@ -6682,6 +6682,74 @@ async def _handle_merchant_message(
                     tenant_id, _scrub_exc,
                 )
 
+        # ── Asset-promise guard (May 2026 #30) ────────────────────────
+        # Detect "I will send you the link/number/barcode/location" in
+        # the outbound text and verify the matching asset is actually
+        # queued. When the promise is broken (text says yes, dispatch
+        # says no) we rewrite the offending span to a neutral copy so
+        # the customer doesn't get a false promise. Three signals:
+        #
+        #   * ``_has_url``: any explicit URL in the reply OR a product
+        #     card queued (product cards carry their own CTA URL).
+        #   * ``_has_media``: at least one media attachment in
+        #     ``_media_attachments`` (image / video / document /
+        #     barcode picked up by the resolver or safety net).
+        #   * ``_has_phone``: phone digits in the reply OR a
+        #     ``[CALL:...]`` contact card queued in ``_call_targets``.
+        #
+        # The guard runs AFTER the marker scrub so we operate on the
+        # exact text the customer will see, and BEFORE every send
+        # branch (brain buttons / cta split / single text) so all
+        # outbound paths are covered.
+        if reply:
+            try:
+                from core.outbound_sanitizer import (  # noqa: PLC0415
+                    maybe_scrub_unkept_asset_promise as _scrub_promise,
+                )
+                import re as _re_ap  # noqa: PLC0415
+                _has_url_in_text = bool(
+                    _re_ap.search(r"https?://\S+", reply or "")
+                )
+                _has_media_queued = bool(_media_attachments)
+                _has_product_card_queued = bool(_product_attachments)
+                _has_url_total = (
+                    _has_url_in_text or _has_product_card_queued
+                )
+                _has_phone_in_text = bool(
+                    _re_ap.search(
+                        r"(?:\+?966|00966|0)?5\d{8}|\+\d{7,15}", reply or "",
+                    )
+                )
+                _has_call_target = bool(_call_targets)
+                _has_phone_total = _has_phone_in_text or _has_call_target
+
+                _new_reply_promise, _scrubbed_promise, _asset_cls = _scrub_promise(
+                    reply or "",
+                    has_url=_has_url_total,
+                    has_media=_has_media_queued,
+                    has_phone=_has_phone_total,
+                    has_product_card=_has_product_card_queued,
+                    tenant_id=tenant_id,
+                    recipient=to,
+                )
+                if _scrubbed_promise:
+                    logger.info(
+                        "[ASSET_PROMISE_SCRUBBED] tenant=%s "
+                        "conversation_id=%s asset_class=%s "
+                        "has_url=%s has_media=%s has_phone=%s "
+                        "has_product_card=%s",
+                        tenant_id, getattr(convo, "id", None),
+                        _asset_cls,
+                        _has_url_total, _has_media_queued,
+                        _has_phone_total, _has_product_card_queued,
+                    )
+                    reply = _new_reply_promise
+            except Exception as _ap_exc:  # noqa: BLE001 — never break send
+                logger.debug(
+                    "[ASSET_PROMISE_SCRUB] evaluate failed (open): %s",
+                    _ap_exc,
+                )
+
         if _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
