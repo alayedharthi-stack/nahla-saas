@@ -661,6 +661,18 @@ class CustomerIntelligenceService:
             "order_webhook":    "order",
             "whatsapp_inbound": "whatsapp_inbound",
             "whatsapp_lead":    "whatsapp_inbound",
+            # May 2026 #37 — outbound echoes from the merchant's
+            # mobile WA app (Coexistence ``smb_message_echoes``).
+            # They MUST NOT bump ``last_interaction_at`` because
+            # that field tracks customer-side activity for the
+            # silence-detector / re-engagement window. Treating
+            # echoes as inbound also forces a UPDATE customers
+            # statement per merchant message — under contention
+            # this hits the 5s statement_timeout and crashes the
+            # echo branch. The echo channel is a distinct identity
+            # source that finds-or-creates the customer row but
+            # leaves the timestamp alone.
+            "whatsapp_outbound_echo": "whatsapp_outbound_echo",
         }
         channel = _channel_map.get(source or "", source or None)
 

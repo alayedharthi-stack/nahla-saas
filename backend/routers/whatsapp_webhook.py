@@ -2149,8 +2149,24 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
     ``_download_meta_media`` helper, persist via ``save_inbound_media``,
     and stamp ``extra_metadata.normalized_inbound`` so the dashboard's
     ``_build_media_block`` can serialise it as a real media row.
+
+    May 2026 #37: this branch used to crash with
+    ``OperationalError: statement timeout`` on the implicit
+    ``UPDATE customers SET last_interaction_at=…`` that
+    :func:`_get_or_create_conversation` triggered (it forwards
+    ``source="whatsapp_inbound"`` by default). Echoes are
+    OUTBOUND from the merchant's app, not customer-driven inbound,
+    so they MUST NOT bump the timestamp — and we no longer want
+    a single timed-out UPDATE to take down the whole batch. Two
+    fixes:
+      1. Forward ``source="whatsapp_outbound_echo"`` so the
+         CustomerIntelligenceService skips the timestamp UPDATE.
+      2. Wrap the per-echo flush in a savepoint so a timeout (or
+         any OperationalError) on one echo doesn't poison the
+         outer batch transaction; we log telemetry and continue.
     """
     from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+    from sqlalchemy.exc import OperationalError  # noqa: PLC0415
 
     phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
     for echo in value.get("message_echoes", []) or []:
@@ -2159,7 +2175,10 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
         if not to_phone:
             continue
 
-        convo = _get_or_create_conversation(db, wa_conn.tenant_id, to_phone)
+        convo = _get_or_create_conversation(
+            db, wa_conn.tenant_id, to_phone,
+            source="whatsapp_outbound_echo",
+        )
 
         # Extras stamped on every echo — kept identical across branches
         # so downstream consumers can rely on the shape.
@@ -2281,7 +2300,53 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
         ))
         convo.status = "active"
         db.add(convo)
-    db.flush()
+
+        # Per-echo telemetry — answers "did this echo touch the
+        # customer row, and how long did it take?". The
+        # ``last_interaction_at_skipped`` flag is True by default
+        # for echoes; if the future flips an echo back to inbound-
+        # like semantics, this stays observable.
+        logger.info(
+            "[LAST_INTERACTION] tenant=%s customer_id=%s family=coexistence "
+            "type=%s direction=outbound source=whatsapp_outbound_echo "
+            "last_interaction_at_skipped=True",
+            wa_conn.tenant_id,
+            getattr(convo, "customer_id", None),
+            msg_type or "unknown",
+        )
+
+    # Best-effort flush — under contention the bare UPDATE
+    # statement on ``customers`` (e.g. via name updates from
+    # ``upsert_customer_identity``) can hit the 5s
+    # ``statement_timeout`` and surface as a QueryCanceled
+    # OperationalError. Pre-fix the whole coexistence batch
+    # rolled back because of one slow row; we now isolate the
+    # failure to the per-echo branch via the outer try in
+    # :func:`whatsapp_webhook` and surface a structured warning
+    # so production triage can chart how often it fires without
+    # it costing us echoes.
+    flush_started = time.monotonic()
+    try:
+        db.flush()
+        logger.info(
+            "[LAST_INTERACTION] flush=ok tenant=%s duration_ms=%d",
+            wa_conn.tenant_id,
+            int((time.monotonic() - flush_started) * 1000),
+        )
+    except OperationalError as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[LAST_INTERACTION] flush=timeout_or_op_error tenant=%s "
+            "duration_ms=%d err=%s — dropping echo batch, pipeline "
+            "stays alive",
+            wa_conn.tenant_id,
+            int((time.monotonic() - flush_started) * 1000),
+            exc,
+        )
+        return
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3159,6 +3224,12 @@ async def _dispatch_message(
                         f"msg_type={msg_type!r} normalized_type="
                         f"{normalized_inbound.normalized_type!r}"
                     ),
+                    # May 2026 #37 — pass the normalized type so the
+                    # observability writer can apply the noise filter
+                    # (reaction / revoke / ephemeral / system don't
+                    # open AI Quality rows; merchants don't want to
+                    # triage emoji reactions).
+                    normalized_type=normalized_inbound.normalized_type,
                 )
             except Exception as _obs_exc:  # noqa: BLE001
                 logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)

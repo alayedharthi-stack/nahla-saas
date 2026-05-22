@@ -103,6 +103,44 @@ DROP_UNSUPPORTED_TYPE        = "unsupported_type"
 DROP_EMPTY_TEXT              = "empty_text"
 DROP_PRE_BRAIN_HANDOFF       = "pre_brain_handoff_drop"
 DROP_DISPATCHER_EXCEPTION    = "dispatcher_exception"
+
+# ── Noise filter for unsupported-type rows ────────────────────────────
+#
+# Production (May 2026 #37) showed the AI Quality dashboard filling
+# up with rows whose ``mismatch_type=unsupported_type`` and whose
+# ``chosen_path`` carried a ``normalized_type`` we know about and
+# never wanted to action — typing reactions, message revokes,
+# ephemeral / system events. These are protocol-level housekeeping
+# events, not customer turns the merchant needs to investigate.
+# Keeping a row per occurrence created visual spam and (more
+# importantly) drowned signal rows in the same table.
+#
+# The filter below is the single source of truth for "do we open an
+# ai_quality_events row, or is a trace log enough?". Add a type
+# here when the dashboard is being noisy about it; do NOT remove
+# without checking that the dashboard already has another bucket
+# (e.g. coexistence_event) covering the audit need.
+NOISE_NORMALIZED_TYPES: frozenset = frozenset({
+    "reaction",          # 👍 / ❤️ on a previous message
+    "revoke",            # customer "deleted for everyone"
+    "ephemeral",         # disappearing-message lifecycle
+    "system",            # group join / number change / e2e notice
+})
+
+
+def is_noise_inbound_type(normalized_type: Any) -> bool:
+    """Return True when the inbound type is protocol noise.
+
+    Noise types still get a structured INFO log at the call site so
+    operators can correlate them with WhatsApp webhook payloads —
+    they just don't open an ``ai_quality_events`` row.
+    """
+    if not normalized_type:
+        return False
+    try:
+        return str(normalized_type).strip().lower() in NOISE_NORMALIZED_TYPES
+    except Exception:  # noqa: BLE001
+        return False
 # Set when a per-change branch in the 360dialog batch loop raised and
 # we contained the failure (rollback + continue) instead of letting it
 # kill sibling changes. Pre-fix May 2026 this was happening silently:
@@ -239,6 +277,7 @@ def record_inbound_drop(
     inbound_preview: str = "",
     detail: str = "",
     chosen_path: str = "",
+    normalized_type: Optional[str] = None,
 ) -> Optional[int]:
     """Record a pre-brain inbound drop.
 
@@ -250,8 +289,31 @@ def record_inbound_drop(
     ``"outer_except"``) — useful when one ``drop_kind`` can fire from
     multiple flows.
 
+    ``normalized_type`` (May 2026 #37): when the drop is for an
+    unsupported message type AND that type is in
+    :data:`NOISE_NORMALIZED_TYPES` (reaction / revoke / ephemeral /
+    system), no DB row is written — the dashboard would otherwise
+    accumulate visual spam from protocol-level housekeeping events.
+    The call site still gets a structured INFO log so the trace
+    survives in the application log. Other unsupported types
+    (sticker, location, contacts, …) keep writing rows because the
+    merchant may want to act on them.
+
     Never raises.
     """
+    if (
+        drop_kind == DROP_UNSUPPORTED_TYPE
+        and is_noise_inbound_type(normalized_type)
+    ):
+        logger.info(
+            "[INBOUND_NOISE_FILTER] tenant=%s normalized_type=%s "
+            "phone=%s — telemetry-only, no ai_quality_events row",
+            tenant_id if tenant_id else 0,
+            str(normalized_type or "").strip().lower() or "?",
+            mask_phone(customer_phone) if customer_phone else "-",
+        )
+        return None
+
     return _write_event(
         tenant_id=tenant_id,
         category=CATEGORY_INBOUND_DROP,
@@ -317,12 +379,16 @@ __all__ = [
     "DROP_EMPTY_TEXT",
     "DROP_PRE_BRAIN_HANDOFF",
     "DROP_DISPATCHER_EXCEPTION",
+    "DROP_BATCH_BRANCH_ISOLATED",
     # Webhook routing vocabulary
     "ROUTE_UNROUTED_MISSING_PHONE",
     "ROUTE_UNROUTED_UNKNOWN_PHONE",
     "ROUTE_UNROUTED_AMBIGUOUS",
     "ROUTE_UNROUTED_WRONG_PROVIDER",
     "ROUTE_UNROUTED_BAD_SECRET",
+    # Noise filter (May 2026 #37)
+    "NOISE_NORMALIZED_TYPES",
+    "is_noise_inbound_type",
     # Public writers
     "record_inbound_drop",
     "record_webhook_unrouted",

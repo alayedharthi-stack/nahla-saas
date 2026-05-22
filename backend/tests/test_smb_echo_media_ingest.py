@@ -82,9 +82,14 @@ def patches(monkeypatch: pytest.MonkeyPatch):
     from routers import whatsapp_webhook as wh
 
     convo = _StubConvo()
+    # May 2026 #37 — ``_get_or_create_conversation`` now accepts an
+    # optional keyword-only ``source`` so coexistence echoes can opt
+    # out of the customer ``last_interaction_at`` UPDATE. The stub
+    # accepts arbitrary kwargs to stay forward-compatible with the
+    # production signature.
     monkeypatch.setattr(
         "routers.conversations._get_or_create_conversation",
-        lambda _db, _tid, _phone: convo,
+        lambda _db, _tid, _phone, *_a, **_k: convo,
     )
 
     # We DO NOT want any real HTTP — stub the helpers the ingest pulls

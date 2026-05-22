@@ -154,7 +154,14 @@ class BlocklistIn(BaseModel):
     customer_phone: str | None = None  # optional: also pause that conversation
 
 
-def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, customer_name: str = "") -> Customer:
+def _get_or_create_customer(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+    customer_name: str = "",
+    *,
+    source: str = "whatsapp_inbound",
+) -> Customer:
     """
     Create or retrieve a customer via the single unified identity path.
 
@@ -164,6 +171,18 @@ def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, cu
     normalised rows). Removed 2026-04-16. If ``upsert_customer_identity``
     cannot produce a customer from the given inputs, we raise instead of
     silently corrupting the data set.
+
+    ``source`` (May 2026 #37) lets callers distinguish customer-driven
+    inbound (``whatsapp_inbound``) from merchant-driven outbound echoes
+    (``whatsapp_outbound_echo``). The echo source skips the
+    ``last_interaction_at`` UPDATE in :class:`CustomerIntelligenceService`
+    because:
+      * Echoes are merchant→customer messages, not customer activity —
+        bumping the timestamp on them would hide stale conversations
+        from the silence-detector and break re-engagement windows.
+      * The bare UPDATE statement under high merchant-mobile traffic
+        was hitting the 5s ``statement_timeout`` and crashing the
+        coexistence ingest branch (Tenant 33 production trace).
     """
     from core.obs import EVENTS, log_event  # noqa: PLC0415
 
@@ -181,15 +200,15 @@ def _get_or_create_customer(db: Session, tenant_id: int, customer_phone: str, cu
     customer = service.upsert_customer_identity(
         phone=normalized_phone,
         name=resolved_name,
-        source="whatsapp_inbound",
-        extra_metadata={"source": "whatsapp_inbound"},
+        source=source,
+        extra_metadata={"source": source},
         seen_at=datetime.now(timezone.utc),
     )
     if customer is None:
         log_event(
             EVENTS.CUSTOMER_UPSERT_FAILED,
             tenant_id=tenant_id,
-            source="whatsapp_inbound",
+            source=source,
             phone_raw=customer_phone,
             phone_normalized=normalized_phone,
             name=customer_name,
@@ -206,8 +225,12 @@ def _get_or_create_conversation(
     tenant_id: int,
     customer_phone: str,
     customer_name: str = "",
+    *,
+    source: str = "whatsapp_inbound",
 ) -> Conversation:
-    customer = _get_or_create_customer(db, tenant_id, customer_phone, customer_name)
+    customer = _get_or_create_customer(
+        db, tenant_id, customer_phone, customer_name, source=source,
+    )
     convo = db.query(Conversation).filter(
         Conversation.tenant_id == tenant_id,
         Conversation.customer_id == customer.id,
