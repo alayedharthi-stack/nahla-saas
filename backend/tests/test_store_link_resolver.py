@@ -57,10 +57,17 @@ class _StubLoader:
 
 
 class _StubSettings:
-    """Mimics ``TenantSettings`` with the one field the resolver
-    reads (``store_settings``)."""
-    def __init__(self, store_settings: Optional[Dict[str, Any]] = None) -> None:
+    """Mimics ``TenantSettings`` with the two JSONB fields the
+    resolver reads (``store_settings`` for the canonical store-tab
+    URL, ``whatsapp_settings`` for the CTA-button URL slot added by
+    May 2026 #35)."""
+    def __init__(
+        self,
+        store_settings: Optional[Dict[str, Any]] = None,
+        whatsapp_settings: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.store_settings = dict(store_settings or {})
+        self.whatsapp_settings = dict(whatsapp_settings or {})
 
 
 class _StubIntegration:
@@ -119,6 +126,7 @@ def _install_resolver_stubs(
     *,
     snapshot_url: str = "",
     settings_url: str = "",
+    whatsapp_button_url: str = "",
     integrations: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> _StubDB:
     """Inject the three source-of-truth modules via ``sys.modules``
@@ -145,11 +153,25 @@ def _install_resolver_stubs(
     sk_stub.StoreKnowledgeLoader = _fake_loader  # type: ignore[attr-defined]
     monkeypatch.setitem(_sys.modules, "core.store_knowledge", sk_stub)
 
-    # 2) Fake ``core.tenant`` exposing the three names the resolver uses.
+    # 2) Fake ``core.tenant`` exposing the four names the resolver uses
+    # (DEFAULT_STORE / DEFAULT_WHATSAPP / get_or_create_settings /
+    # merge_defaults). DEFAULT_WHATSAPP is read by the May 2026 #35
+    # button-URL fallback layer.
     tenant_stub = _types.ModuleType("core.tenant")
     tenant_stub.DEFAULT_STORE = {"store_url": ""}  # type: ignore[attr-defined]
+    tenant_stub.DEFAULT_WHATSAPP = {  # type: ignore[attr-defined]
+        "store_button_url": "",
+    }
     def _fake_settings(_db: Any, _tid: int) -> _StubSettings:
-        return _StubSettings({"store_url": settings_url} if settings_url else {})
+        return _StubSettings(
+            store_settings=(
+                {"store_url": settings_url} if settings_url else {}
+            ),
+            whatsapp_settings=(
+                {"store_button_url": whatsapp_button_url}
+                if whatsapp_button_url else {}
+            ),
+        )
     tenant_stub.get_or_create_settings = _fake_settings  # type: ignore[attr-defined]
     def _fake_merge_defaults(stored: Optional[Dict], defaults: Dict) -> Dict:
         out = dict(defaults or {})
@@ -219,10 +241,79 @@ def test_resolver_falls_back_to_settings(monkeypatch: pytest.MonkeyPatch) -> Non
     assert _lookup_tenant_store_url(db, 33) == "https://settings.example.sa"
 
 
+def test_resolver_falls_back_to_whatsapp_button_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source #3 (May 2026 #35): when snapshot and store_settings.store_url
+    are both empty, the resolver consults
+    ``whatsapp_settings.store_button_url`` BEFORE falling through to
+    integration configs.
+
+    Why this matters platform-wide: the dashboard exposes two URL
+    slots — one in the "Store" tab (``store_settings.store_url``) and
+    one in the "WhatsApp" tab as the CTA-button URL. Many merchants —
+    especially Nahla-native shops without a Salla/Zid integration —
+    fill ONLY the WhatsApp tab because that's the surface they
+    interact with most. Before this fix the AI could not deliver
+    "ابي رابط المتجر" for those tenants even though the URL was
+    sitting one column over. This is NOT tenant-33-specific; any
+    tenant with this configuration shape benefits.
+    """
+    from modules.ai.postprocess.safety_nets import _lookup_tenant_store_url
+
+    db = _install_resolver_stubs(
+        monkeypatch,
+        snapshot_url="",
+        settings_url="",
+        whatsapp_button_url="https://merchant.example.sa/ar",
+        integrations={},
+    )
+    assert _lookup_tenant_store_url(db, 33) == "https://merchant.example.sa/ar"
+
+
+def test_resolver_prefers_store_settings_over_whatsapp_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order invariant: when BOTH ``store_settings.store_url`` AND
+    ``whatsapp_settings.store_button_url`` are set, the canonical
+    "Store" field wins. The button URL is a fallback, not an override.
+    Tenants who already had a working setup must not see their
+    resolved URL change just because the new layer was added."""
+    from modules.ai.postprocess.safety_nets import _lookup_tenant_store_url
+
+    db = _install_resolver_stubs(
+        monkeypatch,
+        snapshot_url="",
+        settings_url="https://store-tab.example.sa",
+        whatsapp_button_url="https://wa-tab.example.sa",
+        integrations={},
+    )
+    assert _lookup_tenant_store_url(db, 33) == "https://store-tab.example.sa"
+
+
+def test_resolver_prefers_whatsapp_button_over_integrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Order invariant (continued): when settings are empty but BOTH
+    a button URL and a Salla integration domain exist, the manually-
+    typed button URL wins. Manual entry beats auto-discovered
+    integration metadata across the board."""
+    from modules.ai.postprocess.safety_nets import _lookup_tenant_store_url
+
+    db = _install_resolver_stubs(
+        monkeypatch,
+        snapshot_url="",
+        settings_url="",
+        whatsapp_button_url="https://wa-tab.example.sa",
+        integrations={"salla": {"store_url": "https://salla.example.sa"}},
+    )
+    assert _lookup_tenant_store_url(db, 33) == "https://wa-tab.example.sa"
+
+
 def test_resolver_falls_back_to_salla_integration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Source #3a: Salla integration config when prior sources empty."""
+    """Source #4a: Salla integration config when prior sources empty."""
     from modules.ai.postprocess.safety_nets import _lookup_tenant_store_url
 
     db = _install_resolver_stubs(
@@ -237,8 +328,8 @@ def test_resolver_falls_back_to_salla_integration(
 def test_resolver_falls_back_to_zid_integration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Source #3b: Zid integration — the previous resolver only
-    checked Salla and silently failed for Zid tenants."""
+    """Source #4b: Zid integration — the original Salla-only
+    resolver silently failed for Zid tenants."""
     from modules.ai.postprocess.safety_nets import _lookup_tenant_store_url
 
     db = _install_resolver_stubs(

@@ -1031,6 +1031,61 @@ def _maybe_force_https(url: str) -> str:
     return url
 
 
+def _canonicalise_managed_host(url: str) -> str:
+    """Rewrite a media URL whose host is a managed-platform preview
+    domain (Railway/Heroku/Vercel/…) onto the canonical public base
+    declared via ``NAHLA_PUBLIC_BASE_URL``.
+
+    Why this is platform-level (not Tenant-33 specific):
+
+    Every media row uploaded via ``POST /intelligence/ai-media``
+    persists whatever absolute URL ``request.base_url`` returned at
+    upload time. On Railway behind the platform proxy this is
+    ``http://<service>-production.up.railway.app``. Two consequences
+    that hit ALL tenants who uploaded before ``NAHLA_PUBLIC_BASE_URL``
+    was set in the environment:
+
+      1. Meta's WhatsApp Cloud API rejects/blocks plain-HTTP fetches
+         even when the upstream cert is valid.
+      2. The Railway preview hostname leaks infrastructure to
+         end-customers and breaks if the service is renamed.
+
+    :func:`_maybe_force_https` already addresses (1). This helper
+    addresses (2): when ``NAHLA_PUBLIC_BASE_URL`` is configured, we
+    swap the *scheme + host[:port]* portion for the canonical base
+    and keep the URL path intact, so old rows are auto-corrected at
+    send time without a backfill migration.
+
+    No-op (returns the URL unchanged) when:
+      * ``NAHLA_PUBLIC_BASE_URL`` is unset (e.g. local dev),
+      * the URL has no recognisable managed-host substring,
+      * or the URL is empty / malformed.
+
+    Never raises.
+    """
+    if not url:
+        return url
+    base = (os.environ.get("NAHLA_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        return url
+    try:
+        from urllib.parse import urlsplit, urlunsplit  # noqa: PLC0415
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if not host:
+            return url
+        if not any(h in host for h in _PROD_HTTPS_HOSTS):
+            return url
+
+        base_parts = urlsplit(base if "://" in base else "https://" + base)
+        new_scheme = base_parts.scheme or "https"
+        new_netloc = base_parts.netloc or base.replace("https://", "").replace("http://", "")
+        # Preserve the path/query/fragment exactly so file ids survive.
+        return urlunsplit((new_scheme, new_netloc, parts.path, parts.query, parts.fragment))
+    except Exception:  # noqa: BLE001 — never break a send over a URL parse hiccup
+        return url
+
+
 def _safe_filename(title: str, default: str = "file") -> str:
     """Sanitise a merchant-provided title into a WhatsApp-safe filename.
 
@@ -1148,6 +1203,26 @@ def validate_media_for_send(
             )
             file_url = upgraded
             item["file_url"] = upgraded
+
+        # Auto-canonicalise the host when NAHLA_PUBLIC_BASE_URL is set —
+        # rewrites raw managed-platform preview hostnames (e.g.
+        # ``*.up.railway.app``) onto the canonical public base
+        # (``https://api.nahlah.ai``) so old rows persisted with the
+        # preview URL are corrected at send time instead of leaking
+        # infra to merchants/customers. Platform-wide: any tenant whose
+        # AIMediaItem.file_url was captured before the env var was set
+        # benefits automatically. No-op when the env var is empty or
+        # the URL is already on the canonical host.
+        canonical = _canonicalise_managed_host(file_url)
+        if canonical != file_url:
+            logger.info(
+                "[AIMedia.validate] canonicalised host tenant=%s id=%s "
+                "from=%s to=%s",
+                expected_tenant_id, media_id,
+                file_url[:80], canonical[:80],
+            )
+            file_url = canonical
+            item["file_url"] = canonical
 
     if storage_kind == "local":
         # Locally-uploaded asset: the public URL must be HTTPS *and* the
