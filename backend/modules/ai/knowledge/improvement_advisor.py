@@ -259,6 +259,61 @@ _COMPLIANCE_RISK_PATTERNS: List[re.Pattern[str]] = [
 
 _BANK_TRANSFER_KEYWORDS = (
     "تحويل", "آيبان", "iban", "الراجحي", "الأهلي", "بنك",
+    # Barcode / QR synonyms — May 2026 #36 follow-up: a row whose
+    # body explicitly mentions "باركود الراجحي" but has NO barcode
+    # media attached should still trigger the missing-barcode pass.
+    # Pre-fix the row only triggered when bank-name keywords were
+    # present, so a tenant whose only bank_transfer entry was
+    # "الباركود مرفق في البنك" silently slipped through.
+    "باركود", "بار كود", "qr", "كيوار", "كيو ار",
+)
+
+
+# Staff role / contact-card keywords used by ``_pass_orphan_staff_names``.
+# A KB section that mentions one of these AND does not contain a
+# Saudi phone is flagged as "the merchant referenced a person but
+# the AI has nothing to dial". Same surface area as the staff
+# safety net so the audit and the runtime stay in sync.
+_STAFF_ROLE_KEYWORDS: Tuple[str, ...] = (
+    "بائع المعرض", "بائع",
+    "المحاسب", "محاسب",
+    "الكاشير", "كاشير",
+    "المسؤول", "المسؤولة", "مسؤول",
+    "المالك", "صاحب المتجر",
+    "الإدارة", "الادارة",
+    "خدمة العملاء", "الدعم", "الموظف", "موظف",
+    "المندوب", "السائق",
+    # Common Saudi proper-name shapes that frequently appear in
+    # branches / owner_identity sections without a phone next to
+    # them. Mirrors :data:`safety_nets._STAFF_NAME_CANDIDATES`.
+    "أمين", "امين", "هشام", "هيثم",
+    "أحمد", "احمد", "محمد", "خالد",
+    "عبدالله", "عبدالعزيز", "تركي", "سعد",
+    "أبو هشام", "ابو هشام",
+)
+
+
+# Saudi phone shape — used in the audit pass to decide whether a
+# section that mentions a staff role is "complete" (has a phone) or
+# "orphaned" (no phone, AI can't deliver). Matches the same patterns
+# the safety net uses so behaviour stays in lockstep.
+_AUDIT_SAUDI_PHONE_RE = re.compile(
+    r"(?:\+?9665\d{8}|0?5\d{8})"
+)
+
+
+# KB-section kinds we sweep for orphan staff names. Same allowlist
+# as the staff safety net's KB scan (see
+# ``modules.ai.postprocess.safety_nets._STAFF_KB_FALLBACK_KINDS``)
+# minus the catch-all ``faq`` kind — FAQ rows often quote the
+# customer's question without intending to declare a staff phone.
+_STAFF_AUDIT_KINDS: Tuple[str, ...] = (
+    "branches",
+    "store_story",
+    "owner_identity",
+    "escalation_rules",
+    "quick_update",
+    "custom",
 )
 
 _LOCATION_KEYWORDS = (
@@ -765,6 +820,55 @@ def _suggest_compliance_risk(idx: int, row: _RowView) -> ImprovementFinding:
     )
 
 
+def _suggest_missing_staff_phone(
+    idx: int, row: _RowView,
+) -> ImprovementFinding:
+    """Audit signal for "section mentions a staff role but has no phone".
+
+    Production case: a customer asks "أبي رقم أمين", the bot replies
+    "أبشر" / "تفضل أبو خلف" but never sends a phone — because the KB
+    section that mentions أمين has no Saudi phone next to the name.
+    The staff safety net's KB scan correctly fails to find a number,
+    but until this pass landed, the dashboard never told the merchant
+    to FILL the gap. The advice text deliberately frames it as a
+    completion task ("أكمل") rather than a coverage fault — most
+    merchants don't realise their behavioural KB doesn't carry
+    structured contact data.
+    """
+    label = row.title or row.kind
+    return ImprovementFinding(
+        id=f"sug-{idx}",
+        type="missing_staff_phone",
+        severity="medium",
+        title=f"أكمل أرقام التواصل في قسم «{label}»",
+        reason=(
+            "هذا القسم يذكر اسم/دور موظف (أمين، بائع المعرض، الإدارة، "
+            "المحاسب…) لكنه لا يحتوي رقم واتساب أو جوال سعودي. الذكاء "
+            "لا يستطيع إرسال الرقم عند سؤال العميل، فيرد بـ«تواصل مع "
+            "الشخص المختص» بدون رقم — تجربة محبطة للعميل."
+        ),
+        expected_impact=(
+            "إرسال كرت تواصل مباشر للموظف عند سؤال العميل بدلاً من "
+            "وعد بدون تنفيذ. يقلل أيضاً التحويل اليدوي للبشري."
+        ),
+        target_kind=row.kind,
+        proposed_body=(
+            "أضف بجانب كل اسم موظف رقم تواصله السعودي (مثلاً: «أمين "
+            "بائع المعرض - 0541690226»). إذا الرقم نفسه يُستخدم لكل "
+            "الفروع، اذكره مرة واحدة في قسم «الإدارة» وارفق ملاحظة "
+            "بذلك. لا تستخدم أرقاماً وهمية — يفضّل ترك الخانة فارغة "
+            "حتى يتم التأكيد."
+        ),
+        requires_media=False,
+        confidence=0.7,
+        related_section_ids=[row.id],
+        rationale_keys=[
+            "missing:staff_phone",
+            f"section:{row.id}",
+        ],
+    )
+
+
 def _suggest_product_usage_gap(
     idx: int, products_without_usage: List[CatalogSlice],
 ) -> ImprovementFinding:
@@ -1006,6 +1110,58 @@ def _pass_compliance(
     return out
 
 
+def _pass_orphan_staff_names(
+    rows: List[_RowView], idx_start: int,
+) -> List[ImprovementFinding]:
+    """Flag KB sections that name a staff role without a phone.
+
+    Triggered by the May 2026 #36 production case: a customer
+    asked "أبي رقم أمين" and the bot affirmed ("أبشر"/"تفضل")
+    but never sent a number, because the section that mentions
+    أمين contains his name + role label only. The staff safety
+    net's KB scan correctly returns ``source=none`` — but until
+    this pass landed, the dashboard never told the merchant to
+    fill the gap. Now they get an actionable card.
+
+    Heuristic (intentionally conservative):
+      * Section ``kind`` must be in :data:`_STAFF_AUDIT_KINDS`
+        (branches, owner_identity, escalation_rules, store_story,
+        quick_update, custom). FAQ rows are excluded because they
+        often quote customer turns and would generate noise.
+      * Body must mention at least one keyword in
+        :data:`_STAFF_ROLE_KEYWORDS` — either a role noun
+        ("بائع المعرض", "المحاسب"…) or a Saudi proper-name that
+        the safety net knows about ("أمين", "هشام"…). Sections
+        with neither are not "staff sections" so we don't flag.
+      * Body must contain ZERO Saudi phone digit groups. A row
+        with "Owner: 0541690226 / Manager: مسؤول" is considered
+        complete because the safety net can still resolve a phone
+        from proximity. Only fully phone-less staff sections are
+        flagged.
+
+    The finding is emitted per-row so different sections get
+    different ``related_section_ids``, but the cluster pass will
+    merge same-advice findings into one card with all sections
+    listed. So the dashboard renders ONE "أكمل أرقام التواصل…"
+    card even when the merchant has multiple orphan rows.
+    """
+    out: List[ImprovementFinding] = []
+    idx = idx_start
+    for r in rows:
+        if r.kind not in _STAFF_AUDIT_KINDS:
+            continue
+        body = (r.body or "")
+        if not body.strip():
+            continue
+        if not any(kw in body for kw in _STAFF_ROLE_KEYWORDS):
+            continue
+        if _AUDIT_SAUDI_PHONE_RE.search(body):
+            continue
+        out.append(_suggest_missing_staff_phone(idx, r))
+        idx += 1
+    return out
+
+
 def _pass_product_gaps(
     rows: List[_RowView],
     products: Sequence[CatalogSlice],
@@ -1090,6 +1246,12 @@ def audit(
     next_idx = len(findings) + 1
     findings.extend(_pass_compliance(views, next_idx))
     next_idx = len(findings) + 1
+
+    # Orphan staff names — section mentions a role/name with NO
+    # phone next to it. Drives ``missing_staff_phone`` cards.
+    findings.extend(_pass_orphan_staff_names(views, next_idx))
+    next_idx = len(findings) + 1
+
     findings.extend(_pass_product_gaps(views, products_list, next_idx))
 
     # ── Platform-conflict guard ─────────────────────────────────────────
@@ -1195,74 +1357,148 @@ def _purpose_of(f: ImprovementFinding) -> Optional[str]:
 
 
 def _content_cluster_key(f: ImprovementFinding) -> str:
-    """Stable cluster key for a finding based purely on **content**.
+    """Stable **topic** key for a finding.
 
-    Excludes ``related_section_ids`` on purpose — that's the field
-    that made the fingerprint dedup miss the May 2026 #36
-    duplicate-suggestion bug. When five different sections of the
-    same kind happen to share an empty/identical title, every per-
-    section finding had a different fingerprint (because the section
-    id was in the hash) but emitted byte-for-byte identical UI text:
+    May 2026 #36 follow-up: the previous version of this key included
+    ``title`` / ``reason`` / ``expected_impact`` so that a finding
+    whose only difference was the section name interpolated into the
+    title still hashed UNIQUELY — defeating the cluster pass on
+    exactly the production bug it was supposed to catch.
 
-      title:           "حسّن قسم «shipping_zones»"
-      reason:          "القسم الحالي قصير جداً ..."
-      expected_impact: "ردود أكثر اكتمالاً ..."
-      proposed_body:   "<row.body>\n\nأضف هنا تفاصيل أكثر: ..."
+    The merchant feedback was four nearly-identical compliance cards:
 
-    The dashboard then renders the same card N times. We fix that
-    by collapsing on the content tuple (type, target_kind, title,
-    reason, expected_impact, proposed_body) and aggregating the
-    related_section_ids of every collapsed sibling so the merchant
-    can still see which rows the cluster covers.
+      title 1: "راجع صياغة قسم «العسل الصيفي الجبلي عند توفره» — قد تبدو ادعاء علاجي"
+      title 2: "راجع صياغة قسم «الاستخدامات التقليدية» — قد تبدو ادعاء علاجي"
+      title 3: "راجع صياغة قسم «العسل الجبلي إذا توفر» — قد تبدو ادعاء علاجي"
+      title 4: "راجع صياغة قسم «جرثومة المعدة» — قد تبدو ادعاء علاجي"
 
-    NB: ``proposed_body`` is intentionally PART of the key —
-    weak_section findings interpolate ``row.body`` into the body, so
-    two rows with truly different bodies remain in distinct
-    clusters. Only rows that produced byte-identical advice
-    collapse.
+    Same advice, same proposed_body, same expected_impact — but four
+    different titles because each interpolated a different
+    ``row.title``. The old key kept all four. The new key drops the
+    title (and reason / impact) and clusters on **the advice itself**:
+
+        (type, target_kind, normalized_proposed_body)
+
+    ``proposed_body`` is the merchant-actionable text that ships in
+    the dashboard card. When two findings share a proposed body for
+    the same target, they are giving the merchant the SAME action
+    item — the only thing that differs is which row(s) it applies
+    to. Those siblings collapse into a single card whose
+    ``related_section_ids`` lists every affected row, and whose title
+    is rewritten via :func:`_generic_title_for_topic` to stop
+    pretending the card is about one section.
+
+    Findings that ARE materially different stay in distinct
+    clusters: ``weak_section`` interpolates the row body into
+    ``proposed_body`` so two short-body rows with different content
+    keep distinct keys. ``missing_required_knowledge`` findings
+    differ on ``target_kind`` (payment_method vs shipping_zones), so
+    they don't collide either.
     """
     parts = [
         (f.type or "").strip().lower(),
         (f.target_kind or "").strip().lower(),
-        _normalize_for_fingerprint(f.title or ""),
-        _normalize_for_fingerprint(f.reason or ""),
-        _normalize_for_fingerprint(f.expected_impact or ""),
         _normalize_for_fingerprint(f.proposed_body or ""),
     ]
     raw = "|".join(parts).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
+# ── Per-topic generic copy for collapsed clusters ───────────────────────────
+#
+# When the cluster pass collapses N>1 findings whose per-row titles
+# differ, the surviving anchor's title still mentions «<one section>»
+# — that's misleading because the card now covers many sections.
+# These helpers return a count-aware generic title / reason so the
+# dashboard renders something honest like:
+#
+#   "راجع صياغة 4 أقسام لتجنب العبارات العلاجية"
+#
+# Returning ``None`` means "keep the anchor's text as-is" — that's
+# what we want for unique clusters (count == 1) and for finding
+# types whose anchor title doesn't reference a section name.
+
+
+def _generic_title_for_topic(type_: str, count: int) -> Optional[str]:
+    if count <= 1:
+        return None
+    t = (type_ or "").strip().lower()
+    if t == "compliance":
+        return f"راجع صياغة {count} أقسام لتجنب العبارات العلاجية"
+    if t == "semantic_contamination":
+        return f"انقل القواعد السلوكية من {count} أقسام تجارية"
+    if t == "weak_section":
+        return f"وسّع محتوى {count} أقسام مختصرة"
+    if t == "duplicate_merge":
+        return f"ادمج {count} أقسام/أزواج مكررة"
+    if t == "missing_staff_phone":
+        return f"أكمل أرقام التواصل في {count} أقسام موظفين"
+    if t == "missing_media":
+        return f"أرفق مرفقات الدفع لـ {count} أقسام تحويل بنكي"
+    return None
+
+
+def _generic_reason_for_topic(type_: str, count: int) -> Optional[str]:
+    if count <= 1:
+        return None
+    t = (type_ or "").strip().lower()
+    if t == "compliance":
+        return (
+            f"يحتوي {count} أقسام على عبارات قد تُفهم كادعاءات علاجية مباشرة "
+            "(يعالج/يشفي/يقضي على...). توحيد الصياغة الآمنة عليها يحمي "
+            "المتجر من مخالفات المنصات الإعلانية ويرفع ثقة العميل."
+        )
+    if t == "semantic_contamination":
+        return (
+            f"{count} أقسام تجارية تحتوي قواعد أسلوب/سلوك. الذكاء يستحضرها "
+            "في غير محلها عند سؤال العميل عن الدفع/الشحن. ادمجها في "
+            "مجموعة سلوك المساعد."
+        )
+    if t == "missing_staff_phone":
+        return (
+            f"{count} أقسام تذكر أسماء/أدوار موظفين بدون رقم تواصل. "
+            "الذكاء لا يستطيع إرسال الرقم عند سؤال العميل، ويرد بـ"
+            "«تواصل مع X» بدون رقم — تجربة محبطة للعميل."
+        )
+    return None
+
+
 def _cluster_findings(
     findings: List[ImprovementFinding],
 ) -> Tuple[List[ImprovementFinding], int]:
-    """Collapse byte-identical findings into one entry per content key.
+    """Collapse findings sharing a topic key into one card.
 
-    Returns ``(survivors, collapsed_count)`` where ``collapsed_count``
-    is how many rows we squashed (so observability can chart it).
+    Returns ``(survivors, collapsed_count)``.
 
-    Rules:
-      * Iteration order is preserved — the first finding in each
-        cluster anchors the surviving row's text; later siblings only
-        contribute their ``related_section_ids`` and ``rationale_keys``.
-      * The anchor's ``confidence`` and ``severity`` are kept as-is.
-        We DON'T promote a cluster's severity just because it covers
-        more rows — the cluster is "the same advice", not "more
-        urgent advice". Severity is a property of the advice itself.
-      * The anchor's ``fingerprint`` is recomputed from the merged
-        ``related_section_ids`` so the suppression key reflects the
-        cluster — when the merchant dismisses the merged card, the
-        whole cluster stays hidden until TTL.
+    Cluster contract (May 2026 #36 follow-up):
+      * Topic key = ``(type, target_kind, proposed_body)`` — see
+        :func:`_content_cluster_key`. Section ids are deliberately
+        EXCLUDED so per-row variants of the same advice merge.
+      * The first finding of each cluster is the anchor. Later
+        siblings contribute their ``related_section_ids`` and
+        ``rationale_keys`` to the anchor; their text is dropped.
+      * When N > 1 AND any sibling had a title that differs from
+        the anchor's, the anchor's title (and reason, when a
+        generic version exists) is rewritten via
+        :func:`_generic_title_for_topic` so the card doesn't
+        falsely claim it's about a single section.
+      * The anchor's ``fingerprint`` is recomputed over the merged
+        section list — dismissing the merged card hides the
+        WHOLE cluster, not just the anchor.
 
-    Findings whose content key is unique pass through untouched —
-    no allocation, no fingerprint recompute. Hot path stays cheap
-    when nothing is duplicated.
+    Telemetry: emits one ``[KB_IMPROVE_CLUSTER_DEBUG]`` INFO line
+    per non-trivial cluster (i.e. when at least one collapse
+    happened in the cluster). The line carries the cluster key
+    prefix, the topic, member counts, and the merged section ids
+    so production triage can grep "why didn't card X merge?"
+    without enabling DEBUG.
     """
     if not findings:
         return [], 0
     by_key: Dict[str, ImprovementFinding] = {}
     section_ids_by_key: Dict[str, List[int]] = {}
     rationale_by_key: Dict[str, List[str]] = {}
+    titles_by_key: Dict[str, List[str]] = {}
     order: List[str] = []
     collapsed = 0
     for f in findings:
@@ -1271,9 +1507,9 @@ def _cluster_findings(
             by_key[key] = f
             section_ids_by_key[key] = list(f.related_section_ids or [])
             rationale_by_key[key] = list(f.rationale_keys or [])
+            titles_by_key[key] = [(f.title or "")]
             order.append(key)
             continue
-        # Dup → fold into the anchor.
         collapsed += 1
         for sid in (f.related_section_ids or []):
             try:
@@ -1285,28 +1521,57 @@ def _cluster_findings(
         for rk in (f.rationale_keys or []):
             if rk and rk not in rationale_by_key[key]:
                 rationale_by_key[key].append(rk)
+        titles_by_key[key].append(f.title or "")
 
     survivors: List[ImprovementFinding] = []
     for key in order:
         anchor = by_key[key]
         merged_ids = sorted(int(s) for s in section_ids_by_key[key])
         merged_rationales = list(rationale_by_key[key])
-        if (
-            list(anchor.related_section_ids or []) == merged_ids
-            and list(anchor.rationale_keys or []) == merged_rationales
-        ):
+        cluster_titles = titles_by_key[key]
+        cluster_size = len(cluster_titles)
+        titles_differed = len({t for t in cluster_titles}) > 1
+
+        # Telemetry: only emit when the cluster actually collapsed
+        # something. Single-member clusters spam the log otherwise.
+        if cluster_size > 1:
+            logger.info(
+                "[KB_IMPROVE_CLUSTER_DEBUG] cluster_key=%s type=%s "
+                "target_kind=%s members=%d titles_differed=%s "
+                "sections=%s",
+                key[:8],
+                (anchor.type or ""),
+                (anchor.target_kind or ""),
+                cluster_size,
+                titles_differed,
+                merged_ids,
+            )
+
+        same_sections = list(anchor.related_section_ids or []) == merged_ids
+        same_rationales = list(anchor.rationale_keys or []) == merged_rationales
+        if cluster_size == 1 and same_sections and same_rationales:
             survivors.append(anchor)
             continue
-        # Build a NEW finding so the dataclass post-init recomputes
-        # the fingerprint over the merged section list. Suppression
-        # keyed on this fp will hide the whole cluster, not just
-        # the anchor section.
+
+        # Multi-member cluster (or single member whose sections /
+        # rationales were augmented by a non-clustering pass): rebuild
+        # the surviving finding so __post_init__ recomputes fingerprint.
+        new_title = anchor.title
+        new_reason = anchor.reason
+        if cluster_size > 1 and titles_differed:
+            generic_title = _generic_title_for_topic(anchor.type, cluster_size)
+            if generic_title:
+                new_title = generic_title
+            generic_reason = _generic_reason_for_topic(anchor.type, cluster_size)
+            if generic_reason:
+                new_reason = generic_reason
+
         clustered = ImprovementFinding(
             id=anchor.id,
             type=anchor.type,
             severity=anchor.severity,
-            title=anchor.title,
-            reason=anchor.reason,
+            title=new_title,
+            reason=new_reason,
             expected_impact=anchor.expected_impact,
             target_kind=anchor.target_kind,
             proposed_body=anchor.proposed_body,

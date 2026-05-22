@@ -1052,3 +1052,313 @@ def test_cluster_pass_logs_telemetry(caplog: pytest.LogCaptureFixture) -> None:
         "[KB_IMPROVE_CLUSTER]" in ln and "collapsed=" in ln
         for ln in log_lines
     ), f"expected a [KB_IMPROVE_CLUSTER] line; got: {log_lines!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Topic-cluster regression — May 2026 #36 follow-up: production
+# scenario where titles differed (because each title interpolated
+# its row.title) but the proposed_body / reason were byte-identical.
+# Pre-fix the cluster key included the title, so 4 cards survived.
+# Post-fix the key is (type, target_kind, proposed_body) only and
+# the surviving title is rewritten to "X أقسام".
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cluster_collapses_compliance_with_divergent_titles() -> None:
+    """Reproduces the exact production failure mode shown in the
+    May 2026 #36 dashboard screenshot: four compliance findings
+    that differ ONLY because each title contains a different
+    section name. Pre-fix the cluster key hashed the title and
+    they all survived. Post-fix the cluster pass groups them by
+    advice (proposed_body) and emits one card whose title is
+    rewritten with the count.
+    """
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    section_names = [
+        "العسل الصيفي الجبلي عند توفره",
+        "الاستخدامات التقليدية",
+        "العسل الجبلي إذا توفر",
+        "عند سؤال العميل عن جرثومة المعدة",
+    ]
+    common_kwargs = dict(
+        type="compliance",
+        severity="high",
+        reason="النص يحتوي عبارات قد تُفهم كادعاءات علاجية مباشرة.",
+        expected_impact="صياغة قانونية آمنة وزيادة ثقة العملاء.",
+        target_kind="compliance_rules",
+        proposed_body=(
+            "يرجى استخدام عبارات عامة مثل «يدخل في الأنظمة الغذائية "
+            "الصحية»، وتجنب استخدام كلمات مثل «يعالج»، «يشفي»، "
+            "«يقضي على»، أو أي وعد طبي مباشر."
+        ),
+        requires_media=False,
+        confidence=0.75,
+    )
+    findings = [
+        ImprovementFinding(
+            id=f"sug-{i}",
+            title=f"تحسين صياغة قسم «{name}» لتجنب العبارات العلاجية",
+            related_section_ids=[200 + i],
+            rationale_keys=[f"section:{200 + i}"],
+            **common_kwargs,
+        )
+        for i, name in enumerate(section_names, start=1)
+    ]
+
+    survivors, collapsed = _cluster_findings(findings)
+
+    assert len(survivors) == 1, (
+        "topic-clustering must collapse same-advice findings "
+        "regardless of per-row title interpolation"
+    )
+    assert collapsed == 3
+    merged = survivors[0]
+    assert sorted(merged.related_section_ids) == [201, 202, 203, 204]
+    # Title rewritten because per-row titles differed across siblings.
+    assert "4" in merged.title and "أقسام" in merged.title, (
+        f"expected count-aware generic title, got {merged.title!r}"
+    )
+    # The advice text stays verbatim — only the title is generalised.
+    assert "يدخل في الأنظمة الغذائية" in merged.proposed_body
+
+
+def test_cluster_does_not_rewrite_title_for_single_member_cluster() -> None:
+    """A cluster with one finding must NOT have its title generalised.
+    The count-aware rewrite only fires when N > 1 AND siblings'
+    titles diverge — otherwise the per-row title is the most useful
+    signal for the merchant."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    f = ImprovementFinding(
+        id="sug-1",
+        type="compliance",
+        severity="high",
+        title="راجع صياغة قسم «product_benefit» — قد تبدو ادعاء علاجي",
+        reason="r",
+        expected_impact="i",
+        target_kind="compliance_rules",
+        proposed_body="advice",
+        requires_media=False,
+        confidence=0.75,
+        related_section_ids=[50],
+    )
+    survivors, collapsed = _cluster_findings([f])
+    assert collapsed == 0
+    assert survivors[0].title == f.title
+
+
+def test_cluster_keeps_anchor_title_when_all_members_share_it() -> None:
+    """If every member of a cluster has the IDENTICAL title (because
+    they all reference the same row.title or because the row.title
+    was empty), the anchor title is preserved — no need to
+    generalise. Tests the ``titles_differed`` branch of the rewriter.
+    """
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    base = dict(
+        type="compliance", severity="high",
+        title="راجع صياغة قسم «compliance_rules» — قد تبدو ادعاء علاجي",
+        reason="r", expected_impact="i",
+        target_kind="compliance_rules",
+        proposed_body="canned advice",
+        requires_media=False, confidence=0.75,
+    )
+    findings = [
+        ImprovementFinding(
+            id=f"sug-{i}",
+            related_section_ids=[i],
+            rationale_keys=[f"section:{i}"],
+            **base,
+        )
+        for i in range(1, 4)
+    ]
+    survivors, collapsed = _cluster_findings(findings)
+    assert collapsed == 2
+    assert len(survivors) == 1
+    assert survivors[0].title == base["title"]
+
+
+def test_cluster_emits_per_cluster_debug_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each non-trivial cluster must emit a
+    ``[KB_IMPROVE_CLUSTER_DEBUG]`` INFO line exposing the cluster
+    key, type, target_kind, member count, ``titles_differed`` flag,
+    and merged section ids — so production triage can answer "why
+    didn't card X merge?" without reading source.
+    """
+    import logging
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    common = dict(
+        type="compliance", severity="high",
+        reason="r", expected_impact="i",
+        target_kind="compliance_rules",
+        proposed_body="advice body",
+        requires_media=False, confidence=0.75,
+    )
+    findings = [
+        ImprovementFinding(
+            id=f"sug-{i}",
+            title=f"unique title {i}",
+            related_section_ids=[i],
+            **common,
+        )
+        for i in range(1, 4)
+    ]
+    caplog.set_level(
+        logging.INFO,
+        logger="nahla.ai.knowledge.improvement_advisor",
+    )
+    _cluster_findings(findings)
+    log_lines = [r.getMessage() for r in caplog.records]
+    debug = [ln for ln in log_lines if "[KB_IMPROVE_CLUSTER_DEBUG]" in ln]
+    assert debug, (
+        f"expected at least one [KB_IMPROVE_CLUSTER_DEBUG] line; "
+        f"got: {log_lines!r}"
+    )
+    assert any(
+        "members=3" in ln and "titles_differed=True" in ln
+        and "type=compliance" in ln
+        for ln in debug
+    ), f"telemetry payload missing expected fields: {debug!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orphan staff names — May 2026 #36 follow-up: a section that
+# mentions a staff role/name without a phone next to it should
+# emit a ``missing_staff_phone`` finding so the merchant fills
+# the gap that the safety net's KB scan can't paper over.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_orphan_staff_section_yields_missing_phone_finding() -> None:
+    """A ``branches`` row that mentions "بائع المعرض" but has no
+    Saudi phone must emit a ``missing_staff_phone`` finding."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=1, kind="branches",
+            title="فرع الطائف",
+            body=(
+                "فرع الطائف - حي الحلقة الغربية. "
+                "بائع المعرض: أمين. مواعيد العمل من 9 ص إلى 11 م."
+            ),
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    types = [f.type for f in out]
+    assert "missing_staff_phone" in types, (
+        f"expected missing_staff_phone for orphan staff name; got types={types!r}"
+    )
+    finding = next(f for f in out if f.type == "missing_staff_phone")
+    assert 1 in finding.related_section_ids
+    assert "أمين" in finding.proposed_body or "0541690226" in finding.proposed_body
+
+
+def test_staff_section_with_phone_does_not_emit_missing_finding() -> None:
+    """Negative control: a row that already has a Saudi phone
+    next to the staff name must NOT emit ``missing_staff_phone``."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=2, kind="branches",
+            title="فرع الطائف",
+            body="بائع المعرض: أمين - 0541690226",
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    types = [f.type for f in out]
+    assert "missing_staff_phone" not in types, (
+        f"phone was present, no missing_staff_phone expected; got types={types!r}"
+    )
+
+
+def test_orphan_staff_findings_collapse_into_one_card() -> None:
+    """When TWO branch rows both have orphan staff names, the
+    cluster pass merges them into one card whose
+    ``related_section_ids`` covers both rows. The merchant sees
+    ONE "أكمل أرقام التواصل" card, not two."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=10, kind="branches",
+            title="فرع الطائف",
+            body="بائع المعرض: أمين - يستقبلكم بإذن الله.",
+        ),
+        _Row(
+            id=11, kind="branches",
+            title="فرع الرياض",
+            body="المحاسب: هشام - يقفل الحساب آخر اليوم.",
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    staff_findings = [f for f in out if f.type == "missing_staff_phone"]
+    assert len(staff_findings) == 1, (
+        "two orphan-staff rows must collapse via the cluster pass "
+        f"(got {len(staff_findings)} findings: {staff_findings!r})"
+    )
+    assert sorted(staff_findings[0].related_section_ids) == [10, 11]
+
+
+def test_faq_section_with_role_keyword_is_not_flagged() -> None:
+    """FAQ rows often quote the customer turn ("هل عندكم بائع
+    معرض؟") — flagging them would create noise. The audit pass
+    only sweeps ``_STAFF_AUDIT_KINDS`` (branches / owner_identity /
+    escalation_rules / store_story / quick_update / custom)."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=20, kind="faq",
+            title="من البائع؟",
+            body="بائع المعرض جاهز للرد على استفساراتكم.",
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    types = [f.type for f in out]
+    assert "missing_staff_phone" not in types
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Barcode-keyword expansion — May 2026 #36 follow-up: a row whose
+# body mentions "باركود" but has no bank-name keywords (and no
+# barcode media attached) used to slip through the missing-media
+# pass. Now ``باركود`` / ``QR`` are bank-transfer keywords too.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_barcode_only_body_without_media_triggers_missing_media() -> None:
+    """A bank_transfer row whose body talks about a barcode but
+    doesn't mention "تحويل" / "الراجحي" must still trigger the
+    missing-barcode advisor."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=30, kind="bank_transfer",
+            title="الباركود",
+            body=(
+                "أرسل التحويل عبر الباركود المرفق ثم أرسل لنا "
+                "صورة الإيصال."
+            ),
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    media_findings = [f for f in out if f.type == "missing_media"]
+    assert media_findings, (
+        f"expected missing_media finding for barcode-only body; got: "
+        f"{[(f.type, f.target_kind) for f in out]!r}"
+    )
