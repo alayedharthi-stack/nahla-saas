@@ -379,6 +379,343 @@ def test_autolink_helper_never_overwrites_existing_media_key():
     )
 
 
+# ── 5b. Two-tier detection: media_title wins over multi-bank section ─
+
+
+def test_title_alone_disambiguates_when_section_lists_many_banks():
+    """The Tenant 33 incident (May 22 2026): one giant payment section
+    that lists Rajhi + Alahli + STC Pay + Mobily Pay + Barq, but the
+    merchant uploaded an asset titled "باركود التحويل البنكي الراجحي".
+
+    Old detection: multi-bank section → ambiguous → None → media_key
+    stayed NULL → runtime safety net could not resolve the QR.
+
+    New tier-1 detection: media_title alone names exactly ONE specific
+    bank → bind to that bank. The asset title is the highest-signal
+    source the merchant typed for THIS asset specifically.
+    """
+    from services.payment_media_autolink import detect_payment_media_key
+
+    multi_bank_body = (
+        "• الراجحي يستخدم بيانات الراجحي.\n"
+        "• البنك الأهلي السعودي.\n"
+        "• STC Pay يقبل التحويل.\n"
+        "• Mobily Pay كذلك.\n"
+        "• برق متاح للعملاء."
+    )
+
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="طرق الدفع",
+        section_body=multi_bank_body,
+        media_title="باركود التحويل البنكي الراجحي",
+        link_role="barcode",
+    )
+    assert inferred == "payment_rajhi_barcode", (
+        "media_title naming a single bank must win over multi-bank "
+        "section body — that's the whole point of the tier-1 path"
+    )
+
+
+def test_title_alone_disambiguates_iban_shadow():
+    """Even in the title-first tier the IBAN-shadow rule must apply:
+    a title like "باركود الراجحي IBAN" still resolves to Rajhi,
+    not to the generic ``payment_bank_transfer_image`` slug."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    inferred = detect_payment_media_key(
+        section_kind="payment_method",
+        section_title="الدفع",
+        section_body="أي محتوى — لا يهم لأن العنوان حسم الأمر",
+        media_title="باركود الراجحي IBAN",
+        link_role="barcode",
+    )
+    assert inferred == "payment_rajhi_barcode"
+
+
+def test_title_falls_back_to_union_when_title_is_generic():
+    """If the merchant typed a generic title ("باركود التحويل")
+    the title tier can't pick a bank — the union tier kicks in and
+    uses section context. When the section is single-bank, we bind
+    correctly; when it's multi-bank, we still bail."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    rajhi_only_section = (
+        "• الراجحي يستخدم بيانات الراجحي.\n"
+        "• الاسم: تركي بن عايد الحارثي."
+    )
+
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="التحويل البنكي",
+        section_body=rajhi_only_section,
+        media_title="باركود التحويل",  # generic — title tier yields nothing
+        link_role="barcode",
+    )
+    assert inferred == "payment_rajhi_barcode", (
+        "generic title must still let the section-based union path run"
+    )
+
+    # And a generic title + multi-bank section → ambiguous → None.
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="التحويل البنكي",
+        section_body="الراجحي والأهلي وStc Pay",
+        media_title="باركود التحويل",
+        link_role="barcode",
+    )
+    assert inferred is None, (
+        "without a specific title to lean on, multi-bank section "
+        "must remain ambiguous"
+    )
+
+
+# ── 5c. strict_role flag (backfill bypass) ───────────────────────────
+
+
+def test_strict_role_true_blocks_primary_role():
+    """The live link path uses strict_role=True (default). A
+    'primary'-role link must NOT auto-bind — the inferrer has to
+    stay conservative so a tutorial video attached to a payment
+    section doesn't get bound to a payment slug."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="التحويل",
+        section_body="الراجحي فقط",
+        media_title="باركود الراجحي",
+        link_role="primary",  # <- not 'barcode'
+        strict_role=True,
+    )
+    assert inferred is None
+
+
+def test_strict_role_false_allows_primary_role_for_backfill():
+    """The backfill endpoint passes strict_role=False because the
+    merchant already hand-linked this asset before auto-binding
+    existed — we just need to fill in the registry-key column.
+    Other guards still apply: section_kind must be a payment kind,
+    detection must pick exactly one bank."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="التحويل",
+        section_body="الراجحي فقط",
+        media_title="باركود الراجحي",
+        link_role="primary",
+        strict_role=False,
+    )
+    assert inferred == "payment_rajhi_barcode"
+
+
+def test_strict_role_false_still_enforces_section_kind():
+    """``strict_role=False`` only bypasses the role guard — it does
+    NOT loosen the section-kind guard. A 'primary' link into a
+    shipping section must NEVER bind to a payment slug, even
+    during backfill."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    inferred = detect_payment_media_key(
+        section_kind="shipping_zones",  # NOT a payment kind
+        section_title="مناطق الشحن",
+        section_body="نشحن للجميع.",
+        media_title="باركود الراجحي",
+        link_role="primary",
+        strict_role=False,
+    )
+    assert inferred is None
+
+
+def test_strict_role_false_still_returns_none_on_ambiguity():
+    """The backfill bypass doesn't loosen ambiguity handling — a
+    title that doesn't name a specific bank AND a multi-bank section
+    must still return None even with strict_role=False."""
+    from services.payment_media_autolink import detect_payment_media_key
+
+    inferred = detect_payment_media_key(
+        section_kind="bank_transfer",
+        section_title="التحويل",
+        section_body="الراجحي والأهلي.",
+        media_title="باركود التحويل",
+        link_role="primary",
+        strict_role=False,
+    )
+    assert inferred is None
+
+
+# ── 5d. backfill endpoint wiring (source inspection) ─────────────────
+
+
+def test_backfill_endpoint_filters_by_tenant_and_payment_kinds():
+    """The backfill endpoint must be tenant-scoped (cannot heal
+    another merchant's links) AND scoped to payment kinds (cannot
+    re-tag a shipping image as a payment slug)."""
+    src = Path("routers/knowledge.py").read_text(encoding="utf-8")
+    # The endpoint exists.
+    assert "/knowledge/media/backfill-payment-keys" in src
+    # The tenant_id filter on the SECTION join is present.
+    assert "MerchantKnowledgeSection.tenant_id == tenant_id" in src
+    # The kind filter narrows to payment kinds only.
+    assert "payment_method" in src
+    assert "bank_transfer" in src
+
+
+def test_backfill_endpoint_uses_strict_role_false():
+    """The backfill must call the helper with strict_role=False so
+    pre-deploy ``link_role='primary'`` links qualify. The live
+    link_media path STILL uses the strict default — only the
+    backfill endpoint relaxes the guard."""
+    src = Path("routers/knowledge.py").read_text(encoding="utf-8")
+    # The backfill call site explicitly opts into the loose role.
+    assert "strict_role=False" in src
+    # The live link_media call site stays strict (no explicit
+    # strict_role= on its call) — the default kicks in.
+    # We pin this by looking at the immediately preceding call:
+    live_call = (
+        "_maybe_autolink_payment_media_key(db, tenant_id, media, "
+        "section, role)"
+    )
+    assert live_call in src
+
+
+def test_backfill_endpoint_never_overwrites_existing_key():
+    """The contract is: the merchant's (or earlier auto-link's)
+    choice is sacred. Backfill ONLY fills NULLs."""
+    src = Path("routers/knowledge.py").read_text(encoding="utf-8")
+    # The early-skip on already-set media_key lives in the helper
+    # AND we report it separately in the backfill response.
+    assert "already_set" in src
+    # And the inline comment pins the never-overwrite invariant.
+    assert "Never overwrites" in src or "never-overwrite" in src
+
+
+# ── 5e. _maybe_autolink_payment_media_key end-to-end on a fake row ───
+
+
+class _FakeMedia:
+    """Stand-in for ``AIMediaItem`` carrying only what the autolink
+    helper reads/writes — title, media_key, id."""
+
+    def __init__(self, *, id, title, media_key=None):
+        self.id = id
+        self.title = title
+        self.media_key = media_key
+
+
+class _FakeSection:
+    """Stand-in for ``MerchantKnowledgeSection`` — kind, title, body, id."""
+
+    def __init__(self, *, id, kind, title, body):
+        self.id = id
+        self.kind = kind
+        self.title = title
+        self.body = body
+
+
+class _StagingSession:
+    """A SQLAlchemy-Session-like object that records ``db.add(x)``
+    calls so the test can assert the helper staged a write."""
+
+    def __init__(self):
+        self.added = []
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def test_helper_heals_tenant33_style_link_with_strict_role_false():
+    """Replays the exact Tenant 33 incident shape:
+      * section is a multi-bank ``bank_transfer`` blob;
+      * media is "باركود التحويل البنكي الراجحي" (NULL media_key);
+      * link role is 'primary' (pre-deploy default).
+
+    With ``strict_role=False`` (the backfill path) the helper must
+    bind ``media.media_key = 'payment_rajhi_barcode'`` and stage
+    the row for commit. Stays in lock-step with the production
+    fix so a regression on either tier reopens the live bug."""
+    from routers.knowledge import _maybe_autolink_payment_media_key
+
+    section = _FakeSection(
+        id=76,
+        kind="bank_transfer",
+        title='عند ذكر "الأهلي" يستخدم بيانات الأهلي فقط.',
+        body=(
+            "• عند ذكر الراجحي يستخدم بيانات الراجحي.\n"
+            "• البنك الأهلي السعودي.\n"
+            "• STC Pay و Mobily Pay و برق."
+        ),
+    )
+    media = _FakeMedia(id=1, title="باركود التحويل البنكي الراجحي")
+    db = _StagingSession()
+
+    inferred = _maybe_autolink_payment_media_key(
+        db, tenant_id=33, media=media, section=section,
+        link_role="primary",
+        strict_role=False,
+    )
+
+    assert inferred == "payment_rajhi_barcode"
+    assert media.media_key == "payment_rajhi_barcode"
+    assert media in db.added, "the healed row must be staged for commit"
+
+
+def test_helper_strict_default_still_blocks_primary_role():
+    """Insurance against accidental flag-default flips: the live
+    path must still NOT auto-bind a 'primary'-role link, otherwise
+    the original guard the user shipped in Track 3 is gone."""
+    from routers.knowledge import _maybe_autolink_payment_media_key
+
+    section = _FakeSection(
+        id=76, kind="bank_transfer", title="الراجحي",
+        body="الراجحي فقط.",
+    )
+    media = _FakeMedia(id=1, title="باركود الراجحي")
+    db = _StagingSession()
+
+    inferred = _maybe_autolink_payment_media_key(
+        db, tenant_id=33, media=media, section=section,
+        link_role="primary",
+        # strict_role omitted → default True
+    )
+
+    assert inferred is None
+    assert media.media_key is None
+    assert media not in db.added
+
+
+def test_helper_never_overwrites_existing_media_key_even_in_backfill_mode():
+    """The merchant's manually-pinned key wins over any inferrer
+    output — including during backfill. We never silently change a
+    bank slug the merchant explicitly chose, even if our detector
+    would now disagree."""
+    from routers.knowledge import _maybe_autolink_payment_media_key
+
+    section = _FakeSection(
+        id=76, kind="bank_transfer", title="الراجحي",
+        body="الراجحي فقط.",
+    )
+    # Pre-pinned to a different bank — detector would say Rajhi, but
+    # the merchant typed Alahli. Backfill MUST respect that.
+    media = _FakeMedia(
+        id=1,
+        title="باركود الراجحي",
+        media_key="payment_alahli_barcode",
+    )
+    db = _StagingSession()
+
+    inferred = _maybe_autolink_payment_media_key(
+        db, tenant_id=33, media=media, section=section,
+        link_role="primary",
+        strict_role=False,
+    )
+
+    assert inferred is None
+    assert media.media_key == "payment_alahli_barcode"
+    assert media not in db.added
+
+
 # ── 6. Generic payment-barcode noun classifier ───────────────────────
 
 

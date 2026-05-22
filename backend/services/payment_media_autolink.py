@@ -121,6 +121,36 @@ _NORMALISED_PATTERNS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _hits_in_text(text: str) -> Set[str]:
+    """Return the set of bank IDs whose pre-normalised patterns
+    appear anywhere in ``text``. ``text`` is normalised by the
+    caller. Empty input → empty set.
+
+    Centralised so the title-first tier and the union tier share
+    the same matcher and can't diverge under refactors.
+    """
+    if not text:
+        return set()
+    hits: Set[str] = set()
+    for bank_id, patterns in _NORMALISED_PATTERNS.items():
+        for p in patterns:
+            if p and p in text:
+                hits.add(bank_id)
+                break  # one pattern per bank is enough
+    return hits
+
+
+def _collapse_iban_shadow(hits: Set[str]) -> Set[str]:
+    """Drop the generic ``iban`` hit when a single specific bank
+    is also present. Merchants who upload "تحويل بنكي - الراجحي"
+    almost always mean the Rajhi QR, not their generic IBAN
+    screenshot — the specific bank shadows the IBAN signal.
+    """
+    if len(hits) > 1 and "iban" in hits and len(hits - {"iban"}) == 1:
+        return hits - {"iban"}
+    return hits
+
+
 def detect_payment_media_key(
     *,
     section_kind: str,
@@ -128,8 +158,25 @@ def detect_payment_media_key(
     section_body: str,
     media_title: str,
     link_role: str,
+    strict_role: bool = True,
 ) -> Optional[str]:
     """Infer the canonical registry key for a payment-section media link.
+
+    Detection runs in **two tiers** so the strongest signal wins
+    cleanly:
+
+    1. **media_title alone** — if the merchant named the asset
+       after exactly one specific bank ("باركود الراجحي",
+       "Rajhi QR", "صورة الأهلي"), that bank wins even when the
+       attached section body lists multiple banks. The asset
+       title is what the merchant *typed* for this asset
+       specifically — it's the highest-signal source we have.
+
+    2. **union of section_title + section_body + media_title** —
+       legacy path. Used when the title alone is too vague
+       ("باركود التحويل") and we need section context to pick a
+       bank. Ambiguity (two+ specific banks) still bails to
+       ``None``.
 
     Parameters
     ----------
@@ -141,29 +188,38 @@ def detect_payment_media_key(
     section_body
         The section's body text (used for bank-name sniffing).
     media_title
-        The ``AIMediaItem.title`` of the asset being linked
-        (often the most specific signal — merchants name the
-        upload "Rajhi QR" / "باركود الأهلي" / ...).
+        The ``AIMediaItem.title`` of the asset being linked.
+        Now used as a tier-1 standalone signal (see above).
     link_role
         The ``MerchantKnowledgeMedia.link_role`` for this link.
-        Only ``"barcode"`` qualifies — other roles describe
-        non-canonical assets (evidence photos, tutorial videos, …)
-        that should not auto-bind to a payment registry key.
+        Only ``"barcode"`` qualifies for *new* link auto-binding
+        — other roles describe non-canonical assets (evidence
+        photos, tutorial videos, …) that should not auto-bind to
+        a payment registry key.
+    strict_role
+        When ``True`` (the default, used by the live ``link_media``
+        path), only ``"barcode"``-role links qualify. When
+        ``False`` (used by the tenant-scoped *backfill* endpoint),
+        any role is accepted — the merchant ALREADY hand-linked
+        this asset and we trust them about its intent; we're just
+        filling in the registry-key column that their old link
+        pre-dates. The other guards (section_kind, single-bank
+        match) still apply, so we still won't bind a tutorial
+        video to a payment slug.
 
     Returns
     -------
     str | None
         * The registry key when **exactly one** bank pattern
-          matches across the combined text.
+          matches (after the two-tier resolution above).
         * ``None`` when:
-            - ``link_role`` is not ``"barcode"``;
+            - ``link_role`` is not ``"barcode"`` and
+              ``strict_role`` is True;
             - ``section_kind`` is not in
               :data:`_VALID_PAYMENT_KINDS`;
             - no bank pattern matched at all;
-            - more than one bank matched (ambiguous — caller
-              should leave the merchant to set ``media_key``
-              manually rather than risk binding to the wrong
-              bank).
+            - more than one bank matched in the union tier and
+              the title tier didn't disambiguate.
 
     Caller contract
     ---------------
@@ -175,44 +231,41 @@ def detect_payment_media_key(
       decision.
     """
     role = (link_role or "").strip().lower()
-    if role != "barcode":
+    if strict_role and role != "barcode":
         return None
 
     kind = (section_kind or "").strip().lower()
     if kind not in _VALID_PAYMENT_KINDS:
         return None
 
+    # ── Tier 1: media_title alone ────────────────────────────────
+    # The strongest signal: the merchant literally typed this
+    # title when uploading the asset. If it names one specific
+    # bank (or a specific bank + generic IBAN noise), bind to
+    # that bank regardless of how many banks the section body
+    # mentions. Production data (Tenant 33, May 2026) showed
+    # merchants commonly put 5+ banks in one section but name
+    # the asset precisely after a single bank — the title was
+    # the right answer all along.
+    title_norm = normalize_text(media_title or "")
+    title_hits = _collapse_iban_shadow(_hits_in_text(title_norm))
+    if len(title_hits) == 1:
+        return _BANK_KEY_MAP[next(iter(title_hits))]
+
+    # ── Tier 2: union of section + media (legacy path) ───────────
+    # Falls through when the title is too generic
+    # ("باركود التحويل") or empty. The union still bails on
+    # ambiguity — better silent fallback than wrong QR.
     combined = normalize_text(
         " ".join(p for p in (section_title, section_body, media_title) if p)
     )
     if not combined:
         return None
 
-    hits: Set[str] = set()
-    for bank_id, patterns in _NORMALISED_PATTERNS.items():
-        for p in patterns:
-            if p and p in combined:
-                hits.add(bank_id)
-                break  # one pattern per bank is sufficient
-
-    if not hits:
-        return None
-
-    # Disambiguation: a specific-bank QR shadows a tenant's generic
-    # IBAN image. Merchants who upload "تحويل بنكي - الراجحي" almost
-    # always mean the Rajhi QR, not their generic IBAN screenshot.
-    # Drop "iban" if it's the ONLY extra hit alongside a single
-    # specific bank.
-    if len(hits) > 1 and "iban" in hits and len(hits - {"iban"}) == 1:
-        hits.discard("iban")
-
+    hits = _collapse_iban_shadow(_hits_in_text(combined))
     if len(hits) != 1:
-        # Two or more specific banks → genuinely ambiguous. Bail and
-        # let the merchant pick. Better silent fallback than wrong QR.
         return None
-
-    only = next(iter(hits))
-    return _BANK_KEY_MAP[only]
+    return _BANK_KEY_MAP[next(iter(hits))]
 
 
 __all__ = [

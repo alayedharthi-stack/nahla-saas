@@ -102,6 +102,8 @@ def _maybe_autolink_payment_media_key(
     media: AIMediaItem,
     section: MerchantKnowledgeSection,
     link_role: str,
+    *,
+    strict_role: bool = True,
 ) -> Optional[str]:
     """Best-effort: bind ``media.media_key`` to the canonical
     payment registry slug when the merchant just linked a
@@ -112,13 +114,24 @@ def _maybe_autolink_payment_media_key(
     to the registry / autolink module never crashes a legitimate
     "attach image" click.
 
+    ``strict_role`` mirrors the inferrer's flag:
+      * ``True`` (default) — the live ``link_media`` path. We only
+        bind on ``link_role='barcode'`` to avoid mistaking a
+        tutorial video for a payment QR.
+      * ``False`` — the *backfill* path
+        (``/knowledge/media/backfill-payment-keys``). The merchant
+        already hand-linked this asset; we just need to fill in the
+        ``media_key`` column their old link pre-dates. Other guards
+        (section_kind, single-bank match) still apply.
+
     Returns the inferred key (or ``None`` when no change was made).
     The caller MUST still commit / flush the surrounding
     transaction — this helper only mutates the SQLAlchemy
     instance and stages the write.
     """
     # Skip when the merchant (or a prior auto-link) already pinned
-    # a key. Never overwrite an explicit choice.
+    # a key. Never overwrite an explicit choice — applies to both
+    # the live path AND backfill.
     if (getattr(media, "media_key", None) or "").strip():
         return None
 
@@ -140,6 +153,7 @@ def _maybe_autolink_payment_media_key(
             section_body=section.body or "",
             media_title=getattr(media, "title", "") or "",
             link_role=link_role,
+            strict_role=strict_role,
         )
     except Exception as exc:  # pragma: no cover — defensive
         _logger.warning(
@@ -155,9 +169,9 @@ def _maybe_autolink_payment_media_key(
     db.add(media)
     _logger.info(
         "[KB.media.autolink] tenant=%s media=%s section=%s "
-        "section_kind=%s role=%s → media_key=%s",
+        "section_kind=%s role=%s strict_role=%s → media_key=%s",
         tenant_id, media.id, section.id,
-        section.kind, link_role, inferred,
+        section.kind, link_role, strict_role, inferred,
     )
     return inferred
 
@@ -537,6 +551,183 @@ async def unlink_media(
         tenant_id, section_id, link_id,
     )
     return {"deleted": True, "id": int(link_id)}
+
+
+# ── Backfill: heal legacy media links with NULL media_key ──────────────────
+#
+# Why this endpoint exists
+# ────────────────────────
+# The auto-link helper (``_maybe_autolink_payment_media_key``) runs at
+# *link-creation* time. Merchants who linked their payment QR BEFORE
+# the May 22 2026 deploy (commit c9e65218) have ``media_key=NULL`` on
+# the underlying ``AIMediaItem`` row, which leaves the runtime safety
+# net unable to resolve ``[MEDIA_KEY:payment_rajhi_barcode]`` → no QR
+# attached.
+#
+# The Tenant 33 incident on May 22 surfaced exactly this:
+#   * media id=1 "باركود التحويل البنكي الراجحي" (media_key=NULL)
+#   * linked into a giant "all banks" payment section with
+#     link_role='primary' (pre-deploy default).
+#   * Auto-link's live path (strict_role=True, single-bank section)
+#     refuses to bind on its own — by design, to avoid mis-binding.
+#
+# This endpoint lets the merchant (or platform admin) heal those
+# rows in one shot, tenant-scoped, idempotent, never-overwrite. The
+# call is safe to retry: the helper short-circuits on
+# already-bound rows.
+@router.post("/knowledge/media/backfill-payment-keys")
+async def backfill_payment_media_keys(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Re-run the payment-media inferrer against the current tenant's
+    existing links and fill in ``AIMediaItem.media_key`` where it was
+    left NULL.
+
+    Returns
+    -------
+    JSON with the breakdown so the dashboard can show a small
+    "healed N links" toast:
+
+        {
+          "tenant_id": 33,
+          "scanned": 4,        # links touched at all
+          "already_set": 2,    # had media_key — left untouched
+          "healed": 1,         # NULL → inferred key
+          "ambiguous": 1,      # couldn't infer (multi-bank / no match)
+          "details": [         # per-row reasoning (debug-friendly)
+            {"link_id": 1, "media_id": 1, "section_id": 76,
+             "old_key": null, "new_key": "payment_rajhi_barcode",
+             "reason": "healed"},
+            ...
+          ]
+        }
+
+    Semantics
+    ─────────
+    * Tenant-scoped — only operates on rows whose section.tenant_id
+      matches the caller. There is NO platform-admin override; if
+      another merchant has the same issue, they call the same
+      endpoint themselves.
+    * Strict-role bypass — the inferrer is called with
+      ``strict_role=False`` so links created with the legacy
+      default ``link_role='primary'`` qualify. Other guards
+      (section_kind, single-bank match in media_title) still
+      apply, so we cannot mis-bind a tutorial video to a payment
+      slug.
+    * Idempotent — re-running is a no-op (every row is now
+      ``already_set``).
+    * Never overwrites — if the merchant manually pinned a key (or
+      an earlier autolink already did), we leave it alone even
+      when the inferrer would have picked a different bank.
+    """
+    tenant_id = resolve_tenant_id(request)
+
+    # We need all payment-section links for this tenant, with the
+    # joined section + media rows loaded so the helper can sniff
+    # the bank pattern without firing N+1 selects. The orderby
+    # keeps the response deterministic for the dashboard / tests.
+    links = (
+        db.query(MerchantKnowledgeMedia)
+        .join(
+            MerchantKnowledgeSection,
+            MerchantKnowledgeSection.id == MerchantKnowledgeMedia.section_id,
+        )
+        .join(
+            AIMediaItem,
+            AIMediaItem.id == MerchantKnowledgeMedia.media_id,
+        )
+        .filter(
+            MerchantKnowledgeSection.tenant_id == tenant_id,
+            # Section must be a payment kind — the inferrer would
+            # bail otherwise. Filtering early saves a per-row
+            # detect call on unrelated sections.
+            MerchantKnowledgeSection.kind.in_(("payment_method", "bank_transfer")),
+        )
+        .order_by(MerchantKnowledgeMedia.id.asc())
+        .all()
+    )
+
+    scanned = 0
+    already_set = 0
+    healed = 0
+    ambiguous = 0
+    details: List[Dict[str, Any]] = []
+
+    for link in links:
+        scanned += 1
+        media = link.media
+        section = link.section
+        if media is None or section is None:
+            # Dangling link (FK cascade should prevent this — but
+            # be defensive so a corrupt row doesn't 500 the
+            # entire backfill).
+            ambiguous += 1
+            details.append({
+                "link_id": int(link.id),
+                "media_id": getattr(link, "media_id", None),
+                "section_id": getattr(link, "section_id", None),
+                "old_key": None,
+                "new_key": None,
+                "reason": "dangling_link",
+            })
+            continue
+
+        old_key = (media.media_key or "").strip() or None
+        if old_key:
+            already_set += 1
+            details.append({
+                "link_id": int(link.id),
+                "media_id": int(media.id),
+                "section_id": int(section.id),
+                "old_key": old_key,
+                "new_key": old_key,
+                "reason": "already_set",
+            })
+            continue
+
+        new_key = _maybe_autolink_payment_media_key(
+            db, tenant_id, media, section, link.link_role or "",
+            strict_role=False,
+        )
+
+        if new_key:
+            healed += 1
+            reason = "healed"
+        else:
+            ambiguous += 1
+            reason = "ambiguous"
+
+        details.append({
+            "link_id": int(link.id),
+            "media_id": int(media.id),
+            "section_id": int(section.id),
+            "old_key": None,
+            "new_key": new_key,
+            "reason": reason,
+        })
+
+    if healed > 0:
+        db.commit()
+    else:
+        # Nothing changed → no need to spend a commit; rollback
+        # any pending no-op staged writes.
+        db.rollback()
+
+    _logger.info(
+        "[KB.media.backfill] tenant=%s scanned=%s already=%s "
+        "healed=%s ambiguous=%s",
+        tenant_id, scanned, already_set, healed, ambiguous,
+    )
+
+    return {
+        "tenant_id": int(tenant_id),
+        "scanned": scanned,
+        "already_set": already_set,
+        "healed": healed,
+        "ambiguous": ambiguous,
+        "details": details,
+    }
 
 
 # ── Legacy import ───────────────────────────────────────────────────────────
