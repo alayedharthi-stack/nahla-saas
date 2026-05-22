@@ -65,7 +65,51 @@ GROUP_LABELS_AR: Dict[int, str] = {
     4: "سياسات الشحن",
     5: "معلومات المنتجات الإضافية",
     6: "مكتبة الوسائط المرتبطة",
+    # ── KB-2 (May 2026 #23) ──────────────────────────────────────
+    # Group 7 carries *behavioral* rules — how the assistant should
+    # talk, which phrases to avoid, who the owner is, when to escalate.
+    # These sections MUST NOT flow into the structured facts block
+    # (Block 3 of the prompt) because that would let "لا تقل حبيبي"
+    # leak into the same channel that holds payment / shipping facts
+    # and contaminate retrieval. They are routed instead to the
+    # high-priority style/policy layer via
+    # ``build_behavioral_overlay_block`` → ``build_high_priority_block``.
+    7: "سلوك المساعد",
 }
+
+
+# ── Behavioral kinds (KB-2) ──────────────────────────────────────────────────
+# This is the SINGLE source of truth for which kinds are behavioral.
+# - ``tenant_overlay.build_structured_facts_block`` drops these from the
+#   facts bucket so they never compete with commerce knowledge.
+# - ``tenant_overlay.build_behavioral_overlay_block`` collects them into
+#   the high-priority layer.
+# - ``modules.ai.knowledge.classifier`` enforces that any text describing
+#   tone / forbidden phrases / escalation / persona MUST be classified
+#   into one of these kinds, NOT into ``store_info`` / ``payment_method``
+#   / ``shipping_*``.
+BEHAVIORAL_KINDS = frozenset({
+    "forbidden_phrases",
+    "allowed_style",
+    "escalation_rules",
+    "compliance_rules",
+    "response_tone",
+    "emoji_policy",
+    "owner_identity",
+    "assistant_identity",
+})
+
+
+def is_behavioral_kind(kind: Optional[str]) -> bool:
+    """True when the kind belongs to the assistant-behavior taxonomy
+    (group 7). Used by the prompt builder + classifier to enforce
+    separation between commerce knowledge and behavior rules.
+
+    Safe on ``None``/empty/unknown — returns ``False``.
+    """
+    if not kind:
+        return False
+    return kind.strip().lower() in BEHAVIORAL_KINDS
 
 
 # ── Canonical registry ───────────────────────────────────────────────────────
@@ -201,6 +245,52 @@ REGISTRY: List[SectionKind] = [
         "custom", 2,
         "ملاحظة مخصصة",
         "أي معلومة لم تجد لها قسماً مناسباً.",
+    ),
+
+    # ── 7 — Assistant behavior (KB-2, May 2026 #23) ─────────────────────────
+    # CRITICAL: every kind in this group MUST be listed in
+    # ``BEHAVIORAL_KINDS`` above. Forgetting it would route the section
+    # into the commerce facts bucket and re-introduce the contamination
+    # this group exists to prevent.
+    SectionKind(
+        "forbidden_phrases", 7,
+        "كلمات وعبارات ممنوعة",
+        "كلمات أو عبارات لا يستخدمها الذكاء أبداً (مثال: حبيبي، قلبي، يا غالي).",
+    ),
+    SectionKind(
+        "allowed_style", 7,
+        "أسلوب الكلام المسموح",
+        "كيف يتحدث الذكاء — درجة الود، الجدية، استخدام أمثلة، إلخ.",
+    ),
+    SectionKind(
+        "response_tone", 7,
+        "نبرة الرد",
+        "نبرة الرد — لهجة (خليجية/فصحى)، رسمي/ودي، طول الرد المعتاد.",
+    ),
+    SectionKind(
+        "emoji_policy", 7,
+        "سياسة الإيموجي",
+        "متى يُسمح بالإيموجي وكم العدد المسموح في الرد الواحد.",
+    ),
+    SectionKind(
+        "escalation_rules", 7,
+        "قواعد التحويل لموظف",
+        "متى يحوّل الذكاء العميل لموظف بشري (شكاوى، طلبات خاصة، تكرار سؤال…).",
+    ),
+    SectionKind(
+        "compliance_rules", 7,
+        "قواعد الامتثال",
+        "ممنوعات قانونية أو طبية أو شرعية (مثال: لا ادعاءات علاجية للعسل).",
+    ),
+    SectionKind(
+        "owner_identity", 7,
+        "هوية صاحب المتجر",
+        "اسم صاحب المتجر، طريقة الإشارة له، هل يُذكر للعملاء أم لا.",
+    ),
+    SectionKind(
+        "assistant_identity", 7,
+        "هوية الذكاء",
+        "اسم المساعد، دوره، كيف يُعرّف نفسه إذا سُئل.",
     ),
 ]
 

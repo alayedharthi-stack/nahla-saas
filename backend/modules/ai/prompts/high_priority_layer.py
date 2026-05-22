@@ -352,6 +352,7 @@ def build_high_priority_block(
     settings: Optional[Dict[str, Any]],
     *,
     store_name: str = "",
+    merchant_behavior_extra: str = "",
 ) -> str:
     """
     Render the High-Priority Style + Policy block.
@@ -359,6 +360,13 @@ def build_high_priority_block(
     Always returns a non-empty string (even with `settings=None`) because
     the baseline platform rules are unconditional. The merchant's
     ai_settings only adds overrides on top.
+
+    KB-2 (May 2026 #23): ``merchant_behavior_extra`` is the rendered
+    behavioral KB overlay from ``build_behavioral_overlay_block`` —
+    merchants put their tone / forbidden phrases / escalation rules
+    here via the Smart Store Knowledge Hub, and we surface them as a
+    [D] MERCHANT-SPECIFIC BEHAVIOR sub-block in this same priority
+    layer. Passing "" preserves the legacy block exactly.
 
     The output is designed to live at the *top* of the system prompt,
     immediately after the Nahla persona. It carries an explicit banner
@@ -457,6 +465,25 @@ def build_high_priority_block(
     lines.append("[C] FORBIDDEN — ممنوع تمامًا")
     for r in BASELINE_FORBIDDEN_RULES:
         lines.append(f"• {r}")
+
+    # ── D) MERCHANT-SPECIFIC BEHAVIOR (KB-2) ──────────────────────────────
+    # Rendered from ``merchant_knowledge_sections`` rows in group 7
+    # (forbidden_phrases, response_tone, escalation_rules, …). These are
+    # PER-TENANT additions to A/B/C and inherit the same "above the KB"
+    # banner. Empty string → no merchant overrides → block is skipped.
+    extra = (merchant_behavior_extra or "").strip()
+    if extra:
+        lines.append("")
+        lines.append("[D] MERCHANT-SPECIFIC BEHAVIOR — قواعد التاجر السلوكية")
+        lines.append(
+            "هذه قواعد خاصة بهذا المتجر، أضافها التاجر في مركز المعرفة "
+            "تحت قسم «سلوك المساعد». تُطبَّق فوق القواعد العامة A/B/C "
+            "ولا تتعارض معها — إن وُجد تعارض، فالأقوى هو القاعدة الأشد "
+            "تقييداً."
+        )
+        lines.append("")
+        for ln in extra.splitlines():
+            lines.append(ln)
 
     lines.append("")
     lines.append("═════════════════════════════════════════════════════════")

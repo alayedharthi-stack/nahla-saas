@@ -98,9 +98,17 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     persona_block = nahla_persona_system_prompt(store_name=store_name)
 
     # ── BLOCK 2: HIGH PRIORITY (Style + Policy + Forbidden) ───────────────
+    # KB-2 (May 2026 #23): pass the merchant's behavioral overlay (group-7
+    # KB sections — forbidden phrases, escalation rules, tone, …) here so
+    # it lands in the high-priority layer instead of the structured-facts
+    # block. The classifier guarantees these sections are tagged with
+    # behavioral kinds; ``build_tenant_overlay_split`` renders them into
+    # ``overlay_buckets["behavior"]``. When the tenant has no behavioral
+    # rows the bucket is "" and the baseline rules apply unchanged.
     high_priority_block = build_high_priority_block(
         settings_for_overlay,
         store_name=store_name,
+        merchant_behavior_extra=overlay_buckets.get("behavior", ""),
     )
 
     # Assistant identity (name + role) sits with the persona, not with

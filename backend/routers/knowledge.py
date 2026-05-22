@@ -1024,6 +1024,10 @@ from modules.ai.knowledge.product_matcher import (  # noqa: E402
     CatalogProductForMatch,
     match_products,
 )
+from modules.ai.knowledge.repair_advisor import (  # noqa: E402
+    analyze_sections,
+    summarize,
+)
 
 
 class FormatRequest(BaseModel):
@@ -1180,6 +1184,7 @@ async def format_quick_update(
         existing_sections=existing,
         platform_signal=signal,
         available_kinds=available,
+        tenant_id=tenant_id,
     )
 
     # ── Phase 3.2 — fuzzy product matching ─────────────────────────────────
@@ -1814,3 +1819,70 @@ async def search_products(
             for p in rows
         ]
     }
+
+
+# ── KB-2 Repair Advisor (preview-only) ──────────────────────────────────────
+
+
+@router.get("/knowledge/repair/preview")
+async def repair_preview(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """KB-2 — Suggest repairs to the tenant's knowledge sections.
+
+    Read-only endpoint that scans the tenant's
+    ``merchant_knowledge_sections`` rows and returns a list of
+    suggestions in three categories:
+
+      * **move**           — behavioral content sitting in a commerce kind
+      * **duplicate**      — two rows with overlapping bodies + same kind
+      * **contamination**  — a row mixing behavioral text and commerce facts
+
+    The endpoint NEVER mutates state. The merchant reviews the list,
+    approves what makes sense, and applies the moves via the existing
+    section edit/move routes — there's no "auto-fix" button by design.
+
+    Response shape::
+
+        {
+          "suggestions": [
+            {
+              "kind": "move",
+              "severity": "warn",
+              "section_ids": [42],
+              "title_preview": "...",
+              "body_preview": "...",
+              "current_kind": "store_info",
+              "suggested_kind": "forbidden_phrases",
+              "reason_ar": "..."
+            }, ...
+          ],
+          "summary": {"total": 3, "move": 1, "duplicate": 1, "contamination": 1, ...}
+        }
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    rows = (
+        db.query(MerchantKnowledgeSection)
+        .filter(
+            MerchantKnowledgeSection.tenant_id == tenant_id,
+            MerchantKnowledgeSection.is_active.is_(True),
+        )
+        .order_by(MerchantKnowledgeSection.id.asc())
+        .all()
+    )
+
+    suggestions = analyze_sections(rows)
+    payload = [s.to_dict() for s in suggestions]
+    summary = summarize(suggestions)
+
+    _logger.info(
+        "[KB.repair] tenant=%s scanned=%d suggestions=%d "
+        "moves=%d duplicates=%d contamination=%d",
+        tenant_id, len(rows), summary["total"],
+        summary["move"], summary["duplicate"], summary["contamination"],
+    )
+
+    return {"suggestions": payload, "summary": summary}

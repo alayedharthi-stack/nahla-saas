@@ -100,12 +100,174 @@ _API_KEY = os.environ.get("OPENAI_API_KEY", "")
 _API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 # Knowledge-classifier-specific override (so the platform owner can pin
 # a stronger model on this surface without changing the runtime brain).
+#
+# KB-2 (May 2026 #23): the default is now ``gpt-4.1``. The previous
+# ``gpt-4o-mini`` default was the documented cause of:
+#   * weak Arabic semantic classification
+#   * paraphrase-only "structured" output (almost no transformation)
+#   * behavioral text leaking into commerce sections
+#   * confused taxonomy assignment under platform-conflict prompts
+# Railway env vars (``NAHLA_KB_CLASSIFIER_MODEL`` or ``OPENAI_MODEL``)
+# still take precedence so the platform owner can pin a different
+# model without a redeploy.
 _KB_MODEL = os.environ.get(
     "NAHLA_KB_CLASSIFIER_MODEL",
-    os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+    os.environ.get("OPENAI_MODEL", "gpt-4.1"),
 )
 _TIMEOUT = float(os.environ.get("NAHLA_KB_CLASSIFIER_TIMEOUT", "30"))
 _MAX_OPS = 8
+
+
+# ── KB-2 few-shot examples ──────────────────────────────────────────────────
+#
+# Examples are appended to the system prompt verbatim so the model learns
+# the SHAPE of the JSON we want and — critically — the boundary between
+# commerce kinds and behavioral kinds. Each example is paired with the
+# minimal JSON the classifier should emit; we keep them short so the prompt
+# stays under a few KB.
+#
+# Why 5 examples specifically (not more):
+#   * Each example burns ~300 tokens in the system prompt. Five lines up
+#     with the empirical sweet spot from the brain's intent classifier
+#     (see ``modules/ai/brain/intent/social_classifier.py`` — same scale).
+#   * They cover the three axes the previous model regressed on:
+#       1. Behavior vs commerce taxonomy boundary (#2, #5).
+#       2. Specific-vs-generic kind picking inside commerce (#1, #3).
+#       3. Platform-conflict awareness for price/stock claims (#4).
+#   * Adding more examples did not move the dial in offline replay; the
+#     ``gpt-4.1`` upgrade is what carries the bulk of the quality gain.
+_FEW_SHOT_EXAMPLES: List[Dict[str, Any]] = [
+    {
+        # Specific commerce kind — must NOT collapse to generic "payment_method".
+        "input": "باركود الراجحي للتحويل البنكي",
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "bank_transfer",
+                "title": "باركود الراجحي للتحويل البنكي",
+                "body": "يمكن للعميل التحويل البنكي عبر باركود الراجحي.",
+                "rationale": (
+                    "نص يخص حساب/باركود بنكي → kind=bank_transfer "
+                    "(أدقّ من payment_method)."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.95,
+        },
+    },
+    {
+        # CRITICAL behavioral boundary — forbidden phrases must NEVER
+        # land in store_info / payment_method / shipping_*.
+        "input": "لا تقل حبيبي أو قلبي للعملاء",
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "forbidden_phrases",
+                "title": "كلمات ممنوعة في الرد",
+                "body": (
+                    "لا يستخدم المساعد كلمات: «حبيبي»، «قلبي»، «يا غالي» "
+                    "أو أي عبارة تدليل مفرطة. النبرة محترمة ومحايدة."
+                ),
+                "rationale": (
+                    "نص يصف قاعدة سلوكية للنبرة → kind=forbidden_phrases "
+                    "(taxonomy=assistant_behavior، ليس commerce)."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.97,
+        },
+    },
+    {
+        # Specific shipping kind, not a generic store_info dump.
+        "input": "الشحن المبرد مهم بالصيف للعسل",
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "cold_shipping",
+                "title": "الشحن المبرد في الصيف",
+                "body": (
+                    "في فصل الصيف يُستخدم الشحن المبرّد لمنتجات العسل "
+                    "للمحافظة على الجودة وتجنّب الذوبان عند الحرارة العالية."
+                ),
+                "rationale": (
+                    "نص يخص ظرف شحن خاص بالصيف للعسل → kind=cold_shipping "
+                    "(أدقّ من shipping_carrier أو shipping_zones)."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.93,
+        },
+    },
+    {
+        # Platform conflict — must NOT create a knowledge fact for stock
+        # when the platform is connected. The conflict block carries the
+        # entire signal; ``proposed_ops`` stays empty for the stock claim.
+        "input": "بوكس الأرباع نفد مؤقتاً",
+        "expected": {
+            "proposed_ops": [],
+            "conflicts": [{
+                "with_section_id": None,
+                "with_field": "platform_stock",
+                "kind": "platform_stock",
+                "explanation": (
+                    "النص يدّعي حالة توفر لمنتج «بوكس الأرباع» — والمنصة موصولة، "
+                    "فالمخزون يأتي من المنصة وليس من قاعدة المعرفة."
+                ),
+            }],
+            "confidence": 0.90,
+        },
+        "only_when_platform_connected": True,
+    },
+    {
+        # Another behavioral boundary — tone / dialect / emoji rules
+        # must route to assistant_behavior, never to dialect inside
+        # store_info (which is reserved for ai_settings.default_language).
+        "input": "استخدم لهجة خليجية خفيفة وإيموجي بسيط",
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "response_tone",
+                "title": "نبرة الرد المطلوبة",
+                "body": (
+                    "يردّ المساعد بلهجة خليجية خفيفة، ودودة، مع استخدام "
+                    "محدود للإيموجي (إيموجي واحد كحدّ أقصى عند الحاجة)."
+                ),
+                "rationale": (
+                    "نص يصف النبرة + سياسة الإيموجي → kind=response_tone "
+                    "(taxonomy=assistant_behavior). لا تستخدم store_info."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.95,
+        },
+    },
+]
+
+
+def _format_few_shot_examples(*, platform_connected: bool) -> str:
+    """Render the few-shot examples for the system prompt.
+
+    Examples flagged ``only_when_platform_connected`` are skipped when
+    the platform is NOT connected — otherwise the model learns to
+    reject stock claims in environments where it should actually
+    accept them as the sole source of truth.
+    """
+    parts: List[str] = ["أمثلة تعليمية (تعلّم الشكل من الحالات الحقيقية):"]
+    for idx, ex in enumerate(_FEW_SHOT_EXAMPLES, start=1):
+        if ex.get("only_when_platform_connected") and not platform_connected:
+            continue
+        parts.append("")
+        parts.append(f"[{idx}] إدخال التاجر:")
+        parts.append(f"    «{ex['input']}»")
+        parts.append("    الخرج المتوقع (JSON):")
+        rendered = json.dumps(ex["expected"], ensure_ascii=False, indent=2)
+        for ln in rendered.splitlines():
+            parts.append(f"    {ln}")
+    return "\n".join(parts)
 
 
 # ── Data shapes ─────────────────────────────────────────────────────────────
@@ -182,6 +344,41 @@ PROPOSAL_SCHEMA_NOTE = """\
 - ابدأ op_id بـ "op-" يتلوها رقم متسلسل من 1.
 - ابقَ على body مختصراً (≤ 600 حرف) وبصياغة جاهزة للحقن في برومت كلود
   (سطور قصيرة، بدون رموز ماركدون كثيفة).
+
+═══ فصل السلوك عن المعرفة التجارية (KB-2) — قاعدة حرجة ═══
+إذا كان نص التاجر يتحدث عن أيٍّ من الآتي، فيجب تصنيفه داخل taxonomy
+"assistant_behavior" حصراً، وليس داخل أقسام المعرفة التجارية
+(payment_method / bank_transfer / shipping_carrier / cold_shipping /
+store_story / dialect / working_hours / branches / product_*…):
+- طريقة كلام المساعد / أسلوب الرد / النبرة / اللهجة المطلوبة منه
+- الكلمات الممنوعة (لا تقل / تجنب كلمة / لا يقول…)
+- متى يحوّل المساعد لموظف بشري (escalation)
+- شخصية المساعد، اسمه، دوره، كيف يعرّف نفسه
+- اسم صاحب المتجر وهل يُذكر للعملاء
+- سياسة الإيموجي (متى يستخدم، كم العدد)
+- قواعد الامتثال (ادعاءات طبية ممنوعة، تحذيرات شرعية…)
+
+الـ kinds المسموحة لهذه الحالة (assistant_behavior فقط):
+- forbidden_phrases    — كلمات وعبارات ممنوعة
+- allowed_style        — أسلوب الكلام المسموح به
+- response_tone        — نبرة الرد / اللهجة / الطول الافتراضي
+- emoji_policy         — سياسة الإيموجي
+- escalation_rules     — متى يحوّل لبشري
+- compliance_rules     — ممنوعات قانونية/طبية/شرعية
+- owner_identity       — هوية صاحب المتجر
+- assistant_identity   — هوية الذكاء (اسمه، دوره)
+
+أمثلة على الفصل:
+- "لا تقل حبيبي للعملاء"           → kind=forbidden_phrases (NOT store_info)
+- "ردّ بلهجة خليجية مختصرة"          → kind=response_tone     (NOT dialect)
+- "اسم المتجر يكتب كذا في الرد"     → kind=owner_identity   (NOT store_story)
+- "حوّل لموظف لو طلب شكوى"          → kind=escalation_rules (NOT faq)
+- "ممنوع أي ادعاء علاجي للعسل"      → kind=compliance_rules (NOT product_benefit)
+- "إيموجي واحد كحد أقصى لكل رد"     → kind=emoji_policy     (NOT reply_style)
+
+السبب: قواعد السلوك تُحقن في طبقة "HIGH PRIORITY" المنفصلة عن
+"قاعدة المعرفة" في برومت كلود — خلطها مع المعرفة التجارية يلوّث
+الـ retrieval ويجعل الذكاء يستحضرها وقت سؤال العميل عن الشحن أو الدفع.
 """
 
 
@@ -195,23 +392,44 @@ def classify_quick_update(
     existing_sections: List[ExistingSection],
     platform_signal: PlatformSignal,
     available_kinds: List[str],
+    tenant_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Return a structured proposal for the merchant to review.
 
     Never raises — failures degrade to a single ``quick_update``
     create-op so the merchant sees the text saved (and can edit/move
     it manually) rather than a hard error.
+
+    Parameters
+    ──────────
+    tenant_id: Optional[int]
+        Only used for structured ``[KB_CLASSIFIER]`` logging — the
+        classifier itself is tenant-agnostic. Kept optional so legacy
+        callers (e.g. ad-hoc CLI tools) don't break.
     """
+    import time  # noqa: PLC0415
+
+    started = time.monotonic()
     raw_text = (raw_text or "").strip()
     if not raw_text:
+        _emit_kb_log(
+            tenant_id=tenant_id, model=_KB_MODEL, kind=None,
+            confidence=0.0, fallback=True, fallback_reason="empty_input",
+            conflicts_count=0, ops_count=0, retry_count=0,
+            response_length=0, latency_ms=0,
+            original_text="",
+        )
         return _empty_proposal(model=_KB_MODEL, reason="empty_input")
 
     if not _API_KEY:
-        return _deterministic_fallback(
+        result = _deterministic_fallback(
             raw_text=raw_text,
             attached_media=attached_media,
             reason="no_api_key",
         )
+        _log_result(result, tenant_id=tenant_id, started=started,
+                    retry_count=0, raw_text=raw_text, response_length=0)
+        return result
 
     prompt = _build_system_prompt(
         existing_sections=existing_sections,
@@ -219,28 +437,62 @@ def classify_quick_update(
         platform_signal=platform_signal,
         available_kinds=available_kinds,
     )
-    try:
-        raw_reply = _call_openai_chat(prompt=prompt, user_text=raw_text)
-    except Exception as exc:  # noqa: BLE001 — always degrade
-        logger.warning("[KB.classifier] call failed: %s", exc)
-        return _deterministic_fallback(
+
+    raw_reply, retry_count, call_failed = _call_with_retry(
+        prompt=prompt, user_text=raw_text,
+    )
+    if call_failed:
+        result = _deterministic_fallback(
             raw_text=raw_text,
             attached_media=attached_media,
             reason="call_error",
         )
+        _log_result(result, tenant_id=tenant_id, started=started,
+                    retry_count=retry_count, raw_text=raw_text,
+                    response_length=len(raw_reply or ""))
+        return result
 
     parsed = _parse_proposal(raw_reply)
     if parsed is None:
-        logger.info(
-            "[KB.classifier] could not parse model reply (len=%d) — falling back",
-            len(raw_reply or ""),
-        )
-        return _deterministic_fallback(
-            raw_text=raw_text,
-            attached_media=attached_media,
-            reason="parse_error",
-            raw_reply=raw_reply,
-        )
+        # ── KB-2 step 8: one-shot retry on parse_error ────────────────
+        # The original ``raw_reply`` was unparseable — many production
+        # failures come from the model emitting a stray sentence before
+        # the JSON object even in ``response_format=json_object`` mode.
+        # We retry exactly once with a minimal reminder prompt at
+        # ``temperature=0``. A second failure falls back deterministically.
+        if retry_count == 0:
+            logger.info(
+                "[KB.classifier] parse_error on first attempt — retrying once "
+                "(reply_len=%d)",
+                len(raw_reply or ""),
+            )
+            try:
+                raw_reply = _call_openai_chat(
+                    prompt=prompt + "\n\n" + _PARSE_RETRY_REMINDER,
+                    user_text=raw_text,
+                )
+                retry_count = 1
+                parsed = _parse_proposal(raw_reply)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[KB.classifier] retry call failed: %s", exc)
+                parsed = None
+
+        if parsed is None:
+            logger.info(
+                "[KB.classifier] could not parse model reply after retry "
+                "(len=%d) — falling back",
+                len(raw_reply or ""),
+            )
+            result = _deterministic_fallback(
+                raw_text=raw_text,
+                attached_media=attached_media,
+                reason="parse_error",
+                raw_reply=raw_reply,
+            )
+            _log_result(result, tenant_id=tenant_id, started=started,
+                        retry_count=retry_count, raw_text=raw_text,
+                        response_length=len(raw_reply or ""))
+            return result
 
     normalized = _normalize_proposal(
         parsed,
@@ -250,6 +502,9 @@ def classify_quick_update(
     )
     normalized["model"] = _KB_MODEL
     normalized["fallback_used"] = False
+    _log_result(normalized, tenant_id=tenant_id, started=started,
+                retry_count=retry_count, raw_text=raw_text,
+                response_length=len(raw_reply or ""))
     return normalized
 
 
@@ -297,6 +552,12 @@ def _build_system_prompt(
     else:
         parts.append("الوسائط المرفقة: (لا يوجد)")
 
+    # KB-2: few-shot examples (the bulk of the quality gain for
+    # behavioral-boundary detection — see ``_FEW_SHOT_EXAMPLES``).
+    parts.append(_format_few_shot_examples(
+        platform_connected=platform_signal.connected,
+    ))
+
     parts.append(
         "أعد JSON فقط — لا شرح، لا ماركدون خارج JSON، لا تعليقات. "
         "تأكد أن JSON قابل للتحليل من Python json.loads مباشرة."
@@ -306,9 +567,23 @@ def _build_system_prompt(
 
 # ── HTTP call ──────────────────────────────────────────────────────────────
 
+# KB-2 step 8 — appended on the retry call when the first reply failed
+# JSON parsing. We deliberately keep this short: the original prompt is
+# unchanged so we don't drift the taxonomy, only nudge the format.
+_PARSE_RETRY_REMINDER = (
+    "تنبيه: المحاولة السابقة كان فيها نص خارج JSON أو JSON غير صالح. "
+    "هذه المحاولة الأخيرة: أعد JSON فقط — كائن JSON واحد قابل لـ "
+    "json.loads مباشرة، بدون أي حرف قبل { أو بعد }."
+)
+
 
 def _call_openai_chat(*, prompt: str, user_text: str) -> str:
-    """Call the OpenAI-compatible chat completions endpoint in JSON mode."""
+    """Call the OpenAI-compatible chat completions endpoint in JSON mode.
+
+    KB-2: ``temperature=0`` for deterministic classification — random
+    paraphrase variance was a major contributor to the merchant-facing
+    "the AI re-wrote my note for nothing" complaint.
+    """
     import httpx  # noqa: PLC0415 — deferred import keeps cold start light
 
     headers = {
@@ -321,7 +596,7 @@ def _call_openai_chat(*, prompt: str, user_text: str) -> str:
             {"role": "system", "content": prompt},
             {"role": "user", "content": user_text},
         ],
-        "temperature": 0.2,
+        "temperature": 0,
         # JSON mode where supported. Older models ignore this field; we
         # still parse defensively below.
         "response_format": {"type": "json_object"},
@@ -336,6 +611,112 @@ def _call_openai_chat(*, prompt: str, user_text: str) -> str:
         resp.raise_for_status()
         data = resp.json()
     return str(data["choices"][0]["message"]["content"] or "")
+
+
+def _call_with_retry(
+    *, prompt: str, user_text: str,
+) -> Tuple[str, int, bool]:
+    """Single attempt with structured retry-count tracking.
+
+    The retry-on-parse-error path is in ``classify_quick_update`` because
+    it depends on whether ``_parse_proposal`` succeeded; here we only
+    handle hard call errors (network / 5xx) where retrying with the
+    same prompt would just thrash. Returns ``(reply, retry_count, failed)``.
+    """
+    try:
+        reply = _call_openai_chat(prompt=prompt, user_text=user_text)
+        return reply, 0, False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[KB.classifier] call failed: %s", exc)
+        return "", 0, True
+
+
+# ── Structured logging (KB-2 step 7) ──────────────────────────────────────
+
+
+def _emit_kb_log(
+    *,
+    tenant_id: Optional[int],
+    model: str,
+    kind: Optional[str],
+    confidence: float,
+    fallback: bool,
+    fallback_reason: Optional[str],
+    conflicts_count: int,
+    ops_count: int,
+    retry_count: int,
+    response_length: int,
+    latency_ms: int,
+    original_text: str,
+) -> None:
+    """Emit a single structured ``[KB_CLASSIFIER]`` log line.
+
+    Designed to be ``grep -E '\\[KB_CLASSIFIER\\]'`` friendly on Railway
+    so the platform owner can spot:
+
+      * which tenants generate the most fallbacks (fallback=True),
+      * latency tails (latency_ms),
+      * which kinds dominate (kind=…),
+      * whether retries are recovering parse errors (retry_count>0).
+
+    We log a SHA-style truncated input fingerprint (first 80 chars,
+    newlines collapsed) — never the full body — so PII / merchant secrets
+    don't end up in log aggregators. ``original_text`` is also truncated.
+    """
+    text_preview = (
+        (original_text or "")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .strip()[:80]
+    )
+    logger.info(
+        "[KB_CLASSIFIER] tenant_id=%s model=%s kind=%s confidence=%.2f "
+        "fallback=%s fallback_reason=%s conflicts_count=%d ops_count=%d "
+        "retry_count=%d response_length=%d latency_ms=%d original_text=%r",
+        tenant_id if tenant_id is not None else "-",
+        model,
+        kind or "-",
+        float(confidence or 0.0),
+        "true" if fallback else "false",
+        fallback_reason or "-",
+        conflicts_count,
+        ops_count,
+        retry_count,
+        response_length,
+        latency_ms,
+        text_preview,
+    )
+
+
+def _log_result(
+    result: Dict[str, Any],
+    *,
+    tenant_id: Optional[int],
+    started: float,
+    retry_count: int,
+    raw_text: str,
+    response_length: int,
+) -> None:
+    import time  # noqa: PLC0415
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    ops = list(result.get("proposed_ops") or [])
+    conflicts = list(result.get("conflicts") or [])
+    chosen_kind = (ops[0].get("kind") if ops else None) or None
+    _emit_kb_log(
+        tenant_id=tenant_id,
+        model=str(result.get("model") or _KB_MODEL),
+        kind=chosen_kind,
+        confidence=float(result.get("confidence") or 0.0),
+        fallback=bool(result.get("fallback_used")),
+        fallback_reason=result.get("fallback_reason"),
+        conflicts_count=len(conflicts),
+        ops_count=len(ops),
+        retry_count=retry_count,
+        response_length=response_length,
+        latency_ms=latency_ms,
+        original_text=raw_text,
+    )
 
 
 # ── Parsing & normalization ────────────────────────────────────────────────

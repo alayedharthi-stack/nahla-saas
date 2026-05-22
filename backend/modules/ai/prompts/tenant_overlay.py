@@ -81,6 +81,13 @@ LENGTH_MAP: Dict[str, str] = {
 # ``services/knowledge_section_kinds.GROUP_LABELS_AR`` — duplicated here
 # so this module stays import-light when ``models`` is unavailable
 # (e.g. during prompt unit tests).
+#
+# KB-2 (May 2026 #23): group 7 ("سلوك المساعد") is intentionally
+# omitted here — behavioral sections must NEVER appear inside the
+# structured-facts block (Block 3 of the prompt). They flow through
+# ``build_behavioral_overlay_block`` into the high-priority layer
+# instead, so a "لا تقل حبيبي" line cannot leak into the same channel
+# that holds payment / shipping facts and contaminate retrieval.
 _GROUP_HEADINGS_AR: Dict[int, str] = {
     1: "تحديثات سريعة من التاجر",
     2: "معلومات المتجر",
@@ -183,7 +190,10 @@ def build_structured_facts_block(
     """
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
-        from services.knowledge_section_kinds import group_for  # noqa: PLC0415
+        from services.knowledge_section_kinds import (  # noqa: PLC0415
+            group_for,
+            is_behavioral_kind,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[KB.facts] import failed: %s", exc)
         return ""
@@ -206,6 +216,26 @@ def build_structured_facts_block(
         return ""
 
     if not rows:
+        return ""
+
+    # ── KB-2 behavioral filter ──────────────────────────────────────────
+    # Behavioral sections (group 7) are deliberately excluded from the
+    # facts block. They are surfaced through ``build_behavioral_overlay_
+    # block`` into the high-priority layer instead. Counting drops here
+    # gives us a one-glance audit when an overlay change is suspected of
+    # silently swallowing knowledge rows.
+    behavioral_dropped = 0
+    pre_behavioral_total = len(rows)
+    rows = [r for r in rows if not is_behavioral_kind(getattr(r, "kind", None))]
+    behavioral_dropped = pre_behavioral_total - len(rows)
+
+    if not rows:
+        # Only behavioral rows existed — facts bucket is empty by design.
+        logger.info(
+            "[KB.facts] tenant=%s only behavioral rows present "
+            "(dropped=%d); facts bucket empty.",
+            tenant_id, behavioral_dropped,
+        )
         return ""
 
     # ── Phase 3 product-scope filter ────────────────────────────────────
@@ -264,10 +294,112 @@ def build_structured_facts_block(
     )
     logger.info(
         "[KB.facts] tenant=%s sections=%d kinds=%s media_markers=%d "
-        "scoped_dropped=%d active_pids=%s",
+        "scoped_dropped=%d behavioral_dropped=%d active_pids=%s",
         tenant_id, len(rows), sorted({r.kind for r in rows}), media_marker_count,
-        scoped_dropped,
+        scoped_dropped, behavioral_dropped,
         sorted(active_product_ids) if active_product_ids else None,
+    )
+    return "\n\n".join(parts)
+
+
+# ── KB-2 behavioral overlay block ────────────────────────────────────────────
+
+
+# Subtype → Arabic section heading inside the behavioral overlay. Kept
+# in lockstep with ``services.knowledge_section_kinds.BEHAVIORAL_KINDS``.
+# Order matters: we render the most-impactful rules first (forbidden
+# phrases + escalation) so that, if Claude's prompt is truncated under
+# a long conversation, the highest-priority behavior is preserved.
+_BEHAVIORAL_HEADINGS_AR: Dict[str, str] = {
+    "forbidden_phrases":  "كلمات وعبارات ممنوعة",
+    "escalation_rules":   "متى تحوّل لموظف بشري",
+    "compliance_rules":   "قواعد امتثال إلزامية",
+    "response_tone":      "نبرة الرد المطلوبة",
+    "allowed_style":      "أسلوب الكلام المسموح",
+    "emoji_policy":       "سياسة الإيموجي",
+    "owner_identity":     "هوية صاحب المتجر",
+    "assistant_identity": "هوية المساعد",
+}
+
+
+def build_behavioral_overlay_block(db: Any, tenant_id: int) -> str:
+    """Render the merchant's behavioral KB sections for the high-priority layer.
+
+    Reads ``merchant_knowledge_sections`` rows with ``kind`` in
+    ``BEHAVIORAL_KINDS`` (group 7) and emits a compact, Claude-ready
+    Arabic block. Returns "" when no behavioral rows exist — the
+    high-priority layer then falls back to baseline rules only.
+
+    Why a separate block instead of folding into ``facts``:
+      * Behavior is an OVERLAY on platform-wide rules — not facts to
+        cite. It needs the "outranks the KB" banner that the high-
+        priority layer carries.
+      * Keeping them out of ``facts`` prevents the model from quoting
+        a tone rule when a customer asks "كيف أحوّل لكم؟" (which used
+        to happen with the unified bucket).
+      * The retrieval ranker never weighs behavior rows against
+        commerce rows — they live in a different channel entirely.
+    """
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from services.knowledge_section_kinds import (  # noqa: PLC0415
+            BEHAVIORAL_KINDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[KB.behavior] import failed: %s", exc)
+        return ""
+
+    try:
+        rows = (
+            db.query(MerchantKnowledgeSection)
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.is_active.is_(True),
+                MerchantKnowledgeSection.kind.in_(list(BEHAVIORAL_KINDS)),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[KB.behavior] query failed for tenant=%s: %s", tenant_id, exc,
+        )
+        return ""
+
+    if not rows:
+        return ""
+
+    grouped: Dict[str, List[Any]] = {}
+    for r in rows:
+        grouped.setdefault((r.kind or "").strip().lower(), []).append(r)
+
+    parts: List[str] = []
+    # Iterate by canonical order, not by Python dict order.
+    for subtype, heading in _BEHAVIORAL_HEADINGS_AR.items():
+        group_rows = grouped.get(subtype) or []
+        if not group_rows:
+            continue
+        section_lines: List[str] = [f"• {heading}:"]
+        for r in group_rows:
+            title = (getattr(r, "title", None) or "").strip()
+            body = (getattr(r, "body", None) or "").strip()
+            if title and body:
+                section_lines.append(f"  - {title}: {body}")
+            elif body:
+                section_lines.append(f"  - {body}")
+            elif title:
+                section_lines.append(f"  - {title}")
+        parts.append("\n".join(section_lines))
+
+    if not parts:
+        return ""
+
+    logger.info(
+        "[KB.behavior] tenant=%s behavioral_sections=%d subtypes=%s",
+        tenant_id, len(rows), sorted({r.kind for r in rows}),
     )
     return "\n\n".join(parts)
 
@@ -278,22 +410,33 @@ def build_tenant_overlay_split(
     tenant_id: Optional[int] = None,
 ) -> Dict[str, str]:
     """
-    Split a tenant's ai_settings into the three architectural buckets:
+    Split a tenant's ai_settings into the architectural buckets:
 
         {
           "identity": "<اسم/دور المساعد>",          # neutral, free-form
           "style":    "<style block contents>",      # → consumed by High-Priority layer
           "policy":   "<policy block contents>",     # → consumed by High-Priority layer
           "facts":    "<facts-only KB body>",        # → consumed by KB block
+          "behavior": "<merchant behavioral overlay>",  # → KB-2: merged into High-Priority layer
         }
 
-    Keys are always present (empty string when no data). This is the
-    primary feed for the new 3-layer prompt structure introduced in
-    Phase 1 of the prompt-pipeline refactor. The legacy single-string
-    overlay (`build_tenant_prompt_overlay`) is now a thin wrapper that
-    concatenates these buckets for callers that haven't migrated yet.
+    Keys are always present (empty string when no data). The
+    ``behavior`` bucket (KB-2, May 2026 #23) carries the rendered
+    behavioral KB sections (group 7) and is routed by the prompt
+    builder to ``build_high_priority_block`` — never to the facts
+    block. This is the architectural guarantee that "لا تقل حبيبي"
+    cannot leak into commerce knowledge retrieval.
+
+    The legacy single-string overlay (`build_tenant_prompt_overlay`)
+    is a thin wrapper that concatenates non-behavioral buckets for
+    callers that haven't migrated yet. ``behavior`` is intentionally
+    EXCLUDED from that concatenation so old callers don't accidentally
+    inject behavioral rules into the facts position.
     """
-    buckets = {"identity": "", "style": "", "policy": "", "facts": ""}
+    buckets = {
+        "identity": "", "style": "", "policy": "", "facts": "",
+        "behavior": "",
+    }
     if not settings:
         return buckets
 
@@ -378,6 +521,7 @@ def build_tenant_overlay_split(
     # pure-platform paragraphs from the `facts` bucket here does NOT
     # affect that path — it only protects the default merchant flow.
     structured_facts = ""
+    behavioral_overlay = ""
     if db is not None and tenant_id is not None:
         try:
             structured_facts = build_structured_facts_block(db, int(tenant_id))
@@ -386,6 +530,15 @@ def build_tenant_overlay_split(
                 "[KB.facts] structured build failed for tenant=%s: %s",
                 tenant_id, exc,
             )
+        try:
+            behavioral_overlay = build_behavioral_overlay_block(db, int(tenant_id))
+        except Exception as exc:  # noqa: BLE001 — never break overlay build
+            logger.warning(
+                "[KB.behavior] build failed for tenant=%s: %s",
+                tenant_id, exc,
+            )
+    if behavioral_overlay:
+        buckets["behavior"] = behavioral_overlay
     if structured_facts:
         buckets["facts"] = structured_facts
         return buckets
