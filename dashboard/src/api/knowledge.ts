@@ -351,6 +351,107 @@ export const knowledgeApi = {
     const qs = new URLSearchParams({ q: query.trim(), limit: String(limit) })
     return apiCall<{ items: ProductLite[] }>(`/knowledge/products/search?${qs}`)
   },
+
+  // ── KB-Improve V1 — proactive improvement suggestions ───────────────
+  // The merchant clicks "اقتراحات تحسين من نحلة ✨" → server runs the
+  // deterministic auditor (+ optional GPT polish), returns up to 5
+  // preview-only suggestions. Approval funnels through
+  // ``promoteImprovementSuggestion`` which creates a
+  // ``MerchantKnowledgeDraft`` row — the existing draft preview drawer
+  // handles per-op approve / reject after that.
+  getImprovementSuggestions(opts?: { polish?: boolean; max?: number }) {
+    const qs = new URLSearchParams()
+    if (opts?.polish === false) qs.set('polish', 'false')
+    if (opts?.max) qs.set('max_suggestions', String(opts.max))
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return apiCall<ImprovementSuggestionsResponse>(
+      `/knowledge/improvement-suggestions${suffix}`,
+    )
+  },
+
+  promoteImprovementSuggestion(suggestion: ImprovementSuggestion, overrideBody?: string) {
+    return apiCall<KnowledgeDraft>(
+      '/knowledge/improvement-suggestions/promote',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          suggestion_id: suggestion.id,
+          type: suggestion.type,
+          target_kind: suggestion.target_kind,
+          title: suggestion.title,
+          reason: suggestion.reason,
+          expected_impact: suggestion.expected_impact,
+          proposed_body: overrideBody && overrideBody.trim()
+            ? overrideBody
+            : suggestion.proposed_body,
+          severity: suggestion.severity,
+          confidence: suggestion.confidence,
+          fingerprint: suggestion.fingerprint,
+          related_section_ids: suggestion.related_section_ids,
+        }),
+      },
+    )
+  },
+
+  // KB-Improve V1.1 — record a rejection. Server stores it inside
+  // ``TenantSettings.ai_settings.kb_improvement_state`` with a 7-day
+  // TTL so the same fingerprint won't surface again in subsequent
+  // ``/improvement-suggestions`` analyses.
+  dismissImprovementSuggestion(suggestion: ImprovementSuggestion, ttlDays = 7) {
+    return apiCall<{
+      fingerprint: string
+      ttl_days: number
+      active_dismissed_count: number
+    }>('/knowledge/improvement-suggestions/dismiss', {
+      method: 'POST',
+      body: JSON.stringify({
+        fingerprint: suggestion.fingerprint,
+        type: suggestion.type,
+        target_kind: suggestion.target_kind,
+        ttl_days: ttlDays,
+      }),
+    })
+  },
+}
+
+
+// ── KB-Improve V1 — types ──────────────────────────────────────────────────
+
+
+export type ImprovementSuggestionType =
+  | 'missing_required_knowledge'
+  | 'weak_section'
+  | 'semantic_contamination'
+  | 'duplicate_merge'
+  | 'missing_media'
+  | 'product_knowledge_gap'
+  | 'behavior_tone'
+  | 'compliance'
+
+export type ImprovementSeverity = 'high' | 'medium' | 'low'
+
+export interface ImprovementSuggestion {
+  id: string
+  type: ImprovementSuggestionType
+  severity: ImprovementSeverity
+  title: string
+  reason: string
+  expected_impact: string
+  target_kind: string
+  proposed_body: string
+  requires_media: boolean
+  confidence: number
+  related_section_ids: number[]
+  // KB-Improve V1.1 — stable hash used by reject/approve suppression.
+  fingerprint: string
+}
+
+export interface ImprovementSuggestionsResponse {
+  suggestions: ImprovementSuggestion[]
+  platform_connected: boolean
+  platform: string | null
+  scanned_sections: number
+  model: string
 }
 
 // Re-export the AIMediaItem-related types from intelligenceLibraries so

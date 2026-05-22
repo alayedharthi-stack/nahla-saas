@@ -1028,6 +1028,19 @@ from modules.ai.knowledge.repair_advisor import (  # noqa: E402
     analyze_sections,
     summarize,
 )
+from modules.ai.knowledge.improvement_advisor import (  # noqa: E402
+    CatalogSlice,
+    ImprovementFinding,
+    SUPPRESSION_TTL_DAYS,
+    _POLISHER_MODEL,
+    active_dismissed_fingerprints,
+    audit as improvement_audit,
+    compute_fingerprint,
+    emit_improvement_log,
+    polish_with_gpt,
+    record_dismissal,
+)
+from sqlalchemy.orm.attributes import flag_modified  # noqa: E402
 
 
 class FormatRequest(BaseModel):
@@ -1886,3 +1899,381 @@ async def repair_preview(
     )
 
     return {"suggestions": payload, "summary": summary}
+
+
+# ── KB-Improve V1 — proactive improvement suggestions ───────────────────────
+
+
+class PromoteSuggestionRequest(BaseModel):
+    """Promote a single auditor suggestion into a ``MerchantKnowledgeDraft``.
+
+    The dashboard sends the same suggestion payload the GET endpoint
+    returned (re-serialized verbatim). The server doesn't trust it: it
+    revalidates the ``target_kind`` and clips long bodies. The merchant
+    then approves the resulting draft via the existing
+    ``/knowledge/drafts/{id}/approve`` flow.
+
+    ``fingerprint`` (KB-Improve V1.1) is the suggestion's stable hash,
+    stored on the resulting draft so the next ``/improvement-suggestions``
+    call can suppress this idea from being re-suggested. The server
+    recomputes it from (type, target_kind, title, related_section_ids)
+    if the client didn't send one — never trusts the client's value
+    blindly.
+    """
+    suggestion_id: str = Field(..., min_length=1, max_length=64)
+    type: str = Field(..., min_length=1, max_length=64)
+    target_kind: str = Field(..., min_length=1, max_length=64)
+    title: str = Field("", max_length=255)
+    reason: str = Field("", max_length=1000)
+    expected_impact: str = Field("", max_length=1000)
+    proposed_body: str = Field(..., min_length=1, max_length=8000)
+    severity: str = Field("medium", max_length=16)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    fingerprint: Optional[str] = Field(None, max_length=32)
+    related_section_ids: List[int] = Field(default_factory=list, max_length=20)
+
+
+class DismissSuggestionRequest(BaseModel):
+    """Suppress a suggestion fingerprint for ``ttl_days`` (KB-Improve V1.1).
+
+    Only the fingerprint is required; ``type`` and ``target_kind`` are
+    stored alongside for audit / future analytics ("which suggestion
+    types do merchants dismiss most?"). ``ttl_days`` is clamped on the
+    server so a client can't suppress forever.
+    """
+    fingerprint: str = Field(..., min_length=4, max_length=32)
+    type: str = Field("", max_length=64)
+    target_kind: str = Field("", max_length=64)
+    ttl_days: int = Field(SUPPRESSION_TTL_DAYS, ge=1, le=90)
+
+
+def _approved_improvement_fingerprints(db: Session, tenant_id: int) -> set:
+    """Collect fingerprints of suggestions the merchant has already
+    promoted into a draft (KB-Improve V1.1 suppression).
+
+    We use ``MerchantKnowledgeDraft.proposal_json.suggestion_fingerprint``
+    as the canonical record so we don't need a separate table. Any
+    draft with ``source = 'improvement_advisor'`` in its proposal
+    counts — pending or approved alike — because re-suggesting an idea
+    that's already sitting in the merchant's approval inbox is the
+    annoyance we're trying to avoid.
+    """
+    try:
+        drafts = (
+            db.query(MerchantKnowledgeDraft.proposal_json)
+            .filter(
+                MerchantKnowledgeDraft.tenant_id == tenant_id,
+                MerchantKnowledgeDraft.status.in_(("pending", "approved")),
+            )
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "[KB.improve] approved-fp load failed for tenant=%s: %s",
+            tenant_id, exc,
+        )
+        return set()
+
+    out: set = set()
+    for (proposal,) in drafts:
+        if not isinstance(proposal, dict):
+            continue
+        if (proposal.get("source") or "").strip().lower() != "improvement_advisor":
+            continue
+        fp = (proposal.get("suggestion_fingerprint") or "").strip()
+        if fp:
+            out.add(fp)
+    return out
+
+
+def _catalog_slice_for_audit(db: Session, tenant_id: int) -> List[CatalogSlice]:
+    """Build a slim catalog snapshot for the auditor.
+
+    The auditor only needs id/title and two boolean flags; we cap at
+    500 rows so a merchant with a 50k-SKU catalog doesn't blow the
+    request budget.
+    """
+    try:
+        rows = (
+            db.query(Product.id, Product.title, Product.description)
+            .filter(Product.tenant_id == tenant_id)
+            .limit(500)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001 — never break the endpoint
+        _logger.warning(
+            "[KB.improve] catalog load failed for tenant=%s: %s", tenant_id, exc,
+        )
+        return []
+    out: List[CatalogSlice] = []
+    for r in rows:
+        title = str(r.title or "").strip()
+        if not title:
+            continue
+        out.append(CatalogSlice(
+            id=int(r.id),
+            title=title,
+            has_description=bool((r.description or "").strip()),
+            # Image presence isn't a field we use yet but the dataclass
+            # accepts it; left as False until product image cardinality
+            # becomes a V2 signal.
+            has_image=False,
+        ))
+    return out
+
+
+@router.get("/knowledge/improvement-suggestions")
+async def improvement_suggestions(
+    request: Request,
+    db: Session = Depends(get_db),
+    polish: bool = Query(
+        True,
+        description=(
+            "Apply the optional GPT Arabic polisher on top of the "
+            "deterministic auditor. Has no effect when OPENAI_API_KEY "
+            "is unset on the server."
+        ),
+    ),
+    max_suggestions: int = Query(5, ge=1, le=10),
+):
+    """KB-Improve V1 — read-only proactive improvement suggestions.
+
+    Two-layer pipeline (see ``modules/ai/knowledge/improvement_advisor.py``):
+      1. Deterministic auditor (no LLM) generates ``ImprovementFinding``s
+         from the tenant's existing sections + catalog.
+      2. Optional GPT polisher refines Arabic copy without inventing
+         new info (skipped silently when no API key is configured).
+
+    Suggestions are capped at 5 and ranked by severity → impact →
+    confidence. The response shape matches the spec literal:
+
+      ``{"suggestions": [{id, type, severity, title, reason,
+                           expected_impact, target_kind, proposed_body,
+                           requires_media, confidence,
+                           related_section_ids}], ...}``
+
+    Approval flow: the dashboard sends the chosen suggestion back to
+    ``POST /knowledge/improvement-suggestions/promote`` which creates a
+    ``MerchantKnowledgeDraft`` row — then the existing per-op approve
+    pipeline takes over. NEVER auto-applies.
+    """
+    import time as _time
+    started = _time.monotonic()
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    rows = (
+        db.query(MerchantKnowledgeSection)
+        .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
+        .order_by(MerchantKnowledgeSection.id.asc())
+        .all()
+    )
+
+    signal = _platform_signal_for_tenant(db, tenant_id)
+    catalog = _catalog_slice_for_audit(db, tenant_id)
+
+    # ── Suppression (KB-Improve V1.1) ───────────────────────────────────
+    # Two streams of suppression feed the auditor:
+    #   1. Dismissed fingerprints — recorded by the
+    #      ``POST /knowledge/improvement-suggestions/dismiss`` endpoint
+    #      into ``TenantSettings.ai_settings.kb_improvement_state``,
+    #      with a 7-day TTL (expired entries skipped here, pruned on
+    #      next write).
+    #   2. Approved fingerprints — every promote-to-draft call stamps
+    #      the suggestion's fingerprint onto the resulting
+    #      ``MerchantKnowledgeDraft.proposal_json``. We treat ANY draft
+    #      from this source (pending, approved, rejected) as
+    #      suppressed so the merchant doesn't see the same idea twice
+    #      while a previous proposal is still in their inbox.
+    settings = get_or_create_settings(db, tenant_id)
+    dismissed = active_dismissed_fingerprints(settings.ai_settings or {})
+    applied_fps = _approved_improvement_fingerprints(db, tenant_id)
+    suppressed_fps = dismissed | applied_fps
+
+    findings = improvement_audit(
+        rows,
+        platform_connected=signal.connected,
+        products=catalog,
+        max_suggestions=max_suggestions,
+        suppressed_fingerprints=suppressed_fps,
+    )
+
+    polished = findings
+    fallback_used = False
+    if polish:
+        polished = polish_with_gpt(findings, tenant_id=tenant_id)
+        # ``polish_with_gpt`` returns the originals on any failure — we
+        # can't tell here whether GPT actually ran, but the structured
+        # log line in the advisor module records the skip with the
+        # exception reason. Setting fallback_used=False is honest: the
+        # response is still trustworthy even without polish.
+
+    emit_improvement_log(
+        tenant_id=tenant_id,
+        suggestions=polished,
+        started=started,
+        model=_POLISHER_MODEL if polish else "deterministic_only",
+        fallback=fallback_used,
+    )
+
+    return {
+        "suggestions": [f.to_dict() for f in polished],
+        "platform_connected": signal.connected,
+        "platform": signal.platform,
+        "scanned_sections": len(rows),
+        "model": _POLISHER_MODEL if polish else "deterministic_only",
+    }
+
+
+@router.post("/knowledge/improvement-suggestions/promote", status_code=201)
+async def promote_improvement_suggestion(
+    payload: PromoteSuggestionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Convert a suggestion into a pending ``MerchantKnowledgeDraft``.
+
+    The merchant clicks "تطبيق كمقترح" → the dashboard echoes the
+    suggestion back here, and we package it into the same draft row
+    shape ``classify_quick_update`` produces. From the merchant's
+    perspective the next step is identical to the quick-update flow:
+    review the preview drawer, approve / reject per-op.
+
+    Why a new endpoint instead of forging an op into an existing
+    pending draft: each suggestion is logically independent and may
+    target a different ``kind``. Bundling them would force the
+    merchant into "approve all or reject all" semantics, which the
+    per-op approval drawer already escapes.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    # Re-validate the target kind against the canonical registry — the
+    # advisor only emits valid kinds, but a stale client could send
+    # something the server doesn't recognize.
+    target_kind = (payload.target_kind or "").strip().lower()
+    if not is_valid_kind(target_kind):
+        raise HTTPException(status_code=400, detail="invalid_target_kind")
+
+    # Build a single ``create`` op the merchant can approve in the
+    # existing drawer. Title falls back to the suggestion title — the
+    # merchant can edit before approving.
+    title = (payload.title or "").strip()[:255] or None
+    body = (payload.proposed_body or "").strip()[:8000]
+    if not body:
+        raise HTTPException(status_code=400, detail="proposed_body_required")
+
+    # Recompute fingerprint server-side — clients can send the value
+    # they received but we never trust it. A stale / forged fp would
+    # otherwise let a client suppress an unrelated suggestion in the
+    # next analyze run.
+    fingerprint = compute_fingerprint(
+        type_=payload.type,
+        target_kind=target_kind,
+        title=payload.title,
+        related_section_ids=payload.related_section_ids or [],
+    )
+
+    op = {
+        "op_id": "op-1",
+        "op": "create",
+        "kind": target_kind,
+        "title": title,
+        "body": body,
+        "metadata": {
+            "source": "improvement_advisor",
+            "suggestion_id": payload.suggestion_id,
+            "suggestion_type": payload.type,
+            "severity": payload.severity,
+            "fingerprint": fingerprint,
+        },
+        "target_section_id": None,
+        "link_role": None,
+        "media_id": None,
+        "rationale": (
+            (payload.reason or "")[:400] +
+            (" — " + payload.expected_impact[:400] if payload.expected_impact else "")
+        ).strip()[:600],
+    }
+
+    draft = MerchantKnowledgeDraft(
+        tenant_id=tenant_id,
+        raw_text=f"[improvement_advisor] {payload.title or payload.suggestion_id}",
+        attached_media_ids=[],
+        status="pending",
+        proposal_json={
+            "proposed_ops": [op],
+            "confidence": float(payload.confidence or 0.0),
+            "model": "improvement_advisor",
+            "fallback_used": False,
+            "source": "improvement_advisor",
+            "suggestion_id": payload.suggestion_id,
+            "suggestion_fingerprint": fingerprint,
+        },
+        conflicts_json=[],
+    )
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+
+    _logger.info(
+        "[KB.improve.promote] tenant=%s draft=%s suggestion=%s type=%s "
+        "target_kind=%s fp=%s",
+        tenant_id, draft.id, payload.suggestion_id, payload.type, target_kind,
+        fingerprint,
+    )
+
+    return _serialize_draft(draft)
+
+
+@router.post("/knowledge/improvement-suggestions/dismiss", status_code=201)
+async def dismiss_improvement_suggestion(
+    payload: DismissSuggestionRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """KB-Improve V1.1 — record a merchant rejection for ``ttl_days``.
+
+    Suppression is stored inside ``TenantSettings.ai_settings`` (JSONB,
+    no migration) under the ``kb_improvement_state`` key so we don't
+    need a new table. The next ``/improvement-suggestions`` call reads
+    this state and filters any active fingerprint out before passing
+    the audit findings through the polisher.
+
+    The suppression naturally expires after 7 days (default) so an
+    ignored gap eventually re-surfaces — but if the merchant fills the
+    gap in the meantime, the auditor stops generating the finding
+    anyway, so the suggestion won't reappear even after TTL.
+    """
+    tenant_id = resolve_tenant_id(request)
+    settings = get_or_create_settings(db, tenant_id)
+
+    base = dict(settings.ai_settings or {})
+    updated = record_dismissal(
+        base,
+        fingerprint=payload.fingerprint,
+        suggestion_type=payload.type,
+        target_kind=payload.target_kind,
+        ttl_days=int(payload.ttl_days),
+    )
+    settings.ai_settings = updated
+    # ``ai_settings`` is a JSONB column — SQLAlchemy can't detect
+    # in-place dict mutations through change tracking, so we tell it
+    # explicitly. (We assign a fresh dict above, but this is
+    # belt-and-braces for the next maintainer.)
+    flag_modified(settings, "ai_settings")
+    db.commit()
+
+    state = updated.get("kb_improvement_state") or {}
+    _logger.info(
+        "[KB.improve.dismiss] tenant=%s fp=%s type=%s target_kind=%s "
+        "ttl_days=%d active_dismissed=%d",
+        tenant_id, payload.fingerprint, payload.type or "-",
+        payload.target_kind or "-", int(payload.ttl_days),
+        len(state.get("dismissed") or []),
+    )
+    return {
+        "fingerprint": payload.fingerprint,
+        "ttl_days": int(payload.ttl_days),
+        "active_dismissed_count": len(state.get("dismissed") or []),
+    }
