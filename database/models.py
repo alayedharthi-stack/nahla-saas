@@ -2992,3 +2992,237 @@ class PasswordSetupToken(Base):
     # Audit metadata captured at issue time. Never includes the raw token.
     issued_via  = Column(String(64), nullable=True)   # e.g. "salla_oauth", "manual_admin"
     consumed_ip = Column(String(64), nullable=True)   # filled at consume time
+
+
+# ── Smart Store Knowledge Hub (Phase 1) ─────────────────────────────────────
+#
+# Structured replacement for the legacy free-form
+# ``ai_settings.manual_knowledge_base`` blob. Each row is a single
+# fact/policy/note the merchant wants the AI to know about. Sections are
+# grouped by ``kind`` (see ``services/knowledge_section_kinds.py`` for the
+# canonical registry), and can attach any number of ``AIMediaItem`` rows
+# via the M2M ``MerchantKnowledgeMedia`` link table — so a payment policy
+# can carry the bank-transfer barcode image, a product-usage tip can
+# carry a tutorial video, etc.
+#
+# The legacy text field stays untouched for backward compatibility; the
+# ``/knowledge/sections/migrate-from-legacy`` endpoint moves it across on
+# first use of the redesigned page.
+
+
+class MerchantKnowledgeSection(Base):
+    """One curated piece of merchant knowledge (policy, fact, note, …).
+
+    Together these rows form the merchant-side facts surface the AI
+    cites in its WhatsApp replies. Source-of-truth precedence is
+    enforced in :mod:`backend.modules.ai.prompts.tenant_overlay`:
+    e-commerce platform data (Salla / Zid / Shopify) wins on price,
+    inventory, product names and direct URLs; these sections cover
+    everything else (story, payment / shipping policy, return rules,
+    product usage tips, recipes, FAQ, …).
+    """
+
+    __tablename__ = "merchant_knowledge_sections"
+    __table_args__ = (
+        Index("ix_mks_tenant_id", "tenant_id"),
+        Index("ix_mks_tenant_kind_active", "tenant_id", "kind", "is_active"),
+        Index("ix_mks_tenant_priority", "tenant_id", "priority"),
+        Index("ix_mks_tenant_updated", "tenant_id", "updated_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Fixed registry — see ``services/knowledge_section_kinds.py``.
+    # Stored as VARCHAR (not a Postgres enum type) so the registry can
+    # grow without a migration.
+    kind = Column(String(64), nullable=False)
+    title = Column(String(255), nullable=True)
+    body = Column(Text, nullable=False, default="", server_default="")
+    metadata_json = Column(JSONB, nullable=True)
+    priority = Column(Integer, nullable=False, default=100, server_default="100")
+    is_active = Column(
+        Boolean, nullable=False, default=True, server_default="true",
+    )
+    # ``manual`` | ``ai_classified`` | ``imported``
+    source = Column(
+        String(32), nullable=False, default="manual", server_default="manual",
+    )
+    # Phase 2 lifecycle hooks — present from day 1 so the follow-up
+    # migration is purely additive.
+    ai_status = Column(
+        String(32), nullable=False, default="approved", server_default="approved",
+    )
+    classification_confidence = Column(Float, nullable=True)
+    conflicts_json = Column(JSONB, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    media_links = relationship(
+        "MerchantKnowledgeMedia",
+        back_populates="section",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    product_links = relationship(
+        "MerchantKnowledgeSectionProduct",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class MerchantKnowledgeMedia(Base):
+    """Link table between a knowledge section and an :class:`AIMediaItem`.
+
+    The same media row can be linked to multiple sections under
+    different ``link_role`` values — e.g. a Rajhi-barcode image can
+    back both a generic ``payment_method`` section (role=primary) and
+    a bank-specific ``bank_transfer`` section (role=barcode).
+    """
+
+    __tablename__ = "merchant_knowledge_media"
+    __table_args__ = (
+        UniqueConstraint(
+            "section_id", "media_id", "link_role",
+            name="uq_mkm_section_media_role",
+        ),
+        Index("ix_mkm_section_id", "section_id"),
+        Index("ix_mkm_media_id",   "media_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(
+        Integer,
+        ForeignKey("merchant_knowledge_sections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    media_id = Column(
+        Integer,
+        ForeignKey("ai_media_library.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # ``primary`` | ``evidence`` | ``barcode`` | ``tutorial_video``
+    # | ``recipe_video`` | ``policy_pdf`` | ``certificate`` | ``map``
+    link_role = Column(
+        String(32), nullable=False, default="primary", server_default="primary",
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    section = relationship("MerchantKnowledgeSection", back_populates="media_links")
+    media = relationship("AIMediaItem")
+
+
+class MerchantKnowledgeSectionProduct(Base):
+    """M2M link between a knowledge section and a catalog product (Phase 3).
+
+    Sections with at least one product link are "product-scoped": the
+    runtime overlay only injects them into the prompt when the
+    conversation already mentions one of the linked products (matched
+    via :mod:`backend.modules.ai.tooling.product_resolver`). Sections
+    with zero product links remain global (return policy, store
+    hours, …).
+
+    Links can be ``manual`` (merchant picked a product from the
+    dropdown) or ``ai_fuzzy_match`` (the Phase 3 fuzzy matcher
+    proposed a match during draft approval — the merchant can drop
+    the link later if it was wrong). Confidence is only meaningful
+    for ``ai_fuzzy_match`` and NULL otherwise.
+    """
+
+    __tablename__ = "merchant_knowledge_section_products"
+    __table_args__ = (
+        UniqueConstraint(
+            "section_id", "product_id",
+            name="uq_mksp_section_product",
+        ),
+        Index("ix_mksp_section_id", "section_id"),
+        Index("ix_mksp_product_id", "product_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(
+        Integer,
+        ForeignKey(
+            "merchant_knowledge_sections.id", ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source = Column(
+        String(32), nullable=False,
+        default="manual", server_default="manual",
+    )
+    confidence = Column(Float, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class MerchantKnowledgeDraft(Base):
+    """A pending GPT-classified proposal (Phase 2).
+
+    The merchant types a free-form quick-update + (optionally) attaches
+    media; the backend asks GPT to classify the text into structured
+    ops (create / update / merge / link_media) and detects conflicts
+    against the existing sections + Salla snapshot. The result lives
+    here until the merchant approves it (per-op or all) from the
+    dashboard preview drawer.
+
+    Approved drafts are not deleted — they're kept (status='approved'
+    + applied_op_ids) for audit + undo. Failed classifier calls land
+    with status='failed' so the dashboard can surface a retry button.
+    """
+
+    __tablename__ = "merchant_knowledge_drafts"
+    __table_args__ = (
+        Index("ix_mkd_tenant_id", "tenant_id"),
+        Index("ix_mkd_tenant_status_created", "tenant_id", "status", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    raw_text = Column(Text, nullable=False)
+    attached_media_ids = Column(JSONB, nullable=True)
+    status = Column(
+        String(32), nullable=False, default="pending", server_default="pending",
+    )
+    proposal_json = Column(JSONB, nullable=True)
+    conflicts_json = Column(JSONB, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    decided_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    applied_op_ids = Column(JSONB, nullable=True)

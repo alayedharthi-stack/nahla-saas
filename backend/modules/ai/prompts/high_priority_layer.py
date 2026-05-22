@@ -184,6 +184,22 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
 )
 
 BASELINE_FORBIDDEN_RULES: tuple[str, ...] = (
+    # ── Source-of-truth precedence (Phase 4 — Smart Store KB) ─────────────
+    # The Smart Store Knowledge Hub introduces a structured facts surface
+    # that can technically contain prices / stock numbers, but those NEVER
+    # win over the live platform feed. This rule pins the per-field map
+    # so the LLM can resolve any apparent contradiction on its own without
+    # waiting for a post-hoc filter to scrub the reply.
+    "أولوية مصادر البيانات per-field (لا تتجاوزها أبدًا): "
+    "(1) السعر / المخزون / المتغيرات / رابط المنتج المباشر / الصور الأساسية → "
+    "من merchant_context.platform (سلة / زد / شوبيفاي) إن وُجد، وإلا من "
+    "كتالوج نحلة الداخلي (selected_product / sales_context). "
+    "(2) السياسات / أوقات العمل / طريقة الرد / الفوائد / الوصفات / "
+    "طرق الاستخدام / FAQ → من قاعدة المعرفة المنظّمة (merchant_knowledge_sections). "
+    "(3) أرقام الدفع / الباركودات / IBAN / خرائط الفروع → من مكتبة الوسائط "
+    "عبر [MEDIA_KEY:<slug>]. إذا وُجد سعر أو حالة توفر في قاعدة المعرفة "
+    "تخالف بيانات المنصة، اعتمد بيانات المنصة بدون ذكر الرقم اليدوي ولا "
+    "الإشارة إلى وجود تعارض.",
     "لا تخترع أسعارًا أو أرقام مخزون غير الموجودة في merchant_context أو selected_product.",
     "لا تكتب رابطًا غير معطى لك في السياق. لا تخمن URL.",
     "لا تذكر اسم منتج غير موجود في الكتالوج.",

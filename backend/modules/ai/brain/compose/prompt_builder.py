@@ -108,7 +108,18 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     identity_block = overlay_buckets.get("identity", "")
 
     # ── BLOCK 3: Knowledge (Facts only) ───────────────────────────────────
-    kb_block = overlay_buckets.get("facts", "")
+    # Smart Store Knowledge Hub (Phase 1+): the pipeline pre-bakes the
+    # structured facts block (rendered from ``merchant_knowledge_sections``)
+    # under ``merchant_context.structured_facts_block`` because building
+    # it requires DB access and this prompt builder is intentionally
+    # IO-free. When non-empty, it replaces the legacy free-form
+    # ``manual_knowledge_base`` text; otherwise we fall back to whatever
+    # the overlay split derived from ``ai_settings.manual_knowledge_base``.
+    _mc = state.merchant_context or {}
+    _structured_kb = ""
+    if isinstance(_mc, dict):
+        _structured_kb = str(_mc.get("structured_facts_block") or "").strip()
+    kb_block = _structured_kb or overlay_buckets.get("facts", "")
 
     _platform_mode = bool(getattr(state, "platform_kb_mode", False))
     if _platform_mode:

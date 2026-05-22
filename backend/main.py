@@ -406,6 +406,7 @@ from routers.offer_decisions import router as _offer_decisions_router  # noqa: E
 from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
 from routers.intelligence_libraries import router as _intelligence_libraries_router  # noqa: E402
+from routers.knowledge    import router as _knowledge_router      # noqa: E402
 from routers.inbound_media import router as _inbound_media_router  # noqa: E402
 from routers.customers    import router as _customers_router     # noqa: E402
 from routers.customer_import import router as _customer_import_router  # noqa: E402
@@ -472,6 +473,7 @@ app.include_router(_offer_decisions_router)
 app.include_router(_orders_router)
 app.include_router(_intelligence_router)
 app.include_router(_intelligence_libraries_router)
+app.include_router(_knowledge_router)
 app.include_router(_inbound_media_router)
 app.include_router(_customers_router)
 app.include_router(_customer_import_router)

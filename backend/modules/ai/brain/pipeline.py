@@ -867,6 +867,56 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001 — prompt must never break a turn
             _ai_settings_for_prompt = {}
 
+        # Smart Store Knowledge Hub (Phase 1+):
+        # Pre-bake the structured facts block when the merchant has rows
+        # in ``merchant_knowledge_sections``. This is computed here
+        # (where ``db`` is in scope) and passed through merchant_context
+        # so the IO-free prompt_builder can swap it in for the legacy
+        # ``manual_knowledge_base`` text. Empty string → prompt_builder
+        # falls back to the legacy overlay path.
+        #
+        # Phase 3 — Product scoping
+        # ─────────────────────────
+        # Collect the catalog product ids the conversation is currently
+        # "about" — the active focus + recently recommended products —
+        # so the overlay can suppress product-scoped sections that
+        # belong to OTHER products. We pass ``None`` (not an empty set)
+        # when we don't have any signal yet so day-1 deployments keep
+        # showing every product extra.
+        _active_pids: Optional[set] = None
+        try:
+            _pid_candidates: set = set()
+            _focus = getattr(new_state, "current_product_focus", None) or {}
+            _focus_id = _focus.get("id") if isinstance(_focus, dict) else None
+            if isinstance(_focus_id, int):
+                _pid_candidates.add(_focus_id)
+            for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                if isinstance(_rid, int):
+                    _pid_candidates.add(_rid)
+            # Only opt into filtering when we have at least one real
+            # numeric product id — otherwise stay in "show everything"
+            # mode so global sections never disappear.
+            if _pid_candidates:
+                _active_pids = _pid_candidates
+        except Exception:  # noqa: BLE001
+            _active_pids = None
+
+        _structured_facts_block: str = ""
+        try:
+            from modules.ai.prompts.tenant_overlay import (  # noqa: PLC0415
+                build_structured_facts_block,
+            )
+            _structured_facts_block = build_structured_facts_block(
+                db, tenant_id, active_product_ids=_active_pids,
+            ) or ""
+        except Exception as _kb_exc:  # noqa: BLE001
+            logger.warning(
+                "[BrainPipeline] structured KB build failed tenant=%s: %s",
+                tenant_id, _kb_exc,
+            )
+            _structured_facts_block = ""
+
         # Phase 3 — Product/Media resolver overlay for the Brain prompt.
         # The legacy webhook path computes this same overlay just before
         # the LLM call (see whatsapp_webhook.py:3570-3598). We surface
@@ -913,6 +963,7 @@ class MerchantBrain:
                     "tenant_id":         tenant_id,
                     "ai_settings":       _ai_settings_for_prompt,
                     "resolver_overlay":  _resolver_overlay_text,
+                    "structured_facts_block": _structured_facts_block,
                     "tenant_profile":    mc.get("tenant_profile") or {},
                     "customer":          mc.get("customer") or {},
                     "conversation":      mc.get("conversation") or {},
@@ -934,6 +985,7 @@ class MerchantBrain:
                     "tenant_id":         tenant_id,
                     "ai_settings":       _ai_settings_for_prompt,
                     "resolver_overlay":  _resolver_overlay_text,
+                    "structured_facts_block": _structured_facts_block,
                 }
 
         ctx.reply_state = _build_reply_state(
