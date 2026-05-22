@@ -405,10 +405,134 @@ def sanitize_outbound_payload(
         return payload, False
 
 
+# ── Handoff-promise leak (May 2026 P1, Tenant 33) ───────────────────────────
+#
+# Independent of search / planner leaks. The bug shape: the LLM (or a
+# defensive code path like the loop-guard pre-send branch) produces
+# Arabic text claiming "I will transfer you to a human" while the
+# canonical handoff state flags (``Conversation.is_human_handoff`` /
+# ``needs_human`` / ``handoff_active`` / ``status='human'``) stay
+# False, so the conversation never enters the dashboard's "طلب موظف"
+# inbox and the AI silently resumes on the next inbound. From the
+# customer's point of view: a false promise.
+#
+# Two upstream fixes already shipped (loop-guard branch now flips
+# every flag + persona prompt no longer ENCOURAGES the LLM to emit
+# this language). This module is the wire-layer SAFETY NET — even if
+# a future code path produces a handoff promise, this scrubber
+# either lets it through (when state IS active, the promise is
+# genuine) or rewrites it (when state is NOT active, so we don't lie
+# to the customer).
+#
+# Patterns reuse the canonical list maintained at
+# ``whatsapp_webhook.py`` ``_looks_like_owner_fallback`` (lines 6409-6440)
+# so both detectors stay in sync.
+# The verb root "حوّل" appears with many morphological variants in
+# colloquial Saudi Arabic:
+#   * Tense markers: س / سأ / راح / بـ
+#   * Person markers: ك (you-singular) / كم (you-plural)
+#   * Spelling: with or without أ, with or without shadda
+# Rather than enumerate every combination, we anchor on the verb
+# CORE (``ح?وّ?لك?``) plus a short window of optional pronoun /
+# tense / preposition characters, then look for an audience noun
+# (فريق / موظف / متجر) within ~12 characters. This catches the
+# canonical forms + their paraphrases without false-positives on
+# unrelated occurrences of "حول" (which is more commonly part of
+# "حول السعر" / "تحوّل إلى" idioms — those don't end in an
+# audience noun).
+_TRANSFER_VERB_BODY = r"(?:س|سـ|سأ|راح\s*أ|بـ)?[أا]?حو(?:ّ|ـ)?لك?(?:م|نا)?"
+_AUDIENCE_NOUN = r"(?:ال)?(?:فريق|موظف|موظفين|المتجر|متجر)"
+
+_HANDOFF_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
+        # "I will transfer YOU to …" — verb + recipient pronoun + audience.
+        rf"{_TRANSFER_VERB_BODY}\s*(?:ل|لل|إلى|الى)\s*{_AUDIENCE_NOUN}",
+        # "I will transfer the conversation …" — verb + المحادثة.
+        rf"{_TRANSFER_VERB_BODY}\s*(?:ال)?محادثة",
+        # "The team will reach out / contact you" family.
+        r"الفريق\s*(?:راح|سـ?ي?|سوف)\s*(?:يتواصل|يرد|يتابع)",
+        r"(?:راح|سـ?ي?|سوف)\s*(?:يتواصل|يرد|يتابع)\s*معك\s*(?:الفريق|أحد|احد)?",
+        r"سيتواصل\s*معك\s*الفريق",
+        r"سيتابع\s*معك\s*الفريق",
+        r"(?:راح|سـ?ي?|سوف|بـ)?(?:يرد|يجاوب|يجاوبك)\s*عليك\s*(?:أحد|احد)\s*"
+        r"(?:الموظفين|الموظفات|من\s*الفريق)",
+        # "Your message reached the team" — implicit handoff.
+        r"تم\s*تحويل\s*(?:ال)?محادثة",
+        r"سيتم\s*تحويلك",
+    )
+)
+
+
+# Neutral replacement when we strip the promise. Conservative copy
+# (Tenant 33 owner explicitly said the AI must NOT clown-tone or
+# escalate falsely) — we acknowledge receipt without promising any
+# automated transfer.
+_HANDOFF_NEUTRAL_TEXT = (
+    "تمام 🌷 وصلت رسالتك، وسأخبر فريق المتجر ليتواصل معك في أقرب وقت ممكن."
+)
+
+
+def contains_handoff_promise(text: str) -> Optional[str]:
+    """Return the first matching handoff-promise pattern, or ``None``.
+
+    Pure predicate — does not touch state. Used by both unit tests and
+    the wire-layer scrub (``maybe_scrub_handoff_promise``) so the
+    detection stays in one place.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    for pattern in _HANDOFF_PROMISE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def maybe_scrub_handoff_promise(
+    text: str,
+    *,
+    handoff_state_active: bool,
+    tenant_id: Optional[int] = None,
+    recipient: Optional[str] = None,
+) -> Tuple[str, bool]:
+    """Return ``(text_out, was_scrubbed)``.
+
+    When ``handoff_state_active`` is True we let the promise through —
+    the customer is being told the truth. When it's False AND the
+    text contains a handoff promise, we replace the offending text
+    with a neutral acknowledgement so the AI doesn't make a promise
+    the system can't keep.
+
+    Caller is responsible for figuring out ``handoff_state_active`` —
+    typically by checking ``Conversation.is_human_handoff`` /
+    ``needs_human`` / ``handoff_active`` / ``status == 'human'``.
+    """
+    if not text or not isinstance(text, str):
+        return text or "", False
+
+    if handoff_state_active:
+        # Honest promise — let it through.
+        return text, False
+
+    match = contains_handoff_promise(text)
+    if not match:
+        return text, False
+
+    logger.warning(
+        "[HANDOFF_PROMISE_SCRUBBED] tenant=%s to=%s marker=%r "
+        "original_len=%d preview=%r — handoff state NOT active, "
+        "replacing with neutral ack",
+        tenant_id, recipient, match, len(text), text[:140],
+    )
+    return _HANDOFF_NEUTRAL_TEXT, True
+
+
 __all__ = [
     "SAFE_FALLBACK_TEXT",
     "contains_leakage_markers",
     "contains_planner_markers",
+    "contains_handoff_promise",
     "extract_natural_segment",
+    "maybe_scrub_handoff_promise",
     "sanitize_outbound_payload",
 ]

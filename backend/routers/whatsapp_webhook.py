@@ -1083,7 +1083,13 @@ async def _handle_360dialog_body(
                 # inbound was in this delivery but it was dropped".
                 msgs_count    = len(value.get("messages") or []) if isinstance(value.get("messages"), list) else 0
                 statuses_cnt  = len(value.get("statuses") or []) if isinstance(value.get("statuses"), list) else 0
-                echoes_cnt    = len(value.get("smb_message_echoes") or []) if isinstance(value.get("smb_message_echoes"), list) else 0
+                # NOTE: the in-payload key is ``message_echoes`` (the ENVELOPE
+                # field is ``smb_message_echoes`` but the array inside the
+                # value object is just ``message_echoes``). Pre-fix this read
+                # ``smb_message_echoes`` which always returned 0 even when an
+                # echo was being ingested — diagnostic-only bug, but it made
+                # ``[WEBHOOK_IN] ... echoes=N`` lying about the real count.
+                echoes_cnt    = len(value.get("message_echoes") or []) if isinstance(value.get("message_echoes"), list) else 0
 
                 if not phone_number_id:
                     logger.warning(
@@ -2017,38 +2023,161 @@ def _extract_mobile_app_state(value: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Media types we can download + materialise as proper media bubbles in the
+# dashboard. Anything outside this set falls back to a friendly placeholder
+# string (May 2026 P1 fix — Tenant 33 saw "[merchant_image]" literal text
+# instead of the actual image when the owner replied from the mobile app).
+_SMB_ECHO_MEDIA_TYPES: tuple[str, ...] = ("image", "video", "audio", "document")
+
+# Display copy for echo types we can't decode (sticker, location, contacts,
+# interactive, "unsupported"). Keeps the merchant-facing string readable
+# rather than the cryptic ``[merchant_unsupported]`` bracket form.
+_SMB_ECHO_UNSUPPORTED_DISPLAY = "📎 رسالة من تطبيق الجوال — صيغة غير مدعومة"
+
+
 async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dict[str, Any]) -> None:
+    """Persist merchant-mobile (Coexistence) echoes into the conversation.
+
+    May 2026 P1 (Tenant 33): pre-fix this function only handled
+    ``type == "text"`` and stamped ``f"[merchant_{msg_type}]"`` into the
+    body for everything else, so images / videos / documents the
+    merchant sent from his mobile app surfaced in Nahla as the literal
+    placeholder string ``[merchant_image]`` instead of the actual media.
+    The fix mirrors what ``_process_image`` (in
+    ``modules/ai/media/normalizer.py``) already does for inbound
+    customer images: download the binary via the same
+    ``_download_meta_media`` helper, persist via ``save_inbound_media``,
+    and stamp ``extra_metadata.normalized_inbound`` so the dashboard's
+    ``_build_media_block`` can serialise it as a real media row.
+    """
     from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
 
     phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
     for echo in value.get("message_echoes", []) or []:
         to_phone = str(echo.get("to") or "")
         msg_type = str(echo.get("type") or "")
-        body_text = ""
-        if msg_type == "text":
-            body_text = str(((echo.get("text") or {}).get("body")) or "")
-        else:
-            body_text = f"[merchant_{msg_type}]"
-
         if not to_phone:
             continue
 
         convo = _get_or_create_conversation(db, wa_conn.tenant_id, to_phone)
+
+        # Extras stamped on every echo — kept identical across branches
+        # so downstream consumers can rely on the shape.
+        extra: Dict[str, Any] = {
+            "customer_phone": to_phone,
+            "phone": to_phone,
+            "provider": WHATSAPP_PROVIDER_360DIALOG,
+            "phone_number_id": phone_number_id,
+            "message_id": echo.get("id"),
+            "source": "merchant_mobile_app",
+            "echo_type": msg_type,
+        }
+        body_text = ""
+
+        if msg_type == "text":
+            body_text = str(((echo.get("text") or {}).get("body")) or "")
+
+        elif msg_type in _SMB_ECHO_MEDIA_TYPES:
+            # Per the WhatsApp Cloud API spec, every media echo carries
+            # the same sub-object shape as an inbound media message —
+            # i.e. ``echo["image"] = {"id": "...", "mime_type": "...",
+            # "caption": "...", "sha256": "..."}``. ``echo["video"]``,
+            # ``echo["audio"]``, ``echo["document"]`` follow the same
+            # pattern.
+            media_block = echo.get(msg_type) or {}
+            media_id   = str(media_block.get("id") or "")
+            mime_type  = str(media_block.get("mime_type") or "")
+            caption    = str(media_block.get("caption") or "")
+            sha256_hex = str(media_block.get("sha256") or "")
+            body_text  = caption  # may be empty — that's fine
+
+            # Try to fetch + persist the binary so it renders as a real
+            # bubble. If anything fails we fall back to a friendly
+            # placeholder so the merchant at least sees that something
+            # arrived (the old behaviour just dropped the brackets in).
+            stored_url: Optional[str] = None
+            storage_status = "missing_media_id"
+            byte_size: Optional[int] = None
+
+            if media_id:
+                storage_status = "download_failed"
+                try:
+                    from modules.ai.media.normalizer import _download_meta_media  # noqa: PLC0415
+                    from services.inbound_media_storage import save_inbound_media  # noqa: PLC0415
+
+                    download = await _download_meta_media(
+                        db=db, wa_conn=wa_conn,
+                        tenant_id=wa_conn.tenant_id,
+                        media_id=media_id, mime_type=mime_type,
+                    )
+                    if download and download.get("bytes"):
+                        binary = download["bytes"]
+                        eff_mime = download.get("mime_type") or mime_type or "application/octet-stream"
+                        byte_size = len(binary)
+                        stored = save_inbound_media(
+                            kind=msg_type,
+                            tenant_id=int(wa_conn.tenant_id),
+                            binary=binary,
+                            mime_type=eff_mime,
+                            sha256_hex=sha256_hex or None,
+                        )
+                        if stored is not None:
+                            stored_url = getattr(stored, "storage_url", None)
+                            storage_status = "ok"
+                            extra["normalized_inbound"] = {
+                                "source_type": msg_type,
+                                "storage_url": stored_url,
+                                "mime_type": eff_mime,
+                                "byte_size": byte_size,
+                                "storage_sha256": getattr(stored, "storage_sha256", sha256_hex) or sha256_hex,
+                                "caption": caption,
+                                "direction": "outbound",
+                                "echo_source": "merchant_mobile_app",
+                                "image_download_status": "ok",
+                            }
+                except Exception as exc:  # noqa: BLE001
+                    storage_status = "exception"
+                    logger.warning(
+                        "[SMB_ECHO_MEDIA] tenant=%s media_id=%s mime=%s err=%s",
+                        wa_conn.tenant_id, media_id, mime_type, exc,
+                    )
+
+            extra["media_id"] = media_id or None
+            extra["media_mime_type"] = mime_type or None
+            extra["media_storage_status"] = storage_status
+
+            logger.info(
+                "[SMB_ECHO] tenant=%s to=%s type=%s media_id=%s status=%s "
+                "bytes=%s caption_len=%d",
+                wa_conn.tenant_id, to_phone, msg_type, media_id or "-",
+                storage_status, byte_size if byte_size is not None else "-",
+                len(caption),
+            )
+
+            # When download succeeded, leave ``body_text`` as the caption
+            # (often empty). When it failed, surface a readable
+            # placeholder so the merchant sees something landed.
+            if storage_status != "ok" and not body_text:
+                body_text = f"📎 رسالة {msg_type} من تطبيق الجوال"
+
+        else:
+            # sticker / location / contacts / interactive / "unsupported"
+            # — nothing we can render, but use a friendlier placeholder
+            # than ``[merchant_unsupported]``.
+            body_text = _SMB_ECHO_UNSUPPORTED_DISPLAY
+            extra["media_storage_status"] = "unsupported_type"
+            logger.info(
+                "[SMB_ECHO] tenant=%s to=%s type=%s status=unsupported_type",
+                wa_conn.tenant_id, to_phone, msg_type,
+            )
+
         db.add(MessageEvent(
             conversation_id=convo.id,
             tenant_id=wa_conn.tenant_id,
             direction="outbound",
             body=body_text,
             event_type="smb_message_echo",
-            extra_metadata={
-                "customer_phone": to_phone,
-                "phone": to_phone,
-                "provider": WHATSAPP_PROVIDER_360DIALOG,
-                "phone_number_id": phone_number_id,
-                "message_id": echo.get("id"),
-                "source": "merchant_mobile_app",
-                "echo_type": msg_type,
-            },
+            extra_metadata=extra,
         ))
         convo.status = "active"
         db.add(convo)
@@ -5616,10 +5745,69 @@ async def _handle_merchant_message(
                     inbound_text=text,
                 )
                 if _decision.action == "pause":
-                    _loop_pause_ai(db, convo, reason=_R_LOOP, by="system:loop_pause")
-                    # Send the same canned handoff notice the support
-                    # escalation branch uses; the 30-min cooldown there
-                    # prevents double-sends if multiple turns arrive.
+                    # ── Promote loop-pause to REAL handoff (May 2026 P1) ────
+                    # Pre-fix, this branch only flipped ``ai_paused`` under
+                    # REASON_BOT_LOOP and then sent a text claiming the
+                    # conversation would be transferred to a human. None
+                    # of the canonical handoff flags
+                    # (``status="human"``, ``is_human_handoff``,
+                    # ``needs_human``, ``handoff_active``) were raised, so
+                    # the conversation never showed up in the dashboard's
+                    # "طلب موظف" inbox and the AI silently resumed on the
+                    # next inbound. The fix below mirrors the post-brain
+                    # ACTION_HANDOFF branch (~line 5078): flip every
+                    # canonical flag, open a HandoffSession row, and pause
+                    # the AI under REASON_HUMAN_HANDOFF — so the outbound
+                    # text promise is now backed by real state.
+                    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+                    try:
+                        from core.ai_pause_guard import (  # noqa: PLC0415
+                            REASON_HUMAN_HANDOFF as _R_HOFF,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _R_HOFF = "human_handoff"
+
+                    try:
+                        convo.status = "human"
+                        convo.is_human_handoff = True
+                        convo.needs_human = True
+                        convo.handoff_active = True
+                        if not getattr(convo, "taken_over_at", None):
+                            convo.taken_over_at = _dt.now(_tz.utc)
+                        if not getattr(convo, "taken_over_by", None):
+                            convo.taken_over_by = "system:loop_pause"
+                        db.flush()
+                    except Exception as _flag_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[Merchant/LOOP_HANDOFF] flag-flip failed tenant=%s "
+                            "convo=%s err=%s",
+                            tenant_id, getattr(convo, "id", None), _flag_exc,
+                        )
+
+                    try:
+                        from handoff.manager import create_handoff_session  # noqa: PLC0415
+                        _cust_name = ""
+                        try:
+                            _cust_name = (getattr(convo, "customer", None)
+                                          and (getattr(convo.customer, "name", "") or "")) or ""
+                        except Exception:
+                            _cust_name = ""
+                        create_handoff_session(
+                            db, tenant_id, to, _cust_name, text or "",
+                            reason="bot_loop_handoff",
+                        )
+                    except Exception as _hs_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[Merchant/LOOP_HANDOFF] HandoffSession create failed "
+                            "tenant=%s to=%s err=%s",
+                            tenant_id, to, _hs_exc,
+                        )
+
+                    # Pause AI under HUMAN_HANDOFF (not BOT_LOOP) so the
+                    # ai_pause_guard / dashboard correctly classify why
+                    # the AI stopped.
+                    _loop_pause_ai(db, convo, reason=_R_HOFF, by="system:loop_pause")
+
                     _handoff_text = (
                         "أشوف إنه فيه شيء أحتاج فهمه أكثر — سأحوّل المحادثة "
                         "لفريق المتجر الآن وسيرد عليك أحد الموظفين قريباً 🌷"
@@ -5639,8 +5827,8 @@ async def _handle_merchant_message(
                             tenant_id, to, _send_exc,
                         )
                     logger.info(
-                        "[OUTBOUND] tenant=%s to=%s source=loop_guard_pause trigger=inbound "
-                        "intent=bot_loop_detected handoff_triggered=true dedup_blocked=true "
+                        "[OUTBOUND] tenant=%s to=%s source=loop_guard_handoff trigger=inbound "
+                        "intent=bot_loop_detected handoff_triggered=true handoff_state=flags_set "
                         "loop_score=%d similarity=%.2f reply_len=%d",
                         tenant_id, to, _decision.score, _decision.similarity, len(_handoff_text),
                     )
@@ -5656,6 +5844,40 @@ async def _handle_merchant_message(
                     )
             except Exception as _loop_exc:
                 logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
+
+        # ── Handoff-promise scrub (May 2026 P1, Tenant 33) ─────────────────
+        # Wire-layer safety net: if the reply ABOUT to be sent promises a
+        # human handoff but no handoff state is active on the conversation,
+        # rewrite the reply to a neutral acknowledgement instead of
+        # making a false promise. Two upstream fixes (loop-guard branch
+        # now flips every flag + persona prompt no longer encourages this
+        # language) already cover the known sources — this is the wire
+        # net that catches any future leak.
+        if reply and not _brain_handoff:
+            try:
+                from core.outbound_sanitizer import (  # noqa: PLC0415
+                    maybe_scrub_handoff_promise as _scrub_handoff,
+                )
+                _handoff_state_active = bool(
+                    getattr(convo, "is_human_handoff", False)
+                    or getattr(convo, "needs_human", False)
+                    or getattr(convo, "handoff_active", False)
+                    or (str(getattr(convo, "status", "") or "").lower() == "human")
+                )
+                _new_reply, _scrubbed = _scrub_handoff(
+                    reply,
+                    handoff_state_active=_handoff_state_active,
+                    tenant_id=tenant_id,
+                    recipient=to,
+                )
+                if _scrubbed:
+                    reply = _new_reply
+            except Exception as _scrub_exc:  # noqa: BLE001
+                # The scrub MUST NOT take the send path down.
+                logger.debug(
+                    "[handoff_promise_scrub] evaluate failed (open): %s",
+                    _scrub_exc,
+                )
 
         # Save outbound reply after generation.
         StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)

@@ -864,7 +864,14 @@ _PAYMENT_QUERY_RE = re.compile(
     # Transfer / deposit
     r"تحويل\s*بنك|التحويل\s*البنكي|بيانات\s*التحويل|بيانات\s*الدفع|إيداع|"
     # Barcode / QR
-    r"باركود\s*(التحويل|الدفع|البنك|الراجحي)|qr\s*code|كيوار|كيو\s*ار|"
+    # Two-tier match: a bare ``باركود`` / ``الباركود`` on its own is enough
+    # (May 2026 Tenant 33 incident: "ابي الباركود" was failing the regex
+    # because it lacks a following bank/transfer noun, so the legacy
+    # payment-asset hard-override never ran as a safety net for the
+    # new media_key resolver). The bank-qualified form is still allowed
+    # for explicit phrasings like "باركود التحويل" / "باركود الراجحي".
+    r"باركود(\s*(التحويل|الدفع|البنك|الراجحي))?|"
+    r"الباركود|qr\s*code|كيوار|كيو\s*ار|رمز\s*(الدفع|التحويل|السداد)|"
     # English mirrors for customers who switch to Latin script.
     r"\bbank\s*(account|details|transfer|info)\b|"
     r"\b(send|share|give|need|want)\s+(me|us|the)?\s*(your\s+)?bank\b|"

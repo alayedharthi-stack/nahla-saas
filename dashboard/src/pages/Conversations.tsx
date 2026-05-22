@@ -1163,23 +1163,36 @@ export default function Conversations() {
                             return { icon: '', label: t, type: 'reply' as const }
                           }
 
-                          // Inbound media: render the audio player / image
-                          // preview INSTEAD of the textual bubble. The
-                          // backend already concatenated transcript /
-                          // description into ``body`` for AI context, but
-                          // here we want the merchant to see the actual
-                          // recording / image with the extracted text shown
-                          // discreetly below it (per spec point #9).
-                          const inboundMedia = !isOut && m.media ? m.media : null
+                          // Media preview: render the audio player / image
+                          // preview INSTEAD of the textual bubble.
+                          //
+                          // Originally this only fired for inbound customer
+                          // media (``!isOut && m.media``). May 2026 P1 fix:
+                          // also fire for OUTBOUND merchant-mobile echoes
+                          // (Coexistence ``smb_message_echo``) so an image
+                          // the merchant sent from his mobile WhatsApp app
+                          // appears as a real image instead of the literal
+                          // ``[merchant_image]`` placeholder.
+                          //
+                          // The backend's ``_build_media_block`` only
+                          // returns a non-null ``media`` when a real
+                          // storage URL exists (it reads
+                          // ``extra_metadata.normalized_inbound``), so
+                          // relaxing the guard here cannot accidentally
+                          // render a media bubble for unrelated outbound
+                          // text.
+                          const mediaPreview = m.media || null
 
                           return (
                             <>
-                              {inboundMedia ? (
+                              {mediaPreview ? (
                                 <div className={`
                                   relative px-3 py-2 text-sm leading-relaxed shadow-sm
-                                  bg-white text-slate-800 rounded-2xl rounded-es-sm border border-slate-100
+                                  ${isOut
+                                    ? 'bg-amber-50 text-slate-800 rounded-2xl rounded-ee-sm border border-amber-100'
+                                    : 'bg-white text-slate-800 rounded-2xl rounded-es-sm border border-slate-100'}
                                 `}>
-                                  <InboundMediaPreview media={inboundMedia} />
+                                  <InboundMediaPreview media={mediaPreview} />
                                 </div>
                               ) : (
                                 (() => {
