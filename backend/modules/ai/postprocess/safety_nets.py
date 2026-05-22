@@ -69,7 +69,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     # Some webhook unit tests import this module without a real DB
@@ -113,6 +113,17 @@ def staff_contact_net_enabled() -> bool:
 
 def store_link_net_enabled() -> bool:
     return _flag("STORE_LINK_SAFETY_NET_ENABLED")
+
+
+def location_link_net_enabled() -> bool:
+    """Toggle for the May 2026 #36 maps URL safety net.
+
+    Defaults to ON via :func:`_flag` (which treats unset env vars as
+    enabled) — same convention as :func:`store_link_net_enabled`.
+    Set ``LOCATION_LINK_SAFETY_NET_ENABLED=0`` to kill-switch the
+    maps stack at the platform level if a regression slips through.
+    """
+    return _flag("LOCATION_LINK_SAFETY_NET_ENABLED")
 
 
 def clear_intent_fallback_net_enabled() -> bool:
@@ -702,7 +713,14 @@ def apply_staff_contact_safety_net(
 # requires either "رابط"/"link"/"موقع"/"website" or a self-contained
 # noun like "المتجر الإلكتروني".
 
-# Phrases that mean "send me the store URL".
+# Phrases that mean "send me the *online* store URL".
+#
+# May 2026 #36 carve-out: bare-"موقعكم" / "رابط الموقع" /
+# "رابط موقعكم" phrasings used to live here, which made the
+# store-link safety net rewrite "وين موقعكم؟" with the
+# e-commerce URL even when the customer wanted Google Maps.
+# Those phrases have been moved into :data:`_LOCATION_LINK_TRIGGERS_PHRASE`
+# below — the location safety net handles them now.
 _STORE_LINK_TRIGGERS_PHRASE: set = {
     # Arabic — direct
     "رابط المتجر",
@@ -710,11 +728,7 @@ _STORE_LINK_TRIGGERS_PHRASE: set = {
     "رابط متجركم",
     "رابط متجرك",
     "رابط متجرنا",
-    "رابط الموقع",
-    "رابط موقعكم",
-    "رابط موقعك",
     "موقع المتجر",
-    "موقعكم",
     "ارسل رابط المتجر",
     "أرسل رابط المتجر",
     "ابعث رابط المتجر",
@@ -1121,6 +1135,431 @@ def apply_store_link_safety_net(
 
 
 # ──────────────────────────────────────────────────────────────────
+# 4b. Location / Google Maps Safety Net (May 2026 #36)
+# ──────────────────────────────────────────────────────────────────
+#
+# Mirror of the store-link stack above for **physical-location** /
+# Google-Maps questions. The two paths are deliberately kept
+# separate even though they share the same skeleton:
+#
+#   * ``store_url`` answers "where is your *online* shop" — it's an
+#     e-commerce CTA URL.
+#   * ``maps_url`` answers "where is your *physical* shop" — it's a
+#     Google / Apple / Waze maps deep link.
+#
+# Bug class this safety net closes: a customer asks "وين موقعكم؟"
+# and the LLM ships the e-commerce ``store_url`` because that's
+# the only deterministic asset it knows how to resolve. The
+# maps URL is right there in ``store_settings.google_maps_location``
+# and frequently in a free-form KB section under ``kind=branches``
+# — but no resolver was looking. This safety net fires only after
+# intent detection (so it never overrides a payment / order flow)
+# and only when the LLM's reply does NOT already carry a maps URL.
+
+# Phrases that mean "send me the *physical* location URL". Kept
+# disjoint from :data:`_STORE_LINK_TRIGGERS_PHRASE` so a single
+# inbound message can never fire both nets at once.
+_LOCATION_LINK_TRIGGERS_PHRASE: set = {
+    # Arabic — direct location asks
+    "موقعكم",
+    "موقعك",
+    "وين موقعكم",
+    "أين موقعكم",
+    "وين الموقع",
+    "أين الموقع",
+    "وين موقع",
+    "وين مقركم",
+    "أين مقركم",
+    "مقر شركتكم",
+    "وين المحل",
+    "أين المحل",
+    "وين فرعكم",
+    "أين فرعكم",
+    "وين الفرع",
+    "أين الفرع",
+    "عندكم فرع",
+    "فروعكم",
+    "وين فروعكم",
+    "أين فروعكم",
+    "أبي أزوركم",
+    "أبي أزوركم",
+    "أبي أجي للمحل",
+    "ابي ازوركم",
+    "ابي اجي للمحل",
+    "نزور المحل",
+    "نزوركم",
+    "عنوانكم",
+    "عنوان المحل",
+    "عنوان الفرع",
+    "وين عنوانكم",
+    # Arabic — maps phrasings
+    "خرايط",
+    "الخرايط",
+    "خريطة",
+    "الخريطة",
+    "على الخريطة",
+    "على الخرايط",
+    "رابط الموقع",
+    "رابط موقعكم",
+    "رابط موقعك",
+    "رابط الخريطة",
+    "رابط الخرايط",
+    "رابط اللوكيشن",
+    "ارسل لي اللوكيشن",
+    "أرسل لي اللوكيشن",
+    "ابعث اللوكيشن",
+    "أبعث اللوكيشن",
+    "ابي اللوكيشن",
+    "أبي اللوكيشن",
+    "ابغى اللوكيشن",
+    "أبغى اللوكيشن",
+    "لوكيشن",
+    "اللوكيشن",
+    "لوكيشن المحل",
+    "لوكيشن المتجر",
+    "لوكيشن الفرع",
+    # English — maps phrasings
+    "google maps",
+    "google map",
+    "map link",
+    "map url",
+    "your location",
+    "your address",
+    "store location",
+    "branch location",
+    "physical store",
+    "where is your shop",
+    "where is your branch",
+    "where are you located",
+}
+
+
+# Generic "here is the location" markers — used to decide whether to
+# REPLACE the LLM reply (short stub) or APPEND the URL (longer body
+# the LLM already wrote). Mirrors the store-link version.
+_GENERIC_HERE_IS_THE_LOCATION_MARKERS: tuple = (
+    "هذا موقعنا",
+    "هذي موقعنا",
+    "موقعنا هنا",
+    "هذا هو موقعنا",
+    "هذا الموقع",
+    "تفضل الموقع",
+    "تفضل اللوكيشن",
+)
+
+
+# Free-form KB section kinds we sweep for a maps URL when neither
+# the snapshot nor TenantSettings has one. ``branches`` is the
+# canonical location bucket; we also peek at ``store_story`` and
+# ``custom`` because a sizeable share of merchants paste their
+# Google Maps link there in early onboarding.
+_MAPS_KB_FALLBACK_KINDS: tuple = ("branches", "store_story", "custom")
+
+
+# Recognised maps host fragments. We require one of these to appear
+# in a candidate URL extracted from a KB section so we don't
+# accidentally promote a random Salla product link to the maps slot.
+_MAPS_HOST_HINTS: tuple = (
+    "google.com/maps",
+    "google.com.sa/maps",
+    "maps.google.",
+    "maps.app.goo.gl",
+    "goo.gl/maps",
+    "apple.com/maps",
+    "maps.apple.com",
+    "waze.com",
+    "what3words.com",
+    "what3words.",
+    "/maps/",
+)
+
+
+_KB_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+@dataclass
+class LocationLinkSafetyNetResult:
+    fired: bool = False
+    reason: str = ""
+    skipped_reason: str = ""
+    rewrote_reply: bool = False
+    maps_url: str = ""
+    source: str = ""           # snapshot | store_settings | kb:<kind> | none
+    new_reply: str = ""
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        return {
+            "kind":             "location_link",
+            "fired":            self.fired,
+            "reason":           self.reason or self.skipped_reason,
+            "rewrote_reply":    self.rewrote_reply,
+            "maps_url_present": bool(self.maps_url),
+            "source":           self.source,
+        }
+
+
+def _looks_like_location_request(customer_msg: str) -> bool:
+    """True when the inbound message is a physical-location ask.
+
+    Sibling of :func:`_looks_like_store_link_request` — uses the same
+    normalise + phrase-match strategy so behaviour is predictable.
+    The trigger sets are disjoint, so a single message can fire AT
+    MOST one of the two nets per turn.
+    """
+    msg = _normalise_for_match(customer_msg)
+    if not msg:
+        return False
+    msg_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", msg)
+    msg_compact = re.sub(r"\s+", " ", msg_compact).strip()
+    for phrase in _LOCATION_LINK_TRIGGERS_PHRASE:
+        if phrase in msg_compact:
+            return True
+    return False
+
+
+def _looks_like_bare_location_intro(reply: str) -> bool:
+    """True when the LLM emitted a short generic "here is our location"
+    line with no URL — same heuristic as
+    :func:`_looks_like_bare_store_intro` but with location markers."""
+    if not reply:
+        return True
+    trimmed = (reply or "").strip()
+    short = len(trimmed) <= 60
+    norm = _normalise_for_match(trimmed)
+    has_marker = any(m in norm for m in _GENERIC_HERE_IS_THE_LOCATION_MARKERS)
+    return short and has_marker
+
+
+def _extract_maps_url_from_text(body: str) -> str:
+    """Return the first plausible maps URL in ``body`` or empty string.
+
+    Used by the KB-section fallback layer of the resolver. We
+    intentionally do NOT promote any old URL — only those whose
+    host segment matches :data:`_MAPS_HOST_HINTS`. This avoids
+    accidentally promoting a Salla product link or a YouTube embed
+    to the maps slot just because it happens to live in the same KB
+    section.
+    """
+    if not body:
+        return ""
+    for raw in _KB_URL_RE.findall(body):
+        candidate = raw.strip(" \t\n.,،;:)\"]'>")
+        low = candidate.lower()
+        for hint in _MAPS_HOST_HINTS:
+            if hint in low:
+                return candidate
+    return ""
+
+
+def _lookup_tenant_maps_url(db: Any, tenant_id: int) -> Tuple[str, str]:
+    """Resolve the canonical maps URL for ``tenant_id``.
+
+    Resolution chain (May 2026 #36 — platform-wide maps stack):
+
+      1. ``StoreKnowledgeSnapshot.store_profile["maps_url"]`` —
+         the synced source mirrored from
+         ``store_settings.google_maps_location`` by
+         :func:`services.store_sync._rebuild_snapshot`.
+      2. ``TenantSettings.store_settings["google_maps_location"]`` —
+         the dashboard's "Store" tab. Fallback for tenants who
+         filled the maps slot but whose snapshot has not been
+         rebuilt since (or who don't have a snapshot at all
+         because they're on the Nahla-native shop without an
+         outside integration — see Phase-1 audit, May 2026 #36).
+      3. Free-form KB sections in :data:`_MAPS_KB_FALLBACK_KINDS`
+         (``branches`` / ``store_story`` / ``custom``). We scan
+         their ``body`` for the first URL whose host matches
+         :data:`_MAPS_HOST_HINTS`. This closes the gap for
+         merchants who never touched a structured field but did
+         paste their Google Maps link into the "الفروع" bucket
+         in onboarding — the URL is sitting there but no
+         resolver was looking.
+
+    Returns a ``(url, source)`` tuple where ``source`` ∈
+    ``{"snapshot", "store_settings", "kb:<kind>", "none"}``. Never
+    raises; degrade to the next layer on any failure.
+
+    Logs a single ``[MAPS_LINK_RESOLVER]`` INFO line per call so
+    production traffic can be audited via grep without enabling
+    DEBUG. Mirrors the ``[STORE_LINK_RESOLVER]`` shape.
+    """
+    if db is None or not tenant_id:
+        return "", "none"
+    tenant_id = int(tenant_id)
+
+    # ── 1) Synced store profile (StoreKnowledgeSnapshot) ────────────
+    try:
+        from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415
+        loader = StoreKnowledgeLoader(db, tenant_id)
+        profile = loader.store_profile() or {}
+        url = _normalise_url(profile.get("maps_url"))
+        if url:
+            logger.info(
+                "[MAPS_LINK_RESOLVER] tenant_id=%s source=snapshot url_len=%d",
+                tenant_id, len(url),
+            )
+            return url, "snapshot"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.maps_link | snapshot lookup failed tenant=%s "
+            "err=%s", tenant_id, exc,
+        )
+
+    # ── 2) TenantSettings.store_settings.google_maps_location ───────
+    try:
+        from core.tenant import (  # noqa: PLC0415
+            DEFAULT_STORE,
+            get_or_create_settings, merge_defaults,
+        )
+        settings = get_or_create_settings(db, tenant_id)
+        store_cfg = merge_defaults(settings.store_settings, DEFAULT_STORE)
+        url = _normalise_url(store_cfg.get("google_maps_location"))
+        if url:
+            logger.info(
+                "[MAPS_LINK_RESOLVER] tenant_id=%s source=store_settings "
+                "url_len=%d", tenant_id, len(url),
+            )
+            return url, "store_settings"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.maps_link | settings lookup failed tenant=%s "
+            "err=%s", tenant_id, exc,
+        )
+
+    # ── 3) KB free-form sections (branches / store_story / custom) ─
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        rows = (
+            db.query(MerchantKnowledgeSection)
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.is_active.is_(True),
+                MerchantKnowledgeSection.kind.in_(_MAPS_KB_FALLBACK_KINDS),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .limit(20)
+            .all()
+        )
+        for row in rows:
+            body = getattr(row, "body", "") or ""
+            url = _extract_maps_url_from_text(body)
+            if not url:
+                continue
+            url = _normalise_url(url)
+            if url:
+                logger.info(
+                    "[MAPS_LINK_RESOLVER] tenant_id=%s source=kb:%s "
+                    "section_id=%s url_len=%d",
+                    tenant_id, row.kind, row.id, len(url),
+                )
+                return url, f"kb:{row.kind}"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.maps_link | KB lookup failed tenant=%s err=%s",
+            tenant_id, exc,
+        )
+
+    logger.info(
+        "[MAPS_LINK_RESOLVER] tenant_id=%s source=none url_len=0 "
+        "reason=no_source_configured",
+        tenant_id,
+    )
+    return "", "none"
+
+
+# Honest fallback when no maps URL is configured anywhere. We do
+# NOT swap in the e-commerce ``store_url`` (the original bug) and
+# we do NOT promise to "send the location later" — that would
+# trip ``maybe_scrub_unkept_asset_promise``. Instead we ask one
+# clarifying question that the merchant can answer manually.
+_FALLBACK_NO_MAPS_URL_REPLY_AR = (
+    "تأمر أمر 🌷 خبّرنا أي فرع أو مدينة تبحث عنها وسنرسل العنوان "
+    "والتفاصيل."
+)
+
+
+def _build_location_reply(maps_url: str) -> str:
+    """Canonical Arabic reply when we DO have a maps URL. Kept short
+    so WhatsApp renders the link as a tappable preview / lifts it
+    into a CTA button."""
+    return f"موقعنا 📍\n{maps_url}"
+
+
+def apply_location_safety_net(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_msg: str,
+    reply_text: str,
+) -> LocationLinkSafetyNetResult:
+    """Guarantee the maps URL lands when the customer asked for it.
+
+    Behaviour matrix mirrors :func:`apply_store_link_safety_net`:
+
+    +-----------------------------+--------------------------------+
+    | location intent? | URL in reply? | action                    |
+    +==================+===============+============================+
+    | yes              | yes (maps)    | no-op (skip)              |
+    | yes              | no            | rewrite / append URL      |
+    | no               | -             | no-op (skip)              |
+    +------------------+---------------+----------------------------+
+
+    "URL in reply" is intentionally STRICT — we only skip when the
+    reply contains a URL whose host hints look like a maps URL.
+    A reply that contains *only* the e-commerce store URL still
+    fires this net so we can append the maps URL; that's the
+    exact fix for "وين موقعكم → سترسل رابط المتجر" feedback.
+    """
+    result = LocationLinkSafetyNetResult()
+
+    if not location_link_net_enabled():
+        result.skipped_reason = "flag_disabled"
+        return result
+
+    if not _looks_like_location_request(customer_msg or ""):
+        result.skipped_reason = "no_location_intent"
+        return result
+    result.reason = "intent_detected"
+
+    if reply_text:
+        # Only skip when the LLM already shipped a *maps* URL — a
+        # generic store URL must not block the maps net.
+        for raw in _KB_URL_RE.findall(reply_text):
+            low = raw.lower()
+            if any(h in low for h in _MAPS_HOST_HINTS):
+                result.skipped_reason = "maps_url_already_in_reply"
+                return result
+
+    maps_url, source = _lookup_tenant_maps_url(db, tenant_id)
+    result.maps_url = maps_url
+    result.source = source
+
+    if maps_url:
+        if _looks_like_bare_location_intro(reply_text or ""):
+            result.new_reply = _build_location_reply(maps_url)
+        elif reply_text and reply_text.strip():
+            sep = "\n" if reply_text.endswith("\n") else "\n\n"
+            result.new_reply = (
+                reply_text.rstrip() + sep + _build_location_reply(maps_url)
+            )
+        else:
+            result.new_reply = _build_location_reply(maps_url)
+        result.fired = True
+        result.rewrote_reply = True
+        result.reason = f"maps_url_injected:{source}"
+        return result
+
+    result.new_reply = _FALLBACK_NO_MAPS_URL_REPLY_AR
+    result.fired = True
+    result.rewrote_reply = True
+    result.reason = "fallback_no_maps_url_configured"
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────
 # 5. Clear-Intent Fallback Safety Net
 # ──────────────────────────────────────────────────────────────────
 #
@@ -1225,7 +1664,13 @@ _INTENT_ORDER = "order"
 # is to PLACE AN ORDER.
 _CLEAR_INTENT_LEXICON: Dict[str, tuple] = {
     _INTENT_STORE_LINK: (
-        "رابط المتجر", "رابط الموقع", "موقعكم", "اللينك",
+        # NOTE (May 2026 #36): "رابط الموقع" / "موقعكم" used to live
+        # here, which let the clear-intent fallback substitute the
+        # e-commerce store URL for physical-location asks. The
+        # location safety net (``apply_location_safety_net``) handles
+        # those phrasings now; this lexicon is intentionally narrowed
+        # to UNAMBIGUOUS online-store mentions.
+        "رابط المتجر", "اللينك", "المتجر الالكتروني",
         "store link", "store url", "website link",
     ),
     _INTENT_OFFERS: (
@@ -1764,18 +2209,21 @@ __all__ = [
     "MediaKeySafetyNetResult",
     "StaffContactSafetyNetResult",
     "StoreLinkSafetyNetResult",
+    "LocationLinkSafetyNetResult",
     "ClearIntentFallbackResult",
     "DeliveryInfoContextResult",
     "apply_product_safety_net",
     "apply_media_key_safety_net",
     "apply_staff_contact_safety_net",
     "apply_store_link_safety_net",
+    "apply_location_safety_net",
     "apply_clear_intent_fallback_net",
     "apply_delivery_info_context_net",
     "product_net_enabled",
     "media_key_net_enabled",
     "staff_contact_net_enabled",
     "store_link_net_enabled",
+    "location_link_net_enabled",
     "clear_intent_fallback_net_enabled",
     "delivery_info_context_net_enabled",
 ]

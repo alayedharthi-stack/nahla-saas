@@ -45,6 +45,7 @@ from .actions import (
     ACTION_OUT_OF_SCOPE,
 )
 from ..types import (
+    INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_PAYMENT_INFO,
     INTENT_GREETING,
@@ -444,7 +445,7 @@ class DefaultDecisionEngine:
         )
         if _candidates and not _in_data_collection and intent.name not in (
             INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
-            INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
+            INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
         ):
             _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
@@ -1173,7 +1174,20 @@ class DefaultDecisionEngine:
             return Decision(
                 action=ACTION_FAQ_REPLY,
                 args={"topic": "store_info"},
-                reason="customer asked for store info / link / location",
+                reason="customer asked for the e-commerce store link",
+            )
+
+        if intent.name == INTENT_ASK_LOCATION:
+            # Physical-shop / Google-Maps questions get their own
+            # FAQ topic so the deterministic template + maps resolver
+            # chain can deliver the maps URL. Routing this to
+            # ``store_info`` (the previous behaviour) would silently
+            # return the e-commerce storefront link instead — the
+            # exact bug May 2026 #36 set out to fix.
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "location"},
+                reason="customer asked for the physical shop / Google Maps location",
             )
 
         if intent.name == INTENT_ASK_PAYMENT_INFO:

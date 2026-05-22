@@ -153,6 +153,11 @@ class DefaultFactsLoader:
                 profile.get("store_name", "") or "",
             )
             facts.store_url = profile.get("store_url", "") or ""
+            # ``maps_url`` mirrors ``store_settings.google_maps_location``
+            # via _rebuild_snapshot. Empty string when no maps URL has
+            # been configured anywhere — the FAQ template handles
+            # the empty case honestly. See May 2026 #36.
+            facts.maps_url = profile.get("maps_url", "") or ""
             facts.store_description = profile.get("description", "") or ""
             facts.store_contact_phone = profile.get("contact_phone", "") or ""
             facts.store_contact_email = profile.get("contact_email", "") or ""
@@ -192,6 +197,17 @@ class DefaultFactsLoader:
                 assistant_name = str(ai_settings.get("assistant_name") or "").strip()
                 if assistant_name:
                     facts.assistant_name = assistant_name
+                # Fallback maps URL when the snapshot didn't carry it.
+                # Tenants on the native Nahla shop (no integration) may
+                # not have a snapshot yet, but they DO populate
+                # ``store_settings.google_maps_location`` from the
+                # dashboard. We bridge that gap here so the maps
+                # resolver can still find a URL on those tenants.
+                if not facts.maps_url:
+                    store_cfg = settings.store_settings or {}
+                    maps_url = str(store_cfg.get("google_maps_location") or "").strip()
+                    if maps_url:
+                        facts.maps_url = maps_url
         except Exception:
             pass   # working hours / persona are optional — never block a turn
 

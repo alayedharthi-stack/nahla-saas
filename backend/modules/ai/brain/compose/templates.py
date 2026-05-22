@@ -669,6 +669,30 @@ def faq_store_info(
     return f"هذا {name} 🌷"
 
 
+def faq_location(
+    store_name: str = "",
+    maps_url: str = "",
+    **_: Any,
+) -> str:
+    """Physical-shop / Google-Maps reply.
+
+    Mirrors :func:`faq_store_info` in shape — short header, then the
+    URL on its own line so the CTA-button normaliser can lift it
+    into a "موقعنا على الخرايط" button. When no maps URL is
+    available we DON'T silently substitute the e-commerce
+    ``store_url`` (the bug May 2026 #36 fixed); instead we ask the
+    customer to share which branch they're after, which the
+    location safety net will flag for telemetry.
+    """
+    name = store_name or "متجرنا"
+    if maps_url:
+        return f"موقعنا 📍\n{maps_url}"
+    return (
+        f"حياك الله 🌷 لنبعث لك موقعنا على الخرايط"
+        f"\nعطنا اسم الفرع أو المدينة وأبشر."
+    )
+
+
 def faq_shipping(
     shipping_policy: str = "",
     shipping_methods: List[str] | None = None,

@@ -787,6 +787,11 @@ def build_merchant_context(
         store_profile["store_name"] = store_settings.get("store_name")
     if store_settings.get("store_url") and not store_profile.get("store_url"):
         store_profile["store_url"] = store_settings.get("store_url")
+    # Mirror google_maps_location → store_profile["maps_url"] so brain
+    # facts and orchestrator payloads have access to the maps URL even
+    # before the next snapshot rebuild lands the field structurally.
+    if store_settings.get("google_maps_location") and not store_profile.get("maps_url"):
+        store_profile["maps_url"] = store_settings.get("google_maps_location")
     if store_profile.get("store_name"):
         store_profile["store_name"] = clean_store_name(str(store_profile["store_name"]))
 

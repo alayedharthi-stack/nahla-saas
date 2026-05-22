@@ -6388,6 +6388,7 @@ async def _handle_merchant_message(
                 apply_media_key_safety_net as _sn_media_key,
                 apply_staff_contact_safety_net as _sn_staff,
                 apply_store_link_safety_net as _sn_store_link,
+                apply_location_safety_net as _sn_location,
                 apply_delivery_info_context_net as _sn_delivery_ctx,
                 apply_clear_intent_fallback_net as _sn_clear_intent,
             )
@@ -6524,6 +6525,45 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[SAFETY_NET:store_link] failed tenant=%s err=%s",
                     tenant_id, _sle,
+                )
+
+            # ── Location / Google Maps safety net (May 2026 #36) ────
+            # Sibling of the store-link net. Customer asked "وين
+            # موقعكم؟" / "ابي رابط الموقع" / "اللوكيشن" and the LLM
+            # either omitted any URL or shipped the e-commerce
+            # ``store_url`` instead of Google Maps. We resolve the
+            # canonical maps URL via the platform-wide chain
+            # (snapshot → store_settings.google_maps_location → KB
+            # branches/store_story/custom sections) and inject it
+            # so the customer gets a tappable maps preview. NEVER
+            # invents a URL — falls back to a polite clarifying
+            # line when nothing is configured.
+            try:
+                _ll = _sn_location(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                )
+                if _ll.fired and _ll.rewrote_reply and _ll.new_reply:
+                    reply = _ll.new_reply
+                if _ll.fired or _ll.skipped_reason not in {
+                    "no_location_intent", "maps_url_already_in_reply",
+                }:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_ll.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:location_link] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _lle:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:location_link] failed tenant=%s err=%s",
+                    tenant_id, _lle,
                 )
 
             # ── Delivery-info context safety net (May 2026) ──────────

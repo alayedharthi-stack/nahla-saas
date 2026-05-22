@@ -28,6 +28,16 @@ INTENT_START_ORDER   = "start_order"
 INTENT_PAY_NOW       = "pay_now"
 INTENT_ASK_SHIPPING  = "ask_shipping"
 INTENT_ASK_STORE_INFO = "ask_store_info"
+# Physical-location / Google-Maps / branch-address questions. Carved
+# out of the broader STORE_INFO bucket so the brain can deliver the
+# Maps URL deterministically — instead of falling back to the
+# e-commerce ``store_url`` template, which used to silently swap a
+# storefront link in for "وين موقعكم؟". Routed to ``ACTION_FAQ_REPLY``
+# with ``topic="location"`` and resolved via the new maps URL chain
+# (snapshot.maps_url → store_settings.google_maps_location → KB
+# section kind=branches body URL). See May 2026 #36 / Phase 1
+# diagnosis report.
+INTENT_ASK_LOCATION       = "ask_location"
 INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
 # Bank-transfer / IBAN / payment-barcode / QR style requests. Carved out
 # of the broader OWNER_CONTACT bucket so the brain can attach a matching
@@ -503,6 +513,11 @@ class CommerceFacts:
     blocked_categories: List[str] = field(default_factory=list)
     store_name: str = ""
     store_url: str = ""
+    # Physical-location URL (Google / Apple / Waze maps) — populated
+    # from the May 2026 #36 maps resolver chain. Empty string means
+    # the merchant has not configured a maps URL anywhere; the FAQ
+    # template falls back to an honest clarifying line in that case.
+    maps_url: str = ""
     store_description: str = ""
     store_contact_phone: str = ""
     store_contact_email: str = ""

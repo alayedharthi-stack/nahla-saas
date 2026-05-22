@@ -753,9 +753,18 @@ def section_red_flags(state: dict) -> list[str]:
             )
 
     if maps.get("settings_maps"):
+        # May 2026 #36 platform-level fix landed: snapshot mirror,
+        # _lookup_tenant_maps_url chain, apply_location_safety_net,
+        # INTENT_ASK_LOCATION + faq_location template are all wired.
+        # We only flag this row when a known *upstream* gap remains
+        # (e.g. snapshot stale and the new mirror has not been
+        # written yet) — we don't repeat the design-gap text for
+        # tenants who already benefit from the new resolver.
         flags.append(
-            "google_maps_location is set in settings BUT cannot be delivered — "
-            "no snapshot mirror, no maps-URL resolver, no safety net. **DESIGN GAP.**"
+            "google_maps_location is set in settings — delivered via the maps "
+            "resolver chain (snapshot → store_settings → KB branches/store_story/custom). "
+            "If a recent test still returns the e-commerce store URL instead, the "
+            "snapshot may be stale (force a rebuild) or all chain layers are empty."
         )
 
     if not state.get("staff", {}).get("owner_whatsapp_number") and not state.get("staff", {}).get("distinct_phones_in_freetext"):
@@ -823,11 +832,19 @@ def section_canonical_asks(state: dict) -> dict:
         bool(store.get("would_resolve")),
         f"source={store.get('source')} url={_preview(store.get('final_resolved'), limit=80)}",
     )
+    # May 2026 #36 (Maps stack) — full resolver chain now wired:
+    # snapshot → store_settings.google_maps_location → KB branches/
+    # store_story/custom sections that contain a maps-host URL.
+    _maps_would_resolve = bool(maps.get("settings_maps"))
+    _maps_evidence = (
+        f"settings.google_maps_location={_preview(maps.get('settings_maps'), limit=80)} "
+        f"— resolved via _lookup_tenant_maps_url + apply_location_safety_net"
+    )
     _sim(
         "وين موقعكم على الخرايط",
-        False,
-        f"settings.google_maps_location={_preview(maps.get('settings_maps'), limit=80)} — but no resolver wired",
-        design_gap=True,
+        _maps_would_resolve,
+        _maps_evidence,
+        design_gap=not _maps_would_resolve,
     )
     _sim(
         "ابي أكلم أمين / المحاسب",

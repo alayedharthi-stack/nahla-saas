@@ -802,6 +802,11 @@ class StoreSyncService:
         snap.store_profile = {
             "store_name":    store_cfg.get("store_name", ""),
             "store_url":     store_cfg.get("store_url", ""),
+            # Physical-location URL (Google / Apple / Waze maps).
+            # Mirrored here so the merchant brain can deliver the maps
+            # link deterministically without hitting the relational
+            # store every turn — see May 2026 #36 maps stack.
+            "maps_url":      store_cfg.get("google_maps_location", ""),
             "logo_url":      store_cfg.get("logo_url", ""),
             "description":   store_cfg.get("store_description", ""),
             "contact_phone": wa_cfg.get("owner_whatsapp_number", ""),

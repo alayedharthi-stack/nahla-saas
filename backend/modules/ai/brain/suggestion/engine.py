@@ -72,6 +72,15 @@ class DefaultSuggestionEngine:
                 suggestion.needs_follow_up_question = False
                 suggestion.route_to_checkout = False
                 return suggestion
+            if topic == "location":
+                # Same UX contract as ``store_info``: ship the maps URL
+                # on its own line so the wire layer can lift it into
+                # a single "موقعنا" button. No sales follow-up — the
+                # customer wanted the location, not a product nudge.
+                suggestion.suggested_next_step = "maps_link_delivered"
+                suggestion.needs_follow_up_question = False
+                suggestion.route_to_checkout = False
+                return suggestion
             if topic == "shipping":
                 suggestion.suggested_next_step = "select_product_before_shipping_details"
                 suggestion.needs_follow_up_question = True

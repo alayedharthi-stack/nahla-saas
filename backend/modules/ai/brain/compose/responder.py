@@ -64,6 +64,7 @@ from ..decision.actions import (
 )
 from ..execution.faq import (
     TOPIC_IDENTITY,
+    TOPIC_LOCATION,
     TOPIC_OWNER_CONTACT,
     TOPIC_SHIPPING,
     TOPIC_STORE_INFO,
@@ -171,6 +172,14 @@ class DefaultComposer:
                         store_name=payload.get("store_name", ""),
                         store_url=payload.get("store_url", ""),
                         store_description=payload.get("store_description", ""),
+                    ),
+                    ctx,
+                )
+            if topic == TOPIC_LOCATION:
+                return self._with_follow_up(
+                    T.faq_location(
+                        store_name=payload.get("store_name", ""),
+                        maps_url=payload.get("maps_url", ""),
                     ),
                     ctx,
                 )

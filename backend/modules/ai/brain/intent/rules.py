@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ..types import (
+    INTENT_ASK_LOCATION,
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
@@ -231,15 +232,44 @@ _register(RuleSet(
     confidence=0.90,
 ))
 
-# ── Store info / location / link ─────────────────────────────────────────────
+# ── Store info / e-commerce link ─────────────────────────────────────────────
+# The patterns here are intentionally narrowed to the *online store* —
+# physical-shop / Google-Maps phrasings were carved out into a
+# dedicated INTENT_ASK_LOCATION rule below (May 2026 #36) so the
+# brain can ship the maps URL deterministically instead of returning
+# the e-commerce storefront link for "وين موقعكم".
 _register(RuleSet(
     intent=INTENT_ASK_STORE_INFO,
     patterns=[
-        r"(وين المتجر|أين المتجر|وين موقعكم|موقعكم|رابط المتجر|رابط الموقع|عن المتجر|تعريف المتجر)",
-        r"(عندكم موقع|من وين أطلب|وين ألقى المتجر|لوكيشن المتجر|عنوان المتجر)",
-        r"(store link|store url|where is your store|about the store)",
+        r"(رابط المتجر|رابط متجركم|متجركم الإلكتروني|المتجر الإلكتروني)",
+        r"(لينك المتجر|الموقع الإلكتروني|عن المتجر|تعريف المتجر|وين متجركم الإلكتروني)",
+        r"(store link|store url|website link|online store|where is your store online|about the store)",
     ],
     confidence=0.92,
+))
+
+
+# ── Physical location / Google Maps / branch address ─────────────────────────
+# Confidence 0.93 (one notch above ASK_STORE_INFO 0.92) so a phrasing
+# like "وين موقعكم؟" — which COULD theoretically also brush
+# ASK_STORE_INFO by virtue of containing "موقع" — picks the
+# location intent first. The downstream maps resolver is
+# deterministic; if no maps URL is configured, the FAQ template
+# falls back to an honest clarifying line instead of the
+# e-commerce store URL.
+_register(RuleSet(
+    intent=INTENT_ASK_LOCATION,
+    patterns=[
+        # Location / map phrasings — Saudi & GCC dialects.
+        r"(وين موقعكم|أين موقعكم|موقعكم|وين الموقع|وين المحل|وين مقركم|مقر شركتكم)",
+        r"(لوكيشن|لوكيشن المحل|لوكيشن المتجر|لوكيشن الفرع|عنوان المحل|عنوان الفرع|عنوانكم)",
+        r"(الفرع|فروعكم|عندكم فرع|وين فرعكم|أبي أزوركم|أبي أجي للمحل|نزور المحل|نزوركم)",
+        r"(خرايط|الخرائط|خريطة|على الخريطة|رابط الموقع|رابط الخريطة|رابط الخرايط|رابط اللوكيشن)",
+        # English / mixed
+        r"(google maps|google\s*map|location|address|where is your shop|where is your branch|"
+        r"map link|store location|branch location|physical store)",
+    ],
+    confidence=0.93,
 ))
 
 # ── Payment info / bank transfer / IBAN / barcode (registered BEFORE
@@ -672,6 +702,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
+    INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_TRACK_ORDER,
     INTENT_PLATFORM_INQUIRY,
