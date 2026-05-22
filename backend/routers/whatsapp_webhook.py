@@ -6462,6 +6462,7 @@ async def _handle_merchant_message(
                 apply_location_safety_net as _sn_location,
                 apply_delivery_info_context_net as _sn_delivery_ctx,
                 apply_clear_intent_fallback_net as _sn_clear_intent,
+                apply_outbound_artifact_guard as _sn_artifact_guard,
             )
             import json as _json_sn  # noqa: PLC0415
 
@@ -6682,6 +6683,50 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[SAFETY_NET:delivery_info_context] failed tenant=%s err=%s",
                     tenant_id, _dle,
+                )
+
+            # ── Outbound artifact guard (May 2026 #37 / D2) ──────────
+            # Final hollow-affirmation guard. Catches the residual
+            # case where every upstream net passed (or didn't fire)
+            # and the LLM still shipped a short "أبشر" / "تفضل"
+            # reply for a customer who explicitly asked for a
+            # phone / barcode / maps URL / store URL. Either
+            # injects the artifact (when resolvable from KB /
+            # tenant settings) or rewrites to an honest "غير مضاف
+            # حاليًا" line so we never promise a delivery the
+            # customer doesn't receive. Runs before the generic
+            # clear-intent fallback so artifact-specific copy
+            # wins over the generic "I didn't understand" copy.
+            try:
+                _ag = _sn_artifact_guard(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                    media_attachments=_media_attachments,
+                    call_targets=_call_targets,
+                )
+                if _ag.fired and _ag.rewrote_reply and _ag.new_reply:
+                    reply = _ag.new_reply
+                # Always log the outcome — including the
+                # ``action="pass"`` path — so production triage
+                # can chart how often each artifact class actually
+                # gets satisfied vs rewritten.
+                logger.info(
+                    "[OUTBOUND_ARTIFACT_GUARD] tenant=%s "
+                    "artifact=%s expected=%s satisfied=%s "
+                    "action=%s skipped_reason=%s",
+                    tenant_id,
+                    _ag.expected_artifact,
+                    _ag.expected_artifact != "none",
+                    _ag.artifact_satisfied,
+                    _ag.action,
+                    _ag.skipped_reason or "-",
+                )
+            except Exception as _age:  # noqa: BLE001
+                logger.warning(
+                    "[OUTBOUND_ARTIFACT_GUARD] failed tenant=%s err=%s",
+                    tenant_id, _age,
                 )
 
             # ── Clear-intent fallback safety net (May 2026) ──────────

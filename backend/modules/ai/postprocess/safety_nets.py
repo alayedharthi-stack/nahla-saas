@@ -2468,6 +2468,607 @@ def apply_delivery_info_context_net(
     return result
 
 
+# ══════════════════════════════════════════════════════════════════
+# 7. Outbound Artifact Guard — hollow-affirmation rewriter
+#    (May 2026 #37 — D2 / "guard outbound artifact promises")
+# ══════════════════════════════════════════════════════════════════
+#
+# Final safety net. Runs AFTER every other net has had its turn.
+# Catches the residual case where the customer asked for a
+# concrete artifact (a phone number, a payment barcode, a maps
+# URL, a store URL) and the LLM replied with a short
+# affirmation that *sounds* like delivery — "أبشر", "تفضل",
+# "تم", "حاضر" — but contains no actual artifact. Pre-fix
+# (production trace, May 2026 #36 follow-up) the customer saw:
+#
+#     Customer: "عطني رقم أمين"
+#     Bot:      "أبشر 🌷"
+#     Customer: "هيا عطني"
+#     Bot:      "تفضل أبو خلف 🌷"
+#     Customer: "ما جاني شي"
+#
+# That is worse than honest unavailability — it implies a
+# delivery the customer never receives.
+#
+# Guard contract:
+#   1. Classify the customer's expected artifact (or "none").
+#   2. Probe the post-net reply for actual delivery (phone digits
+#      / maps URL / store URL / barcode media).
+#   3. If satisfied → ``action="pass"`` and no rewrite.
+#   4. If NOT satisfied AND the reply is a HOLLOW affirmation
+#      (short, "أبشر"-shaped) → rewrite to either an injected
+#      artifact (when resolvable) or an honest "غير مضاف
+#      حاليًا" fallback.
+#   5. If NOT satisfied AND the reply is natural prose (longer,
+#      explanatory) → pass-through. We never override a
+#      substantive reply.
+#   6. If the reply ALREADY uses an honest "غير متوفر" /
+#      "لم تتم إضافة" phrase → pass-through. Merchants who
+#      coached the AI into honesty get to keep that voice.
+#
+# Platform-level: every merchant gets the guard with no opt-in.
+# All resolutions go through the same chains the upstream nets
+# use (``_lookup_tenant_store_url``, ``_lookup_tenant_maps_url``,
+# ``_lookup_staff_phone_in_kb``) so configuration stays in one
+# place.
+
+# Hollow affirmation tokens — short standalone phrases that
+# *promise* delivery without delivering. The order doesn't matter;
+# we run a substring check against the alif-folded reply.
+_HOLLOW_AFFIRMATION_TOKENS: Tuple[str, ...] = (
+    "أبشر", "ابشر",
+    "تفضل", "تفضلي",
+    "تم",
+    "حاضر",
+    "أكيد", "اكيد",
+    "أرسلت لك", "ارسلت لك",
+    "أرسلتها", "ارسلتها",
+    "خذ",
+    "هذا هو", "هذي هي",
+    "هذا الرقم", "هذا رقمه",
+    "خذ الرقم",
+)
+
+
+# Honest "the asset isn't on file" tokens. When any one of
+# these appears in the reply, the guard backs off — the merchant
+# (or the merchant's coached prompt) is already telling the
+# customer the truth, and we don't want to replace that with our
+# canned line.
+_HONEST_UNAVAILABLE_TOKENS: Tuple[str, ...] = (
+    "غير متوفر", "غير متوفرة",
+    "غير مضاف", "غير مضافة", "غير مضافه",
+    "غير مدخل", "غير مدخلة",
+    "غير مسجل", "غير مسجلة",
+    "لم تتم إضافة", "لم يتم إضافة", "لم نضف",
+    "لم تضاف", "لم يضاف",
+    "ما تم إضافة", "ما تم اضافة",
+    "لا يتوفر", "ما يوجد رقم", "ما عندنا رقم",
+    "ما عندنا باركود", "ما توجد صورة باركود",
+    "ليس لدينا رقم", "ليس عندنا رقم",
+    "أحتاج إضافة", "احتاج إضافة", "احتاج اضافة",
+)
+
+
+# Customer-side lexicon — what does the customer want?
+#
+# Each artifact class has TWO axes:
+#   * a "carrier" keyword set (رقم / جوال / باركود / موقع / رابط)
+#   * a "subject" keyword set (اسم/دور موظف / بنك / متجر / موقع)
+# The classifier requires BOTH axes to fire so a question like
+# "وش رقم الطلب؟" doesn't get mistaken for a staff-phone ask.
+
+_STAFF_PHONE_CARRIER_KEYWORDS: Tuple[str, ...] = (
+    "رقم", "جوال", "موبايل", "واتساب", "وتساب",
+    "اتصل", "اتصال", "تواصل", "كلمه",
+)
+
+
+# Role nouns — same surface area as the orphan-staff audit
+# heuristic in :mod:`modules.ai.knowledge.improvement_advisor`.
+# A staff role keyword + a phone-carrier keyword on the same
+# inbound message is the strongest "the customer wants a
+# specific person's contact" signal.
+_STAFF_ROLE_KEYWORDS: Tuple[str, ...] = (
+    "بائع المعرض", "بائع",
+    "محاسب", "المحاسب",
+    "كاشير", "الكاشير",
+    "مسؤول", "المسؤول", "مسؤولة",
+    "إدارة", "الإدارة", "الادارة",
+    "خدمة العملاء", "الدعم",
+    "موظف", "الموظف",
+    "المالك", "صاحب المتجر",
+)
+
+
+_BARCODE_CARRIER_KEYWORDS: Tuple[str, ...] = (
+    "باركود", "بار كود", "بار-كود",
+    "qr", "كيوار", "كيو ار", "كيو-ار",
+    "كود التحويل", "كود الدفع",
+)
+
+
+_BARCODE_BANK_KEYWORDS: Tuple[str, ...] = (
+    "الراجحي", "الراجحى",
+    "الأهلي", "الاهلي",
+    "إنماء", "الإنماء", "الانماء",
+    "البلاد", "الجزيرة", "الرياض",
+    "ساب", "الفرنسي",
+    "تحويل", "بنكي", "بنك", "حساب",
+    "stcpay", "stc pay", "stc-pay", "اس تي سي",
+)
+
+
+# Reply-side delivery probes
+#
+# A Saudi mobile number in the reply body — the simplest
+# "did the LLM actually send the number?" check. Same regex
+# shape used by the audit pass and the staff KB scanner so
+# behaviour stays consistent across modules.
+_REPLY_PHONE_RE = re.compile(r"(?:\+?9665\d{8}|0?5\d{8})")
+
+
+# wa.me / api.whatsapp.com / wa.link — these are tappable
+# WhatsApp deep-links the LLM occasionally sends in lieu of
+# raw digits. Counts as artifact-satisfied for staff phone.
+_REPLY_WA_LINK_RE = re.compile(
+    r"(?:wa\.me/|api\.whatsapp\.com/|wa\.link/)\d+",
+    re.IGNORECASE,
+)
+
+
+# Maps URL hosts the LLM is allowed to ship as a "location"
+# answer. Mirrors :data:`_MAPS_HOST_HINTS` used by the location
+# net, but expressed as a single regex for the artifact probe.
+_REPLY_MAPS_HOST_RE = re.compile(
+    r"(?:google\.com/maps|goo\.gl/maps|maps\.app\.goo\.gl|maps\.google)",
+    re.IGNORECASE,
+)
+
+
+# Any URL — used for the store-link probe. We deliberately
+# subtract maps URLs at the call site so a maps URL doesn't
+# accidentally satisfy a store-link request.
+_REPLY_ANY_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+@dataclass
+class OutboundArtifactGuardResult:
+    """Outcome of the hollow-affirmation guard.
+
+    ``expected_artifact`` is one of:
+      * ``"staff_phone"``     — customer asked for a staff/role phone
+      * ``"payment_barcode"`` — customer asked for a payment QR / barcode
+      * ``"maps_link"``       — customer asked for the physical location
+      * ``"store_link"``      — customer asked for the e-commerce URL
+      * ``"none"``            — no recognised artifact intent
+
+    ``action`` is one of:
+      * ``"pass"``                          — no rewrite, reply unchanged
+      * ``"inject_staff_phone"``            — KB lookup hit, phone inserted
+      * ``"rewrite_missing_staff_phone"``   — fallback "أحتاج إضافة رقم …"
+      * ``"rewrite_missing_barcode"``       — fallback "صورة الباركود غير مضافة"
+      * ``"inject_maps_link"``              — config has a maps URL, appended
+      * ``"rewrite_missing_maps_link"``     — fallback "موقع المعرض غير مضاف"
+      * ``"inject_store_link"``             — config has a store URL, replaced
+      * ``"rewrite_missing_store_link"``    — fallback "رابط المتجر غير مضاف"
+    """
+    fired: bool = False
+    expected_artifact: str = "none"
+    artifact_satisfied: bool = False
+    rewrote_reply: bool = False
+    new_reply: str = ""
+    action: str = "pass"
+    skipped_reason: str = ""
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "outbound_artifact_guard",
+            "fired": self.fired,
+            "expected_artifact": self.expected_artifact,
+            "artifact_satisfied": self.artifact_satisfied,
+            "rewrote_reply": self.rewrote_reply,
+            "action": self.action,
+            "skipped_reason": self.skipped_reason,
+        }
+
+
+def _strip_decoration(text: str) -> str:
+    """Drop emojis, punctuation, and digit runs so we can size the
+    reply by the *meaningful* characters only. Used by the hollow
+    detector — a reply like ``"تفضل 🌷🌷🌷"`` is hollow even
+    though its raw length is > 8 chars."""
+    if not text:
+        return ""
+    no_url = _REPLY_ANY_URL_RE.sub(" ", text)
+    no_emoji = re.sub(r"[^\w\s\u0621-\u064a]", " ", no_url, flags=re.UNICODE)
+    no_digits = re.sub(r"\d+", " ", no_emoji)
+    return re.sub(r"\s+", " ", no_digits).strip()
+
+
+def _is_hollow_affirmation(reply: str) -> bool:
+    """True when the reply is short AND its meaningful content is
+    dominated by a vague affirmation token. The ~80-char ceiling is
+    intentional — anything longer is treated as natural prose
+    that the merchant's prompt produced for a reason."""
+    if not reply:
+        return True
+    stripped = _strip_decoration(reply)
+    if len(stripped) == 0:
+        return True
+    if len(stripped) > 80:
+        return False
+    norm_reply = _normalise_alif(reply).lower()
+    for tok in _HOLLOW_AFFIRMATION_TOKENS:
+        if _normalise_alif(tok).lower() in norm_reply:
+            return True
+    return False
+
+
+def _reply_already_honest(reply: str) -> bool:
+    """True when the reply is already telling the customer the asset
+    isn't on file. The guard backs off in this case so we don't
+    overwrite a perfectly honest reply with a slightly different
+    canned line (and we don't double-acknowledge unavailability)."""
+    if not reply:
+        return False
+    norm = _normalise_alif(reply).lower()
+    for tok in _HONEST_UNAVAILABLE_TOKENS:
+        if _normalise_alif(tok).lower() in norm:
+            return True
+    return False
+
+
+def _classify_expected_artifact(customer_msg: str) -> str:
+    """Classify the inbound message into an artifact class.
+
+    Order matters: we check the most specific intent first so a
+    message like "وين موقع متجركم" lands on ``maps_link`` rather
+    than ``store_link``. The two trigger sets are designed disjoint
+    by :func:`_looks_like_store_link_request` /
+    :func:`_looks_like_location_request`, so the order is just a
+    safety belt.
+    """
+    if not customer_msg or not customer_msg.strip():
+        return "none"
+
+    norm_compact = _normalise_for_match(customer_msg)
+    norm_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", norm_compact)
+    norm_compact = re.sub(r"\s+", " ", norm_compact).strip()
+
+    # 1. Maps-link intent (location / google maps / lookup)
+    for phrase in _LOCATION_LINK_TRIGGERS_PHRASE:
+        if phrase in norm_compact:
+            return "maps_link"
+
+    # 2. Store-link intent (online shop URL)
+    for phrase in _STORE_LINK_TRIGGERS_PHRASE:
+        if phrase in norm_compact:
+            return "store_link"
+
+    # 3. Payment barcode — needs a barcode-carrier keyword. Bank
+    #    keyword strengthens the signal but isn't strictly required:
+    #    "أبي الباركود" alone counts because barcodes only ever
+    #    refer to payment delivery in this product.
+    for kw in _BARCODE_CARRIER_KEYWORDS:
+        if kw in norm_compact:
+            return "payment_barcode"
+
+    # 4. Staff-phone — requires a phone-carrier keyword AND either
+    #    a recognised staff role or a recognised proper name. Pure
+    #    "وش رقمكم" without role/name resolves to ``none`` so the
+    #    upstream prompt (which knows the merchant's general
+    #    contact) handles it.
+    has_phone_carrier = any(
+        kw in norm_compact for kw in _STAFF_PHONE_CARRIER_KEYWORDS
+    )
+    if has_phone_carrier:
+        has_role = any(
+            kw in norm_compact for kw in _STAFF_ROLE_KEYWORDS
+        )
+        has_name = _find_staff_name(norm_compact) is not None
+        if has_role or has_name:
+            return "staff_phone"
+
+    return "none"
+
+
+def _reply_has_phone(reply: str) -> bool:
+    if not reply:
+        return False
+    if _REPLY_PHONE_RE.search(reply):
+        return True
+    if _REPLY_WA_LINK_RE.search(reply):
+        return True
+    return False
+
+
+def _reply_has_maps_url(reply: str) -> bool:
+    if not reply:
+        return False
+    return bool(_REPLY_MAPS_HOST_RE.search(reply))
+
+
+def _reply_has_any_url(reply: str) -> bool:
+    if not reply:
+        return False
+    return bool(_REPLY_ANY_URL_RE.search(reply))
+
+
+def _media_attachments_have_barcode(
+    media_attachments: Optional[List[Any]],
+) -> bool:
+    """Inspect the post-net media attachment list for a barcode/QR.
+
+    A media item counts as a barcode when ANY of the following hold:
+      * its ``link_role`` (or dict equivalent) is exactly ``"barcode"``;
+      * its ``media_key`` contains "barcode" / "qr" / "payment";
+      * its title contains "باركود" / "QR" / "كيوار".
+
+    The check is lenient on shape so callers can pass either ORM
+    rows (``media_link.media.media_key``) or pre-serialised dicts
+    (``{"media": {"media_key": …}}``) without unwrapping first.
+    """
+    if not media_attachments:
+        return False
+    for att in media_attachments:
+        link_role = ""
+        media_key = ""
+        title = ""
+        try:
+            if hasattr(att, "link_role"):
+                link_role = (getattr(att, "link_role", "") or "").lower()
+            elif isinstance(att, dict):
+                link_role = (att.get("link_role") or "").lower()
+            media_obj = (
+                getattr(att, "media", None)
+                if not isinstance(att, dict)
+                else att.get("media")
+            )
+            if media_obj is not None:
+                if isinstance(media_obj, dict):
+                    media_key = (media_obj.get("media_key") or "").lower()
+                    title = media_obj.get("title") or ""
+                else:
+                    media_key = (getattr(media_obj, "media_key", "") or "").lower()
+                    title = getattr(media_obj, "title", "") or ""
+        except Exception:  # noqa: BLE001
+            continue
+        if link_role == "barcode":
+            return True
+        if any(hint in media_key for hint in ("barcode", "qr", "payment")):
+            return True
+        norm_title = _normalise_alif(title).lower()
+        for hint in ("باركود", "بار كود", "qr", "كيوار", "كيو ار"):
+            if _normalise_alif(hint).lower() in norm_title:
+                return True
+    return False
+
+
+def _call_targets_have_phone(call_targets: Optional[List[Any]]) -> bool:
+    """True when at least one resolved CallTarget carries a Saudi
+    phone. Used as the second satisfaction probe for staff_phone —
+    the reply might omit the digits because the LLM emitted a
+    ``[CALL:…]`` marker that the marker-extractor already turned
+    into a ``CallTarget``. Don't rewrite such replies."""
+    if not call_targets:
+        return False
+    for ct in call_targets:
+        phone = ""
+        try:
+            phone = (
+                getattr(ct, "raw_phone", "")
+                or getattr(ct, "phone_display", "")
+                or getattr(ct, "wa_id", "")
+                or ""
+            )
+            if not phone and isinstance(ct, dict):
+                phone = (
+                    ct.get("raw_phone")
+                    or ct.get("phone_display")
+                    or ct.get("wa_id")
+                    or ""
+                )
+        except Exception:  # noqa: BLE001
+            continue
+        if phone and _REPLY_PHONE_RE.search(str(phone)):
+            return True
+    return False
+
+
+def _detect_bank_label(customer_msg: str) -> str:
+    """Return a short Arabic bank label found in the message, or ""
+    if no recognised bank name appears. Used by the barcode
+    rewrite so the canned line says
+    ``"... صورة باركود الراجحي بعد"`` instead of a generic
+    ``"... صورة الباركود ..."``.
+    """
+    if not customer_msg:
+        return ""
+    norm = _normalise_alif(customer_msg).lower()
+    bank_pairs = (
+        ("الراجحي", "الراجحي"),
+        ("الراجحى", "الراجحي"),
+        ("الاهلي", "الأهلي"),
+        ("الأهلي", "الأهلي"),
+        ("الانماء", "الإنماء"),
+        ("الإنماء", "الإنماء"),
+        ("انماء", "الإنماء"),
+        ("البلاد", "البلاد"),
+        ("الجزيرة", "الجزيرة"),
+        ("الرياض", "الرياض"),
+        ("ساب", "ساب"),
+        ("stc pay", "STC Pay"),
+        ("stcpay", "STC Pay"),
+    )
+    for needle, label in bank_pairs:
+        if _normalise_alif(needle).lower() in norm:
+            return label
+    return ""
+
+
+def apply_outbound_artifact_guard(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_msg: str,
+    reply_text: str,
+    media_attachments: Optional[List[Any]] = None,
+    call_targets: Optional[List[Any]] = None,
+) -> OutboundArtifactGuardResult:
+    """Final hollow-affirmation guard.
+
+    See module-level block "7. Outbound Artifact Guard" for the
+    contract. The function never raises — every failure path
+    returns a result object with ``skipped_reason`` set so the
+    caller's structured log carries the diagnostic without
+    propagating the exception into the webhook handler.
+    """
+    result = OutboundArtifactGuardResult()
+
+    expected = _classify_expected_artifact(customer_msg or "")
+    result.expected_artifact = expected
+
+    if expected == "none":
+        result.skipped_reason = "no_artifact_intent"
+        return result
+
+    # Honest replies win — never rewrite "أحتاج إضافة الرقم …"
+    # into our canned line. The merchant's coached prompt was
+    # already doing the right thing.
+    if _reply_already_honest(reply_text or ""):
+        result.skipped_reason = "reply_already_honest"
+        result.artifact_satisfied = True
+        return result
+
+    # Per-artifact satisfaction probe.
+    satisfied = False
+    if expected == "staff_phone":
+        satisfied = (
+            _reply_has_phone(reply_text or "")
+            or _call_targets_have_phone(call_targets)
+        )
+    elif expected == "payment_barcode":
+        # A barcode ask is satisfied ONLY by a barcode media —
+        # NOT by a phone number in the reply (the customer
+        # explicitly asked for the barcode, the transfer phone
+        # is a different artifact).
+        satisfied = _media_attachments_have_barcode(media_attachments)
+    elif expected == "maps_link":
+        satisfied = _reply_has_maps_url(reply_text or "")
+    elif expected == "store_link":
+        # A maps URL doesn't satisfy a store-link ask — the two
+        # are different products. Subtract maps before declaring
+        # "yes, the LLM shipped a URL".
+        satisfied = (
+            _reply_has_any_url(reply_text or "")
+            and not _reply_has_maps_url(reply_text or "")
+        )
+    result.artifact_satisfied = satisfied
+
+    if satisfied:
+        result.skipped_reason = "artifact_already_present"
+        return result
+
+    # Reply lacks the artifact — rewrite ONLY when the reply is
+    # actually hollow. A long natural-prose reply that explains
+    # something else is left alone (we're a guard, not a
+    # post-editor).
+    if not _is_hollow_affirmation(reply_text or ""):
+        result.skipped_reason = "reply_not_hollow"
+        return result
+
+    # ── Per-artifact rewrite branches ─────────────────────────────
+    if expected == "staff_phone":
+        norm_msg = _normalise_for_match(customer_msg or "")
+        staff_name = _find_staff_name(norm_msg) or ""
+        if not staff_name:
+            # Role-only ask ("رقم البائع"). Use the role label as
+            # the "name" so the rewrite still reads naturally.
+            for kw in _STAFF_ROLE_KEYWORDS:
+                if kw in norm_msg:
+                    staff_name = kw
+                    break
+        # Try the KB scan one more time; the upstream staff-net
+        # may not have run (e.g. CALL marker pipeline disabled).
+        kb_phone, kb_kind, _kb_section = _lookup_staff_phone_in_kb(
+            db, tenant_id, staff_name or "أمين",
+        )
+        if kb_phone:
+            label = staff_name or "الموظف"
+            result.new_reply = f"تفضل رقم {label}: {kb_phone} 🌷"
+            result.action = "inject_staff_phone"
+            result.fired = True
+            result.rewrote_reply = True
+            return result
+        label = staff_name or "الموظف المختص"
+        result.new_reply = (
+            f"أحتاج إضافة رقم {label} في بيانات المتجر "
+            "حتى أرسله لك مباشرة 🌷"
+        )
+        result.action = "rewrite_missing_staff_phone"
+        result.fired = True
+        result.rewrote_reply = True
+        return result
+
+    if expected == "payment_barcode":
+        bank_label = _detect_bank_label(customer_msg or "")
+        bank_seg = f" {bank_label}" if bank_label else ""
+        if _reply_has_phone(reply_text or ""):
+            # The reply already carries the transfer phone — keep
+            # the customer informed about what IS available.
+            result.new_reply = (
+                f"المتوفر حاليًا رقم التحويل، ولم تتم إضافة "
+                f"صورة باركود{bank_seg} بعد 🌷"
+            )
+        else:
+            result.new_reply = (
+                f"صورة باركود{bank_seg} غير مضافة حاليًا "
+                "في إعدادات الدفع 🌷"
+            )
+        result.action = "rewrite_missing_barcode"
+        result.fired = True
+        result.rewrote_reply = True
+        return result
+
+    if expected == "maps_link":
+        try:
+            maps_url, _src = _lookup_tenant_maps_url(db, tenant_id)
+        except Exception:  # noqa: BLE001
+            maps_url = ""
+        if maps_url:
+            result.new_reply = _build_location_reply(maps_url)
+            result.action = "inject_maps_link"
+        else:
+            result.new_reply = (
+                "موقع المعرض غير مضاف حاليًا في بيانات المتجر 🌷"
+            )
+            result.action = "rewrite_missing_maps_link"
+        result.fired = True
+        result.rewrote_reply = True
+        return result
+
+    if expected == "store_link":
+        try:
+            store_url = _lookup_tenant_store_url(db, tenant_id)
+        except Exception:  # noqa: BLE001
+            store_url = ""
+        if store_url:
+            result.new_reply = _build_store_link_reply(store_url)
+            result.action = "inject_store_link"
+        else:
+            result.new_reply = "رابط المتجر غير مضاف حاليًا 🌷"
+            result.action = "rewrite_missing_store_link"
+        result.fired = True
+        result.rewrote_reply = True
+        return result
+
+    # Should never reach here — the classifier returns one of the
+    # four artifact types or "none" (handled above).
+    result.skipped_reason = "unknown_artifact_class"
+    return result
+
+
 __all__ = [
     "ProductSafetyNetResult",
     "MediaKeySafetyNetResult",
@@ -2476,6 +3077,7 @@ __all__ = [
     "LocationLinkSafetyNetResult",
     "ClearIntentFallbackResult",
     "DeliveryInfoContextResult",
+    "OutboundArtifactGuardResult",
     "apply_product_safety_net",
     "apply_media_key_safety_net",
     "apply_staff_contact_safety_net",
@@ -2483,6 +3085,7 @@ __all__ = [
     "apply_location_safety_net",
     "apply_clear_intent_fallback_net",
     "apply_delivery_info_context_net",
+    "apply_outbound_artifact_guard",
     "product_net_enabled",
     "media_key_net_enabled",
     "staff_contact_net_enabled",
