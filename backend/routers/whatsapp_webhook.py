@@ -162,19 +162,40 @@ def _reset_platform_tenant_cache() -> None:
 # rather than embeddings:
 #   * extracts the last two outbound messages from the recorded history
 #   * tokenises both into Arabic word stems (whitespace + punctuation)
-#   * if the new reply shares > 60% of its content words with EITHER of
-#     those previous outbound messages, we mark it as a repeat
-# The caller can then short-circuit to a short follow-up instead.
+#   * computes token-set overlap of the NEW reply against EACH previous
+#   * picks the highest overlap, classifies it into a tier
 #
-# 60% chosen empirically on the failing transcripts: high enough that
-# a normal "هل تحتاج مساعدة في طلبك؟" follow-up after a draft order
-# does not trip (those typically share < 40% of stems with the draft
-# template), low enough that "نفس رسالة استرجاع السلة بصياغة مختلفة"
-# trips reliably.
+# Two-tier philosophy (May 2026 #34 — "pass-through, don't muzzle")
+# ─────────────────────────────────────────────────────────────────
+# v1 (#19) was a one-tier guard: any overlap ≥ 60% replaced the reply
+# with a canned fallback line. In real merchant traffic that fired on
+# perfectly legitimate re-asks ("كم سعره؟" → "كم سعره؟" right after,
+# common with voice notes or customers returning to the conversation
+# after a few minutes), making the bot feel cold and robotic.
+#
+# The merchant's spec for v2:
+#   "إذا كان الرد مكررًا أو قريبًا من رد سابق، دع الـ LLM يرد طبيعيًا
+#    … بدل إدخال fallback ثابت جاهز. dedup لا يمنع الإجابة، ولا
+#    يستبدل الرد بجملة canned. بل يتحول إلى ‘خفف التكرار الحرفي فقط’
+#    بدون قتل conversational flow."
+#
+# Implementation:
+#   * SOFT tier (60% ≤ overlap < 85%): the LLM is repeating a topic
+#     but with its own wording. Pass the reply through, log
+#     ``[CHAT_DEDUP_SOFT]`` for telemetry. No replacement.
+#   * HARD tier (overlap ≥ 85%): near-verbatim. This is the actual
+#     loop case the original guard was built for. Replace with a
+#     fallback so the customer doesn't see the same paragraph twice.
+#   * ASSET-BEARING bypass: even on HARD overlap, if the reply
+#     carries a URL / phone / `[MEDIA…]` / `[PRODUCT:]` / `[CALL:]`
+#     marker, pass through. The asset itself is the new content —
+#     the customer asking "ابي الباركود" twice deserves the barcode
+#     both times, not a canned "we covered that already".
 
-_DEDUP_OVERLAP_THRESHOLD = 0.60
-_DEDUP_MIN_TOKENS = 6  # ignore very short replies — they always overlap
-_DEDUP_LOOKBACK_OUTBOUND = 2  # how many recent outbound turns to check
+_DEDUP_OVERLAP_THRESHOLD       = 0.60   # SOFT — log only, don't replace
+_DEDUP_HARD_OVERLAP_THRESHOLD  = 0.85   # HARD — actually replace
+_DEDUP_MIN_TOKENS = 6                   # ignore very short replies — they always overlap
+_DEDUP_LOOKBACK_OUTBOUND = 2            # how many recent outbound turns to check
 
 
 def _dedup_tokenise(text: str) -> set:
@@ -191,20 +212,25 @@ def _dedup_tokenise(text: str) -> set:
     return tokens
 
 
-def _is_repeat_reply(new_reply: str, history: list) -> bool:
-    """True when ``new_reply`` overlaps too much with one of the most
-    recent outbound messages.
+def _max_outbound_overlap(new_reply: str, history: list) -> float:
+    """Return the highest Jaccard-style overlap (0..1) between the
+    NEW reply's token set and any of the last
+    ``_DEDUP_LOOKBACK_OUTBOUND`` outbound messages in ``history``.
 
-    ``history`` is the same list the brain pipeline receives — each
-    turn is ``{"direction": "in"/"inbound" | "out"/"outbound", "body": str}``.
-    Robust to either spelling. Falls back to a safe ``False`` on any
-    unexpected shape so the dedup never blocks a real reply.
+    Returns ``0.0`` when:
+      * the new reply is too short (< _DEDUP_MIN_TOKENS),
+      * no comparable previous outbound exists,
+      * or any exception interrupts the walk (defensive default).
+
+    The numerator is ``len(new ∩ prev)``, the denominator is
+    ``len(new)`` — same shape the v1 guard used so the SOFT threshold
+    keeps its empirical calibration.
     """
     new_tokens = _dedup_tokenise(new_reply)
     if len(new_tokens) < _DEDUP_MIN_TOKENS:
-        return False
-
+        return 0.0
     outbound_seen = 0
+    best = 0.0
     try:
         for turn in reversed(history or []):
             direction = str((turn or {}).get("direction") or "").lower()
@@ -212,20 +238,85 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
                 continue
             outbound_seen += 1
             prev_tokens = _dedup_tokenise(turn.get("body") or "")
-            if len(prev_tokens) < _DEDUP_MIN_TOKENS:
-                if outbound_seen >= _DEDUP_LOOKBACK_OUTBOUND:
-                    break
-                continue
-            overlap = len(new_tokens & prev_tokens) / max(1, len(new_tokens))
-            if overlap >= _DEDUP_OVERLAP_THRESHOLD:
-                return True
+            if len(prev_tokens) >= _DEDUP_MIN_TOKENS:
+                overlap = len(new_tokens & prev_tokens) / max(1, len(new_tokens))
+                if overlap > best:
+                    best = overlap
             if outbound_seen >= _DEDUP_LOOKBACK_OUTBOUND:
                 break
     except Exception:  # noqa: BLE001 silent-ok
-        # Dedup is a best-effort safety net — never block a real reply
-        # because of an unexpected history shape. Any malformed turn
-        # just falls through to the normal send path.
+        return 0.0
+    return best
+
+
+def _is_repeat_reply(
+    new_reply: str,
+    history: list,
+    *,
+    threshold: float = _DEDUP_HARD_OVERLAP_THRESHOLD,
+) -> bool:
+    """True when ``new_reply`` overlaps with a recent outbound at or
+    above ``threshold``.
+
+    Defaults to the HARD threshold so any caller that doesn't pass an
+    explicit tier gets the conservative "only actual loops" behaviour.
+    The webhook explicitly passes ``_DEDUP_OVERLAP_THRESHOLD`` (soft)
+    when it wants to log a near-duplicate without replacing it.
+
+    ``history`` is the same list the brain pipeline receives — each
+    turn is ``{"direction": "in"/"inbound" | "out"/"outbound", "body": str}``.
+    Robust to either spelling. Falls back to a safe ``False`` on any
+    unexpected shape so the dedup never blocks a real reply.
+    """
+    if not new_reply:
         return False
+    return _max_outbound_overlap(new_reply, history) >= float(threshold)
+
+
+# Patterns used by ``_reply_carries_new_signal`` (May 2026 #34) to
+# bypass the dedup REPLACE step when the reply contains material
+# the customer hasn't seen yet (a URL, a phone number, or an
+# asset marker that resolves to a CTA / media / contact card
+# downstream). Module-level compile so we don't recompile per turn.
+import re as _re_signal  # noqa: E402, PLC0415
+_REPLY_SIGNAL_URL_RE   = _re_signal.compile(r"https?://\S+", _re_signal.IGNORECASE)
+_REPLY_SIGNAL_PHONE_RE = _re_signal.compile(
+    # Saudi mobile (+9665…, 9665…, 05…), and any international
+    # number with at least 7 digits — same shape the asset-promise
+    # sanitizer uses, so the two layers agree on what counts as
+    # "a phone is in the reply".
+    r"(?:\+?966|00966|0)?5\d{8}|\+\d{7,15}",
+)
+# Markers the LLM emits that resolve to attachments downstream.
+# Listed verbatim so a grep over the code base finds them. Order
+# is irrelevant — any one of them flips the signal to True.
+_REPLY_SIGNAL_MARKERS  = ("[MEDIA:", "[MEDIA_KEY:", "[PRODUCT:", "[CALL:")
+
+
+def _reply_carries_new_signal(reply: str) -> bool:
+    """True when ``reply`` carries information the customer hasn't
+    seen yet — even when the surrounding text is a near-duplicate of
+    a previous outbound.
+
+    Examples this guards against accidentally muting:
+      * "تفضل باركود الراجحي 🌷\\nhttps://…" sent again because the
+        customer re-asked "ابي الباركود".
+      * "[PRODUCT:عسل السمر]" marker repeated after the customer
+        asks "ورّني السمر" twice in a row.
+      * "[CALL:+966500…|أبو هشام]" repeated when the customer asks
+        for the staff number again.
+
+    Pure — no DB / network. Tolerates ``None`` / empty input.
+    """
+    if not reply:
+        return False
+    if _REPLY_SIGNAL_URL_RE.search(reply):
+        return True
+    if _REPLY_SIGNAL_PHONE_RE.search(reply):
+        return True
+    for marker in _REPLY_SIGNAL_MARKERS:
+        if marker in reply:
+            return True
     return False
 
 
@@ -5645,50 +5736,96 @@ async def _handle_merchant_message(
                 )
                 reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
 
-        # ── Outbound dedup guard ─────────────────────────────────────────
-        # Last-mile safety net for BOTH paths (Brain + legacy). If the
-        # generated reply overlaps too much with a recent outbound
-        # message we substitute a short follow-up so the customer does
-        # not see the same automation / cart-recovery copy twice in a
-        # row. See `_is_repeat_reply` for the heuristic + threshold
-        # rationale. Skipped for empty replies (already handled
-        # upstream — billing_denied, etc.) and for the handoff path
-        # (_brain_handoff replies are intentionally distinct).
-        if reply and not _brain_handoff and _is_repeat_reply(reply, history):
-            _orig_len = len(reply)
-            _default_short = _short_followup_instead_of_repeat(history)
-            # ── Context-aware fallback ────────────────────────────
-            # When the conversation has an active order, the canned
-            # "أنا هنا — قول وش تحتاج وأكمل معك" line lands MID-
-            # FUNNEL and gives the merchant the impression that the
-            # bot forgot the order. We swap in a sentence that
-            # references the live order state (product / price /
-            # awaiting receipt / under review) so the customer
-            # never sees a stale generic prompt while a real funnel
-            # is in flight.
-            try:
-                from core.order_flow import (  # noqa: PLC0415
-                    context_aware_dedup_fallback,
-                )
-                reply = context_aware_dedup_fallback(
-                    db,
-                    tenant_id=tenant_id,
-                    phone=to,
-                    history=history,
-                    default_fallback=_default_short,
-                    inbound_text=text,
-                )
-            except Exception as _ctx_exc:  # noqa: BLE001
-                logger.debug(
-                    "[CHAT_DEDUP] context-aware fallback failed: %s",
-                    _ctx_exc,
-                )
-                reply = _default_short
-            logger.info(
-                "[CHAT_DEDUP] tenant=%s to=%s replaced near-duplicate outbound "
-                "(orig_len=%d new_len=%d brain=%s)",
-                tenant_id, to, _orig_len, len(reply), _brain_active,
+        # ── Outbound dedup guard (May 2026 #34 — tiered) ─────────────────
+        # Last-mile safety net for BOTH paths (Brain + legacy). The
+        # previous one-tier guard replaced ANY reply with ≥60% overlap,
+        # which fired on perfectly legitimate re-asks (voice notes,
+        # delayed re-engagement, customers asking the same question
+        # twice to confirm). The merchant's v2 spec: "dedup لا يمنع
+        # الإجابة، ولا يستبدل الرد بجملة canned — بل يخفّف التكرار
+        # الحرفي فقط." See ``_is_repeat_reply`` + ``_max_outbound_overlap``
+        # for the heuristic.
+        #
+        # Tier behaviour:
+        #   * overlap < 60%    → no signal, pass through silently
+        #   * 60% ≤ ovl < 85%  → SOFT: log only, pass through (LLM
+        #                        is repeating a TOPIC, not the words)
+        #   * overlap ≥ 85%    → HARD candidate. Replace IFF the reply
+        #                        does NOT carry a new signal (URL /
+        #                        phone / [MEDIA…] / [PRODUCT:] / [CALL:]).
+        #                        Asset-bearing replies always pass —
+        #                        the asset itself is the new content.
+        #
+        # Skipped entirely for empty replies (handled upstream) and
+        # for the handoff path (_brain_handoff replies are
+        # intentionally distinct).
+        if reply and not _brain_handoff:
+            _overlap = _max_outbound_overlap(reply, history)
+            _is_hard = _overlap >= _DEDUP_HARD_OVERLAP_THRESHOLD
+            _is_soft = (
+                _overlap >= _DEDUP_OVERLAP_THRESHOLD and not _is_hard
             )
+            _carries_signal = _reply_carries_new_signal(reply)
+
+            if _is_hard and not _carries_signal:
+                _orig_len = len(reply)
+                _default_short = _short_followup_instead_of_repeat(history)
+                # ── Context-aware fallback ────────────────────────────
+                # When the conversation has an active order, the canned
+                # "أنا هنا — قول وش تحتاج وأكمل معك" line lands MID-
+                # FUNNEL and gives the merchant the impression that the
+                # bot forgot the order. We swap in a sentence that
+                # references the live order state (product / price /
+                # awaiting receipt / under review) so the customer
+                # never sees a stale generic prompt while a real funnel
+                # is in flight.
+                try:
+                    from core.order_flow import (  # noqa: PLC0415
+                        context_aware_dedup_fallback,
+                    )
+                    reply = context_aware_dedup_fallback(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=to,
+                        history=history,
+                        default_fallback=_default_short,
+                        inbound_text=text,
+                    )
+                except Exception as _ctx_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[CHAT_DEDUP] context-aware fallback failed: %s",
+                        _ctx_exc,
+                    )
+                    reply = _default_short
+                logger.info(
+                    "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
+                    "replaced near-duplicate outbound "
+                    "(orig_len=%d new_len=%d brain=%s)",
+                    tenant_id, to, _overlap,
+                    _orig_len, len(reply), _brain_active,
+                )
+            elif _is_hard and _carries_signal:
+                # Near-verbatim wording, BUT the reply ships a URL /
+                # phone / asset marker. The customer asked again
+                # (probably for that exact asset) — give it to them.
+                logger.info(
+                    "[CHAT_DEDUP_BYPASS_ASSET] tenant=%s to=%s "
+                    "overlap=%.2f reply_len=%d brain=%s — pass-through "
+                    "(reply carries url/phone/marker)",
+                    tenant_id, to, _overlap, len(reply), _brain_active,
+                )
+            elif _is_soft:
+                # 60–85% overlap. LLM is repeating the TOPIC but with
+                # its own wording. Trust the LLM — replacing here is
+                # what made the bot feel cold/canned. Telemetry only.
+                logger.info(
+                    "[CHAT_DEDUP_SOFT] tenant=%s to=%s overlap=%.2f "
+                    "carries_signal=%s reply_len=%d brain=%s — "
+                    "pass-through",
+                    tenant_id, to, _overlap,
+                    str(_carries_signal).lower(),
+                    len(reply), _brain_active,
+                )
 
         # ── Payment-context safety net (May 2026) ─────────────────────
         # Last defence against the screenshot bug: even if the brain
