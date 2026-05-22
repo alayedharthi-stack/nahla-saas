@@ -229,7 +229,7 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
     return False
 
 
-# Dedup fallback replies (May 2026 #19 — re-tuned tone).
+# Dedup fallback replies (May 2026 #19 — re-tuned tone; #33 — warmer #3).
 #
 # History
 # ───────
@@ -241,12 +241,21 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
 # like "تفاصيل اكثر" / "اشرح اكثر"). The closed tone read as the bot
 # dismissing the customer mid-question.
 #
-# v2 (this set): clarification-tone — instead of farewell phrases we
-# invite the customer to specify what aspect they want clarified. The
-# brain's near-duplicate is treated as a signal that we don't have NEW
-# substantive content to add, but we leave the conversation open and
-# put the next move in the customer's hands. No emojis (calm tone),
-# no laughter, no funnel-opener.
+# v2 (May 2026 #19): clarification-tone — instead of farewell phrases
+# we invite the customer to specify what aspect they want clarified.
+# The brain's near-duplicate is treated as a signal that we don't
+# have NEW substantive content to add, but we leave the conversation
+# open and put the next move in the customer's hands.
+#
+# v2.1 (May 2026 #33): the third entry —
+#   "تكلمنا عنها فوق، شف وش الجانب اللي تبي تعرف عنه أكثر."
+# was reported as too stiff: "تكلمنا عنها فوق" reads accusatory
+# (like the bot is scolding the customer for repeating) and the
+# command tone "شف وش الجانب اللي تبي تعرف" doesn't fit Nahla's
+# voice. We rewrite ONLY that string into the same warmer shape as
+# entries 1 and 2 — acknowledge similarity without blame, ask one
+# open soft question. Entries 1 and 2 stay untouched since they
+# already pass review.
 #
 # Why this is NOT a keyword→reply rule:
 # the trigger is STRUCTURAL (overlap ≥ 60% with a recent outbound,
@@ -258,7 +267,7 @@ def _is_repeat_reply(new_reply: str, history: list) -> bool:
 _DEDUP_FALLBACK_REPLIES = [
     "ذكرت لك للتو نفس النقطة 🌷 وش الجزء اللي تبيني أوضحه أكثر؟",
     "هذي نفس الإجابة قبل قليل — قلي على وجه التحديد إيش الناقص.",
-    "تكلمنا عنها فوق، شف وش الجانب اللي تبي تعرف عنه أكثر.",
+    "هذي قريبة من سؤال قبل قليل 🌷 أي نقطة تحب أوضحها لك أكثر؟",
 ]
 
 
