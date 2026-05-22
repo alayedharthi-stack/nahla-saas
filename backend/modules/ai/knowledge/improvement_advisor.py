@@ -49,7 +49,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("nahla.ai.knowledge.improvement_advisor")
 
@@ -307,27 +307,107 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 
 @dataclass
 class _RowView:
-    """Minimal view of a section row for the auditor."""
+    """Minimal view of a section row for the auditor.
+
+    KB-Improve V1.2 (May 2026 #29): we now also expose the
+    ``media_keys`` / ``media_roles`` / ``media_titles`` triples on
+    every link. The missing-barcode pass needs to know whether ANY
+    section in the same kind/group already has a barcode-shaped
+    media attached (role='barcode', media_key in the registry
+    payment family, or a title that mentions a barcode/QR). Without
+    this we were emitting 5 identical "أضف باركود" suggestions for
+    5 duplicate bank_transfer rows even when one of the sibling
+    rows already carried the barcode.
+    """
     id: int
     kind: str
     title: str
     body: str
     is_active: bool
     media_count: int
+    # Per-link metadata, aligned by index. ``len(media_keys) ==
+    # len(media_roles) == len(media_titles)`` and equals the number
+    # of *active* media links. Inactive media are dropped earlier
+    # so they don't accidentally satisfy the barcode check.
+    media_keys: List[str] = field(default_factory=list)
+    media_roles: List[str] = field(default_factory=list)
+    media_titles: List[str] = field(default_factory=list)
 
 
 def _row_view(r: Any) -> _RowView:
+    keys: List[str] = []
+    roles: List[str] = []
+    titles: List[str] = []
+    for lk in (getattr(r, "media_links", None) or []):
+        media = getattr(lk, "media", None)
+        if media is None:
+            continue
+        if not bool(getattr(media, "is_active", True)):
+            continue
+        keys.append((getattr(media, "media_key", None) or "").strip().lower())
+        roles.append((getattr(lk, "link_role", None) or "").strip().lower())
+        titles.append((getattr(media, "title", None) or "").strip().lower())
     return _RowView(
         id=int(getattr(r, "id", 0) or 0),
         kind=(getattr(r, "kind", "") or "").strip().lower(),
         title=(getattr(r, "title", None) or "").strip(),
         body=(getattr(r, "body", None) or "").strip(),
         is_active=bool(getattr(r, "is_active", True)),
-        media_count=len([
-            lk for lk in (getattr(r, "media_links", None) or [])
-            if getattr(getattr(lk, "media", None), "is_active", True)
-        ]),
+        media_count=len(keys),
+        media_keys=keys,
+        media_roles=roles,
+        media_titles=titles,
     )
+
+
+# Substrings (already lowercased) that mark a media attachment as
+# "this is the payment barcode the merchant wants the AI to send".
+# Checked against ``media_key`` / ``link_role`` / ``title``. We
+# stay conservative — the false-positive cost is "we don't suggest
+# adding a barcode", which is fine (worst case the merchant misses
+# a hint; never wrong information).
+_BARCODE_MEDIA_KEY_HINTS: Tuple[str, ...] = (
+    "barcode", "_qr", "qr_",
+    "rajhi", "alahli", "ahli", "stcpay", "mobilypay", "barq",
+)
+_BARCODE_TITLE_HINTS: Tuple[str, ...] = (
+    "barcode", "qr", "باركود", "بار كود", "كيوار", "كيو ار",
+    "رمز الدفع", "رمز التحويل", "رمز السداد",
+    "راجحي", "اهلي", "أهلي", "stc", "موبايلي",
+)
+
+
+def _link_looks_like_barcode(
+    media_key: str, link_role: str, media_title: str,
+) -> bool:
+    """One link is a 'barcode' if the role/key/title hints agree.
+
+    Order matters slightly for clarity but not correctness — any
+    one of the three signals is enough. We accept ``link_role=='barcode'``
+    on its own because that's the merchant's explicit declaration in
+    the dashboard.
+    """
+    if (link_role or "").strip().lower() == "barcode":
+        return True
+    k = (media_key or "").strip().lower()
+    if k:
+        if k.startswith("payment_"):
+            return True
+        if any(h in k for h in _BARCODE_MEDIA_KEY_HINTS):
+            return True
+    t = (media_title or "").strip().lower()
+    if t and any(h in t for h in _BARCODE_TITLE_HINTS):
+        return True
+    return False
+
+
+def _row_has_barcode_media(row: _RowView) -> bool:
+    """True iff at least one of this row's active media links looks
+    like the payment barcode the AI would attach for a transfer."""
+    for k, role, title in zip(row.media_keys, row.media_roles, row.media_titles):
+        if _link_looks_like_barcode(k, role, title):
+            return True
+    return False
 
 
 # ── Suggestion factory helpers ──────────────────────────────────────────────
@@ -523,7 +603,55 @@ def _suggest_bank_transfer_needs_barcode(
         requires_media=True,
         confidence=0.85,
         related_section_ids=[row.id],
-        rationale_keys=["missing_media:bank_transfer", f"section:{row.id}"],
+        rationale_keys=[
+            "missing_media:bank_transfer",
+            "purpose:add_payment_barcode",
+            f"section:{row.id}",
+        ],
+    )
+
+
+def _suggest_bank_transfer_merge_and_barcode(
+    idx: int, rows: List[_RowView],
+) -> ImprovementFinding:
+    """Single suggestion that replaces the per-row barcode add when
+    multiple bank_transfer rows exist without a barcode.
+
+    Spec (KB-Improve V1.2, May 2026 #29 problem 2):
+    "إذا كانت عدة أقسام bank_transfer مكررة، لا تعطِ 5 اقتراحات
+    media، بل أعطِ اقتراح واحد: «يوجد تكرار في أقسام التحويل
+    البنكي، نقترح دمجها وربط الباركود بالقسم الموحد»."
+    """
+    ids = sorted({int(r.id) for r in rows})
+    return ImprovementFinding(
+        id=f"sug-{idx}",
+        type="duplicate_merge",
+        severity="high",
+        title="ادمج أقسام التحويل البنكي المكررة وأرفق باركوداً واحداً",
+        reason=(
+            f"يوجد {len(ids)} أقسام للتحويل البنكي بدون باركود مرتبط. "
+            "تعدد الأقسام يربك الذكاء عند الاستحضار، ويضاعف فرصة أن "
+            "يجيب بنص بدل إرسال صورة الباركود."
+        ),
+        expected_impact=(
+            "قسم تحويل بنكي واحد موحّد مع باركود مرتبط واحد = الذكاء "
+            "يرسل الصورة مباشرة عند سؤال العميل «كيف أحوّل لكم؟» "
+            "بدل سرد الخطوات نصياً."
+        ),
+        target_kind="bank_transfer",
+        proposed_body=(
+            "احتفظ بقسم تحويل بنكي واحد فقط، وادمج تفاصيل الأقسام "
+            "الأخرى بداخله، ثم اربط صورة الباركود (الراجحي/الأهلي/إلخ) "
+            "بهذا القسم الموحد. الذكاء يفضّل المصدر الواحد الواضح."
+        ),
+        requires_media=True,
+        confidence=0.85,
+        related_section_ids=ids,
+        rationale_keys=[
+            "missing_media:bank_transfer",
+            "purpose:add_payment_barcode",
+            "duplicate:bank_transfer",
+        ] + [f"section:{i}" for i in ids],
     )
 
 
@@ -766,17 +894,33 @@ def _pass_contamination(
 
 
 def _pass_duplicates(
-    rows: List[_RowView], idx_start: int,
+    rows: List[_RowView],
+    idx_start: int,
+    *,
+    skip_section_ids: Optional[set] = None,
 ) -> List[ImprovementFinding]:
-    """Same-kind duplicate detection (Jaccard ≥ ``_DUPLICATE_SIMILARITY``)."""
+    """Same-kind duplicate detection (Jaccard ≥ ``_DUPLICATE_SIMILARITY``).
+
+    ``skip_section_ids`` (KB-Improve V1.2, May 2026 #29): when the
+    missing-media pass already emitted a merge suggestion covering
+    a bank_transfer group, we don't also want generic ``duplicate_
+    merge`` findings for the same pairs — those would re-introduce
+    the "5 duplicate suggestions" bug from a different angle. Pairs
+    where EITHER side is in ``skip_section_ids`` are dropped.
+    """
+    skip = set(skip_section_ids or [])
     out: List[ImprovementFinding] = []
     idx = idx_start
     seen_pairs: set = set()
     for i, a in enumerate(rows):
+        if a.id in skip:
+            continue
         a_tokens = _tokens(f"{a.title}\n{a.body}")
         if not a_tokens:
             continue
         for b in rows[i + 1:]:
+            if b.id in skip:
+                continue
             if a.kind != b.kind:
                 continue
             b_tokens = _tokens(f"{b.title}\n{b.body}")
@@ -796,20 +940,58 @@ def _pass_duplicates(
 def _pass_missing_media(
     rows: List[_RowView], idx_start: int,
 ) -> List[ImprovementFinding]:
-    """Bank-transfer / payment sections without an attached barcode."""
-    out: List[ImprovementFinding] = []
-    idx = idx_start
+    """Bank-transfer / payment sections without an attached barcode.
+
+    KB-Improve V1.2 (May 2026 #29 problem 2) — the original per-row
+    loop emitted N findings for N duplicate bank_transfer rows, each
+    with a different ``related_section_ids=[row.id]`` so the
+    fingerprint dedup couldn't catch them. Worse, it didn't notice
+    when a SIBLING bank_transfer row in the same KB already had a
+    barcode attached (which means the merchant is fine — they just
+    have legacy duplicates). The fix is to look at the WHOLE group:
+
+      1. Collect bank-shaped bank_transfer / payment_method rows.
+      2. If ANY row in the group already has a barcode media
+         (link_role='barcode', media_key matches the payment
+         family, or title hints at a barcode/QR), emit nothing —
+         the merchant's intent is satisfied at the group level.
+      3. If exactly ONE row has no barcode → keep the existing
+         single ``_suggest_bank_transfer_needs_barcode`` shape so
+         the merchant gets the targeted suggestion.
+      4. If TWO+ rows have no barcode → emit ONE merge suggestion
+         pointing at all of them (instead of N copies). The
+         related_section_ids becomes the full sorted set so the
+         fingerprint is stable across reruns.
+    """
+    bank_rows: List[_RowView] = []
     for r in rows:
-        if r.kind != "bank_transfer" and r.kind != "payment_method":
+        if r.kind not in ("bank_transfer", "payment_method"):
             continue
         joined = f"{r.title}\n{r.body}".lower()
-        looks_like_bank = _has_any(joined, _BANK_TRANSFER_KEYWORDS)
-        if not looks_like_bank:
+        if not _has_any(joined, _BANK_TRANSFER_KEYWORDS):
             continue
-        if r.media_count > 0:
-            continue
-        out.append(_suggest_bank_transfer_needs_barcode(idx, r)); idx += 1
-    return out
+        bank_rows.append(r)
+
+    if not bank_rows:
+        return []
+
+    # 2. Group-level barcode check: if any sibling has a barcode,
+    #    every row in the group is implicitly covered.
+    if any(_row_has_barcode_media(r) for r in bank_rows):
+        return []
+
+    rows_without_barcode = [r for r in bank_rows if not _row_has_barcode_media(r)]
+    if not rows_without_barcode:
+        return []
+
+    if len(rows_without_barcode) == 1:
+        return [_suggest_bank_transfer_needs_barcode(idx_start, rows_without_barcode[0])]
+
+    # 3. Multiple bank_transfer rows without barcode → ONE merge
+    #    suggestion covering them all. Severity stays "high" because
+    #    the customer-facing impact (no barcode in transfer replies)
+    #    is identical to the single-row case.
+    return [_suggest_bank_transfer_merge_and_barcode(idx_start, rows_without_barcode)]
 
 
 def _pass_compliance(
@@ -888,9 +1070,23 @@ def audit(
     next_idx = len(findings) + 1
     findings.extend(_pass_contamination(views, next_idx))
     next_idx = len(findings) + 1
-    findings.extend(_pass_duplicates(views, next_idx))
+
+    # Missing-media now runs BEFORE duplicate detection (KB-Improve
+    # V1.2, May 2026 #29). When it emits a group-level merge for
+    # bank_transfer rows, we collect those section ids and pass them
+    # as ``skip_section_ids`` to ``_pass_duplicates`` so a separate
+    # generic duplicate finding doesn't re-introduce the same advice
+    # from a different angle.
+    missing_media_findings = _pass_missing_media(views, next_idx)
+    findings.extend(missing_media_findings)
     next_idx = len(findings) + 1
-    findings.extend(_pass_missing_media(views, next_idx))
+
+    skip_dup_ids: set = set()
+    for mf in missing_media_findings:
+        if mf.type == "duplicate_merge":
+            skip_dup_ids.update(int(s) for s in mf.related_section_ids or [])
+
+    findings.extend(_pass_duplicates(views, next_idx, skip_section_ids=skip_dup_ids))
     next_idx = len(findings) + 1
     findings.extend(_pass_compliance(views, next_idx))
     next_idx = len(findings) + 1
@@ -921,6 +1117,19 @@ def audit(
     if suppressed:
         findings = [f for f in findings if f.fingerprint not in suppressed]
 
+    # ── Purpose-level dedup (KB-Improve V1.2, May 2026 #29) ──────────────
+    # Belt-and-braces on top of the per-pass group aggregation: if two
+    # different passes accidentally emit findings with the same
+    # ``(type, target_kind, purpose:*)`` triple, keep only the highest-
+    # confidence one. ``purpose`` lives inside ``rationale_keys`` and
+    # NEVER reaches the dashboard — it's a stable internal label
+    # (e.g. ``purpose:add_payment_barcode``). This catches the
+    # remaining "two facts of the same shape" duplication class
+    # without touching the per-section findings whose target naturally
+    # differs (e.g. weak_section on row 12 vs row 13 — those have
+    # different rationale_keys and stay independent).
+    findings = _dedup_by_purpose(findings)
+
     # ── Rank + truncate ─────────────────────────────────────────────────
     ranked = sorted(
         findings,
@@ -945,6 +1154,68 @@ _STOCK_HINT_RE = re.compile(
 def _is_platform_claim_body(f: ImprovementFinding) -> bool:
     body = f.proposed_body or ""
     return bool(_PRICE_HINT_RE.search(body) or _STOCK_HINT_RE.search(body))
+
+
+def _purpose_of(f: ImprovementFinding) -> Optional[str]:
+    """Extract the ``purpose:<slug>`` marker from ``rationale_keys``.
+
+    Returns ``None`` for findings that don't declare a purpose —
+    those are passed through the purpose-dedup unchanged.
+    """
+    for key in f.rationale_keys or []:
+        if not key:
+            continue
+        s = str(key)
+        if s.startswith("purpose:"):
+            return s[len("purpose:"):]
+    return None
+
+
+def _dedup_by_purpose(
+    findings: List[ImprovementFinding],
+) -> List[ImprovementFinding]:
+    """Collapse findings that share ``(type, target_kind, purpose)``.
+
+    Per spec (KB-Improve V1.2, point 5):
+    "لا تعرض أكثر من اقتراح واحد من نفس type + target_kind + purpose."
+
+    Findings without a ``purpose:*`` rationale key pass through —
+    only purposeful findings are touched, so per-section weak/contam
+    suggestions (which intentionally stay independent) are unaffected.
+
+    When a duplicate is found we keep the higher-confidence finding;
+    ties break on severity score then on the lower id (deterministic).
+    """
+    by_purpose: Dict[Tuple[str, str, str], ImprovementFinding] = {}
+    survivors: List[ImprovementFinding] = []
+    for f in findings:
+        purpose = _purpose_of(f)
+        if not purpose:
+            survivors.append(f)
+            continue
+        key = (
+            (f.type or "").strip().lower(),
+            (f.target_kind or "").strip().lower(),
+            purpose,
+        )
+        existing = by_purpose.get(key)
+        if existing is None:
+            by_purpose[key] = f
+            continue
+        # Tie-break: confidence desc, severity desc, lower id first.
+        existing_score = (
+            float(existing.confidence or 0),
+            _severity_score(existing.severity),
+            -int((existing.id or "sug-0").split("-")[-1] or 0),
+        )
+        candidate_score = (
+            float(f.confidence or 0),
+            _severity_score(f.severity),
+            -int((f.id or "sug-0").split("-")[-1] or 0),
+        )
+        if candidate_score > existing_score:
+            by_purpose[key] = f
+    return survivors + list(by_purpose.values())
 
 
 # ── Layer 2 — Optional GPT polisher ─────────────────────────────────────────

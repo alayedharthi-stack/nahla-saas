@@ -408,6 +408,40 @@ _GENERIC_PAYMENT_BARCODE_TRIGGERS: Tuple[str, ...] = (
     "رمز الدفع",
     "رمز التحويل",
     "رمز السداد",
+    # ── May 2026 #29: generic transfer/pay intent ───────────────
+    # Production observation: customers very often ask "كيف أحول
+    # لكم؟" / "كيف أدفع لكم؟" / "وش طريقة التحويل؟" WITHOUT
+    # naming a bank AND without using the word "باركود". These
+    # phrases are clear payment intent — if the merchant has
+    # exactly ONE active payment barcode uploaded, the tenant-
+    # aware fallback in :func:`resolve_generic_payment_barcode`
+    # attaches it. When the merchant has multiple barcodes the
+    # fallback bails by design (we don't want to guess which
+    # bank the customer meant) and the LLM gets to disambiguate.
+    # Verbs are matched as bare stems so ال + ل + ف proclitics
+    # come through naturally via Arabic normalisation in
+    # :func:`_normalize`. Keep these short to avoid over-fitting
+    # to one phrasing — the resolver's single-asset guard is the
+    # real safety net.
+    "كيف احول",
+    "كيف أحول",
+    "ابي احول",
+    "أبي احول",
+    "أبي أحول",
+    "ودي احول",
+    "حابب احول",
+    "كيف ادفع",
+    "كيف أدفع",
+    "كيف الدفع",
+    "كيف التحويل",
+    "طريقة الدفع",
+    "طريقة التحويل",
+    "وش طريقة الدفع",
+    "وش طريقة التحويل",
+    "وش طرق الدفع",
+    "كيف اسدد",
+    "كيف أسدد",
+    "اسلوب الدفع",
 )
 
 

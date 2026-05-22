@@ -292,6 +292,44 @@ def build_structured_facts_block(
         if (getattr(lk, "media", None) is not None)
         and (getattr(lk.media, "media_key", None) or "").strip()
     )
+
+    # ── KB_MEDIA_RESOLUTION (May 2026 #29) ──────────────────────────────
+    # Per-section media inventory log: makes it possible to diagnose
+    # "the AI didn't send the barcode" by checking whether the KB
+    # facts block exposed the marker to Claude at all. Emitted once
+    # per audit pass with the full per-section breakdown.
+    try:
+        for r in rows:
+            section_links = [
+                lk for lk in (getattr(r, "media_links", None) or [])
+                if getattr(getattr(lk, "media", None), "is_active", True)
+            ]
+            if not section_links:
+                continue
+            media_keys = sorted({
+                (getattr(lk.media, "media_key", None) or "").strip()
+                for lk in section_links
+                if getattr(lk, "media", None) is not None
+            })
+            selected_keys = sorted({k for k in media_keys if k})
+            logger.info(
+                "[KB_MEDIA_RESOLUTION] tenant_id=%s section_id=%s kind=%s "
+                "linked_media_count=%d media_keys=%s selected_media_keys=%s "
+                "reason=%s",
+                tenant_id,
+                getattr(r, "id", None),
+                getattr(r, "kind", "") or "",
+                len(section_links),
+                ",".join(media_keys) or "-",
+                ",".join(selected_keys) or "-",
+                "exposed_to_prompt" if selected_keys else "no_media_key_set",
+            )
+    except Exception as exc:  # noqa: BLE001 — never break facts on logging
+        logger.warning(
+            "[KB_MEDIA_RESOLUTION] log emit failed tenant=%s err=%s",
+            tenant_id, exc,
+        )
+
     logger.info(
         "[KB.facts] tenant=%s sections=%d kinds=%s media_markers=%d "
         "scoped_dropped=%d behavioral_dropped=%d active_pids=%s",

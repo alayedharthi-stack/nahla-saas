@@ -42,14 +42,30 @@ if _BACKEND not in sys.path:
 
 
 class _FakeMedia:
-    """A media row attached to a knowledge section."""
-    def __init__(self, *, is_active: bool = True) -> None:
+    """A media row attached to a knowledge section.
+
+    KB-Improve V1.2 (May 2026 #29): the auditor's missing-barcode
+    pass now looks at ``media_key`` / ``link_role`` / ``title`` to
+    decide whether the attached media counts as "the barcode the
+    AI would send". Tests can opt in via the new fields — older
+    tests that just want "some media present" keep working since
+    the stub stays backward compatible.
+    """
+    def __init__(
+        self, *, is_active: bool = True,
+        media_key: str = "", title: str = "",
+    ) -> None:
         self.is_active = is_active
+        self.media_key = media_key
+        self.title = title
 
 
 class _FakeLink:
-    def __init__(self, media: _FakeMedia) -> None:
+    def __init__(
+        self, media: _FakeMedia, *, link_role: str = "primary",
+    ) -> None:
         self.media = media
+        self.link_role = link_role
 
 
 class _Row:
@@ -187,7 +203,11 @@ def test_duplicate_sections_yield_merge_suggestion() -> None:
 def test_bank_transfer_without_media_suggests_barcode() -> None:
     from modules.ai.knowledge.improvement_advisor import audit
 
-    rows = _baseline_kb()
+    # Baseline minus the bank-shaped payment_method row, so #77 is
+    # the ONLY bank-shaped section in the KB. With multiple bank
+    # rows the new group logic emits a merge suggestion instead —
+    # tested separately in test_bank_transfer_dedup_*.
+    rows = [r for r in _baseline_kb() if r.kind != "payment_method"]
     rows.append(_Row(
         77, "bank_transfer", "التحويل البنكي",
         "نقبل التحويل البنكي عبر الراجحي والأهلي. سنرسل الآيبان عند الطلب.",
@@ -202,13 +222,24 @@ def test_bank_transfer_without_media_suggests_barcode() -> None:
 
 
 def test_bank_transfer_with_media_no_suggestion() -> None:
+    """When a bank_transfer section already carries a barcode-shaped
+    media (link_role='barcode' OR a registry payment media_key), the
+    auditor must not nag the merchant to add one again.
+    """
     from modules.ai.knowledge.improvement_advisor import audit
 
-    rows = _baseline_kb()
+    rows = [r for r in _baseline_kb() if r.kind != "payment_method"]
     rows.append(_Row(
         77, "bank_transfer", "التحويل البنكي",
         "نقبل التحويل البنكي عبر الراجحي.",
-        media_links=[_FakeLink(_FakeMedia(is_active=True))],
+        media_links=[_FakeLink(
+            _FakeMedia(
+                is_active=True,
+                media_key="payment_rajhi_barcode",
+                title="باركود الراجحي",
+            ),
+            link_role="barcode",
+        )],
     ))
     suggestions = audit(rows, platform_connected=False, products=[], max_suggestions=10)
     barcode = [s for s in suggestions
@@ -620,3 +651,211 @@ def test_emit_improvement_log_writes_structured_line(
     assert "high_severity_count=" in msg
     assert "missing_required_count=" in msg
     assert "model=gpt-4.1" in msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KB-Improve V1.2 (May 2026 #29): missing-barcode dedup + merge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bank_transfer_dedup_five_rows_collapse_to_one_merge() -> None:
+    """Five duplicate bank_transfer rows without barcodes used to
+    surface as 5 separate "أضف باركود" findings (production bug
+    #29). The new group logic must collapse them into a SINGLE
+    merge suggestion that references all five sections.
+    """
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [r for r in _baseline_kb() if r.kind != "payment_method"]
+    ids = [201, 202, 203, 204, 205]
+    for i, sid in enumerate(ids):
+        rows.append(_Row(
+            sid, "bank_transfer", f"التحويل البنكي {i + 1}",
+            "نقبل التحويل البنكي عبر الراجحي. سنرسل الآيبان عند الطلب.",
+            media_links=[],
+        ))
+
+    suggestions = audit(rows, platform_connected=False, products=[], max_suggestions=10)
+    barcode_related = [
+        s for s in suggestions
+        if (s.type in ("missing_media", "duplicate_merge")
+            and s.target_kind == "bank_transfer")
+    ]
+    # Exactly ONE suggestion across the whole bank_transfer group.
+    assert len(barcode_related) == 1, (
+        f"expected 1 merged barcode suggestion, got {len(barcode_related)}: "
+        f"{[s.title for s in barcode_related]}"
+    )
+    sug = barcode_related[0]
+    assert sug.type == "duplicate_merge"
+    assert sug.requires_media is True
+    assert set(sug.related_section_ids) == set(ids)
+
+
+def test_bank_transfer_with_any_sibling_barcode_suppresses_all_suggestions() -> None:
+    """Spec point 3: "إذا أي قسم bank_transfer لديه media role='barcode'
+    أو media_key يحتوي rajhi/barcode/qr، لا تقترح نفس الاقتراح."
+
+    One of three sibling bank_transfer rows has the Rajhi barcode
+    attached — the auditor must emit zero missing-barcode suggestions
+    for the whole group.
+    """
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [r for r in _baseline_kb() if r.kind != "payment_method"]
+    rows.append(_Row(
+        301, "bank_transfer", "التحويل البنكي - الراجحي",
+        "نقبل التحويل البنكي عبر الراجحي.",
+        media_links=[_FakeLink(
+            _FakeMedia(
+                is_active=True,
+                media_key="payment_rajhi_barcode",
+                title="باركود الراجحي",
+            ),
+            link_role="barcode",
+        )],
+    ))
+    rows.append(_Row(302, "bank_transfer", "تحويل ٢", "تحويل بنكي.", media_links=[]))
+    rows.append(_Row(303, "bank_transfer", "تحويل ٣", "تحويل بنكي.", media_links=[]))
+
+    suggestions = audit(rows, platform_connected=False, products=[], max_suggestions=10)
+    # The CRITICAL invariant: zero suggestions whose rationale is
+    # "add a payment barcode". A generic same-body duplicate_merge
+    # (rows 302↔303 have identical bodies in this fixture) is fine
+    # — that's a different concern and the merchant should be told
+    # about it.
+    barcode_purpose = [
+        s for s in suggestions
+        if s.target_kind == "bank_transfer"
+        and "purpose:add_payment_barcode" in (s.rationale_keys or [])
+    ]
+    assert barcode_purpose == [], (
+        f"expected no barcode-add suggestions when a sibling carries "
+        f"the barcode, got: {[s.title for s in barcode_purpose]}"
+    )
+
+
+def test_purpose_dedup_drops_same_type_target_purpose_repeats() -> None:
+    """Belt-and-braces: even if two passes accidentally emit findings
+    with the same ``(type, target_kind, purpose:*)`` triple, the final
+    dedup pass keeps only the highest-confidence one.
+    """
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding,
+        _dedup_by_purpose,
+    )
+
+    low = ImprovementFinding(
+        id="sug-1", type="missing_media", severity="high",
+        title="A", reason="r", expected_impact="i",
+        target_kind="bank_transfer", proposed_body="b",
+        requires_media=True, confidence=0.60,
+        related_section_ids=[10],
+        rationale_keys=["purpose:add_payment_barcode"],
+    )
+    high = ImprovementFinding(
+        id="sug-2", type="missing_media", severity="high",
+        title="B", reason="r", expected_impact="i",
+        target_kind="bank_transfer", proposed_body="b",
+        requires_media=True, confidence=0.85,
+        related_section_ids=[11],
+        rationale_keys=["purpose:add_payment_barcode"],
+    )
+    other = ImprovementFinding(
+        id="sug-3", type="missing_required_knowledge", severity="high",
+        title="Other", reason="r", expected_impact="i",
+        target_kind="shipping_zones", proposed_body="b",
+        requires_media=False, confidence=0.9,
+        related_section_ids=[],
+        rationale_keys=["purpose:add_shipping_policy"],
+    )
+    kept = _dedup_by_purpose([low, high, other])
+    kept_ids = {f.id for f in kept}
+    assert "sug-2" in kept_ids  # higher confidence wins
+    assert "sug-1" not in kept_ids
+    assert "sug-3" in kept_ids  # different purpose stays
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# May 2026 #29 problem 1: payment regex + generic barcode triggers.
+# Customer asks "كيف أحول لكم؟" (generic, no bank name, no "باركود"
+# noun) → the legacy is_payment_query AND the modern registry
+# generic-payment matcher must both fire so the safety nets can
+# attach the merchant's single uploaded barcode.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "كيف أحول لكم؟",
+        "كيف احول لكم",
+        "ابي أحول لكم",
+        "ودي أحول لكم",
+        "كيف أدفع لكم؟",
+        "كيف الدفع",
+        "كيف التحويل",
+        "وش طريقة الدفع؟",
+        "وش طريقة التحويل؟",
+        "طريقة الدفع",
+        "طريقة التحويل",
+    ],
+)
+def test_is_payment_query_matches_generic_transfer_phrasing(phrase: str) -> None:
+    """The legacy hard-override path uses ``is_payment_query`` as
+    its gate. Pre-fix the regex required either a bank name, the
+    word "باركود", "آيبان", or "تحويل بنكي". Customers say "كيف
+    أحول لكم؟" without any of those — we must catch it too."""
+    from core.ai_libraries import is_payment_query
+
+    assert is_payment_query(phrase), (
+        f"is_payment_query should match: {phrase!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "كيف أحول لكم؟",
+        "كيف احول لكم",
+        "ابي أحول لكم",
+        "كيف أدفع لكم؟",
+        "كيف الدفع",
+        "كيف التحويل",
+        "طريقة الدفع",
+        "وش طريقة التحويل",
+    ],
+)
+def test_generic_payment_barcode_query_catches_transfer_intent(
+    phrase: str,
+) -> None:
+    """``resolve_generic_payment_barcode`` only fires when this
+    matcher returns True. Adding the "كيف أحول لكم" family of
+    phrasings lets the tenant-aware single-asset fallback attach
+    the merchant's barcode for the generic payment intent."""
+    from services.media_key_registry import is_generic_payment_barcode_query
+
+    assert is_generic_payment_barcode_query(phrase), (
+        f"is_generic_payment_barcode_query should match: {phrase!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # Mentions a specific bank → defer to find_key_for_query.
+        "كيف أحول للراجحي",
+        # Unrelated questions.
+        "كيف الأسعار؟",
+        "ابي عسل السمر",
+        "السلام عليكم",
+    ],
+)
+def test_generic_payment_barcode_query_no_false_positive(
+    phrase: str,
+) -> None:
+    from services.media_key_registry import is_generic_payment_barcode_query
+
+    assert not is_generic_payment_barcode_query(phrase), (
+        f"is_generic_payment_barcode_query should NOT match: {phrase!r}"
+    )

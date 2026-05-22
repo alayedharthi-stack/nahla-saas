@@ -7266,6 +7266,32 @@ async def _handle_merchant_message(
                             _media_type_norm, _media_ok,
                         )
 
+                    # ── OUTBOUND_MEDIA_ATTACH (May 2026 #29) ─────────────────
+                    # Structured per-attachment audit line. Distinct from
+                    # the legacy ``[AIMedia.send]`` line because it
+                    # carries ``media_key`` + ``conversation_id`` — the
+                    # two fields needed to diagnose "the customer asked
+                    # for the Rajhi barcode but never got an image". This
+                    # is wrapped in try/except so a logging failure never
+                    # disrupts the send loop.
+                    try:
+                        logger.info(
+                            "[OUTBOUND_MEDIA_ATTACH] tenant_id=%s "
+                            "conversation_id=%s media_key=%s media_id=%s "
+                            "media_type=%s safety_net=%s sent=%s reason=%s",
+                            tenant_id,
+                            getattr(convo, "id", None),
+                            _att.get("media_key") or "-",
+                            _att.get("id") or "-",
+                            _media_type_norm,
+                            bool(_att.get("safety_net")),
+                            "true" if _media_ok else "false",
+                            "delivered" if _media_ok
+                            else "send_returned_false",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
                     # After the product image lands, follow up with
                     # a CTA-URL button to the buy page so the
                     # customer can checkout in one tap. We do NOT
@@ -7299,6 +7325,22 @@ async def _handle_merchant_message(
                         "[AIMedia.send] tenant=%s id=%s failed: %s",
                         tenant_id, _att.get("id"), _media_send_exc,
                     )
+                    try:
+                        logger.info(
+                            "[OUTBOUND_MEDIA_ATTACH] tenant_id=%s "
+                            "conversation_id=%s media_key=%s media_id=%s "
+                            "media_type=%s safety_net=%s sent=false "
+                            "reason=exception:%s",
+                            tenant_id,
+                            getattr(convo, "id", None),
+                            _att.get("media_key") or "-",
+                            _att.get("id") or "-",
+                            _media_type_norm,
+                            bool(_att.get("safety_net")),
+                            type(_media_send_exc).__name__,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
             # ── Staff call contact cards ────────────────────────────
             # Dispatched LAST so the customer sees: (1) the main

@@ -863,6 +863,26 @@ _PAYMENT_QUERY_RE = re.compile(
     r"آيبان|الآيبان|ايبان|الايبان|iban|"
     # Transfer / deposit
     r"تحويل\s*بنك|التحويل\s*البنكي|بيانات\s*التحويل|بيانات\s*الدفع|إيداع|"
+    # Generic transfer / pay intent (May 2026 #29). Production case:
+    # the customer asks "كيف أحول لكم؟" / "كيف أدفع لكم؟" — no bank
+    # name, no "باركود" noun, no "بنكي" qualifier. The old regex
+    # missed all of them, so the legacy payment-asset hard-override
+    # never ran and the AI replied with prose steps instead of the
+    # barcode image. The modern media_key registry has the same
+    # phrasings as triggers (see ``_GENERIC_PAYMENT_BARCODE_TRIGGERS``)
+    # — having both layers catch the intent gives us defense-in-depth.
+    # We require ``لكم``/``لكم؟``/``إليكم`` after the verb so we
+    # don't false-positive on "كيف أحول الكمبيوتر" / unrelated uses.
+    r"كيف\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
+    r"[أا]?بي\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
+    r"ودي\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
+    r"حابب\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
+    r"كيف\s+[أا]?دفع\s+(?:ل|إل)كم|"
+    r"كيف\s+الدفع|كيف\s+التحويل|"
+    r"طريقة\s+(?:الدفع|التحويل|السداد)|"
+    r"وش\s+طريقة\s+(?:الدفع|التحويل|السداد)|"
+    r"وش\s+طرق\s+الدفع|"
+    r"كيف\s+[أا]?سدد|اسلوب\s+الدفع|"
     # Barcode / QR
     # Two-tier match: a bare ``باركود`` / ``الباركود`` on its own is enough
     # (May 2026 Tenant 33 incident: "ابي الباركود" was failing the regex
@@ -876,7 +896,8 @@ _PAYMENT_QUERY_RE = re.compile(
     r"\bbank\s*(account|details|transfer|info)\b|"
     r"\b(send|share|give|need|want)\s+(me|us|the)?\s*(your\s+)?bank\b|"
     r"\bpayment\s*(barcode|qr|details)\b|"
-    r"\biban\b"
+    r"\biban\b|"
+    r"\bhow\s+(?:do\s+I|can\s+I|to)\s+(?:pay|transfer)\b"
     r")",
     re.IGNORECASE,
 )
