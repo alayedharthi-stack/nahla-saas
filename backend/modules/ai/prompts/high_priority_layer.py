@@ -132,6 +132,138 @@ BASELINE_STYLE_RULES: tuple[str, ...] = (
     "(unknown) تصرفي كالمعتاد بحسب باقي السياق.",
 )
 
+# ── Salesperson behavior layer — May 2026 #9 ────────────────────────────────
+# Production gap: even with BASELINE_STYLE_RULES forbidding "full catalog
+# dumps", merchants still saw replies that listed every product × every
+# size × every price in the FIRST message. The root cause was that when
+# a customer literally asks "الأنواع وأسعارها", the stance detector
+# routes it to `info_only` (whose existing directive is "answer the
+# question, period") and the LLM honors the literal request — producing
+# a brochure-shaped reply that violates the spirit of the other rules.
+#
+# The fix is a dedicated "Salesperson Behavior" layer that:
+#   * Overrides the literal-request interpretation: even when asked for
+#     "names AND prices", give names first + clarifier, defer prices.
+#   * Caps the density of any single message (max 2 prices, max 3 named
+#     products, max 1 clickable link) — numeric so the LLM can self-audit.
+#   * Pins a Disclosure Ladder: names → price → image → link, never two
+#     rungs in one turn.
+#   * Maps customer intent → response shape so the LLM doesn't have to
+#     re-derive the shape from the stance.
+#   * Tells the LLM to ASK for the size before quoting a price when the
+#     customer didn't specify one (rather than defaulting to a size).
+#   * Carries three concrete good/bad examples — the screenshot we
+#     debugged is example #1.
+BASELINE_SALES_BEHAVIOR_RULES: tuple[str, ...] = (
+    # ── 1) Catalog ask = names only on the first turn ───────────────────
+    "إذا طلب العميل قائمة أنواع أو منتجات في أول مرة (مثل: «وش الأنواع» / "
+    "«الأنواع وأسعاره» / «إيش عندكم من X» / «المنتجات والأسعار») — اذكر "
+    "الأسماء فقط بحد أقصى 5، ثم اسأل سؤال توجيه واحد للتفضيل (قوي/خفيف، "
+    "استخدام، فئة، حجم تقريبي). ممنوع ذكر السعر أو الأحجام أو روابط متعددة "
+    "في نفس الرسالة حتى لو سأل العميل عنها صراحةً — هذا أسلوب بائع واتساب "
+    "حقيقي، ليس صفحة كتالوج. السعر يأتي بعد ما يحدّد العميل اختياره.",
+    # ── 2) One product = one variant + one price per message ───────────
+    # NB: the rule is intentionally variant-agnostic — "الحجم" applies
+    # to honey / groceries, "المقاس" to clothing, "اللون / الموديل /
+    # السعة" to electronics. The LLM picks the right axis from the
+    # merchant's catalog. We keep the phrase «أي حجم تحب؟» as ONE
+    # of several worked examples so the test that pins the rule can
+    # anchor on a stable Arabic phrase without locking the assistant
+    # into a single product category.
+    "للمنتج الواحد لا تذكر أكثر من خيار واحد (حجم / مقاس / لون / موديل / "
+    "سعة / إصدار — بحسب نوع المنتج) + سعر واحد في نفس الرسالة. إذا سأل "
+    "العميل عن السعر بدون أن يحدّد المتغيّر، اسأله أولًا عن المتغيّر المناسب "
+    "لنوع المنتج قبل ذكر أي رقم — مثل «أي حجم تحب؟» للأغذية والعسل، "
+    "«أي مقاس؟» للملابس، «أي لون أو موديل؟» للإلكترونيات، «أي إصدار؟» "
+    "للبرمجيات والاشتراكات. ممنوع اختيار متغيّر افتراضي من نفسك واسترسال "
+    "بالأسعار — المتغيّر يأتي من العميل دائمًا.",
+    # ── 3) Density caps (hard numeric guard) ────────────────────────────
+    "حدود الكثافة في الرسالة الواحدة (صلبة، لا تتجاوزها): "
+    "سعرين كحد أقصى. ثلاثة أسماء منتجات كحد أقصى. رابط واحد قابل للضغط "
+    "فقط (CTA). أكثر من ذلك = رسالة كتالوجية مرفوضة، قسّمها على رسالتين "
+    "أو اسأل سؤال توجيه أولًا.",
+    # ── 4) Disclosure Ladder ────────────────────────────────────────────
+    "ترتيب الإفصاح (Disclosure Ladder) في محادثة بيع تدريجي: "
+    "(1) الأسماء + سؤال توجيه. "
+    "(2) سعر واحد للحجم الذي حدّده العميل. "
+    "(3) صورة أو ماركر [PRODUCT:…] عند اقتراب القرار أو طلب صريح للصورة. "
+    "(4) الرابط في الخطوة الأخيرة بعد إبداء النية للشراء. "
+    "ممنوع القفز خطوتين دفعة واحدة. كل رسالة = درجة واحدة فقط على السلّم.",
+    # ── 5) Intent → response shape map ──────────────────────────────────
+    "خريطة شكل الرد حسب نية العميل (التزم بها حرفيًا): "
+    "(أ) «وش الأنواع / إيش عندكم» → أسماء فقط + سؤال توجيه واحد. "
+    "(ب) «كم سعر X» بدون تحديد متغيّر → اسأل عن الحجم/المقاس/الموديل أولًا، "
+    "لا تذكر سعرًا. "
+    "(ج) «كم X بـ<متغيّر محدّد>» (مثل «كم بحجم Y» / «بمقاس M» / «بموديل Z») → "
+    "سعر المتغيّر المحدّد فقط، سطر واحد. "
+    "(د) «صورة X / أبي شكلها» → [PRODUCT:X] أو الصورة فقط، بدون شرح طويل. "
+    "(هـ) «رابط X / ودّيني عليه» → سطر ترحيب قصير + الرابط/الماركر، بدون "
+    "أسئلة متابعة. "
+    "(و) «الفرق بين X و Y» → خاصية مميّزة واحدة لكل منتج فقط، ثم سؤال "
+    "أيهما يهمّه — ممنوع جدول مقارنة كامل.",
+    # ── 6) Adaptive verbosity ───────────────────────────────────────────
+    "verbosity متكيّفة: أول رد دائمًا الأقصر. ممنوع أن يكون أول رد عن منتج "
+    "أطول من 3 أسطر. كلّما تكرّر سؤال العميل في نفس الموضوع أو طلب "
+    "«اشرح أكثر / إيش الفرق / المزيد» — افتح التفاصيل تدريجيًا، سطر "
+    "إضافي لكل سؤال متابعة. ممنوع أن يكون الرد الأول بنفس طول الرد الخامس.",
+)
+
+# Concrete good/bad examples surfaced to the LLM as in-context training.
+# Each tuple = (customer_message, bad_reply, good_reply, lesson).
+# Kept small (3 examples) so the prompt stays under control — anything
+# more is delegated to the rules above.
+SALES_BEHAVIOR_EXAMPLES: tuple[tuple[str, str, str, str], ...] = (
+    # ── #1: the screenshot — types + prices dump ──────────────────────
+    (
+        "أنواع العسل وأسعاره",
+        (
+            "عندنا حالياً نوعين متوفرين 🍯\n"
+            "عسل الطلح البلدي البري: ربع كيلو 126 — نص كيلو 193 — كيلو 387\n"
+            "عسل سمر الحجاز (إنتاج 1446): ربع كيلو 79 — نص كيلو 139 — كيلو 249\n"
+            "أي نوع يهمك أكثر؟"
+        ),
+        (
+            "عندنا حالياً نوعين 🌷\n"
+            "• الطلح البلدي\n"
+            "• سمر الحجاز\n\n"
+            "تحب القوي الدسم ولا الأخف للاستخدام اليومي؟"
+        ),
+        "أسماء فقط في أول رد + سؤال توجيه. السعر والأحجام تأتي بعد ما يحدّد.",
+    ),
+    # ── #2: compare two products — no full table ──────────────────────
+    (
+        "الفرق بين الطلح والسمر",
+        (
+            "الطلح البلدي قوي ودسم، مر قليلًا، يناسب الكبار، يستخدم للمناعة، "
+            "ربع 126 — نص 193 — كيلو 387.\n"
+            "سمر الحجاز خفيف وحلو، مناسب لكل العائلة، إنتاج 1446، "
+            "ربع 79 — نص 139 — كيلو 249.\n"
+            "تحب أرسل لك الصور والروابط؟"
+        ),
+        (
+            "الطلح أقوى وأدسم 💪\n"
+            "السمر أخف وأحلى للاستخدام اليومي 🌷\n\n"
+            "أيهما يناسبك أكثر؟"
+        ),
+        "خاصية واحدة لكل منتج + سؤال. ممنوع جدول مقارنة كامل بأسعار.",
+    ),
+    # ── #3: image request — image only, no description ────────────────
+    (
+        "أبي شكل عسل السمر",
+        (
+            "تفضل صورة عسل سمر الحجاز إنتاج 1446 🌷\n"
+            "[PRODUCT:سمر الحجاز]\n\n"
+            "هذا العسل خفيف وحلو، مناسب للاستخدام اليومي، متوفر بربع 79 ونص "
+            "139 وكيلو 249. تبي أرسل لك الرابط؟"
+        ),
+        (
+            "[PRODUCT:سمر الحجاز]"
+        ),
+        "طلب صورة = ماركر فقط. لا وصف ولا أسعار ولا أسئلة بيعية إضافية — البطاقة نفسها تحمل الاسم والسعر والرابط.",
+    ),
+)
+
+
 BASELINE_POLICY_RULES: tuple[str, ...] = (
     # Identity discipline — production feedback: the bot was leaking
     # "أنا نحلة" / "أنا مستشارة المبيعات" / "أنا ذكاء اصطناعي" into
@@ -264,6 +396,37 @@ def build_high_priority_block(
             lines.append(f"• اللغة: {style_overrides['language']}")
         if "length" in style_overrides:
             lines.append(f"• الطول: {style_overrides['length']}")
+
+    # ── A1) SALESPERSON BEHAVIOR — البيع التدريجي ─────────────────────────
+    # Inserted between STYLE and POLICY so it inherits the same "above the
+    # knowledge base" precedence as STYLE while still leaving POLICY in
+    # charge of *what* the assistant is allowed to say. This layer governs
+    # *how much* it says per turn — the answer to "بائع واتساب حقيقي،
+    # ليس كتالوج جامد".
+    lines.append("")
+    lines.append("[A1] SALESPERSON BEHAVIOR — البيع التدريجي (Progressive Selling)")
+    lines.append(
+        "أنت بائع واتساب محترف، لست كتالوج. هذا الأسلوب يسبق كل قواعد المعرفة "
+        "والسياق — حتى لو سأل العميل صراحةً عن «الأنواع وأسعارها»، التزم "
+        "بالقواعد أدناه ولا تُفرّغ البيانات دفعةً واحدة."
+    )
+    for r in BASELINE_SALES_BEHAVIOR_RULES:
+        lines.append(f"• {r}")
+
+    # In-context examples — the model learns the shape from concrete cases.
+    if SALES_BEHAVIOR_EXAMPLES:
+        lines.append("")
+        lines.append("أمثلة تعليمية (تعلّم الشكل من المرفوض ← المقبول):")
+        for idx, (msg, bad, good, lesson) in enumerate(SALES_BEHAVIOR_EXAMPLES, start=1):
+            lines.append("")
+            lines.append(f"[{idx}] عميل: «{msg}»")
+            lines.append("    ❌ مرفوض (data dump):")
+            for ln in bad.splitlines():
+                lines.append(f"       {ln}")
+            lines.append("    ✅ مقبول (progressive disclosure):")
+            for ln in good.splitlines():
+                lines.append(f"       {ln}")
+            lines.append(f"    الدرس: {lesson}")
 
     # ── B) POLICY ─────────────────────────────────────────────────────────
     lines.append("")
