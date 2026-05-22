@@ -454,6 +454,209 @@ def stamp_outbound_send_status(
         return None
 
 
+def _find_queued_outbound_row(
+    db: Any,
+    *,
+    tenant_id: int,
+    recipient: str,
+) -> Optional[Any]:
+    """Lookup helper extracted so unit tests can stub it without
+    having to fake the full SQLAlchemy column chain. Returns the
+    most-recent ``queued`` outbound MessageEvent for
+    ``(tenant_id, recipient)`` within ``_STAMP_LOOKUP_WINDOW``, or
+    ``None`` on miss / any DB error.
+
+    Never raises.
+    """
+    suffix = _phone_suffix(recipient)
+    if not suffix:
+        return None
+    cutoff = datetime.utcnow() - _STAMP_LOOKUP_WINDOW
+    try:
+        from models import MessageEvent  # noqa: PLC0415
+        from sqlalchemy import or_, func  # noqa: PLC0415
+
+        phone_text   = MessageEvent.extra_metadata["phone"].astext
+        customer_txt = MessageEvent.extra_metadata["customer_phone"].astext
+        status_text  = MessageEvent.extra_metadata["provider_send"]["status"].astext
+        return (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                func.lower(MessageEvent.direction) == "outbound",
+                MessageEvent.created_at >= cutoff,
+                or_(
+                    func.right(phone_text, len(suffix)) == suffix,
+                    func.right(customer_txt, len(suffix)) == suffix,
+                ),
+                or_(
+                    status_text.is_(None),
+                    status_text == STATUS_QUEUED,
+                ),
+            )
+            .order_by(MessageEvent.id.desc())
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[outbound_send_status] _find_queued_outbound_row failed "
+            "tenant=%s to=%s err=%s",
+            tenant_id, recipient, exc,
+        )
+        return None
+
+
+def sync_outbound_body_to_final(
+    db: Any,
+    *,
+    tenant_id: Optional[int],
+    recipient: str,
+    final_body: str,
+    reason: str = "post_safety_nets",
+) -> Optional[int]:
+    """Update the body of the most recent queued outbound MessageEvent
+    for ``(tenant_id, recipient)`` so the dashboard sees what the
+    customer actually receives — not the brain's raw pre-safety-net
+    text.
+
+    Why this exists (May 2026 #32 — Tenant 33 production case)
+    ─────────────────────────────────────────────────────────
+    ``StateManager.save_message(direction="outbound")`` is called from
+    ``whatsapp_webhook.py:5883`` IMMEDIATELY after the brain produces
+    a reply, and BEFORE the post-LLM safety nets run. The safety nets
+    routinely modify the reply text:
+
+      * ``apply_store_link_safety_net`` injects ``store_url`` when
+        the customer asked for the store link but the LLM forgot it.
+      * ``apply_clear_intent_fallback_net`` rewrites generic apology
+        replies into intent-aware nudges.
+      * ``apply_delivery_info_context_net`` rewrites dismissive
+        replies when the customer was responding to a delivery prompt.
+      * ``reasoning_scrub`` drops leaked-thought lines.
+      * ``maybe_scrub_unkept_asset_promise`` (May 2026 #31) rewrites
+        false-promise spans when the corresponding asset is missing.
+      * The CTA-button extractor strips inline URLs and replaces the
+        body with a short ``"تفضل المتجر 🌷"``-style label.
+
+    Without this sync, the dashboard renders the OLD body and the
+    customer's WhatsApp shows the NEW body — exactly the divergence
+    the merchant flagged: "نحلة تعرض رسالة لم تصل واتساب".
+
+    Contract
+    ────────
+    * Pure observability glue — must NEVER raise. Any DB hiccup is
+      logged and swallowed; the send path is unaffected.
+    * Uses the SAME lookup as ``stamp_outbound_send_status`` so we
+      always update the row the wire layer will stamp next. If no
+      candidate row exists (rare; only when the persist failed too)
+      we return ``None`` and the caller silently moves on.
+    * Idempotent: callers can invoke this multiple times during a
+      single turn; the last call wins.
+
+    Returns the row id we touched, or ``None`` on miss / error.
+    """
+    if db is None or not recipient:
+        return None
+    if tenant_id is None:
+        return None
+
+    try:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        nested_ok = False
+        try:
+            db.begin_nested()
+            nested_ok = True
+        except Exception:
+            nested_ok = False
+
+        try:
+            row = _find_queued_outbound_row(
+                db, tenant_id=int(tenant_id), recipient=recipient,
+            )
+            if row is None:
+                if nested_ok:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                logger.debug(
+                    "[OUTBOUND_BODY_SYNC] no candidate row tenant=%s to=%s "
+                    "reason=%s",
+                    tenant_id, recipient, reason,
+                )
+                return None
+
+            previous_body = row.body or ""
+            new_body = final_body or ""
+            if previous_body == new_body:
+                if nested_ok:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                logger.debug(
+                    "[OUTBOUND_BODY_SYNC] no-op (identical body) tenant=%s "
+                    "to=%s row=%s reason=%s",
+                    tenant_id, recipient, row.id, reason,
+                )
+                return int(row.id)
+
+            row.body = new_body
+            # Stamp a small audit trail in extra_metadata so we can
+            # always reconstruct what the brain originally produced.
+            meta = dict(row.extra_metadata or {})
+            history = list(meta.get("body_sync_history") or [])
+            # Cap history at the last 3 sync events — enough to debug
+            # without bloating the JSONB column.
+            history.append({
+                "reason":       reason,
+                "at":           datetime.now(timezone.utc).isoformat(),
+                "len_before":   len(previous_body),
+                "len_after":    len(new_body),
+                # Short preview so a grep is enough to verify a fix
+                # without joining tables. Truncated aggressively so
+                # PII / long URLs don't blow up the JSONB.
+                "preview_from": previous_body[:80],
+                "preview_to":   new_body[:80],
+            })
+            meta["body_sync_history"] = history[-3:]
+            row.extra_metadata = meta
+            flag_modified(row, "extra_metadata")
+            db.add(row)
+            db.flush()
+            db.commit()
+
+            logger.info(
+                "[OUTBOUND_BODY_SYNC] tenant=%s to=%s row=%s reason=%s "
+                "len_before=%d len_after=%d delta=%+d",
+                tenant_id, recipient, row.id, reason,
+                len(previous_body), len(new_body),
+                len(new_body) - len(previous_body),
+            )
+            return int(row.id)
+        except Exception as inner_exc:  # noqa: BLE001
+            logger.warning(
+                "[OUTBOUND_BODY_SYNC] sync failed tenant=%s to=%s err=%s",
+                tenant_id, recipient, inner_exc,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+    except Exception as outer_exc:  # noqa: BLE001
+        logger.warning(
+            "[OUTBOUND_BODY_SYNC] setup failed tenant=%s to=%s err=%s",
+            tenant_id, recipient, outer_exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
 def stamp_message_event_id(
     db: Any,
     *,

@@ -6750,6 +6750,39 @@ async def _handle_merchant_message(
                     _ap_exc,
                 )
 
+        # ── Sync persisted body to post-safety-net reply ────────────
+        # ``StateManager.save_message(direction="outbound")`` ran way
+        # upstream (≈ L5883), BEFORE the safety nets / scrub / asset-
+        # promise guard / CTA-button extractor touched the reply. The
+        # dashboard inbox reads MessageEvent rows verbatim, so without
+        # this sync the merchant sees the brain's RAW pre-safety-net
+        # text — e.g. "هذا متجرنا 🌷" — while the customer's WhatsApp
+        # receives the FINAL text with the injected ``store_url``.
+        #
+        # The sync uses the same (tenant, recipient, queued) lookup as
+        # ``stamp_outbound_send_status`` so we always touch the row
+        # the wire layer will stamp next. It never raises — any DB
+        # error is logged and swallowed so the send path is
+        # uncompromised. See ``core.outbound_send_status`` for the
+        # rationale.
+        if reply:
+            try:
+                from core.outbound_send_status import (  # noqa: PLC0415
+                    sync_outbound_body_to_final as _sync_body,
+                )
+                _sync_body(
+                    db,
+                    tenant_id=tenant_id,
+                    recipient=to,
+                    final_body=reply,
+                    reason="post_safety_nets_pre_send",
+                )
+            except Exception as _sync_exc:  # noqa: BLE001 — never break send
+                logger.debug(
+                    "[OUTBOUND_BODY_SYNC] evaluate failed (open): %s",
+                    _sync_exc,
+                )
+
         if _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
