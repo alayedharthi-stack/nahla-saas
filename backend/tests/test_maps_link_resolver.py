@@ -587,3 +587,79 @@ def test_store_link_phrasings_dont_match_location() -> None:
         assert not _looks_like_location_request(msg), (
             f"location net should not match: {msg!r}"
         )
+
+
+# ── Redundant prose REPLACE behaviour (May 2026 #38) ─────────────────────────
+
+
+def test_bare_intro_detector_flags_ask_for_branch_prose() -> None:
+    """The exact prose the LLM emitted before May 2026 #38 — a
+    multi-line "we'll send the location, tell us the branch" stub
+    — MUST be classified as bare-intro-shaped so the safety net
+    REPLACES it instead of appending a second message containing
+    the maps URL. Without this, customers saw both messages on
+    the wire ("أخبرنا بالفرع" + "موقعنا 📍 ..."), contradicting
+    each other."""
+    from modules.ai.postprocess.safety_nets import _looks_like_bare_location_intro
+
+    awkward_prose_replies = (
+        "حياك الله 🌷 لنبعث لك موقعنا على الخرايط\nعطنا اسم الفرع أو المدينة وأبشر.",
+        "أخبرنا بنوع الاستفسار أو الفرع لنبعث لك موقعنا على الخرايط",
+        "أعطنا اسم الفرع أو المدينة 🌷",
+        "خبرنا بالفرع لنرسل لك الموقع",
+        "أخبرنا أي فرع تبحث عنه",
+    )
+    for reply in awkward_prose_replies:
+        assert _looks_like_bare_location_intro(reply), (
+            f"redundant prose should be flagged for replacement: {reply!r}"
+        )
+
+
+def test_substantive_reply_without_redundant_prose_is_not_bare() -> None:
+    """A real product/service answer (no "send branch" prose,
+    no maps URL) must NOT be flagged as bare-intro — we'd
+    overwrite the merchant's actual reply with our canonical
+    location line."""
+    from modules.ai.postprocess.safety_nets import _looks_like_bare_location_intro
+
+    real_replies = (
+        "متوفر شحن مبرد للخليج، السعر ٢٢٠ ريال للكيلو 🌷",
+        "نوفر العسل الجبلي والسدر بأسعار مختلفة حسب الكمية المطلوبة.",
+    )
+    for reply in real_replies:
+        assert not _looks_like_bare_location_intro(reply), (
+            f"substantive reply must NOT be flagged: {reply!r}"
+        )
+
+
+def test_safety_net_replaces_redundant_prose_when_injecting_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the LLM ships the awkward "ask for branch"
+    fallback (because facts.maps_url was empty), the safety net
+    resolves a maps URL, and the FINAL reply must be the clean
+    canonical "موقعنا 📍\n<url>" — NOT the awkward prose plus
+    the URL on a new line."""
+    from modules.ai.postprocess.safety_nets import apply_location_safety_net
+
+    db = _install_resolver_stubs(
+        monkeypatch,
+        snapshot_maps_url="https://maps.app.goo.gl/aledqr",
+        settings_maps_url="",
+        kb_sections=[],
+    )
+    awkward = (
+        "حياك الله 🌷 لنبعث لك موقعنا على الخرايط\n"
+        "عطنا اسم الفرع أو المدينة وأبشر."
+    )
+    result = apply_location_safety_net(
+        db, tenant_id=33,
+        customer_msg="وين موقعكم",
+        reply_text=awkward,
+    )
+    assert result.fired is True
+    assert result.rewrote_reply is True
+    # Customer must NOT see both the redundant prose AND the URL.
+    assert "لنبعث لك" not in result.new_reply
+    assert "عطنا اسم الفرع" not in result.new_reply
+    assert "https://maps.app.goo.gl/aledqr" in result.new_reply

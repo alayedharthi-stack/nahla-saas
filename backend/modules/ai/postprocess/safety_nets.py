@@ -563,8 +563,20 @@ _STAFF_KB_FALLBACK_KINDS: tuple = (
 # Window (in characters) around a name match to consider for the
 # nearest phone digits. Tight enough to avoid pairing the wrong
 # number ("Manager 050... | Driver 053...") and wide enough to
-# bridge a phone that lives one bullet point away from the name.
-_STAFF_KB_PROXIMITY_WINDOW = 80
+# bridge a phone that lives a couple of bullet points away from
+# the name.
+#
+# May 2026 #38 (post-D2 follow-up): bumped from 80 → 220 chars
+# after the live trace showed أمين's name and phone landed in
+# the same KB section but separated by a short paragraph
+# (~120 chars). The narrower window made the resolver miss
+# "بائع المعرض: أمين\n\nالتواصل المباشر: 0541690226" — exactly
+# the merchant's setup. 220 chars covers the typical
+# "name → role → contact" prose layout while still being tight
+# enough to keep two distinct staff members in distinct windows
+# (their entries are usually on separate KB sections, not glued
+# into one paragraph).
+_STAFF_KB_PROXIMITY_WINDOW = 220
 
 
 # Saudi phone — captures the common shapes Claude emits in replies.
@@ -716,6 +728,13 @@ def _lookup_staff_phone_in_kb(
         )
         return "", "", ""
 
+    # Pass 1 — proximity match (the canonical, most-confident path).
+    # We also remember the FIRST section that contained the name +
+    # at least one phone, so we can fall back to a single-phone
+    # bypass below when no proximity hit was found.
+    fallback_single_phone: Optional[tuple] = None  # (kind, id, phone)
+    name_seen_in_kinds: List[str] = []
+    name_seen_in_section_ids: List[int] = []
     for row in rows:
         body = getattr(row, "body", "") or ""
         if not body:
@@ -730,9 +749,45 @@ def _lookup_staff_phone_in_kb(
         for pat in _PHONE_REGEXES:
             for m in pat.finditer(body):
                 phone_spans.append((m.start(), m.end(), m.group(0)))
+        # Track unique phones for the single-phone fallback below.
+        unique_phones_in_section = sorted(
+            {span[2] for span in phone_spans}
+        )
         if not phone_spans:
+            # Section has the name in it (we'll detect this below)
+            # but no phones → record for telemetry only; the
+            # cross-section fallback never reads this branch.
+            if target_norm in body_norm:
+                name_seen_in_kinds.append(getattr(row, "kind", ""))
+                name_seen_in_section_ids.append(int(getattr(row, "id", 0) or 0))
             continue
         phone_spans.sort(key=lambda s: s[0])
+
+        section_has_name = target_norm in body_norm
+        if section_has_name:
+            name_seen_in_kinds.append(getattr(row, "kind", ""))
+            name_seen_in_section_ids.append(int(getattr(row, "id", 0) or 0))
+            # Single-phone-in-section fallback: when the section
+            # has the name AND exactly one phone, the most plausible
+            # interpretation is "this section is about this person".
+            # We hold this in reserve for after the proximity sweep.
+            # Pre-fix (May 2026 #38), a section like
+            #   "بائع المعرض: أمين"
+            #   "<long product paragraph>"
+            #   "للتواصل المباشر: 0541690226"
+            # could exceed the proximity window. The single-phone
+            # bypass rescues this layout — we never bypass on
+            # multi-phone sections because that's where the
+            # ambiguity lives.
+            if (
+                fallback_single_phone is None
+                and len(unique_phones_in_section) == 1
+            ):
+                fallback_single_phone = (
+                    getattr(row, "kind", ""),
+                    str(getattr(row, "id", "")),
+                    unique_phones_in_section[0],
+                )
 
         idx = 0
         while True:
@@ -781,16 +836,47 @@ def _lookup_staff_phone_in_kb(
                 logger.info(
                     "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=kb:%s "
                     "section_id=%s name_len=%d phone_match=%s "
-                    "direction=%s proximity=%d",
+                    "direction=%s proximity=%d tier=proximity",
                     tenant_id, row.kind, row.id,
                     len(name), True, direction, used_dist,
                 )
                 return chosen[2], row.kind, str(row.id)
             idx = name_end
+
+    # Pass 2 — single-phone-in-section bypass (May 2026 #38).
+    # No proximity hit, but a section that mentions the name has
+    # exactly one phone in its body. Treat that phone as the
+    # contact for this name.
+    if fallback_single_phone is not None:
+        kind, sid, phone = fallback_single_phone
+        logger.info(
+            "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=kb:%s "
+            "section_id=%s name_len=%d phone_match=%s tier=single_phone "
+            "reason=single_phone_in_section",
+            tenant_id, kind, sid, len(name), True,
+        )
+        return phone, kind, sid
+
+    # No phone found anywhere. Telemetry covers the four most
+    # actionable failure modes so production triage can answer
+    # "why didn't the bot send أمين's number?" without reading
+    # source. ``no_phone_in_any_section`` means the merchant
+    # genuinely has no phone in the staff KB — this should drive
+    # a ``missing_staff_phone`` improvement suggestion.
+    if not name_seen_in_kinds:
+        miss_reason = "name_not_found_in_kb"
+    elif name_seen_in_section_ids:
+        # Name was found in a section, but that section had either
+        # no phones or multiple phones (none within proximity).
+        miss_reason = "name_found_no_proximity_match"
+    else:
+        miss_reason = "no_phone_in_any_section"
     logger.info(
         "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=kb:miss name_len=%d "
-        "phone_match=%s reason=no_phone_within_window",
-        tenant_id, len(name), False,
+        "phone_match=%s reason=%s name_in_kinds=%s name_in_section_ids=%s",
+        tenant_id, len(name), False, miss_reason,
+        ",".join(name_seen_in_kinds) or "-",
+        ",".join(str(i) for i in name_seen_in_section_ids) or "-",
     )
     return "", "", ""
 
@@ -1581,17 +1667,79 @@ def _looks_like_location_request(customer_msg: str) -> bool:
     return False
 
 
+# Prose patterns that mean "the LLM didn't have a maps URL in
+# context, so it's asking the customer for a branch / city /
+# inquiry type". When the safety net is about to inject a URL,
+# these prose-style replies need to be REPLACED, not appended to —
+# otherwise the customer sees a contradictory message:
+#
+#   Bot: "أخبرنا أي فرع تبحث عنه لنرسل لك الموقع 🌷"
+#        "موقعنا 📍"
+#        "https://maps.app.goo.gl/…"
+#
+# The first sentence asks for a branch; the second sentence
+# IS the branch's location. Customers find this jarring and
+# the merchant gets blamed for "the bot doesn't know it sent
+# the location". May 2026 #38 added these markers so the
+# location safety net classifies the LLM's "prose fallback"
+# as bare-intro-shaped and replaces it cleanly.
+_LOCATION_REDUNDANT_PROSE_MARKERS: tuple = (
+    "لنبعث لك",
+    "لنرسل لك",
+    "نرسل لك الموقع",
+    "نبعث لك الموقع",
+    "نرسلك الموقع",
+    "اسم الفرع",
+    "اسم المدينة",
+    "اي فرع",
+    "أي فرع",
+    "ايش الفرع",
+    "وش الفرع",
+    "بنوع الاستفسار",
+    "نوع الاستفسار",
+    "اخبرنا بنوع",
+    "أخبرنا بنوع",
+    "اخبرنا بالفرع",
+    "أخبرنا بالفرع",
+    "خبرنا بنوع",
+    "خبرنا بالفرع",
+    "اعطنا اسم",
+    "أعطنا اسم",
+    "عطنا اسم",
+    "اي مدينة تبحث",
+    "أي مدينة تبحث",
+)
+
+
 def _looks_like_bare_location_intro(reply: str) -> bool:
-    """True when the LLM emitted a short generic "here is our location"
-    line with no URL — same heuristic as
-    :func:`_looks_like_bare_store_intro` but with location markers."""
+    """True when the LLM emitted a generic "here is our location"
+    line that the safety net should REPLACE rather than append to.
+
+    Two patterns count as bare:
+      1. Short replies (≤60 chars) carrying one of the canonical
+         "هذا موقعنا" / "تفضل الموقع" markers — the legacy heuristic.
+      2. Replies of any length that match one of
+         :data:`_LOCATION_REDUNDANT_PROSE_MARKERS` — the "ask the
+         customer for a branch" prose the LLM emits when it didn't
+         have a maps URL in context. May 2026 #38: these used to
+         survive the bare-intro check (they're > 60 chars), so the
+         safety net appended the URL and the customer saw a
+         contradictory two-message reply.
+    """
     if not reply:
         return True
     trimmed = (reply or "").strip()
-    short = len(trimmed) <= 60
     norm = _normalise_for_match(trimmed)
-    has_marker = any(m in norm for m in _GENERIC_HERE_IS_THE_LOCATION_MARKERS)
-    return short and has_marker
+    short = len(trimmed) <= 60
+    has_legacy_marker = any(
+        m in norm for m in _GENERIC_HERE_IS_THE_LOCATION_MARKERS
+    )
+    if short and has_legacy_marker:
+        return True
+    has_redundant_prose = any(
+        m in norm for m in _LOCATION_REDUNDANT_PROSE_MARKERS
+    )
+    return has_redundant_prose
 
 
 def _extract_maps_url_from_text(body: str) -> str:
@@ -2599,6 +2747,112 @@ _BARCODE_BANK_KEYWORDS: Tuple[str, ...] = (
 )
 
 
+# Delivery-complaint markers — short customer messages that
+# essentially mean "the artifact you promised never arrived /
+# I didn't get it / where is it?". When the CURRENT customer
+# message is one of these AND the PRIOR customer message had an
+# artifact intent (rقم/باركود/موقع/رابط), the artifact guard
+# should treat the prior intent as carried over.
+#
+# Pre-fix (May 2026 #38) the guard only inspected the current
+# inbound, so a sequence like:
+#   Customer: "عطني رقم أمين"
+#   Bot:      "أبشر 🌷"
+#   Customer: "ما جاني شي"
+#   Bot:      "خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷"
+# left the misleading bot reply on the wire — the guard
+# classified "ما جاني شي" as ``expected="none"`` and bailed.
+_ARTIFACT_COMPLAINT_MARKERS: Tuple[str, ...] = (
+    "ما جاني",
+    "ما جاءني",
+    "ما وصل",
+    "ما وصلني",
+    "ما استلمت",
+    "ما استلمته",
+    "وين الرقم",
+    "وين رقم",
+    "وين الرابط",
+    "وين رابط",
+    "وين الباركود",
+    "وين باركود",
+    "وين الموقع",
+    "وين موقع",
+    "أين الرقم",
+    "أين الرابط",
+    "أين الباركود",
+    "أين الموقع",
+    "هيا عطني",
+    "هيا اعطني",
+    "هيا أعطني",
+    "ابعث",   # bare imperative — only fires when prior turn had artifact intent
+    "ارسل",
+    "أرسل",
+    "ارسله",
+    "أرسله",
+    "وين هو",
+    "ما شي",
+    "مافي شي",
+    "ما فيه شي",
+    "لا شيء",
+    "لاشيء",
+)
+
+
+def _is_artifact_complaint(customer_msg: str) -> bool:
+    """True when the customer's message reads as a complaint that
+    a previously-asked-for artifact didn't arrive. Short and
+    imperative patterns only — we never use this as a primary
+    classifier, only as a "carry the prior intent forward" hint.
+    """
+    if not customer_msg:
+        return False
+    norm = _normalise_for_match(customer_msg)
+    norm = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm:
+        return False
+    # Cap on length so a long explanation never accidentally
+    # matches one of these markers.
+    if len(norm) > 60:
+        return False
+    return any(m in norm for m in _ARTIFACT_COMPLAINT_MARKERS)
+
+
+def _last_customer_msg_from_history(
+    history: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Return the most recent inbound (customer-side) message body
+    from a conversation history list, skipping the message that
+    triggered THIS turn (the latest user entry — the caller
+    already has it as ``customer_msg``). Empty string when no
+    such message exists.
+
+    History shape mirrors the rest of the safety-nets module: a
+    list of dicts with ``role`` and ``body`` (or ``content``)
+    fields. We tolerate either key for resilience.
+    """
+    if not history or not isinstance(history, list):
+        return ""
+    seen_current = False
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        role = (entry.get("role") or "").lower()
+        body = entry.get("body") or entry.get("content") or ""
+        if not isinstance(body, str):
+            continue
+        if role not in {"user", "customer", "human", "in", "inbound"}:
+            continue
+        if not seen_current:
+            # Skip the most recent user turn — that's the message
+            # the guard is processing right now.
+            seen_current = True
+            continue
+        if body.strip():
+            return body
+    return ""
+
+
 # Reply-side delivery probes
 #
 # A Saudi mobile number in the reply body — the simplest
@@ -2915,6 +3169,7 @@ def apply_outbound_artifact_guard(
     reply_text: str,
     media_attachments: Optional[List[Any]] = None,
     call_targets: Optional[List[Any]] = None,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> OutboundArtifactGuardResult:
     """Final hollow-affirmation guard.
 
@@ -2923,15 +3178,78 @@ def apply_outbound_artifact_guard(
     returns a result object with ``skipped_reason`` set so the
     caller's structured log carries the diagnostic without
     propagating the exception into the webhook handler.
+
+    ``history`` is optional but recommended — when the current
+    customer message reads as a delivery complaint
+    (``"ما جاني شي"`` / ``"وين الرقم"``) the guard inspects the
+    PRIOR customer turn for artifact intent and carries it
+    forward. Without history this fall-through is skipped and
+    the guard behaves exactly like its pre-May-2026-#38 form.
     """
     result = OutboundArtifactGuardResult()
 
     expected = _classify_expected_artifact(customer_msg or "")
+
+    # History-aware carry-forward (May 2026 #38).
+    # If the current message classified as ``"none"`` AND it's
+    # short / complaint-shaped AND the prior customer turn had
+    # an artifact intent, carry that intent forward. This closes
+    # the gap exposed by:
+    #   Customer: "عطني رقم أمين"   ← classified=staff_phone
+    #   Bot:      "أبشر 🌷"          ← guard fired correctly
+    #   Customer: "ما جاني شي"      ← was classified=none, bailed
+    # Without the carry-forward we leave the awkward
+    # "خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷" reply
+    # on the wire — exactly the production complaint.
+    carryover = False
+    if expected == "none" and _is_artifact_complaint(customer_msg or ""):
+        prior_msg = _last_customer_msg_from_history(history)
+        if prior_msg:
+            prior_expected = _classify_expected_artifact(prior_msg)
+            if prior_expected != "none":
+                expected = prior_expected
+                carryover = True
+                logger.info(
+                    "[OUTBOUND_ARTIFACT_GUARD] tenant=%s "
+                    "carryover=true prior_expected=%s "
+                    "current_msg_len=%d prior_msg_len=%d",
+                    int(tenant_id or 0), prior_expected,
+                    len(customer_msg or ""), len(prior_msg),
+                )
+                # Use the prior message for downstream lookups
+                # (name extraction, bank label) since the current
+                # message is just a complaint.
+                customer_msg = prior_msg
+
     result.expected_artifact = expected
 
     if expected == "none":
         result.skipped_reason = "no_artifact_intent"
         return result
+
+    # When carryover fired AND the LLM's reply is the
+    # asset-promise sanitizer's canned PHONE/LOCATION line, we
+    # know that line is itself misleading (it promises an
+    # escalation that never happens). Flag the reply as hollow
+    # so the rewrite branch always runs in that case.
+    if carryover and not _is_hollow_affirmation(reply_text or ""):
+        norm_reply = _normalise_alif(reply_text or "").lower()
+        misleading_handoff_markers = (
+            "خبرنا بنوع الاستفسار",
+            "خبرنا بالفرع",
+            "وسنوصلك بالشخص المختص",
+            "وسنوضح لك تفاصيل الموقع",
+            "خبرنا بالمنطقة",
+        )
+        for m in misleading_handoff_markers:
+            if _normalise_alif(m).lower() in norm_reply:
+                # Force the hollow path — the guard's rewrite is
+                # honest where this canned line was a soft
+                # promise. The downstream rewrite branches still
+                # try the resolver chain first, so a valid KB
+                # entry still wins over the fallback copy.
+                reply_text = ""
+                break
 
     # Honest replies win — never rewrite "أحتاج إضافة الرقم …"
     # into our canned line. The merchant's coached prompt was

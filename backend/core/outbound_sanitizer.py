@@ -653,17 +653,34 @@ def _contains_phone(text: str) -> bool:
 # the asset isn't ready and ASKS what the customer needs, or
 # (b) acknowledges the request without committing to a delivery
 # this turn.
-# Neutral replacements per asset class. Phrasing revised after Tenant
-# 33 production feedback (May 2026 #31) — the original "تكفي لحظة …"
-# read as awkward Arabic when sandwiched between an existing
-# "أبشر 🌷" intro and the leftover "بعد التأكد منه" tail. The new
-# copy is short, idiomatic, and asks ONE clarifying thing instead
-# of restating a soft promise.
+# Neutral replacements per asset class.
+#
+# May 2026 #38 follow-up: the prior PHONE / LOCATION strings
+# ("خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص" /
+#  "خبّرنا بالفرع أو المنطقة وسنوضّح لك تفاصيل الموقع") were
+# themselves false promises — they tell the customer "we'll
+# connect you" or "we'll explain the location" while the system
+# is in fact unable to honor either. The replacement copy is now
+# OPENLY HONEST: it admits the asset isn't on file. The artifact
+# guard upstream (``apply_outbound_artifact_guard``) takes the
+# same line — when the asset is genuinely missing we say so,
+# never escalate.
+#
+# Phrasing was revised across two production iterations:
+#   • May 2026 #31 — first pass dropped "تكفي لحظة …" prefix.
+#   • May 2026 #38 — current pass dropped "وسنوصلك" /
+#     "وسنوضّح" promises that the wire layer can't fulfill.
 _PROMISE_REPLACEMENTS: Dict[str, str] = {
+    # LINK and BARCODE keep a soft "I'll get back to you" feel
+    # because those assets ARE recoverable in many tenants
+    # (a structured store URL or a mobile-app barcode picture).
+    # PHONE and LOCATION default to honest unavailability —
+    # if the merchant added the data we never reach this line
+    # in the first place.
     ASSET_LINK:     "لحظة وأجيب لك التفاصيل 🌷",
     ASSET_BARCODE:  "خبّرنا بالمبلغ وسنوضّح لك طريقة الدفع المناسبة 🌷",
-    ASSET_PHONE:    "خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷",
-    ASSET_LOCATION: "خبّرنا بالفرع أو المنطقة وسنوضّح لك تفاصيل الموقع 🌷",
+    ASSET_PHONE:    "الرقم غير مضاف حاليًا في بيانات المتجر — يرجى إضافته لإرساله مباشرة 🌷",
+    ASSET_LOCATION: "الموقع غير مضاف حاليًا في بيانات المتجر — يرجى إضافته لإرساله مباشرة 🌷",
 }
 
 

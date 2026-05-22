@@ -322,12 +322,22 @@ def test_kb_scan_picks_nearest_phone_within_window(
     )
 
 
-def test_kb_scan_skips_phone_outside_window(
+def test_kb_scan_single_phone_in_section_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Defence-in-depth: a phone that lives WAY past the proximity
-    window is NOT promoted, even if no other phone exists. We'd
-    rather miss than ship a wrong number."""
+    """May 2026 #38 contract: when a section has the name AND
+    exactly ONE Saudi phone, the resolver promotes that phone
+    even if it falls outside the proximity window.
+
+    Pre-fix this test asserted a "rather miss than mispair" miss
+    when the gap exceeded the (then-80-char) window. Production
+    showed that policy was too conservative — merchants often
+    write a long product paragraph between the name and the
+    phone, all in one section about that person. The new policy
+    accepts the bypass, but ONLY when the section is
+    unambiguous (single phone). Two-phone sections still miss
+    via :func:`test_kb_scan_picks_nearest_phone_within_window`
+    proximity logic."""
     from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
 
     big_gap = "x" * 500
@@ -337,6 +347,41 @@ def test_kb_scan_skips_phone_outside_window(
             _StubKBSection(
                 section_id=1, kind="custom",
                 body=f"أمين هو بائع المعرض\n{big_gap}\nرقم المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="ابي رقم أمين",
+        reply_text="تواصل مع أمين",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.source == "kb:custom"
+    assert "0541690226" in (result.extra_call_target.raw_phone or "")
+
+
+def test_kb_scan_multi_phone_section_outside_window_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence-in-depth: when a section has TWO+ phones AND none
+    fall within the proximity window of the matched name, the
+    resolver misses. We'd rather not ship a wrong number when
+    the section is ambiguous (two phones, ambiguous ownership)."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    big_gap = "x" * 500
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="custom",
+                body=(
+                    f"أمين هو بائع المعرض\n{big_gap}\n"
+                    "أرقام الفروع المختلفة: "
+                    "فرع 1 — 0501111111، فرع 2 — 0502222222"
+                ),
             ),
         ],
     )

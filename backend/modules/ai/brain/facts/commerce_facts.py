@@ -211,6 +211,36 @@ class DefaultFactsLoader:
         except Exception:
             pass   # working hours / persona are optional — never block a turn
 
+        # ── 6. KB free-text fallback for maps_url (May 2026 #38) ────────
+        # Parity with :func:`modules.ai.postprocess.safety_nets.
+        # _lookup_tenant_maps_url`. Pre-fix the LLM-facing facts only
+        # had layers 1 (snapshot) + 2 (store_settings); the safety net
+        # had a 3rd layer (KB free-text scan in ``branches`` /
+        # ``store_story`` / ``custom`` sections). When a merchant's
+        # maps URL lives only in a KB section, the LLM template
+        # emitted the awkward "أخبرنا بالفرع" fallback while the
+        # safety net later injected the actual URL — the customer
+        # then saw both, in sequence, contradicting each other. By
+        # mirroring the KB layer here, the template renders the
+        # canonical "موقعنا 📍\n{url}" reply on the first pass and
+        # the safety net stays out of the way (its
+        # ``url_already_in_reply`` short-circuit fires). Failures
+        # are non-fatal — degrade to whatever the upper layers
+        # already populated.
+        if not facts.maps_url:
+            try:
+                from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
+                    _lookup_tenant_maps_url,
+                )
+                kb_maps_url, _kb_src = _lookup_tenant_maps_url(db, tenant_id)
+                if kb_maps_url:
+                    facts.maps_url = kb_maps_url
+            except Exception:
+                # KB scan errors must never break the facts loader —
+                # the LLM still gets a usable result with whatever
+                # the snapshot/settings layers populated.
+                pass
+
         logger.debug(
             "[FactsLoader] tenant=%s products=%d (in_stock=%d) orderable=%s coupons=%s platform=%s",
             tenant_id,

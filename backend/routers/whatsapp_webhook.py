@@ -6705,6 +6705,13 @@ async def _handle_merchant_message(
                     reply_text=reply or "",
                     media_attachments=_media_attachments,
                     call_targets=_call_targets,
+                    # May 2026 #38 — pass conversation history so the
+                    # guard can carry an artifact intent forward
+                    # when the current customer message is a
+                    # complaint ("ما جاني شي") rather than a fresh
+                    # ask. Falls back to ``None`` gracefully when
+                    # history isn't in scope at this call site.
+                    history=history if isinstance(history, list) else None,
                 )
                 if _ag.fired and _ag.rewrote_reply and _ag.new_reply:
                     reply = _ag.new_reply

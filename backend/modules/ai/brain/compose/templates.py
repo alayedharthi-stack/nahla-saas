@@ -680,17 +680,22 @@ def faq_location(
     URL on its own line so the CTA-button normaliser can lift it
     into a "موقعنا على الخرايط" button. When no maps URL is
     available we DON'T silently substitute the e-commerce
-    ``store_url`` (the bug May 2026 #36 fixed); instead we ask the
-    customer to share which branch they're after, which the
-    location safety net will flag for telemetry.
+    ``store_url`` (the bug May 2026 #36 fixed); we also DON'T ask
+    the customer for "اسم الفرع" — the safety net's KB scan still
+    has a chance to inject a URL it finds in a branches section,
+    and the awkward "أخبرنا بالفرع" prose left over after the
+    injection was the production complaint May 2026 #38 closed.
+    The fallback is now a single honest line; the artifact guard
+    rewrites it cleanly when the safety net also fails.
     """
     name = store_name or "متجرنا"
     if maps_url:
         return f"موقعنا 📍\n{maps_url}"
-    return (
-        f"حياك الله 🌷 لنبعث لك موقعنا على الخرايط"
-        f"\nعطنا اسم الفرع أو المدينة وأبشر."
-    )
+    # Honest fallback — no ask-for-branch prose, no "we'll send".
+    # Short enough that ``_looks_like_bare_location_intro`` flags
+    # it as a generic stub, which lets the location safety net
+    # REPLACE rather than append when it later resolves a URL.
+    return f"موقع {name} 📍"
 
 
 def faq_shipping(

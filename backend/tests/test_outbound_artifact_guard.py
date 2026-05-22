@@ -585,3 +585,137 @@ def test_to_log_dict_carries_full_diagnostic_payload(
     assert payload["kind"] == "outbound_artifact_guard"
     assert payload["fired"] is True
     assert payload["action"] == "inject_store_link"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. History-aware carry-forward (May 2026 #38)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_complaint_after_artifact_ask_carries_intent_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production trace — the customer's CURRENT message is a
+    short complaint ("ما جاني شي") that has no artifact intent
+    on its own. Pre-fix the guard returned ``expected="none"``
+    and bailed, leaving the misleading bot reply on the wire.
+    Post-fix the guard inspects ``history``, sees the prior
+    customer turn was ``"عطني رقم أمين"``, and carries that
+    intent forward to rewrite the LLM's hollow follow-up."""
+    from modules.ai.postprocess.safety_nets import apply_outbound_artifact_guard
+
+    db = _StubDB(rows=[
+        _StubKBSection(
+            id=1, kind="branches",
+            body="بائع المعرض: أمين - 0541690226",
+        ),
+    ])
+    _patch_url_lookups(monkeypatch)
+
+    history = [
+        {"role": "user", "body": "عطني رقم أمين"},
+        {"role": "assistant", "body": "أبشر 🌷"},
+        {"role": "user", "body": "ما جاني شي"},
+    ]
+    res = apply_outbound_artifact_guard(
+        db, tenant_id=33,
+        customer_msg="ما جاني شي",
+        reply_text="تفضل 🌷",
+        media_attachments=[],
+        call_targets=[],
+        history=history,
+    )
+
+    assert res.expected_artifact == "staff_phone"
+    assert res.fired is True
+    assert res.action == "inject_staff_phone"
+    assert "0541690226" in res.new_reply
+
+
+def test_misleading_handoff_prose_replaced_under_carryover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the asset-promise sanitizer's old canned line
+    ``"خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷"`` slips
+    through (long enough to dodge the hollow detector), the
+    guard recognises the prose pattern under carryover and
+    replaces with an honest line. This is the exact production
+    scenario the user complained about."""
+    from modules.ai.postprocess.safety_nets import apply_outbound_artifact_guard
+
+    db = _StubDB()  # no KB phone for أمين
+    _patch_url_lookups(monkeypatch)
+
+    history = [
+        {"role": "user", "body": "عطني رقم أمين"},
+        {"role": "assistant", "body": "أبشر 🌷"},
+        {"role": "user", "body": "ما جاني شي"},
+    ]
+    misleading = (
+        "عذرًا أبو خلف، خبّرنا بنوع الاستفسار "
+        "وسنوصلك بالشخص المختص 🌷"
+    )
+    res = apply_outbound_artifact_guard(
+        db, tenant_id=33,
+        customer_msg="ما جاني شي",
+        reply_text=misleading,
+        media_attachments=[],
+        call_targets=[],
+        history=history,
+    )
+
+    assert res.expected_artifact == "staff_phone"
+    assert res.fired is True
+    assert res.action == "rewrite_missing_staff_phone"
+    assert "أحتاج إضافة" in res.new_reply
+    assert "وسنوصلك" not in res.new_reply
+
+
+def test_complaint_without_history_is_neutral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without history we can't carry intent forward — the
+    guard correctly bails on a bare ``"ما جاني شي"`` so it
+    never fires on stand-alone complaints."""
+    from modules.ai.postprocess.safety_nets import apply_outbound_artifact_guard
+
+    db = _StubDB()
+    _patch_url_lookups(monkeypatch)
+
+    res = apply_outbound_artifact_guard(
+        db, tenant_id=33,
+        customer_msg="ما جاني شي",
+        reply_text="تفضل 🌷",
+    )
+
+    assert res.expected_artifact == "none"
+    assert res.fired is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Honest replacement copy in the asset-promise sanitizer (May 2026 #38)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_asset_promise_phone_replacement_is_honest_not_escalation() -> None:
+    """The canned PHONE replacement used to read
+    ``"خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص"`` — a soft
+    promise of escalation that the wire layer can't fulfill.
+    Post-fix it reads as honest unavailability."""
+    from core.outbound_sanitizer import _PROMISE_REPLACEMENTS, ASSET_PHONE
+
+    replacement = _PROMISE_REPLACEMENTS[ASSET_PHONE]
+    assert "وسنوصلك" not in replacement
+    assert "بالشخص المختص" not in replacement
+    assert "غير مضاف" in replacement
+
+
+def test_asset_promise_location_replacement_is_honest_not_escalation() -> None:
+    """The canned LOCATION replacement used to ask the customer
+    for a branch/area. Post-fix it admits the location isn't
+    on file rather than promising explanation."""
+    from core.outbound_sanitizer import _PROMISE_REPLACEMENTS, ASSET_LOCATION
+
+    replacement = _PROMISE_REPLACEMENTS[ASSET_LOCATION]
+    assert "وسنوضّح" not in replacement and "وسنوضح" not in replacement
+    assert "غير مضاف" in replacement
