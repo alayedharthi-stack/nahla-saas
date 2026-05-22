@@ -50,6 +50,10 @@ from sqlalchemy.orm import Session
 from core.ai_quality_events import VALID_RESOLVED_STATUSES
 from core.auth import require_admin
 from core.database import get_db
+from core.inbound_observability import (
+    VALID_CATEGORIES,
+    CATEGORY_AI_MISMATCH,
+)
 from database.models import AiQualityEvent
 
 logger = logging.getLogger("nahla.admin.ai_quality")
@@ -106,6 +110,11 @@ class AiQualityEventOut(BaseModel):
     resolved_at: Optional[datetime] = None
     resolved_note: Optional[str] = None
 
+    # May 2026 #22 — pre-brain inbound visibility. Legacy rows (no
+    # column or NULL) default to ``ai_mismatch`` so the dashboard's
+    # original tab keeps working unchanged.
+    category: str = CATEGORY_AI_MISMATCH
+
     created_at: datetime
 
     class Config:
@@ -124,6 +133,18 @@ class AiQualityCountByType(BaseModel):
     count: int
 
 
+class AiQualityCountByCategory(BaseModel):
+    """May 2026 #22 — per-category roll-up for the dashboard's tab badges.
+
+    The owner panel renders one tab per category (``ai_mismatch`` for the
+    original brain-mismatch panel, ``inbound_drop`` for pre-brain silent
+    drops, ``webhook_routing`` for 360dialog / Meta unrouted webhooks).
+    Each tab shows its own count badge, which is exactly this row.
+    """
+    category: str
+    count: int
+
+
 class AiQualityTopConversation(BaseModel):
     conversation_id: int
     count: int
@@ -136,6 +157,7 @@ class AiQualitySummaryResponse(BaseModel):
     total_open: int
     total_in_window: int
     counts_by_type: List[AiQualityCountByType]
+    counts_by_category: List[AiQualityCountByCategory]
     top_conversations: List[AiQualityTopConversation]
     latest_events: List[AiQualityEventOut]
 
@@ -204,10 +226,21 @@ def _parse_iso_datetime(raw: Optional[str], *, field_name: str) -> Optional[date
 )
 def list_ai_quality_events(
     tenant_id:       Optional[int] = Query(default=None, description="Filter by tenant."),
+    category:        Optional[str] = Query(default=None,
+                       description="Filter by event family — one of "
+                                   "ai_mismatch / inbound_drop / "
+                                   "webhook_routing / media_failure. "
+                                   "Omit for the legacy (all-rows) view."),
     mismatch_type:   Optional[str] = Query(default=None,
-                       description="Filter by mismatch type (question_to_social, "
-                                   "delivery_to_receipt, closing_to_reopen, "
-                                   "religious_to_oos, ...)."),
+                       description="Filter by mismatch/sub-type. The "
+                                   "vocabulary depends on ``category``: "
+                                   "for ai_mismatch it's question_to_social, "
+                                   "delivery_to_receipt, ...; for "
+                                   "inbound_drop it's unsupported_type, "
+                                   "empty_text, pre_brain_handoff_drop, "
+                                   "dispatcher_exception; for "
+                                   "webhook_routing it's the unrouted_* "
+                                   "sub-reasons."),
     resolved_status: Optional[str] = Query(default=None,
                        description="Filter by triage state (open / reviewed / "
                                    "ignored / fixed)."),
@@ -224,6 +257,10 @@ def list_ai_quality_events(
 
     All filters are optional. The default sort is newest-first to
     match the dashboard's "what just happened?" reading order.
+
+    ``category`` is the May 2026 #22 extension — the dashboard sends one
+    of ``ai_mismatch`` / ``inbound_drop`` / ``webhook_routing`` per tab so
+    the same endpoint backs all three tabs without forking the schema.
     """
     if resolved_status is not None:
         resolved_status = resolved_status.strip().lower()
@@ -235,6 +272,16 @@ def list_ai_quality_events(
                     f"{sorted(VALID_RESOLVED_STATUSES)}"
                 ),
             )
+    if category is not None:
+        category = category.strip().lower()
+        if category not in VALID_CATEGORIES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "category must be one of: "
+                    f"{sorted(VALID_CATEGORIES)}"
+                ),
+            )
 
     since_dt = _parse_iso_datetime(since, field_name="since")
     until_dt = _parse_iso_datetime(until, field_name="until")
@@ -242,6 +289,8 @@ def list_ai_quality_events(
     q = db.query(AiQualityEvent)
     if tenant_id is not None:
         q = q.filter(AiQualityEvent.tenant_id == int(tenant_id))
+    if category:
+        q = q.filter(AiQualityEvent.category == category)
     if mismatch_type:
         q = q.filter(AiQualityEvent.mismatch_type == str(mismatch_type).strip())
     if resolved_status:
@@ -278,6 +327,13 @@ def list_ai_quality_events(
 )
 def ai_quality_summary(
     tenant_id:     Optional[int] = Query(default=None, description="Filter by tenant."),
+    category:      Optional[str] = Query(default=None,
+                       description="Optional category scope (ai_mismatch / "
+                                   "inbound_drop / webhook_routing / "
+                                   "media_failure). When omitted, "
+                                   "counts_by_type aggregates across all "
+                                   "categories while ``counts_by_category`` "
+                                   "still surfaces the per-bucket totals."),
     window_hours:  int           = Query(default=DEFAULT_SUMMARY_LOOKBACK_HOURS,
                                          ge=1, le=24 * 30,
                                          description="Lookback window in hours."),
@@ -286,10 +342,27 @@ def ai_quality_summary(
 ) -> AiQualitySummaryResponse:
     """Rollup view: counts by type, top conversations, latest 50.
 
-    Powers the dashboard's hero panel. Runs three lightweight queries
+    Powers the dashboard's hero panel. Runs four lightweight queries
     against the same ``ai_quality_events`` table — no joins, all
-    backed by the indexes added in ``0066``.
+    backed by the indexes added in ``0066`` + ``0070``.
+
+    May 2026 #22: ``counts_by_category`` is the new aggregate the
+    dashboard tabs need. ``counts_by_type`` already worked but used to
+    blend all categories together; we leave that behaviour intact when
+    ``category`` is omitted, and scope it to the requested family when
+    ``category`` is provided.
     """
+    if category is not None:
+        category = category.strip().lower()
+        if category not in VALID_CATEGORIES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "category must be one of: "
+                    f"{sorted(VALID_CATEGORIES)}"
+                ),
+            )
+
     now_utc = datetime.now(timezone.utc)
     window_start = now_utc - timedelta(hours=int(window_hours))
 
@@ -299,11 +372,20 @@ def ai_quality_summary(
     if tenant_id is not None:
         base = base.filter(AiQualityEvent.tenant_id == int(tenant_id))
 
-    total_in_window = int(base.count() or 0)
+    # ``base`` is the windowed (+ tenant) scope used by per-category
+    # counts and the legacy unfiltered counts_by_type / top / latest
+    # views. When ``category`` is requested, the type / top / latest
+    # views narrow further; the per-category roll-up always reports
+    # every bucket so the tab badges never spuriously vanish.
+    base_category_scoped = base
+    if category:
+        base_category_scoped = base.filter(AiQualityEvent.category == category)
+
+    total_in_window = int(base_category_scoped.count() or 0)
 
     # ── 1. counts by mismatch type ──────────────────────────────────
     counts_q = (
-        base.with_entities(
+        base_category_scoped.with_entities(
             AiQualityEvent.mismatch_type,
             func.count(AiQualityEvent.id),
         )
@@ -318,9 +400,26 @@ def ai_quality_summary(
         for row in counts_q.all()
     ]
 
+    # ── 1b. counts by category (drives the tab badges) ──────────────
+    cat_q = (
+        base.with_entities(
+            AiQualityEvent.category,
+            func.count(AiQualityEvent.id),
+        )
+        .group_by(AiQualityEvent.category)
+        .order_by(desc(func.count(AiQualityEvent.id)))
+    )
+    counts_by_category = [
+        AiQualityCountByCategory(
+            category=str(row[0] or CATEGORY_AI_MISMATCH),
+            count=int(row[1] or 0),
+        )
+        for row in cat_q.all()
+    ]
+
     # ── 2. top conversations (most flagged in window) ───────────────
     top_q = (
-        base.with_entities(
+        base_category_scoped.with_entities(
             AiQualityEvent.conversation_id,
             func.count(AiQualityEvent.id),
             func.max(AiQualityEvent.created_at),
@@ -341,7 +440,9 @@ def ai_quality_summary(
 
     # ── 3. latest events ring ───────────────────────────────────────
     latest_rows = (
-        base.order_by(desc(AiQualityEvent.created_at), desc(AiQualityEvent.id))
+        base_category_scoped.order_by(
+            desc(AiQualityEvent.created_at), desc(AiQualityEvent.id),
+        )
             .limit(SUMMARY_LATEST_LIMIT)
             .all()
     )
@@ -353,6 +454,8 @@ def ai_quality_summary(
     )
     if tenant_id is not None:
         open_q = open_q.filter(AiQualityEvent.tenant_id == int(tenant_id))
+    if category:
+        open_q = open_q.filter(AiQualityEvent.category == category)
     total_open = int(open_q.scalar() or 0)
 
     return AiQualitySummaryResponse(
@@ -361,6 +464,7 @@ def ai_quality_summary(
         total_open=total_open,
         total_in_window=total_in_window,
         counts_by_type=counts_by_type,
+        counts_by_category=counts_by_category,
         top_conversations=top_conversations,
         latest_events=latest_events,
     )

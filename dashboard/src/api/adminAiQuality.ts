@@ -7,6 +7,15 @@ import { apiCall } from './client'
 
 export type ResolvedStatus = 'open' | 'reviewed' | 'ignored' | 'fixed'
 
+// May 2026 #22 — event categories. The original use case was
+// ``ai_mismatch`` (brain alignment), now extended with three pre-brain
+// silent-drop families surfaced in the owner dashboard tabs.
+export type AiQualityCategory =
+  | 'ai_mismatch'
+  | 'inbound_drop'
+  | 'webhook_routing'
+  | 'media_failure'
+
 export interface AiQualityEvent {
   id:                       number
   tenant_id:                number
@@ -31,6 +40,9 @@ export interface AiQualityEvent {
   resolved_by:              string | null
   resolved_at:              string | null
   resolved_note:            string | null
+  // Optional for backward-compat: older API builds (pre-0070) won't
+  // return this field. Treat ``undefined`` as ``ai_mismatch``.
+  category?:                AiQualityCategory
   created_at:               string
 }
 
@@ -46,6 +58,11 @@ export interface AiQualityCountByType {
   count:         number
 }
 
+export interface AiQualityCountByCategory {
+  category: AiQualityCategory | string
+  count:    number
+}
+
 export interface AiQualityTopConversation {
   conversation_id: number
   count:           number
@@ -53,17 +70,21 @@ export interface AiQualityTopConversation {
 }
 
 export interface AiQualitySummaryResponse {
-  window_start:      string
-  window_hours:      number
-  total_open:        number
-  total_in_window:   number
-  counts_by_type:    AiQualityCountByType[]
-  top_conversations: AiQualityTopConversation[]
-  latest_events:     AiQualityEvent[]
+  window_start:        string
+  window_hours:        number
+  total_open:          number
+  total_in_window:     number
+  counts_by_type:      AiQualityCountByType[]
+  // May 2026 #22 — per-category roll-up for the tab badges. Defaults
+  // to an empty array if the API build pre-dates the schema change.
+  counts_by_category?: AiQualityCountByCategory[]
+  top_conversations:   AiQualityTopConversation[]
+  latest_events:       AiQualityEvent[]
 }
 
 export interface ListEventsParams {
   tenant_id?:        number
+  category?:         AiQualityCategory
   mismatch_type?:    string
   resolved_status?:  ResolvedStatus
   since?:            string
@@ -91,7 +112,11 @@ export async function listAiQualityEvents(
 }
 
 export async function getAiQualitySummary(
-  params: { tenant_id?: number; window_hours?: number } = {},
+  params: {
+    tenant_id?:    number
+    category?:     AiQualityCategory
+    window_hours?: number
+  } = {},
 ): Promise<AiQualitySummaryResponse> {
   return apiCall<AiQualitySummaryResponse>(
     `/admin/ai-quality/summary${toQuery(params as Record<string, unknown>)}`,

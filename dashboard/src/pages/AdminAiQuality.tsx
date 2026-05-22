@@ -1,14 +1,17 @@
 /**
  * AdminAiQuality — مراقبة جودة الذكاء (AI Quality Monitor)
  *
- * Surfaces the ``ai_quality_events`` rows the brain pipeline writes
- * whenever ``answer_alignment.check_alignment`` flags a reply that
- * does not actually answer the customer's last message.
+ * Surfaces the ``ai_quality_events`` rows the system writes whenever
+ * something goes wrong with an inbound message. May 2026 #22 widened
+ * this to three orthogonal failure families, each behind its own tab:
  *
- * Three panels:
- *   1. Hero — counts by mismatch type + total open + in-window total.
- *   2. Top conversations — most-flagged ``conversation_id`` values.
- *   3. Events table — latest 50 with filter chips and triage actions.
+ *   1. ``ai_mismatch``    — answer-alignment check fired (brain reply
+ *      did not match the customer's intent).
+ *   2. ``inbound_drop``   — message vanished BEFORE the brain ran
+ *      (unsupported type, empty text, handoff ack failure, dispatcher
+ *      exception).
+ *   3. ``webhook_routing`` — 360dialog / Meta webhook arrived but could
+ *      not be routed to a tenant.
  *
  * Privacy: phone numbers come back already masked from the API.
  */
@@ -24,6 +27,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import {
+  AiQualityCategory,
   AiQualityEvent,
   AiQualityEventListResponse,
   AiQualitySummaryResponse,
@@ -33,15 +37,61 @@ import {
   resolveAiQualityEvent,
 } from '../api/adminAiQuality'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Tab configuration ────────────────────────────────────────────────────────
+//
+// One row per category. ``trackedTypes`` is the canonical vocabulary the
+// hero panel highlights — anything else still appears in the events list
+// but is not pre-allocated a KPI tile (it would have a 0-count tile
+// otherwise, which is noise during early rollout).
 
-const MISMATCH_TYPES: Array<{ key: string; label: string }> = [
-  { key: 'all',                  label: 'الكل' },
-  { key: 'question_to_social',   label: 'سؤال → مجاملة' },
-  { key: 'closing_to_reopen',    label: 'إغلاق → إعادة فتح' },
-  { key: 'religious_to_oos',     label: 'دعاء → خارج النطاق' },
-  { key: 'delivery_to_receipt',  label: 'استلام → إيصال دفع' },
+interface TabSpec {
+  key:           AiQualityCategory
+  label:         string
+  description:   string
+  trackedTypes:  Array<{ key: string; label: string }>
+}
+
+const TABS: TabSpec[] = [
+  {
+    key:         'ai_mismatch',
+    label:       'اختلافات الذكاء',
+    description:
+      'الحالات التي اكتشف فيها مدقّق المحاذاة أن الرد لا يطابق آخر رسالة من العميل.',
+    trackedTypes: [
+      { key: 'question_to_social',  label: 'سؤال → مجاملة' },
+      { key: 'closing_to_reopen',   label: 'إغلاق → إعادة فتح' },
+      { key: 'religious_to_oos',    label: 'دعاء → خارج النطاق' },
+      { key: 'delivery_to_receipt', label: 'استلام → إيصال دفع' },
+    ],
+  },
+  {
+    key:         'inbound_drop',
+    label:       'إسقاطات الإدخال',
+    description:
+      'رسائل وصلت إلى نحلة لكن سقطت قبل أن يبدأ الذكاء — أنواع غير مدعومة، نصّ فارغ بعد التحويل، أو استثناء في dispatcher.',
+    trackedTypes: [
+      { key: 'unsupported_type',        label: 'نوع غير مدعوم' },
+      { key: 'empty_text',              label: 'نص فارغ' },
+      { key: 'pre_brain_handoff_drop',  label: 'إخفاق تسليم لموظف' },
+      { key: 'dispatcher_exception',    label: 'استثناء في الذكاء' },
+    ],
+  },
+  {
+    key:         'webhook_routing',
+    label:       'مشاكل الـ Webhook',
+    description:
+      'إشعارات Meta / 360dialog وصلت ولم نتمكن من ربطها بأي تاجر — phone_number_id مفقود/غير معروف/مكرر، أو سرّ التكامل لم يطابق.',
+    trackedTypes: [
+      { key: 'unrouted_missing_phone_id', label: 'بدون phone_number_id' },
+      { key: 'unrouted_unknown_phone_id', label: 'phone_number_id غير معروف' },
+      { key: 'unrouted_ambiguous',        label: 'تطابق ملتبس' },
+      { key: 'unrouted_wrong_provider',   label: 'مزوّد خاطئ' },
+      { key: 'unrouted_bad_secret',       label: 'سرّ تكامل غير صحيح' },
+    ],
+  },
 ]
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const STATUS_FILTERS: Array<{ key: 'all' | ResolvedStatus; label: string; tone: string }> = [
   { key: 'all',      label: 'الكل',       tone: 'bg-slate-100 text-slate-700 border-slate-200' },
@@ -67,8 +117,12 @@ const STATUS_LABEL: Record<ResolvedStatus, string> = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function mismatchLabel(key: string): string {
-  return MISMATCH_TYPES.find(m => m.key === key)?.label ?? key
+function findTabSpec(category: AiQualityCategory): TabSpec {
+  return TABS.find(t => t.key === category) ?? TABS[0]
+}
+
+function mismatchLabel(tab: TabSpec, key: string): string {
+  return tab.trackedTypes.find(m => m.key === key)?.label ?? key
 }
 
 function formatTimestamp(iso: string | null): string {
@@ -83,7 +137,12 @@ function formatTimestamp(iso: string | null): string {
 
 // ── Panels ────────────────────────────────────────────────────────────────────
 
-function CountsByTypePanel({ summary }: { summary: AiQualitySummaryResponse | null }) {
+function CountsByTypePanel({
+  summary, tab,
+}: {
+  summary: AiQualitySummaryResponse | null
+  tab:     TabSpec
+}) {
   if (!summary) {
     return (
       <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
@@ -97,20 +156,19 @@ function CountsByTypePanel({ summary }: { summary: AiQualitySummaryResponse | nu
     )
   }
   const counts = new Map(summary.counts_by_type.map(c => [c.mismatch_type, c.count]))
-  const tracked = ['question_to_social', 'closing_to_reopen', 'religious_to_oos', 'delivery_to_receipt']
   return (
     <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-bold text-slate-800">العدّ حسب نوع الانحراف</h3>
+        <h3 className="text-sm font-bold text-slate-800">العدّ حسب النوع</h3>
         <span className="text-xs text-slate-500">آخر {summary.window_hours} ساعة</span>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        {tracked.map(key => {
+        {tab.trackedTypes.map(({ key, label }) => {
           const n = counts.get(key) ?? 0
           const heat = n === 0 ? 'text-slate-400' : n >= 10 ? 'text-red-600' : 'text-amber-600'
           return (
             <div key={key} className="rounded-xl border border-slate-200 p-3 bg-slate-50/50">
-              <div className="text-[11px] text-slate-500">{mismatchLabel(key)}</div>
+              <div className="text-[11px] text-slate-500">{label}</div>
               <div className={`text-2xl font-extrabold mt-1 ${heat}`}>{n}</div>
             </div>
           )
@@ -175,9 +233,10 @@ function TopConversationsPanel({ summary }: { summary: AiQualitySummaryResponse 
 // ── Event row ────────────────────────────────────────────────────────────────
 
 function EventRow({
-  ev, onResolve, busy,
+  ev, tab, onResolve, busy,
 }: {
   ev:        AiQualityEvent
+  tab:       TabSpec
   onResolve: (id: number, status: ResolvedStatus) => Promise<void>
   busy:      boolean
 }) {
@@ -188,7 +247,7 @@ function EventRow({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1.5">
             <span className="text-[11px] font-bold px-2 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-800">
-              {mismatchLabel(ev.mismatch_type)}
+              {mismatchLabel(tab, ev.mismatch_type)}
             </span>
             <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${STATUS_TONE[ev.resolved_status]}`}>
               {STATUS_LABEL[ev.resolved_status]}
@@ -199,14 +258,28 @@ function EventRow({
             )}
             <span className="text-[11px] text-slate-400 mr-auto">{formatTimestamp(ev.created_at)}</span>
           </div>
+          {/*
+            For inbound_drop / webhook_routing the reply_preview is
+            empty by design (the AI never ran). We still render the
+            inbound preview (or a dash) so the column layout stays
+            consistent across tabs.
+          */}
           <div className="text-sm text-slate-800 mb-1">
             <span className="text-slate-400">العميل: </span>
             <span dir="auto">{ev.inbound_preview ?? '—'}</span>
           </div>
-          <div className="text-sm text-slate-700">
-            <span className="text-slate-400">الذكاء: </span>
-            <span dir="auto">{ev.reply_preview ?? '—'}</span>
-          </div>
+          {tab.key === 'ai_mismatch' && (
+            <div className="text-sm text-slate-700">
+              <span className="text-slate-400">الذكاء: </span>
+              <span dir="auto">{ev.reply_preview ?? '—'}</span>
+            </div>
+          )}
+          {tab.key !== 'ai_mismatch' && ev.mismatch_reason && (
+            <div className="text-sm text-slate-700">
+              <span className="text-slate-400">التفاصيل: </span>
+              <span dir="auto">{ev.mismatch_reason}</span>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setOpen(o => !o)}
@@ -217,15 +290,19 @@ function EventRow({
           {open && (
             <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-600">
               <div><dt className="inline text-slate-400">السبب: </dt><dd className="inline">{ev.mismatch_reason ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">النية: </dt><dd className="inline">{ev.detected_intent ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">فئة اجتماعية: </dt><dd className="inline">{ev.social_category ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">الفعل: </dt><dd className="inline">{ev.action_taken ?? '—'}</dd></div>
               <div><dt className="inline text-slate-400">المسار: </dt><dd className="inline">{ev.chosen_path ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">حالة الطلب: </dt><dd className="inline">{ev.order_status ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">Fallback: </dt><dd className="inline">{ev.fallback_used ? 'نعم' : 'لا'}</dd></div>
-              <div><dt className="inline text-slate-400">النموذج: </dt><dd className="inline">{ev.model_used ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">Turn: </dt><dd className="inline">{ev.turn ?? '—'}</dd></div>
-              <div><dt className="inline text-slate-400">Regen: </dt><dd className="inline">{ev.regen_fired ? 'نعم' : 'لا'}</dd></div>
+              {tab.key === 'ai_mismatch' && (
+                <>
+                  <div><dt className="inline text-slate-400">النية: </dt><dd className="inline">{ev.detected_intent ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">فئة اجتماعية: </dt><dd className="inline">{ev.social_category ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">الفعل: </dt><dd className="inline">{ev.action_taken ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">حالة الطلب: </dt><dd className="inline">{ev.order_status ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">Fallback: </dt><dd className="inline">{ev.fallback_used ? 'نعم' : 'لا'}</dd></div>
+                  <div><dt className="inline text-slate-400">النموذج: </dt><dd className="inline">{ev.model_used ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">Turn: </dt><dd className="inline">{ev.turn ?? '—'}</dd></div>
+                  <div><dt className="inline text-slate-400">Regen: </dt><dd className="inline">{ev.regen_fired ? 'نعم' : 'لا'}</dd></div>
+                </>
+              )}
               {ev.resolved_status !== 'open' && (
                 <div className="col-span-2">
                   <dt className="inline text-slate-400">آخر مراجعة: </dt>
@@ -272,20 +349,29 @@ function EventRow({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function AdminAiQuality() {
-  const [summary,    setSummary]    = useState<AiQualitySummaryResponse | null>(null)
-  const [events,     setEvents]     = useState<AiQualityEventListResponse | null>(null)
-  const [loading,    setLoading]    = useState(true)
-  const [error,      setError]      = useState<string | null>(null)
-  const [busyIds,    setBusyIds]    = useState<Set<number>>(new Set())
-  const [typeFilter, setTypeFilter] = useState<string>('all')
+  const [activeTab,    setActiveTab]    = useState<AiQualityCategory>('ai_mismatch')
+  const [summary,      setSummary]      = useState<AiQualitySummaryResponse | null>(null)
+  const [events,       setEvents]       = useState<AiQualityEventListResponse | null>(null)
+  const [loading,      setLoading]      = useState(true)
+  const [error,        setError]        = useState<string | null>(null)
+  const [busyIds,      setBusyIds]      = useState<Set<number>>(new Set())
+  const [typeFilter,   setTypeFilter]   = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | ResolvedStatus>('open')
+
+  const currentTab = useMemo(() => findTabSpec(activeTab), [activeTab])
+
+  // Reset the type filter when switching tabs — the vocabulary changes.
+  useEffect(() => {
+    setTypeFilter('all')
+  }, [activeTab])
 
   const load = useCallback(async () => {
     setLoading(true); setError(null)
     try {
       const [s, e] = await Promise.all([
-        getAiQualitySummary({ window_hours: 24 }),
+        getAiQualitySummary({ window_hours: 24, category: activeTab }),
         listAiQualityEvents({
+          category:        activeTab,
           mismatch_type:   typeFilter   === 'all' ? undefined : typeFilter,
           resolved_status: statusFilter === 'all' ? undefined : statusFilter,
           limit:           50,
@@ -298,7 +384,7 @@ export default function AdminAiQuality() {
     } finally {
       setLoading(false)
     }
-  }, [typeFilter, statusFilter])
+  }, [activeTab, typeFilter, statusFilter])
 
   useEffect(() => { void load() }, [load])
 
@@ -318,6 +404,17 @@ export default function AdminAiQuality() {
 
   const visibleEvents = useMemo(() => events?.items ?? [], [events])
 
+  // The tab badge count comes from ``counts_by_category`` on whichever
+  // summary call we just made. It's an unfiltered roll-up, so a tab
+  // shows its true total even when the active tab is a different one.
+  const categoryCounts = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const row of summary?.counts_by_category ?? []) {
+      map.set(String(row.category), row.count)
+    }
+    return map
+  }, [summary])
+
   return (
     <div className="space-y-5">
       {/* ── Header ─────────────────────────────────────────────────────────── */}
@@ -327,10 +424,7 @@ export default function AdminAiQuality() {
             <ShieldCheck className="w-5 h-5 text-emerald-600" />
             مراقبة جودة الذكاء
           </h2>
-          <p className="text-sm text-slate-500 mt-1">
-            الحالات التي اكتشف فيها مدقّق المحاذاة أن الرد لا يطابق آخر رسالة من العميل.
-            تُحفَظ كأحداث ``ai_quality_events`` ولا تُعدِّل سلوك الذكاء حتى الآن.
-          </p>
+          <p className="text-sm text-slate-500 mt-1">{currentTab.description}</p>
         </div>
         <button
           type="button"
@@ -350,9 +444,42 @@ export default function AdminAiQuality() {
         </div>
       )}
 
+      {/* ── Tabs ──────────────────────────────────────────────────────────── */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-2 shadow-sm">
+        <div className="flex items-center gap-1 flex-wrap">
+          {TABS.map(t => {
+            const isActive = t.key === activeTab
+            const count = categoryCounts.get(t.key) ?? 0
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setActiveTab(t.key)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border ${
+                  isActive
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                {t.label}
+                <span className={`inline-flex min-w-5 px-1.5 justify-center items-center rounded-full text-[10px] font-bold ${
+                  isActive
+                    ? 'bg-white text-slate-900'
+                    : count > 0
+                      ? 'bg-red-100 text-red-700'
+                      : 'bg-slate-100 text-slate-500'
+                }`}>
+                  {count}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
       {/* ── Hero panels ────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <CountsByTypePanel summary={summary} />
+        <CountsByTypePanel summary={summary} tab={currentTab} />
         <TopConversationsPanel summary={summary} />
       </div>
 
@@ -360,8 +487,19 @@ export default function AdminAiQuality() {
       <div className="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
           <Flag className="w-3.5 h-3.5 text-slate-400" />
-          <span className="text-[11px] text-slate-500">نوع الانحراف:</span>
-          {MISMATCH_TYPES.map(t => (
+          <span className="text-[11px] text-slate-500">النوع:</span>
+          <button
+            type="button"
+            onClick={() => setTypeFilter('all')}
+            className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+              typeFilter === 'all'
+                ? 'bg-slate-900 border-slate-900 text-white'
+                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            الكل
+          </button>
+          {currentTab.trackedTypes.map(t => (
             <button
               key={t.key}
               type="button"
@@ -404,13 +542,14 @@ export default function AdminAiQuality() {
         )}
         {!loading && visibleEvents.length === 0 && (
           <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-slate-500 text-sm">
-            لا توجد أحداث مطابقة للفلتر الحالي. حاول تغيير الحالة أو نوع الانحراف.
+            لا توجد أحداث مطابقة للفلتر الحالي في هذا التبويب.
           </div>
         )}
         {visibleEvents.map(ev => (
           <EventRow
             key={ev.id}
             ev={ev}
+            tab={currentTab}
             busy={busyIds.has(ev.id)}
             onResolve={onResolve}
           />

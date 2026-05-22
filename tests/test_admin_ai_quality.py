@@ -121,7 +121,7 @@ class TestListEvents:
                              created_at=now - timedelta(hours=1))
 
             resp = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None, resolved_status=None,
+                tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                 since=None, until=None, limit=50, offset=0,
                 db=session, _admin={"role": "admin"},
             )
@@ -142,7 +142,7 @@ class TestListEvents:
                         created_at=now - timedelta(hours=1))
 
             resp = list_ai_quality_events(
-                tenant_id=None,
+                tenant_id=None, category=None,
                 mismatch_type="closing_to_reopen",
                 resolved_status=None, since=None, until=None,
                 limit=50, offset=0,
@@ -163,7 +163,7 @@ class TestListEvents:
             _seed_event(session, tenant_id=2)
 
             resp = list_ai_quality_events(
-                tenant_id=2, mismatch_type=None, resolved_status=None,
+                tenant_id=2, category=None, mismatch_type=None, resolved_status=None,
                 since=None, until=None, limit=50, offset=0,
                 db=session, _admin={"role": "admin"},
             )
@@ -182,7 +182,7 @@ class TestListEvents:
             _seed_event(session, resolved_status="ignored")
 
             resp = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None,
+                tenant_id=None, category=None, mismatch_type=None,
                 resolved_status="reviewed",
                 since=None, until=None, limit=50, offset=0,
                 db=session, _admin={"role": "admin"},
@@ -199,7 +199,7 @@ class TestListEvents:
         try:
             with pytest.raises(HTTPException) as exc:
                 list_ai_quality_events(
-                    tenant_id=None, mismatch_type=None,
+                    tenant_id=None, category=None, mismatch_type=None,
                     resolved_status="bogus",
                     since=None, until=None, limit=50, offset=0,
                     db=session, _admin={"role": "admin"},
@@ -215,7 +215,7 @@ class TestListEvents:
         try:
             with pytest.raises(HTTPException) as exc:
                 list_ai_quality_events(
-                    tenant_id=None, mismatch_type=None, resolved_status=None,
+                    tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                     since="not-a-date", until=None, limit=50, offset=0,
                     db=session, _admin={"role": "admin"},
                 )
@@ -236,7 +236,7 @@ class TestListEvents:
             since_iso = (now - timedelta(days=1)).isoformat()
             until_iso = now.isoformat()
             resp = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None, resolved_status=None,
+                tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                 since=since_iso, until=until_iso, limit=50, offset=0,
                 db=session, _admin={"role": "admin"},
             )
@@ -257,12 +257,12 @@ class TestListEvents:
                 ids.append(row.id)
 
             page1 = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None, resolved_status=None,
+                tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                 since=None, until=None, limit=3, offset=0,
                 db=session, _admin={"role": "admin"},
             )
             page2 = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None, resolved_status=None,
+                tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                 since=None, until=None, limit=3, offset=3,
                 db=session, _admin={"role": "admin"},
             )
@@ -283,7 +283,7 @@ class TestListEvents:
         try:
             _seed_event(session, customer_phone="+966537970430")
             resp = list_ai_quality_events(
-                tenant_id=None, mismatch_type=None, resolved_status=None,
+                tenant_id=None, category=None, mismatch_type=None, resolved_status=None,
                 since=None, until=None, limit=50, offset=0,
                 db=session, _admin={"role": "admin"},
             )
@@ -318,7 +318,7 @@ class TestSummary:
                         created_at=now - timedelta(days=10))
 
             resp = ai_quality_summary(
-                tenant_id=None, window_hours=24,
+                tenant_id=None, category=None, window_hours=24,
                 db=session, _admin={"role": "admin"},
             )
             counts = {c.mismatch_type: c.count for c in resp.counts_by_type}
@@ -353,7 +353,7 @@ class TestSummary:
                         created_at=now - timedelta(minutes=5))
 
             resp = ai_quality_summary(
-                tenant_id=None, window_hours=24,
+                tenant_id=None, category=None, window_hours=24,
                 db=session, _admin={"role": "admin"},
             )
             ids = [tc.conversation_id for tc in resp.top_conversations]
@@ -372,7 +372,7 @@ class TestSummary:
             for i in range(120):
                 _seed_event(session, created_at=now - timedelta(minutes=i))
             resp = ai_quality_summary(
-                tenant_id=None, window_hours=24,
+                tenant_id=None, category=None, window_hours=24,
                 db=session, _admin={"role": "admin"},
             )
             assert len(resp.latest_events) <= 50
@@ -399,7 +399,7 @@ class TestSummary:
                         created_at=now - timedelta(minutes=10))
 
             resp = ai_quality_summary(
-                tenant_id=None, window_hours=1,
+                tenant_id=None, category=None, window_hours=1,
                 db=session, _admin={"role": "admin"},
             )
             assert resp.total_open == 2
@@ -421,7 +421,7 @@ class TestSummary:
                         created_at=now - timedelta(minutes=5))
 
             resp = ai_quality_summary(
-                tenant_id=2, window_hours=24,
+                tenant_id=2, category=None, window_hours=24,
                 db=session, _admin={"role": "admin"},
             )
             assert resp.total_in_window == 1

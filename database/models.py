@@ -2048,7 +2048,42 @@ class AiQualityEvent(Base):
     conversation_id = Column(Integer, ForeignKey('conversations.id'), nullable=True, index=True)
     # ── Privacy-safe identifiers ────────────────────────────────────
     customer_phone_masked = Column(String, nullable=False, index=True)
+    # ── Event family (May 2026 #22 — pre-brain visibility) ──────────
+    # Before this column existed, the table only held brain-side
+    # answer-alignment mismatches and the owner dashboard showed
+    # all-zeros whenever the failure happened BEFORE the brain ran
+    # (unsupported message types, empty text after normalize, 360dialog
+    # routing failures, dispatcher exceptions). Adding ``category`` lets
+    # the same table audit those silent drops too, without forking the
+    # dashboard or duplicating the triage workflow. Legacy rows default
+    # to ``ai_mismatch`` via the server default in migration 0070, so
+    # the historical reader is unaffected.
+    #
+    # Allowed values (string, NOT an enum — we want to add new ones
+    # without a migration):
+    #   * ``ai_mismatch``       — the original use case (alignment fail)
+    #   * ``inbound_drop``      — silent drop in
+    #     ``routers/whatsapp_webhook._dispatch_message`` /
+    #     ``_handle_merchant_message``
+    #   * ``webhook_routing``   — 360dialog / Meta unrouted webhook
+    #   * ``media_failure``     — reserved for a follow-up if needed
+    category = Column(
+        String(32),
+        nullable=False,
+        default='ai_mismatch',
+        server_default=sa.text("'ai_mismatch'"),
+        index=True,
+    )
     # ── Mismatch classification ─────────────────────────────────────
+    # For ``category='ai_mismatch'``  this is one of the legacy values
+    #   (``question_to_social``, ``delivery_to_receipt``, ...).
+    # For ``category='inbound_drop'`` this is the drop kind
+    #   (``unsupported_type``, ``empty_text``,
+    #    ``pre_brain_handoff_drop``, ``dispatcher_exception``).
+    # For ``category='webhook_routing'`` this is the unrouted sub-reason
+    #   (``unrouted_missing_phone_id``, ``unrouted_unknown_phone_id``,
+    #    ``unrouted_ambiguous``, ``unrouted_wrong_provider``,
+    #    ``unrouted_bad_secret``).
     mismatch_type = Column(String, nullable=False, index=True)
     mismatch_reason = Column(Text, nullable=True)
     # ── Brain context snapshot ──────────────────────────────────────

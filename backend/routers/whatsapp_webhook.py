@@ -1113,6 +1113,27 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    # Pre-brain observability (May 2026 #22): surface 360dialog
+                    # routing failures in the owner dashboard's "مشاكل الـ
+                    # Webhook" tab. Tenant id is unknown here (the whole
+                    # point is we couldn't match a phone_number_id), so the
+                    # recorder stores tenant=0 (platform sentinel).
+                    try:
+                        from core.inbound_observability import (  # noqa: PLC0415
+                            record_webhook_unrouted,
+                            ROUTE_UNROUTED_MISSING_PHONE,
+                        )
+                        record_webhook_unrouted(
+                            tenant_id=None,
+                            sub_reason=ROUTE_UNROUTED_MISSING_PHONE,
+                            phone_number_id="",
+                            detail=(
+                                f"scope={scope} field={field} "
+                                f"display_phone_number={display_phone_number or '-'}"
+                            ),
+                        )
+                    except Exception as _obs_exc:  # noqa: BLE001
+                        logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     continue
                 wa_conns = (
                     db.query(WhatsAppConnection)
@@ -1147,6 +1168,23 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    try:
+                        from core.inbound_observability import (  # noqa: PLC0415
+                            record_webhook_unrouted,
+                            ROUTE_UNROUTED_UNKNOWN_PHONE,
+                        )
+                        record_webhook_unrouted(
+                            tenant_id=None,
+                            sub_reason=ROUTE_UNROUTED_UNKNOWN_PHONE,
+                            phone_number_id=str(phone_number_id or ""),
+                            detail=(
+                                f"scope={scope} field={field} "
+                                f"display_phone_number={display_phone_number or '-'} "
+                                "no WhatsAppConnection row matches"
+                            ),
+                        )
+                    except Exception as _obs_exc:  # noqa: BLE001
+                        logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     continue
                 if len(wa_conns) > 1:
                     tenant_ids = [c.tenant_id for c in wa_conns]
@@ -1184,6 +1222,22 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    try:
+                        from core.inbound_observability import (  # noqa: PLC0415
+                            record_webhook_unrouted,
+                            ROUTE_UNROUTED_AMBIGUOUS,
+                        )
+                        record_webhook_unrouted(
+                            tenant_id=None,
+                            sub_reason=ROUTE_UNROUTED_AMBIGUOUS,
+                            phone_number_id=str(phone_number_id or ""),
+                            detail=(
+                                f"candidate_tenants={tenant_ids} "
+                                f"candidate_connections={connection_ids}"
+                            ),
+                        )
+                    except Exception as _obs_exc:  # noqa: BLE001
+                        logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     continue
                 wa_conn = wa_conns[0]
                 if wa_provider(wa_conn) != WHATSAPP_PROVIDER_360DIALOG:
@@ -1215,6 +1269,22 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    try:
+                        from core.inbound_observability import (  # noqa: PLC0415
+                            record_webhook_unrouted,
+                            ROUTE_UNROUTED_WRONG_PROVIDER,
+                        )
+                        record_webhook_unrouted(
+                            tenant_id=getattr(wa_conn, "tenant_id", None),
+                            sub_reason=ROUTE_UNROUTED_WRONG_PROVIDER,
+                            phone_number_id=str(phone_number_id or ""),
+                            detail=(
+                                f"connection={wa_conn.id} "
+                                f"provider_on_row={wa_provider(wa_conn)!r}"
+                            ),
+                        )
+                    except Exception as _obs_exc:  # noqa: BLE001
+                        logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     continue
                 expected_secret = str((wa_conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
                 provided_secret = headers.get("x_nahla_coexistence_secret", "")
@@ -1250,6 +1320,22 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    try:
+                        from core.inbound_observability import (  # noqa: PLC0415
+                            record_webhook_unrouted,
+                            ROUTE_UNROUTED_BAD_SECRET,
+                        )
+                        record_webhook_unrouted(
+                            tenant_id=getattr(wa_conn, "tenant_id", None),
+                            sub_reason=ROUTE_UNROUTED_BAD_SECRET,
+                            phone_number_id=str(phone_number_id or ""),
+                            detail=(
+                                f"connection={wa_conn.id} "
+                                "X-Nahla-Coexistence-Secret header mismatch"
+                            ),
+                        )
+                    except Exception as _obs_exc:  # noqa: BLE001
+                        logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     return
 
                 # Reaching here means the connection routing succeeded.
@@ -2679,6 +2765,29 @@ async def _dispatch_message(
                 "[TRACE][4/6] INBOUND_IGNORED_UNSUPPORTED | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
             )
+            # Pre-brain silent-drop visibility (May 2026 #22): mirror
+            # the trace log into ``ai_quality_events`` so the owner
+            # dashboard's "إسقاطات الإدخال" tab shows the merchant
+            # exactly which sticker/reaction/location/contacts message
+            # never reached the AI. Without this row the dashboard
+            # stays at zero while production drops messages silently.
+            try:
+                from core.inbound_observability import (  # noqa: PLC0415
+                    record_inbound_drop,
+                    DROP_UNSUPPORTED_TYPE,
+                )
+                record_inbound_drop(
+                    tenant_id=resolved_tenant_id,
+                    drop_kind=DROP_UNSUPPORTED_TYPE,
+                    customer_phone=sender or "",
+                    chosen_path=f"normalized_type={normalized_inbound.normalized_type}",
+                    detail=(
+                        f"msg_type={msg_type!r} normalized_type="
+                        f"{normalized_inbound.normalized_type!r}"
+                    ),
+                )
+            except Exception as _obs_exc:  # noqa: BLE001
+                logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
             return
 
         text = normalized_inbound.text.strip()
@@ -2718,6 +2827,27 @@ async def _dispatch_message(
                 "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
             )
+            # Pre-brain silent-drop visibility (May 2026 #22): the normalizer
+            # produced no text AND no fallback reply, so we just ``return``.
+            # Without an audit row the dashboard would never know this
+            # particular audio/image/document arrived but vanished.
+            try:
+                from core.inbound_observability import (  # noqa: PLC0415
+                    record_inbound_drop,
+                    DROP_EMPTY_TEXT,
+                )
+                record_inbound_drop(
+                    tenant_id=resolved_tenant_id,
+                    drop_kind=DROP_EMPTY_TEXT,
+                    customer_phone=sender or "",
+                    chosen_path=f"normalized_type={normalized_inbound.normalized_type}",
+                    detail=(
+                        f"normalized_type={normalized_inbound.normalized_type!r} "
+                        f"no_fallback=True"
+                    ),
+                )
+            except Exception as _obs_exc:  # noqa: BLE001
+                logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────
@@ -3752,6 +3882,30 @@ async def _handle_merchant_message(
                 "[Merchant/HANDOFF_GUARD] ack send failed | tenant=%s to=%s",
                 tenant_id, to,
             )
+            # Pre-brain silent-drop visibility (May 2026 #22): the customer
+            # explicitly asked for a human, the handoff guard fired, but the
+            # acknowledgement send raised. The customer sees nothing AND
+            # the brain pipeline is bypassed — exactly the class of drop the
+            # owner dashboard's "إسقاطات الإدخال" tab is meant to surface.
+            try:
+                from core.inbound_observability import (  # noqa: PLC0415
+                    record_inbound_drop,
+                    DROP_PRE_BRAIN_HANDOFF,
+                )
+                record_inbound_drop(
+                    tenant_id=tenant_id,
+                    drop_kind=DROP_PRE_BRAIN_HANDOFF,
+                    customer_phone=to or "",
+                    conversation_id=getattr(_ho_convo, "id", None),
+                    inbound_preview=text or "",
+                    chosen_path="handoff_guard_ack_send",
+                    detail=(
+                        f"ack_send_exception={_ho_send_exc.__class__.__name__}: "
+                        f"{str(_ho_send_exc)[:120]}"
+                    ),
+                )
+            except Exception as _obs_exc:  # noqa: BLE001
+                logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
         try:
             from routers.conversations import record_outbound_message  # noqa: PLC0415
             record_outbound_message(
@@ -4907,6 +5061,32 @@ async def _handle_merchant_message(
                 # debuggable from logs alone (grep `reply_source=
                 # brain_exception` for the bug class).
                 _trace.mark_brain_exception(brain_exc)
+                # Pre-brain silent-drop visibility (May 2026 #22): the brain
+                # pipeline raised; the customer either gets the policy-driven
+                # safe-reply (legacy fallback disabled) or the legacy path.
+                # In both cases the AI's intended answer never reached the
+                # customer. Record one row in ``ai_quality_events`` so the
+                # owner dashboard's "إسقاطات الإدخال" tab can correlate
+                # spikes with brain regressions.
+                try:
+                    from core.inbound_observability import (  # noqa: PLC0415
+                        record_inbound_drop,
+                        DROP_DISPATCHER_EXCEPTION,
+                    )
+                    record_inbound_drop(
+                        tenant_id=tenant_id,
+                        drop_kind=DROP_DISPATCHER_EXCEPTION,
+                        customer_phone=to or "",
+                        conversation_id=getattr(convo, "id", None),
+                        inbound_preview=text or "",
+                        chosen_path="brain_pipeline_raised",
+                        detail=(
+                            f"exception={brain_exc.__class__.__name__}: "
+                            f"{str(brain_exc)[:200]}"
+                        ),
+                    )
+                except Exception as _obs_exc:  # noqa: BLE001
+                    logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                 if MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK:
                     logger.exception(
                         "[Merchant/Brain] Brain pipeline failed — falling back to legacy "
