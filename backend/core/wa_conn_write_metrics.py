@@ -28,20 +28,39 @@ _meta_bytes_sum = 0
 
 
 def _advance_bucket_if_needed_locked() -> None:
+    """Rotate the in-memory metrics bucket once a minute.
+
+    Lock-held side-effect-only function — its caller already owns
+    ``_lock``. Never raises: a logging failure must not propagate into
+    the webhook batch's transaction (see ``record_row_flush`` for the
+    P1 fix history).
+    """
     global _bucket_minute, _row_flush_count, _meta_flush_count, _meta_bytes_sum
-    m = int(time.time()) // 60
-    if m != _bucket_minute:
-        logger.info(
-            "[WA_CONN_WRITE_METRICS] minute=%s row_flushes=%s meta_flushes=%s approx_meta_bytes_sum=%s",
-            _bucket_minute,
-            _row_flush_count,
-            _meta_flush_count,
-            _meta_bytes_sum,
-        )
-        _bucket_minute = m
-        _row_flush_count = 0
-        _meta_flush_count = 0
-        _meta_bytes_sum = 0
+    try:
+        m = int(time.time()) // 60
+        if m != _bucket_minute:
+            logger.info(
+                "[WA_CONN_WRITE_METRICS] minute=%s row_flushes=%s meta_flushes=%s approx_meta_bytes_sum=%s",
+                _bucket_minute,
+                _row_flush_count,
+                _meta_flush_count,
+                _meta_bytes_sum,
+            )
+            _bucket_minute = m
+            _row_flush_count = 0
+            _meta_flush_count = 0
+            _meta_bytes_sum = 0
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — there's no exception path inside the body today,
+        # but logging.info() can theoretically raise on a custom handler
+        # and we promise the caller "metrics never throws".
+        try:
+            logger.warning(
+                "[WA_CONN_WRITE_METRICS] bucket advance suppressed err=%s",
+                exc,
+            )
+        except Exception:
+            pass
 
 
 def approx_json_bytes(obj: dict) -> int:
@@ -59,31 +78,57 @@ def record_row_flush(
     flush_ms: int,
     approx_meta_json_bytes: int | None = None,
 ) -> None:
-    """Invoke right after ``db.flush()`` that touched ``whatsapp_connections``."""
-    minute_idx = 0
-    with _lock:
-        _advance_bucket_if_needed_locked()
-        _row_flush_count += 1
-        minute_idx = _row_flush_count
-        if approx_meta_json_bytes is not None:
-            _meta_flush_count += 1
-            if approx_meta_json_bytes >= 0:
-                _meta_bytes_sum += approx_meta_json_bytes
+    """Invoke right after ``db.flush()`` that touched ``whatsapp_connections``.
 
-    meta_part = (
-        f" approx_meta_json_bytes={approx_meta_json_bytes}"
-        if approx_meta_json_bytes is not None
-        else ""
-    )
-    logger.info(
-        "[WA_CONN_ROW_FLUSH] source=%s tenant=%s conn_id=%s flush_ms=%s minute_row_idx=%s%s",
-        source,
-        tenant_id,
-        conn_id,
-        flush_ms,
-        minute_idx,
-        meta_part,
-    )
+    Hard-isolation contract (P1 fix, May 2026):
+      * MUST NEVER raise. Any internal error is caught and logged; metrics
+        bookkeeping is best-effort by design and the inbound webhook batch
+        must continue regardless.
+      * Pre-fix bug: the in-place ``_row_flush_count += 1`` was missing
+        ``global _row_flush_count`` (alongside the meta counters), so
+        every call raised ``UnboundLocalError`` and bubbled up into the
+        outer webhook ``except`` — which then did ``db.rollback()`` while
+        still returning 200 OK to 360dialog. The provider never retried
+        and ``smb_message_echoes`` writes (which use the SAME ``db``
+        session as the metric call) were permanently lost.
+    """
+    # NOTE: the ``global`` declaration here is the actual fix. Removing
+    # it brings back the silent-rollback bug. Treat as load-bearing.
+    global _row_flush_count, _meta_flush_count, _meta_bytes_sum
+
+    try:
+        minute_idx = 0
+        with _lock:
+            _advance_bucket_if_needed_locked()
+            _row_flush_count += 1
+            minute_idx = _row_flush_count
+            if approx_meta_json_bytes is not None:
+                _meta_flush_count += 1
+                if approx_meta_json_bytes >= 0:
+                    _meta_bytes_sum += approx_meta_json_bytes
+
+        meta_part = (
+            f" approx_meta_json_bytes={approx_meta_json_bytes}"
+            if approx_meta_json_bytes is not None
+            else ""
+        )
+        logger.info(
+            "[WA_CONN_ROW_FLUSH] source=%s tenant=%s conn_id=%s flush_ms=%s minute_row_idx=%s%s",
+            source,
+            tenant_id,
+            conn_id,
+            flush_ms,
+            minute_idx,
+            meta_part,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Metrics MUST NOT poison the webhook transaction. Log at warning
+        # level so ops still see it, but swallow everything else.
+        logger.warning(
+            "[WA_CONN_WRITE_METRICS] record_row_flush suppressed err=%s "
+            "source=%s tenant=%s conn_id=%s",
+            exc, source, tenant_id, conn_id,
+        )
 
 
 # ── Stamping throttle ───────────────────────────────────────────────────────

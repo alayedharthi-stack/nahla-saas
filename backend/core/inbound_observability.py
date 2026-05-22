@@ -103,6 +103,14 @@ DROP_UNSUPPORTED_TYPE        = "unsupported_type"
 DROP_EMPTY_TEXT              = "empty_text"
 DROP_PRE_BRAIN_HANDOFF       = "pre_brain_handoff_drop"
 DROP_DISPATCHER_EXCEPTION    = "dispatcher_exception"
+# Set when a per-change branch in the 360dialog batch loop raised and
+# we contained the failure (rollback + continue) instead of letting it
+# kill sibling changes. Pre-fix May 2026 this was happening silently:
+# ``record_row_flush`` raised UnboundLocalError → the outer ``except``
+# rolled back the WHOLE batch while the handler still returned 200 OK,
+# so 360dialog never retried and writes were lost. The dashboard tab
+# "Inbound Drops" surfaces these going forward.
+DROP_BATCH_BRANCH_ISOLATED   = "batch_branch_isolated"
 
 # webhook_routing sub-types
 ROUTE_UNROUTED_MISSING_PHONE = "unrouted_missing_phone_id"

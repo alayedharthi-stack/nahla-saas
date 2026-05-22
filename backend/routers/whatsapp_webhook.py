@@ -1430,11 +1430,33 @@ async def _handle_360dialog_body(
                 )
 
                 # ── Channel events ────────────────────────────────────────
+                # ``_dispatch_message`` opens its OWN DB session (see
+                # ``db = next(get_db(), None)`` inside the function), so a
+                # failure here cannot touch the outer batch ``db``. Still
+                # wrapped to keep the loop alive for sibling changes.
                 if field == "messages":
-                    for msg in value.get("messages", []):
-                        await _dispatch_message(phone_number_id, msg, value)
-                    for st_obj in value.get("statuses", []):
-                        await _handle_message_status(st_obj)
+                    try:
+                        for msg in value.get("messages", []):
+                            await _dispatch_message(phone_number_id, msg, value)
+                        for st_obj in value.get("statuses", []):
+                            await _handle_message_status(st_obj)
+                    except Exception as exc:  # noqa: BLE001
+                        # Per-change isolation (P1 May 2026): never let
+                        # one bad change abort the surrounding batch.
+                        # ``_dispatch_message`` has its own integrity
+                        # logger; this fallback exists for unexpected
+                        # exceptions that escape it.
+                        logger.exception(
+                            "[Webhook360] messages dispatch failed isolated "
+                            "tenant=%s phone_number_id=%s err=%s",
+                            wa_conn.tenant_id, phone_number_id, exc,
+                        )
+                        _record_batch_isolation_event(
+                            tenant_id=wa_conn.tenant_id,
+                            field=field, family=family,
+                            phone_number_id=phone_number_id,
+                            exc=exc,
+                        )
                     continue
 
                 # ── Coexistence events ────────────────────────────────────
@@ -1443,31 +1465,86 @@ async def _handle_360dialog_body(
                 # lock across multiple events (e.g. coex + status arriving in
                 # the same delivery) was producing `statement_timeout` on
                 # the next webhook delivery for the same tenant.
+                #
+                # Per-change isolation: wrap each branch so a failure on
+                # one event (metrics raise, JSONB serialization quirk,
+                # row-lock timeout) cannot rollback prior events' writes.
+                # Each branch ends in its own ``db.commit()`` already; we
+                # add a savepoint-style ``db.rollback()`` in the except
+                # so the session is clean for the next iteration.
                 if field == "smb_message_echoes":
-                    await _ingest_smb_message_echoes(db, wa_conn, value)
-                    _record_coexistence_event(
-                        db, wa_conn,
-                        event_type=field,
-                        category="merchant_mobile_echo",
-                        value=value,
-                    )
-                    db.commit()
+                    try:
+                        await _ingest_smb_message_echoes(db, wa_conn, value)
+                        _record_coexistence_event(
+                            db, wa_conn,
+                            event_type=field,
+                            category="merchant_mobile_echo",
+                            value=value,
+                        )
+                        db.commit()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        logger.exception(
+                            "[Webhook360] smb_message_echoes branch failed "
+                            "isolated tenant=%s err=%s",
+                            wa_conn.tenant_id, exc,
+                        )
+                        _record_batch_isolation_event(
+                            tenant_id=wa_conn.tenant_id,
+                            field=field, family=family,
+                            phone_number_id=phone_number_id, exc=exc,
+                        )
                     continue
 
                 if family == "coexistence":
-                    _record_coexistence_event(
-                        db, wa_conn,
-                        event_type=field,
-                        category=_coexistence_category_for(field),
-                        value=value,
-                    )
-                    db.commit()
+                    try:
+                        _record_coexistence_event(
+                            db, wa_conn,
+                            event_type=field,
+                            category=_coexistence_category_for(field),
+                            value=value,
+                        )
+                        db.commit()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        logger.exception(
+                            "[Webhook360] coexistence branch failed isolated "
+                            "tenant=%s field=%s err=%s",
+                            wa_conn.tenant_id, field, exc,
+                        )
+                        _record_batch_isolation_event(
+                            tenant_id=wa_conn.tenant_id,
+                            field=field, family=family,
+                            phone_number_id=phone_number_id, exc=exc,
+                        )
                     continue
 
                 # ── Status / health events ────────────────────────────────
                 if family == "status":
-                    _record_status_event(db, wa_conn, event_type=field, value=value)
-                    db.commit()
+                    try:
+                        _record_status_event(db, wa_conn, event_type=field, value=value)
+                        db.commit()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                        logger.exception(
+                            "[Webhook360] status branch failed isolated "
+                            "tenant=%s field=%s err=%s",
+                            wa_conn.tenant_id, field, exc,
+                        )
+                        _record_batch_isolation_event(
+                            tenant_id=wa_conn.tenant_id,
+                            field=field, family=family,
+                            phone_number_id=phone_number_id, exc=exc,
+                        )
                     continue
 
                 logger.info("[Webhook360] Ignored field=%s tenant=%s phone_number_id=%s", field, wa_conn.tenant_id, phone_number_id)
@@ -1540,12 +1617,23 @@ def _bg_stamp_run(conn_id: int, tenant_id: int | None, family: str, column: str)
         )
         bg_db.commit()
         elapsed = int((time.perf_counter() - t0) * 1000)
-        record_row_flush(
-            source=f"webhook_stamp_bg:{family}",
-            tenant_id=tenant_id,
-            conn_id=conn_id,
-            flush_ms=elapsed,
-        )
+        # The bg path's own except already rolls back ``bg_db`` and
+        # logs a SKIPPED warning, but we tighten the isolation further
+        # so a metrics raise can't even trigger that warning path for
+        # the cosmetic counter — the UPDATE already committed.
+        try:
+            record_row_flush(
+                source=f"webhook_stamp_bg:{family}",
+                tenant_id=tenant_id,
+                conn_id=conn_id,
+                flush_ms=elapsed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[Webhook360/stamp_bg] metrics suppressed family=%s "
+                "conn_id=%s tenant=%s err=%s",
+                family, conn_id, tenant_id, exc,
+            )
         if (result.rowcount or 0) == 0:
             logger.debug(
                 "[Webhook360/stamp_bg] noop family=%s conn_id=%s rowcount=0 (sql_guard hit)",
@@ -1718,6 +1806,44 @@ _COEX_SYNC_STATE_BY_CATEGORY = {
 }
 
 
+def _record_batch_isolation_event(
+    *,
+    tenant_id: Optional[int],
+    field: str,
+    family: str,
+    phone_number_id: str,
+    exc: BaseException,
+) -> None:
+    """Surface a per-change isolation event on the owner's AI Quality
+    Monitor (``/admin/ai-quality``) so contained batch failures are not
+    invisible (P1 May 2026).
+
+    This is best-effort — observability MUST NEVER raise back into the
+    webhook. The underlying ``record_inbound_drop`` already writes in a
+    fresh ``SessionLocal()`` and catches every exception, but we wrap
+    the import + call in a second try/except as belt-and-braces.
+    """
+    try:
+        from core.inbound_observability import (  # noqa: PLC0415
+            DROP_BATCH_BRANCH_ISOLATED,
+            record_inbound_drop,
+        )
+        record_inbound_drop(
+            tenant_id=tenant_id,
+            drop_kind=DROP_BATCH_BRANCH_ISOLATED,
+            customer_phone="",
+            inbound_preview=f"field={field} family={family} "
+                            f"phone_number_id={phone_number_id}",
+            detail=f"{type(exc).__name__}: {exc}",
+            chosen_path=f"webhook360/{family}",
+        )
+    except Exception as obs_exc:  # noqa: BLE001
+        logger.warning(
+            "[Webhook360] isolation event log suppressed err=%s",
+            obs_exc,
+        )
+
+
 def _record_coexistence_event(
     db,
     wa_conn: WhatsAppConnection,
@@ -1790,13 +1916,25 @@ def _record_coexistence_event(
     t_flush = time.perf_counter()
     db.flush()
     flush_ms = int((time.perf_counter() - t_flush) * 1000)
-    record_row_flush(
-        source="webhook360_coex_event",
-        tenant_id=wa_conn.tenant_id,
-        conn_id=wa_conn.id,
-        flush_ms=flush_ms,
-        approx_meta_json_bytes=approx,
-    )
+    # Hard isolation (P1 May 2026): a metrics bug here must NEVER
+    # propagate. Pre-fix, ``record_row_flush`` missed a ``global``
+    # declaration and raised ``UnboundLocalError`` on every call → the
+    # outer batch ``except`` then rolled the whole transaction back
+    # while still returning 200 OK to 360dialog, losing merchant echo
+    # writes. Both ends of the call chain are now defensive.
+    try:
+        record_row_flush(
+            source="webhook360_coex_event",
+            tenant_id=wa_conn.tenant_id,
+            conn_id=wa_conn.id,
+            flush_ms=flush_ms,
+            approx_meta_json_bytes=approx,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[Webhook360/coex] metrics suppressed tenant=%s event=%s err=%s",
+            wa_conn.tenant_id, event_type, exc,
+        )
     logger.info(
         "[Webhook360/coex] tenant=%s event=%s category=%s sync_state=%s",
         wa_conn.tenant_id, event_type, category, coex.get("sync_state"),
@@ -1843,13 +1981,20 @@ def _record_status_event(
     t_flush = time.perf_counter()
     db.flush()
     flush_ms = int((time.perf_counter() - t_flush) * 1000)
-    record_row_flush(
-        source="webhook360_status_event",
-        tenant_id=wa_conn.tenant_id,
-        conn_id=wa_conn.id,
-        flush_ms=flush_ms,
-        approx_meta_json_bytes=approx,
-    )
+    # See coex twin above — metrics never propagates.
+    try:
+        record_row_flush(
+            source="webhook360_status_event",
+            tenant_id=wa_conn.tenant_id,
+            conn_id=wa_conn.id,
+            flush_ms=flush_ms,
+            approx_meta_json_bytes=approx,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[Webhook360/status] metrics suppressed tenant=%s event=%s err=%s",
+            wa_conn.tenant_id, event_type, exc,
+        )
     logger.info(
         "[Webhook360/status] tenant=%s event=%s",
         wa_conn.tenant_id, event_type,
