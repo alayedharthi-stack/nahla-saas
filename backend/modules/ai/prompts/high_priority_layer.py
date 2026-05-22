@@ -226,26 +226,35 @@ SALES_BEHAVIOR_EXAMPLES: tuple[tuple[str, str, str, str], ...] = (
             "عندنا حالياً نوعين 🌷\n"
             "• الطلح البلدي\n"
             "• سمر الحجاز\n\n"
-            "تحب القوي الدسم ولا الأخف للاستخدام اليومي؟"
+            "تحب الطعم الأقوى والمركز ولا الأخف للاستخدام اليومي؟"
         ),
         "أسماء فقط في أول رد + سؤال توجيه. السعر والأحجام تأتي بعد ما يحدّد.",
     ),
     # ── #2: compare two products — no full table ──────────────────────
+    # Examples stay honey-themed (the production complaint was about
+    # the honey screenshots) but the wording uses GENERIC food-tasting
+    # vocabulary — strength, concentration, sharpness — so the LLM
+    # doesn't generalise a domain-specific Arabic adjective ("الدسم")
+    # onto products where it doesn't fit. Behaviour rules above stay
+    # generic; only the surface words inside the examples change.
     (
         "الفرق بين الطلح والسمر",
         (
-            "الطلح البلدي قوي ودسم، مر قليلًا، يناسب الكبار، يستخدم للمناعة، "
+            "الطلح البلدي قوي ومركز، مر قليلًا، يناسب الكبار، يستخدم للمناعة، "
             "ربع 126 — نص 193 — كيلو 387.\n"
             "سمر الحجاز خفيف وحلو، مناسب لكل العائلة، إنتاج 1446، "
             "ربع 79 — نص 139 — كيلو 249.\n"
             "تحب أرسل لك الصور والروابط؟"
         ),
         (
-            "الطلح أقوى وأدسم 💪\n"
-            "السمر أخف وأحلى للاستخدام اليومي 🌷\n\n"
+            "الطلح أقوى وغني بالطعم 💪\n"
+            "السمر نكهته أوضح وحموضته أعلى قليلًا 🌷\n\n"
             "أيهما يناسبك أكثر؟"
         ),
-        "خاصية واحدة لكل منتج + سؤال. ممنوع جدول مقارنة كامل بأسعار.",
+        "خاصية واحدة لكل منتج + سؤال. ممنوع جدول مقارنة كامل بأسعار. "
+        "الأوصاف الخاصة بنوع المنتج (لهجة الصناعة، مصطلحات التذوق "
+        "الدقيقة) مكانها قاعدة المعرفة الخاصة بالتاجر — هذا المثال "
+        "يوضّح فقط بنية الرد المختصر، وليس مفردات صنف معيّن.",
     ),
     # ── #3: image request — image only, no description ────────────────
     (
