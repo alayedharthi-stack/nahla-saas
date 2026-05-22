@@ -6472,6 +6472,14 @@ async def _handle_merchant_message(
                         reply_text=reply or "",
                         existing_call_targets=_call_targets,
                         detected_call_markers=_marker_detected["call"],
+                        # May 2026 #36 KB scan: when the LLM
+                        # mentioned a staff name but omitted the
+                        # phone, the safety net now lifts the
+                        # number from a free-form KB section so
+                        # the merchant's name+phone pair lands
+                        # without needing a structured directory.
+                        db=db,
+                        tenant_id=tenant_id,
                     )
                     if _cn.fired and _cn.extra_call_target is not None:
                         _call_targets.append(_cn.extra_call_target)

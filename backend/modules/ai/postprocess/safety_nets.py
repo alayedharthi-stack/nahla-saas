@@ -507,7 +507,8 @@ _STAFF_INTENT_TRIGGERS: set = {
 # Staff name candidates. The customer will reference one of these
 # when they want a contact card. The tenant-specific list lives
 # (for now) in the prompt KB; we hardcode the common Saudi staff
-# names to catch the common requests. Adding here is cheap.
+# names + role nouns to catch the common requests. Adding here
+# is cheap.
 _STAFF_NAME_CANDIDATES: List[str] = [
     "أمين", "امين",
     "هشام",
@@ -526,7 +527,44 @@ _STAFF_NAME_CANDIDATES: List[str] = [
     "المسؤول",
     "الموظف",
     "المسؤولة",
+    # Role nouns the customer often substitutes for a name
+    # ("أبي رقم البائع" / "أبي أكلم المحاسب"). Free-text KB
+    # entries frequently use these labels next to the phone
+    # ("بائع المعرض - 05xxxxxxxx") so the KB scan can still
+    # resolve a contact even when the customer didn't say a
+    # personal name.
+    "البائع",
+    "بائع المعرض",
+    "المحاسب",
+    "الكاشير",
+    "المندوب",
+    "السائق",
+    "خدمة العملاء",
+    "الدعم",
 ]
+
+
+# KB-section kinds we sweep when the LLM omitted the phone but the
+# merchant has a name+phone pair sitting in free-form knowledge.
+# We deliberately stay away from BEHAVIORAL_KINDS (tone/style
+# rules) and product-bound kinds — those don't carry contact
+# directories. See the May 2026 #36 audit report.
+_STAFF_KB_FALLBACK_KINDS: tuple = (
+    "branches",
+    "store_story",
+    "owner_identity",
+    "quick_update",
+    "custom",
+    "faq",
+    "escalation_rules",
+)
+
+
+# Window (in characters) around a name match to consider for the
+# nearest phone digits. Tight enough to avoid pairing the wrong
+# number ("Manager 050... | Driver 053...") and wide enough to
+# bridge a phone that lives one bullet point away from the name.
+_STAFF_KB_PROXIMITY_WINDOW = 80
 
 
 # Saudi phone — captures the common shapes Claude emits in replies.
@@ -574,6 +612,22 @@ class StaffContactSafetyNetResult:
     skipped_reason: str = ""
     inferred_name: str = ""
     wa_id: str = ""
+    # Where the phone digits ultimately came from. Useful for
+    # production telemetry when triaging "why did the AI say أمين's
+    # name but not send his number?" — the answer is now visible
+    # in a single grep.
+    #
+    # Values:
+    #   ``"reply"``     — Claude wrote the phone as plain text and
+    #                     we lifted it out of the LLM reply (the
+    #                     classic path).
+    #   ``"kb:<kind>"`` — extracted from a free-form KB section
+    #                     where the merchant typed a name + phone
+    #                     pair (May 2026 #36 KB-scan layer). The
+    #                     ``<kind>`` segment tells you which KB
+    #                     bucket carried the data.
+    #   ``""``          — net did not fire.
+    source: str = ""
     extra_call_target: Any = None  # CallTarget when fired
 
     def to_log_dict(self) -> Dict[str, Any]:
@@ -583,7 +637,162 @@ class StaffContactSafetyNetResult:
             "reason":         self.reason or self.skipped_reason,
             "inferred_name":  self.inferred_name,
             "wa_id":          self.wa_id,
+            "source":         self.source,
         }
+
+
+def _normalise_alif(text: str) -> str:
+    """Fold the four alif variants to a bare alif and the alif-maqsura
+    to yaa. Used inside the KB scanner so a merchant who typed
+    "أمين" can still be matched when the customer typed "امين"
+    (and vice versa). We keep this fold LOCAL to the staff-name
+    matcher — the rest of the file deliberately preserves the
+    original Arabic shape so we don't garble unrelated content."""
+    if not text:
+        return ""
+    return (
+        text
+        .replace("\u0623", "\u0627")   # أ
+        .replace("\u0625", "\u0627")   # إ
+        .replace("\u0622", "\u0627")   # آ
+        .replace("\u0649", "\u064a")   # ى → ي
+    )
+
+
+def _lookup_staff_phone_in_kb(
+    db: Any,
+    tenant_id: int,
+    name: str,
+) -> Tuple[str, str, str]:
+    """Scan free-form KB sections for a name+phone pair.
+
+    Returns a ``(raw_phone, source_kind, section_id)`` tuple. Empty
+    strings on miss / error. Never raises.
+
+    Scoring:
+      * For each candidate KB row (kinds in
+        :data:`_STAFF_KB_FALLBACK_KINDS`), find every occurrence
+        of ``name`` (alif-folded) inside the body.
+      * For each occurrence we look at the surrounding window
+        (:data:`_STAFF_KB_PROXIMITY_WINDOW` chars before/after)
+        and pick the FIRST Saudi-shaped phone we see. Proximity
+        wins over absolute body order so we don't pair "أمين"
+        with the warehouse phone three paragraphs down.
+      * Emits a single ``[STAFF_CONTACT_RESOLVER]`` INFO line per
+        outcome (hit/miss). The webhook re-emits its own
+        ``[SAFETY_NET:staff_contact]`` line as before.
+
+    Platform-level: every merchant who typed
+    "أمين - 0541690226" / "بائع المعرض: 0555906901" anywhere in a
+    valid KB section now has the AI deliver that contact card —
+    no schema migration, no dashboard change required.
+    """
+    if db is None or not tenant_id or not name:
+        return "", "", ""
+    target_norm = _normalise_alif(name).lower()
+    if not target_norm:
+        return "", "", ""
+
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        rows = (
+            db.query(MerchantKnowledgeSection)
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.is_active.is_(True),
+                MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .limit(40)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.staff_kb | query failed tenant=%s err=%s",
+            tenant_id, exc,
+        )
+        return "", "", ""
+
+    for row in rows:
+        body = getattr(row, "body", "") or ""
+        if not body:
+            continue
+        body_norm = _normalise_alif(body).lower()
+
+        # Pre-compute every Saudi-phone span in the original body so
+        # we can pick the one CLOSEST to a name hit. Using a single
+        # pass keeps the inner loop O(name_hits + phone_count)
+        # instead of O(name_hits * body_len).
+        phone_spans: List[tuple] = []
+        for pat in _PHONE_REGEXES:
+            for m in pat.finditer(body):
+                phone_spans.append((m.start(), m.end(), m.group(0)))
+        if not phone_spans:
+            continue
+        phone_spans.sort(key=lambda s: s[0])
+
+        idx = 0
+        while True:
+            pos = body_norm.find(target_norm, idx)
+            if pos < 0:
+                break
+            name_end = pos + len(target_norm)
+            # Two-pass selection:
+            #   1. Prefer the closest phone AFTER the name within
+            #      the window. Saudi free-form KB entries
+            #      overwhelmingly write "<اسم>: <رقم>" — phone
+            #      after name. Honouring that ordering keeps us
+            #      from pairing "خالد" with the line above it
+            #      ("أمين بائع المعرض: 054…") just because it
+            #      happens to be one newline away.
+            #   2. If nothing after, fall back to the closest
+            #      phone BEFORE the name within the window.
+            best_after: Optional[tuple] = None
+            best_after_dist = _STAFF_KB_PROXIMITY_WINDOW + 1
+            best_before: Optional[tuple] = None
+            best_before_dist = _STAFF_KB_PROXIMITY_WINDOW + 1
+            for ph_start, ph_end, ph_text in phone_spans:
+                if ph_start >= name_end:
+                    dist = ph_start - name_end
+                    if dist <= _STAFF_KB_PROXIMITY_WINDOW and dist < best_after_dist:
+                        best_after = (ph_start, ph_end, ph_text)
+                        best_after_dist = dist
+                elif ph_end <= pos:
+                    dist = pos - ph_end
+                    if dist <= _STAFF_KB_PROXIMITY_WINDOW and dist < best_before_dist:
+                        best_before = (ph_start, ph_end, ph_text)
+                        best_before_dist = dist
+                else:
+                    # Overlap — phone is inside the name span
+                    # (extremely unlikely). Treat as zero distance.
+                    if 0 < best_after_dist:
+                        best_after = (ph_start, ph_end, ph_text)
+                        best_after_dist = 0
+            chosen = best_after or best_before
+            if chosen is not None:
+                used_dist = (
+                    best_after_dist if best_after is not None
+                    else best_before_dist
+                )
+                direction = "after" if best_after is not None else "before"
+                logger.info(
+                    "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=kb:%s "
+                    "section_id=%s name_len=%d phone_match=%s "
+                    "direction=%s proximity=%d",
+                    tenant_id, row.kind, row.id,
+                    len(name), True, direction, used_dist,
+                )
+                return chosen[2], row.kind, str(row.id)
+            idx = name_end
+    logger.info(
+        "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=kb:miss name_len=%d "
+        "phone_match=%s reason=no_phone_within_window",
+        tenant_id, len(name), False,
+    )
+    return "", "", ""
 
 
 def apply_staff_contact_safety_net(
@@ -592,14 +801,39 @@ def apply_staff_contact_safety_net(
     reply_text: str,
     existing_call_targets: List[Any],
     detected_call_markers: int,
+    db: Any = None,
+    tenant_id: int = 0,
 ) -> StaffContactSafetyNetResult:
     """Build a contact-card ``CallTarget`` when the customer asked
-    to reach a staff member by name AND Claude wrote the phone as
-    plain text in the reply.
+    to reach a staff member by name.
+
+    Resolution order (May 2026 #36 — platform-wide KB scan):
+      1. **Reply scan**  — phones Claude wrote as plain text in
+         the reply. Highest confidence: the LLM saw the KB and
+         chose to mention this number for THIS request.
+      2. **KB free-text scan** — when the LLM omitted the phone
+         but the merchant has a name+phone pair sitting in a
+         free-form KB section (``branches`` / ``store_story`` /
+         ``owner_identity`` / ``quick_update`` / ``custom`` /
+         ``faq`` / ``escalation_rules``), we lift it directly.
+         This closes the gap that produced the May 2026 #36
+         feedback: bot says "تواصل مع أمين بائع المعرض" but
+         doesn't ship the number even though it's in the KB.
+
+    Telemetry: the function emits a structured
+    ``[STAFF_CONTACT_RESOLVER]`` INFO line per outcome (KB hit /
+    miss / reply-only). The webhook re-emits the legacy
+    ``[SAFETY_NET:staff_contact]`` line for backwards compat.
 
     Returns a :class:`StaffContactSafetyNetResult`. When ``fired``
     is true, the caller should append ``extra_call_target`` to
-    ``_call_targets`` and bump ``_marker_resolved["call"]``.
+    ``_call_targets`` and bump ``_marker_resolved["call"]``. The
+    ``source`` field tells you whether the phone came from the
+    reply or which KB kind it was lifted from.
+
+    ``db`` and ``tenant_id`` are optional for backwards
+    compatibility — without them only the reply-scan layer runs,
+    matching the pre-May-2026-#36 behaviour exactly.
     """
     result = StaffContactSafetyNetResult()
 
@@ -628,15 +862,40 @@ def apply_staff_contact_safety_net(
         return result
     result.inferred_name = name
 
-    # We need a phone in the reply text — otherwise we have nothing
-    # to put on the contact card. (We won't guess from the customer
-    # message; the customer typed the request, not the phone.)
+    # ── Layer 1: reply scan (canonical path) ────────────────────
+    raw_phone = ""
+    source = ""
     phones = _extract_phones(reply_text or "")
-    if not phones:
+    if phones:
+        raw_phone = phones[0]
+        source = "reply"
+        logger.info(
+            "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=reply "
+            "name_len=%d phone_match=%s",
+            int(tenant_id or 0), len(name), True,
+        )
+
+    # ── Layer 2: KB free-text scan (May 2026 #36) ───────────────
+    kb_section_kind = ""
+    kb_section_id = ""
+    if not raw_phone and db is not None and tenant_id:
+        raw_phone, kb_section_kind, kb_section_id = _lookup_staff_phone_in_kb(
+            db, int(tenant_id), name,
+        )
+        if raw_phone:
+            source = f"kb:{kb_section_kind}"
+
+    if not raw_phone:
+        # Telemetry: log the miss so production triage can see
+        # tenants who could benefit from filling a structured
+        # staff directory once we ship one.
+        logger.info(
+            "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=none "
+            "name_len=%d phone_match=%s reason=no_phone_in_reply_or_kb",
+            int(tenant_id or 0), len(name), False,
+        )
         result.skipped_reason = "no_phone_in_reply"
         return result
-
-    raw_phone = phones[0]
 
     try:
         from services.call_resolver import (  # noqa: PLC0415
@@ -669,7 +928,12 @@ def apply_staff_contact_safety_net(
     )
     result.extra_call_target = target
     result.fired = True
-    result.reason = "intent_plus_name_plus_phone_in_reply"
+    result.source = source
+    if source == "reply":
+        result.reason = "intent_plus_name_plus_phone_in_reply"
+    else:
+        # ``kb:<kind>``
+        result.reason = f"intent_plus_name_plus_phone_in_{source}"
     return result
 
 
