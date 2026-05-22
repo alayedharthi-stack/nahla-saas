@@ -1130,6 +1130,29 @@ def audit(
     # different rationale_keys and stay independent).
     findings = _dedup_by_purpose(findings)
 
+    # ── Content cluster (KB-Improve V1.3, May 2026 #36) ─────────────────
+    # The previous fingerprint dedup keyed on ``related_section_ids``,
+    # so per-section findings that produced byte-identical UI text
+    # (same title, same reason, same proposed_body) survived the dedup
+    # because each row carried a different section id. The dashboard
+    # then rendered the same card 5 times, which was the merchant
+    # feedback we got after Phase 1 shipped.
+    #
+    # The cluster pass collapses findings on a content-only key
+    # (excludes section ids) and aggregates the section ids of all
+    # collapsed siblings into the surviving anchor. Findings whose
+    # text is genuinely unique (e.g. weak_section on rows with
+    # different bodies) stay separate. The fingerprint is
+    # recomputed over the merged section list so dismissals hide
+    # the entire cluster, not just one row.
+    raw_count = len(findings)
+    findings, collapsed_count = _cluster_findings(findings)
+    if collapsed_count:
+        logger.info(
+            "[KB_IMPROVE_CLUSTER] raw=%d returned=%d collapsed=%d",
+            raw_count, len(findings), collapsed_count,
+        )
+
     # ── Rank + truncate ─────────────────────────────────────────────────
     ranked = sorted(
         findings,
@@ -1169,6 +1192,131 @@ def _purpose_of(f: ImprovementFinding) -> Optional[str]:
         if s.startswith("purpose:"):
             return s[len("purpose:"):]
     return None
+
+
+def _content_cluster_key(f: ImprovementFinding) -> str:
+    """Stable cluster key for a finding based purely on **content**.
+
+    Excludes ``related_section_ids`` on purpose — that's the field
+    that made the fingerprint dedup miss the May 2026 #36
+    duplicate-suggestion bug. When five different sections of the
+    same kind happen to share an empty/identical title, every per-
+    section finding had a different fingerprint (because the section
+    id was in the hash) but emitted byte-for-byte identical UI text:
+
+      title:           "حسّن قسم «shipping_zones»"
+      reason:          "القسم الحالي قصير جداً ..."
+      expected_impact: "ردود أكثر اكتمالاً ..."
+      proposed_body:   "<row.body>\n\nأضف هنا تفاصيل أكثر: ..."
+
+    The dashboard then renders the same card N times. We fix that
+    by collapsing on the content tuple (type, target_kind, title,
+    reason, expected_impact, proposed_body) and aggregating the
+    related_section_ids of every collapsed sibling so the merchant
+    can still see which rows the cluster covers.
+
+    NB: ``proposed_body`` is intentionally PART of the key —
+    weak_section findings interpolate ``row.body`` into the body, so
+    two rows with truly different bodies remain in distinct
+    clusters. Only rows that produced byte-identical advice
+    collapse.
+    """
+    parts = [
+        (f.type or "").strip().lower(),
+        (f.target_kind or "").strip().lower(),
+        _normalize_for_fingerprint(f.title or ""),
+        _normalize_for_fingerprint(f.reason or ""),
+        _normalize_for_fingerprint(f.expected_impact or ""),
+        _normalize_for_fingerprint(f.proposed_body or ""),
+    ]
+    raw = "|".join(parts).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _cluster_findings(
+    findings: List[ImprovementFinding],
+) -> Tuple[List[ImprovementFinding], int]:
+    """Collapse byte-identical findings into one entry per content key.
+
+    Returns ``(survivors, collapsed_count)`` where ``collapsed_count``
+    is how many rows we squashed (so observability can chart it).
+
+    Rules:
+      * Iteration order is preserved — the first finding in each
+        cluster anchors the surviving row's text; later siblings only
+        contribute their ``related_section_ids`` and ``rationale_keys``.
+      * The anchor's ``confidence`` and ``severity`` are kept as-is.
+        We DON'T promote a cluster's severity just because it covers
+        more rows — the cluster is "the same advice", not "more
+        urgent advice". Severity is a property of the advice itself.
+      * The anchor's ``fingerprint`` is recomputed from the merged
+        ``related_section_ids`` so the suppression key reflects the
+        cluster — when the merchant dismisses the merged card, the
+        whole cluster stays hidden until TTL.
+
+    Findings whose content key is unique pass through untouched —
+    no allocation, no fingerprint recompute. Hot path stays cheap
+    when nothing is duplicated.
+    """
+    if not findings:
+        return [], 0
+    by_key: Dict[str, ImprovementFinding] = {}
+    section_ids_by_key: Dict[str, List[int]] = {}
+    rationale_by_key: Dict[str, List[str]] = {}
+    order: List[str] = []
+    collapsed = 0
+    for f in findings:
+        key = _content_cluster_key(f)
+        if key not in by_key:
+            by_key[key] = f
+            section_ids_by_key[key] = list(f.related_section_ids or [])
+            rationale_by_key[key] = list(f.rationale_keys or [])
+            order.append(key)
+            continue
+        # Dup → fold into the anchor.
+        collapsed += 1
+        for sid in (f.related_section_ids or []):
+            try:
+                sid_int = int(sid)
+            except (TypeError, ValueError):
+                continue
+            if sid_int not in section_ids_by_key[key]:
+                section_ids_by_key[key].append(sid_int)
+        for rk in (f.rationale_keys or []):
+            if rk and rk not in rationale_by_key[key]:
+                rationale_by_key[key].append(rk)
+
+    survivors: List[ImprovementFinding] = []
+    for key in order:
+        anchor = by_key[key]
+        merged_ids = sorted(int(s) for s in section_ids_by_key[key])
+        merged_rationales = list(rationale_by_key[key])
+        if (
+            list(anchor.related_section_ids or []) == merged_ids
+            and list(anchor.rationale_keys or []) == merged_rationales
+        ):
+            survivors.append(anchor)
+            continue
+        # Build a NEW finding so the dataclass post-init recomputes
+        # the fingerprint over the merged section list. Suppression
+        # keyed on this fp will hide the whole cluster, not just
+        # the anchor section.
+        clustered = ImprovementFinding(
+            id=anchor.id,
+            type=anchor.type,
+            severity=anchor.severity,
+            title=anchor.title,
+            reason=anchor.reason,
+            expected_impact=anchor.expected_impact,
+            target_kind=anchor.target_kind,
+            proposed_body=anchor.proposed_body,
+            requires_media=anchor.requires_media,
+            confidence=anchor.confidence,
+            related_section_ids=merged_ids,
+            rationale_keys=merged_rationales,
+        )
+        survivors.append(clustered)
+    return survivors, collapsed
 
 
 def _dedup_by_purpose(

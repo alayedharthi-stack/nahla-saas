@@ -859,3 +859,196 @@ def test_generic_payment_barcode_query_no_false_positive(
     assert not is_generic_payment_barcode_query(phrase), (
         f"is_generic_payment_barcode_query should NOT match: {phrase!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KB-Improve V1.3 (May 2026 #36) — content cluster pass.
+# The dashboard previously rendered the same suggestion 5 times when
+# 5 different sections produced byte-identical advice (same title,
+# reason, proposed_body). The cluster pass collapses those into a
+# single card with aggregated ``related_section_ids``.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cluster_collapses_byte_identical_findings() -> None:
+    """Five compliance-risk findings with identical text but
+    different section_ids must collapse into ONE card whose
+    ``related_section_ids`` is the union of the originals."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    base_kwargs = dict(
+        type="compliance",
+        severity="high",
+        title="راجع صياغة قسم «product_benefit» — قد تبدو ادعاء علاجي",
+        reason="النص يحتوي عبارات قد تُفهم كادعاءات علاجية مباشرة.",
+        expected_impact="صياغة آمنة قانونياً.",
+        target_kind="compliance_rules",
+        proposed_body="اعتمد صياغات عامة بدلاً من «يعالج».",
+        requires_media=False,
+        confidence=0.75,
+    )
+    findings = [
+        ImprovementFinding(
+            id=f"sug-{i}",
+            related_section_ids=[100 + i],
+            rationale_keys=[f"section:{100 + i}"],
+            **base_kwargs,
+        )
+        for i in range(1, 6)
+    ]
+
+    survivors, collapsed = _cluster_findings(findings)
+    assert len(survivors) == 1, (
+        "byte-identical findings must collapse to one cluster card"
+    )
+    assert collapsed == 4
+    merged = survivors[0]
+    assert sorted(merged.related_section_ids) == [101, 102, 103, 104, 105], (
+        "all sibling section ids must roll up into the surviving card"
+    )
+    # The fingerprint is recomputed for the merged ids so dismissals
+    # hide the cluster, not just the anchor row.
+    assert "section:101" in merged.rationale_keys
+    assert "section:105" in merged.rationale_keys
+
+
+def test_cluster_keeps_distinct_findings_separate() -> None:
+    """Findings whose content differs (e.g. weak_section bodies are
+    different per row) must NOT be merged. The cluster pass operates
+    on full content, not just (type, target_kind)."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    a = ImprovementFinding(
+        id="sug-1", type="weak_section", severity="medium",
+        title="حسّن قسم «shipping_zones»",
+        reason="القسم الحالي قصير جداً (12 حرف).",
+        expected_impact="ردود أكثر اكتمالاً.",
+        target_kind="shipping_zones",
+        proposed_body="نشحن للرياض.\n\nأضف هنا تفاصيل أكثر",
+        requires_media=False, confidence=0.65,
+        related_section_ids=[1],
+    )
+    b = ImprovementFinding(
+        id="sug-2", type="weak_section", severity="medium",
+        title="حسّن قسم «shipping_zones»",
+        reason="القسم الحالي قصير جداً (15 حرف).",
+        expected_impact="ردود أكثر اكتمالاً.",
+        target_kind="shipping_zones",
+        proposed_body="نشحن للجبيل.\n\nأضف هنا تفاصيل أكثر",   # different body
+        requires_media=False, confidence=0.65,
+        related_section_ids=[2],
+    )
+    survivors, collapsed = _cluster_findings([a, b])
+    assert len(survivors) == 2
+    assert collapsed == 0
+
+
+def test_cluster_pass_through_when_all_unique() -> None:
+    """Mixed findings of different types/targets must round-trip
+    unchanged. The cluster pass must be a no-op when nothing
+    duplicates."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding, _cluster_findings,
+    )
+
+    findings = [
+        ImprovementFinding(
+            id="sug-1", type="missing_required_knowledge", severity="high",
+            title="A", reason="r1", expected_impact="i1",
+            target_kind="payment_method", proposed_body="b1",
+            requires_media=False, confidence=0.9,
+        ),
+        ImprovementFinding(
+            id="sug-2", type="missing_required_knowledge", severity="high",
+            title="B", reason="r2", expected_impact="i2",
+            target_kind="shipping_zones", proposed_body="b2",
+            requires_media=False, confidence=0.9,
+        ),
+    ]
+    survivors, collapsed = _cluster_findings(findings)
+    assert collapsed == 0
+    assert [f.id for f in survivors] == ["sug-1", "sug-2"]
+
+
+def test_audit_clusters_identical_compliance_findings_end_to_end() -> None:
+    """End-to-end: when the auditor sees 4 product_benefit rows whose
+    bodies all contain a medicinal-claim phrase, the previous code
+    emitted 4 compliance findings with identical UI text but
+    different fingerprints (each carried its own row id). The cluster
+    pass must collapse those into a single card the dashboard
+    renders ONCE.
+    """
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    # 4 rows, same kind, each tripping the medicinal-claim pattern
+    # in the same way → byte-identical compliance findings.
+    rows = [
+        _Row(
+            id=10 + i, kind="product_benefit",
+            title="فوائد",
+            body="هذا المنتج يعالج التهاب المعدة بإذن الله.",
+        )
+        for i in range(4)
+    ]
+    out = audit(rows, max_suggestions=10)
+    compliance = [f for f in out if f.type == "compliance"]
+    # Cluster collapses the four into one.
+    assert len(compliance) == 1, (
+        f"expected one merged compliance card, got: "
+        f"{[(f.id, f.related_section_ids) for f in compliance]!r}"
+    )
+    assert sorted(compliance[0].related_section_ids) == [10, 11, 12, 13]
+
+
+def test_audit_does_not_cluster_distinct_weak_sections_end_to_end() -> None:
+    """Negative control: weak-section findings interpolate the row
+    body into ``proposed_body``. Different bodies → different
+    cluster keys → no collapse. We check this end-to-end so the
+    cluster pass can't quietly over-merge in production."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=20, kind="shipping_zones",
+            title="الشحن", body="نشحن للرياض.",
+        ),
+        _Row(
+            id=21, kind="shipping_zones",
+            title="الشحن", body="نشحن للجبيل وحفر الباطن.",
+        ),
+    ]
+    out = audit(rows, max_suggestions=10)
+    weak = [f for f in out if f.type == "weak_section"]
+    assert len(weak) == 2, (
+        "weak-section findings on rows with different bodies must stay "
+        "as two cards"
+    )
+
+
+def test_cluster_pass_logs_telemetry(caplog: pytest.LogCaptureFixture) -> None:
+    """When the cluster pass collapses anything, a single
+    structured ``[KB_IMPROVE_CLUSTER]`` INFO line is emitted so
+    production triage can chart how often the dashboard would have
+    shown duplicates pre-cluster."""
+    import logging
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    rows = [
+        _Row(
+            id=30 + i, kind="product_benefit",
+            title="فوائد",
+            body="يشفي التهاب الحلق بإذن الله.",
+        )
+        for i in range(3)
+    ]
+    caplog.set_level(logging.INFO, logger="nahla.ai.knowledge.improvement_advisor")
+    audit(rows, max_suggestions=10)
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[KB_IMPROVE_CLUSTER]" in ln and "collapsed=" in ln
+        for ln in log_lines
+    ), f"expected a [KB_IMPROVE_CLUSTER] line; got: {log_lines!r}"
