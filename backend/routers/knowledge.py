@@ -93,7 +93,73 @@ class MediaLinkIn(BaseModel):
     link_role: str = Field("primary", max_length=32)
 
 
-# ── Serializers ─────────────────────────────────────────────────────────────
+# ── Internal helpers (auto-link + serializers) ──────────────────────────────
+
+
+def _maybe_autolink_payment_media_key(
+    db: Session,
+    tenant_id: int,
+    media: AIMediaItem,
+    section: MerchantKnowledgeSection,
+    link_role: str,
+) -> Optional[str]:
+    """Best-effort: bind ``media.media_key`` to the canonical
+    payment registry slug when the merchant just linked a
+    barcode-role asset into a payment section.
+
+    See ``services/payment_media_autolink.py`` for the full
+    rationale. We keep the call site defensive so a future change
+    to the registry / autolink module never crashes a legitimate
+    "attach image" click.
+
+    Returns the inferred key (or ``None`` when no change was made).
+    The caller MUST still commit / flush the surrounding
+    transaction — this helper only mutates the SQLAlchemy
+    instance and stages the write.
+    """
+    # Skip when the merchant (or a prior auto-link) already pinned
+    # a key. Never overwrite an explicit choice.
+    if (getattr(media, "media_key", None) or "").strip():
+        return None
+
+    try:
+        from services.payment_media_autolink import (  # noqa: PLC0415
+            detect_payment_media_key,
+        )
+    except Exception as exc:  # pragma: no cover — import-time defense
+        _logger.warning(
+            "[KB.media.autolink] tenant=%s import_failed err=%s",
+            tenant_id, exc,
+        )
+        return None
+
+    try:
+        inferred = detect_payment_media_key(
+            section_kind=section.kind or "",
+            section_title=section.title or "",
+            section_body=section.body or "",
+            media_title=getattr(media, "title", "") or "",
+            link_role=link_role,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        _logger.warning(
+            "[KB.media.autolink] tenant=%s detect_failed err=%s",
+            tenant_id, exc,
+        )
+        return None
+
+    if not inferred:
+        return None
+
+    media.media_key = inferred
+    db.add(media)
+    _logger.info(
+        "[KB.media.autolink] tenant=%s media=%s section=%s "
+        "section_kind=%s role=%s → media_key=%s",
+        tenant_id, media.id, section.id,
+        section.kind, link_role, inferred,
+    )
+    return inferred
 
 
 def _serialize_media_link(link: MerchantKnowledgeMedia) -> Dict[str, Any]:
@@ -424,6 +490,12 @@ async def link_media(
         link_role=role,
     )
     db.add(link)
+    # Auto-bind ``AIMediaItem.media_key`` BEFORE the commit so the
+    # whole link operation (link row + media_key update) lands in a
+    # single transaction. If the auto-link doesn't fire (wrong kind,
+    # wrong role, ambiguous text) the call is a no-op and the
+    # commit just persists the link row.
+    _maybe_autolink_payment_media_key(db, tenant_id, media, section, role)
     db.commit()
     db.refresh(link)
     _logger.info(
@@ -1123,11 +1195,25 @@ def _apply_op_to_db(
             .first()
         )
         if existing:
+            # Even on idempotent re-application of an existing link,
+            # try to auto-bind the canonical media_key — older
+            # links pre-date this auto-bind so we should still fix
+            # them up when a draft is re-approved.
+            _maybe_autolink_payment_media_key(
+                db, tenant_id, media, section, role,
+            )
             return section.id
         link = MerchantKnowledgeMedia(
             section_id=section.id, media_id=media.id, link_role=role,
         )
         db.add(link)
+        # Mirror the manual ``link_media`` endpoint behavior: when the
+        # approved AI proposal creates a new link, give it the same
+        # canonical-key autobind so the runtime safety net can find
+        # the asset without the LLM needing to emit the marker.
+        _maybe_autolink_payment_media_key(
+            db, tenant_id, media, section, role,
+        )
         db.flush()
         return section.id
 

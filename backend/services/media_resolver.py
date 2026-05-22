@@ -205,10 +205,18 @@ def resolve_for_query(
     ``query``, then resolve it.
 
     Returns ``(resolution, inferred_key)``:
-      * ``(MediaResolution, "payment_rajhi_barcode")`` — happy path.
+      * ``(MediaResolution, "payment_rajhi_barcode")`` — happy path,
+        the customer mentioned a specific bank trigger AND the
+        merchant has the asset uploaded.
       * ``(None,            "payment_rajhi_barcode")`` — key was
         inferred but the merchant hasn't uploaded that asset.
         The caller can use ``registry.get(key).fallback_text``.
+      * ``(MediaResolution, "payment_rajhi_barcode")`` via the
+        generic-noun fallback — the customer typed a BARE generic
+        noun ("QR" / "باركود" / "رمز الدفع") without naming a
+        bank AND the merchant uploaded exactly ONE payment
+        barcode for this tenant. See
+        :func:`resolve_generic_payment_barcode` for the rules.
       * ``(None,            None)`` — nothing matched at all.
 
     The deliberate three-way return lets the conversation pipeline
@@ -217,10 +225,112 @@ def resolve_for_query(
     UX paths.
     """
     inferred = registry.find_key_for_query(query)
-    if not inferred:
+    if inferred:
+        res = resolve_by_key(db, tenant_id, inferred, include_fallback_text=True)
+        return res, inferred
+
+    # Generic-noun fallback (May 2026 #21) — runs ONLY when no
+    # specific bank trigger matched. The fallback is tenant-aware
+    # (single-asset disambiguation) so it stays here in the
+    # resolver layer; the registry helpers remain pure.
+    return resolve_generic_payment_barcode(db, tenant_id, query)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Generic payment-barcode fallback (tenant-aware)
+# ──────────────────────────────────────────────────────────────────
+
+
+# Media-key prefixes that count as a "payment barcode the merchant
+# would attach when the customer asks for the QR/code". Keep in
+# lock-step with the payment family in
+# :mod:`services.media_key_registry.REGISTRY`. A new payment-rail
+# slug (e.g. ``payment_urpay_qr``) is automatically picked up by
+# the prefix match — no edit needed here.
+_PAYMENT_KEY_LIKE_PATTERNS: Tuple[str, ...] = (
+    "payment_%_barcode",
+    "payment_%_qr",
+)
+
+
+def resolve_generic_payment_barcode(
+    db: Session,
+    tenant_id: int,
+    query: str,
+) -> Tuple[Optional[MediaResolution], Optional[str]]:
+    """Fallback for "the customer said 'باركود' without naming a bank".
+
+    The customer message must:
+      * mention one of the generic payment-barcode nouns
+        (``QR`` / ``باركود`` / ``كيو آر`` / ``رمز الدفع`` / ...),
+      * NOT mention a specific bank trigger.
+
+    AND the tenant must have **exactly one** active media row with
+    a ``media_key`` in the ``payment_*_barcode`` / ``payment_*_qr``
+    family. When both conditions hold we attach that single asset.
+    When the tenant has zero or two+ payment barcodes uploaded we
+    bail — the LLM / safety net can then ship a clarifying line
+    instead of guessing the wrong bank.
+
+    The same ``(resolution, key)`` shape as
+    :func:`resolve_for_query` so callers don't need to branch.
+    """
+    if not registry.is_generic_payment_barcode_query(query):
         return None, None
-    res = resolve_by_key(db, tenant_id, inferred, include_fallback_text=True)
-    return res, inferred
+
+    # Lazy import — see note in ``resolve_by_key``. Models.py is
+    # heavy and we don't want it loaded at module-import time when
+    # this helper runs in test harnesses.
+    from models import AIMediaItem  # noqa: PLC0415
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    q = (
+        db.query(AIMediaItem)
+        .filter(
+            AIMediaItem.tenant_id == tenant_id,
+            AIMediaItem.is_active.is_(True),
+            or_(
+                AIMediaItem.media_key.like("payment_%_barcode"),
+                AIMediaItem.media_key.like("payment_%_qr"),
+            ),
+        )
+        .order_by(AIMediaItem.id.asc())
+    )
+    rows = q.limit(2).all()  # we only need to know if it's 0, 1, or >=2
+    if len(rows) != 1:
+        if rows:
+            logger.info(
+                "media_resolver | tenant=%s generic_payment_fallback "
+                "ambiguous active_barcodes>=2 — bailing",
+                tenant_id,
+            )
+        return None, None
+
+    row = rows[0]
+    res = MediaResolution(
+        id=int(row.id),
+        tenant_id=int(row.tenant_id),
+        media_key=row.media_key,
+        title=row.title,
+        media_type=row.media_type,
+        file_url=row.file_url,
+        mime_type=row.mime_type,
+        storage_kind=row.storage_kind,
+        storage_path=row.storage_path,
+        file_size_bytes=(
+            int(row.file_size_bytes) if row.file_size_bytes is not None else None
+        ),
+        requested_key=row.media_key,
+    )
+    mk = registry.get(row.media_key or "")
+    if mk:
+        res.fallback_text = mk.fallback_text
+    logger.info(
+        "media_resolver | tenant=%s generic_payment_fallback "
+        "fired media_key=%s media_id=%s",
+        tenant_id, row.media_key, row.id,
+    )
+    return res, row.media_key
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -344,6 +454,7 @@ __all__ = [
     "MediaResolution",
     "resolve_by_key",
     "resolve_for_query",
+    "resolve_generic_payment_barcode",
     "extract_media_key_markers",
     "available_keys_for_tenant",
 ]

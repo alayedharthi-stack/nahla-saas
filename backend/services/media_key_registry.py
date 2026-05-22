@@ -104,6 +104,15 @@ class MediaKey:
 
 REGISTRY: Tuple[MediaKey, ...] = (
     # ── Payment / banking QR + barcodes ──────────────────────────
+    # NOTE on trigger lists below — May 2026 #20 expansion:
+    # The lists were widened to cover the realistic ways a Saudi
+    # customer references each rail on WhatsApp. Substrings stay
+    # short and content-bearing (no proclitics) — the matcher in
+    # ``find_key_for_query`` does substring + Arabic
+    # normalisation so "للراجحي" → "للراجحي" still contains
+    # "راجحي". Adding "تحويل" or "حوالة" + bank name covers
+    # the "أبي أحول للراجحي" / "كيف أحول للأهلي" framings that
+    # don't literally use the word "باركود".
     MediaKey(
         key="payment_rajhi_barcode",
         label_ar="باركود الراجحي",
@@ -111,8 +120,12 @@ REGISTRY: Tuple[MediaKey, ...] = (
         intent="payment",
         expected_media_type="image",
         triggers=(
-            "راجحي", "rajhi", "alrajhi", "ابو دانه",
-            "باركود الراجحي", "qr الراجحي",
+            "راجحي", "rajhi", "alrajhi", "alrahji",
+            "ar rajhi", "ar-rajhi", "ابو دانه",
+            "بنك الراجحي", "للراجحي", "حساب الراجحي",
+            "تحويل الراجحي", "تحويل للراجحي", "حوالة راجحي",
+            "باركود الراجحي", "qr الراجحي", "كيو ار الراجحي",
+            "كيوار الراجحي", "qr راجحي",
         ),
     ),
     MediaKey(
@@ -122,8 +135,11 @@ REGISTRY: Tuple[MediaKey, ...] = (
         intent="payment",
         expected_media_type="image",
         triggers=(
-            "اهلي", "الأهلي", "ahli", "snb", "national",
-            "باركود الأهلي",
+            "اهلي", "ahli", "alahli", "al-ahli", "al ahli",
+            "snb", "saudi national bank", "national bank",
+            "بنك الاهلي", "للأهلي", "للاهلي", "حساب الاهلي",
+            "تحويل الاهلي", "تحويل للاهلي", "حوالة اهلي",
+            "باركود الأهلي", "باركود الاهلي", "qr الاهلي",
         ),
     ),
     MediaKey(
@@ -133,7 +149,9 @@ REGISTRY: Tuple[MediaKey, ...] = (
         intent="payment",
         expected_media_type="image",
         triggers=(
-            "برق", "barq", "باركود برق",
+            "برق", "بارق", "barq",
+            "بنك برق", "حساب برق", "تحويل برق", "للبرق",
+            "باركود برق", "qr برق",
         ),
     ),
     MediaKey(
@@ -143,8 +161,11 @@ REGISTRY: Tuple[MediaKey, ...] = (
         intent="payment",
         expected_media_type="image",
         triggers=(
-            "stc pay", "stcpay", "stc", "إس تي سي باي",
-            "اس تي سي", "stc-pay",
+            "stc pay", "stcpay", "stc-pay", "stc",
+            "إس تي سي باي", "اس تي سي باي", "اس تي سي",
+            "محفظة stc", "محفظة اس تي سي",
+            "كيو ار stc", "qr stc", "qr stcpay",
+            "تحويل stc", "تحويل ستي سي",
         ),
     ),
     MediaKey(
@@ -154,8 +175,9 @@ REGISTRY: Tuple[MediaKey, ...] = (
         intent="payment",
         expected_media_type="image",
         triggers=(
-            "mobily", "mobilypay", "mobily pay", "موبايلي",
-            "موبايلي باي",
+            "mobily", "mobilypay", "mobily pay", "mobily-pay",
+            "موبايلي", "موبايلي باي", "محفظة موبايلي",
+            "تحويل موبايلي", "كيو ار موبايلي", "qr موبايلي",
         ),
     ),
     MediaKey(
@@ -303,6 +325,19 @@ _ARABIC_LETTER_MAP = str.maketrans({
 })
 
 
+def normalize_text(text: str) -> str:
+    """Public alias for :func:`_normalize`.
+
+    Other modules (notably
+    :mod:`services.payment_media_autolink`) need the exact same
+    Arabic normalisation rules used by trigger matching here, so
+    expose the helper instead of having every caller reimplement
+    it slightly differently. Keep ``_normalize`` as the
+    file-local hot path; this is just a thin re-export.
+    """
+    return _normalize(text)
+
+
 def _normalize(text: str) -> str:
     """Light Arabic-aware normalisation for trigger matching.
 
@@ -327,6 +362,88 @@ def _normalize(text: str) -> str:
     s = s.translate(_ARABIC_LETTER_MAP)
     s = _WS_RE.sub(" ", s)
     return s
+
+
+# ──────────────────────────────────────────────────────────────────
+# Generic payment-barcode disambiguation (May 2026 #21)
+# ──────────────────────────────────────────────────────────────────
+#
+# Production data showed that Saudi customers often ask for the
+# payment QR with a BARE generic noun and skip the bank name entirely:
+#
+#   "QR"                       "كيو آر"
+#   "qr"                       "كيوار"
+#   "باركود"                   "رمز الدفع"
+#   "بار كود"                  "رمز التحويل"
+#                              "رمز السداد"
+#
+# Adding these as triggers on a specific bank slug
+# (``payment_rajhi_barcode``) would over-fire — tenants that only
+# accept Alahli would also resolve "QR" to a Rajhi key they don't
+# own. That's the same class of bug ``detect_payment_media_key``
+# avoids on the link side.
+#
+# So we expose a *tenant-agnostic* matcher that simply answers
+# "did the query mention a generic payment-barcode noun WITHOUT
+# naming a specific bank?". The runtime resolver
+# (:func:`services.media_resolver.resolve_for_query`) then combines
+# this with a per-tenant single-asset count: if the merchant has
+# exactly ONE active ``payment_*_barcode`` / ``payment_*_qr``
+# media uploaded, the resolver attaches it; otherwise it bails and
+# the LLM gets to disambiguate.
+_GENERIC_PAYMENT_BARCODE_TRIGGERS: Tuple[str, ...] = (
+    # Latin "QR"
+    "qr",
+    # Arabic transliterations of "QR" — different spellings the
+    # customer actually types on a phone keyboard.
+    "كيو ار",
+    "كيو آر",
+    "كيوار",
+    # The plain noun "باركود" (and its split spelling) — the
+    # most common phrasing among older customers.
+    "باركود",
+    "بار كود",
+    # "رمز" + payment verb. These wouldn't false-positive on the
+    # word "رمز" alone because the matcher requires both tokens.
+    "رمز الدفع",
+    "رمز التحويل",
+    "رمز السداد",
+)
+
+
+# Pre-normalised at import time — saves a pass over the same
+# strings on every inbound message.
+_NORMALISED_GENERIC_PAYMENT_TRIGGERS: Tuple[str, ...] = tuple(
+    filter(None, (_normalize(t) for t in _GENERIC_PAYMENT_BARCODE_TRIGGERS))
+)
+
+
+def is_generic_payment_barcode_query(query: str) -> bool:
+    """True iff ``query`` mentions a generic payment-barcode noun
+    AND no specific bank trigger applies.
+
+    Callers in :mod:`services.media_resolver` use this as the
+    gating signal for the "single uploaded barcode" fallback. We
+    DELIBERATELY suppress the generic match when a specific bank
+    trigger also fires — that case is already handled by the
+    primary :func:`find_key_for_query` path and the bank-named
+    asset should win.
+
+    Returns ``False`` for the empty string, for queries that
+    don't contain any generic noun, and for queries that ALSO
+    contain a specific bank name (e.g. "أبي qr الراجحي").
+    """
+    if not query:
+        return False
+    needle = _normalize(query)
+    if not needle:
+        return False
+    if not any(t in needle for t in _NORMALISED_GENERIC_PAYMENT_TRIGGERS):
+        return False
+    # If a specific bank trigger ALSO matches, defer to that path.
+    if find_key_for_query(query) is not None:
+        return False
+    return True
 
 
 def find_key_for_query(query: str) -> Optional[str]:
@@ -402,5 +519,7 @@ __all__ = [
     "get",
     "is_valid_key",
     "find_key_for_query",
+    "is_generic_payment_barcode_query",
     "format_keys_for_prompt",
+    "normalize_text",
 ]
