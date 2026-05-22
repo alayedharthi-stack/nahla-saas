@@ -196,7 +196,9 @@ def test_link_promise_without_url_gets_scrubbed() -> None:
     assert asset_class == "link"
     assert "أرسل لك الرابط" not in out
     # The neutral replacement carries the production-safe copy.
-    assert "تكفي لحظة" in out or "التفاصيل الكاملة" in out
+    # Revised May 2026 #31: no "تكفي لحظة" — see commit history.
+    assert "تكفي لحظة" not in out
+    assert "أجيب لك التفاصيل" in out
     # The intro ("أهلاً بك 🌷") should survive — we only rewrite the
     # offending span, not the whole reply.
     assert "أهلاً" in out

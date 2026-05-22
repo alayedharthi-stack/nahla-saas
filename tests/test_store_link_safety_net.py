@@ -192,8 +192,12 @@ class TestUrlInjection:
 class TestNoUrlConfigured:
     def test_returns_polite_fallback_when_no_url_on_file(self, monkeypatch):
         """When the tenant has no store_url, the safety net must
-        NOT hallucinate a URL — it returns the polite
-        "أبشر — أرسل لك الرابط بعد التأكد منه" placeholder."""
+        NOT hallucinate a URL AND must NOT make a false promise to
+        send one later. The previous fallback ("أرسل لك الرابط بعد
+        التأكد منه") was itself a broken promise — Tenant 33
+        production case (May 2026 #31). The new fallback asks a
+        clarifying question instead."""
+        from core.outbound_sanitizer import contains_promised_asset
         from modules.ai.postprocess.safety_nets import (
             apply_store_link_safety_net,
         )
@@ -205,12 +209,24 @@ class TestNoUrlConfigured:
         )
         assert res.fired is True
         assert res.rewrote_reply is True
-        assert "أبشر" in res.new_reply
-        assert "بعد التأكد" in res.new_reply
+
         # Must NOT contain a fake URL.
         assert "http" not in res.new_reply
         assert ".com" not in res.new_reply
         assert ".sa" not in res.new_reply
+
+        # Must NOT contain the old broken-promise phrasing.
+        assert "أرسل لك الرابط" not in res.new_reply
+        assert "بعد التأكد منه" not in res.new_reply
+
+        # Critical invariant: the fallback must NOT itself contain
+        # any link/barcode/phone/location promise — otherwise the
+        # wire-layer ``maybe_scrub_unkept_asset_promise`` will
+        # rewrite it AGAIN, reproducing the production bug where
+        # the customer saw two stitched-together neutral phrases.
+        assert contains_promised_asset(res.new_reply) is None, (
+            f"no-URL fallback still contains a promise: {res.new_reply!r}"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────

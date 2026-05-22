@@ -653,11 +653,17 @@ def _contains_phone(text: str) -> bool:
 # the asset isn't ready and ASKS what the customer needs, or
 # (b) acknowledges the request without committing to a delivery
 # this turn.
+# Neutral replacements per asset class. Phrasing revised after Tenant
+# 33 production feedback (May 2026 #31) — the original "تكفي لحظة …"
+# read as awkward Arabic when sandwiched between an existing
+# "أبشر 🌷" intro and the leftover "بعد التأكد منه" tail. The new
+# copy is short, idiomatic, and asks ONE clarifying thing instead
+# of restating a soft promise.
 _PROMISE_REPLACEMENTS: Dict[str, str] = {
-    ASSET_LINK:     "تكفي لحظة وأجيب لك التفاصيل الكاملة 🌷",
-    ASSET_BARCODE:  "للتحويل البنكي، خبّرنا بالمبلغ وسنرسل لك الطريقة المناسبة 🌷",
-    ASSET_PHONE:    "للتواصل المباشر، خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷",
-    ASSET_LOCATION: "خبّرنا بالفرع أو المنطقة وسنرسل تفاصيل الموقع المناسبة 🌷",
+    ASSET_LINK:     "لحظة وأجيب لك التفاصيل 🌷",
+    ASSET_BARCODE:  "خبّرنا بالمبلغ وسنوضّح لك طريقة الدفع المناسبة 🌷",
+    ASSET_PHONE:    "خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص 🌷",
+    ASSET_LOCATION: "خبّرنا بالفرع أو المنطقة وسنوضّح لك تفاصيل الموقع 🌷",
 }
 
 

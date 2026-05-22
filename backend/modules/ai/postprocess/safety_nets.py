@@ -844,49 +844,126 @@ def _looks_like_store_link_request(customer_msg: str) -> bool:
     return False
 
 
+def _normalise_url(url: str) -> str:
+    """Trim whitespace, drop trailing slash, promote bare domains to
+    ``https://``. Returns an empty string for falsy input.
+
+    Used by every link source below so callers can stay tiny and the
+    callsite logs are exact (we know the URL was already normalised).
+    """
+    s = str(url or "").strip().rstrip("/")
+    if not s:
+        return ""
+    if not s.lower().startswith(("http://", "https://")):
+        s = "https://" + s.lstrip("/")
+    return s
+
+
 def _lookup_tenant_store_url(db: Any, tenant_id: int) -> str:
     """Return the canonical store URL configured for ``tenant_id``,
-    or an empty string when none is stored. Mirrors the resolution
-    order used by ``routers/templates`` (settings.store_settings →
-    salla Integration.config). Never raises."""
+    or an empty string when none is stored.
+
+    Resolution chain (May 2026 #31 — strengthened source-of-truth):
+
+      1. ``StoreKnowledgeSnapshot.store_profile["store_url"]`` — the
+         canonical synced source, written by the platform-sync job
+         (Salla/Zid/Shopify webhooks → snapshot table). When the
+         merchant connects a platform this is populated automatically
+         and is the freshest signal we have.
+      2. ``TenantSettings.store_settings["store_url"]`` — manual
+         entry from the dashboard. Used by merchants who don't
+         connect a platform but still want the AI to surface a
+         link (custom Shopify, WooCommerce, Zid SDK, …).
+      3. ``Integration.config["store_url"|"domain"]`` for ANY
+         provider — Salla, Zid, Shopify, WooCommerce. The previous
+         implementation only checked Salla, which silently failed
+         for tenants on other platforms.
+
+    Tenant 33 production case: store_settings was empty AND the
+    legacy lookup only checked Salla → empty result → safety-net
+    fallback ("أبشر … أرسل لك الرابط …") = false promise.
+
+    Never raises. Every step is wrapped — a DB hiccup degrades to
+    "try the next source" rather than taking down the safety net.
+    """
     if db is None or not tenant_id:
         return ""
+    tenant_id = int(tenant_id)
+
+    # ── 1) Synced store profile (StoreKnowledgeSnapshot) ────────────
+    try:
+        from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415
+        loader = StoreKnowledgeLoader(db, tenant_id)
+        profile = loader.store_profile() or {}
+        url = _normalise_url(profile.get("store_url"))
+        if url:
+            logger.debug(
+                "safety_nets.store_link | tenant=%s source=snapshot url=%r",
+                tenant_id, url,
+            )
+            return url
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.store_link | snapshot lookup failed tenant=%s "
+            "err=%s", tenant_id, exc,
+        )
+
+    # ── 2) Tenant settings (manual entry) ────────────────────────────
     try:
         from core.tenant import (  # noqa: PLC0415
             DEFAULT_STORE, get_or_create_settings, merge_defaults,
         )
-        settings = get_or_create_settings(db, int(tenant_id))
+        settings = get_or_create_settings(db, tenant_id)
         store_cfg = merge_defaults(settings.store_settings, DEFAULT_STORE)
-        url = str(store_cfg.get("store_url", "") or "").strip().rstrip("/")
+        url = _normalise_url(store_cfg.get("store_url"))
         if url:
+            logger.debug(
+                "safety_nets.store_link | tenant=%s source=settings url=%r",
+                tenant_id, url,
+            )
             return url
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "safety_nets.store_link | settings lookup failed tenant=%s "
             "err=%s", tenant_id, exc,
         )
-    # Fallback: Salla integration config.
+
+    # ── 3) Any platform Integration (broaden beyond Salla) ───────────
     try:
         from models import Integration  # noqa: PLC0415
-        integration = db.query(Integration).filter(
-            Integration.tenant_id == int(tenant_id),
-            Integration.provider  == "salla",
-        ).first()
-        if integration:
+        # Provider order kept stable so test output is predictable.
+        # Add new providers HERE — every entry automatically becomes
+        # an additional source-of-truth checkpoint.
+        for provider in ("salla", "zid", "shopify", "woocommerce"):
+            integration = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider  == provider,
+            ).first()
+            if not integration:
+                continue
             cfg = integration.config or {}
-            url = str(
-                cfg.get("store_url", "") or cfg.get("domain", "") or ""
-            ).strip().rstrip("/")
+            url = _normalise_url(
+                cfg.get("store_url")
+                or cfg.get("storefront_url")
+                or cfg.get("domain")
+                or cfg.get("shop_domain")
+            )
             if url:
-                # Promote bare domains to https://.
-                if not url.lower().startswith(("http://", "https://")):
-                    url = "https://" + url.lstrip("/")
+                logger.debug(
+                    "safety_nets.store_link | tenant=%s source=%s url=%r",
+                    tenant_id, provider, url,
+                )
                 return url
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "safety_nets.store_link | integration lookup failed tenant=%s "
             "err=%s", tenant_id, exc,
         )
+
+    logger.info(
+        "[STORE_LINK_RESOLVER] tenant_id=%s url=- reason=no_source_configured",
+        tenant_id,
+    )
     return ""
 
 
@@ -905,7 +982,19 @@ def _looks_like_bare_store_intro(reply: str) -> bool:
     return short and has_marker
 
 
-_FALLBACK_NO_URL_REPLY_AR = "أبشر 🌷 أرسل لك الرابط بعد التأكد منه."
+# ── No-URL fallback (revised May 2026 #31) ──────────────────────────
+# The old fallback ("أبشر — أرسل لك الرابط بعد التأكد منه") was itself
+# a broken promise: it said "I'll send the link" while no link was on
+# file. That tripped the new ``maybe_scrub_unkept_asset_promise``
+# guard, producing the awkward concatenated text the Tenant 33 owner
+# flagged. The new copy is honest — it asks the customer ONE
+# clarifying question instead of restating a promise we can't keep,
+# and it does NOT contain any "أرسل لك الرابط" / "أرسل لك" phrase
+# that the asset-promise sanitizer would rewrite again.
+_FALLBACK_NO_URL_REPLY_AR = (
+    "تأمر أمر 🌷 خبّرنا أي قسم أو منتج تبحث عنه وسنرسل تفاصيله "
+    "مباشرة."
+)
 
 
 def _build_store_link_reply(store_url: str) -> str:
