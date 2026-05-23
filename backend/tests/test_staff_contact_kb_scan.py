@@ -967,3 +967,243 @@ def test_reply_driven_trigger_emits_telemetry(
         and "source=reply_offer" in ln
         for ln in log_lines
     ), f"expected a reply_offer trigger trace; got: {log_lines!r}"
+
+
+# ── Dashboard-suggestion filter + reply hallucination guard (May 2026 #38d) ─
+#
+# Live trace from Tenant 33 (May 23 2026, 13:00:00) revealed two new
+# failure modes the prior fixes didn't cover:
+#
+#   1. The merchant's KB has 5+ "improvement suggestion" cards with
+#      titles like "أضف باركود", "استكمال أرقام التواصل", "إضافة أرقام
+#      التواصل في قسم …". These are dashboard PROMPTS asking the
+#      merchant to add data, not real data. The resolver was scanning
+#      them and they inflated the [STAFF_CONTACT_GRAPH] pair count
+#      without contributing real contacts.
+#
+#   2. The customer asked "كم رقم البائع" (intent OK), the customer
+#      message had no name, the pool walker fell through to the LLM
+#      reply, and the LLM had hallucinated "هشام" — a generic
+#      candidate name that happened to appear inside the brand-story
+#      paragraph (kind=shipping_zones). The pre-fix walker grabbed
+#      it and the resolver chased a ghost.
+#
+# Tests below pin both fixes so a future iteration can't regress.
+
+
+def test_dashboard_suggestion_sections_are_skipped_by_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sections whose title starts with a dashboard suggestion verb
+    (أضف / إضافة / استكمال / تحسين / تحديث / اقترح) carry
+    placeholder text that the merchant is asked to replace. They
+    must NOT be scanned for staff contacts — even if they happen
+    to contain a Saudi-shaped phone in a usage example."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            # The only "real" contact section the resolver should touch.
+            _StubKBSection(
+                section_id=10, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+            # Dashboard suggestion card — must be ignored even though
+            # it has the same name + a different phone in the body.
+            _StubKBSection(
+                section_id=99, kind="store_story",
+                body="أمين بائع المعرض: 0500000000 — مثال للتعبئة",
+                priority=10,  # higher priority than #10
+            ),
+        ],
+    )
+    # Force the suggestion section's title.
+    db._sections[1].title = "استكمال أرقام التواصل في قسم «نبذة عن آل عايد»"
+    # Real branches section gets a non-suggestion title.
+    db._sections[0].title = "فرع المعرض الرئيسي"
+
+    result = apply_staff_contact_safety_net(
+        customer_msg="ابي اكلم أمين",
+        reply_text="تواصل مع أمين بائع المعرض",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.wa_id == "966541690226", (
+        "the resolver must lift the real branch contact, not the "
+        "placeholder phone in the dashboard suggestion card"
+    )
+
+
+def test_reply_name_without_contact_verb_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production trace #38d: customer asks 'كم رقمه' (no name —
+    intent comes from the trigger word رقم), the LLM reply
+    mentions 'هشام' inside the merchant brand-story paragraph
+    WITHOUT a contact verb nearby. The pool walker must NOT grab
+    that name — otherwise the resolver chases a ghost and the
+    asset-promise sanitiser writes the 'غير مضاف' fallback even
+    though the merchant has a real contact under a different
+    name in the KB."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",                 # intent only, no name
+        reply_text=(                            # reply mentions هشام in brand prose
+            "نحن بفضل الله من عائلة هشام آل عايد، "
+            "نقدم لك عسلاً أصيلاً 🌷"
+        ),
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    # The pool walker now requires a contact verb in the reply
+    # for reply-source names. هشام sits in brand prose with no
+    # verb nearby, so it must be rejected and the resolver
+    # bails — clean miss, no ghost chase.
+    assert result.fired is False
+    assert result.skipped_reason == "no_staff_name"
+
+
+def test_reply_name_with_contact_verb_is_honoured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counter-test for the rejection above: same reply hallucination
+    pattern but WITH a contact verb anchoring the name. This must
+    still resolve — otherwise the legitimate arrival-flow case
+    (which is the exact case 602c582f shipped) regresses."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",
+        reply_text="تواصل مع أمين بائع المعرض عند الوصول",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.wa_id == "966541690226"
+
+
+def test_graph_trace_emits_per_pair_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each candidate-name occurrence in a non-suggestion section
+    must surface as a [STAFF_CONTACT_GRAPH_PAIR] line so the
+    operator can see EXACTLY which section a name landed in and
+    whether that section carries a phone. This is the diagnostic
+    that lets us answer 'is the LLM hallucinating from a brand-
+    story paragraph?' from a single grep."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            # هشام in brand prose — no phone, kind=shipping_zones
+            # (mirrors the live tenant-33 finding for section_id=3).
+            _StubKBSection(
+                section_id=3, kind="shipping_zones",
+                body=(
+                    "عائلة هشام آل عايد بدأت رحلة العسل من البراري النائية. "
+                    "نحرص على الجودة في كل قطرة."
+                ),
+            ),
+            # أمين with a phone — kind=branches
+            _StubKBSection(
+                section_id=10, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        customer_msg="ابي رقم البائع",
+        reply_text="تواصل مع أمين 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[STAFF_CONTACT_GRAPH_PAIR]" in ln
+        and "kind=shipping_zones" in ln and "section_id=3" in ln
+        and "phones_in_section=0" in ln
+        for ln in log_lines
+    ), f"expected per-pair detail line for the brand-prose هشام; got: {log_lines!r}"
+    assert any(
+        "[STAFF_CONTACT_GRAPH_PAIR]" in ln
+        and "kind=branches" in ln and "section_id=10" in ln
+        and "phones_in_section=1" in ln
+        for ln in log_lines
+    ), f"expected per-pair detail line for the real branches contact; got: {log_lines!r}"
+
+
+def test_graph_trace_reports_suggestion_skipped_count(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The graph summary must report how many sections were skipped
+    as dashboard suggestions, so production triage can distinguish
+    'KB is empty' from 'KB is full of suggestions but no real
+    contacts'. Tenant 33's live trace was the latter."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+            _StubKBSection(
+                section_id=99, kind="store_story",
+                body="أرقام التواصل تكتب هنا",
+            ),
+            _StubKBSection(
+                section_id=100, kind="bank_transfer",
+                body="باركود الراجحي يكتب هنا",
+            ),
+        ],
+    )
+    db._sections[0].title = "فرع المعرض الرئيسي"
+    db._sections[1].title = "إضافة أرقام التواصل في قسم «النبذة»"
+    db._sections[2].title = "أضف باركود أو صورة للتحويل البنكي"
+
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        customer_msg="ابي اكلم أمين",
+        reply_text="تواصل مع أمين",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[STAFF_CONTACT_GRAPH]" in ln
+        and "suggestion_skipped=2" in ln
+        for ln in log_lines
+    ), f"expected suggestion_skipped=2 in the graph summary; got: {log_lines!r}"

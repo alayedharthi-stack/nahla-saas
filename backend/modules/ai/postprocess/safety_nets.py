@@ -575,6 +575,51 @@ _STAFF_KB_FALLBACK_KINDS: tuple = (
 )
 
 
+# Title prefixes the dashboard auto-generates for "improvement
+# suggestion" cards — these read like data ("استكمال أرقام التواصل"
+# / "أضف باركود التحويل") but are in fact prompts asking the
+# merchant to add data, often containing example digits or
+# placeholder text. Tenant 33 #38d trace showed sections 122-126,
+# 136, 139 of this shape contributing 0 actual contacts but
+# inflating the [STAFF_CONTACT_GRAPH] pair count and pushing the
+# resolver to chase ghost names. We strip them at scan time so
+# both the resolver and the graph trace reflect ACTUAL data.
+_KB_SUGGESTION_TITLE_PREFIXES: tuple = (
+    "أضف",
+    "اضف",
+    "أضيفي",
+    "اضيفي",
+    "إضافة",
+    "اضافة",
+    "استكمال",
+    "تحسين",
+    "تحديث",
+    "حسّن",
+    "حسن",
+    "اقترح",
+)
+
+
+def _is_dashboard_suggestion_section(row: Any) -> bool:
+    """Return True for sections whose title looks like a dashboard
+    improvement-suggestion card rather than real merchant data.
+
+    The check is title-prefix only — body text is sometimes the
+    same Arabic verb in genuine content (e.g. "أضف العسل للحليب"
+    in a usage tip), but improvement cards always START their
+    title with one of the suggestion verbs. Keeping the check
+    title-only avoids false-positives on legitimate prose.
+    """
+    title = str(getattr(row, "title", "") or "").strip()
+    if not title:
+        return False
+    folded = _normalise_alif(title).lower()
+    for prefix in _KB_SUGGESTION_TITLE_PREFIXES:
+        if folded.startswith(_normalise_alif(prefix).lower()):
+            return True
+    return False
+
+
 # Window (in characters) around a name match to consider for the
 # nearest phone digits. Tight enough to avoid pairing the wrong
 # number ("Manager 050... | Driver 053...") and wide enough to
@@ -715,6 +760,15 @@ def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
     turn already mentioned the staff name (e.g.
     "تواصل مع أمين بائع المعرض").
 
+    Reply-pulled names go through an extra contact-verb proximity
+    check (Tenant 33 #38d): the bare "name appears in body" rule
+    used to grab common Saudi names ("هشام") that the LLM dropped
+    in unrelated paragraphs of the merchant's brand story. We
+    only honour a reply hit when the name sits within ~60 chars
+    of a contact verb (تواصل / كلم / اتصل …) — that's the same
+    shape the trigger detector already uses, kept consistent so a
+    name we accept here is also one we'd have triggered on.
+
     Returns ``("", "")`` when no candidate name appears in any pool.
     """
     labels = ("customer_msg", "reply", "history_bot", "history_customer", "extra")
@@ -722,9 +776,28 @@ def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
         if not text:
             continue
         name = _find_staff_name(text)
-        if name:
-            label = labels[idx] if idx < len(labels) else f"pool_{idx}"
-            return name, label
+        if not name:
+            continue
+        label = labels[idx] if idx < len(labels) else f"pool_{idx}"
+        # Validate reply-source names against the contact-verb
+        # proximity rule. customer_msg / history_customer are
+        # trusted (the customer is asking explicitly), and
+        # history_bot is also trusted since the prior bot turn
+        # had its own contact-verb gating when it was emitted.
+        # Only the CURRENT-reply path needs validation because
+        # the LLM hallucinates names in non-contact prose more
+        # often than any other source.
+        if label == "reply":
+            offer_verb, offer_name = _reply_offers_staff_contact(text)
+            if not (offer_verb and offer_name):
+                continue
+            # Honour the offer's own pick instead of the bare
+            # candidate match — they're often the same, but the
+            # offer detector used the longest-match rule too,
+            # and any divergence means the contact verb anchored
+            # a different name nearby.
+            return offer_name, label
+        return name, label
     return "", ""
 
 
@@ -837,8 +910,12 @@ def _emit_staff_contact_graph_trace(
     pairs: List[Dict[str, Any]] = []
     sections_scanned = 0
     sections_with_phone = 0
+    suggestion_skipped = 0
     for row in rows:
         sections_scanned += 1
+        if _is_dashboard_suggestion_section(row):
+            suggestion_skipped += 1
+            continue
         body = getattr(row, "body", "") or ""
         if not body:
             continue
@@ -861,12 +938,32 @@ def _emit_staff_contact_graph_trace(
     # (PII discipline). The merchant's audit dashboard reads from
     # the same KB rows, so reconstruction is a one-click query.
     distinct_kinds = sorted({p["kind"] for p in pairs})
+    pairs_with_phone = sum(1 for p in pairs if p["phones"] > 0)
     logger.info(
         "[STAFF_CONTACT_GRAPH] tenant_id=%s sections_scanned=%d "
-        "sections_with_phone=%d pairs_found=%d kinds=%s",
+        "sections_with_phone=%d suggestion_skipped=%d "
+        "pairs_found=%d pairs_with_phone=%d kinds=%s",
         tenant_id, sections_scanned, sections_with_phone,
-        len(pairs), ",".join(distinct_kinds) or "-",
+        suggestion_skipped, len(pairs), pairs_with_phone,
+        ",".join(distinct_kinds) or "-",
     )
+
+    # Per-pair detail — bounded to the first 12 pairs to avoid
+    # log bloat on tenants with very busy KBs. Each line shows
+    # exactly which section a candidate name landed in and
+    # whether that section actually carries a phone, so a
+    # production trace can answer "is the LLM hallucinating a
+    # name from the brand story?" without dashboard access.
+    for pair in pairs[:12]:
+        logger.info(
+            "[STAFF_CONTACT_GRAPH_PAIR] tenant_id=%s kind=%s "
+            "section_id=%d name_chars=%d phones_in_section=%d",
+            tenant_id,
+            pair["kind"] or "-",
+            pair["section_id"],
+            pair["name_chars"],
+            pair["phones"],
+        )
 
 
 @dataclass
@@ -988,6 +1085,13 @@ def _lookup_staff_phone_in_kb(
     name_seen_in_kinds: List[str] = []
     name_seen_in_section_ids: List[int] = []
     for row in rows:
+        # Dashboard improvement-suggestion sections look like data
+        # in the dashboard sidebar but their bodies are
+        # placeholder prompts, not real contact entries. Skipping
+        # at scan-time keeps both [STAFF_CONTACT_RESOLVER] and
+        # the upstream graph trace free of ghost pairs.
+        if _is_dashboard_suggestion_section(row):
+            continue
         body = getattr(row, "body", "") or ""
         if not body:
             continue
