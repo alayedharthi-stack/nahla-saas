@@ -632,6 +632,78 @@ def _find_staff_name(customer_msg_norm: str) -> Optional[str]:
     return hits[0]
 
 
+# Inbound-direction tokens used by ``StateManager.load_history`` rows
+# and any chat-style ``{"role": "user"}`` shape. Outbound tokens cover
+# both wire shapes too. The webhook passes whichever load_history
+# returns directly into the safety nets, so we MUST tolerate both.
+_HISTORY_INBOUND_TOKENS = {
+    "in", "inbound", "user", "customer", "client", "u",
+}
+_HISTORY_OUTBOUND_TOKENS = {
+    "out", "outbound", "assistant", "bot", "ai", "system", "a",
+}
+
+
+def _extract_recent_history_norms(
+    history: Optional[List[Any]],
+) -> Tuple[str, str]:
+    """Return ``(history_bot_norm, history_customer_norm)`` — the
+    most-recent outbound and inbound bodies from a conversation
+    history list, normalised via :func:`_normalise_for_match`.
+
+    Tolerates the two wire shapes that flow through this codebase:
+
+      * ``StateManager.load_history`` rows
+        ``{"direction": "in"/"inbound" | "out"/"outbound",
+            "body": "<text>"}``.
+      * Chat-style messages
+        ``{"role": "user"|"assistant"|"bot"|"ai"|"system",
+            "content": "<text>"}``.
+
+    Empty / unknown shapes contribute the empty string and the
+    walker keeps looking. Critical: the staff-contact safety net's
+    pronoun carry-forward relied on ``role/content`` only, and
+    ``StateManager.load_history`` ships ``direction/body``. The
+    pre-fix walker silently returned empty pools for every
+    production turn — the May 2026 #38c live trace exposed this
+    when the resolver kept missing أمين even though the prior
+    bot turn clearly mentioned him.
+    """
+    bot_norm = ""
+    customer_norm = ""
+    if not isinstance(history, list):
+        return bot_norm, customer_norm
+    for entry in reversed(history):
+        try:
+            if isinstance(entry, dict):
+                role_raw = entry.get("role") or entry.get("direction") or ""
+                content_raw = entry.get("content") or entry.get("body") or ""
+            else:
+                role_raw = (
+                    getattr(entry, "role", None)
+                    or getattr(entry, "direction", None)
+                    or ""
+                )
+                content_raw = (
+                    getattr(entry, "content", None)
+                    or getattr(entry, "body", None)
+                    or ""
+                )
+        except Exception:  # noqa: BLE001
+            continue
+        role = str(role_raw or "").strip().lower()
+        content = str(content_raw or "").strip()
+        if not content:
+            continue
+        if not bot_norm and role in _HISTORY_OUTBOUND_TOKENS:
+            bot_norm = _normalise_for_match(content)
+        elif not customer_norm and role in _HISTORY_INBOUND_TOKENS:
+            customer_norm = _normalise_for_match(content)
+        if bot_norm and customer_norm:
+            break
+    return bot_norm, customer_norm
+
+
 def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
     """Scan multiple already-normalised text candidates and return
     ``(name, source_label)`` for the first hit.
@@ -1172,23 +1244,7 @@ def apply_staff_contact_safety_net(
     # net misses every "كم رقمه" / "ايش رقمه" turn even when the
     # KB has the contact.
     reply_norm = _normalise_for_match(reply_text or "")
-    history_bot_norm = ""
-    history_customer_norm = ""
-    if isinstance(history, list):
-        for entry in reversed(history):
-            try:
-                role = (entry.get("role") or "").lower() if isinstance(entry, dict) else getattr(entry, "role", "")
-                content = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
-            except Exception:  # noqa: BLE001
-                continue
-            if not isinstance(content, str) or not content:
-                continue
-            if not history_bot_norm and role in {"assistant", "bot", "ai"}:
-                history_bot_norm = _normalise_for_match(content)
-            elif not history_customer_norm and role in {"user", "customer"}:
-                history_customer_norm = _normalise_for_match(content)
-            if history_bot_norm and history_customer_norm:
-                break
+    history_bot_norm, history_customer_norm = _extract_recent_history_norms(history)
 
     # When the trigger came from a reply-side offer, the offered
     # name IS the resolver target — short-circuit the pool scan so
@@ -3573,26 +3629,7 @@ def apply_outbound_artifact_guard(
     if expected == "staff_phone":
         norm_msg = _normalise_for_match(customer_msg or "")
         norm_reply_for_name = _normalise_for_match(reply_text or "")
-        # Pull the most recent bot/customer turns from history so
-        # pronoun-only asks ("كم رقمه؟") can recover the name from
-        # the previous turn that the customer is following up on.
-        hist_bot_norm = ""
-        hist_cust_norm = ""
-        if isinstance(history, list):
-            for entry in reversed(history):
-                try:
-                    role = (entry.get("role") or "").lower() if isinstance(entry, dict) else getattr(entry, "role", "")
-                    content = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
-                except Exception:  # noqa: BLE001
-                    continue
-                if not isinstance(content, str) or not content:
-                    continue
-                if not hist_bot_norm and role in {"assistant", "bot", "ai"}:
-                    hist_bot_norm = _normalise_for_match(content)
-                elif not hist_cust_norm and role in {"user", "customer"}:
-                    hist_cust_norm = _normalise_for_match(content)
-                if hist_bot_norm and hist_cust_norm:
-                    break
+        hist_bot_norm, hist_cust_norm = _extract_recent_history_norms(history)
         staff_name, _name_src = _find_staff_name_in_pool(
             norm_msg, norm_reply_for_name, hist_bot_norm, hist_cust_norm,
         )

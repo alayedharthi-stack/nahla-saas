@@ -631,6 +631,53 @@ def test_pronoun_ask_recovers_name_from_history_bot_turn(
     assert result.wa_id == "966541690226"
 
 
+def test_history_direction_body_shape_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production wire shape: ``StateManager.load_history`` returns
+    rows of ``{"direction": "inbound"|"outbound", "body": "<text>"}``
+    — NOT the chat-style ``{"role": ..., "content": ...}``. The
+    pre-fix walker only read role/content keys and silently
+    returned empty pools for every production turn, which is
+    exactly why the May 2026 #38c live trace kept missing أمين
+    even though the prior bot turn clearly mentioned him.
+
+    This test pins the wire shape directly against the safety
+    net so a future refactor can't lose direction/body support."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    # Mirror StateManager.load_history's exact shape — direction +
+    # body keys, no role/content. Pre-fix this would silently bail.
+    history = [
+        {"direction": "inbound",  "body": "هل فيه استلام"},
+        {"direction": "outbound", "body": "تواصل مع أمين بائع المعرض لتجهيز طلبك"},
+        {"direction": "inbound",  "body": "كم رقمه"},
+    ]
+    result = apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",
+        reply_text="لحظة وأجيب لك التفاصيل 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+        history=history,
+    )
+    assert result.fired is True, (
+        "history with direction/body shape must work — this is the "
+        "exact dict shape the production webhook passes in"
+    )
+    assert result.source == "kb:branches"
+    assert result.wa_id == "966541690226"
+
+
 def test_history_carry_forward_does_not_misfire_without_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
