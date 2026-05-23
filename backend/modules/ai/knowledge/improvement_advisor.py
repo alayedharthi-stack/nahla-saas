@@ -84,6 +84,34 @@ SUPPRESSION_TTL_DAYS = 7
 _DEFAULT_MIN_CONFIDENCE = 0.5
 
 
+# Knowledge modes (May 2026 #39)
+# ─────────────────────────────
+# KB Improvement now has two philosophies:
+#
+#   1. Knowledge Hygiene Advisor      → compress / dedup / clean canonical facts.
+#   2. Behavioral Expansion Advisor   → preserve real customer surface forms.
+#
+# The second mode is intentionally anti-compression: similarity means
+# "group these examples under one intent", NOT "delete the variants".
+KNOWLEDGE_MODE_CANONICAL_FACT = "canonical_fact"
+KNOWLEDGE_MODE_POLICY_RULE = "policy_rule"
+KNOWLEDGE_MODE_BEHAVIORAL_RULE = "behavioral_rule"
+KNOWLEDGE_MODE_INTENT_SURFACE_EXAMPLES = "intent_surface_examples"
+KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES = "artifact_trigger_examples"
+
+_VALID_KNOWLEDGE_MODES = frozenset({
+    KNOWLEDGE_MODE_CANONICAL_FACT,
+    KNOWLEDGE_MODE_POLICY_RULE,
+    KNOWLEDGE_MODE_BEHAVIORAL_RULE,
+    KNOWLEDGE_MODE_INTENT_SURFACE_EXAMPLES,
+    KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES,
+})
+_SURFACE_FORM_KNOWLEDGE_MODES = frozenset({
+    KNOWLEDGE_MODE_INTENT_SURFACE_EXAMPLES,
+    KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES,
+})
+
+
 # ── Severity / impact taxonomy ──────────────────────────────────────────────
 
 
@@ -199,8 +227,29 @@ class ImprovementFinding:
     related_section_ids: List[int] = field(default_factory=list)
     rationale_keys: List[str] = field(default_factory=list)
     fingerprint: str = ""
+    # Stage 1-3 architecture (May 2026 #39): suggestions now declare
+    # whether they are canonical/policy hygiene work or behavioral
+    # expansion work. Surface-form modes are non-destructive: clustering
+    # may group them, but it must preserve every example.
+    knowledge_mode: str = KNOWLEDGE_MODE_CANONICAL_FACT
+    preserve_surface_forms: bool = False
+    examples_to_preserve: List[str] = field(default_factory=list)
+    intent: str = ""
+    artifact_target: str = ""
+    summary: str = ""
 
     def __post_init__(self) -> None:
+        # Existing factory helpers pre-date ``knowledge_mode``. Infer a
+        # conservative internal mode so callers get the new contract
+        # without touching every legacy suggestion constructor.
+        if self.knowledge_mode == KNOWLEDGE_MODE_CANONICAL_FACT:
+            self.knowledge_mode = _infer_knowledge_mode(self)
+        if self.knowledge_mode not in _VALID_KNOWLEDGE_MODES:
+            self.knowledge_mode = KNOWLEDGE_MODE_CANONICAL_FACT
+        if self.knowledge_mode in _SURFACE_FORM_KNOWLEDGE_MODES:
+            self.preserve_surface_forms = True
+        if self.preserve_surface_forms and not self.examples_to_preserve:
+            self.examples_to_preserve = _extract_surface_examples(self.proposed_body)
         if not self.fingerprint:
             self.fingerprint = compute_fingerprint(
                 type_=self.type,
@@ -223,6 +272,12 @@ class ImprovementFinding:
             "confidence": round(float(self.confidence), 2),
             "related_section_ids": list(self.related_section_ids),
             "fingerprint": self.fingerprint,
+            "knowledge_mode": self.knowledge_mode,
+            "preserve_surface_forms": bool(self.preserve_surface_forms),
+            "examples_to_preserve": list(self.examples_to_preserve),
+            "intent": self.intent or "",
+            "artifact_target": self.artifact_target or "",
+            "summary": self.summary or "",
         }
 
 
@@ -355,6 +410,158 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     inter = len(a & b)
     union = len(a | b)
     return (inter / union) if union else 0.0
+
+
+_SURFACE_LINE_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*•]+|\d+[\).:-]?|[،,؛;:\-–—]+)?\s*"
+)
+
+
+def _clean_surface_example(line: str) -> str:
+    if not line:
+        return ""
+    s = _SURFACE_LINE_PREFIX_RE.sub("", str(line)).strip()
+    s = s.strip(" \t\r\n\"'“”«»")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _extract_surface_examples(text: str) -> List[str]:
+    """Extract human customer utterance examples without normalising them.
+
+    The preservation contract is deliberate: Arabic spelling,
+    colloquial phrasing, punctuation, and word order are the training
+    signal. We only strip bullets / numbering so the dashboard can
+    render a clean list; we never fold or paraphrase the phrases.
+    """
+    if not text:
+        return []
+    candidates: List[str] = []
+    for raw in re.split(r"[\n\r]+", text):
+        cleaned = _clean_surface_example(raw)
+        if not cleaned:
+            continue
+        # Skip long explanatory prose. Surface examples are short
+        # customer utterances, not paragraph summaries.
+        if len(cleaned) > 90:
+            continue
+        candidates.append(cleaned)
+    if len(candidates) <= 1:
+        # Some merchants paste examples comma-separated on one line.
+        # Split softly only when the line clearly looks like a list.
+        inline = _clean_surface_example(text)
+        parts = [
+            _clean_surface_example(p)
+            for p in re.split(r"\s*[،,؛;]\s*", inline)
+        ]
+        candidates = [p for p in parts if 1 < len(p) <= 90]
+    out: List[str] = []
+    seen: set[str] = set()
+    for ex in candidates:
+        key = ex.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(ex)
+    return out
+
+
+_LOCATION_SURFACE_HINTS: Tuple[str, ...] = (
+    "قريب", "بالطريق", "الطريق", "البوابة", "بوابة",
+    "وين المعرض", "وين المحل", "وين الفرع", "وين موقع",
+    "المعرض", "المدخل", "مواقف", "المواقف", "قدام",
+    "جنبكم", "عندكم", "لوكيشن", "اللوكيشن", "الخريطة",
+    "الخرايط", "الموقع", "العنوان", "موقعكم", "أرسل اللوكيشن",
+    "ارسل اللوكيشن",
+)
+_STAFF_SURFACE_HINTS: Tuple[str, ...] = (
+    "رقم", "أكلم", "اكلم", "تواصل", "اتصل", "البائع",
+    "بائع المعرض", "الموظف", "المسؤول", "السائق", "المندوب",
+)
+_PAYMENT_SURFACE_HINTS: Tuple[str, ...] = (
+    "باركود", "بار كود", "كيوار", "qr", "تحويل", "الراجحي",
+    "الأهلي", "الاهلي", "آيبان", "ايبان", "iban",
+)
+
+
+def _classify_surface_examples(
+    examples: Sequence[str],
+) -> Tuple[str, str, str]:
+    """Return ``(intent, artifact_target, summary)`` for preserved examples."""
+    joined = "\n".join(examples).lower()
+    if _has_any(joined, _PAYMENT_SURFACE_HINTS):
+        return (
+            "ask_payment_barcode_or_transfer",
+            "payment_barcode",
+            "صيغ عملاء متنوعة لطلب الباركود أو التحويل البنكي.",
+        )
+    if _has_any(joined, _STAFF_SURFACE_HINTS):
+        return (
+            "ask_staff_contact",
+            "staff_phone",
+            "صيغ عملاء متنوعة لطلب رقم موظف أو دور تشغيلي.",
+        )
+    return (
+        "ask_location_or_arrival_help",
+        "maps_link_or_staff_contact",
+        "صيغ وصول وموقع واقعية يجب حفظها كإشارات تشغيلية لا كملخص نظري.",
+    )
+
+
+def _looks_like_surface_example_set(examples: Sequence[str]) -> bool:
+    if len(examples) < 4:
+        return False
+    joined = "\n".join(examples).lower()
+    return (
+        _has_any(joined, _LOCATION_SURFACE_HINTS)
+        or _has_any(joined, _STAFF_SURFACE_HINTS)
+        or _has_any(joined, _PAYMENT_SURFACE_HINTS)
+    )
+
+
+def _build_surface_examples_body(
+    *,
+    intent: str,
+    artifact_target: str,
+    examples: Sequence[str],
+    summary: str,
+) -> str:
+    lines = [
+        "احفظ هذه الصيغ كما هي كأمثلة واقعية لعبارات العملاء.",
+        f"intent: {intent}",
+        f"artifact_target: {artifact_target}",
+        f"summary: {summary}",
+        "examples_to_preserve:",
+    ]
+    lines.extend(f"- {ex}" for ex in examples)
+    return "\n".join(lines)
+
+
+def _infer_knowledge_mode(f: "ImprovementFinding") -> str:
+    if f.preserve_surface_forms or f.type in {
+        "intent_surface_expansion", "artifact_trigger_expansion",
+    }:
+        return (
+            KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES
+            if f.artifact_target
+            else KNOWLEDGE_MODE_INTENT_SURFACE_EXAMPLES
+        )
+    t = (f.type or "").strip().lower()
+    target = (f.target_kind or "").strip().lower()
+    if t in {"behavior_tone", "semantic_contamination", "missing_staff_phone"}:
+        return KNOWLEDGE_MODE_BEHAVIORAL_RULE
+    if t == "compliance" or target in {
+        "return_policy", "compliance_rules", "forbidden_phrases",
+    }:
+        return KNOWLEDGE_MODE_POLICY_RULE
+    return KNOWLEDGE_MODE_CANONICAL_FACT
+
+
+def _is_surface_form_protected(f: ImprovementFinding) -> bool:
+    return bool(
+        f.preserve_surface_forms
+        or f.knowledge_mode in _SURFACE_FORM_KNOWLEDGE_MODES
+    )
 
 
 # ── Auditor (Layer 1) ───────────────────────────────────────────────────────
@@ -631,6 +838,60 @@ def _suggest_missing_forbidden_phrases(idx: int) -> ImprovementFinding:
         requires_media=False,
         confidence=0.6,
         rationale_keys=["missing:forbidden_phrases"],
+    )
+
+
+def _suggest_intent_surface_expansion(
+    idx: int, row: _RowView, examples: List[str],
+) -> ImprovementFinding:
+    intent, artifact_target, summary = _classify_surface_examples(examples)
+    title = "حوّل أمثلة العملاء إلى ذاكرة صيغ واقعية"
+    if artifact_target == "maps_link_or_staff_contact":
+        title = "وسّع أمثلة طلب الموقع والوصول للمعرض"
+    elif artifact_target == "staff_phone":
+        title = "وسّع أمثلة طلب أرقام الموظفين"
+    elif artifact_target == "payment_barcode":
+        title = "وسّع أمثلة طلب الباركود والتحويل"
+    return ImprovementFinding(
+        id=f"sug-{idx}",
+        type="intent_surface_expansion",
+        severity="medium",
+        title=title,
+        reason=(
+            "هذا القسم يحتوي صيغاً بشرية حقيقية يستخدمها العملاء. "
+            "تشابهها يعني أنها تنتمي لنفس النية، وليس أنها مكررة يجب حذفها."
+        ),
+        expected_impact=(
+            "يحافظ الذكاء على اللهجات والصيغ الواقعية، فيتوقع أسئلة العملاء "
+            "غير الرسمية مثل «أنا عند البوابة» أو «وين رقمه» بدلاً من انتظار "
+            "صياغة مثالية."
+        ),
+        target_kind="custom",
+        proposed_body=_build_surface_examples_body(
+            intent=intent,
+            artifact_target=artifact_target,
+            examples=examples,
+            summary=summary,
+        ),
+        requires_media=False,
+        confidence=0.82,
+        related_section_ids=[row.id],
+        rationale_keys=[
+            "behavioral_expansion:intent_surface_examples",
+            f"intent:{intent}",
+            f"artifact_target:{artifact_target}",
+            f"section:{row.id}",
+        ],
+        knowledge_mode=(
+            KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES
+            if artifact_target
+            else KNOWLEDGE_MODE_INTENT_SURFACE_EXAMPLES
+        ),
+        preserve_surface_forms=True,
+        examples_to_preserve=list(examples),
+        intent=intent,
+        artifact_target=artifact_target,
+        summary=summary,
     )
 
 
@@ -948,6 +1209,38 @@ def _pass_behavior_tone(
     return out
 
 
+def _pass_behavioral_expansion(
+    rows: List[_RowView], idx_start: int,
+) -> List[ImprovementFinding]:
+    """Detect sections that are really surface-form memory.
+
+    This is the first slice of the Behavioral Expansion Advisor.
+    It does not compress or rewrite customer utterances. It simply
+    groups a set of similar examples under an intent/artifact label
+    while preserving every original surface form.
+    """
+    out: List[ImprovementFinding] = []
+    idx = idx_start
+    for r in rows:
+        if r.kind not in {"custom", "quick_update", "faq", "escalation_rules", "branches"}:
+            continue
+        examples = _extract_surface_examples(r.body or "")
+        if not _looks_like_surface_example_set(examples):
+            continue
+        out.append(_suggest_intent_surface_expansion(idx, r, examples))
+        logger.info(
+            "[KB_BEHAVIORAL_EXPANSION] section_id=%s kind=%s examples=%d "
+            "intent=%s artifact_target=%s preserve_surface_forms=true",
+            r.id,
+            r.kind,
+            len(examples),
+            out[-1].intent,
+            out[-1].artifact_target,
+        )
+        idx += 1
+    return out
+
+
 def _pass_weak_sections(
     rows: List[_RowView], idx_start: int,
 ) -> List[ImprovementFinding]:
@@ -1222,6 +1515,14 @@ def audit(
     next_idx = len(findings) + 1
     findings.extend(_pass_behavior_tone(views, next_idx))
     next_idx = len(findings) + 1
+
+    # Behavioral Expansion Advisor (Stage 1-3, May 2026 #39):
+    # preserve real customer surface forms as training/intent signals.
+    # This pass deliberately runs before hygiene passes so protected
+    # findings carry their preservation metadata through dedup/cluster.
+    findings.extend(_pass_behavioral_expansion(views, next_idx))
+    next_idx = len(findings) + 1
+
     findings.extend(_pass_weak_sections(views, next_idx))
     next_idx = len(findings) + 1
     findings.extend(_pass_contamination(views, next_idx))
@@ -1395,6 +1696,19 @@ def _content_cluster_key(f: ImprovementFinding) -> str:
     differ on ``target_kind`` (payment_method vs shipping_zones), so
     they don't collide either.
     """
+    if _is_surface_form_protected(f):
+        # Non-destructive grouping key. Surface examples with the same
+        # intent/artifact target may share one dashboard card, but the
+        # cluster logic MUST append every example from every member.
+        parts = [
+            (f.type or "").strip().lower(),
+            (f.knowledge_mode or "").strip().lower(),
+            (f.intent or "").strip().lower(),
+            (f.artifact_target or "").strip().lower(),
+        ]
+        raw = "|".join(parts).encode("utf-8")
+        return hashlib.sha1(raw).hexdigest()[:16]
+
     parts = [
         (f.type or "").strip().lower(),
         (f.target_kind or "").strip().lower(),
@@ -1499,6 +1813,7 @@ def _cluster_findings(
     section_ids_by_key: Dict[str, List[int]] = {}
     rationale_by_key: Dict[str, List[str]] = {}
     titles_by_key: Dict[str, List[str]] = {}
+    examples_by_key: Dict[str, List[str]] = {}
     order: List[str] = []
     collapsed = 0
     for f in findings:
@@ -1508,6 +1823,7 @@ def _cluster_findings(
             section_ids_by_key[key] = list(f.related_section_ids or [])
             rationale_by_key[key] = list(f.rationale_keys or [])
             titles_by_key[key] = [(f.title or "")]
+            examples_by_key[key] = list(f.examples_to_preserve or [])
             order.append(key)
             continue
         collapsed += 1
@@ -1522,6 +1838,9 @@ def _cluster_findings(
             if rk and rk not in rationale_by_key[key]:
                 rationale_by_key[key].append(rk)
         titles_by_key[key].append(f.title or "")
+        for ex in (f.examples_to_preserve or []):
+            if ex and ex not in examples_by_key[key]:
+                examples_by_key[key].append(ex)
 
     survivors: List[ImprovementFinding] = []
     for key in order:
@@ -1531,6 +1850,8 @@ def _cluster_findings(
         cluster_titles = titles_by_key[key]
         cluster_size = len(cluster_titles)
         titles_differed = len({t for t in cluster_titles}) > 1
+        merged_examples = list(examples_by_key.get(key) or [])
+        protected = _is_surface_form_protected(anchor)
 
         # Telemetry: only emit when the cluster actually collapsed
         # something. Single-member clusters spam the log otherwise.
@@ -1538,18 +1859,21 @@ def _cluster_findings(
             logger.info(
                 "[KB_IMPROVE_CLUSTER_DEBUG] cluster_key=%s type=%s "
                 "target_kind=%s members=%d titles_differed=%s "
-                "sections=%s",
+                "sections=%s preserve_surface_forms=%s examples=%d",
                 key[:8],
                 (anchor.type or ""),
                 (anchor.target_kind or ""),
                 cluster_size,
                 titles_differed,
                 merged_ids,
+                protected,
+                len(merged_examples),
             )
 
         same_sections = list(anchor.related_section_ids or []) == merged_ids
         same_rationales = list(anchor.rationale_keys or []) == merged_rationales
-        if cluster_size == 1 and same_sections and same_rationales:
+        same_examples = list(anchor.examples_to_preserve or []) == merged_examples
+        if cluster_size == 1 and same_sections and same_rationales and same_examples:
             survivors.append(anchor)
             continue
 
@@ -1558,7 +1882,13 @@ def _cluster_findings(
         # the surviving finding so __post_init__ recomputes fingerprint.
         new_title = anchor.title
         new_reason = anchor.reason
-        if cluster_size > 1 and titles_differed:
+        if protected and cluster_size > 1:
+            new_title = anchor.title
+            new_reason = (
+                f"تم تجميع {cluster_size} مجموعات متشابهة تنظيمياً فقط. "
+                "كل صيغة عميل محفوظة كما هي لأن التشابه هنا إشارة نية، وليس تكراراً للحذف."
+            )
+        elif cluster_size > 1 and titles_differed:
             generic_title = _generic_title_for_topic(anchor.type, cluster_size)
             if generic_title:
                 new_title = generic_title
@@ -1579,6 +1909,12 @@ def _cluster_findings(
             confidence=anchor.confidence,
             related_section_ids=merged_ids,
             rationale_keys=merged_rationales,
+            knowledge_mode=anchor.knowledge_mode,
+            preserve_surface_forms=anchor.preserve_surface_forms,
+            examples_to_preserve=merged_examples,
+            intent=anchor.intent,
+            artifact_target=anchor.artifact_target,
+            summary=anchor.summary,
         )
         survivors.append(clustered)
     return survivors, collapsed
@@ -1602,6 +1938,9 @@ def _dedup_by_purpose(
     by_purpose: Dict[Tuple[str, str, str], ImprovementFinding] = {}
     survivors: List[ImprovementFinding] = []
     for f in findings:
+        if _is_surface_form_protected(f):
+            survivors.append(f)
+            continue
         purpose = _purpose_of(f)
         if not purpose:
             survivors.append(f)

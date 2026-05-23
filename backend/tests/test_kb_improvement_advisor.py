@@ -1362,3 +1362,120 @@ def test_barcode_only_body_without_media_triggers_missing_media() -> None:
         f"expected missing_media finding for barcode-only body; got: "
         f"{[(f.type, f.target_kind) for f in out]!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Behavioral Expansion Advisor — preserve surface forms (May 2026 #39)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_intent_surface_examples_yield_expansion_card_preserving_examples() -> None:
+    """Surface forms are training/intent signals, not wiki prose."""
+    from modules.ai.knowledge.improvement_advisor import audit
+
+    examples = [
+        "أنا قريب",
+        "أنا بالطريق",
+        "أنا عند البوابة",
+        "وين المعرض",
+        "أرسل اللوكيشن",
+        "أنا جنبكم",
+        "ما لقيت المدخل",
+        "أنا بالمواقف",
+        "أنا قدام المعرض",
+    ]
+    rows = _baseline_kb() + [
+        _Row(900, "custom", "صيغ الوصول", "\n".join(f"- {e}" for e in examples)),
+    ]
+
+    out = audit(rows, platform_connected=False, products=[], max_suggestions=20)
+    expansion = [f for f in out if f.type == "intent_surface_expansion"]
+    assert len(expansion) == 1
+    card = expansion[0]
+    assert card.knowledge_mode == "artifact_trigger_examples"
+    assert card.preserve_surface_forms is True
+    assert card.intent == "ask_location_or_arrival_help"
+    assert card.artifact_target == "maps_link_or_staff_contact"
+    assert card.examples_to_preserve == examples
+    assert "فهم تنوع تعبيرات العميل" not in card.title
+    assert "فهم تنوع تعبيرات العميل" not in card.proposed_body
+    payload = card.to_dict()
+    assert payload["examples_to_preserve"] == examples
+    assert payload["preserve_surface_forms"] is True
+
+
+def test_surface_example_clustering_groups_without_deleting_examples() -> None:
+    """Similarity means grouping only for surface-form memory."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding,
+        _cluster_findings,
+    )
+
+    a_examples = ["أنا قريب", "أنا عند البوابة", "وين المعرض"]
+    b_examples = ["أرسل اللوكيشن", "ما لقيت المدخل", "أنا بالمواقف"]
+    common = dict(
+        type="intent_surface_expansion",
+        severity="medium",
+        title="وسّع أمثلة طلب الموقع",
+        reason="r",
+        expected_impact="i",
+        target_kind="custom",
+        proposed_body="body",
+        requires_media=False,
+        confidence=0.82,
+        knowledge_mode="artifact_trigger_examples",
+        preserve_surface_forms=True,
+        intent="ask_location_or_arrival_help",
+        artifact_target="maps_link_or_staff_contact",
+        summary="summary",
+    )
+    findings = [
+        ImprovementFinding(
+            id="sug-1", related_section_ids=[1],
+            examples_to_preserve=a_examples, **common,
+        ),
+        ImprovementFinding(
+            id="sug-2", related_section_ids=[2],
+            examples_to_preserve=b_examples, **common,
+        ),
+    ]
+
+    survivors, collapsed = _cluster_findings(findings)
+    assert collapsed == 1
+    assert len(survivors) == 1
+    merged = survivors[0]
+    assert merged.preserve_surface_forms is True
+    assert merged.related_section_ids == [1, 2]
+    assert merged.examples_to_preserve == a_examples + b_examples
+    assert "تنظيمياً فقط" in merged.reason
+
+
+def test_surface_protected_findings_bypass_purpose_dedup() -> None:
+    """Purpose dedup is for hygiene suggestions, not behavioral memory."""
+    from modules.ai.knowledge.improvement_advisor import (
+        ImprovementFinding,
+        _dedup_by_purpose,
+    )
+
+    common = dict(
+        type="intent_surface_expansion",
+        severity="medium",
+        title="وسّع أمثلة طلب الموقع",
+        reason="r",
+        expected_impact="i",
+        target_kind="custom",
+        proposed_body="body",
+        requires_media=False,
+        confidence=0.82,
+        rationale_keys=["purpose:preserve_location_surface_forms"],
+        knowledge_mode="artifact_trigger_examples",
+        preserve_surface_forms=True,
+        intent="ask_location_or_arrival_help",
+        artifact_target="maps_link_or_staff_contact",
+    )
+    findings = [
+        ImprovementFinding(id="sug-1", examples_to_preserve=["أنا قريب"], **common),
+        ImprovementFinding(id="sug-2", examples_to_preserve=["أنا عند البوابة"], **common),
+    ]
+    out = _dedup_by_purpose(findings)
+    assert [f.id for f in out] == ["sug-1", "sug-2"]

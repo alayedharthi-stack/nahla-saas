@@ -97,6 +97,54 @@ def test_registry_link_role_validation() -> None:
     assert not is_valid_link_role(None)
 
 
+def test_classifier_normalizer_marks_surface_examples_for_preservation() -> None:
+    """Classifier cleanup must preserve real customer utterances.
+
+    Even if the LLM forgets metadata, deterministic normalization adds
+    ``preserve_surface_forms`` so later improvement layers group these
+    phrases without compressing them into an abstract summary.
+    """
+    from modules.ai.knowledge.classifier import (
+        AttachedMedia,
+        PlatformSignal,
+        _normalize_proposal,
+    )
+    from services.knowledge_section_kinds import all_kinds
+
+    examples = [
+        "أنا قريب",
+        "أنا بالطريق",
+        "أنا عند البوابة",
+        "وين المعرض",
+        "أرسل اللوكيشن",
+    ]
+    parsed = {
+        "proposed_ops": [{
+            "op_id": "op-1",
+            "op": "create",
+            "kind": "custom",
+            "title": "صيغ الوصول",
+            "body": "\n".join(f"- {e}" for e in examples),
+            "metadata": {},
+        }],
+        "conflicts": [],
+        "confidence": 0.8,
+    }
+    normalized = _normalize_proposal(
+        parsed,
+        available_kinds=[k.kind for k in all_kinds()],
+        platform_signal=PlatformSignal(False, "", ""),
+        attached_media=[],
+    )
+    op = normalized["proposed_ops"][0]
+    assert op["body"].splitlines() == [f"- {e}" for e in examples]
+    assert op["metadata"]["preserve_surface_forms"] is True
+    assert op["metadata"]["knowledge_mode"] == "artifact_trigger_examples"
+    assert op["metadata"]["examples_to_preserve"] == examples
+    assert op["metadata"]["intent"] == "ask_location_or_arrival_help"
+    assert op["metadata"]["artifact_target"] == "maps_link_or_staff_contact"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Legacy splitter
 # ─────────────────────────────────────────────────────────────────────────────

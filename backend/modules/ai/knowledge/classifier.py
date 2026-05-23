@@ -305,7 +305,7 @@ PROPOSAL_SCHEMA_NOTE = """\
 وإنتاج اقتراحات منظمة بشكل JSON صارم فقط — بدون أي نص خارج JSON.
 
 اقرأ نص التاجر، الوسائط المرفقة، الأقسام الحالية، وحالة منصة التجارة،
-ثم أنتج كائن JSON بالشكل التالي بالضبط (لا تُضف حقولاً جديدة):
+ثم أنتج كائن JSON بالشكل التالي بالضبط (لا تُضف حقولاً جديدة خارج هذا الشكل):
 
 {
   "proposed_ops": [
@@ -343,7 +343,19 @@ PROPOSAL_SCHEMA_NOTE = """\
 - لا تُنتج أكثر من 8 عمليات.
 - ابدأ op_id بـ "op-" يتلوها رقم متسلسل من 1.
 - ابقَ على body مختصراً (≤ 600 حرف) وبصياغة جاهزة للحقن في برومت كلود
-  (سطور قصيرة، بدون رموز ماركدون كثيفة).
+  (سطور قصيرة، بدون رموز ماركدون كثيفة) — إلا إذا كان النص عبارة عن
+  أمثلة فعلية لعبارات العملاء، فالاختصار هنا ممنوع.
+- إذا أرسل التاجر قائمة صيغ يقولها العملاء (مثل: "أنا قريب"،
+  "أنا عند البوابة"، "وين المعرض"، "أرسل اللوكيشن"، "وين رقمه") فلا
+  تلخصها إلى عبارة عامة مثل "فهم تنوع تعبيرات العميل". احفظ كل صيغة
+  كما هي في body كسطور منفصلة، واجعل metadata تحتوي:
+  {"knowledge_mode":"intent_surface_examples" أو "artifact_trigger_examples",
+   "preserve_surface_forms":true,
+   "examples_to_preserve":[...],
+   "intent":"<نية تنظيمية>",
+   "artifact_target":"<إن وجد>"}
+  التشابه بين هذه الصيغ يعني grouping تنظيمي فقط، وليس حذفاً أو دمجاً
+  مدمراً. الأولوية: richness > brevity.
 
 ═══ فصل السلوك عن المعرفة التجارية (KB-2) — قاعدة حرجة ═══
 إذا كان نص التاجر يتحدث عن أيٍّ من الآتي، فيجب تصنيفه داخل taxonomy
@@ -773,6 +785,15 @@ def _normalize_proposal(
         title = (raw_op.get("title") or "").strip()[:255] or None
         body = (raw_op.get("body") or "").strip()[:8000]
         metadata = raw_op.get("metadata") if isinstance(raw_op.get("metadata"), dict) else {}
+        # Stage 1-3 Behavioral Expansion contract: if the model kept
+        # customer utterance examples in the body but forgot the
+        # preservation metadata, add it deterministically. This keeps
+        # "أنا عند البوابة / وين المعرض / أرسل اللوكيشن" as runtime
+        # signals instead of letting later UI/advisor layers treat them
+        # as summarizable prose.
+        if _looks_like_surface_examples(body):
+            meta_surface = _surface_metadata_from_body(body)
+            metadata = {**metadata, **meta_surface}
         target_id = raw_op.get("target_section_id")
         try:
             target_id_int: Optional[int] = int(target_id) if target_id not in (None, "", "null") else None
@@ -866,6 +887,86 @@ def _looks_like_platform_field_claim(body: str) -> bool:
     if not body:
         return False
     return bool(_PRICE_HINT_RE.search(body) or _STOCK_HINT_RE.search(body))
+
+
+_SURFACE_LINE_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*•]+|\d+[\).:-]?|[،,؛;:\-–—]+)?\s*"
+)
+_SURFACE_HINTS = (
+    "قريب", "بالطريق", "البوابة", "بوابة", "وين المعرض",
+    "وين المحل", "وين الفرع", "وين موقع", "المدخل", "مواقف",
+    "المواقف", "قدام", "جنبكم", "لوكيشن", "اللوكيشن",
+    "الخريطة", "الخرايط", "وين رقمه", "رقم", "باركود",
+)
+
+
+def _clean_surface_example(line: str) -> str:
+    if not line:
+        return ""
+    s = _SURFACE_LINE_PREFIX_RE.sub("", str(line)).strip()
+    s = s.strip(" \t\r\n\"'“”«»")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extract_surface_examples(text: str) -> List[str]:
+    if not text:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[\n\r]+", text):
+        ex = _clean_surface_example(raw)
+        if not ex or len(ex) > 90:
+            continue
+        if ex in seen:
+            continue
+        seen.add(ex)
+        out.append(ex)
+    if len(out) <= 1:
+        inline = _clean_surface_example(text)
+        parts = [
+            _clean_surface_example(p)
+            for p in re.split(r"\s*[،,؛;]\s*", inline)
+        ]
+        out = []
+        seen = set()
+        for ex in parts:
+            if not ex or len(ex) > 90 or ex in seen:
+                continue
+            seen.add(ex)
+            out.append(ex)
+    return out
+
+
+def _looks_like_surface_examples(text: str) -> bool:
+    examples = _extract_surface_examples(text)
+    if len(examples) < 4:
+        return False
+    joined = "\n".join(examples).lower()
+    return any(h in joined for h in _SURFACE_HINTS)
+
+
+def _surface_metadata_from_body(body: str) -> Dict[str, Any]:
+    examples = _extract_surface_examples(body)
+    joined = "\n".join(examples).lower()
+    if any(h in joined for h in ("رقم", "اكلم", "أكلم", "وين رقمه")):
+        intent = "ask_staff_contact"
+        artifact_target = "staff_phone"
+        mode = "artifact_trigger_examples"
+    elif any(h in joined for h in ("باركود", "تحويل", "الراجحي", "qr")):
+        intent = "ask_payment_barcode_or_transfer"
+        artifact_target = "payment_barcode"
+        mode = "artifact_trigger_examples"
+    else:
+        intent = "ask_location_or_arrival_help"
+        artifact_target = "maps_link_or_staff_contact"
+        mode = "artifact_trigger_examples"
+    return {
+        "knowledge_mode": mode,
+        "preserve_surface_forms": True,
+        "examples_to_preserve": examples,
+        "intent": intent,
+        "artifact_target": artifact_target,
+    }
 
 
 def _safe_int(val: Any) -> Optional[int]:
