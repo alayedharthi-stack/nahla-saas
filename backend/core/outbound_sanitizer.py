@@ -674,13 +674,16 @@ _PROMISE_REPLACEMENTS: Dict[str, str] = {
     # LINK and BARCODE keep a soft "I'll get back to you" feel
     # because those assets ARE recoverable in many tenants
     # (a structured store URL or a mobile-app barcode picture).
-    # PHONE and LOCATION default to honest unavailability —
-    # if the merchant added the data we never reach this line
-    # in the first place.
+    # PHONE and LOCATION default to a warm "we couldn't surface
+    # it but we can still help" line — the cold "غير مضاف في
+    # بيانات المتجر" copy used to leak a system-internal phrase
+    # that the customer didn't need to see, and read as a
+    # complaint against the merchant. The phrasing below stays
+    # conversational and offers an actionable next step instead.
     ASSET_LINK:     "لحظة وأجيب لك التفاصيل 🌷",
     ASSET_BARCODE:  "خبّرنا بالمبلغ وسنوضّح لك طريقة الدفع المناسبة 🌷",
-    ASSET_PHONE:    "الرقم غير مضاف حاليًا في بيانات المتجر — يرجى إضافته لإرساله مباشرة 🌷",
-    ASSET_LOCATION: "الموقع غير مضاف حاليًا في بيانات المتجر — يرجى إضافته لإرساله مباشرة 🌷",
+    ASSET_PHONE:    "أبشر 🌷 ما ظهر لي رقم البائع لحظتها — أقدر أوصلك بالموقع أو أساعدك بأي شيء ثاني تحتاجه.",
+    ASSET_LOCATION: "أبشر 🌷 الموقع ما طلع لي مباشرة، أقدر أرسل لك تفاصيل الفرع أو أساعدك بطريقة ثانية.",
 }
 
 
@@ -762,6 +765,23 @@ def maybe_scrub_unkept_asset_promise(
         ASSET_PHONE:    has_phone,
         ASSET_LOCATION: (has_url or has_product_card),
     }.get(asset_class, True)
+
+    # Pre-scrub trace — emitted on every promise hit (honoured or
+    # scrubbed). Lets production triage answer "did the resolver
+    # ship the asset, or did the LLM just write a soft promise
+    # that got rewritten?" without enabling DEBUG. Pair with
+    # ``[STAFF_CONTACT_TRACE]`` / ``[STAFF_CONTACT_GRAPH]`` /
+    # ``[STAFF_CONTACT_RESOLVER]`` to walk the whole chain in one
+    # grep.
+    logger.info(
+        "[ASSET_PROMISE_TRACE] tenant=%s to=%s asset_class=%s "
+        "asset_present=%s has_url=%s has_media=%s has_phone=%s "
+        "has_product_card=%s text_len=%d",
+        tenant_id, recipient, asset_class,
+        bool(asset_present),
+        bool(has_url), bool(has_media), bool(has_phone),
+        bool(has_product_card), len(text),
+    )
 
     if asset_present:
         # Honest promise — let it through. We don't log here on

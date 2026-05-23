@@ -731,3 +731,192 @@ def test_pronoun_resolution_emits_trace_telemetry(
         and "hit=True" in ln and "source=reply" in ln
         for ln in log_lines
     ), f"expected a name-lookup trace; got: {log_lines!r}"
+
+
+# ── Reply-driven trigger (May 2026 #38c) ────────────────────────────────────
+#
+# Live trace from Tenant 33 (May 23 2026): customer says "وصلت" — no
+# explicit staff intent in the message — and the bot proactively offers
+# "تواصل مع أمين عند الوصول". The pre-fix safety net checked only the
+# customer-side trigger set, returned ``no_staff_intent``, and the
+# asset-promise sanitiser downstream rewrote the reply to the cold
+# fallback even though the KB has أمين's number.
+#
+# Fix: when the bot reply itself offers a staff contact (verb + name
+# pattern, no digits in reply yet), the safety net runs the same KB
+# resolver pass. Tests below pin the new trigger source, the
+# no-misfire guard when the reply already carries digits, and the
+# proactive [STAFF_CONTACT_GRAPH] trace that exposes resolver-visible
+# pairs once per turn.
+
+
+def test_reply_driven_trigger_arrival_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Customer says 'وصلت' — no customer-side trigger. The bot
+    reply offers 'تواصل مع أمين عند الوصول' without digits. The
+    safety net must treat that as an implicit staff_phone intent
+    and ship the contact card from the KB."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=5, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="وصلت",
+        reply_text="أبشر 🌷 تواصل مع أمين عند الوصول للمعرض",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True, (
+        "arrival-flow proactive offer must trigger the resolver "
+        "even without a customer-side intent keyword"
+    )
+    assert result.source == "kb:branches"
+    assert result.wa_id == "966541690226"
+
+
+def test_reply_driven_trigger_skipped_when_reply_has_digits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the LLM already wrote the phone digits in its reply,
+    there is nothing to recover — the implicit reply-driven
+    trigger must NOT fire (otherwise we'd attach a duplicate
+    contact card to a turn that already shipped the number).
+
+    The customer message has no explicit trigger either, so the
+    expected outcome is a clean ``no_staff_intent`` skip and the
+    LLM's digits flow through to the customer untouched."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="وصلت",
+        reply_text="تواصل مع أمين على 0541690226 عند الوصول 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "no_staff_intent"
+
+
+def test_reply_driven_trigger_no_misfire_on_unrelated_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated chit-chat ('تمام 🌷 شكراً') with no staff verb /
+    name in either the message or the reply must remain a no-op.
+    Guards against the implicit trigger over-firing on every
+    turn that happens to mention تواصل / كلم."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="وصلت",
+        reply_text="أبشر 🌷 وصول سعيد!",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "no_staff_intent"
+
+
+def test_staff_contact_graph_trace_emits_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """[STAFF_CONTACT_GRAPH] must fire on every safety-net entry
+    (even when the resolver bails). Production triage uses it to
+    verify the merchant's KB carries a staff contact at all
+    before debugging trigger gating. The line surfaces a
+    pairs_found count and the kinds that contributed."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="payment_method",
+                body="للتواصل: أمين بائع المعرض 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        customer_msg="وصلت",
+        reply_text="تواصل مع أمين عند الوصول",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[STAFF_CONTACT_GRAPH]" in ln
+        and "tenant_id=33" in ln
+        and "pairs_found=" in ln
+        and "payment_method" in ln
+        for ln in log_lines
+    ), f"expected a graph snapshot line; got: {log_lines!r}"
+
+
+def test_reply_driven_trigger_emits_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The new reply-side branch must log
+    ``stage=trigger hit=True source=reply_offer`` so production
+    can distinguish customer-driven from reply-driven resolutions
+    when reading staff-contact telemetry."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        customer_msg="وصلت",
+        reply_text="تواصل مع أمين عند الوصول",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[STAFF_CONTACT_TRACE]" in ln
+        and "stage=trigger" in ln
+        and "hit=True" in ln
+        and "source=reply_offer" in ln
+        for ln in log_lines
+    ), f"expected a reply_offer trigger trace; got: {log_lines!r}"

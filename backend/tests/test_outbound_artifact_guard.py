@@ -698,24 +698,44 @@ def test_complaint_without_history_is_neutral(
 
 
 def test_asset_promise_phone_replacement_is_honest_not_escalation() -> None:
-    """The canned PHONE replacement used to read
-    ``"خبّرنا بنوع الاستفسار وسنوصلك بالشخص المختص"`` — a soft
-    promise of escalation that the wire layer can't fulfill.
-    Post-fix it reads as honest unavailability."""
+    """The canned PHONE replacement evolved across two iterations:
+
+    * Pre-fix copy escalated falsely
+      ("خبّرنا … وسنوصلك بالشخص المختص") and made promises the
+      wire layer couldn't keep.
+    * May 2026 #38 dropped the escalation and admitted the asset
+      isn't on file ("غير مضاف …") — honest, but cold; the
+      customer read it as a complaint against the merchant.
+    * May 2026 #38c (this commit) keeps the honesty contract
+      but warms the tone and offers a concrete next step
+      ("أبشر 🌷 ما ظهر لي … أقدر أوصلك بالموقع …").
+
+    The assertions below pin BOTH the no-false-escalation invariant
+    and the new "warm + actionable" shape so a future iteration
+    can't silently regress to the cold copy."""
     from core.outbound_sanitizer import _PROMISE_REPLACEMENTS, ASSET_PHONE
 
     replacement = _PROMISE_REPLACEMENTS[ASSET_PHONE]
+    # No false-escalation promises.
     assert "وسنوصلك" not in replacement
     assert "بالشخص المختص" not in replacement
-    assert "غير مضاف" in replacement
+    # No system-internal "بيانات المتجر" leak.
+    assert "بيانات المتجر" not in replacement, (
+        "the cold 'في بيانات المتجر' phrase reads as a complaint "
+        "to the customer; warm copy must not leak it"
+    )
+    # Warm acknowledgement + actionable alternative.
+    assert "أبشر" in replacement, "warm acknowledgement must lead the line"
+    assert "أقدر" in replacement, "must offer an actionable next step"
 
 
 def test_asset_promise_location_replacement_is_honest_not_escalation() -> None:
-    """The canned LOCATION replacement used to ask the customer
-    for a branch/area. Post-fix it admits the location isn't
-    on file rather than promising explanation."""
+    """Same invariant for LOCATION: no false promise, no
+    system-internal leak, warm acknowledgement + alternative."""
     from core.outbound_sanitizer import _PROMISE_REPLACEMENTS, ASSET_LOCATION
 
     replacement = _PROMISE_REPLACEMENTS[ASSET_LOCATION]
     assert "وسنوضّح" not in replacement and "وسنوضح" not in replacement
-    assert "غير مضاف" in replacement
+    assert "بيانات المتجر" not in replacement
+    assert "أبشر" in replacement
+    assert "أقدر" in replacement

@@ -656,6 +656,147 @@ def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
     return "", ""
 
 
+# Verbs the LLM uses when it offers a staff contact in its OWN reply.
+# The pre-fix safety net only fired on customer-side triggers
+# ("ابي رقم أمين"), so a reply-side offer like "تواصل مع أمين عند
+# الوصول" — produced proactively when the customer says "وصلت" — never
+# got a resolver pass. We now match these reply verbs to detect implicit
+# contact offers and run the same KB scan.
+_REPLY_STAFF_CONTACT_VERBS: tuple = (
+    "تواصل مع",
+    "تواصل ب",
+    "اتصل ب",
+    "اتصل على",
+    "كلم",
+    "رقم",
+    "اطلب",
+    "رتب مع",
+)
+
+
+def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
+    """Detect a proactive staff-contact offer in the bot reply.
+
+    Returns ``(verb, name)`` for the first match where one of
+    :data:`_REPLY_STAFF_CONTACT_VERBS` is followed within ~50 chars
+    by a known :data:`_STAFF_NAME_CANDIDATES` token. Empty tuple
+    on miss.
+
+    Used as the secondary trigger for
+    :func:`apply_staff_contact_safety_net` so an arrival-flow
+    reply ("وصلت" → "تواصل مع أمين عند الوصول") gets the same
+    resolver pass as an explicit "ابي رقم أمين" ask. Without
+    this the asset-promise sanitiser downstream rewrites the
+    reply to the cold "الرقم غير مضاف" copy even though the
+    KB has the contact.
+    """
+    if not reply_text:
+        return "", ""
+    rn = _normalise_for_match(reply_text)
+    if not rn:
+        return "", ""
+    # Sort name candidates longest-first so "أبو هشام" beats "هشام"
+    # and "بائع المعرض" beats "البائع".
+    candidates = sorted(_STAFF_NAME_CANDIDATES, key=len, reverse=True)
+    for verb in _REPLY_STAFF_CONTACT_VERBS:
+        start = 0
+        while True:
+            idx = rn.find(verb, start)
+            if idx < 0:
+                break
+            after = rn[idx + len(verb): idx + len(verb) + 60]
+            for name in candidates:
+                if name in after:
+                    return verb, name
+            start = idx + len(verb)
+    return "", ""
+
+
+def _emit_staff_contact_graph_trace(
+    db: Any,
+    tenant_id: int,
+) -> None:
+    """Log a snapshot of the staff-contact graph the resolver can see.
+
+    Runs at most once per turn from inside
+    :func:`apply_staff_contact_safety_net`. Emits a single
+    ``[STAFF_CONTACT_GRAPH]`` INFO line that lists every
+    ``(candidate_name → phone)`` pair the resolver discovers in
+    the KB sections covered by :data:`_STAFF_KB_FALLBACK_KINDS`,
+    regardless of whether the safety net fires this turn.
+
+    Production triage uses this to answer "does the resolver see
+    أمين's number at all?" without enabling DEBUG and without
+    reading code. When the trace shows the pair exists but the
+    safety net still bails, the bug is in the trigger gating —
+    not in KB ingestion. When the trace shows no pair exists,
+    the merchant's KB genuinely doesn't carry the contact in a
+    scanned kind and the next move is to expand
+    :data:`_STAFF_KB_FALLBACK_KINDS` or add the contact to the
+    KB.
+
+    Never raises. Pure telemetry.
+    """
+    if db is None or not tenant_id:
+        return
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        rows = (
+            db.query(MerchantKnowledgeSection)
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.is_active.is_(True),
+                MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .limit(40)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "[STAFF_CONTACT_GRAPH] tenant_id=%s state=query_failed err=%s",
+            tenant_id, exc,
+        )
+        return
+
+    pairs: List[Dict[str, Any]] = []
+    sections_scanned = 0
+    sections_with_phone = 0
+    for row in rows:
+        sections_scanned += 1
+        body = getattr(row, "body", "") or ""
+        if not body:
+            continue
+        body_norm = _normalise_alif(body).lower()
+        phones = _extract_phones(body)
+        if phones:
+            sections_with_phone += 1
+        for cand in _STAFF_NAME_CANDIDATES:
+            cand_norm = _normalise_alif(cand).lower()
+            if cand_norm and cand_norm in body_norm:
+                pairs.append({
+                    "kind": getattr(row, "kind", ""),
+                    "section_id": int(getattr(row, "id", 0) or 0),
+                    "name_chars": len(cand),
+                    "phones": len(phones),
+                })
+
+    # Compact summary — one line, easy to grep in production logs.
+    # We deliberately don't ship the raw phone digits or full names
+    # (PII discipline). The merchant's audit dashboard reads from
+    # the same KB rows, so reconstruction is a one-click query.
+    distinct_kinds = sorted({p["kind"] for p in pairs})
+    logger.info(
+        "[STAFF_CONTACT_GRAPH] tenant_id=%s sections_scanned=%d "
+        "sections_with_phone=%d pairs_found=%d kinds=%s",
+        tenant_id, sections_scanned, sections_with_phone,
+        len(pairs), ",".join(distinct_kinds) or "-",
+    )
+
+
 @dataclass
 class StaffContactSafetyNetResult:
     fired: bool = False
@@ -978,9 +1119,50 @@ def apply_staff_contact_safety_net(
         result.skipped_reason = "empty_msg"
         return result
 
-    if not _has_any(_STAFF_INTENT_TRIGGERS, msg_norm):
-        result.skipped_reason = "no_staff_intent"
-        return result
+    # Emit the structured contact-graph snapshot once per turn so
+    # production triage can confirm "does the resolver see أمين's
+    # number at all?" before debugging trigger gating. Cheap query,
+    # bounded to 40 rows; the same shape we run for the resolver.
+    _emit_staff_contact_graph_trace(db, int(tenant_id or 0))
+
+    # Trigger gating: a turn fires the resolver when EITHER side of
+    # the conversation surfaces staff-contact intent.
+    #   * Customer-side: explicit ask ("ابي رقم أمين", "كم رقمه").
+    #   * Reply-side:    bot proactively offers a contact
+    #                    ("تواصل مع أمين عند الوصول") with no digits
+    #                    in the reply yet — the arrival-flow case
+    #                    that triggered Tenant 33 #38c. Without this
+    #                    branch the asset-promise sanitiser downstream
+    #                    rewrites the reply to the cold "الرقم غير
+    #                    مضاف" copy even though the KB has the
+    #                    contact.
+    customer_intent = _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
+    reply_offer_verb, reply_offer_name = "", ""
+    if not customer_intent:
+        reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(reply_text or "")
+        reply_has_digits = bool(_extract_phones(reply_text or ""))
+        if not (reply_offer_verb and reply_offer_name) or reply_has_digits:
+            logger.info(
+                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
+                "customer_intent=False reply_offer_verb=%r "
+                "reply_has_digits=%s",
+                int(tenant_id or 0),
+                reply_offer_verb or "", reply_has_digits,
+            )
+            result.skipped_reason = "no_staff_intent"
+            return result
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+            "source=reply_offer verb_chars=%d name_chars=%d",
+            int(tenant_id or 0),
+            len(reply_offer_verb), len(reply_offer_name),
+        )
+    else:
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+            "source=customer_msg",
+            int(tenant_id or 0),
+        )
 
     # Layer 0: scan the customer message → the LLM reply →
     # the most recent bot/customer turns in history. Pronoun-only
@@ -1008,9 +1190,19 @@ def apply_staff_contact_safety_net(
             if history_bot_norm and history_customer_norm:
                 break
 
-    name, name_source = _find_staff_name_in_pool(
-        msg_norm, reply_norm, history_bot_norm, history_customer_norm,
-    )
+    # When the trigger came from a reply-side offer, the offered
+    # name IS the resolver target — short-circuit the pool scan so
+    # we don't accidentally pick a different candidate that happens
+    # to also appear in history (e.g. an older question about
+    # "خالد"). When the trigger came from the customer side the
+    # canonical pool order applies.
+    if reply_offer_name:
+        name, name_source = reply_offer_name, "reply_offer"
+    else:
+        name, name_source = _find_staff_name_in_pool(
+            msg_norm, reply_norm,
+            history_bot_norm, history_customer_norm,
+        )
     if not name:
         logger.info(
             "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=False "
