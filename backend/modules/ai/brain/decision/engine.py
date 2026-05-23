@@ -69,6 +69,90 @@ from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 logger = logging.getLogger("nahla.brain.decision")
 
 
+# ── Direct Answer First (DAF) — first-turn welcome bypass ────────────────────
+#
+# Production regression (May 2026 #20 — "voice note with invoice question"):
+# A customer's first-turn message can carry a real, actionable question even
+# when the rule classifier returns INTENT_GENERAL (or a high-confidence
+# INTENT_GREETING that did not get demoted by the rules-layer welcome gate).
+# This happens routinely for media-origin inputs that get flattened to plain
+# text BEFORE reaching the brain:
+#
+#   * voice notes        → Whisper transcript ("السلام عليكم وسهل الخير. اقول
+#                          لك فيه فاتورة بتاريخ ... يعني انا كده سددت اسدد
+#                          فاتورة اثنين؟")
+#   * status replies     → reply-to-status preamble + caption
+#   * captioned images   → OCR / vision summary + caption
+#   * captioned videos   → frame description + caption
+#
+# The customer clearly asked a question. The rule layer either could not pin
+# a specific intent (long, conversational transcript) or routed it to
+# INTENT_GENERAL without ``embedded_greeting=True`` because the greeting
+# wasn't the *best* candidate to begin with. The engine then short-circuits
+# to ACTION_GREET on the "first-turn general help" branch and the customer
+# gets a self-introduction card instead of an answer — exactly what the
+# merchant reported as feeling like "the bot didn't read my message".
+#
+# Fix: before either first-turn greet branch fires, check whether the
+# customer's message carries substantive actionable content. We reuse the
+# greeting-residue stripper from the rules layer so the threshold matches
+# the existing "is this a greeting + question hybrid?" detector. Pure tiny
+# inputs ("اي" / "ok" / "هلا") fail the residue check and still trigger
+# the welcome card; anything with a real question or request falls through
+# to the rest of the engine, where the LLM fallback (rule #9) composes a
+# proper answer with full KB/catalog/history context.
+
+# Word-character count above which a first-turn message is treated as a
+# real ask and the welcome card is bypassed. Three is the same floor the
+# rules layer uses for INTENT_GREETING demotion (`_GREETING_RESIDUE_MIN_CHARS`),
+# kept in sync on purpose so the two layers agree on what counts as
+# "substantive". Tested boundary cases:
+#   * "اي"          → 2 chars  → still greets
+#   * "نعم"         → 3 chars  → bypasses (a 3-char ack on first turn is
+#                                 vanishingly rare; a real ask like "وش"
+#                                 also ≥ 3 should bypass)
+#   * "كم سعره؟"    → 6 chars  → bypasses
+#   * voice transcript with invoice question → 100+ chars → bypasses
+_DAF_FIRST_TURN_MIN_RESIDUE = 3
+
+
+def _first_turn_has_actionable_substance(message: Optional[str]) -> bool:
+    """Return True when a first-turn message carries enough content to skip
+    the welcome card and let the LLM answer directly.
+
+    Reuses the rules-layer greeting/courtesy stripper so leading salaams,
+    bot tags ("نحلة") and how-are-you fillers are removed before measuring
+    residue. Voice transcripts, captions, OCR text and reply-to-status
+    snippets all enter the brain as plain text, so a single substance check
+    on the customer-facing message text covers every media origin.
+
+    Defensive: if the rules module cannot be imported for any reason
+    (circular import, partial test stub, etc.) we fall back to a raw
+    word-character count so the bypass still works.
+    """
+    if not message:
+        return False
+    raw = message.strip()
+    if not raw:
+        return False
+    try:
+        from ..intent.rules import (  # noqa: PLC0415
+            _GREETING_RESIDUE_WORD_CHARS_RE,
+            _strip_greeting_residue,
+        )
+        residue = _strip_greeting_residue(raw)
+        if not residue:
+            return False
+        n_chars = len(_GREETING_RESIDUE_WORD_CHARS_RE.findall(residue))
+        return n_chars >= _DAF_FIRST_TURN_MIN_RESIDUE
+    except Exception:
+        # Last-ditch fallback: any message with ≥ 8 raw word characters
+        # is almost certainly substantive. Slightly stricter than the
+        # rules-aware path to reduce false bypass when courtesy tokens
+        # cannot be stripped.
+        return len(re.findall(r"[\w\u0600-\u06FF]", raw)) >= 8
+
+
 class DefaultDecisionEngine:
     """Implements DecisionMaker protocol."""
 
@@ -1246,16 +1330,48 @@ class DefaultDecisionEngine:
             _intent_slots = getattr(intent, "slots", None) or {}
             _embedded_greeting = bool(_intent_slots.get("embedded_greeting"))
             if not _embedded_greeting:
+                # ── Direct Answer First (DAF) bypass ─────────────────────
+                # Both first-turn greet branches below short-circuit the
+                # rest of the engine and emit a canned welcome card. That
+                # is the right call ONLY when the customer's message is
+                # genuinely thin (pure salaam, "هلا", "اي", "ok"). When
+                # the message carries a real question — most often a
+                # voice transcript, OCR caption, or reply-to-status
+                # preamble — we MUST let it flow through to the LLM
+                # fallback so the brain answers the actual ask. Without
+                # this guard a customer who opens with a 30-second voice
+                # note about an invoice gets met with "أنا نحلة مستشارة
+                # المبيعات…" and feels ignored. See module-level comment
+                # for the full background.
+                _daf_bypass = _first_turn_has_actionable_substance(ctx.message)
                 if intent.name == INTENT_GREETING and not state.greeted:
-                    return Decision(
-                        action=ACTION_GREET,
-                        reason="explicit greeting on first turn",
-                    )
+                    if _daf_bypass:
+                        logger.info(
+                            "[DAF.BYPASS] first_turn_greeting_with_substance "
+                            "tenant=%s extraction=%s preview=%r",
+                            getattr(ctx, "tenant_id", None),
+                            getattr(intent, "extraction_method", "?"),
+                            (ctx.message or "")[:80],
+                        )
+                    else:
+                        return Decision(
+                            action=ACTION_GREET,
+                            reason="explicit greeting on first turn",
+                        )
                 if not state.greeted and intent.name == INTENT_GENERAL:
-                    return Decision(
-                        action=ACTION_GREET,
-                        reason="first-turn general help",
-                    )
+                    if _daf_bypass:
+                        logger.info(
+                            "[DAF.BYPASS] first_turn_general_actionable "
+                            "tenant=%s extraction=%s preview=%r",
+                            getattr(ctx, "tenant_id", None),
+                            getattr(intent, "extraction_method", "?"),
+                            (ctx.message or "")[:80],
+                        )
+                    else:
+                        return Decision(
+                            action=ACTION_GREET,
+                            reason="first-turn general help",
+                        )
             if intent.name == INTENT_GREETING and state.greeted:
                 # Composer reads `re_greet=True` and renders the short
                 # `re_greeting` template instead of the full onboarding
@@ -1456,6 +1572,7 @@ class DefaultDecisionEngine:
                 "[OUT_OF_SCOPE_PASSTHROUGH] tenant=%s intent=%s preview=%r — "
                 "deferring to LLM brain with full KB context",
                 getattr(ctx, "tenant_id", None),
+                intent.name,
                 (ctx.message or "")[:60],
             )
 
