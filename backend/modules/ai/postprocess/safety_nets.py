@@ -807,33 +807,119 @@ def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
 # الوصول" — produced proactively when the customer says "وصلت" — never
 # got a resolver pass. We now match these reply verbs to detect implicit
 # contact offers and run the same KB scan.
+#
+# The two tuples below are searched separately because they carry
+# different proximity expectations:
+#
+#   * Direct contact verbs ("تواصل مع X لخدمة العملاء", "اتصل على X")
+#     allow up to 60 chars between the verb and the name — the LLM
+#     often inserts a role description ("لخدمة العملاء", "بائع
+#     المعرض") between them.
+#   * Suggestion verbs ("جربي X", "حاولي مع X") are short, tight
+#     escalation phrases. The customer says "أمين مايرد" and the
+#     LLM suggests an alternative as a one-line answer — the name
+#     is always within ~30 chars of the verb. The tighter proximity
+#     keeps unrelated brand-story prose ("جربي هذا العسل البلدي ولا
+#     يفوّت على الأكل اليوم … تواصل مع المتجر") from accidentally
+#     pairing a stray name candidate with the suggestion verb.
 _REPLY_STAFF_CONTACT_VERBS: tuple = (
     "تواصل مع",
     "تواصل ب",
+    "تواصلي مع",
+    "تواصلي ب",
     "اتصل ب",
     "اتصل على",
+    "اتصلي ب",
+    "اتصلي على",
     "كلم",
+    "اكلم",
     "رقم",
     "اطلب",
+    "اطلبي",
     "رتب مع",
+    "رتبي مع",
 )
+
+# Suggestion verbs the LLM uses to escalate to an alternative staff
+# member when the primary one is unavailable. Tenant 33 #38e: the
+# reported regression chain "أمين مايرد → جربي هشام (card sent) →
+# مايرد → جربي هيثم 🌷 (no card) → وين رقمه؟ (no card)". Step 2
+# silently dropped because the trigger detector did not consider
+# "جربي" a contact offer, so the LLM-suggested alternative was
+# never resolved through the same KB scan that fed the first card.
+#
+# Substring matching (`verb in rn`) means short forms cover their
+# inflected variants for free — "جرب" matches "جربي" / "جربه" /
+# "جربها" / "جرّب" (after diacritic strip) and "حاول" matches
+# "حاولي". We deliberately keep this set tight: every verb here
+# MUST be one the LLM uses to nominate a person; broad recommendation
+# verbs ("استخدم" / "اختار") would invite false positives because
+# we already widened :data:`_STAFF_NAME_CANDIDATES` to cover role
+# nouns ("البائع" / "بائع المعرض").
+_REPLY_STAFF_SUGGESTION_VERBS: tuple = (
+    "جرب",         # also matches "جربي" / "جربه" / "جربها" / "جرّب"
+    "حاول",        # also matches "حاولي"
+    "اسأل",        # also matches "اسألي"
+    "اسال",        # alif-folded variant of "اسأل"
+    "تقدر تكلم",
+    "تقدري تكلمي",
+    "ما رايك تكلم",
+    "ما رايك تكلمي",
+)
+
+# Proximity windows the verb→name search uses, in characters. Direct
+# contact verbs allow a longer trailing window because the LLM often
+# describes the role between the verb and the name; suggestion verbs
+# are tight one-liners where the name lands directly after.
+_REPLY_STAFF_CONTACT_PROXIMITY = 60
+_REPLY_STAFF_SUGGESTION_PROXIMITY = 30
+
+
+def _scan_verb_name_pair(
+    rn: str,
+    verbs: tuple,
+    proximity: int,
+    candidates: List[str],
+) -> Tuple[str, str]:
+    """Find the first ``(verb, name)`` pair where one of *verbs*
+    is followed within *proximity* characters by one of *candidates*.
+
+    Helper extracted so the contact-verb and suggestion-verb scans
+    share identical longest-first matching semantics. Returns an
+    empty tuple on miss.
+    """
+    for verb in verbs:
+        start = 0
+        while True:
+            idx = rn.find(verb, start)
+            if idx < 0:
+                break
+            after = rn[idx + len(verb): idx + len(verb) + proximity]
+            for name in candidates:
+                if name in after:
+                    return verb, name
+            start = idx + len(verb)
+    return "", ""
 
 
 def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
     """Detect a proactive staff-contact offer in the bot reply.
 
-    Returns ``(verb, name)`` for the first match where one of
-    :data:`_REPLY_STAFF_CONTACT_VERBS` is followed within ~50 chars
-    by a known :data:`_STAFF_NAME_CANDIDATES` token. Empty tuple
-    on miss.
+    Returns ``(verb, name)`` for the first match where one of the
+    direct contact verbs (:data:`_REPLY_STAFF_CONTACT_VERBS`) is
+    followed within :data:`_REPLY_STAFF_CONTACT_PROXIMITY` chars by
+    a known :data:`_STAFF_NAME_CANDIDATES` token, OR one of the
+    suggestion verbs (:data:`_REPLY_STAFF_SUGGESTION_VERBS`) is
+    followed within :data:`_REPLY_STAFF_SUGGESTION_PROXIMITY` chars
+    by a candidate. Empty tuple on miss.
 
     Used as the secondary trigger for
     :func:`apply_staff_contact_safety_net` so an arrival-flow
-    reply ("وصلت" → "تواصل مع أمين عند الوصول") gets the same
-    resolver pass as an explicit "ابي رقم أمين" ask. Without
-    this the asset-promise sanitiser downstream rewrites the
-    reply to the cold "الرقم غير مضاف" copy even though the
-    KB has the contact.
+    reply ("وصلت" → "تواصل مع أمين عند الوصول") OR an escalation
+    reply ("أمين مايرد" → "جربي هشام 🌷") gets the same resolver
+    pass as an explicit "ابي رقم أمين" ask. Without this the
+    asset-promise sanitiser downstream rewrites the reply to the
+    cold "الرقم غير مضاف" copy even though the KB has the contact.
     """
     if not reply_text:
         return "", ""
@@ -843,18 +929,21 @@ def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
     # Sort name candidates longest-first so "أبو هشام" beats "هشام"
     # and "بائع المعرض" beats "البائع".
     candidates = sorted(_STAFF_NAME_CANDIDATES, key=len, reverse=True)
-    for verb in _REPLY_STAFF_CONTACT_VERBS:
-        start = 0
-        while True:
-            idx = rn.find(verb, start)
-            if idx < 0:
-                break
-            after = rn[idx + len(verb): idx + len(verb) + 60]
-            for name in candidates:
-                if name in after:
-                    return verb, name
-            start = idx + len(verb)
-    return "", ""
+    # Direct contact verbs first — they carry the strongest semantic
+    # weight ("تواصل مع X" is unambiguous) and the longer proximity
+    # window beats suggestion verbs in the rare case the LLM stacks
+    # both ("جربي التواصل مع هشام لخدمة العملاء"), so the resolver
+    # logs `verb=تواصل مع` instead of `verb=جرب`.
+    verb, name = _scan_verb_name_pair(
+        rn, _REPLY_STAFF_CONTACT_VERBS,
+        _REPLY_STAFF_CONTACT_PROXIMITY, candidates,
+    )
+    if verb and name:
+        return verb, name
+    return _scan_verb_name_pair(
+        rn, _REPLY_STAFF_SUGGESTION_VERBS,
+        _REPLY_STAFF_SUGGESTION_PROXIMITY, candidates,
+    )
 
 
 def _emit_staff_contact_graph_trace(
@@ -1413,6 +1502,22 @@ def apply_staff_contact_safety_net(
             "name_len=%d phone_match=%s reason=no_phone_in_reply_or_kb",
             int(tenant_id or 0), len(name), False,
         )
+        # Tenant 33 #38e — escalation-chain gap signal. When the bot
+        # PROACTIVELY suggested an alternative staff member but the
+        # KB carries no phone for them, we want a single grep-able
+        # line that says exactly which name fell through. This is
+        # the actionable artefact for the merchant: "you suggested
+        # هيثم but didn't add his number — fill it in the dashboard".
+        # We emit only when the name came from the bot side
+        # (reply_offer / history_bot) since a customer-typed name
+        # is the customer's own ask, not an escalation gap.
+        if name_source in ("reply_offer", "history_bot"):
+            logger.info(
+                "[STAFF_ESCALATION_GAP] tenant_id=%s name_chars=%d "
+                "name_source=%s reason=suggested_but_no_kb_phone "
+                "— merchant should add this contact to the KB",
+                int(tenant_id or 0), len(name), name_source,
+            )
         result.skipped_reason = "no_phone_in_reply"
         return result
 

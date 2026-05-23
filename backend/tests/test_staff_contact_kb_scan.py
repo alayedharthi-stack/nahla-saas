@@ -1207,3 +1207,348 @@ def test_graph_trace_reports_suggestion_skipped_count(
         and "suggestion_skipped=2" in ln
         for ln in log_lines
     ), f"expected suggestion_skipped=2 in the graph summary; got: {log_lines!r}"
+
+
+# ── Suggestion-verb escalation chain (Tenant 33 #38e) ────────────────────────
+#
+# Production regression chain reported on Tenant 33:
+#
+#   1. "أمين مايرد"  → bot:  "جربي التواصل مع هشام لخدمة العملاء 🌷"
+#                    + Hisham contact card. WORKED (تواصل مع verb).
+#   2. "مايرد"       → bot:  "جربي هيثم 🌷"
+#                    NO card. The reply-offer detector did not consider
+#                    "جربي" a contact verb, so the trigger never fired
+#                    and the resolver never tried to attach a card.
+#   3. "وين رقمه؟"   → bot:  "تفضلي 🌷"
+#                    NO card. Step 2 having silently dropped means the
+#                    name pool walker in step 3 is the LAST line of
+#                    defence — it MUST find هيثم in the prior bot turn
+#                    and send the card if the KB has the phone.
+#
+# These tests pin the fix:
+#   * `_reply_offers_staff_contact` now matches "جربي X" / "حاولي X" /
+#     "اسألي X" with a tighter 30-char proximity window (vs 60 for
+#     the direct contact verbs).
+#   * The walker continues to recover هيثم from history_bot when the
+#     customer follows up with a pronoun-only ask.
+#   * A new `[STAFF_ESCALATION_GAP]` log line surfaces when the bot
+#     suggests a staff member but the KB has no phone for them, so
+#     the merchant has an actionable signal in production.
+
+
+def test_reply_suggestion_verb_jarrabi_triggers_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bot replies "جربي هيثم 🌷" with NO contact verb. Pre-fix
+    the trigger detector returned ("", "") and the resolver bailed
+    on `no_staff_intent` — the customer never got a card even when
+    Haitham's number was sitting in the KB."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="هيثم مسؤول التوصيل: 0507654321",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="مايرد",                # no customer-side trigger
+        reply_text="جربي هيثم 🌷",          # suggestion verb only
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True, (
+        "regression: 'جربي X' must trigger the resolver with the "
+        "suggestion-verb proximity rule. "
+        f"Got skipped_reason={result.skipped_reason!r}."
+    )
+    assert result.wa_id == "966507654321"
+    assert result.source == "kb:branches"
+
+
+def test_reply_suggestion_verb_haawli_with_role_noun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same path with "حاولي مع X" feminine variant + a role noun
+    between verb and name. The 30-char proximity must still catch
+    a name that lands ≤ ~30 chars from the verb."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="custom",
+                body="أمين هو الكاشير اليومي - 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="ما رد الإدارة",
+        reply_text="حاولي مع أمين الكاشير 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.wa_id == "966541690226"
+
+
+def test_reply_suggestion_verb_no_false_positive_on_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence-in-depth: "جربي عسل السدر هذا اليوم" must NOT trigger
+    the resolver. The suggestion verb is generic enough that without
+    the proximity-bound name check we'd ship a phantom contact card
+    every time the LLM recommended a product."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="ايش تنصحوني",
+        reply_text="جربي عسل السدر اليوم لو سمحتي 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "no_staff_intent", (
+        f"expected proximity rule to reject the product-recommendation "
+        f"phrase. Got skipped_reason={result.skipped_reason!r}."
+    )
+
+
+def test_reply_suggestion_verb_with_far_name_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 30-char window is intentional: a brand-story paragraph
+    that opens with "جربي العسل" and then 60 chars later mentions
+    "هشام بدأ مشروعه في 2010" must NOT pair the suggestion verb
+    with هشام. Only escalation phrases where the name lands tight
+    after the verb should fire."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="هشام مالك المتجر: 0507654321",
+            ),
+        ],
+    )
+    long_filler = "ولاتفوّتي على نكهات السدر والطلح والضهيان البلدي اليوم"
+    result = apply_staff_contact_safety_net(
+        customer_msg="ايش تنصحوني",
+        reply_text=f"جربي العسل البلدي. {long_filler}. هشام بدأ مشروعه عام 2010 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is False, (
+        "suggestion verb must only pair with names within ~30 chars; "
+        "a brand-story name 60+ chars away must not produce a card."
+    )
+    assert result.skipped_reason == "no_staff_intent"
+
+
+def test_full_escalation_chain_amin_to_hisham_to_haitham(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end pin for the user-reported scenario.
+
+    Three turns, each running through the safety net with the
+    history populated from the prior turn(s):
+
+        turn 1  customer: "أمين مايرد"
+                bot:      "جربي التواصل مع هشام لخدمة العملاء 🌷"
+                          → contact verb hit → Hisham card.
+
+        turn 2  customer: "مايرد"
+                bot:      "جربي هيثم 🌷"
+                          → suggestion verb hit → Haitham card
+                            (NEW: this is what dropped pre-fix).
+
+        turn 3  customer: "وين رقمه؟"
+                bot:      "تفضلي 🌷"
+                          → customer-side trigger (رقم) + name pool
+                            walker recovers هيثم from history_bot
+                            → Haitham card again, idempotent.
+
+    KB carries phones for Hisham AND Haitham; Amin is intentionally
+    absent so the chain reflects the merchant's real "أمين الأصلي
+    لا رقم له" state. The assertions guarantee that every step
+    sends a card; the regression we're pinning is the silent drop
+    at turn 2.
+    """
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body=(
+                    "هشام خدمة العملاء: 0501112233\n"
+                    "هيثم مسؤول التوصيل: 0507654321"
+                ),
+            ),
+        ],
+    )
+
+    # ── turn 1 ──
+    turn1 = apply_staff_contact_safety_net(
+        customer_msg="أمين مايرد",
+        reply_text="جربي التواصل مع هشام لخدمة العملاء 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert turn1.fired is True, f"turn1 skipped={turn1.skipped_reason!r}"
+    assert turn1.wa_id == "966501112233"
+
+    history_after_t1 = [
+        {"direction": "in", "body": "أمين مايرد"},
+        {"direction": "out", "body": "جربي التواصل مع هشام لخدمة العملاء 🌷"},
+    ]
+
+    # ── turn 2 — the previously-silent drop ──
+    turn2 = apply_staff_contact_safety_net(
+        customer_msg="مايرد",
+        reply_text="جربي هيثم 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+        history=history_after_t1,
+    )
+    assert turn2.fired is True, (
+        "regression: turn 2 must fire on the suggestion verb 'جربي'. "
+        f"Got skipped_reason={turn2.skipped_reason!r}."
+    )
+    assert turn2.wa_id == "966507654321", (
+        "turn 2 must resolve to Haitham's KB phone, not Hisham's."
+    )
+
+    history_after_t2 = history_after_t1 + [
+        {"direction": "in", "body": "مايرد"},
+        {"direction": "out", "body": "جربي هيثم 🌷"},
+    ]
+
+    # ── turn 3 — pronoun follow-up ──
+    turn3 = apply_staff_contact_safety_net(
+        customer_msg="وين رقمه؟",
+        reply_text="تفضلي 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+        history=history_after_t2,
+    )
+    assert turn3.fired is True, (
+        "turn 3 'وين رقمه؟' must fire via customer-side trigger and "
+        f"recover هيثم from history_bot. Got "
+        f"skipped_reason={turn3.skipped_reason!r}."
+    )
+    assert turn3.wa_id == "966507654321", (
+        "turn 3 must re-resolve to Haitham (the most recent suggested "
+        "name) — not to Hisham (the earlier suggestion)."
+    )
+
+
+def test_escalation_gap_telemetry_when_suggested_name_has_no_kb_phone(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Actionable signal for the merchant: when the LLM suggests an
+    alternative staff member ("جربي هيثم 🌷") but the KB carries
+    NO phone for that person, the resolver must emit a single
+    `[STAFF_ESCALATION_GAP]` line so the merchant dashboard can
+    surface "you suggested هيثم but didn't add his number" without
+    ops having to read the conversation transcript."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            # KB has أمين but NOT هيثم — exactly the merchant case.
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    result = apply_staff_contact_safety_net(
+        customer_msg="مايرد",
+        reply_text="جربي هيثم 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "no_phone_in_reply"
+    assert result.inferred_name in {"هيثم"}, (
+        f"resolver must infer the suggested name even on a miss. "
+        f"Got inferred_name={result.inferred_name!r}"
+    )
+
+    log_lines = [rec.getMessage() for rec in caplog.records]
+    assert any(
+        "[STAFF_ESCALATION_GAP]" in ln
+        and "name_source=reply_offer" in ln
+        and "suggested_but_no_kb_phone" in ln
+        for ln in log_lines
+    ), (
+        "expected a single [STAFF_ESCALATION_GAP] line flagging the "
+        "merchant-actionable miss; got: "
+        f"{[ln for ln in log_lines if 'STAFF_' in ln]!r}"
+    )
+
+
+def test_escalation_gap_does_not_fire_for_customer_typed_name(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The escalation-gap signal is a merchant-actionable artefact —
+    only emit when the bot SUGGESTED a name (reply_offer / history_bot).
+    A customer who typed an unknown name themselves is NOT a KB gap;
+    it's the customer asking about a person the merchant never
+    advertised, so the gap log would just create noise."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        # Customer typed "هيثم" themselves — not a bot suggestion.
+        customer_msg="ابي رقم هيثم",
+        reply_text="حاضر 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [rec.getMessage() for rec in caplog.records]
+    assert not any("[STAFF_ESCALATION_GAP]" in ln for ln in log_lines), (
+        "customer-typed unknown names must not produce escalation-gap "
+        "noise — only bot-suggested names count as merchant gaps."
+    )
