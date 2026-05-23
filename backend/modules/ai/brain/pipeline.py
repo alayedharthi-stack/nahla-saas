@@ -903,12 +903,17 @@ class MerchantBrain:
             _active_pids = None
 
         _structured_facts_block: str = ""
+        _structured_behavior_block: str = ""
         try:
             from modules.ai.prompts.tenant_overlay import (  # noqa: PLC0415
+                build_behavioral_overlay_block,
                 build_structured_facts_block,
             )
             _structured_facts_block = build_structured_facts_block(
                 db, tenant_id, active_product_ids=_active_pids,
+            ) or ""
+            _structured_behavior_block = build_behavioral_overlay_block(
+                db, tenant_id,
             ) or ""
         except Exception as _kb_exc:  # noqa: BLE001
             logger.warning(
@@ -916,6 +921,7 @@ class MerchantBrain:
                 tenant_id, _kb_exc,
             )
             _structured_facts_block = ""
+            _structured_behavior_block = ""
 
         # Phase 3 — Product/Media resolver overlay for the Brain prompt.
         # The legacy webhook path computes this same overlay just before
@@ -964,6 +970,7 @@ class MerchantBrain:
                     "ai_settings":       _ai_settings_for_prompt,
                     "resolver_overlay":  _resolver_overlay_text,
                     "structured_facts_block": _structured_facts_block,
+                    "structured_behavior_block": _structured_behavior_block,
                     "tenant_profile":    mc.get("tenant_profile") or {},
                     "customer":          mc.get("customer") or {},
                     "conversation":      mc.get("conversation") or {},
@@ -986,6 +993,7 @@ class MerchantBrain:
                     "ai_settings":       _ai_settings_for_prompt,
                     "resolver_overlay":  _resolver_overlay_text,
                     "structured_facts_block": _structured_facts_block,
+                    "structured_behavior_block": _structured_behavior_block,
                 }
 
         ctx.reply_state = _build_reply_state(

@@ -105,10 +105,20 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # behavioral kinds; ``build_tenant_overlay_split`` renders them into
     # ``overlay_buckets["behavior"]``. When the tenant has no behavioral
     # rows the bucket is "" and the baseline rules apply unchanged.
+    structured_behavior_block = ""
+    try:
+        structured_behavior_block = str(
+            (state.merchant_context or {}).get("structured_behavior_block") or ""
+        ).strip()
+    except Exception:  # noqa: BLE001
+        structured_behavior_block = ""
+    merchant_behavior_extra = (
+        structured_behavior_block or overlay_buckets.get("behavior", "")
+    )
     high_priority_block = build_high_priority_block(
         settings_for_overlay,
         store_name=store_name,
-        merchant_behavior_extra=overlay_buckets.get("behavior", ""),
+        merchant_behavior_extra=merchant_behavior_extra,
     )
 
     # Assistant identity (name + role) sits with the persona, not with
@@ -402,10 +412,12 @@ def _emit_prompt_log(
             "approx_tokens_total":       _approx_tokens(total),
             "approx_tokens_kb":          _approx_tokens(kb),
             "approx_tokens_high_pri":    _approx_tokens(high_priority),
+            "structured_behavior_chars": len(str(mc.get("structured_behavior_block") or "")),
             "has_kb":                    bool(kb),
             "has_tools_block":           bool(tools),
             "has_libraries":             bool(libraries),
             "has_resolver_overlay":      bool(resolver_overlay),
+            "has_structured_behavior":   bool(mc.get("structured_behavior_block")),
         }
         _log.info("[PROMPT_LAYERS] " + json.dumps(payload, ensure_ascii=False))
     except Exception:  # noqa: BLE001 — logging must never break a turn

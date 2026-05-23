@@ -501,6 +501,60 @@ def test_overlay_split_produces_behavior_bucket() -> None:
     assert "حبيبي" not in buckets["facts"]
 
 
+def test_legacy_prompt_overlay_includes_behavior_separately() -> None:
+    """Legacy webhook prompt path must not lose structured behavior rows.
+
+    Before this regression fix, ``build_tenant_prompt_overlay`` excluded
+    the behavior bucket entirely. That meant contact/escalation rows that
+    used to live in the old single KB textarea disappeared after migration
+    to structured sections.
+    """
+    from modules.ai.prompts.tenant_overlay import build_tenant_prompt_overlay
+
+    rows = [
+        _FakeSection(id=1, kind="branches", title="المعرض",
+                     body="موقع المعرض في الرياض."),
+        _FakeSection(id=2, kind="escalation_rules", title="وصول العميل",
+                     body="عند الوصول للمعرض تواصل مع أمين بائع المعرض 0541690226."),
+    ]
+    overlay = build_tenant_prompt_overlay(
+        {"manual_knowledge_base": ""},
+        db=_FakeSession(rows),
+        tenant_id=33,
+    )
+
+    assert "قواعد سلوك ومساندة من قاعدة المعرفة" in overlay
+    assert "أمين بائع المعرض" in overlay
+    assert "0541690226" in overlay
+    assert "موقع المعرض" in overlay
+
+
+def test_kb_runtime_ingestion_trace_reports_asset_flags(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from modules.ai.prompts.tenant_overlay import build_structured_facts_block
+
+    rows = [
+        _FakeSection(id=1, kind="branches", title="المعرض",
+                     body="رابط اللوكيشن https://maps.app.goo.gl/abc"),
+        _FakeSection(id=2, kind="bank_transfer", title="باركود الراجحي",
+                     body="باركود الراجحي للتحويل متاح."),
+        _FakeSection(id=3, kind="custom", title="أمين",
+                     body="أمين بائع المعرض 0541690226 للتواصل عند الوصول."),
+    ]
+
+    caplog.set_level(logging.INFO, logger="nahla.ai.overlay")
+    build_structured_facts_block(_FakeSession(rows), tenant_id=33)
+
+    logs = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "[KB.RUNTIME_INGESTION]" in logs
+    assert '"included_sections": 3' in logs
+    assert '"staff_contact": 1' in logs
+    assert '"payment_barcode": 1' in logs
+    assert '"maps": 1' in logs
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. High-priority layer accepts merchant_behavior_extra
 # ─────────────────────────────────────────────────────────────────────────────
@@ -535,6 +589,33 @@ def test_high_priority_layer_omits_d_block_when_no_merchant_behavior() -> None:
     assert "[A] STYLE" in block
     assert "[B] POLICY" in block
     assert "[C] FORBIDDEN" in block
+
+
+def test_brain_prompt_uses_structured_behavior_block_from_context() -> None:
+    from modules.ai.brain.compose.prompt_builder import build_brain_reply_prompt
+    from modules.ai.brain.types import BrainReplyState
+
+    prompt = build_brain_reply_prompt(
+        BrainReplyState(
+            store_name="آل عايد",
+            tenant_overlay="",
+            merchant_context={
+                "tenant_id": 33,
+                "ai_settings": {},
+                "structured_facts_block": "قاعدة المعرفة:\nالدفع متاح.",
+                "structured_behavior_block": (
+                    "• متى تحوّل لموظف بشري:\n"
+                    "  - عند الوصول للمعرض تواصل مع أمين بائع المعرض 0541690226."
+                ),
+            },
+            intent_name="ask_location_or_arrival_help",
+            response_goal="أجب عن طلب الوصول.",
+        )
+    )
+
+    assert "[D] MERCHANT-SPECIFIC BEHAVIOR" in prompt
+    assert "أمين بائع المعرض" in prompt
+    assert "0541690226" in prompt
 
 
 # ─────────────────────────────────────────────────────────────────────────────

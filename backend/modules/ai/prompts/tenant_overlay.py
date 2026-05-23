@@ -25,7 +25,9 @@ Smart Store Knowledge Hub (Phase 1+):
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.ai.overlay")
@@ -109,6 +111,99 @@ _PRECEDENCE_NOTE_AR = (
     "دائمًا ولا تذكر الرقم اليدوي.\n"
     "- لا تختلق معلومات ليست في القاعدة أو في merchant_context."
 )
+
+_PHONE_HINT_RE = re.compile(r"(?:\+?966|00966|0)?5\d[\d\s\-()]{7,12}")
+_URL_HINT_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_MAPS_HINT_RE = re.compile(
+    r"(?:maps\.app\.goo\.gl|google\.[^/\s]+/maps|goo\.gl/maps|خرائط|الخرايط|لوكيشن|location)",
+    re.IGNORECASE,
+)
+_PAYMENT_BARCODE_HINT_RE = re.compile(
+    r"(?:باركود|كيو\s*آر|qr|رمز\s+الدفع|payment_[\w-]*(?:barcode|qr))",
+    re.IGNORECASE,
+)
+_STAFF_CONTACT_HINT_RE = re.compile(
+    r"(?:أمين|امين|بائع|المعرض|موظف|الموظف|مسؤول|المسؤول|الإدارة|الادارة|تواصل|واتساب)",
+    re.IGNORECASE,
+)
+
+
+def _compact_section_ref(section: Any) -> Dict[str, Any]:
+    title = (getattr(section, "title", None) or "").strip()
+    return {
+        "id": getattr(section, "id", None),
+        "kind": (getattr(section, "kind", "") or "").strip(),
+        "title": title[:80],
+        "body_chars": len((getattr(section, "body", None) or "").strip()),
+    }
+
+
+def _asset_flags_for_section(section: Any) -> List[str]:
+    text = " ".join(
+        [
+            str(getattr(section, "title", "") or ""),
+            str(getattr(section, "body", "") or ""),
+            " ".join(
+                (getattr(getattr(lk, "media", None), "media_key", "") or "")
+                for lk in (getattr(section, "media_links", None) or [])
+            ),
+        ]
+    )
+    flags: List[str] = []
+    if _PHONE_HINT_RE.search(text) and _STAFF_CONTACT_HINT_RE.search(text):
+        flags.append("staff_contact")
+    if _PAYMENT_BARCODE_HINT_RE.search(text):
+        flags.append("payment_barcode")
+    if _MAPS_HINT_RE.search(text):
+        flags.append("maps")
+    urls = _URL_HINT_RE.findall(text)
+    if urls:
+        flags.append("url")
+    return flags
+
+
+def _emit_kb_runtime_trace(
+    *,
+    tenant_id: int,
+    channel: str,
+    queried_rows: List[Any],
+    included_rows: List[Any],
+    dropped_behavioral: int = 0,
+    dropped_product_scope: int = 0,
+) -> None:
+    """Log which structured KB rows are visible to a runtime prompt layer."""
+
+    try:
+        asset_flags: Dict[str, int] = {}
+        for row in included_rows:
+            for flag in _asset_flags_for_section(row):
+                asset_flags[flag] = asset_flags.get(flag, 0) + 1
+        payload = {
+            "tenant_id": tenant_id,
+            "channel": channel,
+            "queried_sections": len(queried_rows),
+            "included_sections": len(included_rows),
+            "dropped_behavioral": dropped_behavioral,
+            "dropped_product_scope": dropped_product_scope,
+            "included_kinds": sorted({
+                (getattr(r, "kind", "") or "").strip()
+                for r in included_rows
+                if (getattr(r, "kind", "") or "").strip()
+            }),
+            "asset_flags": asset_flags,
+            "sections": [_compact_section_ref(r) for r in included_rows[:40]],
+        }
+        logger.info(
+            "[KB.RUNTIME_INGESTION] "
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[KB.RUNTIME_INGESTION] trace failed tenant=%s channel=%s err=%s",
+            tenant_id,
+            channel,
+            exc,
+        )
 
 
 def _render_section_block(section: Any, *, index: int = 0) -> str:
@@ -226,11 +321,19 @@ def build_structured_facts_block(
     # silently swallowing knowledge rows.
     behavioral_dropped = 0
     pre_behavioral_total = len(rows)
+    queried_rows_all = list(rows)
     rows = [r for r in rows if not is_behavioral_kind(getattr(r, "kind", None))]
     behavioral_dropped = pre_behavioral_total - len(rows)
 
     if not rows:
         # Only behavioral rows existed — facts bucket is empty by design.
+        _emit_kb_runtime_trace(
+            tenant_id=tenant_id,
+            channel="facts",
+            queried_rows=queried_rows_all,
+            included_rows=[],
+            dropped_behavioral=behavioral_dropped,
+        )
         logger.info(
             "[KB.facts] tenant=%s only behavioral rows present "
             "(dropped=%d); facts bucket empty.",
@@ -241,6 +344,7 @@ def build_structured_facts_block(
     # ── Phase 3 product-scope filter ────────────────────────────────────
     filtered_rows: List[Any] = []
     scoped_dropped = 0
+    queried_non_behavior_rows = list(rows)
     for r in rows:
         linked_pids = {
             int(lk.product_id)
@@ -261,6 +365,14 @@ def build_structured_facts_block(
     rows = filtered_rows
 
     if not rows:
+        _emit_kb_runtime_trace(
+            tenant_id=tenant_id,
+            channel="facts",
+            queried_rows=queried_non_behavior_rows,
+            included_rows=[],
+            dropped_behavioral=behavioral_dropped,
+            dropped_product_scope=scoped_dropped,
+        )
         return ""
 
     grouped: Dict[int, List[Any]] = {}
@@ -336,6 +448,14 @@ def build_structured_facts_block(
         tenant_id, len(rows), sorted({r.kind for r in rows}), media_marker_count,
         scoped_dropped, behavioral_dropped,
         sorted(active_product_ids) if active_product_ids else None,
+    )
+    _emit_kb_runtime_trace(
+        tenant_id=tenant_id,
+        channel="facts",
+        queried_rows=queried_non_behavior_rows,
+        included_rows=rows,
+        dropped_behavioral=behavioral_dropped,
+        dropped_product_scope=scoped_dropped,
     )
     return "\n\n".join(parts)
 
@@ -439,6 +559,12 @@ def build_behavioral_overlay_block(db: Any, tenant_id: int) -> str:
         "[KB.behavior] tenant=%s behavioral_sections=%d subtypes=%s",
         tenant_id, len(rows), sorted({r.kind for r in rows}),
     )
+    _emit_kb_runtime_trace(
+        tenant_id=tenant_id,
+        channel="behavior",
+        queried_rows=rows,
+        included_rows=rows,
+    )
     return "\n\n".join(parts)
 
 
@@ -466,10 +592,10 @@ def build_tenant_overlay_split(
     cannot leak into commerce knowledge retrieval.
 
     The legacy single-string overlay (`build_tenant_prompt_overlay`)
-    is a thin wrapper that concatenates non-behavioral buckets for
-    callers that haven't migrated yet. ``behavior`` is intentionally
-    EXCLUDED from that concatenation so old callers don't accidentally
-    inject behavioral rules into the facts position.
+    concatenates the buckets as separate labelled sections. ``behavior``
+    stays outside the facts bucket, but legacy callers still receive it;
+    otherwise structured contact/escalation rows disappear from the
+    runtime prompt after migration from the old single-text KB.
     """
     buckets = {
         "identity": "", "style": "", "policy": "", "facts": "",
@@ -651,6 +777,10 @@ def build_tenant_prompt_overlay(
         sections.append(buckets["style"])
     if buckets["policy"]:
         sections.append(buckets["policy"])
+    if buckets["behavior"]:
+        sections.append(
+            "قواعد سلوك ومساندة من قاعدة المعرفة:\n" + buckets["behavior"]
+        )
     if buckets["facts"]:
         sections.append(buckets["facts"])
 
