@@ -6552,6 +6552,11 @@ async def _handle_merchant_message(
                         # without needing a structured directory.
                         db=db,
                         tenant_id=tenant_id,
+                        # May 2026 #38 follow-up: pass history so
+                        # pronoun-only asks ("كم رقمه؟") can recover
+                        # the staff name from the prior bot turn
+                        # that the customer is following up on.
+                        history=history if isinstance(history, list) else None,
                     )
                     if _cn.fired and _cn.extra_call_target is not None:
                         _call_targets.append(_cn.extra_call_target)

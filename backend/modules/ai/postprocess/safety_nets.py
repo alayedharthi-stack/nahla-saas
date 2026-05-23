@@ -546,9 +546,12 @@ _STAFF_NAME_CANDIDATES: List[str] = [
 
 # KB-section kinds we sweep when the LLM omitted the phone but the
 # merchant has a name+phone pair sitting in free-form knowledge.
-# We deliberately stay away from BEHAVIORAL_KINDS (tone/style
-# rules) and product-bound kinds — those don't carry contact
-# directories. See the May 2026 #36 audit report.
+# We deliberately stay away from BEHAVIORAL_KINDS like ``response_tone``
+# / ``forbidden_phrases`` (those don't carry contact directories) and
+# product-bound kinds. After the structured KB rollout merchants started
+# pasting "للتواصل المباشر: 05…" into commerce sections (payment_method,
+# bank_transfer, working_hours, cod, shipping_*) so the resolver must
+# scan those too — otherwise the migration silently lost contacts.
 _STAFF_KB_FALLBACK_KINDS: tuple = (
     "branches",
     "store_story",
@@ -557,6 +560,18 @@ _STAFF_KB_FALLBACK_KINDS: tuple = (
     "custom",
     "faq",
     "escalation_rules",
+    "payment_method",
+    "bank_transfer",
+    "cod",
+    "working_hours",
+    "shipping_carrier",
+    "shipping_zones",
+    "cold_shipping",
+    "summer_note",
+    "return_policy",
+    "warranty",
+    "reply_style",
+    "dialect",
 )
 
 
@@ -615,6 +630,30 @@ def _find_staff_name(customer_msg_norm: str) -> Optional[str]:
         return None
     hits.sort(key=len, reverse=True)
     return hits[0]
+
+
+def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
+    """Scan multiple already-normalised text candidates and return
+    ``(name, source_label)`` for the first hit.
+
+    Priority order is the argument order; pass the most authoritative
+    text first (typically the customer message). Used to recover the
+    intent target when the customer message itself is just a pronoun
+    ("كم رقمه؟") but the LLM reply or the immediately preceding bot
+    turn already mentioned the staff name (e.g.
+    "تواصل مع أمين بائع المعرض").
+
+    Returns ``("", "")`` when no candidate name appears in any pool.
+    """
+    labels = ("customer_msg", "reply", "history_bot", "history_customer", "extra")
+    for idx, text in enumerate(texts):
+        if not text:
+            continue
+        name = _find_staff_name(text)
+        if name:
+            label = labels[idx] if idx < len(labels) else f"pool_{idx}"
+            return name, label
+    return "", ""
 
 
 @dataclass
@@ -889,6 +928,7 @@ def apply_staff_contact_safety_net(
     detected_call_markers: int,
     db: Any = None,
     tenant_id: int = 0,
+    history: Optional[List[Any]] = None,
 ) -> StaffContactSafetyNetResult:
     """Build a contact-card ``CallTarget`` when the customer asked
     to reach a staff member by name.
@@ -942,11 +982,52 @@ def apply_staff_contact_safety_net(
         result.skipped_reason = "no_staff_intent"
         return result
 
-    name = _find_staff_name(msg_norm)
+    # Layer 0: scan the customer message → the LLM reply →
+    # the most recent bot/customer turns in history. Pronoun-only
+    # asks ("كم رقمه؟") rely on the LLM having mentioned the staff
+    # name in the same reply, or on the prior bot turn that the
+    # customer is following up on. Without this carry-forward the
+    # net misses every "كم رقمه" / "ايش رقمه" turn even when the
+    # KB has the contact.
+    reply_norm = _normalise_for_match(reply_text or "")
+    history_bot_norm = ""
+    history_customer_norm = ""
+    if isinstance(history, list):
+        for entry in reversed(history):
+            try:
+                role = (entry.get("role") or "").lower() if isinstance(entry, dict) else getattr(entry, "role", "")
+                content = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(content, str) or not content:
+                continue
+            if not history_bot_norm and role in {"assistant", "bot", "ai"}:
+                history_bot_norm = _normalise_for_match(content)
+            elif not history_customer_norm and role in {"user", "customer"}:
+                history_customer_norm = _normalise_for_match(content)
+            if history_bot_norm and history_customer_norm:
+                break
+
+    name, name_source = _find_staff_name_in_pool(
+        msg_norm, reply_norm, history_bot_norm, history_customer_norm,
+    )
     if not name:
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=False "
+            "msg_chars=%d reply_chars=%d history_bot_chars=%d "
+            "history_customer_chars=%d",
+            int(tenant_id or 0),
+            len(msg_norm), len(reply_norm),
+            len(history_bot_norm), len(history_customer_norm),
+        )
         result.skipped_reason = "no_staff_name"
         return result
     result.inferred_name = name
+    logger.info(
+        "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=True "
+        "name_chars=%d source=%s",
+        int(tenant_id or 0), len(name), name_source,
+    )
 
     # ── Layer 1: reply scan (canonical path) ────────────────────
     raw_phone = ""
@@ -3299,12 +3380,42 @@ def apply_outbound_artifact_guard(
     # ── Per-artifact rewrite branches ─────────────────────────────
     if expected == "staff_phone":
         norm_msg = _normalise_for_match(customer_msg or "")
-        staff_name = _find_staff_name(norm_msg) or ""
+        norm_reply_for_name = _normalise_for_match(reply_text or "")
+        # Pull the most recent bot/customer turns from history so
+        # pronoun-only asks ("كم رقمه؟") can recover the name from
+        # the previous turn that the customer is following up on.
+        hist_bot_norm = ""
+        hist_cust_norm = ""
+        if isinstance(history, list):
+            for entry in reversed(history):
+                try:
+                    role = (entry.get("role") or "").lower() if isinstance(entry, dict) else getattr(entry, "role", "")
+                    content = entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")
+                except Exception:  # noqa: BLE001
+                    continue
+                if not isinstance(content, str) or not content:
+                    continue
+                if not hist_bot_norm and role in {"assistant", "bot", "ai"}:
+                    hist_bot_norm = _normalise_for_match(content)
+                elif not hist_cust_norm and role in {"user", "customer"}:
+                    hist_cust_norm = _normalise_for_match(content)
+                if hist_bot_norm and hist_cust_norm:
+                    break
+        staff_name, _name_src = _find_staff_name_in_pool(
+            norm_msg, norm_reply_for_name, hist_bot_norm, hist_cust_norm,
+        )
         if not staff_name:
             # Role-only ask ("رقم البائع"). Use the role label as
-            # the "name" so the rewrite still reads naturally.
+            # the "name" so the rewrite still reads naturally. Search
+            # the same pool we used for proper names so a role label
+            # in the prior bot turn ("بائع المعرض") can carry forward.
             for kw in _STAFF_ROLE_KEYWORDS:
-                if kw in norm_msg:
+                if (
+                    kw in norm_msg
+                    or kw in norm_reply_for_name
+                    or kw in hist_bot_norm
+                    or kw in hist_cust_norm
+                ):
                     staff_name = kw
                     break
         # Try the KB scan one more time; the upstream staff-net

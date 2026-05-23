@@ -541,3 +541,193 @@ def test_kb_scan_logs_miss_when_no_phone_anywhere(
         "[STAFF_CONTACT_RESOLVER]" in ln and "source=none" in ln
         for ln in log_lines
     )
+
+
+# ── Pronoun-only follow-ups (May 2026 #38b) ─────────────────────────────────
+#
+# Production trace from Tenant 33: customer asked about أمين in turn N-1
+# ("تواصل مع أمين بائع المعرض") and followed up with the pronoun "كم رقمه"
+# in turn N. The pre-fix safety net normalised the customer message,
+# found ``رقم`` as a staff intent trigger, then looked for a name token
+# inside the same message — and bailed with ``no_staff_name`` because
+# pronouns aren't on the candidate list. The asset-promise sanitiser
+# downstream then rewrote the reply to "الرقم غير مضاف حاليًا…" even
+# though the merchant has أمين's number in the KB.
+#
+# The fix scans the customer message → the LLM reply → the previous
+# bot turn → the previous customer turn for a known staff name, in
+# that priority order. Tests below pin the carry-forward behaviour
+# layer-by-layer so a future refactor can't silently drop it.
+
+
+def test_pronoun_ask_recovers_name_from_llm_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Customer message is just a pronoun, but the LLM reply mentions
+    أمين (because the customer was following up on it). The safety net
+    must lift the name from the reply pool and complete the KB
+    resolution — otherwise pronoun-only asks silently fail."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=7, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",   # pronoun only — no name
+        reply_text="عذراً، تواصل مع أمين",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.inferred_name in {"أمين", "امين"}
+    assert result.source == "kb:branches"
+    assert result.wa_id == "966541690226"
+
+
+def test_pronoun_ask_recovers_name_from_history_bot_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The current LLM reply also lacks the name (the LLM produced a
+    generic "لحظة" placeholder), but the prior bot turn mentioned
+    أمين. The safety net must walk back into history to recover the
+    target — exactly the screenshot from Tenant 33."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=11, kind="payment_method",
+                body="للتواصل مع أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    history = [
+        {"role": "user",      "content": "هل فيه استلام"},
+        {"role": "assistant", "content": "تواصل مع أمين بائع المعرض لتجهيز طلبك"},
+        {"role": "user",      "content": "كم رقمه"},
+    ]
+    result = apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",
+        reply_text="لحظة وأجيب لك التفاصيل 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+        history=history,
+    )
+    assert result.fired is True
+    assert result.source == "kb:payment_method", (
+        "the merchant pasted أمين's contact under payment_method "
+        "after the structured-KB migration; the resolver must "
+        "scan that kind too — not only branches/store_story."
+    )
+    assert result.wa_id == "966541690226"
+
+
+def test_history_carry_forward_does_not_misfire_without_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pronoun resolution is gated on the staff-intent trigger.
+    A casual "وش رأيك" is not an ask for a phone — even when a prior
+    bot turn happens to have mentioned أمين we must NOT fire."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    history = [
+        {"role": "assistant", "content": "تواصل مع أمين بائع المعرض"},
+    ]
+    result = apply_staff_contact_safety_net(
+        customer_msg="وش رأيك",
+        reply_text="تمام 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+        history=history,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "no_staff_intent"
+
+
+def test_kb_scan_includes_post_migration_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the structured-KB migration merchants paste contact
+    blocks into commerce sections (payment_method, working_hours,
+    bank_transfer, …). The resolver must scan those — otherwise the
+    migration silently lost contacts that used to live in the old
+    monolithic text. We pick ``working_hours`` here as a canary."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="working_hours",
+                body=(
+                    "نستقبلكم من 10ص إلى 11م.\n"
+                    "للتواصل: أمين بائع المعرض 0541690226"
+                ),
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="ابي اكلم أمين",
+        reply_text="تواصل مع أمين بائع المعرض",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    assert result.fired is True
+    assert result.source == "kb:working_hours"
+    assert result.wa_id == "966541690226"
+
+
+def test_pronoun_resolution_emits_trace_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Production triage must be able to grep
+    ``[STAFF_CONTACT_TRACE]`` and see which pool surfaced the name
+    (customer message vs reply vs history). Without this line the
+    "why didn't أمين resolve?" question still costs a redeploy."""
+    import logging
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=1, kind="branches",
+                body="أمين بائع المعرض: 0541690226",
+            ),
+        ],
+    )
+    caplog.set_level(logging.INFO)
+    apply_staff_contact_safety_net(
+        customer_msg="كم رقمه",
+        reply_text="عذراً، تواصل مع أمين بائع المعرض",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db, tenant_id=33,
+    )
+    log_lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[STAFF_CONTACT_TRACE]" in ln and "stage=name_lookup" in ln
+        and "hit=True" in ln and "source=reply" in ln
+        for ln in log_lines
+    ), f"expected a name-lookup trace; got: {log_lines!r}"
