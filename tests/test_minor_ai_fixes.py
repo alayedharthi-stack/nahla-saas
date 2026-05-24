@@ -201,7 +201,14 @@ def test_payment_evidence_override_skipped_without_prior_receipt(
     monkeypatch: Any,
 ) -> None:
     """If there's no recent pre-transfer/pending evidence inbound,
-    the helper falls through to the legacy claim-ack branch."""
+    the helper falls through to the legacy claim-ack branch.
+
+    Tenant 33 #48 (May 2026) introduced the brain-driven text-claim
+    policy (default on). This test verifies the legacy branch while
+    that policy remains togglable, so we explicitly disable the
+    flag for this assertion."""
+    monkeypatch.setenv("PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED", "0")
+
     from core import payment_intent as pi
 
     monkeypatch.setattr(

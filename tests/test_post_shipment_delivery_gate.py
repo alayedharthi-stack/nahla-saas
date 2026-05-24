@@ -316,8 +316,16 @@ class TestPaymentClaimSkipsOnDeliveryGate:
         )
 
     def test_payment_claim_still_fires_for_real_transfer(self, monkeypatch):
-        """Belt-and-suspenders: explicit transfer claims still
-        short-circuit even when shipment context is present."""
+        """Legacy behaviour (feature flag off): explicit transfer
+        claims short-circuit with a hardcoded ACK even when shipment
+        context is present.
+
+        After Tenant 33 #48 (May 2026) the new default is to NOT
+        short-circuit; this test disables the flag so the legacy
+        path is still covered while it remains supported."""
+        # Roll back to legacy hardcoded-ACK behaviour for this test.
+        monkeypatch.setenv("PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED", "0")
+
         from core import payment_intent
 
         rows = [_msg_event(body="تم شحن الطلب", direction="out")]

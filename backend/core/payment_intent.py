@@ -1,8 +1,35 @@
 """
 core/payment_intent.py
 ──────────────────────
-Detect text-only "I just paid / I transferred" claims and short-circuit
-the AI brain with a deterministic acknowledgement.
+Detect text-only "I just paid / I transferred" claims and surface
+a payment-understanding signal so the brain composes its own reply.
+
+Tenant 33 #48 (May 2026) policy update
+─────────────────────────────────────
+Previous behaviour: this module would short-circuit the brain with
+a hardcoded "وصل، يعطيك العافية" ACK whenever the customer typed
+"حولت" or "تم التحويل", and would flip
+``awaiting_payment_receipt=True`` + ``order_status='awaiting_receipt'``
+in state. The merchant directive now is unambiguous:
+
+    "أصلحوا الفهم والقرار، وليس الكلمات."
+
+We are explicitly told NOT to:
+    * write hardcoded ACK lines for the AI to repeat,
+    * force any specific wording on the brain,
+    * impose tenant-specific copy.
+
+When ``PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED`` is True (the new
+default), text-only payment claims:
+    1. set ``payment_claim_unverified=True`` and
+       ``payment_claim_at`` in brain state (these are *understanding
+       hints* the brain prompt overlay can use, NOT outbound copy),
+    2. do NOT flip ``awaiting_payment_receipt`` or ``order_status``
+       (no false implication that anything was received),
+    3. let the brain run normally — it composes the reply itself.
+
+The legacy hardcoded-ACK path is preserved behind the feature flag
+for any operator who needs a temporary rollback.
 
 Why this module exists
 ──────────────────────
@@ -46,10 +73,25 @@ swaps it for a payment-aware sentence.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.payment_intent")
+
+
+# ── Feature flag (Tenant 33 #48, May 2026) ──────────────────────────
+# When True (the new default), text-only payment claims are NOT
+# answered with the hardcoded ``_ACK_FIRST_CLAIM`` copy. The brain
+# handles the reply naturally, with a ``payment_claim_unverified``
+# understanding flag stamped on brain state so the prompt overlay
+# knows the situation. Set the env var to "0"/"false" to roll back
+# to the legacy hardcoded-ACK behaviour.
+def _payment_text_claim_brain_driven_enabled() -> bool:
+    """Read the feature flag at call time (so tests can monkey-patch
+    the env var without re-importing the module). Defaults to True."""
+    raw = os.environ.get("PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED", "1")
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
 # ── Payment-confirmation tokens (Arabic) ────────────────────────────
@@ -638,6 +680,39 @@ def maybe_handle_payment_claim(
         )
         return _override_promotion
 
+    # ── Brain-driven text-claim policy (May 2026 #48) ────────────────
+    # No prior receipt-shaped evidence to promote, no real media this
+    # turn — the customer's "حولت" / "تم التحويل" is a pure verbal
+    # claim. We do NOT short-circuit the brain with a hardcoded ACK.
+    # We do NOT flip ``awaiting_payment_receipt`` or ``order_status``
+    # — that would falsely imply something arrived at the merchant
+    # when nothing has. Instead we stamp the lightweight understanding
+    # flag ``payment_claim_unverified=True`` so the brain prompt can
+    # see the situation and compose its own natural reply.
+    if _payment_text_claim_brain_driven_enabled():
+        try:
+            patch = _stamp_text_claim_unverified_state(
+                db, tenant_id=tenant_id, phone=phone,
+                inbound_text=inbound_text,
+            )
+            logger.info(
+                "[PAYMENT_INTENT] brain_driven=text_claim "
+                "tenant=%s phone=*%s patch_keys=%s "
+                "selected_product=%r awaiting_receipt=%s "
+                "receipt_received=%s order_status=%r",
+                tenant_id, (phone or "")[-4:],
+                sorted(list((patch or {}).keys())),
+                selected_product, awaiting_receipt, receipt_received,
+                order_status,
+            )
+        except Exception as _stamp_exc:  # noqa: BLE001
+            logger.debug(
+                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
+                "tenant=%s err=%s",
+                tenant_id, _stamp_exc,
+            )
+        return None
+
     reply_text = compose_payment_claim_ack(
         selected_product=selected_product,
         awaiting_receipt=awaiting_receipt,
@@ -686,6 +761,13 @@ def rewrite_generic_reply_for_payment_context(
         return None
     if not looks_like_generic_fallback_reply(brain_reply):
         return None
+    # Brain-driven text-claim policy (May 2026 #48): when the new
+    # behaviour is on, we do not substitute the brain's wording with
+    # a hardcoded payment ACK. The brain owns the wording even when
+    # it shipped a generic fallback — the ``payment_claim_unverified``
+    # flag in state nudges the next turn naturally.
+    if _payment_text_claim_brain_driven_enabled():
+        return None
     s = state_summary or {}
     selected_product = s.get("selected_product")
     awaiting_receipt = bool(s.get("awaiting_payment_receipt"))
@@ -709,6 +791,53 @@ def rewrite_generic_reply_for_payment_context(
 def _utcnow_iso() -> str:
     from datetime import datetime, timezone   # noqa: PLC0415
     return datetime.now(timezone.utc).isoformat()
+
+
+def _stamp_text_claim_unverified_state(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    inbound_text: str,
+) -> Dict[str, Any]:
+    """Stamp ``payment_claim_unverified=True`` + timestamp into
+    brain state so the next-turn brain prompt overlay can include
+    a payment-understanding advisory. Pure understanding signal —
+    we do NOT flip ``awaiting_payment_receipt`` or ``order_status``.
+
+    Returns the applied patch (mostly for logging). Never raises;
+    a DB failure simply skips the stamp and the brain will still
+    handle the turn normally.
+    """
+    patch: Dict[str, Any] = {
+        "payment_claim_unverified":    True,
+        "payment_claim_unverified_at": _utcnow_iso(),
+        "payment_claim_text_preview":  (inbound_text or "")[:120],
+    }
+    try:
+        from core.order_flow import apply_state_patch  # noqa: PLC0415
+        apply_state_patch(
+            db,
+            tenant_id=tenant_id,
+            phone=phone,
+            state_patch=patch,
+        )
+    except Exception:
+        # Try the alternate brain-state writer if the order_flow
+        # helper isn't importable (e.g. in narrow unit-test
+        # contexts). Failing silently is fine — the only effect
+        # is the brain doesn't see the advisory hint this turn.
+        try:
+            from core.order_flow import _load_brain_state  # noqa: PLC0415
+            conv, bs = _load_brain_state(
+                db, tenant_id=tenant_id, phone=phone,
+            )
+            if conv is not None and isinstance(bs, dict):
+                op = bs.setdefault("order_prep", {})
+                op.update(patch)
+        except Exception:
+            return {}
+    return patch
 
 
 # ── Evidence-override promotion helper ──────────────────────────────

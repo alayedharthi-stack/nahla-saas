@@ -447,6 +447,79 @@ def maybe_handle_receipt_inbound(
         )
         return None
 
+    # ── Tenant-account verification gate (May 2026 #48) ───────────
+    # Even when the deterministic ``payment_evidence`` classifier
+    # said ``confirmed`` (a real receipt with completion markers),
+    # we must NOT treat the order as paid until the receipt's
+    # IBAN / beneficiary matches one of the merchant's registered
+    # official accounts. Otherwise a customer's screenshot of an
+    # unrelated transfer (to a personal account, a previous
+    # merchant, a friend, …) would silently flip the order into
+    # ``under_review`` + ``payment_receipt_received=True``.
+    #
+    # Policy:
+    #   * Tenant has NO registered ``bank_transfer`` /
+    #     ``payment_method`` KB sections → legacy behaviour
+    #     (we have nothing to compare against, never block).
+    #   * Tenant HAS accounts AND we have some evidence text from
+    #     the inbound (caption / filename / pdf_text_preview /
+    #     vision_text / ocr_text) → enforce strict match.
+    #   * Tenant has accounts BUT the inbound carries no text we
+    #     can scan → fall back to legacy. The deterministic
+    #     ``classify_payment_evidence`` already gated this turn on
+    #     completion markers; we only block when we have a
+    #     concrete IBAN / beneficiary to compare.
+    _understanding_block: Optional[Dict[str, Any]] = None
+    try:
+        from core.tenant_payment_accounts import (  # noqa: PLC0415
+            load_tenant_payment_accounts,
+        )
+        from core.payment_understanding import (  # noqa: PLC0415
+            compute_payment_understanding,
+            log_payment_understanding,
+        )
+        _accounts = load_tenant_payment_accounts(db, tenant_id=tenant_id)
+        _ev_text_blob = "\n".join(filter(None, [
+            (inbound_metadata or {}).get("caption") or "",
+            (inbound_metadata or {}).get("filename") or "",
+            (inbound_metadata or {}).get("pdf_text_preview") or "",
+            (inbound_metadata or {}).get("vision_text") or "",
+            (inbound_metadata or {}).get("ocr_text") or "",
+        ])).strip()
+        if _accounts.has_accounts and _ev_text_blob:
+            _verdict = compute_payment_understanding(
+                tenant_accounts=_accounts,
+                evidence_text=_ev_text_blob,
+                has_text_only_claim=False,
+            )
+            log_payment_understanding(
+                tenant_id=tenant_id, phone=phone,
+                source="receipt_inbound",
+                verdict=_verdict,
+                extra={"pdf_kind": kind},
+            )
+            _understanding_block = {
+                "status":              _verdict.status,
+                "reason":              _verdict.reason,
+                "matched_iban":        _verdict.matched_iban,
+                "matched_beneficiary": _verdict.matched_beneficiary,
+            }
+            if not _verdict.can_flip_receipt_received:
+                logger.info(
+                    "[ORDER_FLOW_STATE] receipt short-circuit blocked by "
+                    "tenant-account verification tenant=%s phone=*%s "
+                    "payment_understanding_status=%s reason=%s",
+                    tenant_id, (phone[-4:] if phone else ""),
+                    _verdict.status, _verdict.reason,
+                )
+                return None
+    except Exception as _u_exc:  # noqa: BLE001
+        logger.debug(
+            "[ORDER_FLOW_STATE] payment-understanding probe failed "
+            "(non-fatal) tenant=%s err=%s",
+            tenant_id, _u_exc,
+        )
+
     state_patch: Dict[str, Any] = {
         "awaiting_payment_receipt": False,
         "payment_receipt_received": True,
@@ -456,6 +529,7 @@ def maybe_handle_receipt_inbound(
             "kind":             kind,
             "confidence":       (inbound_metadata or {}).get("pdf_kind_confidence")
                                  or (inbound_metadata or {}).get("image_kind_confidence"),
+            "tenant_account_match": _understanding_block,
             "wa_message_id":    (inbound_metadata or {}).get("wa_message_id"),
             "filename":         (inbound_metadata or {}).get("filename"),
             "mime_type":        (inbound_metadata or {}).get("mime_type"),
@@ -569,6 +643,78 @@ def maybe_handle_payment_evidence_inbound(
     # screenshot dropped into an unrelated conversation does NOT
     # mark a non-existent order as paid.
     if has_active_order and awaiting:
+        # ── Tenant-account verification gate (May 2026 #48) ──────
+        # The active-order promotion branch is the riskiest auto-flip:
+        # a customer who explicitly asked for a receipt screenshot
+        # gets the receipt-confirmed state mutation as soon as ANY
+        # bank-related document arrives. When the merchant has
+        # registered accounts AND we have any text to scan, we
+        # verify the IBAN / beneficiary against those accounts
+        # before promoting. Tenants without registered accounts —
+        # or inbounds without extractable text — keep legacy
+        # behaviour to avoid regressing existing flows.
+        _understanding_block: Optional[Dict[str, Any]] = None
+        _block_promotion = False
+        try:
+            from core.tenant_payment_accounts import (  # noqa: PLC0415
+                load_tenant_payment_accounts,
+            )
+            from core.payment_understanding import (  # noqa: PLC0415
+                compute_payment_understanding,
+                log_payment_understanding,
+            )
+            _accounts = load_tenant_payment_accounts(db, tenant_id=tenant_id)
+            _ev_text_blob = "\n".join(filter(None, [
+                md.get("caption") or "",
+                md.get("filename") or "",
+                md.get("pdf_text_preview") or "",
+                md.get("vision_text") or "",
+                md.get("ocr_text") or "",
+            ])).strip()
+            if _accounts.has_accounts and _ev_text_blob:
+                _verdict = compute_payment_understanding(
+                    tenant_accounts=_accounts,
+                    evidence_text=_ev_text_blob,
+                    has_text_only_claim=False,
+                )
+                log_payment_understanding(
+                    tenant_id=tenant_id, phone=phone,
+                    source="active_order_promotion",
+                    verdict=_verdict,
+                    extra={"pe_status": pe_status, "kind": kind},
+                )
+                _understanding_block = {
+                    "status":              _verdict.status,
+                    "reason":              _verdict.reason,
+                    "matched_iban":        _verdict.matched_iban,
+                    "matched_beneficiary": _verdict.matched_beneficiary,
+                }
+                if not _verdict.can_flip_receipt_received:
+                    logger.info(
+                        "[PAYMENT_EVIDENCE] active-order promotion blocked by "
+                        "tenant-account verification tenant=%s phone=*%s "
+                        "payment_understanding_status=%s reason=%s",
+                        tenant_id, (phone[-4:] if phone else ""),
+                        _verdict.status, _verdict.reason,
+                    )
+                    # Fall through: skip auto-promotion entirely.
+                    _block_promotion = True
+        except Exception as _u_exc:  # noqa: BLE001
+            logger.debug(
+                "[PAYMENT_EVIDENCE] payment-understanding probe failed "
+                "(non-fatal) tenant=%s err=%s",
+                tenant_id, _u_exc,
+            )
+
+        if _block_promotion:
+            # Skip the auto-promotion entirely. The legacy soft
+            # reply is intentionally suppressed too — we want the
+            # brain to handle this turn naturally instead of
+            # shipping a hardcoded "send the final receipt" line
+            # that would confuse a customer whose receipt simply
+            # went to the wrong account.
+            return None
+
         logger.info(
             "[PAYMENT_EVIDENCE] active-order promotion → confirmed "
             "tenant=%s phone=*%s pe_status=%s reason=%s product=%r",
@@ -591,6 +737,7 @@ def maybe_handle_payment_evidence_inbound(
                 "mime_type":       md.get("mime_type"),
                 "storage_url":     md.get("storage_url"),
                 "storage_sha256":  md.get("storage_sha256"),
+                "tenant_account_match": _understanding_block,
             },
         }
         # ``_compose_receipt_ack`` includes the structured address
