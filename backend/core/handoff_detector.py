@@ -465,28 +465,43 @@ def is_handoff_request(text: Optional[str]) -> bool:
 HANDOFF_ACK_TEXT_AR = "تمام، راح يتواصل معك أحد فريقنا في أقرب وقت 🌷"
 
 
-# Owner-contact acknowledgement (May 2026 #42).
+# Owner-contact acknowledgement (May 2026 #42 + #43 polish).
 #
 # Used by the pre-brain handoff guard ONLY when the inbound also
 # matches ``is_owner_contact_request`` — i.e. the customer specifically
 # asked to talk to the OWNER / MANAGEMENT / SHOP-OWNER, not just any
-# staff member. The wording follows the merchant's specification:
+# staff member.
 #
-#   "أكيد، ممكن توضح لي سبب التواصل مع المالك؟ وبرفع طلبك
-#    للإدارة/المسؤول المناسب."
+# May 2026 #43 polish — merchant feedback on Tenant 33 was that the
+# initial wording ("ممكن توضح لي سبب التواصل مع المالك؟ وراح أرفع
+# طلبك للإدارة/المسؤول المناسب") was technically correct but felt
+# "support-gateway" formal — closer to a corporate ticketing form
+# than a Saudi WhatsApp store conversation. The new copy:
 #
-# Why a clarifier instead of the generic team copy:
-#   * Owner-contact requests usually have a SPECIFIC reason (شكوى /
-#     اقتراح / طلب خاص). Asking once gives the merchant context to
-#     route faster.
-#   * The customer chose the framing ("المالك" — not "موظف"); echoing
-#     it preserves their intent in the reply.
-#   * The promise "برفع طلبك للإدارة/المسؤول المناسب" is honest:
-#     needs_human + handoff_active are flipped in the same turn so the
-#     merchant inbox sees the request immediately.
+#   "أكيد 🌷
+#    وش الطلب أو المشكلة اللي حاب توصله للمالك؟ وبرفعه للمسؤول
+#    المناسب مباشرة."
+#
+# Why this wording works better:
+#   * "وش الطلب أو المشكلة" reads as Saudi spoken Arabic, not MSA.
+#     The customer is more likely to volunteer the actual reason
+#     instead of typing "أبي أتواصل" again.
+#   * Two concrete buckets ("الطلب أو المشكلة") gently nudge the
+#     customer to commit to one shape — easier for the merchant to
+#     triage than an open "ما هو سبب التواصل؟".
+#   * Newline after "أكيد 🌷" gives the eye a beat — the
+#     acknowledgement reads like a warm answer, not a paragraph.
+#   * "مباشرة" ends with action: we are not punting the customer
+#     through layers of approval, we are forwarding immediately.
+#
+# Functional contract is unchanged: the customer-facing line ships
+# alongside the SAME plumbing as before — needs_human + handoff_active
+# flipped, AI paused for the conversation, merchant inbox sees the
+# "طلب موظف" entry. Only the wording moved.
 HANDOFF_OWNER_ACK_TEXT_AR = (
-    "أكيد 🌷 ممكن توضح لي سبب التواصل مع المالك؟ "
-    "وراح أرفع طلبك للإدارة/المسؤول المناسب."
+    "أكيد 🌷\n"
+    "وش الطلب أو المشكلة اللي حاب توصله للمالك؟ "
+    "وبرفعه للمسؤول المناسب مباشرة."
 )
 
 

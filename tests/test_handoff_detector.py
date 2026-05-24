@@ -363,10 +363,15 @@ def test_owner_contact_request_does_not_fire_on_unrelated_text() -> None:
 
 def test_owner_contact_ack_text_is_clarifier_style() -> None:
     """Pin the production-facing copy so a future refactor can't
-    silently regress to the generic team line. The merchant
-    explicitly asked for a clarifier ('ممكن توضح سبب التواصل؟') so
-    they receive WHY the customer wants the owner alongside the
-    handoff."""
+    silently regress to the generic team line.
+
+    May 2026 #43 polish — merchant feedback on Tenant 33 was that
+    the original wording felt "support-gateway" formal. The new
+    copy uses Saudi spoken Arabic ("وش الطلب أو المشكلة") and ends
+    with action ("مباشرة"). These assertions pin both:
+      * The clarifier-question shape (asks for the reason),
+      * The honest forwarding promise (no invented team).
+    """
     from core.handoff_detector import (
         HANDOFF_ACK_TEXT_AR,
         HANDOFF_OWNER_ACK_TEXT_AR,
@@ -375,14 +380,41 @@ def test_owner_contact_ack_text_is_clarifier_style() -> None:
     assert HANDOFF_OWNER_ACK_TEXT_AR != HANDOFF_ACK_TEXT_AR, (
         "Owner ack must be distinct from the generic team ack"
     )
-    assert "سبب التواصل" in HANDOFF_OWNER_ACK_TEXT_AR
-    assert "المالك" in HANDOFF_OWNER_ACK_TEXT_AR
+    # Must echo the customer's framing — they chose "المالك" not
+    # "موظف". The Arabic preposition prefix ("للمالك" / "بالمالك")
+    # still counts as echoing the framing, so we accept any
+    # standard prefix variant. What we're guarding against is the
+    # ack ever using "موظف / فريقنا / فريق المتجر" instead.
+    assert any(
+        token in HANDOFF_OWNER_ACK_TEXT_AR
+        for token in ("المالك", "للمالك", "بالمالك", "صاحب المحل", "صاحب المتجر")
+    ), "owner ack must echo the المالك / صاحب المحل framing"
+    assert "موظف" not in HANDOFF_OWNER_ACK_TEXT_AR, (
+        "owner ack must not redirect to the generic 'موظف' framing"
+    )
+    # Must ASK for context (clarifier shape — "وش / ما / ممكن"
+    # interrogative). Without the clarifier the message is a bare
+    # ack and the merchant has to ping the customer twice.
+    assert any(
+        marker in HANDOFF_OWNER_ACK_TEXT_AR
+        for marker in ("وش", "ما هو", "ممكن توضح", "ممكن تعطيني")
+    ), "owner ack must ask the customer for the reason"
     # Must promise escalation to management/supervisor — not invent
-    # a human team that doesn't exist.
-    assert (
-        "الإدارة" in HANDOFF_OWNER_ACK_TEXT_AR
-        or "الادارة" in HANDOFF_OWNER_ACK_TEXT_AR
-        or "المسؤول" in HANDOFF_OWNER_ACK_TEXT_AR
+    # a human team that doesn't exist. Allow the standard Arabic
+    # prefix variants (للإدارة / للمسؤول / بالإدارة).
+    assert any(
+        token in HANDOFF_OWNER_ACK_TEXT_AR
+        for token in (
+            "الإدارة", "الادارة", "للإدارة", "للادارة", "بالإدارة", "بالادارة",
+            "المسؤول", "للمسؤول", "بالمسؤول",
+        )
+    ), "owner ack must promise forwarding to management/supervisor"
+    # New polish (#43): copy must NOT start with a long preamble.
+    # The ack reads like a warm one-line answer + a follow-up
+    # question, not a corporate ticket form.
+    first_line = HANDOFF_OWNER_ACK_TEXT_AR.split("\n", 1)[0]
+    assert len(first_line) <= 30, (
+        f"first line should be a short warm ack, got: {first_line!r}"
     )
 
 
