@@ -309,7 +309,16 @@ class TestStickyLiveChatLease:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestHandoffPrecedence:
-    def test_handoff_flag_wins_over_recovery(self):
+    def test_advisory_handoff_flag_does_not_route_to_support(self):
+        """May 2026 #46 (Tenant 33) — the auto-flipped advisory tags
+        (``is_human_handoff`` / ``needs_human`` / ``handoff_active``)
+        no longer trap the conversation in MODE_SUPPORT_ESCALATION on
+        their own. They surface the request to staff via the
+        dashboard's "طلب موظف" filter, but the brain keeps running so
+        the customer's natural product / pricing / shipping
+        follow-ups are answered. Pre-#46 this same setup routed to
+        MODE_SUPPORT_ESCALATION and silenced the brain.
+        """
         db = FakeDB()
         convo = FakeConvo(is_human_handoff=True)
         _seed_lease(convo, mode=MODE_AUTOMATION_RECOVERY)
@@ -320,11 +329,36 @@ class TestHandoffPrecedence:
             text="عندكم خصم؟",
         )
 
-        assert decision.mode == MODE_SUPPORT_ESCALATION
+        assert decision.mode != MODE_SUPPORT_ESCALATION, (
+            "Advisory handoff tag alone must not silence the brain — "
+            "Tenant 33 #46 policy: only manual takeover from the "
+            "staff dashboard should pivot to MODE_SUPPORT_ESCALATION."
+        )
 
-    def test_paused_by_human_also_routes_to_support(self):
+    def test_paused_by_human_routes_to_support(self):
+        """``paused_by_human`` is set on every manual staff reply — a
+        real takeover. The mode resolver MUST pivot to SUPPORT so the
+        brain doesn't talk over the human."""
         db = FakeDB()
         convo = FakeConvo(paused_by_human=True)
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="السلام عليكم",
+        )
+
+        assert decision.mode == MODE_SUPPORT_ESCALATION
+
+    def test_taken_over_at_routes_to_support(self):
+        """``taken_over_at`` is stamped the first time staff engages
+        ("استلام" button or first manual reply) — also a real
+        takeover. New gate added in May 2026 #46."""
+        from datetime import datetime, timezone
+
+        db = FakeDB()
+        convo = FakeConvo()
+        convo.taken_over_at = datetime.now(timezone.utc)
 
         decision = resolve_conversation_mode(
             db,

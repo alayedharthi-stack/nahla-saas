@@ -30,7 +30,7 @@ Design constraints
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from typing import Dict, Iterable, Optional
 
 
 # ── Arabic normalisation ────────────────────────────────────────────
@@ -970,7 +970,97 @@ HANDOFF_POST_PAYMENT_ACK_TEXT_AR = (
 )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Handoff pause policy (May 2026 #46 — Tenant 33)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Background: in May-2026 production we observed that customers who
+# typed "أبي أتواصل مع المالك" — even with the gentle clarifier ack —
+# stopped getting AI replies for the rest of the session. The cause
+# was the pre-brain handoff guard calling ``pause_ai`` on every tier
+# except VAGUE, plus several other handoff branches (loop pause,
+# brain-side handoff, support-escalation, outer-exception handoff)
+# also flipping ``ai_paused = True``. The customer would then ask
+# perfectly normal questions ("ايش طرق التوصيل؟"، "كم سعر الكيلو؟")
+# and the conversation would be silent until staff stepped in.
+#
+# Merchant policy (Tenant 33, May 2026 #46): the AI must NOT pause
+# itself based on customer-side handoff/escalation signals. Only
+# manual pause from the staff dashboard should silence replies.
+# Tags (``needs_human`` / ``handoff_active`` / owner tier / staff
+# notification) remain useful so the dashboard surfaces the request,
+# but they are advisory — not a kill-switch.
+#
+# This helper is the SINGLE place that maps an escalation tier to
+# the pause/flip plumbing the webhook should perform. Inlining the
+# decision here keeps the webhook short and makes the policy
+# trivially unit-testable.
+#
+# IMPORTANT — this policy ONLY governs AI pause/handoff plumbing for
+# customer-side escalation requests. It does NOT change:
+#   * manual pause from the dashboard (``pause_ai`` is still callable)
+#   * loop-guard pause when the customer side itself looks automated
+#   * internal-number / blocklist pause
+#   * rate-limit pause
+# Those are self-protective mechanisms unrelated to handoff intent.
+
+# Tier label used when the customer asked for a generic human ("ابي
+# اتكلم مع موظف") without owner-specific framing. The pre-brain
+# handoff guard hands this to the resolver as the default.
+GENERIC_HANDOFF_TIER = "generic_handoff"
+
+
+def resolve_handoff_pause_policy(
+    tier: Optional[str],
+) -> Dict[str, bool]:
+    """Map an escalation tier to the (do_full_flip, do_create_session,
+    do_pause_ai) tuple the webhook applies after sending the ack.
+
+    Returns a plain dict with three boolean keys so the call site
+    keeps its current shape:
+
+        policy = resolve_handoff_pause_policy(tier)
+        _do_full_handoff_flip = policy["do_full_handoff_flip"]
+        _do_create_session    = policy["do_create_session"]
+        _do_pause_ai          = policy["do_pause_ai"]
+
+    Tier semantics (May 2026 #46 policy):
+
+      * VAGUE              — clarifier ack only. Soft ``needs_human``
+                             flag, no full flip, no session, AI alive.
+      * CLEAR              — full flip + session so the dashboard
+                             shows a real "طلب موظف" entry. AI alive.
+      * COMPLAINT          — full flip + session so staff sees a
+                             priority entry. AI alive (the customer
+                             may keep asking unrelated questions
+                             while staff prepares to follow up).
+      * GENERIC            — full flip + session. AI alive.
+      * unknown / None     — falls back to GENERIC behaviour.
+
+    Per Tenant 33 #46 — every tier returns ``do_pause_ai=False``.
+    Manual pause from the dashboard is the ONLY path that flips
+    ``Conversation.ai_paused``.
+    """
+    tier_norm = (tier or "").strip() or GENERIC_HANDOFF_TIER
+
+    if tier_norm == OWNER_TIER_VAGUE:
+        return {
+            "do_full_handoff_flip": False,
+            "do_create_session":    False,
+            "do_pause_ai":          False,
+        }
+
+    # CLEAR / COMPLAINT / GENERIC / unknown — all share the same
+    # plumbing now: surface to staff but never silence the AI.
+    return {
+        "do_full_handoff_flip": True,
+        "do_create_session":    True,
+        "do_pause_ai":          False,
+    }
+
+
 __all__ = [
+    "GENERIC_HANDOFF_TIER",
     "HANDOFF_ACK_TEXT_AR",
     "HANDOFF_OWNER_ACK_TEXT_AR",
     "HANDOFF_OWNER_COMPLAINT_TEXT_AR",
@@ -985,4 +1075,5 @@ __all__ = [
     "is_owner_contact_request",
     "is_post_payment_modification_request",
     "normalize_arabic_text",
+    "resolve_handoff_pause_policy",
 ]

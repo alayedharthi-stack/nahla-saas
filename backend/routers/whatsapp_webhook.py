@@ -4511,30 +4511,32 @@ async def _handle_merchant_message(
             )
 
     if _is_handoff:
-        # ── May 2026 #44 — Owner-contact escalation TIERS ────────────
-        # Three tiers govern how aggressively we hand off + whether
-        # we pause the AI:
+        # ── May 2026 #44 + #46 — Owner-contact escalation TIERS ──────
+        # Tier resolution is unchanged from #44; the pause/flip
+        # decision is now centralised in
+        # ``core.handoff_detector.resolve_handoff_pause_policy``
+        # which encodes the Tenant-33 #46 policy:
         #
-        #   * VAGUE     — customer typed "أبي أكلم المالك" with no
-        #                 stated reason. Send the clarifier ack, set
-        #                 only ``needs_human=True`` so the merchant
-        #                 inbox still sees the entry, and keep AI
-        #                 alive. The customer can answer the
-        #                 clarifier and the brain handles the rest.
+        #   "الإيقاف الكامل للذكاء يجب أن يكون يدويًا فقط من الموظف
+        #    داخل لوحة نحلة."
         #
-        #   * CLEAR     — owner-contact + stated reason. Flip the
-        #                 FULL handoff plumbing, alert the merchant,
-        #                 BUT keep AI alive so parallel customer
-        #                 questions still get answered.
+        # Concretely:
+        #   * VAGUE     — clarifier ack + soft needs_human flag.
+        #                 No full flip, no session, AI alive.
+        #   * CLEAR     — full flip + session so the dashboard's
+        #                 "طلب موظف" filter sees the entry. AI alive.
+        #   * COMPLAINT — full flip + session, apologetic ack. AI
+        #                 alive (the customer often asks unrelated
+        #                 product questions while waiting; we must
+        #                 not silence the brain).
+        #   * generic   — full flip + session. AI alive.
         #
-        #   * COMPLAINT — owner-contact + complaint signal
-        #                 (احتيال / غش / استرجاع / اشتكي / …). Full
-        #                 handoff + PAUSE AI + apologetic ack.
-        #
-        # For non-owner handoff (generic موظف/مختص), behaviour is
-        # UNCHANGED — full handoff + pause AI + canonical ack.
+        # ALL tiers return ``do_pause_ai=False``. Manual pause from
+        # the dashboard is the only path that still silences the AI.
         from core.handoff_detector import (  # noqa: PLC0415
             classify_owner_escalation_tier as _classify_owner_tier,
+            resolve_handoff_pause_policy as _resolve_handoff_policy,
+            GENERIC_HANDOFF_TIER as _GENERIC_HANDOFF_TIER,
             OWNER_TIER_CLEAR as _OWNER_TIER_CLEAR,
             OWNER_TIER_COMPLAINT as _OWNER_TIER_COMPLAINT,
             OWNER_TIER_VAGUE as _OWNER_TIER_VAGUE,
@@ -4542,43 +4544,21 @@ async def _handle_merchant_message(
             HANDOFF_OWNER_COMPLAINT_TEXT_AR as _HANDOFF_OWNER_COMPLAINT_TEXT,
         )
 
-        # Defaults for the non-owner handoff path — preserves the
-        # pre-#44 behaviour (full flip + pause + generic ack).
-        _ho_tier               = "generic_handoff"
-        _do_full_handoff_flip  = True
-        _do_create_session     = True
-        _do_pause_ai           = True
+        _ho_tier = _GENERIC_HANDOFF_TIER
 
         if _is_owner_contact:
             _ho_tier = _classify_owner_tier(text or "")
             if _ho_tier == _OWNER_TIER_VAGUE:
                 _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_ACK_TEXT
-                # SOFT path — clarifier only. Don't flip the full
-                # status="human" / handoff_active set; only mark
-                # needs_human=True so the merchant inbox shows a
-                # low-priority entry. Don't create a handoff
-                # session yet (the merchant tab would treat that
-                # as a confirmed escalation). Keep AI alive so the
-                # customer's NEXT inbound flows through the brain.
-                _do_full_handoff_flip = False
-                _do_create_session    = False
-                _do_pause_ai          = False
             elif _ho_tier == _OWNER_TIER_CLEAR:
                 _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_HANDOFF_TEXT
-                # FULL handoff plumbing fires, but AI stays alive.
-                # The customer can keep asking shipping/product
-                # questions while the merchant prepares to address
-                # the owner-level request offline.
-                _do_full_handoff_flip = True
-                _do_create_session    = True
-                _do_pause_ai          = False
             elif _ho_tier == _OWNER_TIER_COMPLAINT:
                 _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_COMPLAINT_TEXT
-                # Full handoff + pause AI. We don't want the AI to
-                # keep "selling" while a grievance is open.
-                _do_full_handoff_flip = True
-                _do_create_session    = True
-                _do_pause_ai          = True
+
+        _ho_policy             = _resolve_handoff_policy(_ho_tier)
+        _do_full_handoff_flip  = _ho_policy["do_full_handoff_flip"]
+        _do_create_session     = _ho_policy["do_create_session"]
+        _do_pause_ai           = _ho_policy["do_pause_ai"]
 
         logger.info(
             "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
@@ -5297,13 +5277,16 @@ async def _handle_merchant_message(
                         tenant_id, to, _last_at,
                         int((_now_utc - _last_at).total_seconds()),
                     )
-                    # Still ensure AI stays paused so subsequent inbound
-                    # turns don't loop back into this branch.
-                    try:
-                        from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
-                        _pause_ai(db, convo, reason=_R_HOFF, by="system:human_handoff")
-                    except Exception as _hoff_exc:
-                        logger.debug("[ai_pause] handoff pause failed: %s", _hoff_exc)
+                    # May 2026 #46 — no automatic pause_ai on
+                    # customer-side escalation. The cooldown stamp
+                    # already prevents the canonical handoff line
+                    # from being replayed within 30 minutes; the
+                    # mode resolver no longer routes back into this
+                    # branch on subsequent inbounds unless staff has
+                    # actively taken over (paused_by_human /
+                    # taken_over_at), so the brain handles natural
+                    # follow-up questions ("ايش طرق التوصيل؟")
+                    # without being silenced.
                     logger.info(
                         "[OUTBOUND] tenant=%s to=%s source=handoff_dedup trigger=inbound "
                         "intent=human_handoff handoff_triggered=true dedup_blocked=true reply_len=0",
@@ -5339,13 +5322,11 @@ async def _handle_merchant_message(
                         logger.debug("[handoff] cooldown stamp failed: %s", _stamp_exc)
                 else:
                     logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
-                # Pause AI for this conversation so subsequent inbound
-                # messages don't keep replaying the same handoff acknowledgement.
-                try:
-                    from core.ai_pause_guard import pause_ai as _pause_ai, REASON_HUMAN_HANDOFF as _R_HOFF  # noqa: PLC0415
-                    _pause_ai(db, convo, reason=_R_HOFF, by="system:human_handoff")
-                except Exception as _hoff_exc:
-                    logger.debug("[ai_pause] handoff pause failed: %s", _hoff_exc)
+                # May 2026 #46 — no automatic pause_ai on
+                # customer-side escalation. The cooldown stamp
+                # prevents replay; subsequent inbounds flow through
+                # the brain (mode resolver only pivots to support
+                # escalation when staff has actually taken over).
                 logger.info(
                     "[OUTBOUND] tenant=%s to=%s source=support_escalation trigger=inbound "
                     "intent=human_handoff handoff_triggered=true dedup_blocked=false "
@@ -5755,17 +5736,12 @@ async def _handle_merchant_message(
                             "needs_human=True handoff_active=True during_active_order=%s",
                             tenant_id, to, _has_active_order,
                         )
-                        # Pause AI so subsequent inbounds don't keep
-                        # producing brain handoff replies. Mirrors the
-                        # support-escalation branch's behaviour.
-                        try:
-                            from core.ai_pause_guard import (  # noqa: PLC0415
-                                pause_ai as _pause_ai,
-                                REASON_HUMAN_HANDOFF as _R_HOFF,
-                            )
-                            _pause_ai(db, convo, reason=_R_HOFF, by="brain:handoff")
-                        except Exception as _ph_exc:
-                            logger.debug("[ai_pause] brain handoff pause failed: %s", _ph_exc)
+                        # May 2026 #46 — no automatic pause_ai on
+                        # brain-driven handoff. The dashboard sees
+                        # the handoff session + needs_human badge;
+                        # the brain keeps responding to subsequent
+                        # natural questions until staff explicitly
+                        # takes over.
                     except Exception as ho_exc:
                         logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
 
@@ -8528,22 +8504,13 @@ async def _handle_merchant_message(
                             _outer_conv.needs_human       = True
                             _outer_conv.handoff_active    = True
                             db.flush()
-                        try:
-                            from core.ai_pause_guard import (  # noqa: PLC0415
-                                pause_ai as _outer_pause_ai,
-                                REASON_HUMAN_HANDOFF as _OUTER_R_HOFF,
-                            )
-                            if _outer_conv is not None:
-                                _outer_pause_ai(
-                                    db, _outer_conv,
-                                    reason=_OUTER_R_HOFF,
-                                    by="webhook:outer_exc_handoff",
-                                )
-                        except Exception as _outer_pause_exc:  # noqa: BLE001
-                            logger.debug(
-                                "[Merchant] outer-exc handoff pause failed: %s",
-                                _outer_pause_exc,
-                            )
+                        # May 2026 #46 — no automatic pause_ai on the
+                        # outer-exception handoff path either. The
+                        # advisory flags above surface the request to
+                        # staff (dashboard "طلب موظف" filter); the
+                        # brain keeps responding to follow-up questions
+                        # on the next inbound. Manual pause from the
+                        # dashboard remains the only kill-switch.
                         # Canonical handoff copy so the customer
                         # doesn't think the request was lost. We use
                         # the same wording as the brain's `T.handoff`
