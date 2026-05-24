@@ -2426,6 +2426,31 @@ async def _dispatch_message(
         phone_number_id, sender, msg_id, msg_type, _text_preview,
     )
 
+    # ── [INBOUND_MEDIA_RAW] — May 2026 #41 ────────────────────────────
+    # Single grep-able line for EVERY inbound payload before any
+    # routing / dedup / tenant-resolution gate fires. Surfaces the
+    # exact shape that 360dialog / Meta delivered so on-call can
+    # answer "did the message even reach the webhook?" with a single
+    # log query, no DB hit required. Never raises — this is pure
+    # observability and must not affect message delivery.
+    try:
+        _media_block = msg.get(msg_type) if isinstance(msg.get(msg_type), dict) else None
+        _raw_caption = (_media_block or {}).get("caption") or ""
+        logger.info(
+            "[INBOUND_MEDIA_RAW] phone_number_id=%s from=%s msg_id=%s "
+            "msg_type=%s mime=%s media_id=%s has_caption=%s "
+            "has_text_block=%s payload_keys=%s",
+            phone_number_id, sender, msg_id or "-",
+            msg_type or "-",
+            (_media_block or {}).get("mime_type") or "-",
+            (_media_block or {}).get("id") or "-",
+            bool(_raw_caption.strip()),
+            bool(msg.get("text")),
+            ",".join(sorted(msg.keys())),
+        )
+    except Exception:
+        pass
+
     if not phone_number_id:
         logger.error(
             "[Webhook] DROPPED — phone_number_id missing from metadata. "
@@ -3028,19 +3053,77 @@ async def _dispatch_message(
                 resolved_tenant_id, sender, _oc_exc,
             )
 
-        normalized_inbound = await normalize_whatsapp_inbound(
-            db=db,
-            wa_conn=wa_conn,
-            tenant_id=resolved_tenant_id,
-            message=msg,
-            order_context=_order_context,
-        )
+        # ── Normalize with safe-stub fallback (May 2026 #41) ────────
+        # Any unhandled exception inside the normalizer must NOT
+        # silently drop the inbound — pre-fix, a normalizer crash
+        # bubbled up the dispatch try/except and the message
+        # vanished from the merchant inbox with only a warning log.
+        # We catch + persist a minimal placeholder so the
+        # conversation row always exists; the merchant can then
+        # ask the customer to retype while ops triages the
+        # exception offline.
+        try:
+            normalized_inbound = await normalize_whatsapp_inbound(
+                db=db,
+                wa_conn=wa_conn,
+                tenant_id=resolved_tenant_id,
+                message=msg,
+                order_context=_order_context,
+            )
+        except Exception as _norm_exc:  # noqa: BLE001
+            logger.error(
+                "[INBOUND_MEDIA_ERROR] normalize_whatsapp_inbound raised | "
+                "tenant_id=%s sender=%s msg_type=%s wa_msg_id=%s err=%s",
+                resolved_tenant_id, sender, msg_type, msg_id or "-", _norm_exc,
+                exc_info=True,
+            )
+            _persist_inbound_only(
+                db=db,
+                tenant_id=resolved_tenant_id,
+                sender=sender or "",
+                msg_type=msg_type or "",
+                normalized_type="error",
+                inbound_metadata={
+                    "normalizer_error": f"{type(_norm_exc).__name__}: {str(_norm_exc)[:200]}",
+                    "media_id":         (msg.get(msg_type) or {}).get("id") if isinstance(msg.get(msg_type), dict) else None,
+                    "mime_type":        (msg.get(msg_type) or {}).get("mime_type") if isinstance(msg.get(msg_type), dict) else None,
+                    "caption":          (msg.get(msg_type) or {}).get("caption") if isinstance(msg.get(msg_type), dict) else None,
+                },
+                wa_msg_id=msg_id or None,
+                drop_reason="normalizer_exception",
+            )
+            return
         logger.info(
             "[TRACE][3/6] INBOUND_NORMALIZED | tenant_id=%s sender=%s normalized_type=%s should_process=%s",
             resolved_tenant_id, sender,
             normalized_inbound.normalized_type,
             normalized_inbound.should_process,
         )
+        # Structured equivalent of the trace line above with the
+        # full media metadata surface (mime / caption / media_id)
+        # in a single grep-able shape. The TRACE line stays for
+        # backward-compatible dashboards; this one is the May 2026
+        # #41 audit contract.
+        try:
+            _norm_meta_for_log = normalized_inbound.metadata or {}
+            logger.info(
+                "[INBOUND_MEDIA_NORMALIZED] tenant_id=%s sender=%s "
+                "msg_type=%s normalized_type=%s should_process=%s "
+                "has_text=%s text_chars=%d has_caption=%s "
+                "fallback_reply=%s mime=%s media_id=%s wa_msg_id=%s",
+                resolved_tenant_id, sender, msg_type or "-",
+                normalized_inbound.normalized_type or "-",
+                normalized_inbound.should_process,
+                bool((normalized_inbound.text or "").strip()),
+                len(normalized_inbound.text or ""),
+                bool((_norm_meta_for_log.get("caption") or "").strip()),
+                bool(normalized_inbound.fallback_reply_ar),
+                _norm_meta_for_log.get("mime_type") or "-",
+                _norm_meta_for_log.get("media_id") or "-",
+                msg_id or "-",
+            )
+        except Exception:
+            pass
 
         # ── Handle interactive button replies ──────────────────────────────────────
         if normalized_inbound.normalized_type == "interactive":
@@ -3233,22 +3316,47 @@ async def _dispatch_message(
                 )
             except Exception as _obs_exc:  # noqa: BLE001
                 logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+            # May 2026 #41 — persist a placeholder inbound row so
+            # the merchant inbox lists the message even when the AI
+            # could not process it. Sticker / reaction / unknown
+            # types previously vanished from the conversation list;
+            # the merchant had no way to see "the customer DID
+            # send something at 1:05 PM" without raw provider logs.
+            _persist_inbound_only(
+                db=db,
+                tenant_id=resolved_tenant_id,
+                sender=sender or "",
+                msg_type=msg_type or "",
+                normalized_type=normalized_inbound.normalized_type or "",
+                inbound_metadata=normalized_inbound.metadata,
+                wa_msg_id=msg_id or None,
+                drop_reason=f"unsupported_type:{normalized_inbound.normalized_type}",
+                placeholder_body=f"[رسالة وسائط: {normalized_inbound.normalized_type}]",
+            )
             return
 
         text = normalized_inbound.text.strip()
         # ── Media-without-text fallback ─────────────────────────────
-        # The normalizer detected an audio/image but couldn't extract
-        # any usable text (Whisper failed, vision failed, missing
-        # caption, etc.) AND there's a canonical Arabic fallback
-        # message it wants us to send. We MUST NOT call the brain in
-        # that case — we'd spend tokens generating a generic apology
-        # while losing the structured metadata that explains why. The
-        # fallback reply is short, kind, and asks the customer to
-        # retype — exactly the spec's required behaviour.
+        # The normalizer detected an audio/image/video/document but
+        # couldn't extract any usable text (Whisper failed, vision
+        # failed, missing caption, etc.) AND there's a canonical
+        # Arabic fallback message it wants us to send. We MUST NOT
+        # call the brain in that case — we'd spend tokens generating
+        # a generic apology while losing the structured metadata that
+        # explains why. The fallback reply is short, kind, and asks
+        # the customer to retype — exactly the spec's required
+        # behaviour.
+        #
+        # May 2026 #41: ``video`` added to the fallback set defensively.
+        # The normalizer normally builds non-empty Arabic framing text
+        # for inbound video, but if a future regression ships an empty
+        # transcript path the fallback handler (which persists the
+        # inbound row + sends a courtesy reply) is a safer landing
+        # than the empty-text drop further down.
         if (
             not text
             and normalized_inbound.fallback_reply_ar
-            and normalized_inbound.normalized_type in {"audio", "image", "document"}
+            and normalized_inbound.normalized_type in {"audio", "image", "document", "video"}
             and not _is_platform_tenant(db, resolved_tenant_id)
         ):
             logger.info(
@@ -3293,6 +3401,22 @@ async def _dispatch_message(
                 )
             except Exception as _obs_exc:  # noqa: BLE001
                 logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+            # May 2026 #41 — never let a media-only inbound vanish
+            # from the merchant inbox. This branch fires when the
+            # normalizer produced no text AND no fallback (or for
+            # platform tenants which the fallback skips). Persist a
+            # structured placeholder so the conversation row exists,
+            # then return without spending brain tokens.
+            _persist_inbound_only(
+                db=db,
+                tenant_id=resolved_tenant_id,
+                sender=sender or "",
+                msg_type=msg_type or "",
+                normalized_type=normalized_inbound.normalized_type or "",
+                inbound_metadata=normalized_inbound.metadata,
+                wa_msg_id=msg_id or None,
+                drop_reason="empty_text_no_fallback",
+            )
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────
@@ -4032,6 +4156,89 @@ async def _send_cod_followup_message(
         phone_id=phone_id, to=to, text=body,
         _tenant_id=_tenant_id, _db=_db,
     )
+
+
+def _persist_inbound_only(
+    *,
+    db,
+    tenant_id: int,
+    sender: str,
+    msg_type: str,
+    normalized_type: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    wa_msg_id: Optional[str] = None,
+    drop_reason: str = "",
+    placeholder_body: str = "[رسالة وسائط بدون نص قابل للقراءة]",
+) -> bool:
+    """Best-effort persist of an inbound message that did NOT reach the
+    brain — to guarantee EVERY inbound row that 360dialog/Meta hand
+    us appears in the merchant's conversation list, even when the
+    normalizer returned no usable text or the type fell outside the
+    brain's allow-list.
+
+    This is the single backstop the May 2026 #41 audit exposed:
+    pre-fix, an image / video / sticker without caption could be
+    dropped silently at the type-allow-list guard or the empty-text
+    guard with NO conversation row, leaving the merchant convinced
+    the bot "ignored" the customer when the row was simply never
+    written.
+
+    Contract:
+
+      1. Look up / create the dashboard conversation so the merchant
+         sees the message in the inbox.
+      2. Persist a single INBOUND ``MessageEvent`` carrying the full
+         normalized metadata (storage_url, transcript_status, mime,
+         caption, etc.) plus a ``drop_reason`` field so the dashboard
+         media-debug pane can explain "why no AI reply" without
+         re-running anything.
+      3. Emit a structured ``[INBOUND_MEDIA_STORE]`` log line on
+         success and a ``[INBOUND_MEDIA_ERROR]`` on any failure.
+      4. NEVER raise — the webhook ack loop must complete regardless
+         of bookkeeping failures here.
+
+    Returns ``True`` when the inbound row was persisted, ``False``
+    otherwise. The caller can use the return value to decide whether
+    to send a courtesy reply (we deliberately do not couple sending
+    to persistence — a failed persist must not silence the bot).
+    """
+    meta = dict(inbound_metadata or {})
+    has_caption = bool((meta.get("caption") or "").strip())
+    mime_type = (meta.get("mime_type") or "")
+    media_id = meta.get("media_id") or ""
+    try:
+        from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+        convo = _get_or_create_conversation(db, tenant_id, sender)
+        StateManager.save_message(
+            db, sender, placeholder_body, "inbound",
+            conversation_id=convo.id,
+            tenant_id=tenant_id,
+            extra_metadata={
+                "normalized_inbound": meta,
+                "media_persist_only": True,
+                "drop_reason":        drop_reason or "",
+                "wa_message_id":      wa_msg_id or "",
+            },
+        )
+        logger.info(
+            "[INBOUND_MEDIA_STORE] tenant_id=%s sender=%s msg_type=%s "
+            "normalized_type=%s mime=%s media_id=%s has_caption=%s "
+            "wa_msg_id=%s convo_id=%s drop_reason=%s persisted=True",
+            tenant_id, sender, msg_type, normalized_type,
+            mime_type or "-", media_id or "-", has_caption,
+            wa_msg_id or "-", getattr(convo, "id", None),
+            drop_reason or "-",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[INBOUND_MEDIA_ERROR] tenant_id=%s sender=%s msg_type=%s "
+            "normalized_type=%s wa_msg_id=%s drop_reason=%s persisted=False "
+            "err=%s",
+            tenant_id, sender, msg_type, normalized_type,
+            wa_msg_id or "-", drop_reason or "-", exc,
+        )
+        return False
 
 
 async def _handle_media_fallback(
