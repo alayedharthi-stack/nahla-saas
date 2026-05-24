@@ -6798,6 +6798,7 @@ async def _handle_merchant_message(
                 apply_store_link_safety_net as _sn_store_link,
                 apply_location_safety_net as _sn_location,
                 apply_delivery_info_context_net as _sn_delivery_ctx,
+                apply_product_reask_guard as _sn_product_reask,
                 apply_clear_intent_fallback_net as _sn_clear_intent,
                 apply_outbound_artifact_guard as _sn_artifact_guard,
             )
@@ -7026,6 +7027,48 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[SAFETY_NET:delivery_info_context] failed tenant=%s err=%s",
                     tenant_id, _dle,
+                )
+
+            # ── Product re-ask guard (May 2026 #47) ─────────────────
+            # Recurring Tenant 33 regression: customer confirmed
+            # product+price+quantity, bot asked for location, customer
+            # sent a Google Maps URL → brain replied "اختر المنتج
+            # اللي تبغاه من القائمة". This guard rewrites that single
+            # contradictory turn into a short order-continuation ACK.
+            # Pure text rewrite — no order-state mutation. Three
+            # independent signals must align (product re-ask phrase
+            # in the reply + location signal in the inbound + active
+            # order in recent history) so the guard is impossible to
+            # over-fire.
+            try:
+                _prg = _sn_product_reask(
+                    customer_msg=text or "",
+                    reply_text=reply or "",
+                    history=history,
+                )
+                if _prg.fired and _prg.new_reply:
+                    reply = _prg.new_reply
+                if _prg.fired or _prg.skipped_reason not in {
+                    "flag_disabled",
+                    "empty_reply",
+                    "reply_not_product_reask",
+                    "inbound_not_location",
+                    "no_active_order_context",
+                }:
+                    _payload = {
+                        "event":             "safety_net",
+                        "tenant_id":         tenant_id,
+                        "conversation_id":   getattr(convo, "id", None),
+                        **_prg.to_log_dict(),
+                    }
+                    logger.info(
+                        "[SAFETY_NET:product_reask_guard] "
+                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                    )
+            except Exception as _prge:  # noqa: BLE001
+                logger.warning(
+                    "[SAFETY_NET:product_reask_guard] failed tenant=%s err=%s",
+                    tenant_id, _prge,
                 )
 
             # ── Outbound artifact guard (May 2026 #37 / D2) ──────────

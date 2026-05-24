@@ -3290,6 +3290,294 @@ def apply_delivery_info_context_net(
 
 
 # ══════════════════════════════════════════════════════════════════
+# 6.5 Product Re-Ask Guard (May 2026 #47 — Tenant 33)
+# ══════════════════════════════════════════════════════════════════
+#
+# Recurring regression on Tenant 33 (re-reported May 25 KSA after
+# multiple "fixed-then-comes-back" cycles). The full transcript:
+#
+#   Customer: "أبي نص كيلو طلح بلدي"
+#   Bot:      "نص كيلو طلح بلدي = 193 ريال"
+#   Bot:      "أرسل لي موقعك على قوقل ماب أو الرمز الوطني المختصر
+#              عشان نجهز الشحنة"
+#   Customer: <Google Maps URL>
+#   Bot:      "وصلني موقعك. قبل ما نكمل، اختر المنتج اللي تبغاه
+#              من القائمة…"      ← BUG: product was already chosen!
+#
+# Why ``apply_delivery_info_context_net`` doesn't catch this on its
+# own: the bot's reply ISN'T dismissive in the "خارج تخصصي" /
+# "didn't understand" sense — it's actually a "re-ask the product"
+# loop the brain emits when its in-turn slot extractor fails to
+# carry the product across the address-collection turn. The
+# delivery-info net only rewrites dismissive replies, so this
+# regression slipped through the previous safety chain.
+#
+# Architectural fix (smallest possible): a dedicated narrow guard
+# that fires ONLY when ALL three signals line up:
+#
+#   1. The bot's CURRENT reply contains a "re-ask product" phrase
+#      ("اختر المنتج", "أي منتج", "حدد المنتج", "من القائمة", …).
+#   2. The customer's CURRENT inbound carries a location signal
+#      (Google Maps URL, geo coords, national short code,
+#      "العنوان الوطني" / "موقعي" / "موقعك").
+#   3. The recent history (last 3 outbounds) carries an
+#      active-order marker (price+currency, quantity confirm,
+#      checkout cue) — the existing ``_history_in_active_order_context``
+#      helper. This is the proof that product+price+quantity were
+#      already discussed.
+#
+# All three together is the ONLY combination that proves the
+# brain is contradicting its own recent history. We deliberately
+# do NOT mutate the order state — we only rewrite the outbound
+# text into an order-continuation ACK so the customer doesn't see
+# the contradictory "اختر المنتج" line. The next turn flows
+# through the regular pipeline with the slot extractor working
+# from the now-fresh history.
+#
+# This is the THIRD time the same class of bug has surfaced
+# ("product context lost across address-collection turn") under
+# slightly different brain behaviours — so we lock the regression
+# down with a guard that doesn't depend on the brain's internal
+# slot extractor working perfectly.
+
+_PRODUCT_REASK_MARKERS: tuple = (
+    # Direct "pick the product" re-asks. Normalised forms — the
+    # caller passes the reply through ``_normalise_for_match``
+    # before scanning so ة → ه, ي → ي, etc. are already collapsed.
+    "اختر المنتج",
+    "اختاري المنتج",
+    "اختار المنتج",
+    "اخترالمنتج",
+    "حدد المنتج",
+    "حددي المنتج",
+    "حدد لي المنتج",
+    "حددي لي المنتج",
+    "اسم المنتج",
+    "وش اسم المنتج",
+    "ايش اسم المنتج",
+    "وش المنتج",
+    "ايش المنتج",
+    "اي منتج",
+    "أي منتج",
+    "اي منتج تبغ",
+    "أي منتج تبغ",
+    "اي منتج تبي",
+    "أي منتج تبي",
+    "اي منتج تحب",
+    "أي منتج تحب",
+    "اي منتج تريد",
+    "أي منتج تريد",
+    # "من القائمة" / "من قائمة المنتجات" — this is the literal
+    # phrase from the screenshot. Always paired with one of the
+    # verbs above; we still match it stand-alone for safety.
+    "من القائمه",
+    "من قائمه",
+    "من قائمه المنتجات",
+    "اختر من القائمه",
+    "اختار من القائمه",
+    "اختر من المنتجات",
+    "اختار من المنتجات",
+    # "تبغى تطلب أيش" / "وش تبغى" with product hint — caught via
+    # "وش المنتج" / "ايش المنتج" already.
+)
+
+
+# Location-signal markers in the customer's CURRENT inbound that
+# prove they're answering an address/location ask — independent of
+# whether the slot extractor caught structured fields. Used as a
+# belt-and-braces check on top of ``_extract_delivery_signals``.
+_CUSTOMER_LOCATION_INBOUND_MARKERS: tuple = (
+    # URL fingerprints — these survive ``_normalise_for_match``
+    # because the function normalises Arabic only.
+    "maps.google",
+    "google.com/maps",
+    "goo.gl/maps",
+    "maps.app.goo.gl",
+    "maps.app.gl",
+    "/maps/",
+    "geo:",
+    # National address code prefixes (Saudi short address is 4
+    # letters + 4 digits, e.g. "RAKB1234" — we also match the
+    # human prefix the merchant requests).
+    "العنوان الوطني",
+    "الرمز الوطني",
+    "الرمز المختصر",
+    "العنوان المختصر",
+    # Self-references that are nearly always location-shaped when
+    # they arrive after a "send me your location" ask.
+    "موقعي",
+    "موقعك",  # bot may quote it back — but appears in inbound too
+    "هذا موقعي",
+    "هذي موقعي",
+    "هذا الموقع",
+    "ذا موقعي",
+)
+
+
+def _customer_inbound_has_location(customer_msg: str) -> bool:
+    """True when the customer's inbound carries a location signal —
+    Maps URL, geo coords, national short code, or an explicit
+    "موقعي / العنوان الوطني" mention.
+
+    Two-layer check: first a substring scan over the inbound
+    markers (catches the URL shapes), then the structured slot
+    extractor used by the delivery-info net (catches normalised
+    coords / short codes that the substring scan would miss).
+    Never raises.
+    """
+    if not customer_msg:
+        return False
+    raw = str(customer_msg)
+    raw_lower = raw.lower()
+    norm = _normalise_for_match(raw)
+    for m in _CUSTOMER_LOCATION_INBOUND_MARKERS:
+        if m in norm or m.lower() in raw_lower:
+            return True
+    # Structured signals via the existing extractor.
+    try:
+        slots = _extract_delivery_signals(raw)
+    except Exception:  # noqa: BLE001
+        slots = {}
+    return bool(
+        slots.get("google_maps_url")
+        or slots.get("short_address_code")
+        or (slots.get("latitude") is not None and slots.get("longitude") is not None)
+    )
+
+
+def _reply_looks_like_product_reask(reply_text: str) -> bool:
+    """True when the bot's reply is asking the customer to pick a
+    product — either with an explicit "اختر المنتج" phrasing or a
+    "من القائمة" cue. The marker list is intentionally narrow so
+    we don't over-fire on legitimate up-sell prompts ("هل تحب
+    تضيف منتج آخر؟" stays untouched)."""
+    if not reply_text:
+        return False
+    norm = _normalise_for_match(reply_text)
+    return any(m in norm for m in _PRODUCT_REASK_MARKERS)
+
+
+@dataclass
+class ProductReaskGuardResult:
+    fired: bool = False
+    reason: str = ""
+    skipped_reason: str = ""
+    has_maps_url: bool = False
+    has_short_address: bool = False
+    new_reply: str = ""
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        return {
+            "kind":               "product_reask_guard",
+            "fired":              self.fired,
+            "reason":             self.reason or self.skipped_reason,
+            "has_maps_url":       self.has_maps_url,
+            "has_short_address":  self.has_short_address,
+        }
+
+
+# Feature flag — defaults ON. Same convention as the other safety
+# nets so ops can flip the switch without a redeploy if a hot
+# regression emerges.
+def product_reask_guard_enabled() -> bool:
+    raw = os.environ.get("PRODUCT_REASK_GUARD_ENABLED", "true")
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+# Order-continuation ACK copies. Two variants — one when the
+# customer also sent name+phone (data is complete enough), one
+# generic when only the location arrived. Both NEVER promise a
+# specific shipping carrier or price; that comes from the
+# merchant's KB / catalogue on the next turn.
+_ORDER_CONTINUATION_ACK_LOCATION_ONLY = (
+    "وصلني موقعك 🌷 باقي نحتاج الاسم ورقم الجوال لو ما وصلوني، "
+    "وبنجهز الطلب ونرسل لك طريقة الدفع."
+)
+_ORDER_CONTINUATION_ACK_LOCATION_FULL = (
+    "وصلني موقعك 🌷 بيانات الشحن اكتملت، بنجهز الطلب ونرسل لك "
+    "طريقة الدفع/التأكيد."
+)
+
+
+def apply_product_reask_guard(
+    *,
+    customer_msg: str,
+    reply_text: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> ProductReaskGuardResult:
+    """Block the brain from asking the customer to re-pick a product
+    when (a) the brain's reply is a product re-ask, (b) the
+    customer's inbound is a location/address signal, and
+    (c) the recent history shows an active order (product +
+    price/quantity already confirmed).
+
+    Pure text rewrite — never mutates order state, never deletes
+    markers. The next turn flows through the regular slot extractor
+    with the brain's history caching freshly invalidated.
+
+    Returns a :class:`ProductReaskGuardResult` with ``fired=True``
+    and ``new_reply`` populated when the rewrite should happen. The
+    webhook substitutes ``new_reply`` for the outbound text in that
+    case; otherwise the LLM's reply ships unchanged.
+    """
+    result = ProductReaskGuardResult()
+
+    if not product_reask_guard_enabled():
+        result.skipped_reason = "flag_disabled"
+        return result
+
+    if not reply_text or not reply_text.strip():
+        result.skipped_reason = "empty_reply"
+        return result
+
+    if not _reply_looks_like_product_reask(reply_text):
+        result.skipped_reason = "reply_not_product_reask"
+        return result
+
+    if not _customer_inbound_has_location(customer_msg or ""):
+        # Customer didn't actually send a location — the brain may
+        # be legitimately asking which product they want. Stay
+        # out of the way.
+        result.skipped_reason = "inbound_not_location"
+        return result
+
+    if not _history_in_active_order_context(history):
+        # No active-order context in recent outbounds — without
+        # proof that product+price/quantity were just discussed
+        # we can't claim the brain is contradicting itself.
+        result.skipped_reason = "no_active_order_context"
+        return result
+
+    # All three guards lined up — the brain IS contradicting recent
+    # context. Pick an ACK shape based on whether the customer also
+    # sent name+phone alongside the location.
+    try:
+        slots = _extract_delivery_signals(customer_msg or "")
+    except Exception:  # noqa: BLE001
+        slots = {}
+
+    has_name = bool(
+        slots.get("customer_name")
+        or slots.get("customer_first_name")
+        or slots.get("customer_last_name")
+    )
+    has_phone = bool(slots.get("phone"))
+    has_maps_url = bool(slots.get("google_maps_url"))
+    has_short_address = bool(slots.get("short_address_code"))
+
+    if has_name and has_phone:
+        result.new_reply = _ORDER_CONTINUATION_ACK_LOCATION_FULL
+    else:
+        result.new_reply = _ORDER_CONTINUATION_ACK_LOCATION_ONLY
+
+    result.fired = True
+    result.reason = "product_reask_after_location_in_active_order"
+    result.has_maps_url = has_maps_url
+    result.has_short_address = has_short_address
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════
 # 7. Outbound Artifact Guard — hollow-affirmation rewriter
 #    (May 2026 #37 — D2 / "guard outbound artifact promises")
 # ══════════════════════════════════════════════════════════════════
@@ -4079,6 +4367,7 @@ __all__ = [
     "LocationLinkSafetyNetResult",
     "ClearIntentFallbackResult",
     "DeliveryInfoContextResult",
+    "ProductReaskGuardResult",
     "OutboundArtifactGuardResult",
     "apply_product_safety_net",
     "apply_media_key_safety_net",
@@ -4087,6 +4376,7 @@ __all__ = [
     "apply_location_safety_net",
     "apply_clear_intent_fallback_net",
     "apply_delivery_info_context_net",
+    "apply_product_reask_guard",
     "apply_outbound_artifact_guard",
     "product_net_enabled",
     "media_key_net_enabled",
@@ -4095,4 +4385,5 @@ __all__ = [
     "location_link_net_enabled",
     "clear_intent_fallback_net_enabled",
     "delivery_info_context_net_enabled",
+    "product_reask_guard_enabled",
 ]
