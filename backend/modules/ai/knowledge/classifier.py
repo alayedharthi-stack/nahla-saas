@@ -126,16 +126,25 @@ _MAX_OPS = 8
 # minimal JSON the classifier should emit; we keep them short so the prompt
 # stays under a few KB.
 #
-# Why 5 examples specifically (not more):
-#   * Each example burns ~300 tokens in the system prompt. Five lines up
-#     with the empirical sweet spot from the brain's intent classifier
+# Why 7 examples specifically (was 5 pre-#46):
+#   * Each example burns ~300 tokens in the system prompt. Seven still
+#     fits comfortably under the 4 KB system-prompt budget and remains
+#     close to the empirical sweet spot from the brain's intent classifier
 #     (see ``modules/ai/brain/intent/social_classifier.py`` — same scale).
-#   * They cover the three axes the previous model regressed on:
+#   * They cover four axes the model has regressed on in production:
 #       1. Behavior vs commerce taxonomy boundary (#2, #5).
 #       2. Specific-vs-generic kind picking inside commerce (#1, #3).
 #       3. Platform-conflict awareness for price/stock claims (#4).
+#       4. KB-3 (May 2026 #46) — shipping/order-completion vs escalation
+#          boundary. The Arabic verb "حوّل / تحويل" is shared between
+#          "transfer to a human" (escalation) and "transfer money /
+#          route a shipment" (commerce). Examples #6 and #7 are paired
+#          contrasts so the model learns to use surrounding context
+#          (شحن / عنوان / Google Maps / سمسا  vs  موظف / شكوى / غش)
+#          rather than the verb alone.
 #   * Adding more examples did not move the dial in offline replay; the
-#     ``gpt-4.1`` upgrade is what carries the bulk of the quality gain.
+#     ``gpt-4.1`` upgrade plus the KB-3 contrast pair carry the bulk of
+#     the quality gain.
 _FEW_SHOT_EXAMPLES: List[Dict[str, Any]] = [
     {
         # Specific commerce kind — must NOT collapse to generic "payment_method".
@@ -243,6 +252,73 @@ _FEW_SHOT_EXAMPLES: List[Dict[str, Any]] = [
             }],
             "conflicts": [],
             "confidence": 0.95,
+        },
+    },
+    {
+        # KB-3 (May 2026 #46) — order-completion / shipping flow text.
+        # Production regression on Tenant 33: a merchant note that
+        # described the order-completion flow ("بعد تأكيد الطلب
+        # نطلب العنوان والجوال ونحدد سمسا أو توصيل") was misrouted
+        # to ``escalation_rules`` because the model latched onto the
+        # word "نحوّل / تحويل" (which in Arabic is shared between
+        # "transfer to a human" and "money transfer / delivery
+        # routing"). This example pins shipping-flow text firmly in
+        # the commerce taxonomy.
+        "input": (
+            "بعد ما يأكد العميل طلبه نطلب الاسم والجوال والعنوان "
+            "أو رابط Google Maps، ونحدد سمسا أو التوصيل المباشر."
+        ),
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "shipping_zones",
+                "title": "إكمال الطلب وبيانات الشحن",
+                "body": (
+                    "بعد تأكيد العميل للطلب نطلب: الاسم الكامل، رقم الجوال، "
+                    "والعنوان التفصيلي أو رابط الموقع على Google Maps. "
+                    "ثم نحدد طريقة الشحن (سمسا / توصيل مباشر) حسب المنطقة."
+                ),
+                "rationale": (
+                    "نص يصف flow إكمال الطلب وجمع بيانات الشحن "
+                    "(عنوان، جوال، خرائط، شركة شحن) → "
+                    "kind=shipping_zones. هذا commerce taxonomy، ليس "
+                    "assistant_behavior. كلمة «نحدد/نحوّل/التوصيل» هنا "
+                    "تشير إلى توجيه الشحنة، وليست تحويل العميل لموظف."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.95,
+        },
+    },
+    {
+        # KB-3 — the contrasting escalation example. Same Arabic root
+        # ("حوّل / تحويل") but unambiguously about handing the
+        # customer to a human staff member when a complaint or
+        # special request appears. Pinning this side-by-side with
+        # the shipping example forces the model to learn the
+        # distinguishing feature: "موظف / بشري / شكوى" vs
+        # "شحن / عنوان / سمسا / Google Maps".
+        "input": "إذا قال العميل غش أو شكوى أو أبي فلوسي، حوّله للموظف فوراً.",
+        "expected": {
+            "proposed_ops": [{
+                "op_id": "op-1",
+                "op": "create",
+                "kind": "escalation_rules",
+                "title": "متى نحوّل العميل لموظف",
+                "body": (
+                    "في حال ذكر العميل عبارات شكوى صريحة (غش، احتيال، "
+                    "أبي فلوسي، استرجاع عاجل) يحوّل المساعد المحادثة "
+                    "لموظف بشري مباشرة بدون محاولة بيع إضافية."
+                ),
+                "rationale": (
+                    "نص يصف متى يحوّل المساعد العميل لموظف (شكوى/غش) → "
+                    "kind=escalation_rules (taxonomy=assistant_behavior). "
+                    "لا يخص الشحن أو طريقة التوصيل."
+                ),
+            }],
+            "conflicts": [],
+            "confidence": 0.97,
         },
     },
 ]
@@ -391,6 +467,47 @@ store_story / dialect / working_hours / branches / product_*…):
 السبب: قواعد السلوك تُحقن في طبقة "HIGH PRIORITY" المنفصلة عن
 "قاعدة المعرفة" في برومت كلود — خلطها مع المعرفة التجارية يلوّث
 الـ retrieval ويجعل الذكاء يستحضرها وقت سؤال العميل عن الشحن أو الدفع.
+
+═══ KB-3 (May 2026 #46) — حدود escalation_rules ═══
+escalation_rules مخصص حصراً لقواعد تحويل العميل لموظف بشري — أي
+حالات (شكوى، غش، احتيال، طلب خاص يخرج عن قدرة المساعد، تكرار سؤال،
+طلب تصعيد للمالك / الإدارة).
+
+نصوص يجب أن لا تذهب أبداً إلى escalation_rules:
+- نصوص إكمال الطلب (تأكيد، اسم، جوال، عنوان، خرائط Google)
+- شركات الشحن (سمسا، أرامكس، ريدبوكس، …)
+- التوصيل المباشر داخل المدينة، أو التوصيل لفرع
+- المناطق المغطاة ومدد التوصيل
+- العنوان الوطني / الإحداثيات / رقم المبنى
+- طرق الدفع، التحويل البنكي، الباركود
+
+ملاحظة لغوية مهمة (من معاينات إنتاج Tenant 33):
+كلمة «حوّل / تحويل / نحوّل» في النصوص العربية لها معنيان متفرقان
+تماماً، ويجب التفريق بينهما من السياق:
+
+  1) تحويل لموظف بشري (escalation/handoff):
+     مفاتيح السياق: «موظف» «بشري» «شكوى» «غش» «استرجاع عاجل»
+                    «المالك» «الإدارة» «المسؤول».
+     → kind = escalation_rules (taxonomy = assistant_behavior).
+
+  2) توجيه شحنة / تحويل بنكي / توصيل / مسار الطلب:
+     مفاتيح السياق: «شحن» «شحنة» «سمسا» «أرامكس» «التوصيل»
+                    «العنوان» «المدينة» «الحي» «خرائط Google»
+                    «إكمال الطلب» «تأكيد الطلب» «الجوال» «الاسم»
+                    «الباركود» «التحويل البنكي» «الراجحي».
+     → kind في أحد:
+        - shipping_zones      (flow + مناطق + مدد توصيل)
+        - shipping_carrier    (شركة شحن محددة)
+        - cold_shipping       (شحن مبرّد للعسل صيفاً)
+        - bank_transfer       (تحويل بنكي للدفع)
+        - faq                 (سؤال تشغيلي عام عن الشحن/الطلب)
+     لا تستخدم escalation_rules لهذه النصوص أبداً.
+
+اختبار سريع قبل اختيار escalation_rules:
+هل النص يصف "متى ينسحب المساعد ويسلّم الموضوع لموظف"؟
+- نعم → escalation_rules.
+- لا، النص يصف "كيف يتم الشحن / إكمال الطلب / جمع العنوان" → اختر
+  shipping_* أو bank_transfer أو faq حسب المحتوى الأقرب.
 """
 
 
