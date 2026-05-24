@@ -4511,19 +4511,81 @@ async def _handle_merchant_message(
             )
 
     if _is_handoff:
-        # May 2026 #42 — clarifier-style ack for owner-contact phrasings.
-        # ``_is_owner_contact`` is set above when the inbound is
-        # specifically about المالك / الإدارة / المسؤول / صاحب المحل.
-        # We override ``_HANDOFF_ACK_TEXT`` (which still reflects either
-        # the generic team copy or the post-payment variant) BEFORE
-        # the merchant-inbox plumbing runs, so the rest of the guard
-        # block stays unchanged.
+        # ── May 2026 #44 — Owner-contact escalation TIERS ────────────
+        # Three tiers govern how aggressively we hand off + whether
+        # we pause the AI:
+        #
+        #   * VAGUE     — customer typed "أبي أكلم المالك" with no
+        #                 stated reason. Send the clarifier ack, set
+        #                 only ``needs_human=True`` so the merchant
+        #                 inbox still sees the entry, and keep AI
+        #                 alive. The customer can answer the
+        #                 clarifier and the brain handles the rest.
+        #
+        #   * CLEAR     — owner-contact + stated reason. Flip the
+        #                 FULL handoff plumbing, alert the merchant,
+        #                 BUT keep AI alive so parallel customer
+        #                 questions still get answered.
+        #
+        #   * COMPLAINT — owner-contact + complaint signal
+        #                 (احتيال / غش / استرجاع / اشتكي / …). Full
+        #                 handoff + PAUSE AI + apologetic ack.
+        #
+        # For non-owner handoff (generic موظف/مختص), behaviour is
+        # UNCHANGED — full handoff + pause AI + canonical ack.
+        from core.handoff_detector import (  # noqa: PLC0415
+            classify_owner_escalation_tier as _classify_owner_tier,
+            OWNER_TIER_CLEAR as _OWNER_TIER_CLEAR,
+            OWNER_TIER_COMPLAINT as _OWNER_TIER_COMPLAINT,
+            OWNER_TIER_VAGUE as _OWNER_TIER_VAGUE,
+            HANDOFF_OWNER_HANDOFF_TEXT_AR as _HANDOFF_OWNER_HANDOFF_TEXT,
+            HANDOFF_OWNER_COMPLAINT_TEXT_AR as _HANDOFF_OWNER_COMPLAINT_TEXT,
+        )
+
+        # Defaults for the non-owner handoff path — preserves the
+        # pre-#44 behaviour (full flip + pause + generic ack).
+        _ho_tier               = "generic_handoff"
+        _do_full_handoff_flip  = True
+        _do_create_session     = True
+        _do_pause_ai           = True
+
         if _is_owner_contact:
-            _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_ACK_TEXT
+            _ho_tier = _classify_owner_tier(text or "")
+            if _ho_tier == _OWNER_TIER_VAGUE:
+                _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_ACK_TEXT
+                # SOFT path — clarifier only. Don't flip the full
+                # status="human" / handoff_active set; only mark
+                # needs_human=True so the merchant inbox shows a
+                # low-priority entry. Don't create a handoff
+                # session yet (the merchant tab would treat that
+                # as a confirmed escalation). Keep AI alive so the
+                # customer's NEXT inbound flows through the brain.
+                _do_full_handoff_flip = False
+                _do_create_session    = False
+                _do_pause_ai          = False
+            elif _ho_tier == _OWNER_TIER_CLEAR:
+                _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_HANDOFF_TEXT
+                # FULL handoff plumbing fires, but AI stays alive.
+                # The customer can keep asking shipping/product
+                # questions while the merchant prepares to address
+                # the owner-level request offline.
+                _do_full_handoff_flip = True
+                _do_create_session    = True
+                _do_pause_ai          = False
+            elif _ho_tier == _OWNER_TIER_COMPLAINT:
+                _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_COMPLAINT_TEXT
+                # Full handoff + pause AI. We don't want the AI to
+                # keep "selling" while a grievance is open.
+                _do_full_handoff_flip = True
+                _do_create_session    = True
+                _do_pause_ai          = True
+
         logger.info(
             "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
-            "to=%s text_snippet=%r owner_contact=%s",
-            tenant_id, to, (text or "")[:80], _is_owner_contact,
+            "to=%s text_snippet=%r owner_contact=%s tier=%s "
+            "full_flip=%s create_session=%s pause_ai=%s",
+            tenant_id, to, (text or "")[:80], _is_owner_contact, _ho_tier,
+            _do_full_handoff_flip, _do_create_session, _do_pause_ai,
         )
         _ho_convo = None
         try:
@@ -4537,10 +4599,18 @@ async def _handle_merchant_message(
             )
         if _ho_convo is not None:
             try:
-                _ho_convo.status            = "human"
-                _ho_convo.is_human_handoff  = True
-                _ho_convo.needs_human       = True
-                _ho_convo.handoff_active    = True
+                if _do_full_handoff_flip:
+                    _ho_convo.status            = "human"
+                    _ho_convo.is_human_handoff  = True
+                    _ho_convo.needs_human       = True
+                    _ho_convo.handoff_active    = True
+                else:
+                    # VAGUE tier — soft flag only. We deliberately
+                    # leave status / is_human_handoff / handoff_active
+                    # untouched so the conversation remains
+                    # AI-served and the next inbound goes through
+                    # the brain.
+                    _ho_convo.needs_human       = True
                 db.flush()
             except Exception as _ho_flag_exc:  # noqa: BLE001
                 logger.warning(
@@ -4548,26 +4618,27 @@ async def _handle_merchant_message(
                     "tenant=%s err=%s",
                     tenant_id, _ho_flag_exc,
                 )
-        try:
-            from handoff.manager import create_handoff_session  # noqa: PLC0415
-            create_handoff_session(
-                db, tenant_id, to, to, text or "",
-                reason="customer_request_pre_brain",
-            )
-        except Exception as _ho_sess_exc:  # noqa: BLE001
-            logger.warning(
-                "[Merchant/HANDOFF_GUARD] session creation failed | "
-                "tenant=%s err=%s",
-                tenant_id, _ho_sess_exc,
-            )
-        if _ho_convo is not None:
+        if _do_create_session:
+            try:
+                from handoff.manager import create_handoff_session  # noqa: PLC0415
+                create_handoff_session(
+                    db, tenant_id, to, to, text or "",
+                    reason=f"customer_request_pre_brain:{_ho_tier}",
+                )
+            except Exception as _ho_sess_exc:  # noqa: BLE001
+                logger.warning(
+                    "[Merchant/HANDOFF_GUARD] session creation failed | "
+                    "tenant=%s err=%s",
+                    tenant_id, _ho_sess_exc,
+                )
+        if _do_pause_ai and _ho_convo is not None:
             try:
                 from core.ai_pause_guard import (  # noqa: PLC0415
                     pause_ai as _ho_pause_ai,
                     REASON_HUMAN_HANDOFF as _HO_R_HOFF,
                 )
                 _ho_pause_ai(db, _ho_convo, reason=_HO_R_HOFF,
-                             by="webhook:pre_brain_handoff")
+                             by=f"webhook:pre_brain_handoff:{_ho_tier}")
             except Exception as _ho_pause_exc:  # noqa: BLE001
                 logger.debug(
                     "[Merchant/HANDOFF_GUARD] pause_ai failed: %s",
@@ -4618,10 +4689,13 @@ async def _handle_merchant_message(
                 db, tenant_id, to, _HANDOFF_ACK_TEXT,
                 event_type="ai_handoff_ack",
                 extra={
-                    "is_ai": True,
-                    "deterministic_path": "pre_brain_handoff",
-                    "handoff_active": True,
-                    "needs_human": True,
+                    "is_ai":              True,
+                    "deterministic_path": f"pre_brain_handoff:{_ho_tier}",
+                    "handoff_active":     bool(_do_full_handoff_flip),
+                    "needs_human":        True,
+                    "ai_paused":          bool(_do_pause_ai),
+                    "owner_contact":      bool(_is_owner_contact),
+                    "owner_tier":         _ho_tier,
                 },
             )
         except Exception as _ho_rec_exc:  # noqa: BLE001
@@ -4630,7 +4704,7 @@ async def _handle_merchant_message(
                 _ho_rec_exc,
             )
         try:
-            _trace.fallback_source = "pre_brain_handoff"
+            _trace.fallback_source = f"pre_brain_handoff:{_ho_tier}"
             _trace.response_goal   = "handoff"
             _trace.intent          = "talk_to_human"
             _trace.emit()

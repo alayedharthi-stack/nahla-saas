@@ -407,7 +407,8 @@ def is_owner_contact_request(text: Optional[str]) -> bool:
     Caller pattern (webhook): treat the message as a handoff (uses the
     ``is_handoff_request`` plumbing — needs_human, handoff_active,
     paused AI, merchant inbox alert) AND override the acknowledgement
-    text to ``HANDOFF_OWNER_ACK_TEXT_AR``.
+    text to one of the tier-specific copies. See
+    ``classify_owner_escalation_tier`` for the routing.
 
     Never raises.
     """
@@ -430,6 +431,298 @@ def is_owner_contact_request(text: Optional[str]) -> bool:
         return False
     has_contact_verb = any(v and v in norm for v in _OWNER_VERB_TOKENS_NORM)
     return has_contact_verb
+
+
+# ── Owner-contact escalation TIERS (May 2026 #44) ──────────────────
+#
+# Merchant feedback after the May 2026 #43 polish was that pausing
+# the AI on EVERY owner-contact request was over-aggressive: a vague
+# "أبي أكلم المالك" with no reason should not freeze the conversation
+# while the merchant tracks down the customer's intent. The merchant
+# specified four behavioural tiers:
+#
+#   1. **VAGUE owner request** ("أبي أكلم المالك" with no reason) →
+#      send the clarifier ack, set ``needs_human=True`` so the
+#      merchant inbox sees the entry, but DO NOT flip
+#      ``handoff_active`` / ``status="human"`` and DO NOT pause the
+#      AI. The next customer message can keep flowing through the
+#      Brain (e.g. they answer the clarifier and the AI helps with
+#      whatever they actually wanted).
+#
+#   2. **CLEAR owner / management request** ("أبي أكلم المالك بخصوص
+#      الدفع" / a follow-up that has substance beyond the bare verb-
+#      noun pair) → flip the FULL handoff plumbing, alert the
+#      merchant, BUT keep AI alive so the customer can ask shipping/
+#      product questions while waiting for the human. The ack
+#      acknowledges the forwarding without pretending the AI is
+#      stepping aside completely.
+#
+#   3. **COMPLAINT / sensitive case** ("احتيال", "غش", "ابي
+#      استرجاع", "اشتكي عليكم" …) → full handoff + PAUSE AI. The
+#      AI must NOT keep "selling" while a customer is escalating a
+#      grievance. The ack is apologetic and pinned to a "نراجع
+#      الموضوع فورًا" promise.
+#
+#   4. **Owner phone share** stays an explicit, manual decision in
+#      the merchant inbox — never auto-shared by the AI on the first
+#      contact request. (No code change needed; reasserted here as a
+#      design principle so a future commit doesn't accidentally
+#      add an "ASSET_OWNER_PHONE" auto-attach for this path.)
+
+OWNER_TIER_VAGUE     = "owner_vague"
+OWNER_TIER_CLEAR     = "owner_clear"
+OWNER_TIER_COMPLAINT = "owner_complaint"
+
+
+# Complaint / refund / sensitive-case phrase library. Curated from
+# Tenant 33 production transcripts + a small set of common Saudi
+# escalation idioms. Substring-matched against the normalised text
+# so dialect variants ("ارجاع" / "استرجاع" / "استرداد") all hit.
+_COMPLAINT_PHRASES = (
+    # Fraud / dishonesty accusations
+    "غش",
+    "احتيال",
+    "نصب",
+    "نصابين",
+    "خدعتوني",
+    "خدعتموني",
+    "اخدعتوني",
+    "كذبتوا",
+    "كذبتم",
+    "ضحكتوا علي",
+    "ضحكتم علي",
+    "سرقه",
+    "سرقتوني",
+    "حرامي",
+    "حرامية",
+    # Religious / moral framing of grievance
+    "حرام عليكم",
+    "حرام عليكوا",
+    "ما تستحون",
+    "ما تخافون الله",
+    "والله ظلم",
+    "ظلم",
+    "مظلوم",
+    # Refund / return / cancel-paid
+    "ابي ارد",
+    "ابي ارجع",
+    "ابي استرد",
+    "ابي استرداد",
+    "ابي استرجاع",
+    "ابي استرجع",
+    "ارجاع المنتج",
+    "ارجاع الطلب",
+    "استرجاع المنتج",
+    "استرجاع الطلب",
+    "استرداد المبلغ",
+    "استرداد الفلوس",
+    "ابي فلوسي",
+    "ابي رد فلوسي",
+    "ابي ارجع فلوسي",
+    "ابغى استرد",
+    "ابغى ارجاع",
+    # Formal complaint / threat to escalate externally
+    "اشتكي",
+    "بشتكي",
+    "بشكي",
+    "اشكي",
+    "مشتكي",
+    "مشكتي",
+    "شكوى",
+    "شكوي",
+    "بقدم شكوى",
+    "ارفع شكوى",
+    "ابي اشتكي",
+    "ابغى اشتكي",
+    "حقوق المستهلك",
+    "حقوقي",
+    "بشكيكم",
+    "نشتكي عليكم",
+    "نشكيكم",
+    "هيئة المستهلك",
+    "وزارة التجارة",
+    "بلغ عنكم",
+    "ابلغ عنكم",
+    # English fallbacks
+    "scam",
+    "fraud",
+    "refund",
+    "complaint",
+    "report you",
+    "i want my money back",
+)
+
+_COMPLAINT_PHRASES_NORM = tuple(
+    normalize_arabic_text(p) for p in _COMPLAINT_PHRASES if p
+)
+
+
+def is_complaint_signal(text: Optional[str]) -> bool:
+    """Return True when the message reads as a COMPLAINT / refund
+    request / sensitive grievance — not just a polite handoff.
+
+    Pure-string check; never raises. Caller pattern: when this fires
+    INSIDE an owner-contact context the webhook routes the turn to
+    the COMPLAINT tier (apologetic ack + pause AI). When it fires
+    OUTSIDE owner-contact context the brain still gets the turn and
+    can decide on the right response — we deliberately do NOT
+    auto-escalate every "ابي ارجاع" customer because some of those
+    are genuine post-purchase logistics questions the brain can
+    answer without humans.
+    """
+    norm = normalize_arabic_text(text)
+    if not norm:
+        return False
+    for phrase in _COMPLAINT_PHRASES_NORM:
+        if phrase and phrase in norm:
+            return True
+    return False
+
+
+# MULTI-WORD pleasantries / fillers — stripped via substring scan
+# BEFORE tokenisation. We keep these intentionally short and high-
+# precision so substring strip can't fragment unrelated text.
+_OWNER_RESIDUE_MULTI_FILLERS = tuple(normalize_arabic_text(t) for t in (
+    "السلام عليكم", "وعليكم السلام", "السلام عليكم ورحمه الله",
+    "لو سمحت", "لو سمحتي", "لو سمحتم",
+    "من فضلك", "من فضلكم", "من فضلكي",
+))
+
+# SINGLE-WORD fillers — matched on whole-word boundaries during the
+# tokenised pass (NOT via raw substring replace). Keeping single
+# Arabic prepositions ("ل", "ب", "من") in this list was the bug
+# that chopped "السلام" into "س‍ا م" — so they live here, not in a
+# substring-replace list.
+_OWNER_RESIDUE_FILLER_WORDS = frozenset(normalize_arabic_text(t) for t in (
+    "ابي", "ابغى", "ابغا", "اريد", "احتاج", "محتاج",
+    "ودي", "بدي", "ممكن", "رجاء", "رجاءا",
+    "مع", "ل", "لي", "للـ", "بـ", "ب", "من", "الى", "إلى",
+    "حاب", "حابب", "حابه", "اللي", "لو", "كذا",
+    "وش", "شو", "ايش", "اش",
+    "اهلا", "مرحبا", "شكرا", "شكرا",
+    "السلام", "عليكم",      # individual halves of greetings
+    "ورحمه", "الله", "وبركاته",
+))
+
+
+# Pre-computed splits of the verb / noun token sets into single-word
+# vs multi-word forms. Multi-word entries ("صاحب المحل" / "ودي اكلم")
+# must be substring-stripped FIRST because per-token filtering can't
+# match a phrase that spans two whitespace-separated words.
+_OWNER_TOKENS_MULTI_WORD = tuple(
+    t for t in (_OWNER_VERB_TOKENS_NORM + _OWNER_NOUN_TOKENS_NORM)
+    if t and " " in t
+)
+_OWNER_TOKENS_SINGLE_WORD = tuple(
+    t for t in (_OWNER_VERB_TOKENS_NORM + _OWNER_NOUN_TOKENS_NORM)
+    if t and " " not in t
+)
+
+
+def _owner_request_residue(text: str) -> str:
+    """Return the customer's substantive residue AFTER stripping the
+    owner-verb / owner-noun pair plus generic boilerplate fillers.
+
+    Algorithm (revised May 2026 #44):
+
+      1. Strip MULTI-WORD owner verbs / nouns / pleasantries via
+         substring scan. These are high-precision phrases
+         ("صاحب المحل" / "السلام عليكم" / "ودي اكلم") that don't
+         fragment unrelated words because they all carry whitespace
+         themselves.
+      2. Tokenise on whitespace.
+      3. Per token, drop when:
+           * The token CONTAINS a single-word owner-verb / owner-
+             noun substring (handles preposition prefixes like
+             "للمالك" / "للمسؤول" / "بالمالك" — they all match
+             "المالك" / "المسؤول" by ``tok in word``), OR
+           * The token equals a single-word filler ("ابي" / "مع" /
+             "ل" / …) — single Arabic letters like "ل" only get
+             stripped here (where they're whole-word), never via
+             substring replace (which would chop "السلام" into
+             "اسام").
+      4. Join the survivors. Empty residue → caller infers VAGUE.
+
+    Why the previous version was wrong: substring-replacing single-
+    letter Arabic prepositions ("ل", "ب", "من") chopped "السلام
+    عليكم" into "ا سام عيكم" — those fragments survived as 4-char
+    "alpha residue" and pushed the bare salam-prefixed turn into
+    CLEAR tier instead of VAGUE.
+    """
+    norm = normalize_arabic_text(text)
+    if not norm:
+        return ""
+
+    # 1. Strip multi-word phrases (owner phrases + pleasantries).
+    residue = norm
+    for phrase in _OWNER_TOKENS_MULTI_WORD + _OWNER_RESIDUE_MULTI_FILLERS:
+        if phrase:
+            residue = residue.replace(phrase, " ")
+
+    # 2 + 3. Tokenise + per-token strip.
+    kept = []
+    for word in residue.split():
+        if not word:
+            continue
+        # Drop if the token CONTAINS a single-word owner-verb /
+        # owner-noun substring. This catches:
+        #   * the bare token itself ("المالك"),
+        #   * Arabic preposition prefixes ("للمالك" / "بالمالك"),
+        #   * pronoun suffixes ("اكلمه" — though uncommon).
+        if any(tok in word for tok in _OWNER_TOKENS_SINGLE_WORD):
+            continue
+        # Drop if the token equals a single-word filler.
+        if word in _OWNER_RESIDUE_FILLER_WORDS:
+            continue
+        kept.append(word)
+
+    return " ".join(kept)
+
+
+# Minimum word-character count in the residue for the message to
+# count as "carrying a reason". Empirically calibrated on Tenant 33:
+#   * "أبي أكلم المالك"                  → residue "" / 0 chars  → VAGUE
+#   * "أبي أكلم المالك بخصوص الدفع"      → residue "بخصوص الدفع" / 9 chars → CLEAR
+#   * "أبي أكلم المالك السلام عليكم"     → residue ""             → VAGUE
+#   * "أبي اتواصل مع المالك مشكلة طلبي"  → residue "مشكله طلبي"   → CLEAR
+_OWNER_REASON_MIN_WORD_CHARS = 5
+
+
+def classify_owner_escalation_tier(text: Optional[str]) -> str:
+    """Tier the owner-contact request by severity / substance.
+
+    Returns one of:
+      * ``OWNER_TIER_COMPLAINT`` — message carries a complaint /
+        refund / sensitive-case signal. Highest priority — overrides
+        substance check because "احتيال" alone is enough to demand
+        an apologetic ack + AI pause even without a long explanation.
+      * ``OWNER_TIER_CLEAR``     — owner-contact + a stated reason
+        (substantive residue ≥ 5 word chars after stripping the
+        verb/noun pair and boilerplate). Webhook flips full handoff
+        flags but keeps AI alive.
+      * ``OWNER_TIER_VAGUE``     — bare owner-contact phrasing with
+        no stated reason. Webhook sends the clarifier ack and a
+        soft ``needs_human=True`` flag, AI stays alive.
+
+    Caller is responsible for ensuring ``is_owner_contact_request``
+    fired first — passing a non-owner-contact message returns
+    ``OWNER_TIER_VAGUE`` by default.
+
+    Never raises.
+    """
+    if not text:
+        return OWNER_TIER_VAGUE
+
+    # Complaint signal trumps substance — even bare "احتيال" goes
+    # straight to the highest tier.
+    if is_complaint_signal(text):
+        return OWNER_TIER_COMPLAINT
+
+    residue = _owner_request_residue(text)
+    word_chars = sum(1 for c in residue if c.isalpha())
+    if word_chars >= _OWNER_REASON_MIN_WORD_CHARS:
+        return OWNER_TIER_CLEAR
+    return OWNER_TIER_VAGUE
 
 
 def is_handoff_request(text: Optional[str]) -> bool:
@@ -502,6 +795,49 @@ HANDOFF_OWNER_ACK_TEXT_AR = (
     "أكيد 🌷\n"
     "وش الطلب أو المشكلة اللي حاب توصله للمالك؟ "
     "وبرفعه للمسؤول المناسب مباشرة."
+)
+
+
+# CLEAR-tier ack (May 2026 #44).
+#
+# Used when the customer EXPLICITLY asked to talk to the owner AND
+# already stated a reason (substantive residue ≥ 5 word chars). The
+# webhook flips the full handoff plumbing in this tier — the merchant
+# inbox sees a "طلب موظف" entry — but the AI is intentionally NOT
+# paused. The customer can keep asking parallel questions
+# (shipping / product / payment) and the brain will respond, while
+# the merchant prepares to address the owner-level request offline.
+#
+# Wording:
+#   * Acknowledges the forwarding without lying about timing.
+#   * Echoes the customer's framing ("طلبك" — keeps the customer
+#     feeling heard, doesn't recast their issue as something else).
+#   * Leaves the door open ("لو حابة تسألين عن شي ثاني، أنا هنا")
+#     so the customer doesn't feel they have to wait silently —
+#     critical because the AI is still active.
+HANDOFF_OWNER_HANDOFF_TEXT_AR = (
+    "تمام 🌷 وصلني طلبك ورفعته للمسؤول المناسب.\n"
+    "لو حابة تسألين عن شي ثاني — توصيل، منتج، دفع — أنا هنا."
+)
+
+
+# COMPLAINT-tier ack (May 2026 #44).
+#
+# Fires only when the customer's message carries a complaint /
+# refund / sensitive-case signal AND is also an owner-contact
+# request. The AI is paused in this tier so we don't keep "selling"
+# while a grievance is open.
+#
+# Wording:
+#   * Apologetic, no defensiveness, no "هذا مو من اختصاصي".
+#   * Honest about the next step ("نراجع الموضوع فورًا") without
+#     promising an outcome the merchant hasn't approved (refund /
+#     compensation).
+#   * No CTA — the conversation belongs to the human now.
+HANDOFF_OWNER_COMPLAINT_TEXT_AR = (
+    "نعتذر منك 🌷\n"
+    "وصلني الموضوع ورفعته للمسؤول المباشر، وراح يتواصل معك "
+    "في أقرب وقت لمراجعة الموضوع وإيجاد الحل المناسب."
 )
 
 
@@ -637,7 +973,14 @@ HANDOFF_POST_PAYMENT_ACK_TEXT_AR = (
 __all__ = [
     "HANDOFF_ACK_TEXT_AR",
     "HANDOFF_OWNER_ACK_TEXT_AR",
+    "HANDOFF_OWNER_COMPLAINT_TEXT_AR",
+    "HANDOFF_OWNER_HANDOFF_TEXT_AR",
     "HANDOFF_POST_PAYMENT_ACK_TEXT_AR",
+    "OWNER_TIER_CLEAR",
+    "OWNER_TIER_COMPLAINT",
+    "OWNER_TIER_VAGUE",
+    "classify_owner_escalation_tier",
+    "is_complaint_signal",
     "is_handoff_request",
     "is_owner_contact_request",
     "is_post_payment_modification_request",

@@ -433,3 +433,223 @@ def test_handoff_still_fires_for_non_owner_phrases() -> None:
         assert is_handoff_request(s), (
             f"Pre-existing handoff phrase regressed: {s!r}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Owner-contact tier classifier (May 2026 #44)
+# ────────────────────────────────────────────────────────────────────
+#
+# The tier classifier governs whether the PRE-BRAIN handoff guard
+# pauses the AI, flips the full handoff plumbing, or just sends the
+# clarifier ack. Three tiers, one decision per turn:
+#
+#   * VAGUE     — bare owner ask, no reason given.
+#   * CLEAR     — owner ask + stated reason ≥ 5 word chars.
+#   * COMPLAINT — owner ask + complaint signal (refund / fraud /
+#                 formal complaint).
+#
+# The classifier is pure-string. Tests assert each tier on
+# production-observed phrasings + adversarial cases that the merchant
+# explicitly worried about ("جربي عسل" looking like a refund verb).
+
+
+def test_owner_tier_constants_are_pinned_strings() -> None:
+    from core.handoff_detector import (
+        OWNER_TIER_CLEAR,
+        OWNER_TIER_COMPLAINT,
+        OWNER_TIER_VAGUE,
+    )
+
+    assert OWNER_TIER_VAGUE     == "owner_vague"
+    assert OWNER_TIER_CLEAR     == "owner_clear"
+    assert OWNER_TIER_COMPLAINT == "owner_complaint"
+
+
+def test_owner_tier_vague_for_bare_owner_phrases() -> None:
+    """Bare owner-contact phrasings without a stated reason map to
+    VAGUE. The webhook responds with the clarifier and keeps AI alive."""
+    from core.handoff_detector import (
+        OWNER_TIER_VAGUE,
+        classify_owner_escalation_tier,
+    )
+
+    samples = (
+        "ابي اتواصل مع المالك",
+        "أبي أتواصل مع المالك",
+        "ابغى اكلم المالك",
+        "ودي اكلم المالك",
+        # Pleasantries don't add substance
+        "السلام عليكم ابي اكلم المالك",
+        "اهلا ابي اكلم المالك",
+        # Single-word "صاحب المحل" / "الادارة" with verb but no reason
+        "ابي صاحب المحل",
+        "ابي اتواصل مع الادارة",
+    )
+    for s in samples:
+        assert classify_owner_escalation_tier(s) == OWNER_TIER_VAGUE, (
+            f"Bare owner-contact must classify as VAGUE: {s!r}"
+        )
+
+
+def test_owner_tier_clear_when_reason_is_stated() -> None:
+    """Owner-contact + a stated reason → CLEAR tier. Webhook flips
+    full handoff but keeps AI alive."""
+    from core.handoff_detector import (
+        OWNER_TIER_CLEAR,
+        classify_owner_escalation_tier,
+    )
+
+    samples = (
+        "ابي اتواصل مع المالك بخصوص الدفع",
+        "ابي اكلم المالك عن مشكله طلبي",
+        "ابي اكلم المالك بخصوص ايصال التحويل",
+        "ابي اتواصل مع الادارة بخصوص العرض الخاص",
+        "ابي اكلم صاحب المحل عن طلب التوصيل المتاخر",
+    )
+    for s in samples:
+        assert classify_owner_escalation_tier(s) == OWNER_TIER_CLEAR, (
+            f"Owner-contact + reason must classify as CLEAR: {s!r}"
+        )
+
+
+def test_owner_tier_complaint_for_grievance_signals() -> None:
+    """Complaint signal in an owner-contact context → COMPLAINT
+    tier. Webhook pauses AI + sends apologetic ack."""
+    from core.handoff_detector import (
+        OWNER_TIER_COMPLAINT,
+        classify_owner_escalation_tier,
+    )
+
+    samples = (
+        "ابي اكلم المالك هذا غش",
+        "ابي اتواصل مع المالك ابي ارد فلوسي",
+        "ابي اكلم المالك بشتكي عليكم",
+        "ابي اكلم المالك حرام عليكم",
+        "ابي اكلم المالك بلغ عنكم لهيئة المستهلك",
+        # Standalone bare grievance — even without a "reason" the
+        # complaint signal alone is enough.
+        "ابي اكلم المالك احتيال",
+        # Sensitive case — refund word inside owner-contact context
+        "ابغى اتواصل مع الادارة استرداد المبلغ",
+    )
+    for s in samples:
+        assert classify_owner_escalation_tier(s) == OWNER_TIER_COMPLAINT, (
+            f"Owner-contact + complaint must classify as COMPLAINT: {s!r}"
+        )
+
+
+def test_complaint_signal_detector_positive_cases() -> None:
+    from core.handoff_detector import is_complaint_signal
+
+    samples = (
+        "هذا غش",
+        "احتيال صريح",
+        "ابي ارد فلوسي",
+        "ابي استرجاع المنتج",
+        "بشتكي عليكم لهيئة المستهلك",
+        "بقدم شكوى",
+        "حرام عليكم",
+        "ظلم والله",
+        "scam",
+        "i want my money back",
+    )
+    for s in samples:
+        assert is_complaint_signal(s), (
+            f"Complaint detector should fire for {s!r}"
+        )
+
+
+def test_complaint_signal_detector_negative_cases() -> None:
+    """Don't auto-escalate ambiguous phrases. The brain still gets
+    these turns and can craft a context-aware response."""
+    from core.handoff_detector import is_complaint_signal
+
+    samples = (
+        # Polite questions — no complaint
+        "السلام عليكم",
+        "كم سعر العسل",
+        "وين الفرع",
+        # Refund WORDS that aren't complaints in context — these are
+        # edge cases the merchant explicitly flagged. We're conservative
+        # here: a bare "ارجاع" without "ابي ارجاع المنتج" framing
+        # doesn't fire. False positives in this detector trigger an
+        # unnecessary AI pause.
+        "كم تستغرق سياسة الارجاع",
+        # Common Saudi phrases that look like complaints but aren't
+        "والله ما اخذت بضاعتي بعد",   # tracking question, not grievance
+        "خدعتني ولا لا",               # rhetorical
+    )
+    for s in samples:
+        if is_complaint_signal(s):
+            # Some of these may flip when the phrase library expands
+            # — but until then, confirm we stay conservative.
+            raise AssertionError(
+                f"Complaint detector false-positive on neutral phrase: {s!r}"
+            )
+
+
+def test_owner_residue_strips_boilerplate() -> None:
+    """The residue helper must remove every owner verb / noun /
+    polite filler so the substance threshold is meaningful."""
+    from core.handoff_detector import _owner_request_residue
+
+    # Bare owner request leaves nothing of substance after stripping.
+    assert _owner_request_residue("أبي أتواصل مع المالك").strip() == ""
+    assert _owner_request_residue("ابغى اكلم المالك").strip() == ""
+    # Pleasantries get stripped too — VAGUE, not CLEAR.
+    assert _owner_request_residue(
+        "السلام عليكم ابي اكلم المالك"
+    ).strip() == ""
+    # Reason words survive the strip — they drive CLEAR tier.
+    assert "بخصوص" in _owner_request_residue(
+        "ابي اكلم المالك بخصوص الدفع"
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Tier-specific ack copy pinning
+# ────────────────────────────────────────────────────────────────────
+
+
+def test_owner_handoff_text_acknowledges_without_pausing_promise() -> None:
+    """CLEAR tier ack ('تمام، رفعت طلبك...') must:
+      * Confirm forwarding (so the customer knows it landed),
+      * Leave the AI door open (because we DON'T pause),
+      * NOT promise a specific timing the merchant hasn't approved.
+    """
+    from core.handoff_detector import HANDOFF_OWNER_HANDOFF_TEXT_AR
+
+    txt = HANDOFF_OWNER_HANDOFF_TEXT_AR
+    # Must confirm forwarding
+    assert any(token in txt for token in ("رفعت", "وصلني", "وصلنا", "نقلت"))
+    # Must keep the conversation open with the AI — invite further
+    # parallel questions explicitly.
+    assert any(
+        marker in txt
+        for marker in ("هنا", "أكمل", "تسألين", "تسأل", "احنا")
+    ), "CLEAR tier ack must signal the AI is still available"
+    # Must NOT use the apologetic complaint wording
+    assert "نعتذر" not in txt
+    # Must NOT use the bare clarifier "وش الطلب أو المشكلة"
+    assert "وش الطلب أو المشكلة" not in txt
+
+
+def test_owner_complaint_text_is_apologetic_and_action_oriented() -> None:
+    """COMPLAINT tier ack must:
+      * Open with an apology (no defensiveness),
+      * Promise human review (we paused AI — merchant must take over),
+      * NOT promise a specific outcome (refund / replacement).
+    """
+    from core.handoff_detector import HANDOFF_OWNER_COMPLAINT_TEXT_AR
+
+    txt = HANDOFF_OWNER_COMPLAINT_TEXT_AR
+    assert any(token in txt for token in ("نعتذر", "اعتذر", "آسف", "متأسف"))
+    assert any(
+        token in txt
+        for token in ("المسؤول", "للمسؤول", "الادارة", "للإدارة", "للادارة")
+    )
+    # Must NOT auto-promise refund / replacement — that's a merchant
+    # decision the AI must not pre-commit.
+    assert "نرجع" not in txt
+    assert "نسترد" not in txt
+    assert "نعيد المبلغ" not in txt
