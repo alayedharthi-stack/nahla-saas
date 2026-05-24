@@ -3092,6 +3092,31 @@ async def _dispatch_message(
                 wa_msg_id=msg_id or None,
                 drop_reason="normalizer_exception",
             )
+            # ── [AI_TEMP_ERROR_FALLBACK] (May 2026 #42) ────────────────
+            # Normalizer raised → conversation persisted with placeholder,
+            # but the customer effectively saw "no AI reply" for that
+            # turn. Pinning the exception class + message here closes
+            # the loop with the merchant: every silent media drop now
+            # has a single greppable marker.
+            try:
+                from services.fallback_policy import (  # noqa: PLC0415
+                    STAGE_NORMALIZER_EXCEPTION as _STG_NORM_EXC,
+                    emit_temp_error_fallback_log as _emit_temp_err_norm,
+                )
+                _emit_temp_err_norm(
+                    tenant_id=resolved_tenant_id,
+                    conversation_id=None,
+                    sender=sender or "",
+                    inbound_msg_id=str(msg_id or ""),
+                    msg_type=str(msg_type or ""),
+                    intent="",
+                    stage=_STG_NORM_EXC,
+                    exception=_norm_exc,
+                    fallback_kind="persist_only_placeholder",
+                    response_goal="silent",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return
         logger.info(
             "[TRACE][3/6] INBOUND_NORMALIZED | tenant_id=%s sender=%s normalized_type=%s should_process=%s",
@@ -4417,16 +4442,36 @@ async def _handle_merchant_message(
     try:
         from core.handoff_detector import (  # noqa: PLC0415
             is_handoff_request as _is_handoff_req,
+            is_owner_contact_request as _is_owner_contact_req,
             is_post_payment_modification_request as _is_post_pay_mod_req,
             HANDOFF_ACK_TEXT_AR as _HANDOFF_ACK_TEXT,
+            HANDOFF_OWNER_ACK_TEXT_AR as _HANDOFF_OWNER_ACK_TEXT,
             HANDOFF_POST_PAYMENT_ACK_TEXT_AR as _HANDOFF_POST_PAY_ACK_TEXT,
         )
         _is_handoff = _is_handoff_req(text or "")
         _is_post_pay_mod = _is_post_pay_mod_req(text or "")
+        _is_owner_contact = _is_owner_contact_req(text or "")
+        # Owner-contact phrasings ("أبي أتواصل مع المالك" / "اكلم
+        # المالك") are a SUBSET of handoff intent — the customer
+        # explicitly chose the owner/management framing. We:
+        #   1. Promote them to the handoff path even if the generic
+        #      ``is_handoff_request`` substring scan happened to
+        #      miss the wording (defence in depth).
+        #   2. Override the ack text below so the customer sees the
+        #      clarifier-style copy ("ممكن توضح سبب التواصل مع
+        #      المالك؟") instead of the generic team line.
+        if _is_owner_contact and not _is_handoff:
+            _is_handoff = True
+            logger.info(
+                "[Merchant/HANDOFF_GUARD] owner-contact phrase promoted "
+                "to handoff | tenant=%s to=%s snippet=%r",
+                tenant_id, to, (text or "")[:80],
+            )
     except Exception as _hd_exc:  # noqa: BLE001
         logger.debug("[Merchant/HANDOFF_GUARD] detector failed: %s", _hd_exc)
         _is_handoff = False
         _is_post_pay_mod = False
+        _is_owner_contact = False
 
     # Post-payment modification check piggybacks on the same handoff
     # plumbing. We only promote it to a handoff when the customer
@@ -4466,10 +4511,19 @@ async def _handle_merchant_message(
             )
 
     if _is_handoff:
+        # May 2026 #42 — clarifier-style ack for owner-contact phrasings.
+        # ``_is_owner_contact`` is set above when the inbound is
+        # specifically about المالك / الإدارة / المسؤول / صاحب المحل.
+        # We override ``_HANDOFF_ACK_TEXT`` (which still reflects either
+        # the generic team copy or the post-payment variant) BEFORE
+        # the merchant-inbox plumbing runs, so the rest of the guard
+        # block stays unchanged.
+        if _is_owner_contact:
+            _HANDOFF_ACK_TEXT = _HANDOFF_OWNER_ACK_TEXT
         logger.info(
             "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
-            "to=%s text_snippet=%r",
-            tenant_id, to, (text or "")[:80],
+            "to=%s text_snippet=%r owner_contact=%s",
+            tenant_id, to, (text or "")[:80], _is_owner_contact,
         )
         _ho_convo = None
         try:
@@ -5798,6 +5852,32 @@ async def _handle_merchant_message(
                     )
                     _trace.fallback_source = _decision.kind
                     _trace.response_goal   = _decision.response_goal
+                    # ── [AI_TEMP_ERROR_FALLBACK] (May 2026 #42) ───────
+                    # One greppable line per generic-fallback emission.
+                    # Carries enough context to find the root cause
+                    # without re-grepping multiple log entries:
+                    # tenant / conversation / sender / msg-id /
+                    # msg-type / intent / stage / exception class +
+                    # message / fallback-kind / git-sha.
+                    try:
+                        from services.fallback_policy import (  # noqa: PLC0415
+                            STAGE_BRAIN_EXCEPTION as _STG_BRAIN_EXC,
+                            emit_temp_error_fallback_log as _emit_temp_err,
+                        )
+                        _emit_temp_err(
+                            tenant_id=tenant_id,
+                            conversation_id=getattr(convo, "id", None),
+                            sender=to or "",
+                            inbound_msg_id=str(wa_msg_id or ""),
+                            msg_type=str(getattr(_trace, "msg_type", "") or "text"),
+                            intent=str(getattr(_trace, "intent", "") or ""),
+                            stage=_STG_BRAIN_EXC,
+                            exception=brain_exc,
+                            fallback_kind=str(_decision.kind),
+                            response_goal=str(_decision.response_goal),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     # If the policy fell through to soft_retry, mark
                     # the trace so the [TURN] line tells the team
                     # WHY we ended up at clarification — was it
@@ -8471,6 +8551,36 @@ async def _handle_merchant_message(
                 "rationale=outer_exception_path",
                 tenant_id, to, _outer_decision.kind, _outer_decision.response_goal,
             )
+            # ── [AI_TEMP_ERROR_FALLBACK] (May 2026 #42) ────────────────
+            # Outer-exception path: SOMETHING in the request lifecycle
+            # raised before the brain reply could land. ``exc`` is the
+            # outer exception — pin it on the log so on-call can grep
+            # for the exception class and find the real culprit
+            # (DB connection drop / KB load failure / OpenAI timeout /
+            # JSON decode error / etc.) without re-paging through
+            # generic ``[Merchant] Error generating reply`` lines.
+            try:
+                from services.fallback_policy import (  # noqa: PLC0415
+                    STAGE_OUTER_EXCEPTION as _STG_OUTER_EXC,
+                    emit_temp_error_fallback_log as _emit_temp_err_outer,
+                )
+                _emit_temp_err_outer(
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None) if 'convo' in locals() else None,
+                    sender=to or "",
+                    inbound_msg_id=str(wa_msg_id or ""),
+                    msg_type=str(getattr(_trace, "msg_type", "") or "text"),
+                    intent=str(getattr(_trace, "intent", "") or ""),
+                    stage=_STG_OUTER_EXC,
+                    exception=exc,
+                    fallback_kind=str(_outer_decision.kind),
+                    response_goal=str(_outer_decision.response_goal),
+                    extra={
+                        "handoff_promoted": bool(_outer_handoff_text),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 await _send_whatsapp_message(
                     phone_id=phone_id, to=to,

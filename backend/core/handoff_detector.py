@@ -233,6 +233,66 @@ _SUBSTRING_HANDOFF_PHRASES = tuple(normalize_arabic_text(p) for p in (
     "ابي الدعم",
     "ابغى الدعم",
     "اريد خدمه العملاء",
+    # ── Owner / management / shop-owner / supervisor contact (May 2026 #42)
+    # Production regression on Tenant 33: a customer typed
+    #   "أبي أتواصل مع المالك"
+    # and Nahla replied with a generic store-intro
+    #   "أنا نحلة... متخصصين في العسل..."
+    # because the message:
+    #   1. Did NOT match _SUBSTRING_HANDOFF_PHRASES (no "ابي اتكلم
+    #      مع احد" / "حولني لموظف" wording),
+    #   2. Did NOT match the rule classifier's INTENT_TALK_HUMAN
+    #      target-noun set (المالك / صاحب المحل / الإدارة / المسؤول
+    #      were missing from the noun list — only "موظف / مسؤول /
+    #      شخص" were anchored),
+    #   3. Did NOT match the INTENT_ASK_OWNER_CONTACT noun-form
+    #      patterns ("التواصل مع المالك" requires the noun form
+    #      التواصل, not the verb form أتواصل),
+    # so the message fell through to the default LLM compose path
+    # which hallucinated a store intro.
+    #
+    # Fix: every "verb + المالك / صاحب المحل / الادارة / المسؤول"
+    # phrasing the production transcripts surfaced is added to the
+    # substring scan so the PRE-BRAIN handoff guard catches it BEFORE
+    # any LLM call. The webhook then uses the new
+    # ``HANDOFF_OWNER_ACK_TEXT_AR`` (a clarifier-style ack) instead
+    # of the generic team copy — see ``is_owner_contact_request``.
+    "ابي اتواصل مع المالك",
+    "ابغى اتواصل مع المالك",
+    "اتواصل مع المالك",
+    "ابي اكلم المالك",
+    "ابغى اكلم المالك",
+    "اكلم المالك",
+    "ابي تواصل مع المالك",
+    "ابغى تواصل مع المالك",
+    "ودي اكلم المالك",
+    "ودي اتواصل مع المالك",
+    "ابي احكي مع المالك",
+    "ابغى احكي مع المالك",
+    "اكلم صاحب المحل",
+    "اتواصل مع صاحب المحل",
+    "ابي اكلم صاحب المحل",
+    "ابغى اكلم صاحب المحل",
+    "ابي اتواصل مع صاحب المحل",
+    "ابغى اتواصل مع صاحب المحل",
+    "ابي صاحب المحل",
+    "ابي صاحب المتجر",
+    "ابي اكلم صاحب المتجر",
+    "اتواصل مع صاحب المتجر",
+    "ابي اتواصل مع الادارة",
+    "ابغى اتواصل مع الادارة",
+    "اتواصل مع الادارة",
+    "ابي اكلم الادارة",
+    "ابغى اكلم الادارة",
+    "اكلم الادارة",
+    "ابي الادارة",
+    "ابغى الادارة",
+    "ابي اتواصل مع المسؤول",
+    "ابغى اتواصل مع المسؤول",
+    "اتواصل مع المسؤول",
+    "ابي اكلم المسؤول",
+    "ابغى اكلم المسؤول",
+    "اكلم المسؤول",
     # English fallbacks
     "talk to a human",
     "talk to an agent",
@@ -244,7 +304,132 @@ _SUBSTRING_HANDOFF_PHRASES = tuple(normalize_arabic_text(p) for p in (
     "i need a human",
     "transfer me to",
     "connect me to",
+    # Owner / management — English
+    "talk to the owner",
+    "speak to the owner",
+    "talk to management",
+    "speak to management",
+    "shop owner",
+    "store owner",
 ))
+
+
+# ── Owner-contact specific detector (May 2026 #42) ──────────────────
+#
+# Returns True for the SUBSET of handoff requests that are explicitly
+# about contacting the OWNER / MANAGEMENT / SHOP-OWNER / SUPERVISOR.
+# These messages still get the full handoff plumbing (needs_human,
+# handoff_active, paused AI, merchant inbox alert), but the customer-
+# facing acknowledgement uses the clarifier-style copy below so we:
+#
+#   1. Honour the customer's specific framing ("المالك", not "موظف"),
+#   2. Ask one focused clarifier question — "ممكن توضح سبب التواصل؟"
+#   3. Promise to forward the request to the right person, without
+#      pretending we already know who that is.
+#
+# The detector is intentionally narrow — it requires BOTH:
+#   * an escalation/contact verb (أتواصل / أكلم / احكي / contact / talk),
+#   * AND an owner-noun token (المالك / صاحب المحل / الادارة /
+#     المسؤول / owner / management / shop owner / store owner).
+# This guards against false positives on messages that happen to
+# mention "المسؤول" inside a non-handoff context (e.g. a product
+# review).
+#
+# Pure-string check; never raises.
+
+_OWNER_NOUN_TOKENS = (
+    "المالك",
+    "مالك المحل",
+    "مالك المتجر",
+    "صاحب المحل",
+    "صاحب المتجر",
+    "صاحب الموقع",
+    "الادارة",
+    "ادارة المحل",
+    "ادارة المتجر",
+    "المسؤول",
+    "المسوول",
+    "المشرف العام",
+)
+
+_OWNER_VERB_TOKENS = (
+    "اتواصل",
+    "تواصل",
+    "اكلم",
+    "كلم",
+    "احكي",
+    "اتكلم",
+    "اتحدث",
+    "تحدث",
+    "ودي اكلم",
+    "ودي اتواصل",
+    "ابي اكلم",
+    "ابي اتواصل",
+    "ابغى اكلم",
+    "ابغى اتواصل",
+    "اريد التواصل",
+    "ارفع طلب",
+    "ابي ارفع طلب",
+    "اشتكي",
+    "اقدم شكوى",
+)
+
+_OWNER_NOUN_TOKENS_NORM = tuple(
+    normalize_arabic_text(t) for t in _OWNER_NOUN_TOKENS if t
+)
+_OWNER_VERB_TOKENS_NORM = tuple(
+    normalize_arabic_text(t) for t in _OWNER_VERB_TOKENS if t
+)
+
+_OWNER_ENGLISH_PHRASES = (
+    "talk to the owner",
+    "speak to the owner",
+    "talk to management",
+    "speak to management",
+    "contact the owner",
+    "contact management",
+    "shop owner",
+    "store owner",
+    "the owner",
+    "the management",
+)
+
+
+def is_owner_contact_request(text: Optional[str]) -> bool:
+    """Return True iff the message is an explicit ask to contact the
+    OWNER / MANAGEMENT / SHOP-OWNER / SUPERVISOR.
+
+    Pure-string check, intentionally narrow:
+      * BOTH a contact/escalation verb AND an owner-noun token must
+        appear in the normalised message (Arabic),
+      * OR one of the high-precision English phrases below appears.
+
+    Caller pattern (webhook): treat the message as a handoff (uses the
+    ``is_handoff_request`` plumbing — needs_human, handoff_active,
+    paused AI, merchant inbox alert) AND override the acknowledgement
+    text to ``HANDOFF_OWNER_ACK_TEXT_AR``.
+
+    Never raises.
+    """
+    norm = normalize_arabic_text(text)
+    if not norm:
+        return False
+
+    # English short-circuit — phrase library is high-precision.
+    for phrase in _OWNER_ENGLISH_PHRASES:
+        if phrase and phrase in norm:
+            return True
+
+    # Arabic: require BOTH a contact/escalation verb AND an owner
+    # noun-token in the same normalised message. We deliberately do
+    # NOT enforce strict ordering or proximity — Saudi/Gulf phrasings
+    # interleave verbs and nouns liberally ("أبي أتواصل مع المالك",
+    # "المالك أبي أكلمه", "ودي مع المالك أحكي").
+    has_owner_noun = any(t and t in norm for t in _OWNER_NOUN_TOKENS_NORM)
+    if not has_owner_noun:
+        return False
+    has_contact_verb = any(v and v in norm for v in _OWNER_VERB_TOKENS_NORM)
+    return has_contact_verb
 
 
 def is_handoff_request(text: Optional[str]) -> bool:
@@ -278,6 +463,31 @@ def is_handoff_request(text: Optional[str]) -> bool:
 # by the pre-brain guard and the outer-exception guard so the
 # customer experience is identical across the two paths.
 HANDOFF_ACK_TEXT_AR = "تمام، راح يتواصل معك أحد فريقنا في أقرب وقت 🌷"
+
+
+# Owner-contact acknowledgement (May 2026 #42).
+#
+# Used by the pre-brain handoff guard ONLY when the inbound also
+# matches ``is_owner_contact_request`` — i.e. the customer specifically
+# asked to talk to the OWNER / MANAGEMENT / SHOP-OWNER, not just any
+# staff member. The wording follows the merchant's specification:
+#
+#   "أكيد، ممكن توضح لي سبب التواصل مع المالك؟ وبرفع طلبك
+#    للإدارة/المسؤول المناسب."
+#
+# Why a clarifier instead of the generic team copy:
+#   * Owner-contact requests usually have a SPECIFIC reason (شكوى /
+#     اقتراح / طلب خاص). Asking once gives the merchant context to
+#     route faster.
+#   * The customer chose the framing ("المالك" — not "موظف"); echoing
+#     it preserves their intent in the reply.
+#   * The promise "برفع طلبك للإدارة/المسؤول المناسب" is honest:
+#     needs_human + handoff_active are flipped in the same turn so the
+#     merchant inbox sees the request immediately.
+HANDOFF_OWNER_ACK_TEXT_AR = (
+    "أكيد 🌷 ممكن توضح لي سبب التواصل مع المالك؟ "
+    "وراح أرفع طلبك للإدارة/المسؤول المناسب."
+)
 
 
 # ── Post-payment modification detector ──────────────────────────────
@@ -411,8 +621,10 @@ HANDOFF_POST_PAYMENT_ACK_TEXT_AR = (
 
 __all__ = [
     "HANDOFF_ACK_TEXT_AR",
+    "HANDOFF_OWNER_ACK_TEXT_AR",
     "HANDOFF_POST_PAYMENT_ACK_TEXT_AR",
     "is_handoff_request",
+    "is_owner_contact_request",
     "is_post_payment_modification_request",
     "normalize_arabic_text",
 ]

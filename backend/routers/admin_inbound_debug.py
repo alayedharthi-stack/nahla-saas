@@ -71,6 +71,36 @@ _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _DEFAULT_LOOKBACK_HOURS = 24
 
+# Saudi Arabia is UTC+3 year-round (no DST). Pinning to a fixed offset
+# avoids the pitfall of zoneinfo not being installed on some Python
+# builds (Windows default lacks the IANA database). The merchant's
+# specification — surface BOTH UTC and KSA timestamps so 24/25 May
+# events can never be confused — only requires a stable offset.
+KSA_UTC_OFFSET = timezone(timedelta(hours=3), name="Asia/Riyadh")
+
+_TABLE_MESSAGE_EVENT  = "message_events"
+_TABLE_AI_QUALITY     = "ai_quality_events"
+
+
+def _to_utc_iso(value: Optional[datetime]) -> str:
+    """Render ``value`` as an ISO-8601 UTC string, never naive."""
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _to_ksa_iso(value: Optional[datetime]) -> str:
+    """Render ``value`` in KSA local time so on-call can compare a
+    customer-reported timestamp ("الساعة ٢:٠٦ مساءً") against the log
+    without mental UTC arithmetic."""
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(KSA_UTC_OFFSET).isoformat()
+
 
 def _summarise_message_event(row: MessageEvent) -> Dict[str, Any]:
     """Project a MessageEvent into a triage-friendly dict.
@@ -79,6 +109,9 @@ def _summarise_message_event(row: MessageEvent) -> Dict[str, Any]:
     the conversation table; ``drop_reason`` is non-empty only for the
     placeholder rows the May 2026 #41 fix writes when the brain was
     skipped.
+
+    May 2026 #42 — surface BOTH UTC and KSA timestamps + the source
+    table so triage never confuses 24 May (UTC) with 25 May (KSA).
     """
     meta = row.extra_metadata or {}
     norm_inbound = meta.get("normalized_inbound") or {}
@@ -92,6 +125,7 @@ def _summarise_message_event(row: MessageEvent) -> Dict[str, Any]:
     return {
         "id":               row.id,
         "kind":             "message_event",
+        "source_table":     _TABLE_MESSAGE_EVENT,
         "tenant_id":        row.tenant_id,
         "conversation_id":  row.conversation_id,
         "direction":        row.direction or "",
@@ -104,9 +138,9 @@ def _summarise_message_event(row: MessageEvent) -> Dict[str, Any]:
         "transcript_status": norm_inbound.get("transcript_status") or "",
         "drop_reason":      drop_reason,
         "persisted":        True,
-        "created_at":       (
-            row.created_at.isoformat() if row.created_at else ""
-        ),
+        "created_at":              _to_utc_iso(row.created_at),
+        "event_created_at_utc":    _to_utc_iso(row.created_at),
+        "event_created_at_ksa":    _to_ksa_iso(row.created_at),
     }
 
 
@@ -122,6 +156,7 @@ def _summarise_drop_event(row: AiQualityEvent) -> Dict[str, Any]:
     return {
         "id":               row.id,
         "kind":             "drop_event",
+        "source_table":     _TABLE_AI_QUALITY,
         "tenant_id":        row.tenant_id,
         "conversation_id":  row.conversation_id,
         "direction":        "inbound",
@@ -134,9 +169,9 @@ def _summarise_drop_event(row: AiQualityEvent) -> Dict[str, Any]:
         "transcript_status": "",
         "drop_reason":      row.mismatch_type or "",
         "persisted":        None,
-        "created_at":       (
-            row.created_at.isoformat() if row.created_at else ""
-        ),
+        "created_at":              _to_utc_iso(row.created_at),
+        "event_created_at_utc":    _to_utc_iso(row.created_at),
+        "event_created_at_ksa":    _to_ksa_iso(row.created_at),
         "category":         row.category or "",
         "detail":           (row.mismatch_reason or "")[:300],
         "phone_masked":     row.customer_phone_masked or "",
@@ -158,8 +193,12 @@ def list_recent_inbound_events(
         description="Max rows per source (message_event + drop_event).",
     ),
     lookback_hours: int = Query(
-        _DEFAULT_LOOKBACK_HOURS, ge=1, le=24 * 14,
-        description="How far back to scan, in hours.",
+        _DEFAULT_LOOKBACK_HOURS, ge=1, le=24 * 30,
+        description=(
+            "How far back to scan, in hours. Lookback window starts "
+            "from server NOW (UTC). Increase to 48-168 hours when a "
+            "merchant reports an event from a previous calendar day."
+        ),
     ),
 ) -> Dict[str, Any]:
     """Return the most recent inbound events for triage.
@@ -215,12 +254,19 @@ def list_recent_inbound_events(
         drop_query = drop_query.filter(AiQualityEvent.tenant_id == int(tenant_id))
     drop_rows = drop_query.limit(int(limit)).all()
 
+    now_utc = datetime.now(timezone.utc)
     return {
-        "since":           since.isoformat(),
-        "tenant_id":       tenant_id,
-        "limit":           limit,
-        "message_events":  [_summarise_message_event(r) for r in message_rows],
-        "drop_events":     [_summarise_drop_event(r) for r in drop_rows],
+        "since":              since.isoformat(),
+        "since_utc":          _to_utc_iso(since),
+        "since_ksa":          _to_ksa_iso(since),
+        "now_utc":            _to_utc_iso(now_utc),
+        "now_ksa":            _to_ksa_iso(now_utc),
+        "lookback_hours":     int(lookback_hours),
+        "ksa_utc_offset":     "+03:00",
+        "tenant_id":          tenant_id,
+        "limit":              limit,
+        "message_events":     [_summarise_message_event(r) for r in message_rows],
+        "drop_events":        [_summarise_drop_event(r) for r in drop_rows],
         "counts": {
             "message_events": len(message_rows),
             "drop_events":    len(drop_rows),

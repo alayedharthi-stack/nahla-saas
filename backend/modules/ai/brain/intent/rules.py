@@ -405,7 +405,15 @@ _register(RuleSet(
         r"\s*(?:\S+\s+){0,2}?"
         r"(أحد|احد|واحد|موظف|موظفه|موظفة|مختص|مختصه|مختصة|مسؤول|"
         r"مسؤوله|مسؤولة|مشرف|مشرفه|مشرفة|شخص|بشري|بشريه|بشرية|"
-        r"إنسان|انسان|واحدمنكم|واحد منكم)?",
+        r"إنسان|انسان|واحدمنكم|واحد منكم|"
+        # May 2026 #42 — owner / management target nouns. The
+        # customer's choice of framing ("المالك" / "الإدارة" /
+        # "صاحب المحل") used to fall through to the default LLM
+        # because it wasn't enumerated here. Adding them keeps the
+        # routing on the staff-escalation path even when the
+        # PRE-BRAIN handoff guard misses a regional phrasing.
+        r"المالك|مالك|صاحب المحل|صاحب المتجر|صاحبك|"
+        r"الإدارة|الادارة|إدارة|ادارة)?",
         # "في أحد يرد / فيه أحد يرد / هل في أحد / محد رد / ما حد رد"
         r"(في|فيه|هل في|هل يوجد|يوجد|ما في|مافي|محد|ماحد)"
         r"\s*(أحد|احد|واحد|حد)"

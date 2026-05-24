@@ -248,3 +248,156 @@ def test_post_payment_modification_does_not_fire_on_unrelated_text() -> None:
         assert not is_post_payment_modification_request(s), (
             f"Modification detector should NOT fire for {s!r}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Owner-contact escalation (May 2026 #42)
+# ────────────────────────────────────────────────────────────────────
+#
+# Production regression on Tenant 33: a customer typed
+#   "أبي أتواصل مع المالك"
+# and got the generic store-intro hallucination instead of the staff-
+# escalation flow, because the message did not match any of:
+#   * is_handoff_request — no "موظف / احد / حولني" wording,
+#   * INTENT_TALK_HUMAN target nouns — "المالك" was not enumerated,
+#   * INTENT_ASK_OWNER_CONTACT — required noun-form "التواصل" not the
+#     verb form "أتواصل".
+# These tests pin the new behaviour so a future refactor can't silently
+# drop owner-contact phrasings back into the LLM-hallucination path.
+
+
+def test_handoff_fires_on_owner_contact_phrasings() -> None:
+    """Every "أبي أتواصل/أكلم مع المالك / صاحب المحل / الإدارة /
+    المسؤول" phrasing must trigger the PRE-BRAIN handoff guard."""
+    from core.handoff_detector import is_handoff_request
+
+    samples = (
+        # The exact phrase from the production WhatsApp screenshot
+        "ابي اتواصل مع المالك",
+        "أبي أتواصل مع المالك",
+        "ابغى اتواصل مع المالك",
+        # Verb variants
+        "ابي اكلم المالك",
+        "ابغى اكلم المالك",
+        "ودي اكلم المالك",
+        "ودي اتواصل مع المالك",
+        "ابي احكي مع المالك",
+        # Shop-owner / store-owner framing
+        "ابي اكلم صاحب المحل",
+        "اتواصل مع صاحب المحل",
+        "ابي صاحب المتجر",
+        "ابي اكلم صاحب المتجر",
+        # Management / supervisor framing
+        "ابي اتواصل مع الادارة",
+        "ابي اكلم الادارة",
+        "اكلم الادارة",
+        "ابي اكلم المسؤول",
+        "اتواصل مع المسؤول",
+        # English
+        "talk to the owner",
+        "speak to management",
+        "shop owner please",
+        "store owner",
+    )
+    for s in samples:
+        assert is_handoff_request(s), (
+            f"Owner-contact phrase should fire is_handoff_request: {s!r}"
+        )
+
+
+def test_owner_contact_request_fires_on_explicit_phrases() -> None:
+    """The narrower owner-specific detector must fire on every
+    production-observed phrasing — these are the cases that get the
+    clarifier-style ack instead of the generic team copy."""
+    from core.handoff_detector import is_owner_contact_request
+
+    samples = (
+        "أبي أتواصل مع المالك",
+        "ابي اتواصل مع المالك",
+        "ابغى اكلم المالك",
+        "ودي اكلم المالك",
+        "ابي اكلم صاحب المحل",
+        "اتواصل مع صاحب المتجر",
+        "ابي اتواصل مع الادارة",
+        "اكلم المسؤول",
+        "talk to the owner",
+        "speak to management",
+        "contact the owner",
+    )
+    for s in samples:
+        assert is_owner_contact_request(s), (
+            f"Owner-contact detector should fire for {s!r}"
+        )
+
+
+def test_owner_contact_request_does_not_fire_on_unrelated_text() -> None:
+    """Conservative detector — must NOT classify product / shipping
+    questions that happen to mention "المالك" or "المسؤول" without an
+    explicit contact verb."""
+    from core.handoff_detector import is_owner_contact_request
+
+    samples = (
+        # Product asks
+        "السلام عليكم",
+        "ابي عسل سدر",
+        "كم سعر العسل",
+        "وين الفرع",
+        # Negative: "صاحب" appears in many polite phrasings unrelated
+        # to escalation. We require an OWNER-NOUN token (المالك /
+        # صاحب المحل / صاحب المتجر / الادارة / المسؤول) AND a verb.
+        "صاحبي يبي عسل",
+        "اشتريت من صاحب الموقع امس",
+        # Negative: "ادارة" inside an unrelated context
+        "كيف ادارة الطلبات عندكم",
+        # Negative: bare "المسؤول" without a verb
+        "المسؤول هنا غالي شوي",
+        # Negative: explicit handoff for a regular employee, NOT owner
+        "ابي اتكلم مع موظف",
+        "ابي مختص",
+    )
+    for s in samples:
+        assert not is_owner_contact_request(s), (
+            f"Owner-contact detector should NOT fire for {s!r}"
+        )
+
+
+def test_owner_contact_ack_text_is_clarifier_style() -> None:
+    """Pin the production-facing copy so a future refactor can't
+    silently regress to the generic team line. The merchant
+    explicitly asked for a clarifier ('ممكن توضح سبب التواصل؟') so
+    they receive WHY the customer wants the owner alongside the
+    handoff."""
+    from core.handoff_detector import (
+        HANDOFF_ACK_TEXT_AR,
+        HANDOFF_OWNER_ACK_TEXT_AR,
+    )
+
+    assert HANDOFF_OWNER_ACK_TEXT_AR != HANDOFF_ACK_TEXT_AR, (
+        "Owner ack must be distinct from the generic team ack"
+    )
+    assert "سبب التواصل" in HANDOFF_OWNER_ACK_TEXT_AR
+    assert "المالك" in HANDOFF_OWNER_ACK_TEXT_AR
+    # Must promise escalation to management/supervisor — not invent
+    # a human team that doesn't exist.
+    assert (
+        "الإدارة" in HANDOFF_OWNER_ACK_TEXT_AR
+        or "الادارة" in HANDOFF_OWNER_ACK_TEXT_AR
+        or "المسؤول" in HANDOFF_OWNER_ACK_TEXT_AR
+    )
+
+
+def test_handoff_still_fires_for_non_owner_phrases() -> None:
+    """Regression sanity: extending the substring library for owner
+    phrasings must not break the existing 'موظف / مختص / احد' rules."""
+    from core.handoff_detector import is_handoff_request
+
+    samples = (
+        "ابي اتكلم مع احد",
+        "حولني لموظف",
+        "كلموني",
+        "في احد يرد",
+    )
+    for s in samples:
+        assert is_handoff_request(s), (
+            f"Pre-existing handoff phrase regressed: {s!r}"
+        )

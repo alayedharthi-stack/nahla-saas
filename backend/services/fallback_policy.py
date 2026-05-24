@@ -62,10 +62,12 @@ Brain is getting better.
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Any, Optional, Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -581,6 +583,143 @@ def choose_intent_aware_fallback(
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Structured fallback telemetry (May 2026 #42)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# When a customer sees "حصل خطأ مؤقت 🙏 ممكن تعيد رسالتك؟" we MUST be able
+# to answer in one log search:
+#
+#   * which tenant / conversation / sender hit the fallback?
+#   * which inbound message id / type triggered it?
+#   * which classifier intent was active?
+#   * which orchestration STAGE produced the failure (brain pipeline?
+#     outer try/except? media normaliser? pre-brain handoff send?)?
+#   * which exception class + message was raised?
+#   * which build (git sha) was running?
+#
+# Without this every fallback is a black box — we get a customer
+# complaint with a timestamp and have to grep generic ``[Merchant/Brain]``
+# error lines and pray they correlate. The merchant explicitly asked
+# for a single greppable marker covering all of the above.
+#
+# Pure logging — never raises, never blocks the reply path.
+
+# Stage vocabulary — pinned strings so log search is deterministic.
+STAGE_BRAIN_EXCEPTION       = "brain_exception"
+STAGE_OUTER_EXCEPTION       = "outer_exception"
+STAGE_NORMALIZER_EXCEPTION  = "normalizer_exception"
+STAGE_PRE_BRAIN_HANDOFF     = "pre_brain_handoff_send"
+STAGE_MEDIA_FALLBACK        = "media_fallback"
+STAGE_NO_AI                 = "no_ai_configured"
+
+_FALLBACK_LOGGER = logging.getLogger("nahla.fallback")
+
+
+def _resolve_git_sha() -> str:
+    """Best-effort build-sha resolver.
+
+    Honours the same env-var precedence as ``routers.health._read_git_head_sha``
+    so the [AI_TEMP_ERROR_FALLBACK] line agrees with ``GET /version``.
+    Returns ``"unknown"`` when no signal is available — never raises.
+    """
+    sha = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_SHA")
+        or os.getenv("SOURCE_COMMIT")
+        or os.getenv("COMMIT_SHA")
+        or ""
+    )
+    sha = sha.strip()
+    if sha:
+        return sha[:12]
+    return "unknown"
+
+
+def _safe(value: Any, default: str = "-") -> str:
+    """Render ``value`` as a short, single-line string for log output.
+
+    Strips newlines / tabs and clips to 200 chars so a noisy exception
+    message can't blow up a single-line greppable log entry.
+    """
+    if value is None or value == "":
+        return default
+    s = str(value).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    return s[:200] if len(s) > 200 else s
+
+
+def emit_temp_error_fallback_log(
+    *,
+    tenant_id: Any,
+    conversation_id: Any = None,
+    sender: str = "",
+    inbound_msg_id: str = "",
+    msg_type: str = "",
+    intent: str = "",
+    stage: str = "",
+    exception: Optional[BaseException] = None,
+    exception_class: str = "",
+    error_message: str = "",
+    fallback_kind: str = "",
+    response_goal: str = "",
+    extra: Optional[dict] = None,
+) -> None:
+    """Emit the ``[AI_TEMP_ERROR_FALLBACK]`` structured log line.
+
+    Wired in at every site that may send the generic temporary-error
+    fallback to the customer:
+      * Brain pipeline raised → safe-reply send.
+      * Outer try/except → final fallback send.
+      * Media normaliser raised → persist-only placeholder.
+      * Pre-brain handoff guard ack-send raised.
+
+    Never raises; logging failures are swallowed.
+
+    Format
+    ------
+    ``[AI_TEMP_ERROR_FALLBACK] tenant_id=... conversation_id=...
+    sender=... inbound_msg_id=... msg_type=... intent=... stage=...
+    exception_class=... error_message=... fallback_kind=...
+    response_goal=... git_sha=...``
+    """
+    try:
+        if exception is not None and not exception_class:
+            exception_class = exception.__class__.__name__
+        if exception is not None and not error_message:
+            error_message = str(exception)
+
+        masked_sender = sender or ""
+        if masked_sender and len(masked_sender) > 6:
+            masked_sender = masked_sender[:3] + "***" + masked_sender[-3:]
+
+        parts = [
+            f"tenant_id={_safe(tenant_id)}",
+            f"conversation_id={_safe(conversation_id)}",
+            f"sender={_safe(masked_sender)}",
+            f"inbound_msg_id={_safe(inbound_msg_id)}",
+            f"msg_type={_safe(msg_type)}",
+            f"intent={_safe(intent)}",
+            f"stage={_safe(stage)}",
+            f"exception_class={_safe(exception_class)}",
+            f"error_message={_safe(error_message)}",
+            f"fallback_kind={_safe(fallback_kind)}",
+            f"response_goal={_safe(response_goal)}",
+            f"git_sha={_safe(_resolve_git_sha())}",
+        ]
+        if extra:
+            for k, v in extra.items():
+                parts.append(f"{_safe(k)}={_safe(v)}")
+        _FALLBACK_LOGGER.warning("[AI_TEMP_ERROR_FALLBACK] %s", " ".join(parts))
+    except Exception:  # noqa: BLE001 — observability MUST NOT crash the reply path
+        try:
+            _FALLBACK_LOGGER.debug(
+                "[AI_TEMP_ERROR_FALLBACK] emit failed (suppressed)",
+                exc_info=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 __all__ = [
     "FALLBACK_KIND_HANDOFF_ACK",
     "FALLBACK_KIND_INTENT_DETERMINISTIC",
@@ -598,8 +737,15 @@ __all__ = [
     "GOAL_RETRY",
     "GOAL_SILENT",
     "INTENT_AWARE_MIN_CONFIDENCE",
+    "STAGE_BRAIN_EXCEPTION",
+    "STAGE_MEDIA_FALLBACK",
+    "STAGE_NO_AI",
+    "STAGE_NORMALIZER_EXCEPTION",
+    "STAGE_OUTER_EXCEPTION",
+    "STAGE_PRE_BRAIN_HANDOFF",
     "choose_intent_aware_fallback",
     "choose_safe_fallback",
+    "emit_temp_error_fallback_log",
     "fallback_text",
     "is_explicit_handoff_request",
     "is_informational_question",
