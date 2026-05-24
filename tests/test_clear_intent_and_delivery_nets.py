@@ -505,3 +505,227 @@ class TestNetsCooperate:
         assert result.fired is True
         # The acknowledgement must NOT include the dismissive copy.
         assert "خارج تخصصي" not in result.new_reply
+
+
+# ════════════════════════════════════════════════════════════════════
+# Part 4 — Active-order continuation path (May 2026 #45)
+# ════════════════════════════════════════════════════════════════════
+#
+# Production complaint on Tenant 33 (May 25 KSA): customer worked
+# through the full sales flow — picked product, confirmed quantity,
+# agreed to the price — and then sent name + phone + city + district
+# WITHOUT the bot using one of the explicit "أرسل لي العنوان"
+# markers. The pre-#45 code path skipped the rewrite (because the
+# bot's last outbound was a price-confirmation, not an address ask)
+# and the LLM dismissed the address as out_of_scope.
+#
+# After #45 the safety net also fires on the active-order
+# continuation path — bot's recent outbounds carry order markers
+# (price + currency / quantity confirmation / checkout cue) AND the
+# customer message has ≥ 2 distinct delivery fields.
+
+
+# A typical price-confirmation outbound from a real Tenant 33
+# transcript — carries the price + currency tokens but
+# DELIBERATELY does NOT include any of the explicit "أرسل لي
+# العنوان" / "نكمل الطلب" markers. That isolation is what makes
+# this test exercise the new Path B (active-order continuation).
+ACTIVE_ORDER_BOT_OUTBOUND_PRICE = (
+    "ممتاز 🌷 السعر الإجمالي 198 ريال (زجاجتين × 99 ريال)."
+)
+
+ACTIVE_ORDER_BOT_OUTBOUND_QUANTITY = (
+    "تمام 🌷 الكمية المطلوبة زجاجتين."
+)
+
+ACTIVE_ORDER_BOT_OUTBOUND_CHECKOUT = (
+    "بعد ما تأكد، نرسل لك رابط الدفع 🌷"
+)
+
+
+class TestDeliveryInfoActiveOrderContinuation:
+    """Path B (May 2026 #45): bot's recent outbound was a price /
+    quantity / checkout confirmation, customer proactively sends
+    shipping info. Safety net must rewrite the dismissive LLM reply."""
+
+    def test_full_address_after_price_confirmation_rewrites(self):
+        """The exact Tenant 33 scenario: customer types the full
+        shipping block right after the bot confirmed the price.
+        Pre-fix this skipped the safety net entirely."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg=SCREENSHOT_CUSTOMER_REPLY,
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE),
+        )
+        assert result.fired is True
+        # Trace marker for the new path.
+        assert result.reason == "active_order_continuation_strong_signal"
+        assert "خارج تخصصي" not in result.new_reply
+
+    def test_full_address_after_quantity_confirmation_rewrites(self):
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg=SCREENSHOT_CUSTOMER_REPLY,
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_QUANTITY),
+        )
+        assert result.fired is True
+
+    def test_full_address_after_checkout_cue_rewrites(self):
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg=SCREENSHOT_CUSTOMER_REPLY,
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_CHECKOUT),
+        )
+        assert result.fired is True
+
+    def test_bare_phone_after_price_does_not_rewrite(self):
+        """Conservative: a single delivery field (just a phone) on
+        the active-order path is NOT enough — it could be unrelated
+        chatter. We require ≥ 2 fields for Path B."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg="0552375813",
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE),
+        )
+        assert result.fired is False
+        assert result.skipped_reason == "active_order_context_but_weak_signal"
+
+    def test_name_plus_city_after_price_rewrites(self):
+        """Two distinct fields meets the Path B threshold."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg="خالد الحربي\nجدة",
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE),
+        )
+        assert result.fired is True
+
+    def test_phone_plus_city_after_price_rewrites(self):
+        """Phone + city — still ≥ 2 fields."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg="0552375813\nالرياض",
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE),
+        )
+        assert result.fired is True
+
+    def test_helpful_reply_left_alone_even_with_active_order(self):
+        """Brain produced a non-dismissive reply → never override.
+        Merchant explicitly required: don't prevent natural Brain
+        responses, only fix the false out_of_scope case."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        result = apply_delivery_info_context_net(
+            customer_msg=SCREENSHOT_CUSTOMER_REPLY,
+            reply_text=(
+                "تمام 🌷 وصلتني بياناتك يا خالد. "
+                "نرتب لك التوصيل للمدينة المنورة."
+            ),
+            history=_history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE),
+        )
+        assert result.fired is False
+        assert result.skipped_reason == "reply_not_dismissive"
+
+    def test_bare_phone_in_unrelated_chat_does_not_rewrite(self):
+        """Negative regression: customer sends a phone number in a
+        general chat (no order in flight) — must not classify as
+        delivery info. Same behaviour as before #45."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        # History where the bot was just chatting, no order context.
+        history = [
+            {"direction": "in",  "body": "السلام عليكم"},
+            {"direction": "out", "body": "وعليكم السلام 🌷 كيف نقدر نخدمك؟"},
+        ]
+        result = apply_delivery_info_context_net(
+            customer_msg="رقمي 0552375813",
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=history,
+        )
+        assert result.fired is False
+        assert result.skipped_reason == "bot_not_awaiting_delivery"
+
+    def test_full_address_in_unrelated_chat_does_not_rewrite(self):
+        """Negative regression: even a full address block must NOT
+        trigger the rewrite when there's no order context AND no
+        explicit address ask. The brain handles those turns."""
+        from modules.ai.postprocess.safety_nets import (
+            apply_delivery_info_context_net,
+        )
+        history = [
+            {"direction": "in",  "body": "هل عندكم عسل سدر"},
+            {"direction": "out", "body": "نعم متوفر 🌷 بعدة أحجام."},
+        ]
+        result = apply_delivery_info_context_net(
+            customer_msg=SCREENSHOT_CUSTOMER_REPLY,
+            reply_text=SCREENSHOT_DISMISSIVE_BOT_REPLY,
+            history=history,
+        )
+        assert result.fired is False
+        assert result.skipped_reason == "bot_not_awaiting_delivery"
+
+    def test_active_order_helper_detects_price_marker(self):
+        """Pin the active-order detector helper directly."""
+        from modules.ai.postprocess.safety_nets import (
+            _history_in_active_order_context,
+        )
+        history = _history_with_outbound(ACTIVE_ORDER_BOT_OUTBOUND_PRICE)
+        assert _history_in_active_order_context(history) is True
+
+    def test_active_order_helper_ignores_general_chat(self):
+        from modules.ai.postprocess.safety_nets import (
+            _history_in_active_order_context,
+        )
+        history = [
+            {"direction": "in",  "body": "هلا"},
+            {"direction": "out", "body": "هلا فيك 🌷 كيف نقدر نخدمك؟"},
+        ]
+        assert _history_in_active_order_context(history) is False
+
+    def test_active_order_helper_handles_empty_history(self):
+        from modules.ai.postprocess.safety_nets import (
+            _history_in_active_order_context,
+        )
+        assert _history_in_active_order_context(None) is False
+        assert _history_in_active_order_context([]) is False
+
+    def test_active_order_helper_only_scans_last_three_outbounds(self):
+        """An old order from a previous session (4+ outbounds ago)
+        must not trigger the active-order path on a fresh discovery
+        turn."""
+        from modules.ai.postprocess.safety_nets import (
+            _history_in_active_order_context,
+        )
+        history = [
+            # Old session — order completed
+            {"direction": "out", "body": ACTIVE_ORDER_BOT_OUTBOUND_PRICE},
+            {"direction": "in",  "body": "تم"},
+            {"direction": "out", "body": "تمام 🌷 وصلني الإيصال."},
+            # Fresh, unrelated turns (3 outbounds without order markers)
+            {"direction": "in",  "body": "السلام عليكم"},
+            {"direction": "out", "body": "وعليكم السلام 🌷"},
+            {"direction": "in",  "body": "كيف الأحوال"},
+            {"direction": "out", "body": "بخير الحمد لله 🌷"},
+            {"direction": "in",  "body": "..."},
+            {"direction": "out", "body": "أيش تحب نعرض لك؟"},
+        ]
+        assert _history_in_active_order_context(history) is False

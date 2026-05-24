@@ -7034,6 +7034,7 @@ async def _handle_merchant_message(
                     "flag_disabled",
                     "bot_not_awaiting_delivery",
                     "reply_not_dismissive",
+                    "active_order_context_but_weak_signal",
                 }:
                     _payload = {
                         "event":             "safety_net",

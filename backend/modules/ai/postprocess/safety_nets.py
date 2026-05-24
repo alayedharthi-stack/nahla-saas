@@ -2863,6 +2863,98 @@ def apply_clear_intent_fallback_net(
 # detection.
 
 
+# ── Active-order context markers (May 2026 #45) ────────────────
+#
+# Production complaint on Tenant 33 (May 25 KSA): customer ran
+# through the full sales flow — picked the product, confirmed
+# quantity, agreed to the price — and then sent their shipping
+# data (name + phone + city + district) UNPROMPTED. The bot's
+# last outbound was the price confirmation, NOT one of the
+# explicit "أرسل لي العنوان" markers below, so
+# ``_bot_was_awaiting_delivery`` returned False, the rewrite
+# path stayed asleep, and the LLM dismissed the address as
+# out_of_scope.
+#
+# Architectural fix: also treat the conversation as "ready for
+# delivery info" when recent outbounds carry ACTIVE-ORDER context
+# (price / currency / quantity / checkout language). The customer
+# typing their address while the bot was just confirming a price
+# is the natural next step — never out_of_scope.
+#
+# We keep this list narrow + high-signal so it can't accidentally
+# fire on a generic catalogue browse. A real catalogue listing
+# mentions products without committing the customer; an active
+# order has either a currency-tagged price OR an explicit
+# quantity + checkout cue paired with a single product focus.
+_ACTIVE_ORDER_MARKERS: tuple = (
+    # Currency / price tokens — always paired with digits in real
+    # outbound text, but the substring scan is enough here.
+    "ريال",
+    "ر.س",
+    "ر.س.",
+    "ر س",
+    "sar",
+    # Order-progress phrases the bot uses after price confirmation
+    "تأكيد الطلب", "تاكيد الطلب", "نأكد الطلب", "ناكد الطلب",
+    "نكمل الطلب", "نكمل طلبك", "نكمل بعدها", "نكمل معك",
+    "اكمل الطلب", "اكمال الطلب",
+    "متابعة الطلب", "متابعه الطلب",
+    "تأكيد الكمية", "تاكيد الكميه",
+    "السعر الإجمالي", "السعر الاجمالي",
+    "المبلغ الإجمالي", "المبلغ الاجمالي",
+    "الإجمالي", "الاجمالي",
+    "المجموع",
+    # Quantity confirmation phrases
+    "الكمية المطلوبة", "الكميه المطلوبه",
+    "كم العدد", "العدد المطلوب",
+    "وحدة", "وحده", "وحدتين", "وحدات",
+    "زجاجة", "زجاجه", "زجاجتين",
+    "علبة", "علبه", "علبتين",
+    # Direct checkout cues
+    "نرسل لك رابط الدفع", "نرسل رابط الدفع",
+    "رابط الدفع", "رابط دفع",
+    "بعد ما تأكد", "بعد ما تاكد",
+)
+
+
+def _history_in_active_order_context(
+    history: Optional[List[Dict[str, Any]]],
+) -> bool:
+    """True when one of the last 3 outbounds contains an
+    active-order marker — price + currency, quantity confirmation,
+    or checkout cue.
+
+    Used as a SECONDARY trigger for the delivery-info safety net so
+    a customer typing "name + phone + city" right after a
+    price-confirmation outbound (without the bot using one of the
+    explicit "أرسل لي العنوان" markers) is still recognised as
+    delivery info instead of a false out_of_scope.
+
+    Conservative by design — never raises, and the threshold of 3
+    outbounds is short enough that an old order from a previous
+    session can't trigger it on a fresh discovery turn.
+    """
+    if not history:
+        return False
+    outbound_seen = 0
+    try:
+        for turn in reversed(history):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("out", "outbound"):
+                continue
+            outbound_seen += 1
+            body = str((turn or {}).get("body") or "")
+            if body:
+                norm = _normalise_for_match(body)
+                if any(m in norm for m in _ACTIVE_ORDER_MARKERS):
+                    return True
+            if outbound_seen >= 3:
+                break
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 # Markers in the bot's most-recent outbound that mean "I am
 # waiting for delivery info from the customer".
 _BOT_AWAITING_DELIVERY_MARKERS: tuple = (
@@ -3130,15 +3222,42 @@ def apply_delivery_info_context_net(
         result.skipped_reason = "flag_disabled"
         return result
 
-    if not _bot_was_awaiting_delivery(history):
-        result.skipped_reason = "bot_not_awaiting_delivery"
-        return result
-    result.reason = "bot_was_awaiting_delivery_info"
+    # ── Trigger condition (May 2026 #45 widened) ──────────────────
+    # Two paths into the rewrite:
+    #
+    #   PATH A — explicit ask: bot's last 1-3 outbounds contained
+    #            one of the "أرسل لي العنوان" markers. Same as
+    #            April 2026 behaviour. Single delivery signal in
+    #            the customer message is enough.
+    #
+    #   PATH B — active-order continuation: bot's last 3 outbounds
+    #            contained an active-order marker (price+currency,
+    #            quantity confirmation, checkout cue) AND the
+    #            customer's message carries ≥ 2 distinct delivery
+    #            fields. The stronger threshold guards against
+    #            rewriting a bare "0552..." that's actually
+    #            unrelated chatter from a customer who happens to
+    #            be mid-order.
+    #
+    # Both paths still require ``_reply_looks_dismissive(reply_text)``
+    # before we rewrite — when the LLM's reply is reasonable we
+    # leave it alone.
+    awaiting_explicit = _bot_was_awaiting_delivery(history)
+    if awaiting_explicit:
+        result.reason = "bot_was_awaiting_delivery_info"
+    else:
+        active_order = _history_in_active_order_context(history)
+        if not active_order:
+            result.skipped_reason = "bot_not_awaiting_delivery"
+            return result
+        result.reason = "active_order_continuation"
 
     if not _reply_looks_dismissive(reply_text):
-        # Bot was waiting, but its reply isn't dismissive →
-        # leave the LLM's reply alone (it may be doing the right
-        # thing already, e.g. acknowledging the partial address).
+        # Bot was waiting (or order is in flight), but the LLM's
+        # reply isn't dismissive → the brain is handling it. Stay
+        # out of the way — the merchant explicitly asked for
+        # "احترام order context الجاري" without preventing
+        # natural Brain responses.
         result.skipped_reason = "reply_not_dismissive"
         return result
 
@@ -3146,6 +3265,22 @@ def apply_delivery_info_context_net(
     if not slots:
         result.skipped_reason = "no_delivery_signals_in_msg"
         return result
+
+    # PATH B requires a STRONGER signal than PATH A — at least two
+    # distinct delivery fields. This prevents rewriting on a bare
+    # phone number or city name that may be unrelated to the order.
+    if not awaiting_explicit:
+        delivery_field_keys = (
+            "phone", "city",
+            "customer_name", "customer_first_name", "customer_last_name",
+            "address_line", "short_address_code", "google_maps_url",
+            "street", "district", "building_number",
+        )
+        signal_count = sum(1 for k in delivery_field_keys if slots.get(k))
+        if signal_count < 2:
+            result.skipped_reason = "active_order_context_but_weak_signal"
+            return result
+        result.reason = "active_order_continuation_strong_signal"
 
     result.extracted_slots = slots
     result.has_phone = bool(slots.get("phone"))
