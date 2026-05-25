@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .types import (
@@ -85,6 +86,72 @@ def _normalize_sku_token(s: Any) -> str:
     """Lowercase + strip non-alphanumeric chars so SKU variants like
     ``"WA-123"`` / ``"wa_123"`` / ``"wa:123"`` all compare equal."""
     return _CATALOG_NORM_RE.sub("", str(s or "").lower())
+
+
+# ── Relational layer feature flag (May 2026 — Tenant 33 #49) ─────────
+# Default OFF. Per merchant directive: rollout is staged
+#   1. flag off (this commit ships)
+#   2. flag on for telemetry only — no consumer reads the state
+#   3. shadow eval -> Tenant 33 -> gradual.
+# Read at the call site so unit tests can flip it via monkeypatch
+# without restarting the process.
+import os as _os_relational  # noqa: E402
+
+
+def _relational_layer_enabled() -> bool:
+    """True when ``RELATIONAL_LAYER_ENABLED`` env var is set to a
+    truthy value (``1`` / ``true`` / ``yes`` / ``on``)."""
+    raw = (_os_relational.environ.get("RELATIONAL_LAYER_ENABLED") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _resolve_last_shipment_at(
+    *,
+    conv_meta: Any,
+    history: Any,
+) -> Optional[datetime]:
+    """Best-effort extraction of the last shipment / dispatch event
+    timestamp for the post-purchase-window classifier. Tolerates
+    missing / malformed fields and never raises.
+
+    Sources scanned (first match wins):
+      * ``conv_meta['shipment']['shipped_at']`` — preferred path.
+      * Any inbound history turn whose ``body`` mentions the
+        Saudi-post-style "تم شحن" line; we use ``created_at`` of
+        that turn.
+    """
+    try:
+        if isinstance(conv_meta, dict):
+            shipment = conv_meta.get("shipment") or conv_meta.get("order_shipment") or {}
+            if isinstance(shipment, dict):
+                stamp = shipment.get("shipped_at") or shipment.get("dispatched_at")
+                if isinstance(stamp, datetime):
+                    return stamp
+                if isinstance(stamp, str) and stamp:
+                    try:
+                        return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    try:
+        if isinstance(history, list):
+            for turn in reversed(history):
+                if not isinstance(turn, dict):
+                    continue
+                body = str(turn.get("body") or "")
+                if "تم شحن" in body or "shipment dispatched" in body.lower():
+                    stamp = turn.get("created_at")
+                    if isinstance(stamp, datetime):
+                        return stamp
+                    if isinstance(stamp, str) and stamp:
+                        try:
+                            return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                        except Exception:
+                            continue
+    except Exception:
+        pass
+    return None
 
 
 def _resolve_catalog_product(
@@ -513,6 +580,86 @@ class MerchantBrain:
             )
         # Attach db for handlers that need it (avoids threading Session issues)
         ctx._db = db  # type: ignore[attr-defined]
+
+        # ── Relational layer (May 2026 — Tenant 33 #49, Commit 1) ────────
+        # Behind a feature flag (default OFF). Computes a typed
+        # ``RelationalState`` describing the conversation moment, the
+        # customer's lifecycle stage, sentiment, post-purchase window
+        # and a non-imperative advisory the brain prompt overlay (and
+        # later the decision engine + safety nets) can consume. ZERO
+        # behaviour change in Commit 1 — no consumer reads
+        # ``ctx.relational_state``; this commit only emits the
+        # ``[CX]`` telemetry line so we can validate classifier
+        # behaviour against production traffic before any layer
+        # integration.
+        if _relational_layer_enabled():
+            try:
+                from .relational import (  # noqa: PLC0415
+                    compute_relational_state as _compute_relational,
+                    log_relational_state as _log_relational,
+                )
+                _social_category: Optional[str] = None
+                _stance_for_relational: Optional[str] = None
+                # Light read: stance + social classification are
+                # cheap pure functions; we re-run them here so the
+                # relational layer is independent of pipeline order.
+                try:
+                    from .intent.social_classifier import classify_social  # noqa: PLC0415
+                    _social_match = classify_social(message or "")
+                    if _social_match is not None:
+                        _social_category = str(_social_match.category)
+                except Exception:
+                    _social_category = None
+                _last_shipment_at = None
+                try:
+                    _last_shipment_at = _resolve_last_shipment_at(
+                        conv_meta=None,
+                        history=history,
+                    )
+                except Exception:
+                    _last_shipment_at = None
+                _customer_messages = [
+                    str(t.get("body") or "")
+                    for t in (history or [])
+                    if t.get("direction") == "in"
+                ][-3:]
+                _handoff_signals: Dict[str, Any] = {}
+                try:
+                    if intent and getattr(intent, "name", "") == "talk_to_human":
+                        _handoff_signals["is_explicit_handoff_request"] = True
+                except Exception:
+                    pass
+                relational = _compute_relational(
+                    inbound_text=message or "",
+                    intent_name=getattr(intent, "name", "") or "",
+                    stance=_stance_for_relational,
+                    social_category=_social_category,
+                    customer_profile=profile or {},
+                    order_state=(
+                        state.order_prep.to_dict()
+                        if hasattr(state, "order_prep") and state.order_prep
+                        else {}
+                    ),
+                    conversation_summary=(
+                        getattr(state, "conversation_summary", None) or {}
+                    ),
+                    recent_customer_messages=_customer_messages,
+                    last_shipment_event_at=_last_shipment_at,
+                    handoff_signals=_handoff_signals,
+                )
+                ctx.relational_state = relational
+                _log_relational(
+                    tenant_id=tenant_id,
+                    phone=customer_phone,
+                    state=relational,
+                    extra={"intent": getattr(intent, "name", "") or ""},
+                )
+            except Exception as _rel_exc:  # noqa: BLE001
+                logger.debug(
+                    "[CX] relational layer compute failed (non-fatal) "
+                    "tenant=%s err=%s",
+                    tenant_id, _rel_exc,
+                )
 
         if merchant_context:
             logger.info(

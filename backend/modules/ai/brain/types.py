@@ -707,6 +707,18 @@ class BrainContext:
     # way without the AI competing with them. Strictly turn-local —
     # NOT persisted on the Conversation row.
     human_priority: bool = False
+    # Relational layer verdict for THIS turn (May 2026 — Tenant 33 #49,
+    # Commit 1 of the relational architecture rollout). Computed in
+    # ``Pipeline.process`` when ``RELATIONAL_LAYER_ENABLED`` is on.
+    # Carries the conversation moment, lifecycle, sentiment, post-
+    # purchase window and a non-imperative advisory the brain prompt
+    # overlay can use later. STRICT architectural rule (pinned in
+    # ``modules.ai.brain.relational.contracts``): this object MUST
+    # NEVER fabricate business state; it may only influence tone /
+    # framing / suppression / prioritisation downstream.
+    # Commit 1 attaches the verdict but no consumer reads it yet —
+    # zero behaviour change.
+    relational_state: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
