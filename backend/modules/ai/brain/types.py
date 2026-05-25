@@ -178,6 +178,22 @@ class OrderPreparationState:
     payment_receipt_at:       str = ""
     payment_receipt_metadata: Dict[str, Any] = field(default_factory=dict)
     order_status: str = ""
+    # ── Text-only payment claim understanding flag (Wave 1, W1.1) ────
+    # Stamped by ``core.payment_intent._stamp_text_claim_unverified_state``
+    # when the customer says "حولت" / "تم التحويل" without attached
+    # media. Wave 1 commits W1.2 / W1.4 will consume these to drive
+    # the brain's prompt overlay. They live as first-class fields on
+    # ``OrderPreparationState`` so :class:`brain.state.store.DefaultStateStore`
+    # cannot silently drop them on its full ``brain_state`` replace
+    # in ``save()`` — the diagnostic identified that drop as a
+    # structural risk.
+    #
+    # NEVER imply confirmed payment. They are pure understanding
+    # signals. ``payment_receipt_received`` / ``order_status`` are
+    # not touched by the stamp helper.
+    payment_claim_unverified:    bool = False
+    payment_claim_unverified_at: str = ""
+    payment_claim_text_preview:  str = ""
     # ── Variant choice gate (migration 0064 — Phase 3) ───────────────────
     # When the resolver returns a parent with 2+ in-stock variants, the
     # responder ships ``ask_product_variants`` instead of the product
@@ -232,6 +248,9 @@ class OrderPreparationState:
             "payment_receipt_at":       self.payment_receipt_at,
             "payment_receipt_metadata": dict(self.payment_receipt_metadata or {}),
             "order_status":             self.order_status,
+            "payment_claim_unverified":    self.payment_claim_unverified,
+            "payment_claim_unverified_at": self.payment_claim_unverified_at,
+            "payment_claim_text_preview":  self.payment_claim_text_preview,
             "awaiting_variant_choice":  self.awaiting_variant_choice,
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
@@ -284,6 +303,9 @@ class OrderPreparationState:
             payment_receipt_at=str(raw.get("payment_receipt_at", "") or ""),
             payment_receipt_metadata=dict(raw.get("payment_receipt_metadata") or {}),
             order_status=str(raw.get("order_status", "") or ""),
+            payment_claim_unverified=bool(raw.get("payment_claim_unverified", False)),
+            payment_claim_unverified_at=str(raw.get("payment_claim_unverified_at", "") or ""),
+            payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),
             awaiting_variant_choice=bool(raw.get("awaiting_variant_choice", False)),
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),

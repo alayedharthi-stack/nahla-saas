@@ -48,10 +48,87 @@ prompt mid-funnel.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.order_flow")
+
+
+# ── Payment contradiction guard (Wave 1, W1.1 — May 2026) ───────────
+#
+# Production complaint: within the same beat the bot would say
+#   "وصلني الإيصال"      (got the receipt)
+# and then ask for it again
+#   "أرسل لي الإيصال"    (send the receipt).
+#
+# Root cause located in the diagnostic: the post-send
+# ``mark_awaiting_receipt`` hook scans the OUTBOUND text for the bare
+# keyword "إيصال" (see ``_RECEIPT_ASK_KEYWORDS`` below). The bot's own
+# receipt acknowledgement contains "إيصال", so the keyword scan
+# false-matches and flips ``awaiting_payment_receipt=True`` IMMEDIATELY
+# AFTER ``payment_receipt_received=True`` was just set on the same
+# turn. Next turn the bot then asks for the receipt as if nothing
+# arrived.
+#
+# This guard refuses the awaiting flip when the receipt was confirmed
+# inside the recency window (default 30 minutes). It does NOT change
+# any other behaviour — the keyword scan still works, the legacy
+# code path is preserved, the flip simply gets vetoed when the state
+# would contradict itself.
+#
+# Strict invariants:
+#   * Pure read of brain state. Never mutates anything.
+#   * Never raises. Any DB / shape / parse failure falls through to
+#     the legacy ``apply_state_patch`` call — defensive, because the
+#     post-send hook must not break the outbound response path.
+#   * Independent kill switch ``PAYMENT_CONTRADICTION_GUARD_ENABLED``
+#     (default OFF). Wave 1 will flip ON after telemetry confirms
+#     the guard is silent on legitimate flips.
+#   * Conservative window: a missing / unparseable
+#     ``payment_receipt_at`` is TREATED AS RECENT, because we'd
+#     rather skip a legitimate awaiting-flip than overwrite a
+#     genuine receipt-confirmed state.
+_PAYMENT_CONTRADICTION_GUARD_RECENT_RECEIPT_WINDOW_SECS = 30 * 60
+
+
+def _payment_contradiction_guard_enabled() -> bool:
+    """Return ``True`` when ``PAYMENT_CONTRADICTION_GUARD_ENABLED`` is
+    set to a truthy value. Wave 1 default = OFF (staged rollout)."""
+    raw = (
+        os.environ.get("PAYMENT_CONTRADICTION_GUARD_ENABLED") or ""
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _receipt_received_recently(received_at_iso: str) -> bool:
+    """Return ``True`` when ``received_at_iso`` is within the
+    contradiction-guard recency window.
+
+    Behaviour:
+      * Empty / missing string  -> ``True``  (defensive: never
+        downgrade a confirmed receipt because the ISO field is
+        missing).
+      * Unparseable string      -> ``True``  (same reason).
+      * Naive timestamp         -> assumed UTC.
+      * Inside the window       -> ``True``.
+      * Outside the window      -> ``False``.
+
+    Pure function. Never raises.
+    """
+    if not received_at_iso:
+        return True
+    try:
+        from datetime import timedelta  # noqa: PLC0415,F401
+        ts = datetime.fromisoformat(
+            str(received_at_iso).replace("Z", "+00:00")
+        )
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - ts
+        return delta.total_seconds() <= _PAYMENT_CONTRADICTION_GUARD_RECENT_RECEIPT_WINDOW_SECS
+    except Exception:
+        return True
 
 
 # ── Receipt-request keywords (Arabic + English) ─────────────────────
@@ -936,11 +1013,66 @@ def mark_awaiting_receipt(
     *,
     tenant_id: int,
     phone: str,
+    conversation_id: Optional[int] = None,
 ) -> bool:
     """Convenience wrapper for setting
     ``awaiting_payment_receipt=True`` after the bot's outbound
     asked for a receipt. The webhook calls this from inside
-    ``_handle_merchant_message`` right after a successful send."""
+    ``_handle_merchant_message`` right after a successful send.
+
+    Tenant 33 #50 (Wave 1, W1.1 — contradiction guard):
+    when ``PAYMENT_CONTRADICTION_GUARD_ENABLED`` is on AND the
+    persisted ``order_prep`` already records a recent
+    ``payment_receipt_received=True``, refuse the flip. This closes
+    the false-match where the bot's own ACK ("وصلنا إيصال التحويل
+    ...") triggers ``detect_awaiting_receipt_in_reply`` against its
+    own keyword list — which would otherwise produce the production
+    complaint of "got the receipt" + "send the receipt" inside the
+    same beat. The guard never raises and never blocks an
+    apply_state_patch failure cascade; with the flag off, behaviour
+    is byte-identical to the pre-guard implementation.
+
+    Returns ``True`` when ``apply_state_patch`` actually ran and
+    succeeded; ``False`` either because the patch failed OR because
+    the guard refused the flip (the caller's structured log already
+    distinguishes via the ``[PAYMENT_CONTRADICTION_GUARD]`` line).
+    """
+    if _payment_contradiction_guard_enabled():
+        try:
+            _conv, bs = _load_brain_state(
+                db, tenant_id=tenant_id, phone=phone,
+            )
+            op = (
+                bs.get("order_prep") or bs.get("order_preparation") or {}
+            ) if isinstance(bs, dict) else {}
+            received = bool(op.get("payment_receipt_received"))
+            received_at = str(op.get("payment_receipt_at") or "").strip()
+            if received and _receipt_received_recently(received_at):
+                _conv_id = (
+                    conversation_id
+                    if conversation_id is not None
+                    else getattr(_conv, "id", None)
+                )
+                logger.info(
+                    "[PAYMENT_CONTRADICTION_GUARD] "
+                    "decision=block_awaiting_flip "
+                    "reason=recent_receipt_received_blocks_awaiting_flip "
+                    "tenant_id=%s conversation_id=%s phone=*%s "
+                    "payment_receipt_at=%s window_secs=%s",
+                    tenant_id, _conv_id,
+                    phone[-4:] if phone else "",
+                    received_at or "<missing>",
+                    _PAYMENT_CONTRADICTION_GUARD_RECENT_RECEIPT_WINDOW_SECS,
+                )
+                return False
+        except Exception as exc:  # noqa: BLE001
+            # Defensive: never let the guard's own failure mode
+            # block the legitimate flip. The legacy code path runs
+            # below.
+            logger.debug(
+                "[PAYMENT_CONTRADICTION_GUARD] inspection failed "
+                "(falling through to legacy flip): %s", exc,
+            )
     return apply_state_patch(
         db,
         tenant_id=tenant_id,

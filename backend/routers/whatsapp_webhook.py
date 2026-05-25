@@ -8293,14 +8293,22 @@ async def _handle_merchant_message(
                     mark_awaiting_receipt,
                 )
                 if detect_awaiting_receipt_in_reply(reply or ""):
-                    mark_awaiting_receipt(
-                        db, tenant_id=tenant_id, phone=to,
+                    # Wave 1 W1.1 (contradiction guard): pass the
+                    # conversation id so the structured
+                    # ``[PAYMENT_CONTRADICTION_GUARD]`` log line
+                    # carries it whenever the guard refuses the flip.
+                    _flipped = mark_awaiting_receipt(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=to,
+                        conversation_id=getattr(convo, "id", None),
                     )
-                    logger.info(
-                        "[ORDER_FLOW_STATE] transition=awaiting_receipt "
-                        "tenant=%s phone=*%s source=brain_reply_keyword",
-                        tenant_id, to[-4:] if to else "",
-                    )
+                    if _flipped:
+                        logger.info(
+                            "[ORDER_FLOW_STATE] transition=awaiting_receipt "
+                            "tenant=%s phone=*%s source=brain_reply_keyword",
+                            tenant_id, to[-4:] if to else "",
+                        )
             except Exception as _ar_exc:  # noqa: BLE001
                 logger.debug(
                     "[ORDER_FLOW_STATE] awaiting-receipt detection "
