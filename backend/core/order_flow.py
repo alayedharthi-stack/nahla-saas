@@ -101,6 +101,47 @@ def _payment_contradiction_guard_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _w13_emit_receipt_extraction(
+    *,
+    tenant_id: Any,
+    phone: Optional[str],
+    conversation_id: Any = None,
+    message_id: Any = None,
+    source: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Wave 1 W1.3 — observation-only emission of the
+    ``[PAYMENT_RECEIPT_EXTRACTED]`` log line.
+
+    Runs the receipt-extraction layer on the inbound metadata to
+    surface what fields the regex-heuristic extractor sees in the
+    full-text body (vs the legacy 280-char preview), with
+    per-field confidence. Behaviour is byte-identical with the
+    ``RECEIPT_FIELD_EXTRACTION_TELEMETRY_ENABLED`` flag off — this
+    helper neither computes nor logs anything in that case. NEVER
+    raises. Independent from the W1.2 verdict-telemetry flag.
+    """
+    try:
+        from core.receipt_extraction import (  # noqa: PLC0415
+            compute_receipt_fields,
+            is_receipt_extraction_telemetry_enabled,
+            log_receipt_fields,
+        )
+        if not is_receipt_extraction_telemetry_enabled():
+            return
+        fields = compute_receipt_fields(metadata=metadata or {})
+        log_receipt_fields(
+            tenant_id=tenant_id, phone=phone,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            source=source,
+            fields=fields,
+        )
+    except Exception:
+        # Telemetry must never break the pipeline.
+        return
+
+
 def _w12_emit_receipt_verdict(
     *,
     tenant_id: Any,
@@ -658,6 +699,16 @@ def maybe_handle_receipt_inbound(
                     has_attached_media=True,
                     has_text_only_claim=False,
                 )
+                # Wave 1 W1.3 — emit extraction telemetry for the
+                # blocked path so we can correlate "what did the
+                # extractor see?" with "why did the verifier block?".
+                _w13_emit_receipt_extraction(
+                    tenant_id=tenant_id, phone=phone,
+                    conversation_id=getattr(_conv, "id", None),
+                    message_id=(inbound_metadata or {}).get("message_id"),
+                    source="receipt_inbound_blocked",
+                    metadata=inbound_metadata,
+                )
                 logger.info(
                     "[ORDER_FLOW_STATE] receipt short-circuit blocked by "
                     "tenant-account verification tenant=%s phone=*%s "
@@ -688,6 +739,14 @@ def maybe_handle_receipt_inbound(
         pdf_kind=(inbound_metadata or {}).get("pdf_kind"),
         has_attached_media=True,
         has_text_only_claim=False,
+    )
+    # Wave 1 W1.3 — extraction telemetry for the same call site.
+    _w13_emit_receipt_extraction(
+        tenant_id=tenant_id, phone=phone,
+        conversation_id=getattr(_conv, "id", None),
+        message_id=(inbound_metadata or {}).get("message_id"),
+        source="receipt_inbound",
+        metadata=inbound_metadata,
     )
 
     state_patch: Dict[str, Any] = {
@@ -897,6 +956,17 @@ def maybe_handle_payment_evidence_inbound(
             pdf_kind=md.get("pdf_kind"),
             has_attached_media=True,
             has_text_only_claim=False,
+        )
+        # Wave 1 W1.3 — extraction telemetry for the same call site.
+        _w13_emit_receipt_extraction(
+            tenant_id=tenant_id, phone=phone,
+            conversation_id=getattr(_conv, "id", None),
+            message_id=md.get("message_id"),
+            source=(
+                "active_order_promotion_blocked"
+                if _block_promotion else "active_order_promotion"
+            ),
+            metadata=md,
         )
 
         if _block_promotion:

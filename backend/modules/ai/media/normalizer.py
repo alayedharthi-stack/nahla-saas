@@ -393,6 +393,13 @@ def classify_inbound_document(
 
 _PDF_TEXT_CHAR_LIMIT = 20000  # plenty for any receipt; truncates absurd PDFs
 
+# Wave 1 W1.3 — cap for the persisted full-body text. Far above any
+# real receipt body (typical bank receipts produce 300-2000 chars of
+# OCR), but bounded so a misbehaving extraction can't bloat row
+# storage. Independent from ``_PDF_TEXT_CHAR_LIMIT`` (in-memory
+# extraction window) — this is the persistence ceiling.
+_W13_FULL_TEXT_PERSIST_CAP = 8000
+
 
 def _extract_pdf_text(
     file_bytes: bytes,
@@ -2338,6 +2345,13 @@ async def _process_document(
         "pdf_text_length":         0,
         "pdf_page_count":          0,
         "pdf_text_preview":        None,
+        # Wave 1 W1.3 — full PDF body persisted alongside the
+        # 280-char preview so the receipt-extraction layer can
+        # operate on the complete text. Capped at
+        # ``_W13_FULL_TEXT_PERSIST_CAP`` chars to bound storage
+        # cost. The legacy ``pdf_text_preview`` is unchanged for
+        # the Brain prompt / dashboard UI.
+        "pdf_text_full":           None,
         # Payment-evidence gate (universal, all tenants).
         "payment_evidence_status": None,
         "payment_evidence_reason": None,
@@ -2392,6 +2406,13 @@ async def _process_document(
             base_meta["pdf_text_preview"] = (
                 extracted_text[:280].replace("\n", " ")
             )
+            # Wave 1 W1.3 — additive full-body persistence, capped
+            # to bound storage cost. NEVER consumed by behaviour
+            # in W1.3; the receipt-extraction layer reads it for
+            # telemetry only.
+            base_meta["pdf_text_full"] = (
+                extracted_text[:_W13_FULL_TEXT_PERSIST_CAP]
+            )
 
         # If pypdf returned empty body but the file has pages,
         # fall back to OpenAI Vision OCR over the raw PDF bytes.
@@ -2421,6 +2442,11 @@ async def _process_document(
                 base_meta["pdf_text_length"]  = len(ocr_text)
                 base_meta["pdf_text_preview"] = (
                     ocr_text[:280].replace("\n", " ")
+                )
+                # Wave 1 W1.3 — full OCR body persisted for the
+                # receipt-extraction telemetry layer (additive).
+                base_meta["pdf_text_full"] = (
+                    ocr_text[:_W13_FULL_TEXT_PERSIST_CAP]
                 )
 
     # ── Heuristic classification ─────────────────────────────────
