@@ -711,6 +711,28 @@ def maybe_handle_payment_claim(
                 "tenant=%s err=%s",
                 tenant_id, _stamp_exc,
             )
+        # Wave 1 W1.2 — receipt-verdict telemetry for the text-claim
+        # path. Observation only; default OFF; never raises.
+        try:
+            from core.receipt_verdict import (  # noqa: PLC0415
+                compute_receipt_verdict,
+                is_receipt_verdict_telemetry_enabled,
+                log_receipt_verdict,
+            )
+            if is_receipt_verdict_telemetry_enabled():
+                _rv = compute_receipt_verdict(
+                    payment_understanding=None,
+                    payment_evidence_status=None,
+                    has_attached_media=bool(has_attached_media),
+                    has_text_only_claim=True,
+                )
+                log_receipt_verdict(
+                    tenant_id=tenant_id, phone=phone,
+                    source="text_claim_brain_driven",
+                    verdict=_rv,
+                )
+        except Exception:
+            pass
         return None
 
     reply_text = compose_payment_claim_ack(

@@ -101,6 +101,60 @@ def _payment_contradiction_guard_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _w12_emit_receipt_verdict(
+    *,
+    tenant_id: Any,
+    phone: Optional[str],
+    conversation_id: Any = None,
+    message_id: Any = None,
+    source: str,
+    payment_understanding: Any = None,
+    payment_evidence_status: Optional[str] = None,
+    image_kind: Optional[str] = None,
+    pdf_kind: Optional[str] = None,
+    has_attached_media: bool = False,
+    has_text_only_claim: bool = False,
+) -> None:
+    """Wave 1 W1.2 — observation-only emission of the unified
+    ``[PAYMENT_VERIFICATION_DECISION]`` log line.
+
+    Folds the existing ``PaymentUnderstanding`` (W1.0) and
+    ``payment_evidence_status`` (legacy classifier) signals into
+    one closed verdict and emits a structured log line. Behaviour
+    is byte-identical with the ``RECEIPT_VERDICT_TELEMETRY_ENABLED``
+    flag off — this helper neither computes nor logs anything in
+    that case. Even with the flag on, callers MUST NOT consume the
+    verdict for state decisions in W1.2; the consumption surface
+    arrives in W1.4. NEVER raises.
+    """
+    try:
+        from core.receipt_verdict import (  # noqa: PLC0415
+            compute_receipt_verdict,
+            is_receipt_verdict_telemetry_enabled,
+            log_receipt_verdict,
+        )
+        if not is_receipt_verdict_telemetry_enabled():
+            return
+        rv = compute_receipt_verdict(
+            payment_understanding=payment_understanding,
+            payment_evidence_status=payment_evidence_status,
+            image_kind=image_kind,
+            pdf_kind=pdf_kind,
+            has_attached_media=has_attached_media,
+            has_text_only_claim=has_text_only_claim,
+        )
+        log_receipt_verdict(
+            tenant_id=tenant_id, phone=phone,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            source=source,
+            verdict=rv,
+        )
+    except Exception:
+        # Telemetry must never break the pipeline.
+        return
+
+
 def _receipt_received_recently(received_at_iso: str) -> bool:
     """Return ``True`` when ``received_at_iso`` is within the
     contradiction-guard recency window.
@@ -547,6 +601,12 @@ def maybe_handle_receipt_inbound(
     #     completion markers; we only block when we have a
     #     concrete IBAN / beneficiary to compare.
     _understanding_block: Optional[Dict[str, Any]] = None
+    # Wave 1 W1.2 — hoisted out of the inner try block so the
+    # receipt-verdict telemetry below can read it regardless of
+    # which branch of the verification gate ran. The verdict
+    # telemetry NEVER changes behaviour; it only emits a structured
+    # log line for vocabulary unification.
+    _understanding_pu: Optional[Any] = None
     try:
         from core.tenant_payment_accounts import (  # noqa: PLC0415
             load_tenant_payment_accounts,
@@ -569,6 +629,7 @@ def maybe_handle_receipt_inbound(
                 evidence_text=_ev_text_blob,
                 has_text_only_claim=False,
             )
+            _understanding_pu = _verdict
             log_payment_understanding(
                 tenant_id=tenant_id, phone=phone,
                 source="receipt_inbound",
@@ -582,6 +643,21 @@ def maybe_handle_receipt_inbound(
                 "matched_beneficiary": _verdict.matched_beneficiary,
             }
             if not _verdict.can_flip_receipt_received:
+                # Wave 1 W1.2 — emit the unified verdict telemetry
+                # BEFORE returning, so an "expected paid → blocked"
+                # turn still produces one structured log line.
+                _w12_emit_receipt_verdict(
+                    tenant_id=tenant_id, phone=phone,
+                    conversation_id=getattr(_conv, "id", None),
+                    message_id=(inbound_metadata or {}).get("message_id"),
+                    source="receipt_inbound_blocked",
+                    payment_understanding=_understanding_pu,
+                    payment_evidence_status=pe_status,
+                    image_kind=(inbound_metadata or {}).get("image_kind"),
+                    pdf_kind=(inbound_metadata or {}).get("pdf_kind"),
+                    has_attached_media=True,
+                    has_text_only_claim=False,
+                )
                 logger.info(
                     "[ORDER_FLOW_STATE] receipt short-circuit blocked by "
                     "tenant-account verification tenant=%s phone=*%s "
@@ -596,6 +672,23 @@ def maybe_handle_receipt_inbound(
             "(non-fatal) tenant=%s err=%s",
             tenant_id, _u_exc,
         )
+
+    # Wave 1 W1.2 — receipt-verdict telemetry for the receipt-confirmed
+    # path. Observation only: behaviour is identical with the flag
+    # off, and even with the flag on the verdict is NOT consumed by
+    # any state-flip decision (that arrives in W1.4).
+    _w12_emit_receipt_verdict(
+        tenant_id=tenant_id, phone=phone,
+        conversation_id=getattr(_conv, "id", None),
+        message_id=(inbound_metadata or {}).get("message_id"),
+        source="receipt_inbound",
+        payment_understanding=_understanding_pu,
+        payment_evidence_status=pe_status,
+        image_kind=(inbound_metadata or {}).get("image_kind"),
+        pdf_kind=(inbound_metadata or {}).get("pdf_kind"),
+        has_attached_media=True,
+        has_text_only_claim=False,
+    )
 
     state_patch: Dict[str, Any] = {
         "awaiting_payment_receipt": False,
@@ -732,6 +825,10 @@ def maybe_handle_payment_evidence_inbound(
         # behaviour to avoid regressing existing flows.
         _understanding_block: Optional[Dict[str, Any]] = None
         _block_promotion = False
+        # Wave 1 W1.2 — hoisted so the verdict telemetry below has
+        # access to the underlying ``PaymentUnderstanding`` object
+        # regardless of which branch of the verification gate ran.
+        _understanding_pu: Optional[Any] = None
         try:
             from core.tenant_payment_accounts import (  # noqa: PLC0415
                 load_tenant_payment_accounts,
@@ -754,6 +851,7 @@ def maybe_handle_payment_evidence_inbound(
                     evidence_text=_ev_text_blob,
                     has_text_only_claim=False,
                 )
+                _understanding_pu = _verdict
                 log_payment_understanding(
                     tenant_id=tenant_id, phone=phone,
                     source="active_order_promotion",
@@ -782,6 +880,24 @@ def maybe_handle_payment_evidence_inbound(
                 "(non-fatal) tenant=%s err=%s",
                 tenant_id, _u_exc,
             )
+
+        # Wave 1 W1.2 — receipt-verdict telemetry for the
+        # active-order promotion path. Observation only.
+        _w12_emit_receipt_verdict(
+            tenant_id=tenant_id, phone=phone,
+            conversation_id=getattr(_conv, "id", None),
+            message_id=md.get("message_id"),
+            source=(
+                "active_order_promotion_blocked"
+                if _block_promotion else "active_order_promotion"
+            ),
+            payment_understanding=_understanding_pu,
+            payment_evidence_status=pe_status,
+            image_kind=md.get("image_kind"),
+            pdf_kind=md.get("pdf_kind"),
+            has_attached_media=True,
+            has_text_only_claim=False,
+        )
 
         if _block_promotion:
             # Skip the auto-promotion entirely. The legacy soft
