@@ -1575,10 +1575,28 @@ class MerchantBrain:
         except Exception:
             pass   # trace logging must never break the reply path
 
+        # ── Relational moment passthrough (Tenant 33 #49 — Commit 3) ──
+        # The webhook's safety-net loop consults this token to decide
+        # whether the cold-info nets (store_link / location) get a
+        # chance to fire on top of an emotionally-correct reply.
+        # Empty string when the relational layer is disabled or no
+        # moment is set — guarantees zero behaviour change with
+        # ``RELATIONAL_LAYER_ENABLED=false``.
+        _relational_moment_token: str = ""
+        try:
+            rel_state = getattr(ctx, "relational_state", None)
+            mom = getattr(rel_state, "moment", None) if rel_state is not None else None
+            mom_value = getattr(mom, "value", None)
+            if isinstance(mom_value, str) and mom_value and mom_value != "none":
+                _relational_moment_token = mom_value
+        except Exception:
+            _relational_moment_token = ""
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
             "handoff": decision.action == ACTION_HANDOFF,
+            "relational_moment": _relational_moment_token,
         }
 
 

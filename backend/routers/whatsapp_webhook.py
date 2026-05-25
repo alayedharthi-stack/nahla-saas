@@ -5092,6 +5092,10 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _brain_handoff: bool = False  # set True only by the brain handoff branch
+        # Tenant 33 #49 (Commit 3): empty string when the relational
+        # layer is disabled or no moment was identified — guarantees
+        # the safety-net suppression gate stays inert.
+        _relational_moment: str = ""
 
         # ── Top-level Conversation Mode Controller ───────────────────────────
         # Decides who owns this turn (live chat, automation recovery,
@@ -5420,14 +5424,25 @@ async def _handle_merchant_message(
                         reply          = ""
                         _brain_buttons = []
                         _brain_handoff = False
+                        _relational_moment = ""
                     else:
                         reply   = brain_result.get("reply", "") or ""
                         _brain_buttons = brain_result.get("buttons") or []
                         _brain_handoff = bool(brain_result.get("handoff"))
+                        # Tenant 33 #49 (Commit 3): the brain pipeline
+                        # surfaces the relational moment when the
+                        # relational layer is enabled. Empty string
+                        # otherwise — guarantees the cold-info safety
+                        # nets (store_link / location) keep their
+                        # legacy behaviour with the flag OFF.
+                        _relational_moment = str(
+                            brain_result.get("relational_moment") or ""
+                        ).strip()
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []
                     _brain_handoff = False
+                    _relational_moment = ""
 
                 # ── Belt-and-suspenders handoff guard (May 2026) ─────────
                 # Even when the brain returned ACTION_LLM_REPLY (because
@@ -6922,33 +6937,65 @@ async def _handle_merchant_message(
             # configured ``store_url`` from TenantSettings so the
             # customer sees a tappable preview — and never invent
             # a URL when none is on file (polite fallback instead).
+            #
+            # Tenant 33 #49 (Commit 3): the relational suppression
+            # gate runs BEFORE invoking the net. When the brain has
+            # produced an emotionally-correct reply for a praise /
+            # complaint moment, a cold "تفضل رابط متجرنا" injection
+            # would overwrite the warmth — the gate skips the call
+            # entirely and emits a structured ``[CX]
+            # safety_net_suppressed`` line. The gate stays inert
+            # whenever the kill switch is off or no moment is set.
+            _sl_suppressed = False
             try:
-                _sl = _sn_store_link(
-                    db,
-                    tenant_id=tenant_id,
-                    customer_msg=text or "",
-                    reply_text=reply or "",
+                from modules.ai.brain.relational import (  # noqa: PLC0415
+                    log_safety_net_suppressed as _cx_log_suppressed,
+                    should_suppress_safety_net as _cx_should_suppress,
                 )
-                if _sl.fired and _sl.rewrote_reply and _sl.new_reply:
-                    reply = _sl.new_reply
-                if _sl.fired or _sl.skipped_reason not in {
-                    "no_store_link_intent", "url_already_in_reply",
-                }:
-                    _payload = {
-                        "event":             "safety_net",
-                        "tenant_id":         tenant_id,
-                        "conversation_id":   getattr(convo, "id", None),
-                        **_sl.to_log_dict(),
-                    }
-                    logger.info(
-                        "[SAFETY_NET:store_link] "
-                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                _sl_suppressed, _sl_reason = _cx_should_suppress(
+                    net_name="store_link",
+                    moment=_relational_moment or None,
+                )
+                if _sl_suppressed:
+                    _cx_log_suppressed(
+                        net_name="store_link",
+                        moment=_relational_moment,
+                        reason=_sl_reason,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                        customer_phone=to,
                     )
-            except Exception as _sle:  # noqa: BLE001
-                logger.warning(
-                    "[SAFETY_NET:store_link] failed tenant=%s err=%s",
-                    tenant_id, _sle,
-                )
+            except Exception:
+                _sl_suppressed = False
+
+            if not _sl_suppressed:
+                try:
+                    _sl = _sn_store_link(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_msg=text or "",
+                        reply_text=reply or "",
+                    )
+                    if _sl.fired and _sl.rewrote_reply and _sl.new_reply:
+                        reply = _sl.new_reply
+                    if _sl.fired or _sl.skipped_reason not in {
+                        "no_store_link_intent", "url_already_in_reply",
+                    }:
+                        _payload = {
+                            "event":             "safety_net",
+                            "tenant_id":         tenant_id,
+                            "conversation_id":   getattr(convo, "id", None),
+                            **_sl.to_log_dict(),
+                        }
+                        logger.info(
+                            "[SAFETY_NET:store_link] "
+                            + _json_sn.dumps(_payload, ensure_ascii=False)
+                        )
+                except Exception as _sle:  # noqa: BLE001
+                    logger.warning(
+                        "[SAFETY_NET:store_link] failed tenant=%s err=%s",
+                        tenant_id, _sle,
+                    )
 
             # ── Location / Google Maps safety net (May 2026 #36) ────
             # Sibling of the store-link net. Customer asked "وين
@@ -6961,33 +7008,61 @@ async def _handle_merchant_message(
             # so the customer gets a tappable maps preview. NEVER
             # invents a URL — falls back to a polite clarifying
             # line when nothing is configured.
+            # Tenant 33 #49 (Commit 3): same surgical suppression
+            # gate as the store-link block above. A maps-URL injection
+            # on top of an empathy-shaped complaint reply or a thank-
+            # you reply derails the warmth — we skip the call and
+            # log the canonical ``[CX] safety_net_suppressed`` line.
+            _ll_suppressed = False
             try:
-                _ll = _sn_location(
-                    db,
-                    tenant_id=tenant_id,
-                    customer_msg=text or "",
-                    reply_text=reply or "",
+                from modules.ai.brain.relational import (  # noqa: PLC0415
+                    log_safety_net_suppressed as _cx_log_suppressed_ll,
+                    should_suppress_safety_net as _cx_should_suppress_ll,
                 )
-                if _ll.fired and _ll.rewrote_reply and _ll.new_reply:
-                    reply = _ll.new_reply
-                if _ll.fired or _ll.skipped_reason not in {
-                    "no_location_intent", "maps_url_already_in_reply",
-                }:
-                    _payload = {
-                        "event":             "safety_net",
-                        "tenant_id":         tenant_id,
-                        "conversation_id":   getattr(convo, "id", None),
-                        **_ll.to_log_dict(),
-                    }
-                    logger.info(
-                        "[SAFETY_NET:location_link] "
-                        + _json_sn.dumps(_payload, ensure_ascii=False)
+                _ll_suppressed, _ll_reason = _cx_should_suppress_ll(
+                    net_name="location",
+                    moment=_relational_moment or None,
+                )
+                if _ll_suppressed:
+                    _cx_log_suppressed_ll(
+                        net_name="location",
+                        moment=_relational_moment,
+                        reason=_ll_reason,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                        customer_phone=to,
                     )
-            except Exception as _lle:  # noqa: BLE001
-                logger.warning(
-                    "[SAFETY_NET:location_link] failed tenant=%s err=%s",
-                    tenant_id, _lle,
-                )
+            except Exception:
+                _ll_suppressed = False
+
+            if not _ll_suppressed:
+                try:
+                    _ll = _sn_location(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_msg=text or "",
+                        reply_text=reply or "",
+                    )
+                    if _ll.fired and _ll.rewrote_reply and _ll.new_reply:
+                        reply = _ll.new_reply
+                    if _ll.fired or _ll.skipped_reason not in {
+                        "no_location_intent", "maps_url_already_in_reply",
+                    }:
+                        _payload = {
+                            "event":             "safety_net",
+                            "tenant_id":         tenant_id,
+                            "conversation_id":   getattr(convo, "id", None),
+                            **_ll.to_log_dict(),
+                        }
+                        logger.info(
+                            "[SAFETY_NET:location_link] "
+                            + _json_sn.dumps(_payload, ensure_ascii=False)
+                        )
+                except Exception as _lle:  # noqa: BLE001
+                    logger.warning(
+                        "[SAFETY_NET:location_link] failed tenant=%s err=%s",
+                        tenant_id, _lle,
+                    )
 
             # ── Delivery-info context safety net (May 2026) ──────────
             # When the bot's last outbound asked for delivery info

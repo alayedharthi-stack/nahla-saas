@@ -43,6 +43,13 @@ from .decision_router import (
     apply_relational_preference,
     is_decision_router_enabled,
 )
+from .safety_net_gate import (
+    NEVER_SUPPRESSIBLE_NETS,
+    SUPPRESSIBLE_NETS,
+    is_safety_net_suppression_enabled,
+    log_safety_net_suppressed,
+    should_suppress_safety_net,
+)
 
 
 __all__ = [
@@ -62,6 +69,11 @@ __all__ = [
     "RESPONSE_GOAL_COMPLAINT_RECOVERY_PRODUCT",
     "RESPONSE_GOAL_COMPLAINT_RECOVERY_SHIPPING",
     "RESPONSE_GOAL_TRUST_BUILDING",
+    "is_safety_net_suppression_enabled",
+    "should_suppress_safety_net",
+    "log_safety_net_suppressed",
+    "SUPPRESSIBLE_NETS",
+    "NEVER_SUPPRESSIBLE_NETS",
     "BUSINESS_FACT_FIELD_FORBIDDEN_TOKENS",
     "RELATIONAL_LAYER_PERMITTED_OUTPUTS",
     "FORBIDDEN_SIDE_EFFECT_SYMBOLS",
