@@ -678,6 +678,37 @@ class MerchantBrain:
         reason_before_policy = decision.reason
         decision             = self._policy_gate.gate(decision, ctx)
 
+        # ── 4.5 Relational decision router (May 2026 — Tenant 33 #49,
+        # Commit 2). Behind ``RELATIONAL_DECISION_ROUTER_ENABLED``
+        # (independent kill switch from the Commit-1 telemetry flag).
+        # SOFT preference layer: re-routes a narrow set of (action,
+        # moment) pairs (TRACK_ORDER on praise, HANDOFF on complaint,
+        # SUGGEST_COUPON on pre-purchase concern). Strictly bound by
+        # the architectural rule pinned in
+        # ``modules.ai.brain.relational.contracts``: never fabricates
+        # business state, never mutates ctx.state, never selects a
+        # reply text. Inert if the Commit-1 flag is off (because no
+        # ``ctx.relational_state`` was attached).
+        try:
+            from .relational import (  # noqa: PLC0415
+                apply_relational_preference as _apply_relational_pref,
+                is_decision_router_enabled as _router_on,
+            )
+            if _router_on() and getattr(ctx, "relational_state", None) is not None:
+                _action_before_router = decision.action
+                decision = _apply_relational_pref(decision, ctx)
+                if decision.action != _action_before_router:
+                    logger.info(
+                        "[CX] router rerouted tenant=%s before=%s after=%s",
+                        ctx.tenant_id, _action_before_router, decision.action,
+                    )
+        except Exception as _rr_exc:  # noqa: BLE001
+            logger.debug(
+                "[CX] relational router invocation failed (non-fatal) "
+                "tenant=%s err=%s",
+                getattr(ctx, "tenant_id", "?"), _rr_exc,
+            )
+
         # Visible in all Railway log levels — critical checkpoint.
         _policy_changed = (decision.reason != reason_before_policy)
         logger.info(
@@ -1836,6 +1867,17 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         return " | ".join(lines)
 
     parts: List[str] = []
+    # ── Relational preference prefix (May 2026 — Tenant 33 #49, Commit 2)
+    # When the relational decision router has tagged a goal token on
+    # this turn (``preferred_response_goal``) we prepend it so the
+    # brain reads the relational frame BEFORE the engine reason.
+    # Stays a TOKEN — never prose, never an imperative; the brain
+    # owns the wording.
+    _preferred_goal = str(
+        (decision.args or {}).get("preferred_response_goal") or ""
+    ).strip()
+    if _preferred_goal:
+        parts.append(f"relational_goal={_preferred_goal}")
     if decision.reason:
         parts.append(decision.reason.strip())
     nxt = (suggestion.suggested_next_step or "").strip() if suggestion else ""

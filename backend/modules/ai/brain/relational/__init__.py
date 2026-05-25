@@ -34,6 +34,15 @@ from .state import (
     compute_relational_state,
     log_relational_state,
 )
+from .decision_router import (
+    RESPONSE_GOAL_APPRECIATION_ACK,
+    RESPONSE_GOAL_COMPLAINT_RECOVERY_GENERIC,
+    RESPONSE_GOAL_COMPLAINT_RECOVERY_PRODUCT,
+    RESPONSE_GOAL_COMPLAINT_RECOVERY_SHIPPING,
+    RESPONSE_GOAL_TRUST_BUILDING,
+    apply_relational_preference,
+    is_decision_router_enabled,
+)
 
 
 __all__ = [
@@ -46,6 +55,13 @@ __all__ = [
     "RelationalState",
     "compute_relational_state",
     "log_relational_state",
+    "apply_relational_preference",
+    "is_decision_router_enabled",
+    "RESPONSE_GOAL_APPRECIATION_ACK",
+    "RESPONSE_GOAL_COMPLAINT_RECOVERY_GENERIC",
+    "RESPONSE_GOAL_COMPLAINT_RECOVERY_PRODUCT",
+    "RESPONSE_GOAL_COMPLAINT_RECOVERY_SHIPPING",
+    "RESPONSE_GOAL_TRUST_BUILDING",
     "BUSINESS_FACT_FIELD_FORBIDDEN_TOKENS",
     "RELATIONAL_LAYER_PERMITTED_OUTPUTS",
     "FORBIDDEN_SIDE_EFFECT_SYMBOLS",

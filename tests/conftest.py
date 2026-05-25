@@ -32,3 +32,20 @@ for p in reversed([str(REPO_ROOT), str(BACKEND_DIR), str(DATABASE_DIR)]):
 # that might inadvertently shadow them with a different observability package.
 import observability        # noqa: E402, F401
 import observability.event_logger  # noqa: E402, F401
+
+# ── Prime ``database.models`` so it stays a package member even after a
+# legacy ``from models import X`` runs (e.g. inside ``core.billing``).
+# Without this, the first test that triggers ``brain.process()`` makes
+# Python load ``database/models.py`` as the top-level ``models`` module
+# (because ``DATABASE_DIR`` is on ``sys.path``), which then poisons
+# ``from database.models import X`` for subsequent tests by demoting
+# ``database`` to a non-package namespace. The fix pins both names in
+# ``sys.modules`` up-front so neither resolution path can lose. Catches
+# the production-grade bug surfaced by ``test_post_shipment_delivery_gate``
+# when run after any pipeline-level relational test.
+try:
+    import database.models  # noqa: E402, F401
+except Exception:  # noqa: BLE001
+    # Tests that don't need this import still run — failure here only
+    # means the conftest priming was a best-effort.
+    pass
