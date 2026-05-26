@@ -6191,42 +6191,99 @@ async def _handle_merchant_message(
             _carries_signal = _reply_carries_new_signal(reply)
 
             if _is_hard and not _carries_signal:
-                _orig_len = len(reply)
-                _default_short = _short_followup_instead_of_repeat(history)
-                # ── Context-aware fallback ────────────────────────────
-                # When the conversation has an active order, the canned
-                # "أنا هنا — قول وش تحتاج وأكمل معك" line lands MID-
-                # FUNNEL and gives the merchant the impression that the
-                # bot forgot the order. We swap in a sentence that
-                # references the live order state (product / price /
-                # awaiting receipt / under review) so the customer
-                # never sees a stale generic prompt while a real funnel
-                # is in flight.
+                # ── Wave 3 (May 2026): Relational/seasonal-aware
+                # dedup suppression gate. Eid-season audit on
+                # Tenant 33 found this branch was substituting
+                # natural Brain replies to religious / seasonal
+                # greetings ("بارك الله فيك", "كل عام مبارك") with
+                # the canned "هذي نفس الإجابة قبل قليل — إيش
+                # الناقص؟" line. The gate is a pure function gated
+                # by ``RELATIONAL_DEDUP_SUPPRESSION_ENABLED``
+                # (default OFF). When ON and the inbound is in a
+                # relational moment / matches a religious or
+                # seasonal marker phrase, suppression fires and we
+                # leave the Brain's reply untouched. When OFF —
+                # or when the gate fails for any reason — the
+                # legacy substitution path below runs unchanged.
+                _w3_suppressed = False
                 try:
-                    from core.order_flow import (  # noqa: PLC0415
-                        context_aware_dedup_fallback,
+                    from modules.ai.brain.relational import (  # noqa: PLC0415
+                        log_dedup_suppression as _cx_log_dedup_suppression,
+                        should_suppress_dedup_substitution as _cx_should_suppress_dedup,
                     )
-                    reply = context_aware_dedup_fallback(
-                        db,
-                        tenant_id=tenant_id,
-                        phone=to,
-                        history=history,
-                        default_fallback=_default_short,
+                    _w3_decision = _cx_should_suppress_dedup(
                         inbound_text=text,
+                        relational_moment=_relational_moment or None,
+                        overlap=_overlap,
                     )
-                except Exception as _ctx_exc:  # noqa: BLE001
+                    _cx_log_dedup_suppression(
+                        decision=_w3_decision,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                        overlap=_overlap,
+                        would_have_replaced=True,
+                    )
+                    if _w3_decision.suppress:
+                        _w3_suppressed = True
+                except Exception as _w3_exc:  # noqa: BLE001
                     logger.debug(
-                        "[CHAT_DEDUP] context-aware fallback failed: %s",
-                        _ctx_exc,
+                        "[CX] dedup_suppression gate failed; falling "
+                        "back to legacy substitution: %s",
+                        _w3_exc,
                     )
-                    reply = _default_short
-                logger.info(
-                    "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
-                    "replaced near-duplicate outbound "
-                    "(orig_len=%d new_len=%d brain=%s)",
-                    tenant_id, to, _overlap,
-                    _orig_len, len(reply), _brain_active,
-                )
+                    _w3_suppressed = False
+
+                if _w3_suppressed:
+                    # Brain reply passes through unchanged. Emit a
+                    # ``[CHAT_DEDUP]`` line with the relational tag
+                    # so existing operator dashboards still surface
+                    # the high-overlap event for cross-checking.
+                    logger.info(
+                        "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                        "overlap=%.2f relational_suppressed=true "
+                        "moment=%s reason=%s reply_len=%d brain=%s",
+                        tenant_id, to, _overlap,
+                        getattr(_w3_decision, "moment_token", "") or "",
+                        getattr(_w3_decision, "reason", "") or "",
+                        len(reply), _brain_active,
+                    )
+                else:
+                    _orig_len = len(reply)
+                    _default_short = _short_followup_instead_of_repeat(history)
+                    # ── Context-aware fallback ────────────────────────────
+                    # When the conversation has an active order, the canned
+                    # "أنا هنا — قول وش تحتاج وأكمل معك" line lands MID-
+                    # FUNNEL and gives the merchant the impression that the
+                    # bot forgot the order. We swap in a sentence that
+                    # references the live order state (product / price /
+                    # awaiting receipt / under review) so the customer
+                    # never sees a stale generic prompt while a real funnel
+                    # is in flight.
+                    try:
+                        from core.order_flow import (  # noqa: PLC0415
+                            context_aware_dedup_fallback,
+                        )
+                        reply = context_aware_dedup_fallback(
+                            db,
+                            tenant_id=tenant_id,
+                            phone=to,
+                            history=history,
+                            default_fallback=_default_short,
+                            inbound_text=text,
+                        )
+                    except Exception as _ctx_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[CHAT_DEDUP] context-aware fallback failed: %s",
+                            _ctx_exc,
+                        )
+                        reply = _default_short
+                    logger.info(
+                        "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
+                        "replaced near-duplicate outbound "
+                        "(orig_len=%d new_len=%d brain=%s)",
+                        tenant_id, to, _overlap,
+                        _orig_len, len(reply), _brain_active,
+                    )
             elif _is_hard and _carries_signal:
                 # Near-verbatim wording, BUT the reply ships a URL /
                 # phone / asset marker. The customer asked again

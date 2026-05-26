@@ -135,6 +135,29 @@ class ConversationMoment(str, Enum):
     # a softer framing.
     ESCALATION_REQUEST = "escalation_request"
 
+    # ── W3 (May 2026) — additive moments for relational dedup
+    # suppression. Tenant 33 production audit found the post-Brain
+    # outbound dedup guard was substituting natural Brain replies
+    # to religious / seasonal greetings with the canned "هذي نفس
+    # الإجابة قبل قليل — إيش الناقص؟" line. These two moments give
+    # the relational classifier a way to label such turns; the
+    # dedup-suppression gate (W3.2) reads them to decide whether
+    # to skip its substitution.
+
+    # Customer's turn is a religious supplication / blessing /
+    # ritual formula ("الله يحفظك", "بارك الله فيك", "اللهم
+    # بارك في رزقك") with NO commerce intent on the same turn.
+    # Pure-thanks ("شكرا") still maps to ``GRATITUDE_GENERIC``;
+    # this moment is for the religious axis distinct from gratitude.
+    RELIGIOUS_RITUAL_EXCHANGE = "religious_ritual_exchange"
+
+    # Customer's turn carries an explicit seasonal greeting
+    # ("كل عام وأنت بخير", "عيدكم مبارك", "تقبل الله", Ramadan /
+    # Eid congratulations). Independent of any commerce intent on
+    # the same turn — see the dedup-suppression gate for the
+    # "block when transactional" rule.
+    SEASONAL_GREETING = "seasonal_greeting"
+
 
 ALL_MOMENTS: Tuple[ConversationMoment, ...] = tuple(ConversationMoment)
 

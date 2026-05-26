@@ -64,6 +64,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .contracts import ARCHITECTURAL_RULE_TEXT
+from .dedup_suppression import (
+    text_indicates_religious_ritual,
+    text_indicates_seasonal_greeting,
+)
 from .moments import (
     ConversationMoment,
     LifecycleStage,
@@ -658,6 +662,60 @@ def _compute_unsafe(
                 "thanks does not warrant."
             ),
             framing="reciprocate_briefly",
+        )
+
+    # 4c) Seasonal greeting (W3.1, May 2026). Customer's turn carries
+    #     an explicit seasonal congratulation. Fires only when no
+    #     gratitude / praise / complaint / escalation / recovery
+    #     moment has matched above (additive-only insertion). Must
+    #     NOT fire when the customer is mid-funnel: a transactional
+    #     active turn that happens to include "كل عام مبارك" still
+    #     belongs to the funnel (the dedup-suppression gate also
+    #     guards this independently, but the classifier shouldn't
+    #     hand it the wrong moment).
+    has_seasonal_marker = text_indicates_seasonal_greeting(inbound_text)
+    has_religious_marker = text_indicates_religious_ritual(inbound_text)
+    active_funnel_statuses_w3 = {
+        "awaiting_receipt", "under_review", "processing", "payment_pending",
+    }
+    is_mid_funnel_w3 = (
+        has_selected_product
+        or order_status.lower() in active_funnel_statuses_w3
+    )
+    if has_seasonal_marker and not is_mid_funnel_w3:
+        return _make(
+            ConversationMoment.SEASONAL_GREETING, lifecycle, sentiment, ppw, urgency,
+            reason="seasonal_greeting_marker",
+            advisory=(
+                "Customer is sending a seasonal greeting (Eid / "
+                "Ramadan / new-year style). This is a relational "
+                "turn — match the register naturally, do not pivot "
+                "to a sales prompt or a customer-lookup. The Brain "
+                "owns the wording; downstream dedup will be told "
+                "to keep your reply intact."
+            ),
+            framing="match_seasonal_register",
+        )
+
+    # 4d) Religious ritual exchange (W3.1, May 2026). Pure
+    #     supplication / blessing without a gratitude marker (which
+    #     would have fired GRATITUDE_GENERIC at step 4b above) and
+    #     without a commerce intent in flight. Same mid-funnel guard
+    #     as seasonal: a customer mid-payment-flow saying "بارك الله
+    #     فيك" stays in transactional_active.
+    if has_religious_marker and not is_mid_funnel_w3:
+        return _make(
+            ConversationMoment.RELIGIOUS_RITUAL_EXCHANGE, lifecycle, sentiment, ppw, urgency,
+            reason="religious_ritual_marker",
+            advisory=(
+                "Customer's turn is a religious supplication / "
+                "blessing / ritual phrase with no commerce ask. "
+                "Reciprocate naturally; do not start a customer "
+                "lookup, do not push the catalogue, do not treat "
+                "lexical repetition with a previous reply as a "
+                "loop."
+            ),
+            framing="reciprocate_ritual_warmly",
         )
 
     # 5) Pre-purchase concern: hesitation markers in first-time / lapsed.
