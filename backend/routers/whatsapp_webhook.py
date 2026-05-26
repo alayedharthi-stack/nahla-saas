@@ -1204,8 +1204,8 @@ async def _handle_360dialog_body(
 
     db = SessionLocal()
     try:
-        for entry in body.get("entry", []):
-            for change in entry.get("changes", []):
+        for _entry_idx, entry in enumerate(body.get("entry", [])):
+            for _change_idx, change in enumerate(entry.get("changes", [])):
                 value = change.get("value", {}) or {}
                 field = str(change.get("field") or "")
                 metadata = value.get("metadata", {}) or {}
@@ -1223,6 +1223,46 @@ async def _handle_360dialog_body(
                 # echo was being ingested — diagnostic-only bug, but it made
                 # ``[WEBHOOK_IN] ... echoes=N`` lying about the real count.
                 echoes_cnt    = len(value.get("message_echoes") or []) if isinstance(value.get("message_echoes"), list) else 0
+
+                # ── W2.0.1.5 (May 2026): D360 dispatch-gap probe ─────
+                # Three production cases (sender=*2692 video, *8626 +
+                # *5699 documents) had visible WhatsApp delivery but
+                # no [INBOUND_LIFECYCLE] trace at all — meaning they
+                # never reached _dispatch_message. This single line,
+                # emitted BEFORE any routing decision, surfaces the
+                # raw shape (field, array sizes, first sender, first
+                # message id) so a single grep on a masked sender
+                # answers "did this inbound arrive at the webhook at
+                # all, and under which field?". Telemetry-only;
+                # never raises; phone numbers masked to last-4.
+                try:
+                    from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                        emit_raw_inbound as _d360_emit_raw_inbound,
+                    )
+                    _d360_emit_raw_inbound(
+                        scope=scope,
+                        field=field,
+                        phone_number_id=phone_number_id or "",
+                        msgs_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                        messages=value.get("messages") if isinstance(
+                            value.get("messages"), list
+                        ) else None,
+                        has_messages_key=isinstance(
+                            value.get("messages"), list
+                        ),
+                        has_message_echoes_key=isinstance(
+                            value.get("message_echoes"), list
+                        ),
+                        has_statuses_key=isinstance(
+                            value.get("statuses"), list
+                        ),
+                        entry_idx=_entry_idx,
+                        change_idx=_change_idx,
+                    )
+                except Exception:
+                    pass
 
                 if not phone_number_id:
                     logger.warning(
@@ -1273,6 +1313,28 @@ async def _handle_360dialog_body(
                         )
                     except Exception as _obs_exc:  # noqa: BLE001
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+                    # ── W2.0.1.5: gap probe — messages were present
+                    # in this change but we have no phone_number_id,
+                    # so the change ``continue``s without dispatch.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_MISSING_PHONE_ID as _REASON_MPI,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_MPI,
+                            scope=scope, field=field,
+                            phone_number_id="",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            detail=(
+                                f"display_phone_number={display_phone_number or '-'}"
+                            ),
+                        )
+                    except Exception:
+                        pass
                     continue
                 wa_conns = (
                     db.query(WhatsAppConnection)
@@ -1324,6 +1386,31 @@ async def _handle_360dialog_body(
                         )
                     except Exception as _obs_exc:  # noqa: BLE001
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+                    # ── W2.0.1.5: gap probe — phone_number_id known
+                    # but no WhatsAppConnection row matches it. Most
+                    # common cause: merchant re-paired the channel
+                    # under a NEW phone_number_id while the row still
+                    # stores the OLD one. The customer's media
+                    # vanishes silently.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_UNKNOWN_PHONE_ID as _REASON_UPI,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_UPI,
+                            scope=scope, field=field,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            detail=(
+                                f"display_phone_number={display_phone_number or '-'}"
+                            ),
+                        )
+                    except Exception:
+                        pass
                     continue
                 if len(wa_conns) > 1:
                     tenant_ids = [c.tenant_id for c in wa_conns]
@@ -1377,6 +1464,26 @@ async def _handle_360dialog_body(
                         )
                     except Exception as _obs_exc:  # noqa: BLE001
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+                    # ── W2.0.1.5: gap probe — ambiguous routing.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_AMBIGUOUS_PHONE_ID as _REASON_API,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_API,
+                            scope=scope, field=field,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            detail=(
+                                f"candidate_tenants={tenant_ids}"
+                            ),
+                        )
+                    except Exception:
+                        pass
                     continue
                 wa_conn = wa_conns[0]
                 if wa_provider(wa_conn) != WHATSAPP_PROVIDER_360DIALOG:
@@ -1424,6 +1531,30 @@ async def _handle_360dialog_body(
                         )
                     except Exception as _obs_exc:  # noqa: BLE001
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+                    # ── W2.0.1.5: gap probe — connection exists but
+                    # provider on the row is NOT dialog360 (a Meta
+                    # row ingesting a 360dialog payload, or vice
+                    # versa). Cross-provider routing accident.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_WRONG_PROVIDER as _REASON_WP,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_WP,
+                            scope=scope, field=field,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                            detail=(
+                                f"provider_on_row={wa_provider(wa_conn)!r}"
+                            ),
+                        )
+                    except Exception:
+                        pass
                     continue
                 expected_secret = str((wa_conn.extra_metadata or {}).get("coexistence_internal_secret") or "")
                 provided_secret = headers.get("x_nahla_coexistence_secret", "")
@@ -1475,6 +1606,29 @@ async def _handle_360dialog_body(
                         )
                     except Exception as _obs_exc:  # noqa: BLE001
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+                    # ── W2.0.1.5: gap probe — bad coexistence secret.
+                    # Note this branch ``return``s (not ``continue``)
+                    # so the rest of the batch is also dropped — but
+                    # the gap probe still surfaces this change's
+                    # messages count.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_BAD_SECRET as _REASON_BS,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_BS,
+                            scope=scope, field=field,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                            detail=f"connection={wa_conn.id}",
+                        )
+                    except Exception:
+                        pass
                     return
 
                 # Reaching here means the connection routing succeeded.
@@ -1552,6 +1706,42 @@ async def _handle_360dialog_body(
                         statuses_count=statuses_cnt,
                         echoes_count=echoes_cnt,
                     )
+                    # ── W2.0.1.5: gap probe — change accepted by
+                    # routing but the field/family does not match the
+                    # endpoint scope (e.g. ``messages`` arriving on a
+                    # ``status``-scoped URL). The merchant configured
+                    # a wrong URL → silent media loss.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            REASON_SCOPE_MISMATCH as _REASON_SM,
+                            BRANCH_SCOPE_MISMATCH as _BRANCH_SM,
+                            emit_branch_decision as _d360_branch,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_branch(
+                            branch=_BRANCH_SM, scope=scope, field=field,
+                            family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            statuses_count=statuses_cnt,
+                            echoes_count=echoes_cnt,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_SM,
+                            scope=scope, field=field, family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                    except Exception:
+                        pass
                     continue
 
                 _safe_record(
@@ -1574,6 +1764,29 @@ async def _handle_360dialog_body(
                 # failure here cannot touch the outer batch ``db``. Still
                 # wrapped to keep the loop alive for sibling changes.
                 if field == "messages":
+                    # ── W2.0.1.5: branch decision marker so a single
+                    # grep on a masked sender shows the change took
+                    # the messages branch (the only branch that
+                    # actually dispatches).
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            BRANCH_MESSAGES as _BR_M,
+                            emit_branch_decision as _d360_branch,
+                        )
+                        _d360_branch(
+                            branch=_BR_M, scope=scope, field=field,
+                            family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            statuses_count=statuses_cnt,
+                            echoes_count=echoes_cnt,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                    except Exception:
+                        pass
                     try:
                         # ── W2.0.1 (May 2026): per-message lifecycle
                         # trace wrap. See _handle_whatsapp_body for
@@ -1625,6 +1838,46 @@ async def _handle_360dialog_body(
                 # add a savepoint-style ``db.rollback()`` in the except
                 # so the session is clean for the next iteration.
                 if field == "smb_message_echoes":
+                    # ── W2.0.1.5: branch marker + gap probe. If the
+                    # change carries a non-empty messages[] alongside
+                    # the smb echo (a 360dialog mislabelling we have
+                    # actually seen on Eid traffic), flag it as
+                    # ``messages_in_payload_but_field_not_messages`` —
+                    # the dispatcher would never have seen the
+                    # customer's media because the field name routes
+                    # us into the merchant-echo branch.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            BRANCH_SMB_MESSAGE_ECHOES as _BR_SMB,
+                            REASON_FIELD_NOT_MESSAGES as _REASON_FNM,
+                            emit_branch_decision as _d360_branch,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_branch(
+                            branch=_BR_SMB, scope=scope, field=field,
+                            family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            statuses_count=statuses_cnt,
+                            echoes_count=echoes_cnt,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_FNM,
+                            scope=scope, field=field, family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                            detail="field=smb_message_echoes_with_messages_array",
+                        )
+                    except Exception:
+                        pass
                     try:
                         await _ingest_smb_message_echoes(db, wa_conn, value)
                         _record_coexistence_event(
@@ -1652,6 +1905,42 @@ async def _handle_360dialog_body(
                     continue
 
                 if family == "coexistence":
+                    # ── W2.0.1.5: branch + gap probe (if mislabelled
+                    # messages[] are riding alongside a coexistence
+                    # field like ``device_sync`` — *2692/*8626/*5699
+                    # type symptoms).
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            BRANCH_COEXISTENCE as _BR_CX,
+                            REASON_FIELD_NOT_MESSAGES as _REASON_FNM,
+                            emit_branch_decision as _d360_branch,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_branch(
+                            branch=_BR_CX, scope=scope, field=field,
+                            family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            statuses_count=statuses_cnt,
+                            echoes_count=echoes_cnt,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_FNM,
+                            scope=scope, field=field, family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                            detail="family=coexistence_with_messages_array",
+                        )
+                    except Exception:
+                        pass
                     try:
                         _record_coexistence_event(
                             db, wa_conn,
@@ -1679,6 +1968,39 @@ async def _handle_360dialog_body(
 
                 # ── Status / health events ────────────────────────────────
                 if family == "status":
+                    # ── W2.0.1.5: branch + gap probe.
+                    try:
+                        from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                            BRANCH_STATUS as _BR_ST,
+                            REASON_FIELD_NOT_MESSAGES as _REASON_FNM,
+                            emit_branch_decision as _d360_branch,
+                            emit_dispatch_gap as _d360_emit_gap,
+                        )
+                        _d360_branch(
+                            branch=_BR_ST, scope=scope, field=field,
+                            family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            statuses_count=statuses_cnt,
+                            echoes_count=echoes_cnt,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        )
+                        _d360_emit_gap(
+                            reason=_REASON_FNM,
+                            scope=scope, field=field, family=family,
+                            phone_number_id=phone_number_id or "",
+                            msgs_count=msgs_count,
+                            messages=value.get("messages") if isinstance(
+                                value.get("messages"), list
+                            ) else None,
+                            matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                            detail="family=status_with_messages_array",
+                        )
+                    except Exception:
+                        pass
                     try:
                         _record_status_event(db, wa_conn, event_type=field, value=value)
                         db.commit()
@@ -1700,6 +2022,43 @@ async def _handle_360dialog_body(
                     continue
 
                 logger.info("[Webhook360] Ignored field=%s tenant=%s phone_number_id=%s", field, wa_conn.tenant_id, phone_number_id)
+                # ── W2.0.1.5: ignored-field branch — last fallback.
+                # Any new 360dialog field name we don't know about
+                # still ends up here. If the change happens to carry
+                # a non-empty messages[] array, that's the silent
+                # drop class we are hunting.
+                try:
+                    from core.d360_dispatch_telemetry import (  # noqa: PLC0415
+                        BRANCH_IGNORED as _BR_IGN,
+                        REASON_FIELD_IGNORED as _REASON_FI,
+                        emit_branch_decision as _d360_branch,
+                        emit_dispatch_gap as _d360_emit_gap,
+                    )
+                    _d360_branch(
+                        branch=_BR_IGN, scope=scope, field=field,
+                        family=family,
+                        phone_number_id=phone_number_id or "",
+                        msgs_count=msgs_count,
+                        statuses_count=statuses_cnt,
+                        echoes_count=echoes_cnt,
+                        messages=value.get("messages") if isinstance(
+                            value.get("messages"), list
+                        ) else None,
+                        matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                    )
+                    _d360_emit_gap(
+                        reason=_REASON_FI,
+                        scope=scope, field=field, family=family,
+                        phone_number_id=phone_number_id or "",
+                        msgs_count=msgs_count,
+                        messages=value.get("messages") if isinstance(
+                            value.get("messages"), list
+                        ) else None,
+                        matched_tenant_id=getattr(wa_conn, "tenant_id", None),
+                        detail=f"unknown_field={field!r}",
+                    )
+                except Exception:
+                    pass
         # Final no-op commit guarantees we close the implicit tx the SELECTs opened,
         # even if no event branches above wrote anything.
         db.commit()
