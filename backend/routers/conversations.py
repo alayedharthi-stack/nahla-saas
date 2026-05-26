@@ -246,7 +246,36 @@ def _get_or_create_conversation(
         )
         db.add(convo)
         db.flush()
+        # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry. The flush
+        # only stages the row; the actual commit happens later (often
+        # inside StateManager.save_message). The trace records BOTH the
+        # creation here AND a potential rollback later — together they
+        # tell us whether a Conversation row really persisted.
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_CONVERSATION_CREATED,
+                record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_CONVERSATION_CREATED,
+                detail=f"tenant_id={tenant_id} source={source}",
+                conversation_id=int(getattr(convo, "id", 0) or 0),
+            )
+        except Exception:
+            pass
     else:
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_CONVERSATION_LOOKUP_HIT,
+                record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_CONVERSATION_LOOKUP_HIT,
+                detail=f"tenant_id={tenant_id} source={source}",
+                conversation_id=int(getattr(convo, "id", 0) or 0),
+            )
+        except Exception:
+            pass
         meta = dict(convo.extra_metadata or {})
         meta["customer_phone"] = customer_phone
         meta["phone"] = customer_phone

@@ -130,6 +130,24 @@ def spawn_background(
                 "task explosion guard tripped",
                 name, rid, in_flight_now, cap,
             )
+            # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry. The
+            # webhook path spawns _handle_whatsapp_body /
+            # _handle_360dialog_body via this helper; if we reject
+            # here the upstream provider already saw a 200 OK and the
+            # message will never be processed. This standalone event
+            # surfaces the drop to the [INBOUND_LIFECYCLE] grep.
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_BG_REJECTED,
+                    emit_standalone_event,
+                )
+                emit_standalone_event(
+                    EVENT_BG_REJECTED,
+                    detail=f"name={name} in_flight={in_flight_now} cap={cap}",
+                    request_id=rid,
+                )
+            except Exception:
+                pass
             return asyncio.ensure_future(done_future)
 
         _BG.in_flight += 1

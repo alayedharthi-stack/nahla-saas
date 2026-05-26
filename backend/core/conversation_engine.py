@@ -1242,6 +1242,41 @@ class StateManager:
                 extra_metadata=meta,
             ))
             db.commit()
+            # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry.
+            # We record the persistence outcome on the active trace
+            # so the summary line knows whether a MessageEvent was
+            # written, and whether it was orphaned (no
+            # ``conversation_id``). This is the single most important
+            # signal the operator needs when a merchant reports
+            # "the conversation never appeared in Nahla".
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_MESSAGE_SAVED,
+                    EVENT_MESSAGE_SAVED_ORPHAN,
+                    record_lifecycle,
+                )
+                if direction in ("inbound", "in"):
+                    if conversation_id is None:
+                        record_lifecycle(
+                            EVENT_MESSAGE_SAVED_ORPHAN,
+                            detail=(
+                                f"direction={direction} "
+                                f"event_type={event_type or 'whatsapp'} "
+                                f"body_len={len(safe_body or '')}"
+                            ),
+                        )
+                    else:
+                        record_lifecycle(
+                            EVENT_MESSAGE_SAVED,
+                            detail=(
+                                f"direction={direction} "
+                                f"event_type={event_type or 'whatsapp'} "
+                                f"body_len={len(safe_body or '')}"
+                            ),
+                            conversation_id=int(conversation_id),
+                        )
+            except Exception:
+                pass
         except Exception as exc:
             # ── Surface psycopg2 details (May 2026 #19) ─────────────
             # The original ``logger.warning("...: %s", exc)`` dropped
@@ -1272,6 +1307,28 @@ class StateManager:
                 _tid, phone, direction, event_type or "whatsapp",
                 _diag_sql_error(exc, db=db),
             )
+            # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry.
+            # The rollback above ALSO unwinds any uncommitted
+            # ``Conversation`` flush from the same session — so this
+            # event tells the summary line "the convo creation that
+            # looked successful upstream was just rolled back". The
+            # exception itself is swallowed (legacy contract); only
+            # the trace and structured log surface it.
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_MESSAGE_SAVE_ROLLBACK,
+                    record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_MESSAGE_SAVE_ROLLBACK,
+                    detail=(
+                        f"direction={direction} "
+                        f"event_type={event_type or 'whatsapp'} "
+                        f"exc={type(exc).__name__}"
+                    ),
+                )
+            except Exception:
+                pass
 
     @classmethod
     def load_history(cls, db, phone: str, limit: int = HISTORY_WINDOW,

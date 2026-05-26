@@ -602,6 +602,17 @@ async def whatsapp_incoming(request: Request):
             logger.warning("[webhook/meta] audit record failed: %s", exc)
 
         if _meta_should_reject(result):
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_HTTP_SIGNATURE_REJECT, emit_standalone_event,
+                )
+                emit_standalone_event(
+                    EVENT_HTTP_SIGNATURE_REJECT,
+                    provider="meta",
+                    detail=getattr(result, "status", ""),
+                )
+            except Exception:
+                pass
             logger.warning(
                 "[webhook/meta] rejecting request: status=%s detail=%s",
                 result.status.value, result.detail,
@@ -628,6 +639,16 @@ async def whatsapp_incoming(request: Request):
                 "user_agent": request.headers.get("user-agent", "")[:120],
             },
         ):
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_HTTP_REPLAY_REJECT, emit_standalone_event,
+                )
+                emit_standalone_event(
+                    EVENT_HTTP_REPLAY_REJECT,
+                    provider="meta",
+                )
+            except Exception:
+                pass
             return JSONResponse(
                 {"status": "ignored", "reason": "replay"},
                 status_code=200,
@@ -873,12 +894,24 @@ def _scope_accepts(scope: str, family: str) -> bool:
 
 
 async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
+    # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry wrap ─────────
+    # Each Meta inbound message is wrapped in a per-message trace.
+    # The context manager records EVENT_RECEIVED on entry and emits
+    # the canonical [INBOUND_LIFECYCLE] summary on exit (success or
+    # exception). Status events are NOT customer messages and stay
+    # untraced — they go through the campaign delivery audit path.
+    from core.inbound_lifecycle import inbound_lifecycle_trace  # noqa: PLC0415
     for entry in body.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
             for msg in value.get("messages", []):
-                await _dispatch_message(phone_number_id, msg, value)
+                with inbound_lifecycle_trace(
+                    provider="meta",
+                    phone_number_id=phone_number_id,
+                    msg=msg,
+                ):
+                    await _dispatch_message(phone_number_id, msg, value)
             for status in value.get("statuses", []):
                 await _handle_message_status(status)
 
@@ -1542,8 +1575,21 @@ async def _handle_360dialog_body(
                 # wrapped to keep the loop alive for sibling changes.
                 if field == "messages":
                     try:
+                        # ── W2.0.1 (May 2026): per-message lifecycle
+                        # trace wrap. See _handle_whatsapp_body for
+                        # the rationale. The provider tag here is
+                        # "360dialog" so log greps can split
+                        # tenants by upstream channel.
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            inbound_lifecycle_trace,
+                        )
                         for msg in value.get("messages", []):
-                            await _dispatch_message(phone_number_id, msg, value)
+                            with inbound_lifecycle_trace(
+                                provider="360dialog",
+                                phone_number_id=phone_number_id,
+                                msg=msg,
+                            ):
+                                await _dispatch_message(phone_number_id, msg, value)
                         for st_obj in value.get("statuses", []):
                             await _handle_message_status(st_obj)
                     except Exception as exc:  # noqa: BLE001
@@ -2457,6 +2503,14 @@ async def _dispatch_message(
             "msg_type=%s from=%s msg_id=%s",
             msg_type, sender, msg_id,
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_MISSING_PHONE_ID, EVENT_END_DROPPED, record_lifecycle,
+            )
+            record_lifecycle(EVENT_MISSING_PHONE_ID)
+            record_lifecycle(EVENT_END_DROPPED)
+        except Exception:
+            pass
         return
 
     # ── Strict in-memory dedup — runs BEFORE the conversation lock ─────────
@@ -2481,6 +2535,15 @@ async def _dispatch_message(
                     "skipping conversation lock + DB",
                     msg_id, phone_number_id, sender,
                 )
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_DEDUP_DROP_MEMORY, EVENT_END_DROPPED,
+                        record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_DEDUP_DROP_MEMORY)
+                    record_lifecycle(EVENT_END_DROPPED)
+                except Exception:
+                    pass
                 return
         except Exception as _early_dedup_exc:
             # Never block real traffic on a dedup hiccup — fall through to
@@ -2494,6 +2557,14 @@ async def _dispatch_message(
     db = next(get_db(), None)
     if not db:
         logger.error("[Engine] Cannot open DB session for phone=%s", sender)
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_DB_SESSION_FAIL, EVENT_END_DROPPED, record_lifecycle,
+            )
+            record_lifecycle(EVENT_DB_SESSION_FAIL)
+            record_lifecycle(EVENT_END_DROPPED)
+        except Exception:
+            pass
         return
 
     # Lock state-vars: declared before the try so the finally can always
@@ -2527,6 +2598,15 @@ async def _dispatch_message(
                 db.commit()
             except Exception:
                 pass
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_UNKNOWN_PHONE_ID, EVENT_END_DROPPED,
+                    record_lifecycle,
+                )
+                record_lifecycle(EVENT_UNKNOWN_PHONE_ID)
+                record_lifecycle(EVENT_END_DROPPED)
+            except Exception:
+                pass
             return
 
         if len(wa_matches) > 1:
@@ -2549,9 +2629,29 @@ async def _dispatch_message(
                 db.commit()
             except Exception:
                 pass
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_AMBIGUOUS_PHONE_ID, EVENT_END_DROPPED,
+                    record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_AMBIGUOUS_PHONE_ID,
+                    detail=f"matches={len(wa_matches)}",
+                )
+                record_lifecycle(EVENT_END_DROPPED)
+            except Exception:
+                pass
             return
 
         wa_conn = wa_matches[0]
+        # ── W2.0.1 (May 2026): tenant_resolved attaches tenant_id to
+        # the trace so the summary line surfaces it without a DB
+        # round-trip when on-call is grepping for a specific tenant.
+        try:
+            from core.inbound_lifecycle import attach_tenant  # noqa: PLC0415
+            attach_tenant(getattr(wa_conn, "tenant_id", None))
+        except Exception:
+            pass
 
         # WhatsApp business timestamp + AI live cutoff (ignore backlog before activation).
         from core.whatsapp_ai_live import (  # noqa: PLC0415
@@ -2660,11 +2760,34 @@ async def _dispatch_message(
                         "tenant=%s from=%s — Meta webhook retry",
                         msg_id, resolved_tenant_id, sender,
                     )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_DEDUP_DROP_DB, EVENT_END_DROPPED,
+                            record_lifecycle,
+                        )
+                        record_lifecycle(EVENT_DEDUP_DROP_DB)
+                        record_lifecycle(EVENT_END_DROPPED)
+                    except Exception:
+                        pass
                     return
                 IdempotencyGuard.mark_processed(inbound_dedup_state, msg_id)
                 StateManager.save(
                     db, inbound_dedup_state, tenant_id=resolved_tenant_id,
                 )
+                # ── W2.0.1 (May 2026): the dedup mark was just
+                # committed BEFORE any Conversation / MessageEvent for
+                # this inbound. If anything below crashes silently,
+                # the next provider retry will hit the duplicate-drop
+                # branch above with zero rows written. The trace
+                # records both halves so the summary tells operators
+                # exactly when the mark fired vs. the message saved.
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_DEDUP_MARKED, record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_DEDUP_MARKED)
+                except Exception:
+                    pass
             except Exception as _dedup_exc:
                 # Never block real traffic on a dedup-table hiccup. Log
                 # at WARNING (not DEBUG) so a repeated failure surfaces.
@@ -2933,6 +3056,15 @@ async def _dispatch_message(
 
             if _unsub_short_circuit:
                 # Skip automation / AI for unsubscribe-related events.
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_UNSUB_SHORT_CIRCUIT, EVENT_END_DROPPED,
+                        record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_UNSUB_SHORT_CIRCUIT)
+                    record_lifecycle(EVENT_END_DROPPED)
+                except Exception:
+                    pass
                 return
 
             # ── Email: smart notification (first message OR 24h silence) ────
@@ -3070,6 +3202,23 @@ async def _dispatch_message(
                 message=msg,
                 order_context=_order_context,
             )
+            # ── W2.0.1 (May 2026): normalizer happy path — pin the
+            # outcome on the trace so the summary line surfaces the
+            # normalized type / text length / fallback flag without
+            # parsing free-form logs.
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    attach_normalizer_outcome,
+                )
+                attach_normalizer_outcome(
+                    normalized_type=getattr(normalized_inbound, "normalized_type", None),
+                    text_len=len(getattr(normalized_inbound, "text", "") or ""),
+                    fallback_set=bool(
+                        getattr(normalized_inbound, "fallback_reply_ar", "") or ""
+                    ),
+                )
+            except Exception:
+                pass
         except Exception as _norm_exc:  # noqa: BLE001
             logger.error(
                 "[INBOUND_MEDIA_ERROR] normalize_whatsapp_inbound raised | "
@@ -3077,6 +3226,16 @@ async def _dispatch_message(
                 resolved_tenant_id, sender, msg_type, msg_id or "-", _norm_exc,
                 exc_info=True,
             )
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_NORMALIZER_FAIL, record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_NORMALIZER_FAIL,
+                    detail=f"exc={type(_norm_exc).__name__}",
+                )
+            except Exception:
+                pass
             _persist_inbound_only(
                 db=db,
                 tenant_id=resolved_tenant_id,
@@ -3347,6 +3506,16 @@ async def _dispatch_message(
             # types previously vanished from the conversation list;
             # the merchant had no way to see "the customer DID
             # send something at 1:05 PM" without raw provider logs.
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_UNSUPPORTED_TYPE, record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_UNSUPPORTED_TYPE,
+                    detail=f"normalized_type={normalized_inbound.normalized_type!r}",
+                )
+            except Exception:
+                pass
             _persist_inbound_only(
                 db=db,
                 tenant_id=resolved_tenant_id,
@@ -3390,6 +3559,16 @@ async def _dispatch_message(
                 resolved_tenant_id, sender,
                 normalized_inbound.normalized_type,
             )
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_EMPTY_TEXT_FALLBACK, record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_EMPTY_TEXT_FALLBACK,
+                    detail=f"normalized_type={normalized_inbound.normalized_type!r}",
+                )
+            except Exception:
+                pass
             await _handle_media_fallback(
                 phone_id=used_pid, to=sender,
                 tenant_id=resolved_tenant_id, db=db,
@@ -3432,6 +3611,16 @@ async def _dispatch_message(
             # platform tenants which the fallback skips). Persist a
             # structured placeholder so the conversation row exists,
             # then return without spending brain tokens.
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_EMPTY_TEXT_NO_FALLBACK, record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_EMPTY_TEXT_NO_FALLBACK,
+                    detail=f"normalized_type={normalized_inbound.normalized_type!r}",
+                )
+            except Exception:
+                pass
             _persist_inbound_only(
                 db=db,
                 tenant_id=resolved_tenant_id,
@@ -3594,6 +3783,19 @@ async def _dispatch_message(
                     resolved_tenant_id,
                     sender[-4:] if sender else "",
                 )
+                # ── W2.0.1 (May 2026): pin the short-circuit on the
+                # trace. The save_message inside this branch fires
+                # WITHOUT a conversation_id — the StateManager hook
+                # will record EVENT_MESSAGE_SAVED_ORPHAN automatically,
+                # but recording the short-circuit kind here keeps the
+                # path token greppable per business reason.
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_PAYMENT_SHORT_CIRCUIT, record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_PAYMENT_SHORT_CIRCUIT)
+                except Exception:
+                    pass
                 # Persist the state patch first so subsequent inbounds
                 # see the awaiting-receipt flag even if the send fails.
                 try:
@@ -3672,6 +3874,16 @@ async def _dispatch_message(
                     resolved_tenant_id,
                     sender[-4:] if sender else "",
                 )
+                # ── W2.0.1 (May 2026): receipt short-circuit marker.
+                # save_message below runs without a conversation_id —
+                # see EVENT_MESSAGE_SAVED_ORPHAN auto-stamp.
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_RECEIPT_SHORT_CIRCUIT, record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_RECEIPT_SHORT_CIRCUIT)
+                except Exception:
+                    pass
                 # 1) Persist the brain_state mutation FIRST so even if
                 #    the WhatsApp POST fails the next inbound still
                 #    sees ``payment_receipt_received=True`` and our
@@ -3764,6 +3976,13 @@ async def _dispatch_message(
                 # awaiting_location_text=True), then reply asking
                 # for a parseable location form.
                 try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_MAP_SHORT_CIRCUIT, record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_MAP_SHORT_CIRCUIT)
+                except Exception:
+                    pass
+                try:
                     from core.order_flow import (  # noqa: PLC0415
                         apply_state_patch as _apply_state_patch_map,
                     )
@@ -3853,6 +4072,20 @@ async def _dispatch_message(
                     sender[-4:] if sender else "",
                     _pe_status, _pe_reason,
                 )
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_PAYMENT_SHORT_CIRCUIT, record_lifecycle,
+                    )
+                    record_lifecycle(
+                        EVENT_PAYMENT_SHORT_CIRCUIT,
+                        detail=(
+                            f"kind=evidence_soft "
+                            f"status={_pe_status} "
+                            f"reason={_pe_reason}"
+                        ),
+                    )
+                except Exception:
+                    pass
                 # Persist the customer's inbound so the merchant
                 # drawer keeps the original PDF / image alongside
                 # our soft reply.
@@ -3924,6 +4157,13 @@ async def _dispatch_message(
                 "[WEBHOOK_ROUTE] route=merchant_ai tenant=%s from=%s msg_id=%s",
                 resolved_tenant_id, sender, msg_id,
             )
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_BRAIN_INVOKED, record_lifecycle,
+                )
+                record_lifecycle(EVENT_BRAIN_INVOKED)
+            except Exception:
+                pass
             await _handle_merchant_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
@@ -4254,6 +4494,16 @@ def _persist_inbound_only(
             wa_msg_id or "-", getattr(convo, "id", None),
             drop_reason or "-",
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_PERSIST_INBOUND_ONLY_OK, record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_PERSIST_INBOUND_ONLY_OK,
+                detail=f"drop_reason={drop_reason or '-'}",
+            )
+        except Exception:
+            pass
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -4263,6 +4513,16 @@ def _persist_inbound_only(
             tenant_id, sender, msg_type, normalized_type,
             wa_msg_id or "-", drop_reason or "-", exc,
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_PERSIST_INBOUND_ONLY_FAIL, record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_PERSIST_INBOUND_ONLY_FAIL,
+                detail=f"exc={type(exc).__name__} drop_reason={drop_reason or '-'}",
+            )
+        except Exception:
+            pass
         return False
 
 
@@ -4321,12 +4581,29 @@ async def _handle_media_fallback(
                 "wa_message_id":      wa_msg_id or "",
             },
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_MEDIA_FALLBACK_OK, record_lifecycle,
+            )
+            record_lifecycle(EVENT_MEDIA_FALLBACK_OK)
+        except Exception:
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[MediaFallback] failed to persist inbound row tenant=%s "
             "to=%s err=%s",
             tenant_id, to, exc,
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_MEDIA_FALLBACK_FAIL, record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_MEDIA_FALLBACK_FAIL,
+                detail=f"exc={type(exc).__name__}",
+            )
+        except Exception:
+            pass
 
     try:
         sent = await _send_whatsapp_message(
@@ -4386,6 +4663,16 @@ async def _handle_merchant_message(
             "[Merchant] DROPPED empty inbound — no reply generated | tenant=%s to=%s",
             tenant_id, to,
         )
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_END_DROPPED, record_lifecycle,
+            )
+            record_lifecycle(
+                EVENT_END_DROPPED,
+                detail="merchant_empty_text_guard",
+            )
+        except Exception:
+            pass
         return
     logger.info(
         "[Merchant/INBOUND_TRIGGER] tenant=%s from=%s direction=inbound text_len=%d snippet=%r",
