@@ -725,7 +725,7 @@ const en: Translations = {
     submittingBtn:     'Sending…',
     saveDraft:         'Save as Draft',
     savingDraft:       'Saving…',
-    libraryBtn:        'Nahla Library',
+    libraryBtn:        'Nahla Template Library',
     pendingNote:       'After submission, the template enters Under Review status until Meta approves it (24–48 hours).',
     draftNote:         'Any edit resets the template to Draft — you will need to re-submit to Meta for approval.',
     importNote:        'After importing, the template becomes an editable draft — edit it, then submit to Meta for approval, then use it in your campaigns.',
