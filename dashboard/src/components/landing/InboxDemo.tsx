@@ -84,13 +84,13 @@ const BADGE_META: Record<
   BadgeKind,
   { label: string; icon: typeof Bot; classes: string }
 > = {
-  ai:        { label: 'الذكاء الاصطناعي', icon: Bot,           classes: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
-  human:     { label: 'رد بشري',          icon: Hand,          classes: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
-  agent_req: { label: 'يطلب موظف',        icon: AlertTriangle, classes: 'bg-rose-500/15 text-rose-300 border-rose-500/35' },
-  campaign:  { label: 'حملة تسويقية',     icon: Megaphone,     classes: 'bg-violet-500/15 text-violet-300 border-violet-500/30' },
-  autopilot: { label: 'الطيار الآلي',     icon: Sparkles,      classes: 'bg-sky-500/15 text-sky-300 border-sky-500/30' },
-  cart:      { label: 'استرجاع سلة',      icon: ShoppingCart,  classes: 'bg-orange-500/15 text-orange-300 border-orange-500/30' },
-  closed:    { label: 'مغلقة',            icon: CheckCheck,    classes: 'bg-slate-500/15 text-slate-400 border-slate-500/30' },
+  ai:        { label: 'الذكاء الاصطناعي', icon: Bot,           classes: 'bg-amber-100 text-amber-700 border-amber-200/80' },
+  human:     { label: 'رد بشري',          icon: Hand,          classes: 'bg-emerald-100 text-emerald-700 border-emerald-200/80' },
+  agent_req: { label: 'يطلب موظف',        icon: AlertTriangle, classes: 'bg-rose-100 text-rose-700 border-rose-200/80' },
+  campaign:  { label: 'حملة تسويقية',     icon: Megaphone,     classes: 'bg-violet-100 text-violet-700 border-violet-200/80' },
+  autopilot: { label: 'الطيار الآلي',     icon: Sparkles,      classes: 'bg-sky-100 text-sky-700 border-sky-200/80' },
+  cart:      { label: 'استرجاع سلة',      icon: ShoppingCart,  classes: 'bg-orange-100 text-orange-700 border-orange-200/80' },
+  closed:    { label: 'مغلقة',            icon: CheckCheck,    classes: 'bg-slate-100 text-slate-600 border-slate-200/80' },
 }
 
 const FILTER_LABELS: Record<FilterId, string> = {
@@ -297,12 +297,12 @@ export default function InboxDemo() {
       <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] min-h-[420px] md:min-h-[520px]">
 
         {/* ── Conversation list (hidden on mobile when chat is open) ─── */}
-        <aside className={`border-l border-white/8 bg-slate-800/55 flex flex-col ${mobileShowChat ? 'hidden md:flex' : 'flex'}`}>
+        <aside className={`border-l border-slate-200/90 bg-[#f7f8fa] flex flex-col ${mobileShowChat ? 'hidden md:flex' : 'flex'}`}>
           {/* Search bar */}
           <div className="px-3 pt-3 pb-2">
-            <div className="flex items-center gap-2 bg-slate-700/50 border border-white/8 rounded-xl px-3 py-2 text-slate-300 text-xs">
-              <Search className="w-3.5 h-3.5" />
-              <span className="opacity-60">ابحث في المحادثات…</span>
+            <div className="flex items-center gap-2 bg-white border border-slate-200/90 rounded-xl px-3 py-2 text-slate-500 text-xs shadow-sm">
+              <Search className="w-3.5 h-3.5 text-slate-400" />
+              <span className="text-slate-400">ابحث في المحادثات…</span>
             </div>
           </div>
 
@@ -318,13 +318,13 @@ export default function InboxDemo() {
                   className={[
                     'shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border transition-colors',
                     active
-                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
-                      : 'bg-slate-800/40 text-slate-400 border-white/5 hover:text-white hover:bg-slate-800',
+                      ? 'bg-amber-50 text-amber-700 border-amber-300/80 shadow-sm'
+                      : 'bg-white text-slate-600 border-slate-200/90 hover:bg-slate-50 hover:border-slate-300',
                   ].join(' ')}
                 >
                   {FILTER_LABELS[f]}
                   <span className={`text-[10px] tabular-nums ${
-                    active ? 'text-amber-200/90' : 'text-slate-500'
+                    active ? 'text-amber-600' : 'text-slate-400'
                   }`}>
                     {count}
                   </span>
@@ -334,9 +334,9 @@ export default function InboxDemo() {
           </div>
 
           {/* Conversation rows */}
-          <div className="flex-1 overflow-y-auto divide-y divide-white/5">
+          <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
             {visible.length === 0 && (
-              <p className="text-center text-slate-500 text-xs py-8">
+              <p className="text-center text-slate-400 text-xs py-8">
                 لا توجد محادثات في هذا الفلتر
               </p>
             )}
@@ -351,8 +351,8 @@ export default function InboxDemo() {
                   className={[
                     'w-full text-right flex items-start gap-3 px-3 py-3 transition-colors',
                     isSel
-                      ? 'bg-amber-500/[0.08] border-r-2 border-amber-500'
-                      : 'hover:bg-slate-800/40',
+                      ? 'bg-amber-50 border-r-[3px] border-amber-500 shadow-[inset_0_0_0_1px_rgba(245,158,11,0.08)]'
+                      : 'bg-transparent hover:bg-white/80',
                   ].join(' ')}
                 >
                   <div className={`shrink-0 w-10 h-10 rounded-full bg-gradient-to-br ${c.avatarColor} flex items-center justify-center text-white font-bold text-sm shadow-md`}>
@@ -360,18 +360,18 @@ export default function InboxDemo() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="text-white text-sm font-bold truncate">{c.name}</span>
+                      <span className="text-slate-900 text-sm font-bold truncate">{c.name}</span>
                       <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[9px] font-bold ${Badge.classes}`}>
                         <Icon className="w-2.5 h-2.5" />
                         {Badge.label}
                       </span>
                     </div>
                     <div className="flex items-end justify-between gap-2">
-                      <p className="text-slate-400 text-xs truncate flex-1 leading-relaxed">
+                      <p className="text-slate-500 text-xs truncate flex-1 leading-relaxed">
                         {c.preview}
                       </p>
                       <div className="flex flex-col items-end gap-0.5 shrink-0">
-                        <span className="text-[10px] text-slate-500 tabular-nums">{c.time}</span>
+                        <span className="text-[10px] text-slate-400 tabular-nums">{c.time}</span>
                         {c.unread ? (
                           <span className="bg-emerald-500 text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
                             {c.unread}
