@@ -642,6 +642,13 @@ const en: Translations = {
         OTHER:                     'Other',
       },
     },
+    errors: {
+      unexpected:       'An unexpected error occurred while connecting WhatsApp.',
+      meta131000:       'A temporary Meta error occurred while fetching number status. If the verification code arrived or was accepted, wait a moment then tap Refresh now.',
+      corsFetch:        'Could not reach the API. Likely cause: CORS, network interruption, or a temporary server error.',
+      sessionExpired:   'The Nahla Meta admin session expired. If the number still appears in Meta, the connection is likely still active — you may only need to re-authorize.',
+      sanitizeFallback: 'The request was processed, but the message details could not be displayed correctly.',
+    },
   },
 
   billing: {

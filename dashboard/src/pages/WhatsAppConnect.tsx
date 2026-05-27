@@ -257,19 +257,19 @@ function CoexistenceFlow({
   )
 }
 
-function explainWhatsAppError(msg: unknown): string {
+function explainWhatsAppError(msg: unknown, err: Translations['whatsappConnect']['errors']): string {
   const raw = typeof msg === 'string' ? msg.trim() : ''
   const m = raw.toLowerCase()
 
-  if (!raw) return 'حدث خطأ غير متوقع أثناء ربط واتساب.'
+  if (!raw) return err.unexpected
   if (m.includes('131000') || m.includes('something went wrong')) {
-    return 'حدث خلل مؤقت من Meta أثناء جلب حالة الرقم. إذا كان رمز التحقق قد وصل أو تم قبوله، انتظر قليلًا ثم اضغط تحديث الآن.'
+    return err.meta131000
   }
   if (m.includes('cors') || m.includes('failed to fetch') || m.includes('تعذر الوصول إلى الخادم')) {
-    return 'تعذر الاتصال بـ API. السبب المرجّح: CORS أو انقطاع الشبكة أو خطأ مؤقت في الخادم.'
+    return err.corsFetch
   }
   if (m.includes('انتهت جلسة meta') || m.includes('انتهت صلاحية الجلسة') || m.includes('token') || m.includes('authentication required') || m.includes('missing_token')) {
-    return 'انتهت جلسة Meta الإدارية في نحلة. إذا كان الرقم ما زال ظاهرًا في Meta فالربط نفسه غالبًا مستمر، وقد تحتاج فقط إلى إعادة التفويض.'
+    return err.sessionExpired
   }
   if (m.includes('review') || m.includes('مراجعة') || m.includes('name') || m.includes('اسم العرض')) {
     return raw
@@ -287,6 +287,7 @@ function EmbeddedSignupFlow({
 }) {
   const { t } = useLanguage()
   const emb = t(tr => tr.whatsappConnect.embedded)
+  const waErr = t(tr => tr.whatsappConnect.errors)
   const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
@@ -358,7 +359,7 @@ function EmbeddedSignupFlow({
           if (window.FB) { sdkLoaded.current = true; setStage('ready') }
         }
       } catch (err) {
-        if (!cancelled) setError(explainWhatsAppError(err instanceof Error ? err.message : emb.loadConfigFailed))
+        if (!cancelled) setError(explainWhatsAppError(err instanceof Error ? err.message : emb.loadConfigFailed, waErr))
       }
     }
     loadSdk()
@@ -430,7 +431,7 @@ function EmbeddedSignupFlow({
         }
       } catch (err) {
         if (!cancelled) {
-          setError(explainWhatsAppError(err instanceof Error ? err.message : emb.syncStatusFailed))
+          setError(explainWhatsAppError(err instanceof Error ? err.message : emb.syncStatusFailed, waErr))
         }
       }
 
@@ -478,7 +479,7 @@ function EmbeddedSignupFlow({
         && (lower.includes('bsp') || lower.includes(' tp') || lower.includes('tech provider'))
       setError(isBspTp
         ? emb.bspNotEnabled
-        : explainWhatsAppError(raw))
+        : explainWhatsAppError(raw, waErr))
       setStage('ready')
     }).finally(() => setBusy(false))
   }, [emb.bspNotEnabled, emb.exchangeFailed])
@@ -524,7 +525,7 @@ function EmbeddedSignupFlow({
       setNewPhoneId(res.phone_number_id || phoneId)
       applyEmbeddedStatus(res)
     } catch (err) {
-      setError(explainWhatsAppError(err instanceof Error ? err.message : emb.selectPhoneFailed))
+      setError(explainWhatsAppError(err instanceof Error ? err.message : emb.selectPhoneFailed, waErr))
       setStage('select-phone')
     } finally { setBusy(false) }
   }, [applyEmbeddedStatus, emb.preparingVerify, emb.selectPhoneFailed])
@@ -629,7 +630,7 @@ function EmbeddedSignupFlow({
         setStatusHint(res.message || '')
         setStage('verify-phone')
       } catch (err) {
-        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.addPhoneFailed))
+        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.addPhoneFailed, waErr))
         setStage('add-phone')
       } finally { setBusy(false) }
     }
@@ -736,7 +737,7 @@ function EmbeddedSignupFlow({
         })
         applyEmbeddedStatus(res)
       } catch (err) {
-        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.otpInvalid))
+        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.otpInvalid, waErr))
       } finally { setBusy(false) }
     }
     return (
@@ -801,7 +802,7 @@ function EmbeddedSignupFlow({
 
         <div className="flex gap-2">
           <button
-            onClick={() => refreshEmbeddedStatus().catch(err => setError(explainWhatsAppError(err instanceof Error ? err.message : emb.refreshFailed)))}
+            onClick={() => refreshEmbeddedStatus().catch(err2 => setError(explainWhatsAppError(err2 instanceof Error ? err2.message : emb.refreshFailed, waErr)))}
             className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
           >
             <RefreshCw className="w-4 h-4" />
@@ -991,18 +992,16 @@ function isValidSaudiPhone(normalized: string): boolean {
 // Raw Meta messages (escaped unicode, HTML entities, provider text) must NEVER
 // be shown to merchants. This is a last-resort guard on the frontend side.
 
-const FALLBACK_MSG = 'تمت معالجة الطلب، ولكن تعذر عرض تفاصيل الرسالة بشكل صحيح.'
-
-function sanitizeMessage(msg: unknown): string {
-  if (typeof msg !== 'string' || !msg.trim()) return FALLBACK_MSG
+function sanitizeMessage(msg: unknown, fallback: string): string {
+  if (typeof msg !== 'string' || !msg.trim()) return fallback
   const raw = msg.trim()
   // Detect raw escaped unicode sequences
-  if (/\\u[0-9a-fA-F]{4}/.test(raw)) return FALLBACK_MSG
+  if (/\\u[0-9a-fA-F]{4}/.test(raw)) return fallback
   // Detect HTML-escaped content
-  if (/^html:/i.test(raw) || /&[a-z]+;/.test(raw)) return FALLBACK_MSG
+  if (/^html:/i.test(raw) || /&[a-z]+;/.test(raw)) return fallback
   // Detect obvious raw Meta provider messages (English technical text)
-  if (/\(#\d+\)/.test(raw)) return FALLBACK_MSG
-  if (/^unsupported|^object with id|^invalid oauth/i.test(raw)) return FALLBACK_MSG
+  if (/\(#\d+\)/.test(raw)) return fallback
+  if (/^unsupported|^object with id|^invalid oauth/i.test(raw)) return fallback
   return raw
 }
 
@@ -1382,6 +1381,7 @@ export default function WhatsAppConnect() {
   const { t, dir, lang } = useLanguage()
   const wc = t(tr => tr.whatsappConnect)
   const d = t(tr => tr.whatsappConnect.direct)
+  const err = t(tr => tr.whatsappConnect.errors)
   // 'manual' = Manual connect (current) | 'embedded' = Meta Embedded Signup | 'direct' = OTP flow
   const [mode, setMode]       = useState<'manual'|'embedded'|'direct'|'coexistence'>('manual')
   const [step, setStep]       = useState<1|2|3|4>(1)
@@ -1555,7 +1555,7 @@ export default function WhatsAppConnect() {
       console.log('[Nahla/OTP] api_response=', r)
 
       setPhoneNumberId(r.phone_number_id)
-      setSentMsg(sanitizeMessage(r.message))
+      setSentMsg(sanitizeMessage(r.message, err.sanitizeFallback))
       setStep(2)
       // Start 60-second resend cooldown
       setResendCooldown(60)
@@ -1564,18 +1564,18 @@ export default function WhatsAppConnect() {
       console.error('[Nahla/OTP] api_error=', raw)
       const isRateLimit = /انتظار|rate.limit|OTP_RATE_LIMITED|حاولت عدة مرات/i.test(raw)
       if (isRateLimit) {
-        setError('⏳ ' + sanitizeMessage(raw) + d.errRateLimitSuffix)
+        setError('⏳ ' + sanitizeMessage(raw, err.sanitizeFallback) + d.errRateLimitSuffix)
       } else {
         const isPhoneFormatMsg = /صيغة رقم الهاتف|phone.*format|invalid.*phone/i.test(raw)
         if (isPhoneFormatMsg && valid) {
           setError(d.errSendOtpFailed)
         } else {
-          setError(sanitizeMessage(raw))
+          setError(sanitizeMessage(raw, err.sanitizeFallback))
         }
       }
     }
     finally { setBusy(false) }
-  }, [phone, displayName, otpMethod, d])
+  }, [phone, displayName, otpMethod, d, err])
 
   // ── Step 2 → 3 ──────────────────────────────────────────────────────────
 
@@ -1587,13 +1587,13 @@ export default function WhatsAppConnect() {
       setConnPhone(r.phone_number)
       setConnName(r.display_name)
       if (r.sending_enabled === false || (r.status && r.status !== 'connected')) {
-        setError(explainWhatsAppError(r.message || d.errVerifiedPendingMeta))
+        setError(explainWhatsAppError(r.message || d.errVerifiedPendingMeta, err))
         return
       }
       setStep(3)
-    } catch (e) { setError(explainWhatsAppError(sanitizeMessage(e instanceof Error ? e.message : ''))) }
+    } catch (e) { setError(explainWhatsAppError(sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback), err)) }
     finally { setBusy(false) }
-  }, [otp, phoneNumberId, d])
+  }, [otp, phoneNumberId, d, err])
 
   // ── Step 3 → 4 ──────────────────────────────────────────────────────────
 
@@ -1606,7 +1606,7 @@ export default function WhatsAppConnect() {
       })
       setConnAt(new Date().toISOString())
       setStep(4)
-    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '')) }
+    } catch (e) { setError(sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback)) }
     finally { setBusy(false) }
   }, [phoneNumberId, vertical, about, address, email, website])
 
@@ -1919,10 +1919,10 @@ export default function WhatsAppConnect() {
                     setStep(3)
                     setSentMsg(d.refreshSuccess)
                   } else {
-                    setError(sanitizeMessage(r.message))
+                    setError(sanitizeMessage(r.message, err.sanitizeFallback))
                   }
                 } catch(e) {
-                  setError(sanitizeMessage(e instanceof Error ? e.message : ''))
+                  setError(sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback))
                 } finally { setBusy(false) }
               }}
               disabled={busy}
@@ -1942,10 +1942,10 @@ export default function WhatsAppConnect() {
                 setOtp(''); setError(''); setBusy(true)
                 try {
                   const r = await resendOtp(phoneNumberId)
-                  setSentMsg(sanitizeMessage(r.message))
+                  setSentMsg(sanitizeMessage(r.message, err.sanitizeFallback))
                   setResendCooldown(60)
                 } catch(e) {
-                  const msg = sanitizeMessage(e instanceof Error ? e.message : '')
+                  const msg = sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback)
                   // Stale phone_number_id — reset to step 1 so user can re-add
                   if (msg.includes('الخطوة الأولى') || msg.includes('STALE_PHONE')) {
                     setStep(1); setPhone(''); setOtp(''); setPhoneNumberId('')
@@ -2265,8 +2265,9 @@ function DisconnectModal({
 }
 
 function ErrorBox({ msg }: { msg: string }) {
-  // Last-resort sanitization: never render raw Meta/provider text
-  const safe = sanitizeMessage(msg)
+  const { t } = useLanguage()
+  const err = t(tr => tr.whatsappConnect.errors)
+  const safe = sanitizeMessage(msg, err.sanitizeFallback)
   return (
     <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
       <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5"/>

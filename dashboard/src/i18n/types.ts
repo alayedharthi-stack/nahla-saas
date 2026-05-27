@@ -668,6 +668,13 @@ export interface Translations {
         OTHER:                     string
       }
     }
+    errors: {
+      unexpected:       string
+      meta131000:       string
+      corsFetch:        string
+      sessionExpired:   string
+      sanitizeFallback: string
+    }
   }
 
   /** Billing page */
