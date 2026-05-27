@@ -21,7 +21,7 @@ import {
   TemplateSyncStatus, TemplateSyncResult, getTemplateSyncErrorMessage,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
-  STATUS_COLORS, LANGUAGE_LABELS,
+  STATUS_COLORS,
 } from '../api/templates'
 import { useDashboardPoll } from '../lib/dashboardPolling'
 
@@ -170,12 +170,30 @@ function WaPreview({
 function TemplateRow({
   tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting,
 }: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean }) {
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
+  const row = t(tr => tr.templatesMgmt.row)
+  const lib = t(tr => tr.templatesMgmt.library)
+  const create = t(tr => tr.templatesMgmt.create)
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
   const isDefault = isDefaultTemplate(tpl.name)
   const meta = DEFAULT_TEMPLATE_META[tpl.name]
   const compatibility = tpl.compatibility
+
+  const formatRowDelay = (h: number): string => {
+    if (h >= 24) return `${Math.round(h / 24)} ${lib.delayDays}`
+    if (h < 1) return `${Math.round(h * 60)} ${lib.delayMinutes}`
+    return `${h} ${lib.delayHours}`
+  }
+
+  const langLabel = (code: string): string => {
+    switch (code) {
+      case 'ar':    return create.step1.langArabic
+      case 'en':    return create.step1.langEnglish
+      case 'en_US': return create.step1.langEnglishUS
+      default:      return code
+    }
+  }
 
   const displayName = tpl.display_name_ar || (isDefault && meta ? meta.purposeLabel : null)
   const serviceInfo = tpl.service_key ? SERVICE_INFO[tpl.service_key] : null
@@ -229,25 +247,25 @@ function TemplateRow({
           )}
           {tpl.service_key && tpl.is_active && (
             <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded-full font-medium">
-              ● نشط
+              {row.activeBadge}
             </span>
           )}
           {isInactive && tpl.service_key && (
             <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">
-              بديل
+              {row.fallbackBadge}
             </span>
           )}
           {isInactive && !tpl.service_key && (
             <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">
-              معطّل
+              {row.inactiveBadge}
             </span>
           )}
         </div>
         {tpl.step_number != null && (
           <p className="text-[10px] text-slate-500 mt-0.5">
-            المرحلة {tpl.step_number}
-            {tpl.trigger_delay_hours != null && ` · بعد ${fmtDelay(tpl.trigger_delay_hours)}`}
-            {tpl.has_coupon && ' · مع خصم'}
+            {lib.stepLabel} {tpl.step_number}
+            {tpl.trigger_delay_hours != null && ` · ${lib.delayAfter} ${formatRowDelay(tpl.trigger_delay_hours)}`}
+            {tpl.has_coupon && row.withCouponSuffix}
           </p>
         )}
         {/* Service link — shown whenever the template is bound to a Nahla
@@ -276,34 +294,34 @@ function TemplateRow({
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               <span
                 className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium border ${c.border} ${c.text} bg-white`}
-                title={`مرتبط بخدمة ${svcName}`}
+                title={`${row.linkedToServiceTitlePrefix}${svcName}`}
               >
                 <Link2 className="w-2.5 h-2.5" />
-                مرتبط بـ {svcName}
+                {row.linkedTo} {svcName}
               </span>
               {isManual && (
                 <span
                   className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-amber-50 text-amber-800 border border-amber-200"
-                  title="قالب يدوي — الكوبون الذي يدخله التاجر يُرسل كما هو بدون أي توليد تلقائي"
+                  title={row.manualTooltip}
                 >
                   <PenLine className="w-2.5 h-2.5" />
-                  {tpl.has_coupon ? 'كوبون يدوي' : 'يدوي'}
+                  {tpl.has_coupon ? row.manualCouponBadge : row.manualBadge}
                 </span>
               )}
               {autoBound && (
                 <span
                   className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium bg-violet-50 text-violet-700 border border-violet-200"
-                  title="رُبط هذا القالب تلقائياً بالخدمة عبر مزامنة Meta"
+                  title={row.autoBoundTooltip}
                 >
                   <Sparkles className="w-2.5 h-2.5" />
-                  مربوط تلقائياً
+                  {row.autoBoundBadge}
                 </span>
               )}
             </div>
           )
         })()}
       </td>
-      <td className="px-5 py-3.5 text-xs text-slate-600">{LANGUAGE_LABELS[tpl.language] ?? tpl.language}</td>
+      <td className="px-5 py-3.5 text-xs text-slate-600">{langLabel(tpl.language)}</td>
       <td className="px-5 py-3.5">
         <Badge
           label={categoryLabel}
@@ -346,7 +364,7 @@ function TemplateRow({
         </div>
       </td>
       <td className="px-5 py-3.5 text-xs text-slate-400 whitespace-nowrap" dir="ltr">
-        {tpl.updated_at ? new Date(tpl.updated_at).toLocaleDateString('ar-SA') : '—'}
+        {tpl.updated_at ? new Date(tpl.updated_at).toLocaleDateString(lang === 'en' ? 'en-US' : 'ar-SA') : '—'}
       </td>
       <td className="px-5 py-3.5">
         <div className="flex items-center gap-2">
@@ -387,7 +405,7 @@ function TemplateRow({
           <button
             onClick={onDelete}
             className="text-slate-300 hover:text-red-500 transition-colors"
-            title={tpl.status === 'APPROVED' ? 'إزالة من نحلة' : t(tr => tr.templatesMgmt.tooltipDelete)}
+            title={tpl.status === 'APPROVED' ? row.removeFromNahla : t(tr => tr.templatesMgmt.tooltipDelete)}
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>

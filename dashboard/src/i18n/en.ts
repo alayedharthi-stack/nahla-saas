@@ -926,6 +926,20 @@ const en: Translations = {
         setActiveDeactivatedBefore: 'Set as active — deactivated: ',
       },
     },
+    row: {
+      activeBadge: '● Active',
+      fallbackBadge: 'Fallback template',
+      inactiveBadge: 'Inactive',
+      withCouponSuffix: ' · With discount',
+      linkedTo: 'Linked to',
+      linkedToServiceTitlePrefix: 'Linked to service ',
+      manualBadge: 'Manual',
+      manualCouponBadge: 'Manual coupon',
+      manualTooltip: 'Manual template — the merchant-entered coupon is sent as-is with no automatic generation',
+      autoBoundBadge: 'Auto-linked',
+      autoBoundTooltip: 'This template was auto-linked to the service via Meta sync',
+      removeFromNahla: 'Remove from Nahla',
+    },
   },
 
   security: {

@@ -927,6 +927,20 @@ export interface Translations {
         setActiveDeactivatedBefore: string
       }
     }
+    row: {
+      activeBadge: string
+      fallbackBadge: string
+      inactiveBadge: string
+      withCouponSuffix: string
+      linkedTo: string
+      linkedToServiceTitlePrefix: string
+      manualBadge: string
+      manualCouponBadge: string
+      manualTooltip: string
+      autoBoundBadge: string
+      autoBoundTooltip: string
+      removeFromNahla: string
+    }
   }
 
   /** Merchants (admin) page */

@@ -930,6 +930,20 @@ const ar: Translations = {
         setActiveDeactivatedBefore: 'تم تعيينه كنشط — تم تعطيل: ',
       },
     },
+    row: {
+      activeBadge: '● نشط',
+      fallbackBadge: 'بديل',
+      inactiveBadge: 'معطّل',
+      withCouponSuffix: ' · مع خصم',
+      linkedTo: 'مرتبط بـ',
+      linkedToServiceTitlePrefix: 'مرتبط بخدمة ',
+      manualBadge: 'يدوي',
+      manualCouponBadge: 'كوبون يدوي',
+      manualTooltip: 'قالب يدوي — الكوبون الذي يدخله التاجر يُرسل كما هو بدون أي توليد تلقائي',
+      autoBoundBadge: 'مربوط تلقائياً',
+      autoBoundTooltip: 'رُبط هذا القالب تلقائياً بالخدمة عبر مزامنة Meta',
+      removeFromNahla: 'إزالة من نحلة',
+    },
   },
 
   security: {
