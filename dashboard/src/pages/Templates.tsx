@@ -1423,7 +1423,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
   onClose: () => void
   onImported: (tpl: WhatsAppTemplateRecord) => void
 }) {
-  const { t, dir, isRTL } = useLanguage()
+  const { t, dir, isRTL, lang } = useLanguage()
   const lib = t(tr => tr.templatesMgmt.library)
   const mgmt = t(tr => tr.templatesMgmt)
 
@@ -1472,7 +1472,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
     setImporting(key)
     setImportError(null)
     try {
-      const res = await templatesApi.importNahlaTemplate(key)
+      const res = await templatesApi.importNahlaTemplate(key, lang)
       setImported(prev => new Set(prev).add(key))
       onImported(res.template)
     } catch (err: unknown) {

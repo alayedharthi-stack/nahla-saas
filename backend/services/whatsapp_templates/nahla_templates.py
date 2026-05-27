@@ -1179,6 +1179,117 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
             },
         ],
     },
+
+    # ══════════════════════════════════════════════════════════════════
+    # Meta review — English demo templates (product-owned, not automation)
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "meta_review_cart_recovery",
+        "service_key":    "cart_recovery",
+        "service_name_override": "Abandoned cart recovery",
+        "service_description_override": (
+            "Remind customers who left items in their cart to complete checkout"
+        ),
+        "name_ar":        "English Demo · Cart Recovery",
+        "description_ar": (
+            "Meta review demo — reminds customers to complete a cart they left behind"
+        ),
+        "category":       "MARKETING",
+        "filter_tags":    ["recovery", "english_demo"],
+        "button_slots":   ["cart_url"],
+        "slots":          ["cart_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "You left items in your cart 🛒\n\n"
+                    "Complete your order before the products run out."
+                ),
+            },
+            {"type": "FOOTER", "text": "Nahla — your store assistant"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "Complete order",
+                        "url": "https://example.com/{{1}}",
+                        "example": ["https://example.com/cart/abc123"],
+                    },
+                ],
+            },
+        ],
+    },
+    {
+        "key":            "meta_review_order_confirmation",
+        "service_key":    "order_confirmation",
+        "service_name_override": "Order confirmation",
+        "service_description_override": (
+            "Notify customers when their order is confirmed and being prepared"
+        ),
+        "name_ar":        "English Demo · Order Confirmation",
+        "description_ar": (
+            "Meta review demo — confirms the order and sets shipping expectations"
+        ),
+        "category":       "UTILITY",
+        "filter_tags":    ["orders", "english_demo"],
+        "slots":          [],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "Your order has been confirmed successfully ✅\n\n"
+                    "We are preparing it for shipping."
+                ),
+            },
+            {"type": "FOOTER", "text": "Nahla — your store assistant"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "View order",
+                        "url": "https://example.com/orders/{{1}}",
+                        "example": ["https://example.com/orders/98765"],
+                    },
+                ],
+            },
+        ],
+    },
+    {
+        "key":            "meta_review_delivery_update",
+        "service_key":    "shipping_tracking",
+        "service_name_override": "Shipping & tracking",
+        "service_description_override": (
+            "Keep customers updated while their order is on the way"
+        ),
+        "name_ar":        "English Demo · Delivery Update",
+        "description_ar": (
+            "Meta review demo — shipping update with a track-shipment link"
+        ),
+        "category":       "UTILITY",
+        "filter_tags":    ["shipping", "orders", "english_demo"],
+        "button_slots":   ["tracking_url"],
+        "slots":          ["tracking_url"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "Your order is on the way 🚚\n\n"
+                    "Track your shipment using the link below."
+                ),
+            },
+            {"type": "FOOTER", "text": "Nahla — your store assistant"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL", "text": "Track shipment",
+                        "url": "https://example.com/track/{{1}}",
+                        "example": ["https://example.com/track/12345"],
+                    },
+                ],
+            },
+        ],
+    },
 ]
 
 
@@ -1246,8 +1357,8 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
         "slot_count": len(tpl.get("slots", [])),
         "slots": tpl.get("slots", []),
         "service_key":            service_key,
-        "service_name_ar":        service.get("name_ar", ""),
-        "service_description_ar": service.get("description_ar", ""),
+        "service_name_ar":        tpl.get("service_name_override") or service.get("name_ar", ""),
+        "service_description_ar": tpl.get("service_description_override") or service.get("description_ar", ""),
         "service_icon":           service.get("icon", ""),
         "service_color":          service.get("color", "amber"),
         "step_number":            tpl.get("step_number"),
