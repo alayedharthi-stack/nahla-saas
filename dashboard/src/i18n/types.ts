@@ -856,6 +856,41 @@ export interface Translations {
         saveFailed: string
       }
     }
+    library: {
+      title: string
+      subtitle: string
+      searchPlaceholder: string
+      tags: {
+        all:       string
+        marketing: string
+        orders:    string
+        shipping:  string
+        recovery:  string
+        discounts: string
+        welcome:   string
+      }
+      emptyState: string
+      stepLabel: string
+      delayAfter: string
+      delayDays: string
+      delayHours: string
+      delayMinutes: string
+      discountBadge: string
+      discountWithCoupon: string
+      servicePurposeLabel: string
+      previewLabel: string
+      variablesLabel: string
+      importing: string
+      importCustomize: string
+      importCustomizeCta: string
+      importedEditable: string
+      importedDone: string
+      copyCodeDynamicLabel: string
+      dynamicSuffix: string
+      errors: {
+        importFailed: string
+      }
+    }
   }
 
   /** Merchants (admin) page */

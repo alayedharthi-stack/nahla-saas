@@ -1362,20 +1362,33 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
   PHONE_NUMBER:'📞',
 }
 
-const TAG_LABELS: Record<string, string> = {
-  all:       'الكل',
-  marketing: 'التسويق',
-  orders:    'الطلبات',
-  shipping:  'الشحن',
-  recovery:  'الاسترجاع',
-  discounts: 'الخصومات',
-  welcome:   'الترحيب',
-}
+const LIBRARY_TAG_KEYS = ['all', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
 function NahlaLibraryModal({ onClose, onImported }: {
   onClose: () => void
   onImported: (tpl: WhatsAppTemplateRecord) => void
 }) {
+  const { t, dir, isRTL } = useLanguage()
+  const lib = t(tr => tr.templatesMgmt.library)
+  const mgmt = t(tr => tr.templatesMgmt)
+
+  const formatLibDelay = (h: number): string => {
+    if (h >= 24) return `${Math.round(h / 24)} ${lib.delayDays}`
+    if (h < 1) return `${Math.round(h * 60)} ${lib.delayMinutes}`
+    return `${h} ${lib.delayHours}`
+  }
+
+  const tagLabel = (key: typeof LIBRARY_TAG_KEYS[number]): string => lib.tags[key]
+
+  const categoryBadge = (cat: string) =>
+    cat === 'MARKETING' ? mgmt.categoryMarketing : mgmt.categoryUtility
+
+  const bubbleBtnLabel = (btn: { type: string; text?: string; url?: string }): string => {
+    if (btn.type === 'COPY_CODE') return lib.copyCodeDynamicLabel
+    if (btn.type === 'URL' && btn.url?.includes('{{')) return `${btn.text ?? ''}${lib.dynamicSuffix}`
+    return btn.text ?? btn.type
+  }
+
   const [templates, setTemplates]   = useState<NahlaLibraryTemplate[]>([])
   const [loading, setLoading]       = useState(true)
   const [activeTag, setActiveTag]   = useState('all')
@@ -1407,8 +1420,8 @@ function NahlaLibraryModal({ onClose, onImported }: {
       const res = await templatesApi.importNahlaTemplate(key)
       setImported(prev => new Set(prev).add(key))
       onImported(res.template)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'فشل استيراد القالب'
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : lib.errors.importFailed
       setImportError(msg)
     } finally {
       setImporting(null)
@@ -1419,7 +1432,8 @@ function NahlaLibraryModal({ onClose, onImported }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div
         className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
-        onClick={e => e.stopPropagation()}
+        dir={dir}
+        onClick={ev => ev.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -1428,8 +1442,8 @@ function NahlaLibraryModal({ onClose, onImported }: {
               <BookOpen className="w-5 h-5 text-amber-600" />
             </div>
             <div>
-              <h2 className="font-bold text-slate-900 text-base">📚 مكتبة قوالب نحلة</h2>
-              <p className="text-xs text-slate-500">قوالب عربية جاهزة — استوردها وعدّلها وأرسلها لـ Meta</p>
+              <h2 className="font-bold text-slate-900 text-base">{lib.title}</h2>
+              <p className="text-xs text-slate-500">{lib.subtitle}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
@@ -1440,18 +1454,18 @@ function NahlaLibraryModal({ onClose, onImported }: {
         {/* Search + Filter */}
         <div className="px-6 py-3 border-b border-slate-100 space-y-3">
           <div className="relative">
-            <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Search className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 ${isRTL ? 'right-3' : 'left-3'}`} />
             <input
               type="text"
-              placeholder="ابحث عن قالب..."
+              placeholder={lib.searchPlaceholder}
               value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="w-full pr-9 pl-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400"
-              dir="rtl"
+              onChange={ev => setSearch(ev.target.value)}
+              className={`w-full py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 ${isRTL ? 'pr-9 pl-3' : 'pl-9 pr-3'}`}
+              dir={dir}
             />
           </div>
           <div className="flex gap-2 flex-wrap">
-            {Object.entries(TAG_LABELS).map(([key, label]) => (
+            {LIBRARY_TAG_KEYS.map(key => (
               <button
                 key={key}
                 onClick={() => setActiveTag(key)}
@@ -1461,7 +1475,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                     : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                 }`}
               >
-                {label}
+                {tagLabel(key)}
               </button>
             ))}
           </div>
@@ -1476,7 +1490,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                 <RefreshCw className="w-6 h-6 text-amber-500 animate-spin" />
               </div>
             ) : templates.length === 0 ? (
-              <p className="text-center text-slate-400 text-sm py-12">لا توجد قوالب مطابقة</p>
+              <p className="text-center text-slate-400 text-sm py-12">{lib.emptyState}</p>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {templates.map(tpl => {
@@ -1507,7 +1521,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                             ? 'bg-purple-100 text-purple-700'
                             : 'bg-blue-100 text-blue-700'
                         }`}>
-                          {tpl.category === 'MARKETING' ? 'تسويق' : 'خدمة'}
+                          {categoryBadge(tpl.category)}
                         </span>
                       </div>
 
@@ -1520,16 +1534,16 @@ function NahlaLibraryModal({ onClose, onImported }: {
                       {tpl.step_number != null && (
                         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
                           <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                            المرحلة {tpl.step_number}
+                            {lib.stepLabel} {tpl.step_number}
                           </span>
                           {tpl.trigger_delay_hours != null && (
                             <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-medium">
-                              {fmtDelay(tpl.trigger_delay_hours)}
+                              {formatLibDelay(tpl.trigger_delay_hours)}
                             </span>
                           )}
                           {tpl.has_coupon && (
                             <span className="text-[10px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full font-medium">
-                              🎟 خصم
+                              {lib.discountBadge}
                             </span>
                           )}
                         </div>
@@ -1567,15 +1581,15 @@ function NahlaLibraryModal({ onClose, onImported }: {
                       >
                         {isImporting ? (
                           <span className="flex items-center justify-center gap-1">
-                            <RefreshCw className="w-3 h-3 animate-spin" /> جاري الاستيراد...
+                            <RefreshCw className="w-3 h-3 animate-spin" /> {lib.importing}
                           </span>
                         ) : isImported ? (
                           <span className="flex items-center justify-center gap-1">
-                            <CheckCheck className="w-3 h-3" /> تم الاستيراد — يمكنك التعديل
+                            <CheckCheck className="w-3 h-3" /> {lib.importedEditable}
                           </span>
                         ) : (
                           <span className="flex items-center justify-center gap-1">
-                            <Download className="w-3 h-3" /> استيراد وتخصيص
+                            <Download className="w-3 h-3" /> {lib.importCustomize}
                           </span>
                         )}
                       </button>
@@ -1588,13 +1602,13 @@ function NahlaLibraryModal({ onClose, onImported }: {
 
           {/* Preview panel */}
           {preview && (
-            <div className="w-72 border-r border-slate-100 bg-slate-50 p-4 overflow-y-auto hidden lg:block">
+            <div className="w-72 border-e border-slate-100 bg-slate-50 p-4 overflow-y-auto hidden lg:block">
               {/* Service badge */}
               {preview.service_name_ar && (() => {
                 const c = svcColors(preview.service_color)
                 return (
                   <div className={`bg-gradient-to-br ${c.bg} border ${c.border} rounded-xl p-3 mb-4`} dir="rtl">
-                    <p className={`text-[10px] ${c.label} font-medium mb-1`}>الخدمة / الغرض من القالب</p>
+                    <p className={`text-[10px] ${c.label} font-medium mb-1`}>{lib.servicePurposeLabel}</p>
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className="text-lg leading-none">{preview.service_icon}</span>
                       <p className="text-sm font-bold text-slate-900">{preview.service_name_ar}</p>
@@ -1605,15 +1619,15 @@ function NahlaLibraryModal({ onClose, onImported }: {
                     {preview.step_number != null && (
                       <div className="flex items-center gap-1.5 mt-2 flex-wrap">
                         <span className="text-[10px] bg-white/60 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                          المرحلة {preview.step_number}
+                          {lib.stepLabel} {preview.step_number}
                         </span>
                         {preview.trigger_delay_hours != null && (
                           <span className="text-[10px] bg-white/60 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                            بعد {fmtDelay(preview.trigger_delay_hours)}
+                            {lib.delayAfter} {formatLibDelay(preview.trigger_delay_hours)}
                           </span>
                         )}
                         {preview.has_coupon && (
-                          <span className="text-[10px] bg-white/60 text-emerald-600 px-2 py-0.5 rounded-full font-medium">🎟 مع خصم</span>
+                          <span className="text-[10px] bg-white/60 text-emerald-600 px-2 py-0.5 rounded-full font-medium">{lib.discountWithCoupon}</span>
                         )}
                       </div>
                     )}
@@ -1621,7 +1635,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                 )
               })()}
 
-              <p className="text-xs font-semibold text-slate-700 mb-3">معاينة الرسالة</p>
+              <p className="text-xs font-semibold text-slate-700 mb-3">{lib.previewLabel}</p>
               {/* WhatsApp bubble */}
               <div className="bg-[#e5ddd5] rounded-xl p-3 mb-4">
                 <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm p-3 space-y-2" dir="rtl">
@@ -1636,25 +1650,19 @@ function NahlaLibraryModal({ onClose, onImported }: {
                       {preview.buttons.map((btn, i) => (
                         <div key={i} className="text-center text-xs text-blue-600 font-medium py-0.5 flex items-center justify-center gap-1">
                           <span>{BUTTON_TYPE_ICON[btn.type]}</span>
-                          <span>
-                            {btn.type === 'COPY_CODE'
-                              ? 'نسخ كود الخصم ✦ ديناميكي'
-                              : btn.type === 'URL' && btn.url?.includes('{{')
-                                ? `${btn.text} ✦ ديناميكي`
-                                : btn.text}
-                          </span>
+                          <span>{bubbleBtnLabel(btn)}</span>
                         </div>
                       ))}
                     </div>
                   )}
-                  <p className="text-[10px] text-slate-300 text-end">✓✓ الآن</p>
+                  <p className="text-[10px] text-slate-300 text-end">{mgmt.previewReadReceipt}</p>
                 </div>
               </div>
 
               {/* Slots */}
               {preview.slots.length > 0 && (
                 <div className="mb-4">
-                  <p className="text-[10px] font-semibold text-slate-500 uppercase mb-2">المتغيرات ({preview.slot_count})</p>
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase mb-2">{lib.variablesLabel} ({preview.slot_count})</p>
                   <div className="space-y-1">
                     {preview.slots.map((slot, i) => (
                       <div key={slot} className="flex items-center gap-2 text-xs">
@@ -1675,7 +1683,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
                     : 'bg-amber-500 hover:bg-amber-600 text-white'
                 }`}
               >
-                {imported.has(preview.key) ? '✓ تم الاستيراد' : 'استيراد وتخصيص ←'}
+                {imported.has(preview.key) ? lib.importedDone : lib.importCustomizeCta}
               </button>
             </div>
           )}
@@ -1690,7 +1698,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
             </div>
           )}
           <p className="text-[11px] text-slate-400 text-center">
-            بعد الاستيراد يصبح القالب مسودة قابلة للتعديل — عدّله ثم أرسله لـ Meta للموافقة ← استخدمه في حملاتك
+            {mgmt.importNote}
           </p>
         </div>
       </div>
