@@ -1132,6 +1132,11 @@ function EditModal({
   onClose: () => void
   onSaved: (updated: WhatsAppTemplateRecord) => void
 }) {
+  const { t, dir } = useLanguage()
+  const e = t(tr => tr.templatesMgmt.edit)
+  const create = t(tr => tr.templatesMgmt.create)
+  const actions = t(tr => tr.actions)
+
   const bodyComp   = tpl.components.find(c => c.type === 'BODY')
   const headerComp = tpl.components.find(c => c.type === 'HEADER')
   const footerComp = tpl.components.find(c => c.type === 'FOOTER')
@@ -1157,14 +1162,17 @@ function EditModal({
   }
 
   const handleSave = async () => {
-    if (!bodyText.trim()) { setError('نص الرسالة مطلوب'); return }
+    if (!bodyText.trim()) { setError(e.errors.bodyRequired); return }
     setSaving(true); setError('')
     try {
       const updated = await templatesApi.update(tpl.id, { components: buildComponents() })
       onSaved(updated)
       onClose()
-    } catch (e: any) {
-      setError(e?.message ?? 'حدث خطأ — تأكد من البيانات وحاول مجدداً')
+    } catch (err: unknown) {
+      const msg = err && typeof err === 'object' && 'message' in err
+        ? String((err as { message: unknown }).message)
+        : undefined
+      setError(msg ?? e.errors.saveFailed)
     } finally {
       setSaving(false)
     }
@@ -1172,15 +1180,24 @@ function EditModal({
 
   const insertVar = (n: number) => setBodyText(t => t + `{{${n}}}`)
 
+  const btnTypeLabel = (type: TemplateButton['type']) => {
+    switch (type) {
+      case 'URL':          return `🔗 ${e.btnTypeUrl}`
+      case 'COPY_CODE':    return `📋 ${e.btnTypeCopyCode}`
+      case 'PHONE_NUMBER': return `📞 ${e.btnTypePhone}`
+      default:             return `💬 ${e.btnTypeQuickReply}`
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl flex flex-col max-h-[90vh]" dir={dir}>
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
             <Pencil className="w-4 h-4 text-brand-500" />
-            <h2 className="text-sm font-bold text-slate-900">تعديل القالب</h2>
+            <h2 className="text-sm font-bold text-slate-900">{e.title}</h2>
             <span className="text-[11px] text-slate-400 font-mono">{tpl.name}</span>
           </div>
           <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
@@ -1190,21 +1207,23 @@ function EditModal({
           {/* Info notice */}
           <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs text-amber-800">
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
-            أي تعديل يُعيد القالب لحالة <strong>مسودة</strong> — ستحتاج لإرساله لـ Meta من جديد للموافقة.
+            {e.draftNoticeBefore}
+            <strong>{e.draftNoticeStrong}</strong>
+            {e.draftNoticeAfter}
           </div>
 
           {/* Header text */}
           <div>
-            <label className="label text-xs">نص الرأس (اختياري)</label>
+            <label className="label text-xs">{create.step2.headerLabel}</label>
             <input className="input text-sm" value={headerText}
-              onChange={e => setHeaderText(e.target.value)}
+              onChange={ev => setHeaderText(ev.target.value)}
               placeholder="عنوان الرسالة..." />
           </div>
 
           {/* Body */}
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="label mb-0 text-xs">نص الرسالة *</label>
+              <label className="label mb-0 text-xs">{create.step2.bodyLabel}</label>
               <div className="flex gap-1">
                 {[1, 2, 3].map(n => (
                   <button key={n} onClick={() => insertVar(n)}
@@ -1215,44 +1234,45 @@ function EditModal({
               </div>
             </div>
             <textarea rows={6} className="input text-sm" value={bodyText}
-              onChange={e => setBodyText(e.target.value)}
+              onChange={ev => setBodyText(ev.target.value)}
               placeholder="نص الرسالة..." />
-            <p className="text-xs text-slate-400 mt-1">{bodyText.length}/1024 حرف</p>
+            <p className="text-xs text-slate-400 mt-1">{bodyText.length}/1024 {create.step2.charCountSuffix}</p>
           </div>
 
           {/* Footer */}
           <div>
-            <label className="label text-xs">نص التذييل (اختياري)</label>
+            <label className="label text-xs">{create.step2.footerLabel}</label>
             <input className="input text-sm" value={footerText}
-              onChange={e => setFooterText(e.target.value)}
+              onChange={ev => setFooterText(ev.target.value)}
               placeholder="مثال: نحلة — مساعد متجرك 🐝" />
           </div>
 
           {/* Buttons */}
           {buttons.length > 0 && (
             <div className="space-y-2">
-              <label className="label text-xs">الأزرار</label>
+              <label className="label text-xs">{e.buttonsLabel}</label>
               {buttons.map((btn, i) => (
                 <div key={i} className="border border-slate-200 rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-medium text-slate-600">
-                      {btn.type === 'URL' ? '🔗 رابط' : btn.type === 'COPY_CODE' ? '📋 نسخ كود' : btn.type === 'PHONE_NUMBER' ? '📞 هاتف' : '💬 رد سريع'}
+                      {btnTypeLabel(btn.type)}
                     </span>
                     <button onClick={() => setButtons(bs => bs.filter((_, idx) => idx !== i))}
                       className="text-slate-300 hover:text-red-500"><X className="w-3.5 h-3.5" /></button>
                   </div>
                   {btn.type !== 'COPY_CODE' && (
-                    <input className="input text-sm" placeholder="نص الزر"
-                      value={btn.text ?? ''} onChange={e => updateBtn(i, { text: e.target.value })} />
+                    <input className="input text-sm" placeholder={create.step3.buttonTextPlaceholder}
+                      value={btn.text ?? ''} onChange={ev => updateBtn(i, { text: ev.target.value })} />
                   )}
                   {btn.type === 'URL' && (
                     <>
                       <input className="input text-sm" placeholder="https://example.com/page/{{1}}" dir="ltr"
-                        value={btn.url ?? ''} onChange={e => updateBtn(i, { url: e.target.value })} />
+                        value={btn.url ?? ''} onChange={ev => updateBtn(i, { url: ev.target.value })} />
                       {btn.url && /^\{\{\d+\}\}$/.test(btn.url.trim()) && (
                         <p className="text-[11px] text-amber-600 flex items-center gap-1">
                           <AlertCircle className="w-3 h-3" />
-                          الرابط يجب أن يبدأ بـ https:// — مثال: https://yourstore.com/cart/{'{{1}}'}
+                          {e.urlInvalidWarningBefore}
+                          <span dir="ltr">{e.urlInvalidWarningExample}</span>
                         </p>
                       )}
                     </>
@@ -1265,23 +1285,23 @@ function EditModal({
                           placeholder="PROMO2025"
                           dir="ltr"
                           value={btn.example?.[0] ?? ''}
-                          onChange={e => updateBtn(i, { example: [e.target.value] })}
+                          onChange={ev => updateBtn(i, { example: [ev.target.value] })}
                         />
                       </div>
                       {tpl.library?.mode === 'manual' ? (
                         <div className="flex items-start gap-1.5 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
                           <span className="text-amber-500 text-xs mt-0.5">✎</span>
                           <p className="text-[11px] text-amber-800 leading-relaxed">
-                            <strong>كوبون يدوي —</strong> سيتم استخدام الكود الذي يحدده التاجر عند إنشاء الحملة.
-                            هذا المثال يُرسَل لمراجعة Meta فقط ولن يتغيّر تلقائياً عند الإرسال.
+                            <strong>{e.manualCouponStrong}</strong>
+                            {e.manualCouponBody}
                           </p>
                         </div>
                       ) : (
                         <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
                           <span className="text-emerald-500 text-xs mt-0.5">✦</span>
                           <p className="text-[11px] text-emerald-700 leading-relaxed">
-                            <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
-                            عند الإرسال الفعلي، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
+                            <strong>{create.step3.copyCodeStrong}</strong>
+                            {e.dynamicCodeBody}
                           </p>
                         </div>
                       )}
@@ -1291,13 +1311,15 @@ function EditModal({
                     <div className="flex items-start gap-1.5 bg-blue-50 border border-blue-200 rounded-lg px-2.5 py-2">
                       <span className="text-blue-500 text-xs mt-0.5">✦</span>
                       <p className="text-[11px] text-blue-700 leading-relaxed">
-                        <strong>رابط ديناميكي —</strong> <span dir="ltr">{'{{1}}'}</span> يُستبدل برابط سلة العميل تلقائياً عند الإرسال.
+                        <strong>{e.dynamicUrlStrong}</strong>{' '}
+                        <span dir="ltr">{'{{1}}'}</span>
+                        {e.dynamicUrlAfter}
                       </p>
                     </div>
                   )}
                   {btn.type === 'PHONE_NUMBER' && (
                     <input className="input text-sm" placeholder="+966..." dir="ltr"
-                      value={btn.phone_number ?? ''} onChange={e => updateBtn(i, { phone_number: e.target.value })} />
+                      value={btn.phone_number ?? ''} onChange={ev => updateBtn(i, { phone_number: ev.target.value })} />
                   )}
                 </div>
               ))}
@@ -1306,7 +1328,7 @@ function EditModal({
 
           {/* Live preview */}
           <div>
-            <p className="text-xs text-slate-500 mb-2">معاينة</p>
+            <p className="text-xs text-slate-500 mb-2">{e.previewLabel}</p>
             <WaPreview
               header={headerText}
               body={bodyText}
@@ -1318,12 +1340,12 @@ function EditModal({
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
-          <button onClick={onClose} className="btn-ghost text-sm">إلغاء</button>
+          <button onClick={onClose} className="btn-ghost text-sm">{actions.cancel}</button>
           {error && <p className="text-xs text-red-500 flex-1 mx-4 text-center">{error}</p>}
           <button onClick={handleSave} disabled={saving || !bodyText.trim()}
             className="btn-primary text-sm disabled:opacity-40">
             {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
-            حفظ التعديلات
+            {saving ? e.saving : e.save}
           </button>
         </div>
       </div>

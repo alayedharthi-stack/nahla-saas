@@ -831,6 +831,31 @@ export interface Translations {
         createFailed: string
       }
     }
+    edit: {
+      title: string
+      draftNoticeBefore: string
+      draftNoticeStrong: string
+      draftNoticeAfter: string
+      buttonsLabel: string
+      btnTypeUrl: string
+      btnTypeCopyCode: string
+      btnTypePhone: string
+      btnTypeQuickReply: string
+      urlInvalidWarningBefore: string
+      urlInvalidWarningExample: string
+      manualCouponStrong: string
+      manualCouponBody: string
+      dynamicCodeBody: string
+      dynamicUrlStrong: string
+      dynamicUrlAfter: string
+      previewLabel: string
+      save: string
+      saving: string
+      errors: {
+        bodyRequired: string
+        saveFailed: string
+      }
+    }
   }
 
   /** Merchants (admin) page */
