@@ -393,6 +393,139 @@ export interface Translations {
     prereqTitle:     string
     prereq1:         string
     prereq2:         string
+    /** Wave 1A-i — main page shell, disconnect modal, connected state */
+    page: {
+      headerTitle:    string
+      headerSubtitle: string
+      modes: {
+        manual:        string
+        manualBadge:   string
+        embedded:      string
+        otp:           string
+        coexistence:     string
+      }
+      modeHints: {
+        manual:   string
+        embedded: string
+      }
+    }
+    connLabels: {
+      viaMeta:      string
+      coexistence:  string
+      business:     string
+      manualPrefix: string
+    }
+    metaBanner: {
+      success: string
+      failure: string
+    }
+    disconnect: {
+      title:       string
+      subtitle:    string
+      consequence1: string
+      consequence2: string
+      consequence3: string
+      cancel:      string
+      confirm:     string
+      confirming:  string
+      managedByTeam: string
+      opsOnlyError: string
+      failedError: string
+    }
+    connected: {
+      verifying:          string
+      linkedUnverified:   string
+      softWarning:        string
+      verified:           string
+      broken:             string
+      linkedAt:           string
+      reason:             string
+      note:               string
+      softWarningDetail:  string
+      featureAutoReply:     string
+      featureAiReady:       string
+      featureCampaigns:     string
+      recheckLive:          string
+      rechecking:           string
+      dashboard:            string
+      disconnect:           string
+      checkHasRecord:       string
+      checkStatusOk:        string
+      checkWabaId:          string
+      checkPhoneId:         string
+      checkToken:           string
+      checkProvider:        string
+    }
+    manual: {
+      title:                 string
+      badge:                 string
+      subtitle:              string
+      noticeTitle:           string
+      noticeBody:            string
+      phoneNumberIdHint:     string
+      wabaHint:              string
+      tokenHint:             string
+      digitsOnly:            string
+      resolveWabaNeedCreds:  string
+      wabaResolveFailed:     string
+      wabaResolveError:      string
+      validatePhoneIdRequired: string
+      validatePhoneIdDigits:   string
+      validateWabaRequired:    string
+      validateWabaDigits:      string
+      validateTokenRequired:   string
+      resolveWabaTitle:        string
+      resolving:               string
+      resolved:                string
+      discover:                string
+      wabaAutoResolved:        string
+      connectError:            string
+      readinessTitle:          string
+      credSaved:               string
+      credSavedOk:             string
+      credSavedFail:           string
+      phoneRegistered:         string
+      phoneRegisteredOk:       string
+      phoneRegisteredFailPrefix: string
+      phoneRegisteredPending:  string
+      webhookSub:              string
+      webhookSubOk:            string
+      webhookSubFailPrefix:    string
+      webhookSubPending:       string
+      inboundReady:            string
+      inboundReadyOk:          string
+      inboundReadyPartial:     string
+      continueAnyway:          string
+      retry:                   string
+      helpPrefix:              string
+      helpLink:                string
+      connecting:              string
+      connectBtn:              string
+    }
+    coexistence: {
+      connectedTitle:          string
+      connectedBody:           string
+      tipKeepApp:              string
+      tipDontDelete:           string
+      tipOpenPeriodically:     string
+      statusRequestSubmitted:  string
+      statusPendingActivation: string
+      statusActionRequired:    string
+      defaultPendingMessage:   string
+      requestTimeLabel:        string
+      formTitle:               string
+      formSubtitle:            string
+      benefitSameNumber:       string
+      benefitAiReplies:        string
+      benefitActivationTime:   string
+      phonePlaceholder:        string
+      displayNamePlaceholder:  string
+      notesPlaceholder:        string
+      phoneRequired:           string
+      submitFailed:            string
+      submitting:              string
+      submitBtn:               string
+    }
   }
 
   /** Billing page */
