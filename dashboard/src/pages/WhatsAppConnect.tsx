@@ -285,6 +285,8 @@ function EmbeddedSignupFlow({
 }: {
   onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
 }) {
+  const { t } = useLanguage()
+  const emb = t(tr => tr.whatsappConnect.embedded)
   const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
@@ -355,13 +357,13 @@ function EmbeddedSignupFlow({
         } else {
           if (window.FB) { sdkLoaded.current = true; setStage('ready') }
         }
-      } catch (e) {
-        if (!cancelled) setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر تحميل إعدادات Meta'))
+      } catch (err) {
+        if (!cancelled) setError(explainWhatsAppError(err instanceof Error ? err.message : emb.loadConfigFailed))
       }
     }
     loadSdk()
     return () => { cancelled = true }
-  }, [])
+  }, [emb.loadConfigFailed])
 
   const applyEmbeddedStatus = useCallback((res: EmbeddedStatusPayload) => {
     if (res.waba_id) setWabaId(res.waba_id)
@@ -398,7 +400,7 @@ function EmbeddedSignupFlow({
     }
 
     if (res.status === 'error') {
-      setError(message || 'تعذر إكمال تفعيل الرقم في Meta')
+      setError(message || emb.activateFailed)
       setStage('select-phone')
       return
     }
@@ -406,7 +408,7 @@ function EmbeddedSignupFlow({
     if (res.status === 'pending') {
       setStage('select-phone')
     }
-  }, [onConnected])
+  }, [onConnected, emb.activateFailed])
 
   const refreshEmbeddedStatus = useCallback(async () => {
     const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/status')
@@ -426,9 +428,9 @@ function EmbeddedSignupFlow({
         if (res.connected || !['review_pending', 'activation_pending', 'syncing-phone'].includes(res.status)) {
           return
         }
-      } catch (e) {
+      } catch (err) {
         if (!cancelled) {
-          setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر مزامنة حالة الرقم مع Meta'))
+          setError(explainWhatsAppError(err instanceof Error ? err.message : emb.syncStatusFailed))
         }
       }
 
@@ -442,7 +444,7 @@ function EmbeddedSignupFlow({
       cancelled = true
       if (timer) window.clearTimeout(timer)
     }
-  }, [stage, refreshEmbeddedStatus])
+  }, [stage, refreshEmbeddedStatus, emb.syncStatusFailed])
 
   useEffect(() => {
     if (stage !== 'ready' || embeddedStatusChecked.current) return
@@ -463,8 +465,8 @@ function EmbeddedSignupFlow({
       setWabaId(result.waba_id)
       setPhones(result.phones)
       setStage('select-phone')
-    }).catch(e => {
-      const raw = e instanceof Error ? e.message : 'حدث خطأ أثناء الربط'
+    }).catch(err => {
+      const raw = err instanceof Error ? err.message : emb.exchangeFailed
       // Catch the Meta BSP/Tech Provider entitlement error here too —
       // the backend already maps it, but a direct upstream 4xx may
       // leak through with the raw English copy. Show the
@@ -475,21 +477,21 @@ function EmbeddedSignupFlow({
         (lower.includes('embedded signup') || lower.includes('embedded sign up'))
         && (lower.includes('bsp') || lower.includes(' tp') || lower.includes('tech provider'))
       setError(isBspTp
-        ? 'لم يتم تفعيل صلاحية Embedded Signup المباشر بعد على تطبيق نحلة. استخدم الربط عبر 360dialog حالياً.'
+        ? emb.bspNotEnabled
         : explainWhatsAppError(raw))
       setStage('ready')
     }).finally(() => setBusy(false))
-  }, [])
+  }, [emb.bspNotEnabled, emb.exchangeFailed])
 
   const launchSignup = useCallback(() => {
     if (signupEnabled === false) {
-      setError(disabledReason || 'الربط المباشر مع Meta غير مفعّل بعد.')
+      setError(disabledReason || emb.directNotEnabled)
       return
     }
-    if (!window.FB || !sdkLoaded.current) { setError('SDK غير جاهز، انتظر لحظة'); return }
+    if (!window.FB || !sdkLoaded.current) { setError(emb.sdkNotReady); return }
     setError('')
     window.FB.login((response: any) => {
-      if (!response?.authResponse) { setError('تم إلغاء عملية الربط'); return }
+      if (!response?.authResponse) { setError(emb.linkCancelled); return }
       const auth = response.authResponse
       // Prefer accessToken if present — avoids redirect_uri mismatch on code exchange.
       // 'code,token' response_type makes Meta JS SDK return both; backend uses
@@ -508,11 +510,11 @@ function EmbeddedSignupFlow({
         sessionInfoVersion: '3',
       },
     })
-  }, [handleExchange, configId, signupEnabled, disabledReason])
+  }, [handleExchange, configId, signupEnabled, disabledReason, emb.directNotEnabled, emb.sdkNotReady, emb.linkCancelled])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
-    setStatusHint('جارٍ تجهيز خطوة التحقق... قد تصلك رسالة الكود قبل أن تظهر شاشة إدخاله. انتظر قليلًا.')
+    setStatusHint(emb.preparingVerify)
     setStage('requesting-code')
     try {
       const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/select-phone', {
@@ -521,11 +523,11 @@ function EmbeddedSignupFlow({
       })
       setNewPhoneId(res.phone_number_id || phoneId)
       applyEmbeddedStatus(res)
-    } catch (e) {
-      setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر اختيار الرقم'))
+    } catch (err) {
+      setError(explainWhatsAppError(err instanceof Error ? err.message : emb.selectPhoneFailed))
       setStage('select-phone')
     } finally { setBusy(false) }
-  }, [applyEmbeddedStatus])
+  }, [applyEmbeddedStatus, emb.preparingVerify, emb.selectPhoneFailed])
 
   // ── Render ────────────────────────────────────────────────────────────────
   if (stage === 'done') {
@@ -534,7 +536,7 @@ function EmbeddedSignupFlow({
         <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center">
           <CheckCircle2 className="w-8 h-8 text-emerald-600" />
         </div>
-        <p className="font-bold text-slate-800 text-lg">تم ربط واتساب بنجاح!</p>
+        <p className="font-bold text-slate-800 text-lg">{emb.successTitle}</p>
       </div>
     )
   }
@@ -547,17 +549,17 @@ function EmbeddedSignupFlow({
             <Phone className="w-5 h-5 text-emerald-600" />
           </div>
           <div>
-            <p className="font-semibold text-slate-800">اختر رقم الهاتف</p>
+            <p className="font-semibold text-slate-800">{emb.selectPhoneTitle}</p>
             <p className="text-xs text-slate-500">WABA: {wabaId}</p>
           </div>
         </div>
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-            <div className="text-right">
-              <p className="text-sm font-medium text-slate-800">إضافة رقم جديد</p>
+            <div className="text-start">
+              <p className="text-sm font-medium text-slate-800">{emb.addNewTitle}</p>
               <p className="text-xs text-slate-500">
-                إذا ظهر لك رقم قديم أو تجريبي، أضف رقم نشاطك الجديد من هنا
+                {emb.addNewHint}
               </p>
             </div>
             <button
@@ -566,12 +568,12 @@ function EmbeddedSignupFlow({
               className="shrink-0 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Phone className="w-4 h-4" />
-              إضافة رقم
+              {emb.addNewBtn}
             </button>
           </div>
           {phones.length === 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-700">
-              لا توجد أرقام هاتف في حساب واتساب للأعمال.
+              {emb.noPhones}
             </div>
           )}
           {phones.map(p => (
@@ -585,14 +587,14 @@ function EmbeddedSignupFlow({
                 <div className="w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center">
                   <Phone className="w-4 h-4 text-slate-500" />
                 </div>
-                <div className="text-right">
+                <div className="text-start">
                   <p className="font-medium text-slate-800 text-sm">{p.number || p.id}</p>
                   {p.name && <p className="text-xs text-slate-500">{p.name}</p>}
                 </div>
               </div>
               {p.verified
-                ? <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">موثّق</span>
-                : <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">غير موثّق</span>
+                ? <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">{emb.verified}</span>
+                : <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">{emb.unverified}</span>
               }
             </button>
           ))}
@@ -604,15 +606,15 @@ function EmbeddedSignupFlow({
   // ── Add phone stage ──────────────────────────────────────────────────────────
   if (stage === 'add-phone') {
     const submitPhone = async () => {
-      if (!newPhone || !displayName) { setError('أدخل رقم الهاتف والاسم التجاري'); return }
+      if (!newPhone || !displayName) { setError(emb.phoneNameRequired); return }
       setBusy(true); setError('')
       try {
         // Normalize phone: remove spaces, dashes, dots, parentheses, leading zeros
         const cleanPhone = newPhone.replace(/[\s\-().+]/g, '').replace(/^0+/, '')
         const cleanCC    = countryCode.replace(/\D/g, '')
-        if (!cleanPhone) { setError('أدخل رقم الهاتف بشكل صحيح'); setBusy(false); return }
-        if (!displayName.trim()) { setError('الاسم التجاري مطلوب'); setBusy(false); return }
-        setStatusHint('جارٍ إرسال رمز التحقق... قد تصلك رسالة الكود قبل أن تظهر شاشة إدخاله. لا تغادر هذه الخطوة.')
+        if (!cleanPhone) { setError(emb.phoneInvalid); setBusy(false); return }
+        if (!displayName.trim()) { setError(emb.displayNameRequired); setBusy(false); return }
+        setStatusHint(emb.sendingOtp)
         setStage('requesting-code')
         const res = await apiCall<{ phone_number_id: string; message?: string }>('/whatsapp/embedded/add-phone', {
           method: 'POST',
@@ -626,8 +628,8 @@ function EmbeddedSignupFlow({
         setNewPhoneId(res.phone_number_id)
         setStatusHint(res.message || '')
         setStage('verify-phone')
-      } catch (e) {
-        setError(explainWhatsAppError(e instanceof Error ? e.message : 'فشل إضافة الرقم'))
+      } catch (err) {
+        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.addPhoneFailed))
         setStage('add-phone')
       } finally { setBusy(false) }
     }
@@ -638,14 +640,14 @@ function EmbeddedSignupFlow({
             <Phone className="w-5 h-5 text-violet-600" />
           </div>
           <div>
-            <p className="font-semibold text-slate-800">إضافة رقم هاتف</p>
-            <p className="text-xs text-slate-500">سيصلك رمز تحقق عبر SMS</p>
+            <p className="font-semibold text-slate-800">{emb.addPhoneTitle}</p>
+            <p className="text-xs text-slate-500">{emb.addPhoneSubtitle}</p>
           </div>
         </div>
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
         <div className="space-y-3">
           <div>
-            <label className="block text-xs text-slate-500 mb-1 text-right">رقم الهاتف</label>
+            <label className="block text-xs text-slate-500 mb-1 text-start">{emb.phoneLabel}</label>
             <div className="flex gap-2">
               <div className="relative">
                 <input
@@ -665,17 +667,17 @@ function EmbeddedSignupFlow({
                 dir="ltr"
               />
             </div>
-            <p className="text-xs text-slate-400 mt-1 text-right">مثال: كود الدولة <span className="font-mono">966</span> ورقم الهاتف <span className="font-mono">512345678</span> (بدون الصفر الأول)</p>
+            <p className="text-xs text-slate-400 mt-1 text-start">{emb.phoneExampleHint}</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1 text-right">الاسم التجاري</label>
+            <label className="block text-xs text-slate-500 mb-1 text-start">{emb.businessNameLabel}</label>
             <input
               value={displayName}
               onChange={e => setDisplayName(e.target.value)}
-              placeholder="مثال: متجر نحلة للعطور"
+              placeholder={emb.businessNamePlaceholder}
               className="w-full px-4 py-3 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-violet-400"
             />
-            <p className="text-xs text-slate-400 mt-1 text-right">اسم نشاطك التجاري كما سيظهر للعملاء في واتساب</p>
+            <p className="text-xs text-slate-400 mt-1 text-start">{emb.businessNameHint}</p>
           </div>
         </div>
         <div className="flex gap-2">
@@ -683,7 +685,7 @@ function EmbeddedSignupFlow({
             onClick={() => setStage('select-phone')}
             className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
-            رجوع
+            {emb.back}
           </button>
           <button
             onClick={submitPhone}
@@ -691,7 +693,7 @@ function EmbeddedSignupFlow({
             className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
           >
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ChevronRight className="w-4 h-4" />}
-            إرسال رمز التحقق
+            {emb.sendOtp}
           </button>
         </div>
       </div>
@@ -706,17 +708,17 @@ function EmbeddedSignupFlow({
             <Loader2 className="w-5 h-5 text-violet-600 animate-spin" />
           </div>
           <div>
-            <p className="font-semibold text-slate-800">جارٍ تجهيز رمز التحقق</p>
-            <p className="text-xs text-slate-500">قد تصلك الرسالة النصية أولًا ثم تظهر شاشة إدخال الكود بعد لحظات</p>
+            <p className="font-semibold text-slate-800">{emb.preparingCodeTitle}</p>
+            <p className="text-xs text-slate-500">{emb.preparingCodeSubtitle}</p>
           </div>
         </div>
 
         <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 text-sm text-violet-800">
-          {statusHint || 'يتم الآن طلب رمز التحقق من Meta. لا تنتقل إلى خطوة أخرى حتى تظهر شاشة إدخال الكود.'}
+          {statusHint || emb.requestingCodeDefault}
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
-          إذا وصلتك الرسالة الآن فهذا طبيعي. انتظر قليلًا وسيتم فتح نافذة إدخال الكود تلقائيًا.
+          {emb.requestingCodeTip}
         </div>
       </div>
     )
@@ -725,7 +727,7 @@ function EmbeddedSignupFlow({
   // ── Verify phone stage ────────────────────────────────────────────────────────
   if (stage === 'verify-phone') {
     const submitOtp = async () => {
-      if (!otpCode) { setError('أدخل رمز التحقق'); return }
+      if (!otpCode) { setError(emb.otpRequired); return }
       setBusy(true); setError('')
       try {
         const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/verify-phone', {
@@ -733,8 +735,8 @@ function EmbeddedSignupFlow({
           body: JSON.stringify({ phone_number_id: newPhoneId, code: otpCode }),
         })
         applyEmbeddedStatus(res)
-      } catch (e) {
-        setError(explainWhatsAppError(e instanceof Error ? e.message : 'رمز التحقق غير صحيح'))
+      } catch (err) {
+        setError(explainWhatsAppError(err instanceof Error ? err.message : emb.otpInvalid))
       } finally { setBusy(false) }
     }
     return (
@@ -744,8 +746,8 @@ function EmbeddedSignupFlow({
             <ShieldCheck className="w-5 h-5 text-emerald-600" />
           </div>
           <div>
-            <p className="font-semibold text-slate-800">تحقق من رقم الهاتف</p>
-            <p className="text-xs text-slate-500">أدخل الرمز المرسل عبر SMS</p>
+            <p className="font-semibold text-slate-800">{emb.verifyTitle}</p>
+            <p className="text-xs text-slate-500">{emb.verifySubtitle}</p>
           </div>
         </div>
         {statusHint && !error && <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm text-blue-700">{statusHint}</div>}
@@ -763,7 +765,7 @@ function EmbeddedSignupFlow({
             onClick={() => setStage('add-phone')}
             className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
-            رجوع
+            {emb.back}
           </button>
           <button
             onClick={submitOtp}
@@ -771,7 +773,7 @@ function EmbeddedSignupFlow({
             className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
           >
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <BadgeCheck className="w-4 h-4" />}
-            تأكيد
+            {emb.confirm}
           </button>
         </div>
       </div>
@@ -786,30 +788,30 @@ function EmbeddedSignupFlow({
             <Loader2 className="w-5 h-5 text-amber-600 animate-spin" />
           </div>
           <div>
-            <p className="font-semibold text-slate-800">جارٍ مزامنة الرقم مع Meta</p>
-            <p className="text-xs text-slate-500">لن يظهر كمرتبط إلا بعد أن يصبح جاهزًا فعليًا للإرسال</p>
+            <p className="font-semibold text-slate-800">{emb.syncingTitle}</p>
+            <p className="text-xs text-slate-500">{emb.syncingSubtitle}</p>
           </div>
         </div>
 
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-          {statusHint || 'Meta ما زالت تُراجع أو تُفعّل الرقم. يتم التحديث تلقائيًا كل بضع ثوانٍ.'}
+          {statusHint || emb.syncingDefault}
         </div>
 
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
 
         <div className="flex gap-2">
           <button
-            onClick={() => refreshEmbeddedStatus().catch(e => setError(explainWhatsAppError(e instanceof Error ? e.message : 'تعذر تحديث الحالة')))}
+            onClick={() => refreshEmbeddedStatus().catch(err => setError(explainWhatsAppError(err instanceof Error ? err.message : emb.refreshFailed)))}
             className="flex-1 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-medium text-sm transition-colors flex items-center justify-center gap-2"
           >
             <RefreshCw className="w-4 h-4" />
-            تحديث الآن
+            {emb.refreshNow}
           </button>
           <button
             onClick={() => setStage('select-phone')}
             className="flex-1 py-3 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
-            العودة للأرقام
+            {emb.backToPhones}
           </button>
         </div>
       </div>
@@ -834,31 +836,24 @@ function EmbeddedSignupFlow({
             <AlertCircle className="w-8 h-8 text-slate-500" />
           </div>
           <div className="text-center">
-            <p className="font-bold text-slate-800 text-lg">الربط المباشر مع Meta — قيد التفعيل</p>
+            <p className="font-bold text-slate-800 text-lg">{emb.disabledTitle}</p>
             <p className="text-sm text-slate-500 mt-1">
-              سيتم تفعيل هذا الخيار فور اكتمال اعتماد Meta الرسمي لتطبيق نحلة.
+              {emb.disabledSubtitle}
             </p>
           </div>
         </div>
 
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
-          {disabledReason
-            || 'الربط المباشر مع Meta غير مفعّل بعد. استخدم الربط عبر 360dialog حالياً.'}
+          {disabledReason || emb.disabledReasonFallback}
         </div>
 
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-600 space-y-1.5">
-          <p className="font-semibold text-slate-700">ماذا يعني هذا؟</p>
-          <p>
-            موافقة <code className="font-mono text-[11px] bg-white px-1.5 py-0.5 rounded border border-slate-200">whatsapp_business_messaging</code>
-            من Meta لا تكفي وحدها لتشغيل Embedded Signup المباشر —
-            يتطلب أيضاً إعداد <span className="font-semibold">Facebook Login for Business / Embedded Signup config</span>
-            في حساب التطبيق الخاص بنحلة. عند اكتمال هذه الخطوة سيظهر زر "ربط مع Meta" هنا تلقائياً.
-          </p>
+          <p className="font-semibold text-slate-700">{emb.disabledExplainTitle}</p>
+          <p>{emb.disabledExplainBody}</p>
         </div>
 
         <p className="text-center text-xs text-slate-400">
-          حتى ذلك الحين، الربط عبر 360dialog يعمل بكامل المزايا — رسائل،
-          ردود تلقائية، حملات، وقوالب.
+          {emb.disabledFooter}
         </p>
       </div>
     )
@@ -872,18 +867,18 @@ function EmbeddedSignupFlow({
           <MessageCircle className="w-8 h-8 text-[#25D366]" />
         </div>
         <div className="text-center">
-          <p className="font-bold text-slate-800 text-lg">ربط واتساب للأعمال</p>
-          <p className="text-sm text-slate-500 mt-1">اربط حساب واتساب الخاص بمتجرك مباشرةً عبر Meta</p>
+          <p className="font-bold text-slate-800 text-lg">{emb.initTitle}</p>
+          <p className="text-sm text-slate-500 mt-1">{emb.initSubtitle}</p>
         </div>
       </div>
 
       {/* Steps */}
       <div className="bg-slate-50 rounded-xl p-4 space-y-2">
         {[
-          { n: 1, text: 'اضغط "ربط مع Meta" أدناه' },
-          { n: 2, text: 'سجّل دخولك بحساب Facebook' },
-          { n: 3, text: 'ستنشئ Meta حساب واتساب للأعمال تلقائيًا إذا لم يكن لديك' },
-          { n: 4, text: 'اختر أو أضف رقم هاتف نشاطك التجاري' },
+          { n: 1, text: emb.step1 },
+          { n: 2, text: emb.step2 },
+          { n: 3, text: emb.step3 },
+          { n: 4, text: emb.step4 },
         ].map(s => (
           <div key={s.n} className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold shrink-0">{s.n}</div>
@@ -894,7 +889,7 @@ function EmbeddedSignupFlow({
 
       {/* Informational hint — not blocking */}
       <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-700">
-        إذا لم يكن لديك حساب واتساب للأعمال بعد، ستقوم Meta بإنشائه تلقائيًا أثناء الربط — لا تحتاج إعداد أي شيء مسبقًا.
+        {emb.initHint}
       </div>
 
       {error && (
@@ -908,18 +903,18 @@ function EmbeddedSignupFlow({
         className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
       >
         {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
-          ? <><Loader2 className="w-5 h-5 animate-spin" />جاري التحميل...</>
+          ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
           : <>
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
               </svg>
-              ربط مع Meta
+              {emb.connectBtn}
             </>
         }
       </button>
 
       <p className="text-center text-xs text-slate-400">
-        ستُفتح نافذة Meta الرسمية — كل بياناتك آمنة ومشفّرة. ستتكفل Meta بجميع الإعدادات التقنية نيابةً عنك.
+        {emb.initFooter}
       </p>
     </div>
   )

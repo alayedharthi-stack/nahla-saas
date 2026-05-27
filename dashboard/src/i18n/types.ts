@@ -526,6 +526,71 @@ export interface Translations {
       submitting:              string
       submitBtn:               string
     }
+    embedded: {
+      loadConfigFailed:        string
+      activateFailed:          string
+      syncStatusFailed:        string
+      exchangeFailed:          string
+      bspNotEnabled:           string
+      directNotEnabled:        string
+      sdkNotReady:             string
+      linkCancelled:           string
+      preparingVerify:         string
+      selectPhoneFailed:       string
+      phoneNameRequired:       string
+      phoneInvalid:            string
+      displayNameRequired:     string
+      sendingOtp:              string
+      addPhoneFailed:          string
+      otpRequired:             string
+      otpInvalid:              string
+      refreshFailed:           string
+      successTitle:            string
+      selectPhoneTitle:        string
+      addNewTitle:             string
+      addNewHint:              string
+      addNewBtn:               string
+      noPhones:                string
+      verified:                string
+      unverified:              string
+      addPhoneTitle:           string
+      addPhoneSubtitle:        string
+      phoneLabel:              string
+      phoneExampleHint:        string
+      businessNameLabel:       string
+      businessNamePlaceholder: string
+      businessNameHint:        string
+      back:                    string
+      sendOtp:                 string
+      preparingCodeTitle:      string
+      preparingCodeSubtitle:   string
+      requestingCodeDefault:   string
+      requestingCodeTip:       string
+      verifyTitle:             string
+      verifySubtitle:          string
+      confirm:                 string
+      syncingTitle:            string
+      syncingSubtitle:         string
+      syncingDefault:          string
+      refreshNow:              string
+      backToPhones:            string
+      disabledTitle:           string
+      disabledSubtitle:        string
+      disabledReasonFallback:  string
+      disabledExplainTitle:    string
+      disabledExplainBody:     string
+      disabledFooter:          string
+      initTitle:               string
+      initSubtitle:            string
+      step1:                   string
+      step2:                   string
+      step3:                   string
+      step4:                   string
+      initHint:                string
+      loading:                 string
+      connectBtn:              string
+      initFooter:              string
+    }
   }
 
   /** Billing page */
