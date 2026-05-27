@@ -754,6 +754,83 @@ export interface Translations {
     disabled:          string
     archived:          string
     limitExceeded:     string
+    /** WaPreview bubble chrome (copy-code fallback, read receipt) */
+    previewCopyCodeFallback: string
+    previewReadReceipt:      string
+    create: {
+      title: string
+      stepProgressMiddle: string
+      stepProgressOf:     string
+      steps: {
+        info:    string
+        content: string
+        buttons: string
+        review:  string
+      }
+      step1: {
+        intro: string
+        nameLabel: string
+        nameHint: string
+        namePlaceholder: string
+        languageLabel: string
+        langArabic: string
+        langEnglish: string
+        langEnglishUS: string
+        categoryLabel: string
+        categoryOptionMarketing: string
+        categoryOptionUtility: string
+        categoryOptionAuth: string
+        categoryNoticeBeforeMarketing: string
+        marketingTerm: string
+        categoryNoticeAfterMarketing: string
+        utilityTerm: string
+        categoryNoticeAfterUtility: string
+        authTerm: string
+        categoryNoticeAfterAuth: string
+      }
+      step2: {
+        intro: string
+        introSuffix: string
+        headerLabel: string
+        bodyLabel: string
+        footerLabel: string
+        charCountSuffix: string
+      }
+      step3: {
+        intro: string
+        addUrl: string
+        addPhone: string
+        addCopyCode: string
+        noButtons: string
+        btnTypeUrl: string
+        btnTypePhone: string
+        btnTypeCopyCode: string
+        buttonTextPlaceholder: string
+        copyCodeStrong: string
+        copyCodeBody: string
+      }
+      step4: {
+        reviewNoticeBefore: string
+        reviewNoticeStrong: string
+        reviewNoticeAfter: string
+        summaryName: string
+        summaryLanguage: string
+        summaryCategory: string
+        summaryVariables: string
+        summaryButtons: string
+        varUnit: string
+        btnUnit: string
+        noButtonsSummary: string
+        previewLabel: string
+      }
+      nav: {
+        prev: string
+        next: string
+      }
+      errors: {
+        createFailed: string
+      }
+    }
   }
 
   /** Merchants (admin) page */

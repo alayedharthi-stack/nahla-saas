@@ -133,6 +133,7 @@ function isDefaultTemplate(name: string) {
 function WaPreview({
   header, body, footer, buttons,
 }: { header: string; body: string; footer: string; buttons: TemplateButton[] }) {
+  const { t } = useLanguage()
   return (
     <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28">
       <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1" dir="rtl">
@@ -151,14 +152,14 @@ function WaPreview({
                 {btn.type === 'QUICK_REPLY' && <span>💬</span>}
                 <span>
                   {btn.type === 'COPY_CODE'
-                    ? (btn.text || 'نسخ كود الخصم')
+                    ? (btn.text || t(tr => tr.templatesMgmt.previewCopyCodeFallback))
                     : btn.text || '—'}
                 </span>
               </div>
             ))}
           </div>
         )}
-        <p className="text-[10px] text-slate-300 text-end">✓✓ الآن</p>
+        <p className="text-[10px] text-slate-300 text-end">{t(tr => tr.templatesMgmt.previewReadReceipt)}</p>
       </div>
     </div>
   )
@@ -717,8 +718,6 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
 
 // ── Create template wizard ────────────────────────────────────────────────────
 
-const STEP_LABELS_CREATE = ['معلومات القالب', 'محتوى الرسالة', 'الأزرار', 'معاينة وإرسال']
-
 interface WizardState {
   step: number
   name: string
@@ -742,10 +741,32 @@ const INIT_WIZARD: WizardState = {
 }
 
 function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (t: WhatsAppTemplateRecord) => void }) {
-  const { t } = useLanguage()
+  const { t, dir } = useLanguage()
+  const c = t(tr => tr.templatesMgmt.create)
+  const mgmt = t(tr => tr.templatesMgmt)
   const [wiz, setWiz] = useState<WizardState>(INIT_WIZARD)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+
+  const stepLabels = [c.steps.info, c.steps.content, c.steps.buttons, c.steps.review]
+
+  const langLabel = (code: string): string => {
+    switch (code) {
+      case 'ar':    return c.step1.langArabic
+      case 'en':    return c.step1.langEnglish
+      case 'en_US': return c.step1.langEnglishUS
+      default:      return code
+    }
+  }
+
+  const categoryLabel = (cat: TemplateCategory): string => {
+    switch (cat) {
+      case 'MARKETING':      return mgmt.categoryMarketing
+      case 'UTILITY':        return mgmt.categoryUtility
+      case 'AUTHENTICATION': return mgmt.categoryAuth
+      default:               return cat
+    }
+  }
 
   const canNext = (): boolean => {
     if (wiz.step === 1) return !!wiz.name.trim() && !!wiz.category
@@ -807,7 +828,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
       onCreated(created)
       onClose()
     } catch {
-      setError('حدث خطأ أثناء إنشاء القالب. تأكد من البيانات وحاول مجدداً.')
+      setError(c.errors.createFailed)
     } finally {
       setSaving(false)
     }
@@ -821,12 +842,14 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]" dir={dir}>
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div>
-            <h2 className="text-sm font-bold text-slate-900">إنشاء قالب واتساب</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{STEP_LABELS_CREATE[wiz.step - 1]} — الخطوة {wiz.step} من 4</p>
+            <h2 className="text-sm font-bold text-slate-900">{c.title}</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {stepLabels[wiz.step - 1]} — {c.stepProgressMiddle} {wiz.step} {c.stepProgressOf} 4
+            </p>
           </div>
           <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
         </div>
@@ -848,39 +871,47 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
           {/* Step 1 — Template Info */}
           {wiz.step === 1 && (
             <div className="space-y-4">
-              <p className="text-xs text-slate-500">أدخل معلومات القالب الأساسية. الاسم يجب أن يكون بالإنجليزية مع شرطات سفلية.</p>
+              <p className="text-xs text-slate-500">{c.step1.intro}</p>
               <div>
-                <label className="label">اسم القالب</label>
+                <label className="label">{c.step1.nameLabel}</label>
                 <input
                   className="input text-sm"
-                  placeholder="مثال: cart_reminder أو special_offer"
+                  placeholder={c.step1.namePlaceholder}
                   dir="ltr"
                   value={wiz.name}
                   onChange={e => setWiz(w => ({ ...w, name: e.target.value.toLowerCase().replace(/\s+/g, '_') }))}
                 />
-                <p className="text-xs text-slate-400 mt-1">أحرف صغيرة وشرطات سفلية فقط — هذا هو اسم القالب في Meta</p>
+                <p className="text-xs text-slate-400 mt-1">{c.step1.nameHint}</p>
               </div>
               <div className="grid sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="label">اللغة</label>
+                  <label className="label">{c.step1.languageLabel}</label>
                   <select className="input text-sm" value={wiz.language} onChange={e => setWiz(w => ({ ...w, language: e.target.value }))}>
-                    <option value="ar">العربية</option>
-                    <option value="en">English</option>
-                    <option value="en_US">English (US)</option>
+                    <option value="ar">{c.step1.langArabic}</option>
+                    <option value="en">{c.step1.langEnglish}</option>
+                    <option value="en_US">{c.step1.langEnglishUS}</option>
                   </select>
                 </div>
                 <div>
-                  <label className="label">الفئة</label>
+                  <label className="label">{c.step1.categoryLabel}</label>
                   <select className="input text-sm" value={wiz.category} onChange={e => setWiz(w => ({ ...w, category: e.target.value as TemplateCategory }))}>
-                    <option value="MARKETING">تسويق (Marketing)</option>
-                    <option value="UTILITY">خدمة (Utility)</option>
-                    <option value="AUTHENTICATION">مصادقة (Authentication)</option>
+                    <option value="MARKETING">{c.step1.categoryOptionMarketing}</option>
+                    <option value="UTILITY">{c.step1.categoryOptionUtility}</option>
+                    <option value="AUTHENTICATION">{c.step1.categoryOptionAuth}</option>
                   </select>
                 </div>
               </div>
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800 flex gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
-                <span>قوالب <strong>التسويق</strong> تستخدم للعروض والحملات. قوالب <strong>الخدمة</strong> للإشعارات والمعاملات. قوالب <strong>المصادقة</strong> لكودات OTP.</span>
+                <span>
+                  {c.step1.categoryNoticeBeforeMarketing}
+                  <strong>{c.step1.marketingTerm}</strong>
+                  {c.step1.categoryNoticeAfterMarketing}
+                  <strong>{c.step1.utilityTerm}</strong>
+                  {c.step1.categoryNoticeAfterUtility}
+                  <strong>{c.step1.authTerm}</strong>
+                  {c.step1.categoryNoticeAfterAuth}
+                </span>
               </div>
             </div>
           )}
@@ -888,10 +919,12 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
           {/* Step 2 — Message Content */}
           {wiz.step === 2 && (
             <div className="space-y-4">
-              <p className="text-xs text-slate-500">أنشئ محتوى الرسالة. استخدم {`{{1}}`} {`{{2}}`} {`{{3}}`} للمتغيرات الديناميكية.</p>
+              <p className="text-xs text-slate-500">
+                {c.step2.intro} {`{{1}}`} {`{{2}}`} {`{{3}}`} {c.step2.introSuffix}
+              </p>
 
               <div>
-                <label className="label">نص الرأس (اختياري)</label>
+                <label className="label">{c.step2.headerLabel}</label>
                 <input
                   className="input text-sm"
                   placeholder="مثال: عرض خاص لك 🎁"
@@ -902,7 +935,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="label mb-0">نص الرسالة *</label>
+                  <label className="label mb-0">{c.step2.bodyLabel}</label>
                   <div className="flex gap-1">
                     {[1, 2, 3].map(n => (
                       <button
@@ -922,11 +955,11 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                   value={wiz.bodyText}
                   onChange={e => setWiz(w => ({ ...w, bodyText: e.target.value }))}
                 />
-                <p className="text-xs text-slate-400 mt-1">{wiz.bodyText.length}/1024 حرف</p>
+                <p className="text-xs text-slate-400 mt-1">{wiz.bodyText.length}/1024 {c.step2.charCountSuffix}</p>
               </div>
 
               <div>
-                <label className="label">نص التذييل (اختياري)</label>
+                <label className="label">{c.step2.footerLabel}</label>
                 <input
                   className="input text-sm"
                   value={wiz.footerText}
@@ -939,18 +972,18 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
           {/* Step 3 — Buttons */}
           {wiz.step === 3 && (
             <div className="space-y-4">
-              <p className="text-xs text-slate-500">أضف أزراراً تفاعلية اختيارية (حتى 3 أزرار).</p>
+              <p className="text-xs text-slate-500">{c.step3.intro}</p>
 
               {wiz.buttons.length < 3 && (
                 <div className="flex flex-wrap gap-2">
                   <button onClick={() => addButton('URL')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
-                    <Link2 className="w-3.5 h-3.5" /> رابط URL
+                    <Link2 className="w-3.5 h-3.5" /> {c.step3.addUrl}
                   </button>
                   <button onClick={() => addButton('PHONE_NUMBER')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
-                    <Phone className="w-3.5 h-3.5" /> رقم هاتف
+                    <Phone className="w-3.5 h-3.5" /> {c.step3.addPhone}
                   </button>
                   <button onClick={() => addButton('COPY_CODE')} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
-                    <CopyIcon className="w-3.5 h-3.5" /> نسخ كود
+                    <CopyIcon className="w-3.5 h-3.5" /> {c.step3.addCopyCode}
                   </button>
                 </div>
               )}
@@ -958,7 +991,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
               {wiz.buttons.length === 0 && (
                 <div className="py-8 text-center text-sm text-slate-400">
                   <Type className="w-8 h-8 mx-auto mb-2 text-slate-200" />
-                  لا توجد أزرار — الرسالة ستُرسل بدون أزرار تفاعلية.
+                  {c.step3.noButtons}
                 </div>
               )}
 
@@ -967,7 +1000,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                   <div key={i} className="border border-slate-200 rounded-xl p-3 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-medium text-slate-600">
-                        {btn.type === 'URL' ? 'رابط URL' : btn.type === 'PHONE_NUMBER' ? 'رقم هاتف' : 'نسخ كود'}
+                        {btn.type === 'URL' ? c.step3.btnTypeUrl : btn.type === 'PHONE_NUMBER' ? c.step3.btnTypePhone : c.step3.btnTypeCopyCode}
                       </span>
                       <button onClick={() => removeButton(i)} className="text-slate-300 hover:text-red-500">
                         <X className="w-3.5 h-3.5" />
@@ -975,7 +1008,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                     </div>
                     <input
                       className="input text-sm"
-                      placeholder="نص الزر"
+                      placeholder={c.step3.buttonTextPlaceholder}
                       value={btn.text}
                       onChange={e => updateButton(i, { text: e.target.value })}
                     />
@@ -1000,8 +1033,8 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                         <div className="flex items-start gap-1.5 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-2">
                           <span className="text-emerald-500 text-xs mt-0.5">✦</span>
                           <p className="text-[11px] text-emerald-700 leading-relaxed">
-                            <strong>كود ديناميكي —</strong> هذا مثال لمراجعة Meta فقط.
-                            عند الإرسال، يُحقن كود الخصم الحقيقي تلقائياً من نظام الكوبونات.
+                            <strong>{c.step3.copyCodeStrong}</strong>
+                            {c.step3.copyCodeBody}
                           </p>
                         </div>
                       </div>
@@ -1027,28 +1060,29 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
               <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3">
                 <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                 <p className="text-xs text-amber-800">
-                  بعد الإرسال، سيدخل القالب حالة <strong>قيد المراجعة</strong> حتى تعتمده Meta (24–48 ساعة).
-                  لن يمكن استخدامه في الحملات قبل الاعتماد.
+                  {c.step4.reviewNoticeBefore}
+                  <strong>{c.step4.reviewNoticeStrong}</strong>
+                  {c.step4.reviewNoticeAfter}
                 </p>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   {[
-                    ['الاسم',    wiz.name || '—'],
-                    ['اللغة',    LANGUAGE_LABELS[wiz.language] ?? wiz.language],
-                    ['الفئة',    CATEGORY_LABELS[wiz.category]],
-                    ['المتغيرات', `${extractVars(wiz.bodyText).length} متغير`],
-                    ['الأزرار',  wiz.buttons.length > 0 ? `${wiz.buttons.length} زر` : 'بدون أزرار'],
+                    [c.step4.summaryName,       wiz.name || '—'],
+                    [c.step4.summaryLanguage,    langLabel(wiz.language)],
+                    [c.step4.summaryCategory,    categoryLabel(wiz.category)],
+                    [c.step4.summaryVariables,   `${extractVars(wiz.bodyText).length} ${c.step4.varUnit}`],
+                    [c.step4.summaryButtons,     wiz.buttons.length > 0 ? `${wiz.buttons.length} ${c.step4.btnUnit}` : c.step4.noButtonsSummary],
                   ].map(([k, v]) => (
                     <div key={k} className="flex gap-2 bg-slate-50 rounded-lg px-3 py-2 text-xs">
-                      <span className="text-slate-400 w-20 shrink-0">{k}</span>
+                      <span className="text-slate-400 min-w-[5rem] shrink-0">{k}</span>
                       <span className="font-medium text-slate-800 truncate">{v}</span>
                     </div>
                   ))}
                 </div>
                 <div>
-                  <p className="text-xs text-slate-500 mb-2">معاينة الرسالة</p>
+                  <p className="text-xs text-slate-500 mb-2">{c.step4.previewLabel}</p>
                   <WaPreview
                     header={previewHeader}
                     body={previewBody}
@@ -1064,19 +1098,19 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
         {/* Footer nav */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
           <button onClick={prev} disabled={wiz.step === 1} className="btn-ghost text-sm disabled:opacity-30">
-            <ChevronRight className="w-4 h-4" /> السابق
+            <ChevronRight className="w-4 h-4" /> {c.nav.prev}
           </button>
 
           {error && <p className="text-xs text-red-500 mx-4">{error}</p>}
 
           {wiz.step < 4 ? (
             <button onClick={next} disabled={!canNext()} className="btn-primary text-sm disabled:opacity-40">
-              التالي <ChevronLeft className="w-4 h-4" />
+              {c.nav.next} <ChevronLeft className="w-4 h-4" />
             </button>
           ) : (
             <button onClick={handleSubmit} disabled={saving} className="btn-primary text-sm">
               {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              {saving ? t(tr => tr.templatesMgmt.savingDraft) : t(tr => tr.templatesMgmt.saveDraft)}
+              {saving ? mgmt.savingDraft : mgmt.saveDraft}
             </button>
           )}
         </div>
