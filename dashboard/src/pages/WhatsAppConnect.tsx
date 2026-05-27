@@ -945,22 +945,22 @@ interface StatusResponse {
 
 // ── Meta business verticals ───────────────────────────────────────────────────
 
-const VERTICALS = [
-  { value: 'RETAIL',                    label: 'تجزئة وتسوق'           },
-  { value: 'APPAREL',                   label: 'ملابس وأزياء'           },
-  { value: 'BEAUTY_SPA_SALON',          label: 'تجميل وعناية'           },
-  { value: 'FOOD_AND_GROCERY',          label: 'طعام وبقالة'            },
-  { value: 'RESTAURANT',               label: 'مطعم وكافيه'            },
-  { value: 'HEALTH_AND_MEDICAL',        label: 'صحة وطب'               },
-  { value: 'EDUCATION',                label: 'تعليم وتدريب'           },
-  { value: 'HOTEL_AND_LODGING',         label: 'فنادق وضيافة'           },
-  { value: 'TRAVEL_AND_TRANSPORTATION', label: 'سفر ونقل'              },
-  { value: 'AUTOMOTIVE',               label: 'سيارات'                },
-  { value: 'ENTERTAINMENT',            label: 'ترفيه وفعاليات'         },
-  { value: 'PROFESSIONAL_SERVICES',     label: 'خدمات مهنية'            },
-  { value: 'NONPROFIT',                label: 'منظمة غير ربحية'        },
-  { value: 'OTHER',                    label: 'أخرى'                  },
-]
+const VERTICAL_VALUES = [
+  'RETAIL',
+  'APPAREL',
+  'BEAUTY_SPA_SALON',
+  'FOOD_AND_GROCERY',
+  'RESTAURANT',
+  'HEALTH_AND_MEDICAL',
+  'EDUCATION',
+  'HOTEL_AND_LODGING',
+  'TRAVEL_AND_TRANSPORTATION',
+  'AUTOMOTIVE',
+  'ENTERTAINMENT',
+  'PROFESSIONAL_SERVICES',
+  'NONPROFIT',
+  'OTHER',
+] as const
 
 // ── Phone normalizer (frontend) ───────────────────────────────────────────────
 // Mirrors backend _normalize_phone so the user sees the normalized value live.
@@ -1035,12 +1035,10 @@ async function disconnect() {
 
 // ── Step indicator ────────────────────────────────────────────────────────────
 
-const STEPS = ['الهوية', 'التحقق', 'الملف التجاري', 'تم']
-
-function StepBar({ step }: { step: number }) {
+function StepBar({ step, labels }: { step: number; labels: readonly [string, string, string, string] }) {
   return (
     <div className="flex items-center justify-center gap-1 mb-7">
-      {STEPS.map((label, i) => {
+      {labels.map((label, i) => {
         const n    = i + 1
         const done = n < step
         const active = n === step
@@ -1058,7 +1056,7 @@ function StepBar({ step }: { step: number }) {
                 {label}
               </span>
             </div>
-            {i < STEPS.length - 1 && (
+            {i < labels.length - 1 && (
               <div className={`w-8 h-0.5 mb-4 rounded ${n < step ? 'bg-emerald-400' : 'bg-slate-200'}`} />
             )}
           </div>
@@ -1383,6 +1381,7 @@ function ManualConnectForm({ onConnected }: { onConnected: (r: { phone_number_id
 export default function WhatsAppConnect() {
   const { t, dir, lang } = useLanguage()
   const wc = t(tr => tr.whatsappConnect)
+  const d = t(tr => tr.whatsappConnect.direct)
   // 'manual' = Manual connect (current) | 'embedded' = Meta Embedded Signup | 'direct' = OTP flow
   const [mode, setMode]       = useState<'manual'|'embedded'|'direct'|'coexistence'>('manual')
   const [step, setStep]       = useState<1|2|3|4>(1)
@@ -1505,7 +1504,7 @@ export default function WhatsAppConnect() {
         } else if ((s.status === 'pending' || s.status === 'otp_pending') && s.phone_number_id) {
           // Resume from Step 2 — OTP was already sent, pending verification
           setPhoneNumberId(s.phone_number_id)
-          setSentMsg('تم إرسال رمز التحقق مسبقاً — أدخل الرمز الذي وصلك.')
+          setSentMsg(d.resumeOtpSent)
           setStep(2)
           // Calculate remaining cooldown from last_attempt_at
           if (s.last_attempt_at) {
@@ -1531,8 +1530,8 @@ export default function WhatsAppConnect() {
   // ── Step 1 → 2 ──────────────────────────────────────────────────────────
 
   const handleRequestOtp = useCallback(async () => {
-    if (!phone.trim())       { setError('أدخل رقم الهاتف'); return }
-    if (!displayName.trim()) { setError('أدخل اسم العرض'); return }
+    if (!phone.trim())       { setError(d.errPhoneRequired); return }
+    if (!displayName.trim()) { setError(d.errDisplayNameRequired); return }
 
     const original   = phone.trim()
     const normalized = normalizePhone(original)
@@ -1543,7 +1542,7 @@ export default function WhatsAppConnect() {
 
     if (!valid) {
       // PHONE_VALIDATION_ERROR — do not proceed
-      setError('رقم الهاتف غير صحيح. أدخل رقماً سعودياً مثل: +966542878717 أو 0542878717')
+      setError(d.errPhoneInvalid)
       return
     }
 
@@ -1565,36 +1564,36 @@ export default function WhatsAppConnect() {
       console.error('[Nahla/OTP] api_error=', raw)
       const isRateLimit = /انتظار|rate.limit|OTP_RATE_LIMITED|حاولت عدة مرات/i.test(raw)
       if (isRateLimit) {
-        setError('⏳ ' + sanitizeMessage(raw) + ' — جرّب مرة أخرى بعد بضع ساعات أو استخدم رقماً مختلفاً.')
+        setError('⏳ ' + sanitizeMessage(raw) + d.errRateLimitSuffix)
       } else {
         const isPhoneFormatMsg = /صيغة رقم الهاتف|phone.*format|invalid.*phone/i.test(raw)
         if (isPhoneFormatMsg && valid) {
-          setError('تعذر إرسال رمز التحقق. تأكد من الرقم أو حاول مرة أخرى.')
+          setError(d.errSendOtpFailed)
         } else {
           setError(sanitizeMessage(raw))
         }
       }
     }
     finally { setBusy(false) }
-  }, [phone, displayName, otpMethod])
+  }, [phone, displayName, otpMethod, d])
 
   // ── Step 2 → 3 ──────────────────────────────────────────────────────────
 
   const handleVerifyOtp = useCallback(async () => {
-    if (otp.trim().length < 6) { setError('أدخل الرمز كاملاً (6 أرقام)'); return }
+    if (otp.trim().length < 6) { setError(d.errOtpIncomplete); return }
     setBusy(true); setError('')
     try {
       const r = await verifyOtp(phoneNumberId, otp.trim()) as VerifyResponse & { sending_enabled?: boolean; status?: string }
       setConnPhone(r.phone_number)
       setConnName(r.display_name)
       if (r.sending_enabled === false || (r.status && r.status !== 'connected')) {
-        setError(explainWhatsAppError(r.message || 'تم التحقق من الرمز، لكن الرقم ما زال بانتظار تفعيل Meta.'))
+        setError(explainWhatsAppError(r.message || d.errVerifiedPendingMeta))
         return
       }
       setStep(3)
     } catch (e) { setError(explainWhatsAppError(sanitizeMessage(e instanceof Error ? e.message : ''))) }
     finally { setBusy(false) }
-  }, [otp, phoneNumberId])
+  }, [otp, phoneNumberId, d])
 
   // ── Step 3 → 4 ──────────────────────────────────────────────────────────
 
@@ -1786,7 +1785,9 @@ export default function WhatsAppConnect() {
       )}
 
       {/* ── Direct mode step bar ─────────────────────────────────────────── */}
-      {mode === 'direct' && step < 4 && <StepBar step={step} />}
+      {mode === 'direct' && step < 4 && (
+        <StepBar step={step} labels={[d.stepIdentity, d.stepVerify, d.stepProfile, d.stepDone]} />
+      )}
 
       {/* ── Direct mode steps (1-3) ──────────────────────────────────────── */}
       {/* ── Step 1: Identity ─────────────────────────────────────────────── */}
@@ -1797,12 +1798,12 @@ export default function WhatsAppConnect() {
               <Phone className="w-5 h-5 text-violet-600" />
             </div>
             <div>
-              <p className="font-semibold text-slate-800">بيانات هوية النشاط التجاري</p>
-              <p className="text-xs text-slate-500">تُستخدم لتسجيل الرقم في Meta</p>
+              <p className="font-semibold text-slate-800">{d.step1Title}</p>
+              <p className="text-xs text-slate-500">{d.step1Subtitle}</p>
             </div>
           </div>
 
-          <Field label="رقم الهاتف" hint="رقم لم يُسجَّل على واتساب من قبل" required>
+          <Field label={d.phoneLabel} hint={d.phoneHint} required>
             <input
               type="tel" value={phone}
               onChange={e => {
@@ -1816,34 +1817,34 @@ export default function WhatsAppConnect() {
             {phone.trim() && (() => {
               const n = normalizePhone(phone.trim())
               return isValidSaudiPhone(n)
-                ? <p className="text-xs text-emerald-600 mt-1">✓ الرقم المُرسَل: {n}</p>
-                : <p className="text-xs text-amber-500 mt-1">الصيغ المقبولة: +966542878717 أو 0542878717 أو 542878717</p>
+                ? <p className="text-xs text-emerald-600 mt-1">✓ {d.phoneNormalizedOk} {n}</p>
+                : <p className="text-xs text-amber-500 mt-1">{d.phoneFormatHint}</p>
             })()}
           </Field>
 
           <Field
-            label="الاسم المعروض (Verified Name)"
-            hint="الاسم الذي سيظهر للعملاء على واتساب — يجب أن يطابق اسم نشاطك التجاري الرسمي"
+            label={d.displayNameLabel}
+            hint={d.displayNameHint}
             required
           >
             <input
               type="text" value={displayName}
               onChange={e => setDisplayName(e.target.value)}
-              placeholder="مثال: متجر النور للإلكترونيات"
+              placeholder={d.displayNamePlaceholder}
               className={inputCls}
             />
             <p className="text-xs text-amber-600 mt-1">
-              ⚠️ يجب أن يتطابق مع اسم نشاطك في السجل التجاري
+              {d.displayNameWarning}
             </p>
           </Field>
 
-          <Field label="طريقة استقبال رمز التحقق">
+          <Field label={d.otpMethodLabel}>
             <div className="flex gap-3">
               {(['SMS','VOICE'] as const).map(m => (
                 <button key={m} onClick={() => setOtpMethod(m)}
                   className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all
                     ${otpMethod===m ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-300 hover:border-violet-300'}`}>
-                  {m==='SMS' ? '📱 رسالة نصية' : '📞 مكالمة هاتفية'}
+                  {m==='SMS' ? d.otpMethodSms : d.otpMethodVoice}
                 </button>
               ))}
             </div>
@@ -1854,17 +1855,17 @@ export default function WhatsAppConnect() {
           <button onClick={handleRequestOtp} disabled={busy}
             className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
             {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري الإرسال...</>
-              : <>إرسال رمز التحقق <ChevronRight className="w-4 h-4"/></>}
+              ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.sending}</>
+              : <>{d.sendOtpBtn} <ChevronRight className="w-4 h-4"/></>}
           </button>
 
           {/* Info */}
           <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-xs text-blue-700 space-y-1">
-            <p className="font-semibold text-blue-800">📋 متطلبات الرقم:</p>
+            <p className="font-semibold text-blue-800">{d.requirementsTitle}</p>
             <ul className="space-y-1 list-disc list-inside">
-              <li>رقم غير مسجَّل على واتساب الشخصي أو للأعمال</li>
-              <li>يجب استقبال SMS أو مكالمة على هذا الرقم</li>
-              <li>رقم سعودي (+966) أو دولي</li>
+              <li>{d.requirement1}</li>
+              <li>{d.requirement2}</li>
+              <li>{d.requirement3}</li>
             </ul>
           </div>
         </div>
@@ -1878,12 +1879,12 @@ export default function WhatsAppConnect() {
               <ShieldCheck className="w-5 h-5 text-amber-600"/>
             </div>
             <div>
-              <p className="font-semibold text-slate-800">التحقق من الرقم</p>
+              <p className="font-semibold text-slate-800">{d.step2Title}</p>
               <p className="text-xs text-slate-500 mt-0.5">{sentMsg}</p>
             </div>
           </div>
 
-          <Field label="رمز التحقق (6 أرقام)" required>
+          <Field label={d.otpFieldLabel} required>
             <input
               type="text" value={otp}
               onChange={e => setOtp(e.target.value.replace(/\D/g,'').slice(0,6))}
@@ -1899,14 +1900,14 @@ export default function WhatsAppConnect() {
           <button onClick={handleVerifyOtp} disabled={busy||otp.length<6}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20">
             {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري التحقق...</>
-              : <>تأكيد الرقم <CheckCircle2 className="w-4 h-4"/></>}
+              ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.verifying}</>
+              : <>{d.confirmPhoneBtn} <CheckCircle2 className="w-4 h-4"/></>}
           </button>
 
           {/* Already verified in Meta? refresh button */}
           <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700">
             <ShieldCheck className="w-4 h-4 shrink-0 text-blue-500"/>
-            <span>هل تحققت من الرقم مسبقاً في Meta؟</span>
+            <span>{d.metaVerifiedPrompt}</span>
             <button
               onClick={async () => {
                 setBusy(true); setError('')
@@ -1916,7 +1917,7 @@ export default function WhatsAppConnect() {
                   )
                   if (r.updated || r.connected) {
                     setStep(3)
-                    setSentMsg('✅ تم التحقق من حالة الرقم في Meta بنجاح')
+                    setSentMsg(d.refreshSuccess)
                   } else {
                     setError(sanitizeMessage(r.message))
                   }
@@ -1926,7 +1927,7 @@ export default function WhatsAppConnect() {
               }}
               disabled={busy}
               className="mr-auto font-semibold underline hover:text-blue-900 disabled:opacity-50 whitespace-nowrap">
-              {busy ? 'جاري التحقق...' : 'تحقق من حالة الربط'}
+              {busy ? d.refreshStatusBusy : d.refreshStatusBtn}
             </button>
           </div>
 
@@ -1934,7 +1935,7 @@ export default function WhatsAppConnect() {
           <div className="flex items-center justify-between text-sm pt-1">
             <button onClick={()=>{setStep(1);setError('');setOtp('')}}
               className="text-slate-400 hover:text-slate-600">
-              ← تغيير رقم الهاتف
+              {d.changePhone}
             </button>
             <button
               onClick={async () => {
@@ -1955,8 +1956,8 @@ export default function WhatsAppConnect() {
               disabled={resendCooldown > 0 || busy}
               className="text-violet-600 hover:text-violet-800 disabled:text-slate-400 disabled:cursor-not-allowed font-medium">
               {resendCooldown > 0
-                ? `إعادة الإرسال (${resendCooldown}ث)`
-                : 'إعادة إرسال الرمز'}
+                ? `${d.resendLabel} (${resendCooldown}${d.resendCooldownUnit})`
+                : d.resendBtn}
             </button>
           </div>
         </div>
@@ -1970,41 +1971,43 @@ export default function WhatsAppConnect() {
               <Building2 className="w-5 h-5 text-emerald-600"/>
             </div>
             <div>
-              <p className="font-semibold text-slate-800">ملف النشاط التجاري</p>
-              <p className="text-xs text-slate-500">يظهر للعملاء في صفحة نشاطك على واتساب</p>
+              <p className="font-semibold text-slate-800">{d.step3Title}</p>
+              <p className="text-xs text-slate-500">{d.step3Subtitle}</p>
             </div>
           </div>
 
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0"/>
             <p className="text-xs text-emerald-700">
-              تم التحقق من الرقم بنجاح — أكمل بيانات نشاطك التجاري
+              {d.verifiedBanner}
             </p>
           </div>
 
-          <Field label="نوع النشاط التجاري" required>
+          <Field label={d.verticalLabel} required>
             <select value={vertical} onChange={e=>setVertical(e.target.value)} className={inputCls}>
-              {VERTICALS.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
+              {VERTICAL_VALUES.map(v => (
+                <option key={v} value={v}>{d.verticals[v]}</option>
+              ))}
             </select>
           </Field>
 
-          <Field label="وصف النشاط التجاري" hint="ما يظهر في قسم 'نبذة' على واتساب للأعمال — حد أقصى 512 حرف">
+          <Field label={d.aboutLabel} hint={d.aboutHint}>
             <textarea
               value={about} onChange={e=>setAbout(e.target.value.slice(0,512))}
-              placeholder="مثال: نوفر أفضل منتجات الإلكترونيات بأسعار منافسة مع توصيل سريع"
+              placeholder={d.aboutPlaceholder}
               rows={3} className={`${inputCls} resize-none`}
             />
-            <p className="text-xs text-slate-400 text-left">{about.length}/512</p>
+            <p className="text-xs text-slate-400 text-start">{about.length}/512</p>
           </Field>
 
-          <Field label="عنوان النشاط التجاري" hint="العنوان الذي سيظهر في الملف التجاري">
+          <Field label={d.addressLabel} hint={d.addressHint}>
             <input type="text" value={address} onChange={e=>setAddress(e.target.value)}
-              placeholder="مثال: الرياض، حي العليا، شارع التحلية"
+              placeholder={d.addressPlaceholder}
               className={inputCls}/>
           </Field>
 
           <div className="grid grid-cols-2 gap-4">
-            <Field label="البريد الإلكتروني" hint="للتواصل التجاري">
+            <Field label={d.emailLabel} hint={d.emailHint}>
               <div className="relative">
                 <Mail className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
                 <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
@@ -2013,7 +2016,7 @@ export default function WhatsAppConnect() {
               </div>
             </Field>
 
-            <Field label="الموقع الإلكتروني">
+            <Field label={d.websiteLabel}>
               <div className="relative">
                 <Globe className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
                 <input type="url" value={website} onChange={e=>setWebsite(e.target.value)}
@@ -2029,12 +2032,12 @@ export default function WhatsAppConnect() {
             <button onClick={handleSaveProfile} disabled={busy}
               className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
               {busy
-                ? <><Loader2 className="w-4 h-4 animate-spin"/>جاري الحفظ...</>
-                : <>حفظ وإكمال الربط <CheckCircle2 className="w-4 h-4"/></>}
+                ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.saving}</>
+                : <>{d.saveBtn} <CheckCircle2 className="w-4 h-4"/></>}
             </button>
             <button onClick={()=>{setConnAt(new Date().toISOString());setStep(4)}}
               className="px-4 border border-slate-300 text-slate-500 hover:bg-slate-50 rounded-xl text-sm transition-all">
-              تخطي
+              {d.skipBtn}
             </button>
           </div>
         </div>

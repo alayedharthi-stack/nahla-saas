@@ -591,6 +591,83 @@ export interface Translations {
       connectBtn:              string
       initFooter:              string
     }
+    direct: {
+      stepIdentity:            string
+      stepVerify:              string
+      stepProfile:             string
+      stepDone:                string
+      step1Title:              string
+      step1Subtitle:           string
+      phoneLabel:              string
+      phoneHint:               string
+      phoneNormalizedOk:       string
+      phoneFormatHint:         string
+      displayNameLabel:        string
+      displayNameHint:         string
+      displayNamePlaceholder:  string
+      displayNameWarning:      string
+      otpMethodLabel:          string
+      otpMethodSms:            string
+      otpMethodVoice:          string
+      sending:                 string
+      sendOtpBtn:              string
+      requirementsTitle:       string
+      requirement1:            string
+      requirement2:            string
+      requirement3:            string
+      errPhoneRequired:        string
+      errDisplayNameRequired:  string
+      errPhoneInvalid:         string
+      errRateLimitSuffix:      string
+      errSendOtpFailed:        string
+      resumeOtpSent:           string
+      step2Title:              string
+      otpFieldLabel:           string
+      verifying:               string
+      confirmPhoneBtn:         string
+      metaVerifiedPrompt:      string
+      refreshStatusBusy:       string
+      refreshStatusBtn:        string
+      refreshSuccess:          string
+      changePhone:             string
+      resendLabel:             string
+      resendCooldownUnit:      string
+      resendBtn:               string
+      errOtpIncomplete:        string
+      errVerifiedPendingMeta:  string
+      step3Title:              string
+      step3Subtitle:           string
+      verifiedBanner:          string
+      verticalLabel:           string
+      aboutLabel:              string
+      aboutHint:               string
+      aboutPlaceholder:        string
+      addressLabel:            string
+      addressHint:             string
+      addressPlaceholder:      string
+      emailLabel:              string
+      emailHint:               string
+      websiteLabel:            string
+      saving:                  string
+      saveBtn:                 string
+      skipBtn:                 string
+      verticals: {
+        RETAIL:                    string
+        APPAREL:                   string
+        BEAUTY_SPA_SALON:          string
+        FOOD_AND_GROCERY:          string
+        RESTAURANT:                string
+        HEALTH_AND_MEDICAL:        string
+        EDUCATION:                 string
+        HOTEL_AND_LODGING:         string
+        TRAVEL_AND_TRANSPORTATION: string
+        AUTOMOTIVE:                string
+        ENTERTAINMENT:             string
+        PROFESSIONAL_SERVICES:     string
+        NONPROFIT:                 string
+        OTHER:                     string
+      }
+    }
   }
 
   /** Billing page */
