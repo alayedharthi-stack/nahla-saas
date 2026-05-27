@@ -1,0 +1,30 @@
+/*
+ * Landing-page only styles — imported exclusively from Landing.tsx.
+ * Shared trial CTA token used by navbar + hero buttons.
+ */
+.landing-page {
+  --nahla-primary:       #f59e0b; /* amber-500 */
+  --nahla-primary-hover: #fbbf24; /* amber-400 */
+}
+
+.landing-page .landing-trial-btn {
+  background-color: var(--nahla-primary);
+  color: #0f172a;
+  font-weight: 900;
+  transition: background-color 200ms ease, box-shadow 200ms ease;
+  box-shadow: 0 10px 15px -3px rgb(245 158 11 / 0.25), 0 4px 6px -4px rgb(245 158 11 / 0.25);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+  z-index: 10;
+}
+
+.landing-page .landing-trial-btn:hover {
+  background-color: var(--nahla-primary-hover);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .landing-page .landing-trial-btn:hover {
+    box-shadow: 0 10px 15px -3px rgb(251 191 36 / 0.3), 0 4px 6px -4px rgb(251 191 36 / 0.3);
+  }
+}

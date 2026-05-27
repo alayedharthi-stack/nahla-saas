@@ -278,10 +278,10 @@ export default function InboxDemo() {
   return (
     <div
       dir="rtl"
-      className="relative w-full max-w-5xl mx-auto rounded-3xl border border-white/10 bg-slate-950/70 backdrop-blur-sm shadow-[0_20px_60px_-20px_rgba(0,0,0,0.7)] overflow-hidden"
+      className="relative w-full max-w-5xl mx-auto rounded-3xl border border-white/15 bg-slate-900/85 backdrop-blur-sm shadow-[0_20px_60px_-20px_rgba(0,0,0,0.55)] overflow-hidden"
     >
       {/* macOS-style window chrome */}
-      <div className="flex items-center gap-1.5 px-4 py-2.5 border-b border-white/5 bg-slate-900/80">
+      <div className="flex items-center gap-1.5 px-4 py-2.5 border-b border-white/8 bg-slate-800/90">
         <span className="w-2.5 h-2.5 rounded-full bg-rose-400/70" />
         <span className="w-2.5 h-2.5 rounded-full bg-amber-400/70" />
         <span className="w-2.5 h-2.5 rounded-full bg-emerald-400/70" />
@@ -297,10 +297,10 @@ export default function InboxDemo() {
       <div className="grid grid-cols-1 md:grid-cols-[320px_1fr] min-h-[420px] md:min-h-[520px]">
 
         {/* ── Conversation list (hidden on mobile when chat is open) ─── */}
-        <aside className={`border-l border-white/5 bg-slate-900/50 flex flex-col ${mobileShowChat ? 'hidden md:flex' : 'flex'}`}>
+        <aside className={`border-l border-white/8 bg-slate-800/55 flex flex-col ${mobileShowChat ? 'hidden md:flex' : 'flex'}`}>
           {/* Search bar */}
           <div className="px-3 pt-3 pb-2">
-            <div className="flex items-center gap-2 bg-slate-800/70 border border-white/5 rounded-xl px-3 py-2 text-slate-400 text-xs">
+            <div className="flex items-center gap-2 bg-slate-700/50 border border-white/8 rounded-xl px-3 py-2 text-slate-300 text-xs">
               <Search className="w-3.5 h-3.5" />
               <span className="opacity-60">ابحث في المحادثات…</span>
             </div>
@@ -387,15 +387,15 @@ export default function InboxDemo() {
         </aside>
 
         {/* ── Active conversation (hidden on mobile until selected) ─── */}
-        <main className={`flex flex-col bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22%3E%3Cg fill=%22%23f59e0b%22 fill-opacity=%220.025%22%3E%3Cpolygon points=%2260 0 75 8 75 26 60 34 45 26 45 8%22/%3E%3C/g%3E%3C/svg%3E')] bg-slate-950/70 ${mobileShowChat ? 'flex' : 'hidden md:flex'}`}>
+        <main className={`flex flex-col bg-[#ece5dd] bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22%3E%3Cg fill=%22%23d9d2ca%22 fill-opacity=%220.35%22%3E%3Cpolygon points=%2260 0 75 8 75 26 60 34 45 26 45 8%22/%3E%3C/g%3E%3C/svg%3E')] ${mobileShowChat ? 'flex' : 'hidden md:flex'}`}>
           {selected && (
             <>
               {/* Header */}
-              <header className="flex items-center gap-3 px-4 py-3 border-b border-white/5 bg-slate-900/80">
+              <header className="flex items-center gap-3 px-4 py-3 border-b border-[#d1ccc6] bg-[#f0f2f5]">
                 {/* Back button — mobile only */}
                 <button
                   onClick={() => setMobileShowChat(false)}
-                  className="md:hidden p-1.5 -me-1 rounded-lg hover:bg-white/5 transition-colors text-slate-400"
+                  className="md:hidden p-1.5 -me-1 rounded-lg hover:bg-black/5 transition-colors text-slate-500"
                   aria-label="رجوع"
                 >
                   <ArrowRight className="w-5 h-5" />
@@ -405,12 +405,12 @@ export default function InboxDemo() {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-white font-bold text-sm">{selected.name}</span>
+                    <span className="text-slate-900 font-bold text-sm">{selected.name}</span>
                     <DynamicBadge kind={selected.badge} />
                   </div>
                   <span className="text-[10px] text-slate-500">+966 5• ••• ••••</span>
                 </div>
-                <div className="flex items-center gap-1 text-slate-500">
+                <div className="flex items-center gap-1 text-slate-400">
                   <button className="p-1.5 rounded-lg hover:bg-white/5 transition-colors" aria-label="phone"><Phone className="w-4 h-4" /></button>
                   <button className="p-1.5 rounded-lg hover:bg-white/5 transition-colors" aria-label="video"><Video className="w-4 h-4" /></button>
                   <button className="p-1.5 rounded-lg hover:bg-white/5 transition-colors" aria-label="more"><MoreVertical className="w-4 h-4" /></button>
@@ -425,8 +425,8 @@ export default function InboxDemo() {
               </div>
 
               {/* Composer */}
-              <footer className="px-4 py-3 border-t border-white/5 bg-slate-900/80 flex items-center gap-2">
-                <div className="flex-1 bg-slate-800/70 border border-white/5 rounded-2xl px-4 py-2.5 text-slate-500 text-xs">
+              <footer className="px-4 py-3 border-t border-[#d1ccc6] bg-[#f0f2f5] flex items-center gap-2">
+                <div className="flex-1 bg-white border border-[#d1ccc6] rounded-2xl px-4 py-2.5 text-slate-400 text-xs">
                   اكتب رسالة… أو اترك نحلة ترد تلقائياً ✨
                 </div>
                 <button className="bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-xs px-4 py-2.5 rounded-2xl transition-colors">
@@ -457,21 +457,21 @@ function DynamicBadge({ kind }: { kind: BadgeKind }) {
 function MessageBubble({ msg }: { msg: DemoMessage }) {
   const incoming = msg.kind === 'customer'
 
-  // Outgoing message colours per kind
+  // Outgoing message colours per kind — solid tints for readability on light chat bg
   const outgoingClasses: Record<Exclude<MessageKind, 'customer'>, string> = {
-    ai:        'bg-amber-500/12 border-amber-500/25 text-amber-50',
-    human:     'bg-emerald-500/12 border-emerald-500/25 text-emerald-50',
-    autopilot: 'bg-sky-500/12 border-sky-500/25 text-sky-50',
-    campaign:  'bg-violet-500/12 border-violet-500/25 text-violet-50',
-    cart:      'bg-orange-500/12 border-orange-500/25 text-orange-50',
+    ai:        'bg-amber-50 border-amber-200/90 text-slate-800 shadow-sm',
+    human:     'bg-emerald-50 border-emerald-200/90 text-slate-800 shadow-sm',
+    autopilot: 'bg-sky-50 border-sky-200/90 text-slate-800 shadow-sm',
+    campaign:  'bg-violet-50 border-violet-200/90 text-slate-800 shadow-sm',
+    cart:      'bg-orange-50 border-orange-200/90 text-slate-800 shadow-sm',
   }
 
   const tagClasses: Record<Exclude<MessageKind, 'customer'>, string> = {
-    ai:        'text-amber-300',
-    human:     'text-emerald-300',
-    autopilot: 'text-sky-300',
-    campaign:  'text-violet-300',
-    cart:      'text-orange-300',
+    ai:        'text-amber-700',
+    human:     'text-emerald-700',
+    autopilot: 'text-sky-700',
+    campaign:  'text-violet-700',
+    cart:      'text-orange-700',
   }
 
   const tagLabel: Record<Exclude<MessageKind, 'customer'>, string> = {
@@ -485,7 +485,7 @@ function MessageBubble({ msg }: { msg: DemoMessage }) {
   if (incoming) {
     return (
       <div className="flex justify-start">
-        <div className="max-w-[78%] bg-slate-800/80 border border-white/5 text-slate-100 text-sm rounded-2xl rounded-bl-sm px-3.5 py-2 shadow-sm">
+        <div className="max-w-[78%] bg-white border border-black/[0.06] text-slate-800 text-sm rounded-2xl rounded-bl-sm px-3.5 py-2 shadow-sm">
           <p className="whitespace-pre-line leading-relaxed">{msg.text}</p>
           <span className="block text-[10px] text-slate-500 mt-1 text-left">
             {msg.time}
@@ -508,16 +508,16 @@ function MessageBubble({ msg }: { msg: DemoMessage }) {
             {msg.buttons.map(b => (
               <span
                 key={b}
-                className="block text-center text-[11px] font-bold py-1.5 rounded-lg bg-white/5 border border-white/10 text-white"
+                className="block text-center text-[11px] font-bold py-1.5 rounded-lg bg-white/80 border border-slate-200/90 text-slate-700"
               >
                 {b}
               </span>
             ))}
           </div>
         )}
-        <span className="flex items-center justify-end gap-1 text-[10px] text-slate-400 mt-1">
+        <span className="flex items-center justify-end gap-1 text-[10px] text-slate-500 mt-1">
           {msg.time}
-          {msg.read && <CheckCheck className="w-3 h-3 text-sky-300" />}
+          {msg.read && <CheckCheck className="w-3 h-3 text-sky-500" />}
         </span>
       </div>
     </div>

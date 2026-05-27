@@ -151,10 +151,10 @@ function Bubble({ msg, visible }: { msg: Message; visible: boolean }) {
 
       {/* Bubble */}
       <div
-        className={`max-w-[78%] rounded-2xl px-4 py-2.5 shadow-sm relative ${
+        className={`max-w-[78%] rounded-2xl px-4 py-2.5 shadow-md relative ${
           isNahla
-            ? 'bg-white text-slate-800 rounded-tl-sm'
-            : 'bg-[#DCF8C6] text-slate-800 rounded-tr-sm'
+            ? 'bg-white text-slate-800 rounded-tl-sm border border-black/[0.04]'
+            : 'bg-[#d9fdd3] text-slate-800 rounded-tr-sm border border-[#c8efbf]/80'
         }`}
       >
         {/* Sender label */}
@@ -248,7 +248,7 @@ export default function WhatsAppDemo() {
     // Phone device mockup
     <div className="relative mx-auto w-[320px] sm:w-[360px]">
       {/* Outer phone shell */}
-      <div className="rounded-[2.5rem] bg-slate-900 border-[3px] border-slate-700 shadow-2xl shadow-black/60 overflow-hidden">
+      <div className="rounded-[2.5rem] bg-slate-800 border-[3px] border-slate-600/80 shadow-2xl shadow-black/40 overflow-hidden">
 
         {/* Status bar */}
         <div className="bg-[#075E54] px-5 pt-3 pb-1 flex items-center justify-between">
@@ -277,8 +277,8 @@ export default function WhatsAppDemo() {
           ref={scrollRef}
           className="relative h-[420px] overflow-y-auto overflow-x-hidden"
           style={{
-            background: '#e5ddd5',
-            backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e5ddd5'/%3E%3Cpath d='M0 20h40M20 0v40' stroke='%23d4c9be' stroke-width='0.5'/%3E%3C/svg%3E")`,
+            background: '#ece5dd',
+            backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23ece5dd'/%3E%3Cpath d='M0 20h40M20 0v40' stroke='%23ddd6ce' stroke-width='0.5'/%3E%3C/svg%3E")`,
           }}
         >
           <div className="px-3 py-4 space-y-3">

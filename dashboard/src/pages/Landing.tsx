@@ -4,6 +4,7 @@ import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
 import WhatsAppDemo from '../components/landing/WhatsAppDemo'
 import InboxDemo from '../components/landing/InboxDemo'
+import '../components/landing/landing.css'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import {
   MessageCircle,
@@ -410,7 +411,7 @@ export default function Landing() {
   ]
 
   return (
-    <div dir="rtl" className="min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily: "'Cairo', sans-serif" }}>
+    <div dir="rtl" className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily: "'Cairo', sans-serif" }}>
 
       {/* ══════════════════════════════════════════════════════════
           NAVBAR
@@ -449,7 +450,7 @@ export default function Landing() {
               </Link>
               <Link
                 to="/register"
-                className="bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-sm px-5 py-2.5 rounded-xl transition-all duration-200 shadow-lg shadow-amber-500/25"
+                className="landing-trial-btn inline-flex items-center justify-center text-sm px-5 py-2.5 rounded-xl"
               >
                 جرّب مجاناً 14 يوم
               </Link>
@@ -483,7 +484,7 @@ export default function Landing() {
                   تسجيل الدخول
                 </Link>
                 <Link to="/register" onClick={() => setMobile(false)}
-                  className="text-center bg-amber-500 text-slate-900 font-black text-sm py-3.5 rounded-2xl shadow-lg shadow-amber-500/20">
+                  className="landing-trial-btn text-center text-sm py-3.5 rounded-2xl">
                   جرّب مجاناً 14 يوم — بلا بطاقة
                 </Link>
               </div>
@@ -532,16 +533,16 @@ export default function Landing() {
           </p>
 
           {/* Primary CTA — single clear action */}
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+          <div className="relative z-20 flex flex-col sm:flex-row items-center justify-center gap-3">
             <Link
               to="/register"
-              className="group flex items-center gap-2.5 bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl transition-all duration-200 shadow-2xl shadow-amber-500/30 hover:shadow-amber-400/45 hover:scale-[1.03] w-full sm:w-auto justify-center"
+              className="landing-trial-btn group inline-flex items-center gap-2.5 text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl w-full sm:w-auto justify-center"
             >
               {/* Mobile: emphasise the free trial duration */}
-              <span className="sm:hidden">جرّب مجانًا لمدة 14 يوم</span>
+              <span className="sm:hidden pointer-events-none">جرّب مجانًا لمدة 14 يوم</span>
               {/* Desktop: full motivational copy */}
-              <span className="hidden sm:inline">ابدأ تجربتك المجانية الآن</span>
-              <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" />
+              <span className="hidden sm:inline pointer-events-none">ابدأ تجربتك المجانية الآن</span>
+              <ArrowLeft size={18} className="pointer-events-none transition-transform motion-safe:group-hover:-translate-x-1" />
             </Link>
             <button
               onClick={() => scrollTo('how')}
