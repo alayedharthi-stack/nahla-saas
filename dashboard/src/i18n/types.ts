@@ -891,6 +891,42 @@ export interface Translations {
         importFailed: string
       }
     }
+    preview: {
+      title: string
+      arabicNameLabel: string
+      edit: string
+      save: string
+      notSet: string
+      namePlaceholder: string
+      metaNameLabel: string
+      categoryLabel: string
+      statusLabel: string
+      setActive: string
+      disable: string
+      enable: string
+      unlinkService: string
+      whenUsedTitle: string
+      outsideStrong: string
+      outsideBody: string
+      insideStrong: string
+      insideBody: string
+      compatibilityTitle: string
+      supportedFeaturesPrefix: string
+      varMappingTitle: string
+      varMappingIntro: string
+      mappingArrow: string
+      varValuesLabel: string
+      varValueFallback: string
+      couponIncludedSuffix: string
+      toasts: {
+        savedName: string
+        enabled: string
+        disabled: string
+        unlinked: string
+        setActiveDone: string
+        setActiveDeactivatedBefore: string
+      }
+    }
   }
 
   /** Merchants (admin) page */

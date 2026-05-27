@@ -21,7 +21,7 @@ import {
   TemplateSyncStatus, TemplateSyncResult, getTemplateSyncErrorMessage,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
-  STATUS_COLORS, STATUS_LABELS, CATEGORY_LABELS, LANGUAGE_LABELS,
+  STATUS_COLORS, LANGUAGE_LABELS,
 } from '../api/templates'
 import { useDashboardPoll } from '../lib/dashboardPolling'
 
@@ -400,6 +400,47 @@ function TemplateRow({
 // ── Preview modal ─────────────────────────────────────────────────────────────
 
 function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord; onClose: () => void; onUpdate?: (updated: WhatsAppTemplateRecord) => void }) {
+  const { t, dir } = useLanguage()
+  const p = t(tr => tr.templatesMgmt.preview)
+  const mgmt = t(tr => tr.templatesMgmt)
+  const lib = t(tr => tr.templatesMgmt.library)
+  const actions = t(tr => tr.actions)
+
+  const formatPreviewDelay = (h: number): string => {
+    if (h >= 24) return `${Math.round(h / 24)} ${lib.delayDays}`
+    if (h < 1) return `${Math.round(h * 60)} ${lib.delayMinutes}`
+    return `${h} ${lib.delayHours}`
+  }
+
+  const statusLabel = (status: TemplateStatus): string => {
+    switch (status) {
+      case 'DRAFT':          return mgmt.statusDraft
+      case 'APPROVED':       return mgmt.statusApproved
+      case 'PENDING':        return mgmt.statusPending
+      case 'REJECTED':       return mgmt.statusRejected
+      case 'PAUSED':         return mgmt.statusPaused
+      case 'DISABLED':       return mgmt.disabled
+      case 'ARCHIVED':       return mgmt.archived
+      case 'LIMIT_EXCEEDED': return mgmt.limitExceeded
+      default:               return status
+    }
+  }
+
+  const categoryLabel = (cat: TemplateCategory): string => {
+    switch (cat) {
+      case 'MARKETING':      return mgmt.categoryMarketing
+      case 'UTILITY':        return mgmt.categoryUtility
+      case 'AUTHENTICATION': return mgmt.categoryAuth
+      default:               return cat
+    }
+  }
+
+  const compatibilityBadgeLabel = (kind: string): string => {
+    if (kind === 'compatible') return mgmt.compatible
+    if (kind === 'pending_meta') return mgmt.awaitingMeta
+    return mgmt.needsReview
+  }
+
   const [vars, setVars] = useState<Record<string, string>>({})
   const [varMapData, setVarMapData] = useState<TemplateVarMapRecord | null>(null)
   const [editingName, setEditingName] = useState(false)
@@ -422,7 +463,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
   const getVarPlaceholder = (varKey: string): string => {
     if (defaultMeta?.varLabels[varKey]) return defaultMeta.varLabels[varKey]
     if (varMapData?.var_map_annotated[varKey]) return varMapData.var_map_annotated[varKey].label
-    return `قيمة ${varKey}`
+    return `${p.varValueFallback} ${varKey}`
   }
 
   useEffect(() => {
@@ -439,7 +480,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
       const res = await templatesApi.updateNahlaSettings(tpl.id, { display_name_ar: editNameValue })
       onUpdate?.(res)
       setEditingName(false)
-      setActionMsg('تم حفظ الاسم')
+      setActionMsg(p.toasts.savedName)
       setTimeout(() => setActionMsg(''), 2000)
     } catch { /* ignore */ }
     finally { setSaving(false) }
@@ -450,7 +491,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
     try {
       const res = await templatesApi.updateNahlaSettings(tpl.id, { is_active: !tpl.is_active })
       onUpdate?.(res)
-      setActionMsg(res.is_active ? 'تم تفعيل القالب' : 'تم تعطيل القالب')
+      setActionMsg(res.is_active ? p.toasts.enabled : p.toasts.disabled)
       setTimeout(() => setActionMsg(''), 2000)
     } catch { /* ignore */ }
     finally { setSaving(false) }
@@ -461,7 +502,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
     try {
       const res = await templatesApi.unlinkService(tpl.id)
       onUpdate?.(res.template)
-      setActionMsg('تم فك ربط القالب من الخدمة')
+      setActionMsg(p.toasts.unlinked)
       setTimeout(() => setActionMsg(''), 2000)
     } catch { /* ignore */ }
     finally { setSaving(false) }
@@ -473,8 +514,8 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
       const res = await templatesApi.setActive(tpl.id)
       onUpdate?.(res.template)
       const msg = res.deactivated_template_name
-        ? `تم تعيينه كنشط — تم تعطيل: ${res.deactivated_template_name}`
-        : 'تم تعيينه كقالب نشط'
+        ? `${p.toasts.setActiveDeactivatedBefore}${res.deactivated_template_name}`
+        : p.toasts.setActiveDone
       setActionMsg(msg)
       setTimeout(() => setActionMsg(''), 4000)
     } catch { /* ignore */ }
@@ -483,18 +524,18 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[90vh]">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[90vh]" dir={dir}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
-            <h2 className="text-sm font-bold text-slate-900">معاينة القالب</h2>
+            <h2 className="text-sm font-bold text-slate-900">{p.title}</h2>
             {isDefault && (
               <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
                 <Star className="w-2.5 h-2.5" />
-                افتراضي
+                {mgmt.defaultBadge}
               </span>
             )}
             {tpl.is_active === false && (
-              <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">معطّل</span>
+              <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded-full font-medium">{mgmt.disabled}</span>
             )}
           </div>
           <button onClick={onClose}><X className="w-5 h-5 text-slate-400 hover:text-slate-600" /></button>
@@ -506,7 +547,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
             const c = svcColors(svcColor)
             return (
               <div className={`bg-gradient-to-br ${c.bg} border ${c.border} rounded-xl p-4`} dir="rtl">
-                <p className={`text-[10px] ${c.label} font-medium mb-1`}>الخدمة / الغرض من القالب</p>
+                <p className={`text-[10px] ${c.label} font-medium mb-1`}>{lib.servicePurposeLabel}</p>
                 {serviceInfo && (
                   <div className="flex items-center gap-2.5 mb-1.5">
                     <span className="text-xl leading-none">{serviceInfo.icon}</span>
@@ -524,9 +565,9 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                 )}
                 {tpl.step_number != null && (
                   <p className="text-xs text-slate-500 mt-1.5">
-                    المرحلة {tpl.step_number}
-                    {tpl.trigger_delay_hours != null && ` · بعد ${fmtDelay(tpl.trigger_delay_hours)}`}
-                    {tpl.has_coupon && ' · يتضمن كود خصم'}
+                    {lib.stepLabel} {tpl.step_number}
+                    {tpl.trigger_delay_hours != null && ` · ${lib.delayAfter} ${formatPreviewDelay(tpl.trigger_delay_hours)}`}
+                    {tpl.has_coupon && p.couponIncludedSuffix}
                   </p>
                 )}
               </div>
@@ -536,9 +577,9 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
           {/* Editable Arabic name */}
           <div className="bg-slate-50 rounded-xl p-3" dir="rtl">
             <div className="flex items-center justify-between mb-1">
-              <p className="text-[10px] text-slate-400 font-medium">الاسم العربي</p>
+              <p className="text-[10px] text-slate-400 font-medium">{p.arabicNameLabel}</p>
               {!editingName && (
-                <button onClick={() => { setEditNameValue(tpl.display_name_ar || ''); setEditingName(true) }} className="text-[10px] text-brand-500 hover:text-brand-700 font-medium">تعديل</button>
+                <button onClick={() => { setEditNameValue(tpl.display_name_ar || ''); setEditingName(true) }} className="text-[10px] text-brand-500 hover:text-brand-700 font-medium">{p.edit}</button>
               )}
             </div>
             {editingName ? (
@@ -546,15 +587,15 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                 <input
                   className="input text-xs py-1.5 flex-1"
                   value={editNameValue}
-                  onChange={e => setEditNameValue(e.target.value)}
-                  placeholder="أدخل اسم عربي واضح..."
+                  onChange={ev => setEditNameValue(ev.target.value)}
+                  placeholder={p.namePlaceholder}
                   autoFocus
                 />
-                <button onClick={handleSaveDisplayName} disabled={saving} className="text-[11px] bg-brand-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-brand-600 disabled:opacity-50">حفظ</button>
-                <button onClick={() => setEditingName(false)} className="text-[11px] text-slate-400 hover:text-slate-600">إلغاء</button>
+                <button onClick={handleSaveDisplayName} disabled={saving} className="text-[11px] bg-brand-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-brand-600 disabled:opacity-50">{p.save}</button>
+                <button onClick={() => setEditingName(false)} className="text-[11px] text-slate-400 hover:text-slate-600">{actions.cancel}</button>
               </div>
             ) : (
-              <p className="text-sm font-semibold text-slate-800">{displayName || <span className="text-slate-400 italic">لم يُحدد</span>}</p>
+              <p className="text-sm font-semibold text-slate-800">{displayName || <span className="text-slate-400 italic">{p.notSet}</span>}</p>
             )}
             <p className="text-[10px] text-slate-400 font-mono mt-1 truncate">{tpl.name}</p>
           </div>
@@ -562,16 +603,16 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
           {/* Meta info */}
           <div className="grid grid-cols-3 gap-3 text-xs">
             <div className="bg-slate-50 rounded-lg p-2.5">
-              <p className="text-slate-400 mb-0.5">اسم Meta</p>
+              <p className="text-slate-400 mb-0.5">{p.metaNameLabel}</p>
               <p className="font-medium text-slate-800 truncate">{tpl.name.replace(/_/g, ' ')}</p>
             </div>
             <div className="bg-slate-50 rounded-lg p-2.5">
-              <p className="text-slate-400 mb-0.5">الفئة</p>
-              <p className="font-medium text-slate-800">{CATEGORY_LABELS[tpl.category as TemplateCategory]}</p>
+              <p className="text-slate-400 mb-0.5">{p.categoryLabel}</p>
+              <p className="font-medium text-slate-800">{categoryLabel(tpl.category as TemplateCategory)}</p>
             </div>
             <div className="bg-slate-50 rounded-lg p-2.5">
-              <p className="text-slate-400 mb-0.5">الحالة</p>
-              <Badge label={STATUS_LABELS[tpl.status] ?? tpl.status} variant={(STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'} dot />
+              <p className="text-slate-400 mb-0.5">{p.statusLabel}</p>
+              <Badge label={statusLabel(tpl.status)} variant={(STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'} dot />
             </div>
           </div>
 
@@ -583,7 +624,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                 disabled={saving}
                 className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors disabled:opacity-50"
               >
-                ● تعيين كنشط
+                {p.setActive}
               </button>
             )}
             <button
@@ -595,7 +636,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                   : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
               } disabled:opacity-50`}
             >
-              {tpl.is_active !== false ? '⏸ تعطيل' : '▶ تفعيل'}
+              {tpl.is_active !== false ? p.disable : p.enable}
             </button>
             {tpl.service_key && (
               <button
@@ -603,7 +644,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                 disabled={saving}
                 className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50"
               >
-                🔗 فك ربط الخدمة
+                {p.unlinkService}
               </button>
             )}
             {actionMsg && (
@@ -612,28 +653,24 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
           </div>
 
           {/* Session-window rule explainer */}
-          <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs leading-relaxed text-sky-800" dir="rtl">
-            <p className="font-bold mb-1">متى يُستخدم هذا القالب؟</p>
+          <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-xs leading-relaxed text-sky-800">
+            <p className="font-bold mb-1">{p.whenUsedTitle}</p>
             <p className="text-sky-700">
-              <span className="font-semibold">خارج نافذة المحادثة (24 ساعة):</span> يُرسل تلقائياً عبر القالب المعتمد فقط.
+              <span className="font-semibold">{p.outsideStrong}</span>
+              {p.outsideBody}
             </p>
             <p className="text-sky-700 mt-1">
-              <span className="font-semibold">داخل النافذة المفتوحة:</span> يعمل الذكاء الاصطناعي والردود التفاعلية المباشرة — لا حاجة لقالب.
+              <span className="font-semibold">{p.insideStrong}</span>
+              {p.insideBody}
             </p>
           </div>
 
           {tpl.compatibility && (
             <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-              <p className="text-xs font-semibold text-slate-700">توافق القالب مع نحلة</p>
+              <p className="text-xs font-semibold text-slate-700">{p.compatibilityTitle}</p>
               <div className="flex flex-wrap gap-2">
                 <Badge
-                  label={
-                    tpl.compatibility.compatibility === 'compatible'
-                      ? 'متوافق'
-                      : tpl.compatibility.compatibility === 'pending_meta'
-                      ? 'بانتظار اعتماد Meta'
-                      : 'يحتاج مراجعة'
-                  }
+                  label={compatibilityBadgeLabel(tpl.compatibility.compatibility)}
                   variant={
                     tpl.compatibility.compatibility === 'compatible'
                       ? 'green'
@@ -643,13 +680,13 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                   }
                 />
                 <Badge
-                  label={`${tpl.compatibility.placeholder_count} متغير`}
+                  label={`${tpl.compatibility.placeholder_count} ${mgmt.varCount}`}
                   variant="blue"
                 />
               </div>
               {!!tpl.compatibility.supported_features?.length && (
                 <p className="text-[11px] text-slate-600">
-                  الميزات المدعومة: {tpl.compatibility.supported_features.join('، ')}
+                  {p.supportedFeaturesPrefix} {tpl.compatibility.supported_features.join('، ')}
                 </p>
               )}
               {!!tpl.compatibility.issues?.length && (
@@ -668,17 +705,17 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
               <div className="flex items-center gap-2 mb-3">
                 <Zap className="w-3.5 h-3.5 text-brand-600 shrink-0" />
                 <p className="text-xs font-semibold text-brand-800">
-                  ربط المتغيرات — {defaultMeta.purposeLabel}
+                  {p.varMappingTitle} — {defaultMeta.purposeLabel}
                 </p>
               </div>
               <p className="text-[11px] text-brand-700 mb-3">
-                تُملأ هذه المتغيرات تلقائياً من بيانات العميل والطلب قبل الإرسال.
+                {p.varMappingIntro}
               </p>
               <div className="space-y-1.5">
                 {Object.entries(defaultMeta.varLabels).map(([varKey, label]) => (
                   <div key={varKey} className="flex items-center gap-2 text-xs">
                     <span className="font-mono bg-white border border-brand-200 text-brand-700 px-1.5 py-0.5 rounded text-[11px] w-12 text-center shrink-0">{varKey}</span>
-                    <span className="text-slate-400">←</span>
+                    <span className="text-slate-400">{p.mappingArrow}</span>
                     <span className="text-slate-700 font-medium">{label}</span>
                   </div>
                 ))}
@@ -689,7 +726,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
           {/* Variable inputs for preview */}
           {varKeys.length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs font-medium text-slate-600">قيم المتغيرات (للمعاينة)</p>
+              <p className="text-xs font-medium text-slate-600">{p.varValuesLabel}</p>
               {varKeys.map(v => (
                 <div key={v} className="flex items-center gap-2">
                   <span className="text-[11px] font-mono bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded w-14 text-center shrink-0">{v}</span>
@@ -697,7 +734,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
                     className="input text-xs py-1.5 flex-1"
                     placeholder={getVarPlaceholder(v)}
                     value={vars[v] ?? ''}
-                    onChange={e => setVars(p => ({ ...p, [v]: e.target.value }))}
+                    onChange={ev => setVars(prev => ({ ...prev, [v]: ev.target.value }))}
                   />
                 </div>
               ))}
