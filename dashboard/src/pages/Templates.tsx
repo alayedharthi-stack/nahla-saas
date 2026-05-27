@@ -18,7 +18,7 @@ import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
   TemplateVarMapRecord, NahlaLibraryTemplate,
-  TemplateSyncStatus, TemplateSyncResult, getTemplateSyncErrorMessage,
+  TemplateSyncStatus, TemplateSyncResult,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
   STATUS_COLORS,
@@ -1765,16 +1765,49 @@ function NahlaLibraryModal({ onClose, onImported }: {
 
 // ── Sync status card ──────────────────────────────────────────────────────────
 
-function formatRelativeArabic(iso: string | null | undefined): string {
+function resolveSyncErrorMessage(
+  code: string | null | undefined,
+  fallback: string | undefined,
+  errors: Record<string, string>,
+): string {
+  if (!code) return fallback || ''
+  return errors[code] ?? fallback ?? code
+}
+
+function formatRelativeSyncTime(
+  iso: string | null | undefined,
+  lang: string,
+  sync: {
+    relativeJustNow: string
+    relativeMinute: string
+    relativeMinutes: string
+    relativeHour: string
+    relativeHours: string
+    relativeDay: string
+    relativeDays: string
+  },
+): string {
   if (!iso) return '—'
   const then = new Date(iso).getTime()
   if (Number.isNaN(then)) return '—'
   const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000))
-  if (diffSec < 60)        return 'قبل لحظات'
-  if (diffSec < 3600)      return `قبل ${Math.floor(diffSec / 60)} دقيقة`
-  if (diffSec < 86400)     return `قبل ${Math.floor(diffSec / 3600)} ساعة`
-  if (diffSec < 86400 * 7) return `قبل ${Math.floor(diffSec / 86400)} يوم`
-  return new Date(iso).toLocaleDateString('ar-SA')
+  if (diffSec < 60) return sync.relativeJustNow
+  if (diffSec < 3600) {
+    const n = Math.floor(diffSec / 60)
+    if (lang === 'en') return n === 1 ? sync.relativeMinute : sync.relativeMinutes.replace('{count}', String(n))
+    return sync.relativeMinutes.replace('{count}', String(n))
+  }
+  if (diffSec < 86400) {
+    const n = Math.floor(diffSec / 3600)
+    if (lang === 'en') return n === 1 ? sync.relativeHour : sync.relativeHours.replace('{count}', String(n))
+    return sync.relativeHours.replace('{count}', String(n))
+  }
+  if (diffSec < 86400 * 7) {
+    const n = Math.floor(diffSec / 86400)
+    if (lang === 'en') return n === 1 ? sync.relativeDay : sync.relativeDays.replace('{count}', String(n))
+    return sync.relativeDays.replace('{count}', String(n))
+  }
+  return new Date(iso).toLocaleDateString(lang === 'en' ? 'en-US' : 'ar-SA')
 }
 
 function SyncStatusCard({
@@ -1784,12 +1817,15 @@ function SyncStatusCard({
   status: TemplateSyncStatus | null
   onRefresh: () => void
 }) {
+  const { t, lang } = useLanguage()
+  const sync = t(tr => tr.templatesMgmt.sync)
+
   if (!status) {
     return (
       <div className="card px-5 py-4">
         <div className="flex items-center gap-2 text-xs text-slate-400">
           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-          جاري قراءة حالة المزامنة…
+          {sync.loading}
         </div>
       </div>
     )
@@ -1804,13 +1840,13 @@ function SyncStatusCard({
               <Clock className="w-4 h-4 text-slate-500" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-slate-700">لم تتم أي مزامنة بعد</p>
+              <p className="text-sm font-semibold text-slate-700">{sync.noSyncYet}</p>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                {status.next_estimate || 'ستتم المزامنة التلقائية خلال 30 دقيقة كحد أقصى.'}
+                {status.next_estimate || sync.autoSyncEstimateDefault}
               </p>
             </div>
           </div>
-          <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors" title="تحديث">
+          <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors" title={sync.refreshTitle}>
             <RefreshCw className="w-4 h-4" />
           </button>
         </div>
@@ -1819,14 +1855,14 @@ function SyncStatusCard({
   }
 
   const hasError   = !!status.error
-  const sourceLbl  = status.source === 'scheduled' ? 'مزامنة تلقائية' : 'مزامنة يدوية'
+  const sourceLbl  = status.source === 'scheduled' ? sync.sourceScheduled : sync.sourceManual
   const accent     = hasError ? 'border-l-amber-400' : 'border-l-emerald-400'
   const iconBg     = hasError ? 'bg-amber-50'   : 'bg-emerald-50'
   const iconColor  = hasError ? 'text-amber-600' : 'text-emerald-600'
   const Icon       = hasError ? AlertCircle : CheckCircle
   const friendly   = hasError
-    ? getTemplateSyncErrorMessage(status.error, status.message)
-    : (status.message || 'تمت المزامنة بنجاح')
+    ? resolveSyncErrorMessage(status.error, status.message, sync.errors)
+    : (status.message || sync.successDefault)
 
   return (
     <div className={`card px-5 py-4 border-l-4 ${accent}`}>
@@ -1837,27 +1873,27 @@ function SyncStatusCard({
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <p className="text-sm font-semibold text-slate-900">آخر مزامنة من Meta</p>
+              <p className="text-sm font-semibold text-slate-900">{sync.lastSyncTitle}</p>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
                 {sourceLbl}
               </span>
-              <span className="text-[11px] text-slate-500">{formatRelativeArabic(status.at)}</span>
+              <span className="text-[11px] text-slate-500">{formatRelativeSyncTime(status.at, lang, sync)}</span>
             </div>
             <p className={`text-[12px] mt-1 leading-relaxed line-clamp-2 ${hasError ? 'text-amber-700' : 'text-slate-500'}`}>
               {friendly}
             </p>
           </div>
         </div>
-        <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors shrink-0" title="تحديث">
+        <button onClick={onRefresh} className="text-slate-400 hover:text-brand-500 transition-colors shrink-0" title={sync.refreshTitle}>
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <SyncMiniStat label="تم جلبها"    value={status.synced     ?? 0} tone="slate"   />
-        <SyncMiniStat label="مربوطة بخدمات" value={status.total_bound ?? status.auto_bound ?? 0} tone="emerald" />
-        <SyncMiniStat label="فاشلة"       value={status.failed     ?? 0} tone={status.failed ? 'amber' : 'slate'} />
-        <SyncMiniStat label="إجمالي"      value={status.synced     ?? 0} tone="slate"   />
+        <SyncMiniStat label={sync.statSynced} value={status.synced     ?? 0} tone="slate"   />
+        <SyncMiniStat label={sync.statBound}  value={status.total_bound ?? status.auto_bound ?? 0} tone="emerald" />
+        <SyncMiniStat label={sync.statFailed} value={status.failed     ?? 0} tone={status.failed ? 'amber' : 'slate'} />
+        <SyncMiniStat label={sync.statTotal}  value={status.synced     ?? 0} tone="slate"   />
       </div>
     </div>
   )
@@ -1890,7 +1926,10 @@ export default function Templates() {
   const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
   const [submitError, setSubmitError] = useState<{id: number; msg: string; code?: string} | null>(null)
   const [submitting, setSubmitting] = useState<number | null>(null)
-  const { t } = useLanguage()
+  const { t, dir } = useLanguage()
+  const submitErr = t(tr => tr.templatesMgmt.submitErrors)
+  const del = t(tr => tr.templatesMgmt.delete)
+  const manualCoupon = t(tr => tr.templatesMgmt.manualCoupon)
 
   const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
     { key: 'all',      label: t(tr => tr.templatesMgmt.filterAll)      },
@@ -2037,7 +2076,7 @@ export default function Templates() {
       // Backend now returns a structured detail: { code, message }.
       // apiCall surfaces them as err.message + err.code (see api/client.ts).
       const code = (e?.code as string | undefined) ?? ''
-      const msg  = (e?.message as string | undefined) ?? 'فشل إرسال القالب — تحقق من ربط واتساب'
+      const msg  = (e?.message as string | undefined) ?? submitErr.fallback
       console.error('[templates/submit] failed', { id, code, msg, status: e?.status })
       setSubmitError({ id, msg, code })
       setTimeout(() => setSubmitError(s => s?.id === id ? null : s), 12000)
@@ -2091,13 +2130,13 @@ export default function Templates() {
       {submitError && (() => {
         const code = submitError.code ?? ''
         const ctx =
-          code === 'subscription_inactive' ? { label: 'فعّل الاشتراك', to: '/billing' } :
+          code === 'subscription_inactive' ? { label: submitErr.activateSubscription, to: '/billing' } :
           code === 'whatsapp_not_connected'   ||
           code === 'whatsapp_status_invalid'  ||
           code === 'missing_waba_id'          ||
           code === 'missing_phone_number_id'  ||
           code === 'missing_token'
-            ? { label: 'إصلاح ربط واتساب', to: '/whatsapp-connect' }
+            ? { label: submitErr.fixWhatsAppConnect, to: '/whatsapp-connect' }
             : null
         return (
           <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-600 text-white px-5 py-3 rounded-xl shadow-xl text-sm max-w-xl">
@@ -2131,47 +2170,47 @@ export default function Templates() {
       {/* Delete confirmation modal for APPROVED templates */}
       {deleteConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" dir="rtl">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4" dir={dir}>
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center">
                 <Trash2 className="w-5 h-5 text-red-600" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-slate-800">حذف القالب</h3>
+                <h3 className="text-base font-bold text-slate-800">{del.title}</h3>
                 <p className="text-xs text-slate-500 mt-0.5">{deleteConfirm.display_name_ar || deleteConfirm.name}</p>
               </div>
             </div>
 
             <p className="text-sm text-slate-600">
-              هذا القالب معتمد من Meta. سيتم حذفه نهائياً من Meta ونحلة معاً.
+              {del.approvedWarning}
             </p>
 
             <div className="space-y-2">
               <button
                 onClick={() => doDelete(deleteConfirm.id, false)}
                 disabled={deleting}
-                className="w-full flex items-center gap-3 text-right border-2 border-red-300 bg-red-50 rounded-xl px-4 py-3 hover:bg-red-100 transition-colors disabled:opacity-50"
+                className="w-full flex items-center gap-3 text-start border-2 border-red-300 bg-red-50 rounded-xl px-4 py-3 hover:bg-red-100 transition-colors disabled:opacity-50"
               >
                 <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center shrink-0">
                   <Trash2 className="w-4 h-4 text-red-600" />
                 </div>
                 <div>
-                  <p className="text-sm font-bold text-red-700">حذف القالب نهائياً</p>
-                  <p className="text-xs text-red-500">سيتم حذفه من Meta ونحلة — لا يمكن التراجع</p>
+                  <p className="text-sm font-bold text-red-700">{del.deletePermanent}</p>
+                  <p className="text-xs text-red-500">{del.deletePermanentHint}</p>
                 </div>
               </button>
 
               <button
                 onClick={() => doDelete(deleteConfirm.id, true)}
                 disabled={deleting}
-                className="w-full flex items-center gap-3 text-right border border-slate-200 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors disabled:opacity-50"
+                className="w-full flex items-center gap-3 text-start border border-slate-200 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors disabled:opacity-50"
               >
                 <div className="w-8 h-8 bg-amber-100 rounded-lg flex items-center justify-center shrink-0">
                   <EyeOff className="w-4 h-4 text-amber-600" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-slate-700">إزالة من نحلة فقط</p>
-                  <p className="text-xs text-slate-500">يبقى في حسابك على Meta ويمكنك استعادته لاحقاً</p>
+                  <p className="text-sm font-semibold text-slate-700">{del.removeNahlaOnly}</p>
+                  <p className="text-xs text-slate-500">{del.removeNahlaOnlyHint}</p>
                 </div>
               </button>
             </div>
@@ -2181,7 +2220,7 @@ export default function Templates() {
               disabled={deleting}
               className="w-full text-center text-sm text-slate-500 hover:text-slate-700 py-2"
             >
-              إلغاء
+              {t(tr => tr.actions.cancel)}
             </button>
           </div>
         </div>
@@ -2242,10 +2281,9 @@ export default function Templates() {
           <Ticket className="w-5 h-5" />
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-slate-900 mb-0.5">حملة كوبون يدوي</p>
+          <p className="text-sm font-semibold text-slate-900 mb-0.5">{manualCoupon.title}</p>
           <p className="text-xs text-slate-500 leading-relaxed">
-            أنشئ الكوبون داخل سلة بنفسك ثم ضع الكود + رابط المتجر هنا — وترسله نحلة عبر واتساب
-            بزر «اطلب الآن». حل مؤقت قبل اعتماد سلة لـ API الكوبونات.
+            {manualCoupon.description}
           </p>
         </div>
         <ArrowEnd className="w-4 h-4 text-slate-400 shrink-0 rotate-180" />

@@ -941,6 +941,54 @@ export interface Translations {
       autoBoundTooltip: string
       removeFromNahla: string
     }
+    sync: {
+      loading: string
+      noSyncYet: string
+      autoSyncEstimateDefault: string
+      refreshTitle: string
+      sourceScheduled: string
+      sourceManual: string
+      lastSyncTitle: string
+      successDefault: string
+      statSynced: string
+      statBound: string
+      statFailed: string
+      statTotal: string
+      relativeJustNow: string
+      relativeMinute: string
+      relativeMinutes: string
+      relativeHour: string
+      relativeHours: string
+      relativeDay: string
+      relativeDays: string
+      errors: {
+        no_waba_id: string
+        no_valid_token: string
+        bad_provider_payload: string
+        no_provider_data: string
+        db_lookup_failed: string
+        db_commit_failed: string
+        unexpected_failure: string
+        read_failed: string
+      }
+    }
+    delete: {
+      title: string
+      approvedWarning: string
+      deletePermanent: string
+      deletePermanentHint: string
+      removeNahlaOnly: string
+      removeNahlaOnlyHint: string
+    }
+    submitErrors: {
+      fallback: string
+      activateSubscription: string
+      fixWhatsAppConnect: string
+    }
+    manualCoupon: {
+      title: string
+      description: string
+    }
   }
 
   /** Merchants (admin) page */

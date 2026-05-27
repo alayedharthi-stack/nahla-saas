@@ -940,6 +940,63 @@ const en: Translations = {
       autoBoundTooltip: 'This template was auto-linked to the service via Meta sync',
       removeFromNahla: 'Remove from Nahla',
     },
+    sync: {
+      loading: 'Loading sync status…',
+      noSyncYet: 'No sync yet',
+      autoSyncEstimateDefault: 'Automatic sync will run within 30 minutes at most.',
+      refreshTitle: 'Refresh',
+      sourceScheduled: 'Automatic sync',
+      sourceManual: 'Manual sync',
+      lastSyncTitle: 'Last Meta sync',
+      successDefault: 'Sync completed successfully',
+      statSynced: 'Fetched',
+      statBound: 'Service-linked',
+      statFailed: 'Failed',
+      statTotal: 'Total',
+      relativeJustNow: 'Just now',
+      relativeMinute: '1 minute ago',
+      relativeMinutes: '{count} minutes ago',
+      relativeHour: '1 hour ago',
+      relativeHours: '{count} hours ago',
+      relativeDay: '1 day ago',
+      relativeDays: '{count} days ago',
+      errors: {
+        no_waba_id:
+          'No linked WhatsApp Business account found. Complete WhatsApp setup from Settings first.',
+        no_valid_token:
+          'No valid token for template sync. Reconnect WhatsApp from platform settings to refresh permissions.',
+        bad_provider_payload:
+          'Unexpected response from Meta. We will retry automatically in a few minutes.',
+        no_provider_data:
+          'Could not reach Meta right now. Check credentials or try again later.',
+        db_lookup_failed:
+          'Could not read connection data. Retry will happen automatically.',
+        db_commit_failed:
+          'Could not save templates to the database. Retry will happen automatically.',
+        unexpected_failure:
+          'An unexpected error occurred. Sync will retry automatically in a few minutes.',
+        read_failed:
+          'Could not read the last sync record from the database.',
+      },
+    },
+    delete: {
+      title: 'Delete template',
+      approvedWarning: 'This template is approved by Meta. It will be permanently deleted from both Meta and Nahla.',
+      deletePermanent: 'Delete template permanently',
+      deletePermanentHint: 'Removed from Meta and Nahla — cannot be undone',
+      removeNahlaOnly: 'Remove from Nahla only',
+      removeNahlaOnlyHint: 'Stays in your Meta account and can be restored later',
+    },
+    submitErrors: {
+      fallback: 'Failed to submit template — check your WhatsApp connection',
+      activateSubscription: 'Activate subscription',
+      fixWhatsAppConnect: 'Fix WhatsApp connection',
+    },
+    manualCoupon: {
+      title: 'Manual coupon campaign',
+      description:
+        'Create the coupon in Salla yourself, then enter the code and store link here — Nahla sends it via WhatsApp with an Order Now button. Interim flow until Salla approves the coupon API.',
+    },
   },
 
   security: {

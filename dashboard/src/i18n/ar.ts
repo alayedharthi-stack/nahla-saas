@@ -944,6 +944,63 @@ const ar: Translations = {
       autoBoundTooltip: 'رُبط هذا القالب تلقائياً بالخدمة عبر مزامنة Meta',
       removeFromNahla: 'إزالة من نحلة',
     },
+    sync: {
+      loading: 'جاري قراءة حالة المزامنة…',
+      noSyncYet: 'لم تتم أي مزامنة بعد',
+      autoSyncEstimateDefault: 'ستتم المزامنة التلقائية خلال 30 دقيقة كحد أقصى.',
+      refreshTitle: 'تحديث',
+      sourceScheduled: 'مزامنة تلقائية',
+      sourceManual: 'مزامنة يدوية',
+      lastSyncTitle: 'آخر مزامنة من Meta',
+      successDefault: 'تمت المزامنة بنجاح',
+      statSynced: 'تم جلبها',
+      statBound: 'مربوطة بخدمات',
+      statFailed: 'فاشلة',
+      statTotal: 'إجمالي',
+      relativeJustNow: 'قبل لحظات',
+      relativeMinute: 'قبل {count} دقيقة',
+      relativeMinutes: 'قبل {count} دقيقة',
+      relativeHour: 'قبل {count} ساعة',
+      relativeHours: 'قبل {count} ساعة',
+      relativeDay: 'قبل {count} يوم',
+      relativeDays: 'قبل {count} يوم',
+      errors: {
+        no_waba_id:
+          'لم يتم العثور على رقم WhatsApp Business مرتبط. يجب إكمال ربط واتساب أولاً من صفحة الإعدادات.',
+        no_valid_token:
+          'لا يوجد توكن صالح لمزامنة القوالب. أعد ربط حساب واتساب من إعدادات المنصة لتجديد الصلاحيات.',
+        bad_provider_payload:
+          'استجابة غير متوقعة من Meta. سنعيد المحاولة تلقائياً خلال دقائق دون تدخل منك.',
+        no_provider_data:
+          'تعذّر الاتصال بـ Meta حالياً. تحقّق من بيانات الاعتماد أو حاول لاحقاً.',
+        db_lookup_failed:
+          'تعذّرت قراءة بيانات الاتصال. سيُعاد المحاولة تلقائياً.',
+        db_commit_failed:
+          'تعذّر حفظ القوالب في قاعدة البيانات. ستتم إعادة المحاولة تلقائياً.',
+        unexpected_failure:
+          'حدث خطأ غير متوقّع. ستتم المزامنة تلقائياً خلال دقائق.',
+        read_failed:
+          'تعذّر قراءة سجل آخر مزامنة من قاعدة البيانات.',
+      },
+    },
+    delete: {
+      title: 'حذف القالب',
+      approvedWarning: 'هذا القالب معتمد من Meta. سيتم حذفه نهائياً من Meta ونحلة معاً.',
+      deletePermanent: 'حذف القالب نهائياً',
+      deletePermanentHint: 'سيتم حذفه من Meta ونحلة — لا يمكن التراجع',
+      removeNahlaOnly: 'إزالة من نحلة فقط',
+      removeNahlaOnlyHint: 'يبقى في حسابك على Meta ويمكنك استعادته لاحقاً',
+    },
+    submitErrors: {
+      fallback: 'فشل إرسال القالب — تحقق من ربط واتساب',
+      activateSubscription: 'فعّل الاشتراك',
+      fixWhatsAppConnect: 'إصلاح ربط واتساب',
+    },
+    manualCoupon: {
+      title: 'حملة كوبون يدوي',
+      description:
+        'أنشئ الكوبون داخل سلة بنفسك ثم ضع الكود + رابط المتجر هنا — وترسله نحلة عبر واتساب بزر «اطلب الآن». حل مؤقت قبل اعتماد سلة لـ API الكوبونات.',
+    },
   },
 
   security: {
