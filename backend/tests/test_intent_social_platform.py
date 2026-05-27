@@ -857,6 +857,62 @@ def test_state_round_trip_defaults_when_legacy_blob() -> None:
     # Pure identity asks → identity card.
     ("من أنت؟",                                "identity"),
     ("هل أنت AI؟",                             "identity"),
+
+    # ──────────────────────────────────────────────────────────────────
+    # v2 (May 2026 Eid season — Tenant 33): greeting + relational /
+    # seasonal / religious / self-introduction content MUST yield to
+    # the brain so the natural social reply runs instead of the cold
+    # canned identity card. Production reproducers from real merchants
+    # are listed below.
+    # ──────────────────────────────────────────────────────────────────
+
+    # Eid / seasonal — short forms.
+    ("السلام عليكم كل عام وأنتم بخير",          ""),
+    ("مرحبا، عيد مبارك",                        ""),
+    ("هلا، عساكم من العايدين",                  ""),
+    # Eid greeting after long salaam variant.
+    ("السلام عليكم ورحمة الله وبركاته، كل سنة وأنتم سالمين", ""),
+
+    # Religious / wellbeing — prayer / gratitude content.
+    ("السلام عليكم الله يشفي الشباب",            ""),
+    ("مرحبا الحمد لله على سلامتك",              ""),
+    ("صباح الخير الله يحفظكم",                  ""),
+    ("السلام عليكم جزاكم الله خير",              ""),
+    ("هلا، الله يجزاك خير على المنتج",          ""),
+
+    # Long combined emotional Eid message (literal Tenant 33 production
+    # reproducer — Hamed's Eid greeting that triggered the canned card).
+    (
+        "السلام عليكم ورحمة الله وبركاته اسعد الله مساك بكل خير "
+        "وكل عام وانتم بخير الحمد لله على سلامة عيالك يبو هشام "
+        "سبحانه قدر ولطف ولا ترون مكروه والله يشفي الشباب اللي "
+        "كانو معه وما ترون باس",
+        "",
+    ),
+
+    # Self-introduction — new number, name, "معك" prefix.
+    ("السلام عليكم معك سعيد وهذا رقمي الجديد",  ""),
+    ("مرحبا، أنا فهد من جدة",                   ""),
+    ("هلا، اسمي محمد",                           ""),
+    # Literal Tenant 33 production reproducer — Sa3eed Bin Baabad's
+    # self-introduction message that triggered the canned card.
+    (
+        "السلام عليكم ورحمة الله وبركاته كيف حالك معك سعيد عامر "
+        "شيخ باعباد هذا رقمي الجديد 73 عليه واتساب وكل عام وانتم بخير",
+        "",
+    ),
+
+    # Relational inquiry — asking about wellbeing / family.
+    ("السلام عليكم كيف الأهل",                  ""),
+    ("هلا، أخبارك",                              ""),
+    ("مرحبا، طمنا عليك",                         ""),
+
+    # Negative guards — pure short greetings must STILL go to the canned
+    # card even after the v2 extension. These existed before v2 but we
+    # repeat them as explicit negative anchors to prevent regression.
+    ("السلام عليكم.",                            "greeting"),
+    ("هلا",                                      "greeting"),
+    ("مرحبا!",                                   "greeting"),
 ])
 def test_detect_identity_topic_welcome_gate_yield(
     text: str, expected: str,
@@ -867,6 +923,80 @@ def test_detect_identity_topic_welcome_gate_yield(
         f"welcome-gate yield is broken and this exact message will be "
         f"swallowed by MODE_IDENTITY_REPLY in production."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13b. Direct unit tests for the seven cases listed in the v2 fix brief.
+# These provide a one-line-per-case manifest so a regression on any of the
+# original guarantees fails with a clear, single-purpose error message.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_v2_brief_case_1_pure_salaam_still_canned() -> None:
+    """1. pure "السلام عليكم" still returns MODE_IDENTITY_REPLY (greeting)."""
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic("السلام عليكم") == "greeting"
+
+
+def test_v2_brief_case_2_salaam_plus_eid_yields_to_brain() -> None:
+    """2. "السلام عليكم كل عام وأنتم بخير" yields to Brain."""
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic("السلام عليكم كل عام وأنتم بخير") == ""
+
+
+def test_v2_brief_case_3_religious_wellbeing_no_greeting_prefix_yields() -> None:
+    """3. "الحمد لله على سلامة عيالك" yields to Brain.
+
+    This message has no greeting prefix, so it never reaches the
+    canned-card branch in the first place — `detect_identity_topic`
+    returns "". This case anchors the property that emotional/social
+    content without a salaam opener always reaches the brain.
+    """
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic("الحمد لله على سلامة عيالك") == ""
+
+
+def test_v2_brief_case_4_salaam_plus_self_intro_yields_to_brain() -> None:
+    """4. "السلام عليكم معك سعيد وهذا رقمي الجديد" yields to Brain."""
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic(
+        "السلام عليكم معك سعيد وهذا رقمي الجديد"
+    ) == ""
+
+
+def test_v2_brief_case_5_salaam_plus_commerce_still_yields() -> None:
+    """5. "السلام عليكم أبي سعر العسل" still yields to Brain (legacy v1)."""
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic("السلام عليكم أبي سعر العسل") == ""
+
+
+def test_v2_brief_case_6_pure_identity_still_identity() -> None:
+    """6. "من أنت؟" still returns identity reply."""
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    assert detect_identity_topic("من أنت؟") == "identity"
+
+
+def test_v2_brief_case_7_payment_order_shipping_unaffected() -> None:
+    """7. Payment / order / shipping intents unaffected by v2 extension.
+
+    A spread of commerce-token messages must still yield to Brain
+    exactly as they did before v2 — the relational additions are
+    additive only, never reclassifying existing yield paths.
+    """
+    from modules.ai.routing.conversation_mode import detect_identity_topic
+    commerce_cases = [
+        "السلام عليكم، أبي رابط الدفع",
+        "مرحبا، كم الشحن للرياض؟",
+        "هلا، وين طلبي؟",
+        "السلام عليكم أبغى تتبع شحنتي",
+        "صباح الخير، حوّلت على إيبان الراجحي",
+        "مرحبا، عندكم باركود qr للدفع؟",
+    ]
+    for text in commerce_cases:
+        assert detect_identity_topic(text) == "", (
+            f"commerce case regressed: detect_identity_topic({text!r}) "
+            f"no longer yields to Brain."
+        )
 
 
 def test_actionable_after_greeting_helper_strips_long_salaam() -> None:

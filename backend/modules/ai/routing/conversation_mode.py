@@ -243,7 +243,7 @@ _GREETING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
 )
 
 
-# ── Actionable signal detector (welcome-gate consistency) ────────────────────
+# ── Actionable / relational signal detector (welcome-gate consistency) ──────
 #
 # A real production bug (May 2026): a customer wrote
 #     "السلام عليكم أبي سعر العسل"
@@ -252,14 +252,27 @@ _GREETING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
 # fired, and the brain pipeline (with the welcome-gate fix that demotes
 # the greeting to ASK_PRICE+embedded_greeting) never even ran.
 #
-# Fix: a greeting at the start is only allowed to route to the canned
+# Fix v1: a greeting at the start is only allowed to route to the canned
 # identity card when the REST of the message carries no actionable
-# commerce/platform signal. The regex below mirrors the actionable
-# keyword set that ``intent.rules`` recognises so the two layers cannot
-# diverge. Adding a new actionable intent? Add its discriminating tokens
-# here too.
-_ACTIONABLE_AFTER_GREETING_RE = re.compile(
+# commerce/platform signal.
+#
+# Fix v2 (May 2026, Eid season — Tenant 33): production traffic revealed
+# the v1 regex was commerce-only, so customers sending heartfelt Eid /
+# religious / wellbeing / self-introduction greetings *with no commerce
+# token* still collapsed into the canned identity card (cold sales
+# fallback on top of a deeply social message). Extending the same regex
+# with relational axes lets those messages yield to the Brain so the
+# natural social reply runs. We keep MODE_IDENTITY_REPLY for pure short
+# greetings ("السلام عليكم", "هلا", "مرحبا") only.
+#
+# Cost of a false positive (yield to Brain when canned would also work)
+# is low — Brain handles any inbound gracefully. Cost of a false
+# negative is the cold-card regression we are fixing.
+#
+# Adding a new actionable intent? Add its discriminating tokens here too.
+_ACTIONABLE_OR_RELATIONAL_AFTER_GREETING_RE = re.compile(
     "|".join((
+        # ── Commerce / platform (legacy v1) ──────────────────────────────
         # Price / cost asks (avoid bare "كم" because "كيف حالك" would
         # false-positive — require concrete price tokens).
         r"سعر", r"اسعار", r"أسعار",
@@ -285,9 +298,47 @@ _ACTIONABLE_AFTER_GREETING_RE = re.compile(
         r"meta", r"embedded\s*signup",
         # Track order asks
         r"طلبي", r"طلبية", r"شحنتي", r"تتبع",
+
+        # ── Relational / seasonal / religious / self-intro (v2) ──────────
+        # Eid / seasonal markers. ``\b`` on the short tokens keeps
+        # "سعيد" (a common Saudi name) from false-matching "عيد",
+        # and "مبارك" from false-matching inside an unrelated word.
+        r"\bعيد\b", r"كل\s*عام", r"كل\s*سنة",
+        r"عساكم", r"عساك",
+        r"العايدين", r"العائدين", r"عواده",
+        r"\bمبارك\b",
+        # Religious / wellbeing.
+        # ``الله\s+ي`` catches "الله يحفظكم / يجزاك / يبارك / يشفي / ..."
+        # without matching bare "والله" / "إن شاء الله بخير" alone,
+        # which the legacy "هلا والله" pure-greeting test exercises.
+        r"اللهم", r"الحمد\s*لله",
+        r"الله\s+ي",
+        r"إن\s*شاء\s*الله", r"ما\s*شاء\s*الله",
+        r"سلامتك", r"سلامتكم", r"سلامة",
+        r"يحفظ",
+        r"يجزا", r"جزا",
+        r"بارك",
+        r"يشفي", r"شفا", r"اشف",
+        r"عافى", r"عافاك", r"العافية",
+        r"يصبر", r"يعوض", r"يرحم",
+        # Self-introduction. ``\b`` on the short tokens reduces lax matches.
+        r"\bمعك\b", r"\bأنا\b",
+        r"اسمي",
+        r"رقمي", r"رقم\s*جديد",
+        # Relational inquiry.
+        r"كيفكم",
+        r"كيف\s*الأهل", r"كيف\s*الاهل",
+        r"طمنا", r"طمني", r"اطمئن",
+        r"أخبارك", r"اخبارك", r"أخباركم", r"اخباركم",
+        r"أبشرك", r"ابشرك",
     )),
     re.IGNORECASE | re.UNICODE,
 )
+
+# Backward-compat alias — internal callers / tests that still reference the
+# legacy "actionable-only" name keep working. Both names point at the same
+# extended regex.
+_ACTIONABLE_AFTER_GREETING_RE = _ACTIONABLE_OR_RELATIONAL_AFTER_GREETING_RE
 
 # Greeting prefix tokens we strip off before testing for actionable content.
 # Kept separate from the matching patterns so we can compute the "what's
@@ -304,20 +355,40 @@ _GREETING_PREFIX_RE = re.compile(
 )
 
 
-def _message_has_actionable_after_greeting(text: str) -> bool:
-    """True when the customer combined a greeting with a real ask.
+def _message_has_actionable_or_relational_after_greeting(text: str) -> bool:
+    """True when the customer combined a greeting with a real ask OR with
+    relational / religious / seasonal / self-introduction content.
 
-    Example: "السلام عليكم أبي سعر العسل" → the salaam prefix is
-    stripped, the remainder "أبي سعر العسل" matches an actionable
-    token (سعر / عسل / أبي), so we MUST NOT route to the canned
-    greeting card. The brain's welcome-gate handles the rest.
+    Examples that yield to Brain (return True):
+
+      * "السلام عليكم أبي سعر العسل"             — commerce
+      * "السلام عليكم كل عام وأنتم بخير"          — Eid / seasonal
+      * "السلام عليكم الله يشفي الشباب"          — wellbeing prayer
+      * "السلام عليكم معك سعيد رقمي الجديد"      — self-introduction
+
+    Examples that stay on the canned identity card (return False):
+
+      * "السلام عليكم"                            — pure salaam
+      * "وعليكم السلام ورحمة الله وبركاته"        — pure return salaam
+      * "هلا والله"                               — short greeting + intensifier
+      * "صباح الخير، كيف حالك؟"                   — pure courtesy
+
+    The brain's welcome-gate handles every "True" case below.
     """
     if not isinstance(text, str):
         return False
     remainder = _GREETING_PREFIX_RE.sub("", text, count=1).strip()
     if not remainder:
         return False
-    return bool(_ACTIONABLE_AFTER_GREETING_RE.search(remainder))
+    return bool(_ACTIONABLE_OR_RELATIONAL_AFTER_GREETING_RE.search(remainder))
+
+
+# Backward-compat alias — internal callers / tests that still reference the
+# legacy "actionable-only" function name keep working. Both names route
+# through the same v2 detector.
+_message_has_actionable_after_greeting = (
+    _message_has_actionable_or_relational_after_greeting
+)
 
 _SUPPORT_PATTERNS: Tuple[re.Pattern, ...] = tuple(
     re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
@@ -376,10 +447,10 @@ def detect_identity_topic(text: str) -> str:
     if _matches_any(text, _IDENTITY_PATTERNS):
         return "identity"
     if _matches_any(text, _GREETING_PATTERNS):
-        # Welcome-gate yield: greeting + actionable signal → let the
-        # brain handle it. Pure greeting (or greeting + courtesy only)
-        # stays on the canned identity reply path.
-        if _message_has_actionable_after_greeting(text):
+        # Welcome-gate yield: greeting + actionable / relational signal
+        # → let the brain handle it. Pure greeting (or greeting + bare
+        # courtesy only) stays on the canned identity reply path.
+        if _message_has_actionable_or_relational_after_greeting(text):
             return ""
         return "greeting"
     return ""
