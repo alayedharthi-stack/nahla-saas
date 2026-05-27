@@ -147,6 +147,18 @@ EVENT_MESSAGE_SAVED               = "message_saved"
 EVENT_MESSAGE_SAVED_ORPHAN        = "message_saved_orphan"
 EVENT_MESSAGE_SAVE_ROLLBACK       = "message_save_rollback"
 
+# Conversation-linking integrity (W2.0.3, May 2026). Recorded by the
+# order-flow short-circuits that historically called save_message
+# without conversation_id and produced orphans. AUTO_LINK_OK means
+# the dispatcher resolved a Conversation row before persisting; all
+# downstream save_message calls in that branch carry the id.
+# AUTO_LINK_FAILED means the resolver raised — the branch fell open
+# to legacy orphan behaviour to preserve forward progress (the
+# user's media still goes through), and the row counts as an orphan
+# in the summary.
+EVENT_AUTO_LINK_OK                = "auto_link_ok"
+EVENT_AUTO_LINK_FAILED            = "auto_link_failed"
+
 # Terminal markers
 EVENT_END_OK                      = "end_ok"
 EVENT_END_DROPPED                 = "end_dropped"
@@ -194,6 +206,8 @@ ALL_EVENTS: Tuple[str, ...] = (
     EVENT_MESSAGE_SAVED,
     EVENT_MESSAGE_SAVED_ORPHAN,
     EVENT_MESSAGE_SAVE_ROLLBACK,
+    EVENT_AUTO_LINK_OK,
+    EVENT_AUTO_LINK_FAILED,
     EVENT_END_OK,
     EVENT_END_DROPPED,
     EVENT_END_UNCAUGHT,
@@ -273,6 +287,15 @@ class InboundLifecycleTrace:
                 self.conversation_id = cid
         elif event_name == EVENT_CONVERSATION_LOOKUP_HIT:
             self.conversation_lookup_hit = True
+            cid = kwargs.get("conversation_id")
+            if isinstance(cid, int):
+                self.conversation_id = cid
+        elif event_name == EVENT_AUTO_LINK_OK:
+            # W2.0.3: surface the resolved conversation_id on the
+            # summary line even when persistence later fails — the
+            # operator needs to see "we DID resolve a row, the
+            # downstream save just blew up" vs. "we never resolved
+            # anything to begin with".
             cid = kwargs.get("conversation_id")
             if isinstance(cid, int):
                 self.conversation_id = cid
@@ -668,6 +691,8 @@ __all__ = [
     "EVENT_MESSAGE_SAVED",
     "EVENT_MESSAGE_SAVED_ORPHAN",
     "EVENT_MESSAGE_SAVE_ROLLBACK",
+    "EVENT_AUTO_LINK_OK",
+    "EVENT_AUTO_LINK_FAILED",
     "EVENT_END_OK",
     "EVENT_END_DROPPED",
     "EVENT_END_UNCAUGHT",

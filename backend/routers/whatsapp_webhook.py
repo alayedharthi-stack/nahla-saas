@@ -4143,11 +4143,10 @@ async def _dispatch_message(
                     sender[-4:] if sender else "",
                 )
                 # ── W2.0.1 (May 2026): pin the short-circuit on the
-                # trace. The save_message inside this branch fires
-                # WITHOUT a conversation_id — the StateManager hook
-                # will record EVENT_MESSAGE_SAVED_ORPHAN automatically,
-                # but recording the short-circuit kind here keeps the
-                # path token greppable per business reason.
+                # trace. (Pre-W2.0.3 this branch produced orphan
+                # MessageEvents because save_message ran without a
+                # conversation_id; W2.0.3 below resolves a row first
+                # and threads its id into every save.)
                 try:
                     from core.inbound_lifecycle import (  # noqa: PLC0415
                         EVENT_PAYMENT_SHORT_CIRCUIT, record_lifecycle,
@@ -4155,6 +4154,58 @@ async def _dispatch_message(
                     record_lifecycle(EVENT_PAYMENT_SHORT_CIRCUIT)
                 except Exception:
                     pass
+                # ── W2.0.3 (May 2026): Conversation-linking integrity.
+                # Resolve the Conversation row BEFORE any save_message
+                # so the short-circuit path no longer produces orphans.
+                # Fail-open contract: if the resolver raises (DB hiccup,
+                # session error, etc.) we record an auto_link_failed
+                # event and fall back to the legacy orphan behaviour —
+                # the user's media still gets persisted, just without
+                # a conversation_id, exactly like before this patch.
+                _w203_conv_id_pc: Optional[int] = None
+                try:
+                    from routers.conversations import (  # noqa: PLC0415
+                        _get_or_create_conversation as _w203_resolve_pc,
+                    )
+                    _w203_convo_pc = _w203_resolve_pc(
+                        db, resolved_tenant_id, sender,
+                    )
+                    _w203_conv_id_pc = (
+                        int(getattr(_w203_convo_pc, "id", 0) or 0)
+                        or None
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_OK, record_lifecycle as _rl_pc,
+                        )
+                        _rl_pc(
+                            EVENT_AUTO_LINK_OK,
+                            detail="branch=payment_claim",
+                            conversation_id=_w203_conv_id_pc,
+                        )
+                    except Exception:
+                        pass
+                except Exception as _w203_exc_pc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_claim auto-link "
+                        "failed (fail-open to legacy orphan write) "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _w203_exc_pc,
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_FAILED, record_lifecycle as _rl_pc,
+                        )
+                        _rl_pc(
+                            EVENT_AUTO_LINK_FAILED,
+                            detail=(
+                                f"branch=payment_claim "
+                                f"exc={type(_w203_exc_pc).__name__}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    _w203_conv_id_pc = None
                 # Persist the state patch first so subsequent inbounds
                 # see the awaiting-receipt flag even if the send fails.
                 try:
@@ -4180,6 +4231,7 @@ async def _dispatch_message(
                         direction="inbound",
                         body=text or "[payment_claim]",
                         event_type="whatsapp_message",
+                        conversation_id=_w203_conv_id_pc,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "wa_message_id": msg_id or None,
@@ -4199,6 +4251,7 @@ async def _dispatch_message(
                         direction="outbound",
                         body=_payment_claim_decision["reply_text"],
                         event_type="whatsapp_message",
+                        conversation_id=_w203_conv_id_pc,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
@@ -4234,8 +4287,10 @@ async def _dispatch_message(
                     sender[-4:] if sender else "",
                 )
                 # ── W2.0.1 (May 2026): receipt short-circuit marker.
-                # save_message below runs without a conversation_id —
-                # see EVENT_MESSAGE_SAVED_ORPHAN auto-stamp.
+                # (Pre-W2.0.3 this branch produced orphan
+                # MessageEvents because save_message ran without a
+                # conversation_id; W2.0.3 below resolves a row first
+                # and threads its id into every save.)
                 try:
                     from core.inbound_lifecycle import (  # noqa: PLC0415
                         EVENT_RECEIPT_SHORT_CIRCUIT, record_lifecycle,
@@ -4243,6 +4298,51 @@ async def _dispatch_message(
                     record_lifecycle(EVENT_RECEIPT_SHORT_CIRCUIT)
                 except Exception:
                     pass
+                # ── W2.0.3: Conversation-linking integrity (fail-open).
+                _w203_conv_id_rc: Optional[int] = None
+                try:
+                    from routers.conversations import (  # noqa: PLC0415
+                        _get_or_create_conversation as _w203_resolve_rc,
+                    )
+                    _w203_convo_rc = _w203_resolve_rc(
+                        db, resolved_tenant_id, sender,
+                    )
+                    _w203_conv_id_rc = (
+                        int(getattr(_w203_convo_rc, "id", 0) or 0)
+                        or None
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_OK, record_lifecycle as _rl_rc,
+                        )
+                        _rl_rc(
+                            EVENT_AUTO_LINK_OK,
+                            detail="branch=payment_receipt",
+                            conversation_id=_w203_conv_id_rc,
+                        )
+                    except Exception:
+                        pass
+                except Exception as _w203_exc_rc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_receipt auto-link "
+                        "failed (fail-open to legacy orphan write) "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _w203_exc_rc,
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_FAILED, record_lifecycle as _rl_rc,
+                        )
+                        _rl_rc(
+                            EVENT_AUTO_LINK_FAILED,
+                            detail=(
+                                f"branch=payment_receipt "
+                                f"exc={type(_w203_exc_rc).__name__}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    _w203_conv_id_rc = None
                 # 1) Persist the brain_state mutation FIRST so even if
                 #    the WhatsApp POST fails the next inbound still
                 #    sees ``payment_receipt_received=True`` and our
@@ -4274,6 +4374,7 @@ async def _dispatch_message(
                             if normalized_inbound.normalized_type == "document"
                             else "whatsapp_image"
                         ),
+                        conversation_id=_w203_conv_id_rc,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "normalized_inbound": normalized_inbound.metadata,
@@ -4300,6 +4401,7 @@ async def _dispatch_message(
                         direction="outbound",
                         body=_receipt_decision["reply_text"],
                         event_type="whatsapp_message",
+                        conversation_id=_w203_conv_id_rc,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
@@ -4341,6 +4443,51 @@ async def _dispatch_message(
                     record_lifecycle(EVENT_MAP_SHORT_CIRCUIT)
                 except Exception:
                     pass
+                # ── W2.0.3: Conversation-linking integrity (fail-open).
+                _w203_conv_id_mp: Optional[int] = None
+                try:
+                    from routers.conversations import (  # noqa: PLC0415
+                        _get_or_create_conversation as _w203_resolve_mp,
+                    )
+                    _w203_convo_mp = _w203_resolve_mp(
+                        db, resolved_tenant_id, sender,
+                    )
+                    _w203_conv_id_mp = (
+                        int(getattr(_w203_convo_mp, "id", 0) or 0)
+                        or None
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_OK, record_lifecycle as _rl_mp,
+                        )
+                        _rl_mp(
+                            EVENT_AUTO_LINK_OK,
+                            detail="branch=map_image",
+                            conversation_id=_w203_conv_id_mp,
+                        )
+                    except Exception:
+                        pass
+                except Exception as _w203_exc_mp:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] map_image auto-link "
+                        "failed (fail-open to legacy orphan write) "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _w203_exc_mp,
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_FAILED, record_lifecycle as _rl_mp,
+                        )
+                        _rl_mp(
+                            EVENT_AUTO_LINK_FAILED,
+                            detail=(
+                                f"branch=map_image "
+                                f"exc={type(_w203_exc_mp).__name__}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    _w203_conv_id_mp = None
                 try:
                     from core.order_flow import (  # noqa: PLC0415
                         apply_state_patch as _apply_state_patch_map,
@@ -4364,6 +4511,7 @@ async def _dispatch_message(
                         direction="inbound",
                         body=text or "[لقطة خرائط]",
                         event_type="whatsapp_image",
+                        conversation_id=_w203_conv_id_mp,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "normalized_inbound": normalized_inbound.metadata,
@@ -4384,6 +4532,7 @@ async def _dispatch_message(
                         direction="outbound",
                         body=_map_image_decision["reply_text"],
                         event_type="whatsapp_message",
+                        conversation_id=_w203_conv_id_mp,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
@@ -4445,6 +4594,51 @@ async def _dispatch_message(
                     )
                 except Exception:
                     pass
+                # ── W2.0.3: Conversation-linking integrity (fail-open).
+                _w203_conv_id_ev: Optional[int] = None
+                try:
+                    from routers.conversations import (  # noqa: PLC0415
+                        _get_or_create_conversation as _w203_resolve_ev,
+                    )
+                    _w203_convo_ev = _w203_resolve_ev(
+                        db, resolved_tenant_id, sender,
+                    )
+                    _w203_conv_id_ev = (
+                        int(getattr(_w203_convo_ev, "id", 0) or 0)
+                        or None
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_OK, record_lifecycle as _rl_ev,
+                        )
+                        _rl_ev(
+                            EVENT_AUTO_LINK_OK,
+                            detail="branch=payment_evidence",
+                            conversation_id=_w203_conv_id_ev,
+                        )
+                    except Exception:
+                        pass
+                except Exception as _w203_exc_ev:  # noqa: BLE001
+                    logger.warning(
+                        "[PAYMENT_EVIDENCE] auto-link failed "
+                        "(fail-open to legacy orphan write) "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _w203_exc_ev,
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_AUTO_LINK_FAILED, record_lifecycle as _rl_ev,
+                        )
+                        _rl_ev(
+                            EVENT_AUTO_LINK_FAILED,
+                            detail=(
+                                f"branch=payment_evidence "
+                                f"exc={type(_w203_exc_ev).__name__}"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    _w203_conv_id_ev = None
                 # Persist the customer's inbound so the merchant
                 # drawer keeps the original PDF / image alongside
                 # our soft reply.
@@ -4459,6 +4653,7 @@ async def _dispatch_message(
                             if normalized_inbound.normalized_type == "document"
                             else "whatsapp_image"
                         ),
+                        conversation_id=_w203_conv_id_ev,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "normalized_inbound": normalized_inbound.metadata,
@@ -4479,6 +4674,7 @@ async def _dispatch_message(
                         direction="outbound",
                         body=_evidence_decision["reply_text"],
                         event_type="whatsapp_message",
+                        conversation_id=_w203_conv_id_ev,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
