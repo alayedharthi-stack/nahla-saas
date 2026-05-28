@@ -184,6 +184,10 @@ JWT_PUBLIC_PREFIXES = (
     "/merchant/widgets/",               # all widget JS/JSON endpoints
     "/salla-auto.js",                   # short alias (configured in Salla Partner Portal)
     "/static/salla-auto.js",            # legacy path (configured in Salla Partner Portal)
+    # WhatsApp / 360dialog fetch outbound media by anonymous GET on the
+    # stored file_url. Must stay public; access is gated by unguessable id
+    # + row existence inside stream_ai_media (see intelligence_libraries).
+    "/intelligence/ai-media/file/",
 )
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
 
