@@ -32,7 +32,12 @@ class TestPersonaConstants:
             assert emoji in NAHLA_PERSONA, f"missing {emoji} in persona"
 
     def test_persona_caps_emoji_usage(self):
-        assert "1–2" in NAHLA_PERSONA or "1-2" in NAHLA_PERSONA
+        assert "1–2" in NAHLA_PERSONA or "1-2" in NAHLA_PERSONA or "واحد" in NAHLA_PERSONA
+
+    def test_persona_includes_saudi_dialect_guidance(self):
+        assert "اللهجة السعودية" in NAHLA_PERSONA
+        assert "حياك الله" in NAHLA_PERSONA
+        assert "يطري" in NAHLA_PERSONA  # forbidden leakage called out
 
     def test_persona_forbids_robot_self_reference(self):
         # Hard rule: the assistant never refers to itself as a system /

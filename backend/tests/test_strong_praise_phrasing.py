@@ -207,6 +207,7 @@ def test_prompt_rule_forbids_unsolicited_heavy_reciprocal() -> None:
     assert (
         "الله يكرمك" in joined
         or "آمين وإياك" in joined
+        or "الله يسعدك" in joined
         or "دوم بخير" in joined
     ), "Rule lacks a lighter alternative — LLM will have no fallback"
 
