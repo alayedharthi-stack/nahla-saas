@@ -11,7 +11,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Sequence, Set
+from typing import Any, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger("nahla.ai.knowledge.conversation_signals")
 
@@ -148,6 +148,55 @@ def _summarize_inbound_messages(
     return summary
 
 
+def _rollback_db(db: Any) -> None:
+    """Clear a poisoned transaction so the caller's session stays usable."""
+    if db is None:
+        return
+    try:
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            rollback()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _fetch_recent_inbound_conversation_ids(
+    db: Any,
+    *,
+    tenant_id: int,
+    cutoff: datetime,
+    max_conversations: int,
+) -> Set[int]:
+    """Return conversation ids with recent inbound traffic (newest first).
+
+    Uses ``GROUP BY conversation_id`` + ``MAX(created_at)`` so PostgreSQL
+    accepts the ``ORDER BY`` (unlike ``SELECT DISTINCT … ORDER BY created_at``
+    when ``created_at`` is not in the select list).
+    """
+    from sqlalchemy import func  # noqa: PLC0415
+    from models import MessageEvent  # noqa: PLC0415
+
+    rows = (
+        db.query(
+            MessageEvent.conversation_id,
+            func.max(MessageEvent.created_at).label("last_inbound_at"),
+        )
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.direction == "inbound",
+            MessageEvent.conversation_id.isnot(None),
+            MessageEvent.created_at >= cutoff,
+        )
+        .group_by(MessageEvent.conversation_id)
+        .order_by(func.max(MessageEvent.created_at).desc())
+        .limit(max(1, int(max_conversations)))
+        .all()
+    )
+    return {
+        int(r[0]) for r in rows if r and r[0] is not None
+    }
+
+
 def scan_tenant_conversation_signals(
     db: Any,
     tenant_id: int,
@@ -171,21 +220,12 @@ def scan_tenant_conversation_signals(
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=int(window_days))
 
-        conv_ids_q = (
-            db.query(MessageEvent.conversation_id)
-            .filter(
-                MessageEvent.tenant_id == tenant_id,
-                MessageEvent.direction == "inbound",
-                MessageEvent.conversation_id.isnot(None),
-                MessageEvent.created_at >= cutoff,
-            )
-            .distinct()
-            .order_by(MessageEvent.created_at.desc())
-            .limit(max(1, int(max_conversations)))
+        conv_ids = _fetch_recent_inbound_conversation_ids(
+            db,
+            tenant_id=tenant_id,
+            cutoff=cutoff,
+            max_conversations=max_conversations,
         )
-        conv_ids: Set[int] = {
-            int(r[0]) for r in conv_ids_q.all() if r and r[0] is not None
-        }
         summary.scanned_conversations = len(conv_ids)
 
         if not conv_ids:
@@ -207,6 +247,7 @@ def scan_tenant_conversation_signals(
         logger.warning(
             "[KB_GAP_SIGNALS] scan failed tenant=%s err=%s", tenant_id, exc,
         )
+        _rollback_db(db)
         return summary
 
     handoff_ids: Set[int] = set()
@@ -230,6 +271,7 @@ def scan_tenant_conversation_signals(
             "[KB_GAP_SIGNALS] handoff scan failed tenant=%s err=%s",
             tenant_id, exc,
         )
+        _rollback_db(db)
 
     summary = _summarize_inbound_messages(
         rows,
