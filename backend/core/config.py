@@ -224,7 +224,7 @@ SALLA_OAUTH_REDIRECT_URI  = (
 # For Salla embedded apps this is typically the partner app iframe URL.
 SALLA_EMBEDDED_URL = os.environ.get(
     "SALLA_EMBEDDED_URL",
-    "https://app.nahlah.ai",
+    "https://app.nahlah.ai/app/salla",
 )
 
 # ── Zid OAuth ──────────────────────────────────────────────────────────────────

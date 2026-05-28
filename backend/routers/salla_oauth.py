@@ -45,6 +45,7 @@ from core.audit import audit
 from core.auth import create_token, decode_token, get_jwt_tenant_id, hash_password
 from core.merchant_provisioning import get_or_create_merchant_user
 from core.config import (
+    BACKEND_URL,
     DASHBOARD_URL,
     SALLA_OAUTH_CLIENT_ID,
     SALLA_OAUTH_CLIENT_SECRET,
@@ -1868,6 +1869,52 @@ async def salla_diag_oauth_config():
             "Set Railway env var: "
             "SALLA_REDIRECT_URI=https://api.nahlah.ai/oauth/salla/callback "
             "(NO trailing slash, MUST be https, MUST match Salla Partner Portal Callback URL exactly)"
+        ),
+    }
+
+
+@router.get("/api/salla/diag/embedded-config")
+async def salla_diag_embedded_config():
+    """
+    PUBLIC — diagnostic endpoint for the Salla embedded iframe URL.
+
+    Safe: exposes only public URLs/domains (no secrets). Use to verify
+    Railway env vars and Partner Portal iframe URL alignment:
+      curl https://api.nahlah.ai/api/salla/diag/embedded-config
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    raw_embedded = SALLA_EMBEDDED_URL or ""
+    normalized_embedded = raw_embedded.strip().rstrip("/")
+    dashboard_origin = (DASHBOARD_URL or "https://app.nahlah.ai").strip().rstrip("/")
+    expected_embedded = f"{dashboard_origin}/app/salla"
+    dashboard_domain = urlparse(dashboard_origin).netloc or "app.nahlah.ai"
+    api_origin = (BACKEND_URL or "https://api.nahlah.ai").strip().rstrip("/")
+    api_domain = urlparse(api_origin).netloc or "api.nahlah.ai"
+    allowed_domains = sorted({d for d in (dashboard_domain, api_domain) if d})
+    path_ok = normalized_embedded.endswith("/app/salla")
+    warning = None
+    if not path_ok:
+        warning = (
+            "SALLA_EMBEDDED_URL should end with /app/salla — that is the "
+            "iframe entry registered in Salla Partner Portal "
+            f"(expected {expected_embedded!r})."
+        )
+
+    return {
+        "embedded_url": raw_embedded,
+        "embedded_url_normalized": normalized_embedded,
+        "expected_embedded_url": expected_embedded,
+        "matches_expected": normalized_embedded == expected_embedded.rstrip("/"),
+        "embedded_path_ok": path_ok,
+        "allowed_domains": allowed_domains,
+        "dashboard_domain": dashboard_domain,
+        "api_domain": api_domain,
+        "warning": warning,
+        "instructions": (
+            "Set Railway env var: "
+            "SALLA_EMBEDDED_URL=https://app.nahlah.ai/app/salla "
+            "(must match the Embedded Page URL in Salla Partner Portal exactly)"
         ),
     }
 
