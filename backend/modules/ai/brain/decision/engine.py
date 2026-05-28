@@ -1362,17 +1362,32 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_PAYMENT_INFO:
-            # Payment-info questions (bank account / IBAN / barcode / QR)
-            # MUST go through the brain compose path so GPT can reach the
-            # AI Media Library and attach a matching item via [MEDIA:<id>].
-            # Routing this to ACTION_FAQ_REPLY would short-circuit into
-            # the static "هذه وسائل التواصل المتاحة" template and the
-            # bank-transfer barcode would never be sent — which is the
-            # exact bug the merchant reported.
+            from modules.ai.brain.decision.payment_barcode_routing import (  # noqa: PLC0415
+                PAYMENT_BARCODE_IMAGE_REQUEST,
+                is_payment_barcode_image_request,
+            )
+            _barcode_image = is_payment_barcode_image_request(ctx.message)
             return Decision(
                 action=ACTION_LLM_REPLY,
-                args={"topic": "payment_info"},
-                reason="customer asked for bank/IBAN/barcode — let GPT attach matching media library item",
+                args={
+                    "topic": (
+                        "payment_barcode_image"
+                        if _barcode_image
+                        else "payment_info"
+                    ),
+                    "payment_request_kind": (
+                        PAYMENT_BARCODE_IMAGE_REQUEST
+                        if _barcode_image
+                        else "ask_payment_info"
+                    ),
+                },
+                reason=(
+                    "customer asked for payment barcode/QR image — "
+                    "outbound media first"
+                    if _barcode_image else
+                    "customer asked for bank/IBAN/barcode — let GPT attach "
+                    "matching media library item"
+                ),
             )
 
         if intent.name == INTENT_ASK_OWNER_CONTACT:

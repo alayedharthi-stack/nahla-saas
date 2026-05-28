@@ -4118,6 +4118,11 @@ def _media_attachments_have_barcode(
                 else:
                     media_key = (getattr(media_obj, "media_key", "") or "").lower()
                     title = getattr(media_obj, "title", "") or ""
+            elif isinstance(att, dict):
+                # ``MediaResolution.to_attachment()`` and the payment
+                # barcode route emit flat dicts with top-level keys.
+                media_key = (att.get("media_key") or "").lower()
+                title = att.get("title") or ""
         except Exception:  # noqa: BLE001
             continue
         if link_role == "barcode":

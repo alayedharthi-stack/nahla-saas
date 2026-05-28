@@ -5761,19 +5761,41 @@ async def _handle_merchant_message(
                 is_payment_query as _is_payment_query,
                 validate_media_for_send as _validate_media,
             )
-            _early_payment_intent = _is_payment_query(text or "")
-            _early_payment_asset = (
-                _find_payment_asset(db, tenant_id, text or "")
-                if _early_payment_intent else None
+            from modules.ai.brain.decision.payment_barcode_routing import (  # noqa: PLC0415
+                is_payment_barcode_image_request as _is_barcode_image_request,
+                payment_barcode_intro_text as _barcode_intro_text,
             )
+            from services.media_resolver import resolve_for_query as _resolve_for_query  # noqa: PLC0415
+
+            _early_barcode_image = _is_barcode_image_request(text or "")
+            _early_payment_intent = _is_payment_query(text or "") or _early_barcode_image
+            _early_payment_asset = None
+            _early_payment_key = ""
+            if _early_barcode_image:
+                try:
+                    _early_resolution, _early_payment_key = _resolve_for_query(
+                        db, tenant_id, text or "",
+                    )
+                    if _early_resolution:
+                        _early_payment_asset = _early_resolution.to_attachment()
+                        _early_payment_asset["_relevance_score"] = 99.0
+                except Exception as _early_resolve_exc:
+                    logger.warning(
+                        "[PAYMENT_BARCODE] early-bypass resolve failed tenant=%s err=%s",
+                        tenant_id, _early_resolve_exc,
+                    )
+            elif _early_payment_intent:
+                _early_payment_asset = _find_payment_asset(db, tenant_id, text or "")
             logger.info(
                 "[PAYMENT_INFO] early-gate tenant=%s convo=%s to=%s "
-                "intent_detected=%s asset_found=%s asset_id=%s "
-                "asset_score=%s",
+                "intent_detected=%s barcode_image=%s asset_found=%s asset_id=%s "
+                "asset_key=%s asset_score=%s",
                 tenant_id, getattr(convo, "id", None), to,
                 _early_payment_intent,
+                _early_barcode_image,
                 bool(_early_payment_asset),
                 (_early_payment_asset or {}).get("id"),
+                (_early_payment_asset or {}).get("media_key") or _early_payment_key or None,
                 f"{(_early_payment_asset or {}).get('_relevance_score') or 0:.2f}"
                 if _early_payment_asset else None,
             )
@@ -5789,7 +5811,11 @@ async def _handle_merchant_message(
                     db=db,
                 )
                 if _ok and _normalised:
-                    _intro_text = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                    _intro_text = (
+                        _barcode_intro_text(_early_payment_key or _normalised.get("media_key") or "")
+                        if _early_barcode_image else
+                        "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                    )
                     # 1) warm text reply
                     _text_ok = await _send_whatsapp_message(
                         phone_id=phone_id, to=to, text=_intro_text,
@@ -8044,6 +8070,29 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[SAFETY_NET:product_reask_guard] failed tenant=%s err=%s",
                     tenant_id, _prge,
+                )
+
+            # Payment barcode image route — queue outbound media before
+            # the text-only artifact guard can rewrite to phone fallback.
+            try:
+                from modules.ai.brain.decision.payment_barcode_routing import (  # noqa: PLC0415
+                    apply_payment_barcode_image_route as _apply_barcode_route,
+                    payment_barcode_intro_text as _barcode_intro_text,
+                )
+                _pbr = _apply_barcode_route(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_msg=text or "",
+                    media_attachments=_media_attachments,
+                    reply_text=reply or "",
+                    conversation_id=getattr(convo, "id", None),
+                )
+                if _pbr.rewrote_reply:
+                    reply = _barcode_intro_text(_pbr.media_key)
+            except Exception as _pbr_exc:  # noqa: BLE001
+                logger.warning(
+                    "[PAYMENT_BARCODE] route failed tenant=%s err=%s",
+                    tenant_id, _pbr_exc,
                 )
 
             # ── Outbound artifact guard (May 2026 #37 / D2) ──────────
