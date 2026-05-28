@@ -129,6 +129,92 @@ _STORE_LINK_MARKERS: tuple = (
     "online store",
 )
 
+# E-commerce store URL — only when the customer explicitly asks for the
+# online storefront / checkout site, NOT a physical branch on Maps.
+_ECOMMERCE_STORE_EXPLICIT_MARKERS: tuple = (
+    "رابط المتجر",
+    "رابط متجر",
+    "رابط متجركم",
+    "رابط متجرك",
+    "المتجر الالكتروني",
+    "المتجر الإلكتروني",
+    "موقعكم الالكتروني",
+    "موقعكم الإلكتروني",
+    "الموقع الالكتروني",
+    "الموقع الإلكتروني",
+    "رابط الطلب",
+    "رابط الاونلاين",
+    "رابط الأونلاين",
+    "رابط الاون لاين",
+    "اطلب من الموقع",
+    "أطلب من الموقع",
+    "ابي اطلب من الموقع",
+    "أبي أطلب من الموقع",
+    "ابغى اطلب من الموقع",
+    "أبغى أطلب من الموقع",
+    "اونلاين",
+    "أونلاين",
+    "online store",
+    "store link",
+    "store url",
+    "website link",
+    "shop link",
+)
+
+# Physical shop / branch / Google Maps — default for bare "موقع …"
+# phrasing on WhatsApp unless the customer explicitly said "online".
+_PHYSICAL_LOCATION_MARKERS: tuple = (
+    "موقع المتجر",
+    "موقع المعرض",
+    "موقع المحل",
+    "وين موقعكم",
+    "أين موقعكم",
+    "وين موقع",
+    "وين الموقع",
+    "وين المحل",
+    "وين المعرض",
+    "وين أنتم",
+    "وين انتم",
+    "وين فرعكم",
+    "وين الفرع",
+    "وين مقركم",
+    "عنوان المحل",
+    "عنوان المعرض",
+    "عنوان الفرع",
+    "ارسل اللوكيشن",
+    "أرسل اللوكيشن",
+    "ارسلي اللوكيشن",
+    "أرسلي اللوكيشن",
+    "ابعث اللوكيشن",
+    "أبعث اللوكيشن",
+    "ابعثلي اللوكيشن",
+    "ابي اللوكيشن",
+    "أبي اللوكيشن",
+    "ابغى اللوكيشن",
+    "أبغى اللوكيشن",
+    "اللوكيشن",
+    "لوكيشن المحل",
+    "لوكيشن المتجر",
+    "لوكيشن المعرض",
+    "لوكيشن الفرع",
+    "google maps",
+    "store location",
+    "branch location",
+    "where are you",
+    "where is your shop",
+    "where is your branch",
+)
+
+# Bare "موقع + noun" without "رابط"/"إلكتروني" → physical branch.
+_PHYSICAL_LOCATION_SITE_RE = re.compile(
+    r"(?:^|\s)(?:وين|أين|اين)\s+(?:موقع(?:كم|ك|نا)?|انتم|أنتم|انت|فرع|محل|معرض|مقر)\b",
+    re.UNICODE | re.IGNORECASE,
+)
+_PHYSICAL_SITE_NOUN_RE = re.compile(
+    r"(?:^|\s)موقع(?:\s+(?:المتجر|المعرض|المحل|الفرع|كم|ك|نا))\b",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _PAYMENT_LINK_MARKERS: tuple = (
     "رابط الدفع",
     "رابط دفع",
@@ -319,10 +405,43 @@ def looks_like_payment_link_request(message: str) -> bool:
     return _contains_any(norm, _PAYMENT_LINK_MARKERS)
 
 
+def looks_like_ecommerce_store_link_request(message: str) -> bool:
+    """True when the customer explicitly wants the online store URL."""
+    norm = _normalise(message)
+    if not norm:
+        return False
+    return _contains_any(norm, _ECOMMERCE_STORE_EXPLICIT_MARKERS)
+
+
+def looks_like_physical_location_request(message: str) -> bool:
+    """True when the customer wants a branch / shop on Google Maps.
+
+    Bare phrasings like ``موقع المتجر`` default here — NOT to the
+    e-commerce ``store_url`` — unless the customer said ``online`` /
+    ``رابط المتجر`` / ``المتجر الإلكتروني`` explicitly.
+    """
+    norm = _normalise(message)
+    if not norm:
+        return False
+    if looks_like_ecommerce_store_link_request(message):
+        return False
+    if _contains_any(norm, _PHYSICAL_LOCATION_MARKERS):
+        return True
+    if _PHYSICAL_LOCATION_SITE_RE.search(norm):
+        return True
+    if _PHYSICAL_SITE_NOUN_RE.search(norm):
+        return True
+    return False
+
+
 def looks_like_store_link_request(message: str) -> bool:
     norm = _normalise(message)
     if not norm:
         return False
+    if looks_like_physical_location_request(message):
+        return False
+    if looks_like_ecommerce_store_link_request(message):
+        return True
     return _contains_any(norm, _STORE_LINK_MARKERS)
 
 
@@ -380,7 +499,9 @@ def should_suppress_store_link_intent(
     state: Any = None,
     order_prep: Any = None,
 ) -> bool:
-    """Gate store-link safety nets / artifact injection for tracking asks."""
+    """Gate store-link safety nets / artifact injection for non-store asks."""
+    if looks_like_physical_location_request(message):
+        return True
     return looks_like_tracking_link_request(
         message,
         history=history,

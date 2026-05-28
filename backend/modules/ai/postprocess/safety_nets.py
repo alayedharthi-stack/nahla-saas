@@ -1616,7 +1616,6 @@ _STORE_LINK_TRIGGERS_PHRASE: set = {
     "رابط متجركم",
     "رابط متجرك",
     "رابط متجرنا",
-    "موقع المتجر",
     "ارسل رابط المتجر",
     "أرسل رابط المتجر",
     "ابعث رابط المتجر",
@@ -2082,6 +2081,12 @@ _LOCATION_LINK_TRIGGERS_PHRASE: set = {
     "وين مقركم",
     "أين مقركم",
     "مقر شركتكم",
+    "موقع المتجر",
+    "موقع المعرض",
+    "موقع المحل",
+    "وين أنتم",
+    "وين انتم",
+    "وين المعرض",
     "وين المحل",
     "أين المحل",
     "وين فرعكم",
@@ -2118,6 +2123,8 @@ _LOCATION_LINK_TRIGGERS_PHRASE: set = {
     "رابط اللوكيشن",
     "ارسل لي اللوكيشن",
     "أرسل لي اللوكيشن",
+    "ارسل اللوكيشن",
+    "أرسل اللوكيشن",
     "ابعث اللوكيشن",
     "أبعث اللوكيشن",
     "ابي اللوكيشن",
@@ -2217,6 +2224,14 @@ def _looks_like_location_request(customer_msg: str) -> bool:
     The trigger sets are disjoint, so a single message can fire AT
     MOST one of the two nets per turn.
     """
+    try:
+        from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+            looks_like_physical_location_request,
+        )
+        if looks_like_physical_location_request(customer_msg or ""):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     msg = _normalise_for_match(customer_msg)
     if not msg:
         return False
