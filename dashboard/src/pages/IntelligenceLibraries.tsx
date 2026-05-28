@@ -575,6 +575,8 @@ export function AIMediaLibraryPanel() {
   const [saving, setSaving] = useState(false)
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<AIMediaItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -714,13 +716,27 @@ export function AIMediaLibraryPanel() {
   }
 
   const remove = async (row: AIMediaItem) => {
-    if (!window.confirm(`حذف الوسيط "${row.title}"؟`)) return
     try {
       await intelligenceLibrariesApi.deleteAIMedia(row.id)
       setItems((prev) => prev.filter((r) => r.id !== row.id))
       setSuccess(`تم حذف الوسيط "${row.title}"`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'تعذر الحذف')
+      throw e
+    }
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteConfirm) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await remove(deleteConfirm)
+      setDeleteConfirm(null)
+    } catch {
+      // remove() surfaces the error banner; keep modal open for retry.
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -763,7 +779,7 @@ export function AIMediaLibraryPanel() {
                 item={m}
                 onEdit={() => openEdit(m)}
                 onToggle={() => toggle(m)}
-                onDelete={() => remove(m)}
+                onDelete={() => setDeleteConfirm(m)}
               />
             ))}
           </ul>
@@ -782,6 +798,53 @@ export function AIMediaLibraryPanel() {
           saving={saving}
           error={error}
         />
+      )}
+
+      {deleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
+          onClick={() => { if (!deleting) setDeleteConfirm(null) }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4"
+            dir="rtl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-red-600" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-slate-900">تأكيد حذف الوسيط</h3>
+                <p className="text-xs text-slate-500 mt-0.5 truncate">{deleteConfirm.title}</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-slate-600 leading-relaxed">
+              هل تريد حذف هذا الوسيط؟ لا يمكن التراجع عن هذه العملية.
+            </p>
+
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                disabled={deleting}
+                className="flex-1 btn-secondary text-sm"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={() => { void confirmDelete() }}
+                disabled={deleting}
+                className="flex-1 inline-flex items-center justify-center gap-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                {deleting ? 'جارٍ الحذف…' : 'حذف'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
