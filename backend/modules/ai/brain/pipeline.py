@@ -1888,13 +1888,33 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "tracking_link_follow_up"
     ):
-        return (
-            "tracking_link_follow_up — العميل لديه طلب نشط/مؤكد ويسأل عن "
-            "رابط التتبع أو متى يصل رابط الشحن. أكدي حالة الطلب الحالية "
-            "(مراجعة/تجهيز/شحن) وطمئني أن رابط التتبع يُرسل هنا فور صدوره. "
-            "ممنوع إرسال رابط المتجر، ممنوع طلب المدينة/الحي/الجوال/العنوان "
-            "من جديد، وممنوع إعادة فتح مسار «أقدر أجهز طلبك» أو checkout."
-        )
+        _args = decision.args or {}
+        _order_ref = str(_args.get("order_reference") or "").strip()
+        _order_status = str(_args.get("order_status") or "").strip()
+        _tracking_available = bool(_args.get("tracking_available"))
+        lines = [
+            "tracking_link_follow_up — Generate a short natural Saudi Arabic "
+            "WhatsApp reply. The customer is asking to receive the tracking "
+            "link once their existing confirmed order ships.",
+            "The order already exists — acknowledge it, state the current "
+            "status (pending review / not shipped yet when applicable), and "
+            "confirm the tracking link will be sent here once issued.",
+            "Do NOT send store_url. Do NOT ask for city/district/phone/address. "
+            "Do NOT restart checkout or say you can prepare a new order.",
+            "Do NOT stay silent — always produce a helpful reply.",
+        ]
+        if _order_ref:
+            lines.append(f"Known order reference: {_order_ref}")
+        if _order_status:
+            lines.append(f"Known order_status: {_order_status}")
+        if _tracking_available:
+            lines.append(
+                "tracking_available=true — include the tracking link if present "
+                "in facts; otherwise explain it is not issued yet."
+            )
+        else:
+            lines.append("tracking_available=false — no tracking URL to send yet.")
+        return " | ".join(lines)
 
     parts: List[str] = []
     # ── Relational preference prefix (May 2026 — Tenant 33 #49, Commit 2)

@@ -164,6 +164,36 @@ _SEND_LINK_COMBO_RE = re.compile(
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _DIA_RE = re.compile(f"[{_DIA}]+")
 
+# Pre-shipment statuses — tracking URL is usually not issued yet.
+PRE_SHIP_STATUSES = frozenset({
+    "",
+    "awaiting_receipt",
+    "under_review",
+    "in_review",
+    "pending_review",
+    "awaiting_review",
+    "processing",
+    "preparing",
+    "ready",
+    "payment_pending",
+    "pending_payment",
+    "pending",
+    "confirmed",
+    "complete",
+})
+
+_SHIPPED_STATUSES = frozenset({
+    "shipped",
+    "in_transit",
+    "out_for_delivery",
+    "delivered",
+})
+
+_ORDER_REF_RE = re.compile(
+    r"(?:طلب(?:ك|كم)?\s*رقم|رقم\s*(?:ال)?طلب(?:ك|كم)?|order\s*(?:#|number)?)\s*[:#]?\s*(\d{4,})",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def _normalise(text: str) -> str:
     if not text:
@@ -182,9 +212,13 @@ def _contains_any(text: str, needles: tuple) -> bool:
 def history_indicates_post_order(
     history: Optional[List[Dict[str, Any]]],
     *,
-    lookback_outbound: int = 6,
+    lookback_outbound: int = 0,
 ) -> bool:
-    """True when recent outbound turns prove an order already exists."""
+    """True when outbound turns prove an order already exists.
+
+    ``lookback_outbound=0`` scans the full history so post-order context
+    survives product Q&A turns after confirmation.
+    """
     if not history:
         return False
     outbound_seen = 0
@@ -197,7 +231,7 @@ def history_indicates_post_order(
             body = _normalise(str((turn or {}).get("body") or ""))
             if body and _contains_any(body, _POST_ORDER_OUTBOUND_MARKERS):
                 return True
-            if outbound_seen >= lookback_outbound:
+            if lookback_outbound and outbound_seen >= lookback_outbound:
                 break
     except Exception:  # noqa: BLE001
         return False
@@ -353,3 +387,144 @@ def should_suppress_store_link_intent(
         state=state,
         order_prep=order_prep,
     )
+
+
+def resolve_order_status(
+    *,
+    state: Any = None,
+    order_prep: Any = None,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Best-effort order status from brain state or recent outbound copy."""
+    prep = order_prep if order_prep is not None else getattr(state, "order_prep", None)
+    try:
+        status = str(getattr(prep, "order_status", "") or "").strip().lower()
+        if status:
+            return status
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not history:
+        return ""
+
+    status_markers = (
+        ("بانتظار المراجعة", "under_review"),
+        ("بإنتظار المراجعة", "under_review"),
+        ("بمرحلة المراجعة", "under_review"),
+        ("مرحلة المراجعة", "under_review"),
+        ("pending review", "pending_review"),
+        ("under review", "under_review"),
+        ("تم الشحن", "shipped"),
+        ("في طريق", "in_transit"),
+        ("خارج للتوصيل", "out_for_delivery"),
+        ("تم التسليم", "delivered"),
+    )
+    _SHIPPED_BODY_RE = re.compile(
+        r"(?<![\u064a\u064a])تم\s+شحن(?:ه|ها|هم)?",
+        re.UNICODE,
+    )
+    try:
+        for turn in reversed(history):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("out", "outbound"):
+                continue
+            body = _normalise(str((turn or {}).get("body") or ""))
+            if not body:
+                continue
+            for marker, slug in status_markers:
+                if marker in body:
+                    return slug
+            if _SHIPPED_BODY_RE.search(body):
+                return "shipped"
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def extract_order_reference(
+    *,
+    state: Any = None,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Pull a confirmed order number from brain state or conversation history."""
+    for source in (
+        str(getattr(state, "draft_order_id", "") or "").strip(),
+        str(getattr(getattr(state, "order_prep", None), "draft_order_id", "") or "").strip(),
+    ):
+        if source:
+            return source
+
+    if not history:
+        return ""
+    try:
+        for turn in reversed(history):
+            body = str((turn or {}).get("body") or "")
+            if not body:
+                continue
+            match = _ORDER_REF_RE.search(body)
+            if match:
+                return match.group(1)
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def is_pre_ship_status(status: str) -> bool:
+    slug = str(status or "").strip().lower()
+    if slug in _SHIPPED_STATUSES:
+        return False
+    return slug in PRE_SHIP_STATUSES or not slug
+
+
+def should_use_generative_tracking_follow_up(
+    message: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    state: Any = None,
+    order_prep: Any = None,
+) -> bool:
+    """True when the brain (not a template) should answer a tracking-link ask."""
+    if looks_like_payment_link_request(message):
+        return False
+    if looks_like_store_link_request(message):
+        return False
+    if not has_active_post_order_context(
+        state=state,
+        order_prep=order_prep,
+        history=history,
+    ):
+        return False
+    if not looks_like_tracking_link_request(
+        message,
+        history=history,
+        state=state,
+        order_prep=order_prep,
+    ):
+        return False
+    status = resolve_order_status(
+        state=state,
+        order_prep=order_prep,
+        history=history,
+    )
+    return is_pre_ship_status(status)
+
+
+def build_tracking_follow_up_args(
+    *,
+    state: Any = None,
+    history: Optional[List[Dict[str, Any]]] = None,
+    tracking_available: bool = False,
+) -> Dict[str, Any]:
+    """Decision args for ``ACTION_LLM_REPLY`` tracking follow-up turns."""
+    args: Dict[str, Any] = {
+        "topic": "tracking_link_follow_up",
+        "intent_hint": "order_tracking",
+        "tracking_available": bool(tracking_available),
+    }
+    order_ref = extract_order_reference(state=state, history=history)
+    if order_ref:
+        args["order_reference"] = order_ref
+    status = resolve_order_status(state=state, history=history)
+    if status:
+        args["order_status"] = status
+    return args

@@ -360,6 +360,18 @@ class DefaultComposer:
 
         # ── Track order ────────────────────────────────────────────────────
         if action == ACTION_TRACK_ORDER:
+            try:
+                from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+                    should_use_generative_tracking_follow_up,
+                )
+                if should_use_generative_tracking_follow_up(
+                    ctx.message or "",
+                    history=ctx.history,
+                    state=ctx.state,
+                ):
+                    return await self._llm_compose(ctx, result)
+            except Exception:  # noqa: BLE001
+                pass
             if not result.success or data.get("message") == "no_orders_found":
                 return T.no_orders()
             return self._with_follow_up(

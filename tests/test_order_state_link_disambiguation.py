@@ -188,7 +188,6 @@ class TestDecisionEnginePostOrder:
         from modules.ai.brain.decision.actions import (
             ACTION_LLM_REPLY,
             ACTION_PROPOSE_DRAFT_ORDER,
-            ACTION_TRACK_ORDER,
         )
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         from modules.ai.brain.types import INTENT_TRACK_ORDER
@@ -211,10 +210,61 @@ class TestDecisionEnginePostOrder:
                 state,
             )
         )
-        assert d.action in (ACTION_LLM_REPLY, ACTION_TRACK_ORDER)
+        assert d.action == ACTION_LLM_REPLY
         assert d.action != ACTION_PROPOSE_DRAFT_ORDER
-        if d.action == ACTION_LLM_REPLY:
-            assert d.args.get("topic") == "tracking_link_follow_up"
+        assert d.args.get("topic") == "tracking_link_follow_up"
+        assert d.args.get("tracking_available") is False
+        assert d.args.get("order_reference") == "262511443"
+
+    def test_tracking_link_routes_to_generative_llm_without_tracking_url(self):
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.types import INTENT_TRACK_ORDER
+
+        eng = DefaultDecisionEngine()
+        d = eng.decide(
+            self._ctx(
+                "رابط التتبع",
+                INTENT_TRACK_ORDER,
+                _make_state(order_status="under_review"),
+            )
+        )
+        assert d.action == ACTION_LLM_REPLY
+        assert d.args.get("topic") == "tracking_link_follow_up"
+        assert d.args.get("tracking_available") is False
+
+    def test_post_order_context_survives_product_questions_in_between(self):
+        from modules.ai.brain.intent.link_disambiguation import (
+            has_active_post_order_context,
+            should_use_generative_tracking_follow_up,
+        )
+
+        history = list(ORDER_CONFIRMED_HISTORY)
+        for _ in range(6):
+            history.extend([
+                {"direction": "inbound", "body": "كم سعر ارخص عسل عندكم"},
+                {
+                    "direction": "outbound",
+                    "body": "عندنا عسل سدر بـ 180 ريال للكيلو 🌷",
+                },
+            ])
+        assert has_active_post_order_context(history=history) is True
+        assert should_use_generative_tracking_follow_up(
+            "تمام بس تشحنو ارسلو الرابط",
+            history=history,
+        ) is True
+
+    def test_normal_product_question_unaffected(self):
+        from modules.ai.brain.intent.link_disambiguation import (
+            looks_like_tracking_link_request,
+            should_use_generative_tracking_follow_up,
+        )
+
+        assert looks_like_tracking_link_request("كم سعر العسل") is False
+        assert should_use_generative_tracking_follow_up(
+            "كم سعر العسل",
+            history=ORDER_CONFIRMED_HISTORY,
+        ) is False
 
     def test_unpaid_payment_link_still_pay_now(self):
         from modules.ai.brain.decision.actions import ACTION_SEND_PAYMENT_LINK
@@ -237,3 +287,28 @@ class TestDecisionEnginePostOrder:
             )
         )
         assert d.action == ACTION_SEND_PAYMENT_LINK
+
+
+class TestTrackingFollowUpResponseGoal:
+    def test_response_goal_includes_order_context_and_generative_directive(self):
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import Decision, SuggestionSnapshot
+
+        decision = Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "tracking_link_follow_up",
+                "order_reference": "262511443",
+                "order_status": "under_review",
+                "tracking_available": False,
+            },
+            reason="post-order tracking follow-up",
+        )
+        goal = _compose_base_response_goal(decision, SuggestionSnapshot())
+        assert "tracking_link_follow_up" in goal
+        assert "262511443" in goal
+        assert "under_review" in goal
+        assert "tracking_available=false" in goal
+        assert "store_url" in goal
+        assert "Do NOT stay silent" in goal

@@ -483,56 +483,42 @@ class DefaultDecisionEngine:
         # ── 1.8 Post-order tracking-link guard (May 2026) ───────────────
         # After an order is confirmed, bare "الرابط" / "ارسل الرابط"
         # usually means tracking follow-up — not store URL / checkout.
+        # When no tracking URL exists yet, route to the LLM with a strict
+        # response_goal so the customer always gets a natural reply.
         try:
             from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
-                has_active_post_order_context,
+                build_tracking_follow_up_args,
                 looks_like_payment_link_request,
-                looks_like_tracking_link_request,
+                should_use_generative_tracking_follow_up,
             )
-            _post_order_active = has_active_post_order_context(
-                state=state,
+            if should_use_generative_tracking_follow_up(
+                ctx.message or "",
                 history=ctx.history,
-            )
-            _tracking_link_ask = (
-                intent.name == INTENT_TRACK_ORDER
-                or looks_like_tracking_link_request(
-                    ctx.message or "",
-                    history=ctx.history,
-                    state=state,
-                )
-            )
-            if (
-                _post_order_active
-                and _tracking_link_ask
-                and not looks_like_payment_link_request(ctx.message or "")
+                state=state,
             ):
-                if intent.name == INTENT_TRACK_ORDER:
-                    return Decision(
-                        action=ACTION_TRACK_ORDER,
-                        args={"order_id": intent.slots.get("order_id", "")},
-                        reason=(
-                            "post-order tracking-link ask — route to "
-                            "order status / tracking handler"
-                        ),
-                    )
                 logger.info(
-                    "[TRACKING_LINK_GUARD] post-order follow-up — defer to "
-                    "brain | tenant=%s preview=%r order_status=%r",
+                    "[TRACKING_LINK_GUARD] generative follow-up | tenant=%s "
+                    "preview=%r order_status=%r",
                     ctx.tenant_id,
                     (ctx.message or "")[:60],
-                    getattr(getattr(state, "order_prep", None), "order_status", ""),
+                    build_tracking_follow_up_args(
+                        state=state,
+                        history=ctx.history,
+                    ).get("order_status", ""),
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
-                    args={
-                        "topic": "tracking_link_follow_up",
-                        "intent_hint": "order_tracking",
-                    },
+                    args=build_tracking_follow_up_args(
+                        state=state,
+                        history=ctx.history,
+                        tracking_available=False,
+                    ),
                     reason=(
                         "post-order tracking/shipping link follow-up — "
-                        "do not restart checkout or send store URL"
+                        "generative reply (no tracking URL yet); do not "
+                        "restart checkout or send store URL"
                     ),
-                    confidence=0.91,
+                    confidence=0.93,
                 )
         except Exception as _tlg_exc:  # noqa: BLE001
             logger.debug(
@@ -568,6 +554,31 @@ class DefaultDecisionEngine:
 
         # ── 3. Track order ────────────────────────────────────────────────
         if intent.name == INTENT_TRACK_ORDER:
+            try:
+                from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+                    build_tracking_follow_up_args,
+                    should_use_generative_tracking_follow_up,
+                )
+                if should_use_generative_tracking_follow_up(
+                    ctx.message or "",
+                    history=ctx.history,
+                    state=state,
+                ):
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args=build_tracking_follow_up_args(
+                            state=state,
+                            history=ctx.history,
+                            tracking_available=False,
+                        ),
+                        reason=(
+                            "track_order intent but customer asked for a "
+                            "future tracking link — generative follow-up"
+                        ),
+                        confidence=0.93,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             return Decision(
                 action=ACTION_TRACK_ORDER,
                 args={"order_id": intent.slots.get("order_id", "")},
@@ -1643,16 +1654,13 @@ class DefaultDecisionEngine:
         # This is the last line of defence before LLM fallback.
         try:
             from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
-                has_active_post_order_context,
-                looks_like_tracking_link_request,
+                build_tracking_follow_up_args,
+                should_use_generative_tracking_follow_up,
             )
-            if has_active_post_order_context(state=state, history=ctx.history) and (
-                intent.name == INTENT_TRACK_ORDER
-                or looks_like_tracking_link_request(
-                    ctx.message or "",
-                    history=ctx.history,
-                    state=state,
-                )
+            if should_use_generative_tracking_follow_up(
+                ctx.message or "",
+                history=ctx.history,
+                state=state,
             ):
                 logger.info(
                     "[ORDER FLOW] suppress ordering safety net for post-order "
@@ -1662,10 +1670,11 @@ class DefaultDecisionEngine:
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
-                    args={
-                        "topic": "tracking_link_follow_up",
-                        "intent_hint": "order_tracking",
-                    },
+                    args=build_tracking_follow_up_args(
+                        state=state,
+                        history=ctx.history,
+                        tracking_available=False,
+                    ),
                     reason=(
                         "ordering_stage_safety_net bypassed — active order "
                         "exists and customer asked about tracking/shipping link"
