@@ -111,6 +111,28 @@ _SURFACE_FORM_KNOWLEDGE_MODES = frozenset({
     KNOWLEDGE_MODE_ARTIFACT_TRIGGER_EXAMPLES,
 })
 
+# ── Knowledge Gap Intelligence v1 — suggestion categories ─────────────────
+CATEGORY_MISSING_INFORMATION = "MISSING_INFORMATION"
+CATEGORY_CONTRADICTION = "CONTRADICTION"
+CATEGORY_SALES_OPPORTUNITY = "SALES_OPPORTUNITY"
+CATEGORY_TRUST_IMPROVEMENT = "TRUST_IMPROVEMENT"
+CATEGORY_MARKETING_IMPROVEMENT = "MARKETING_IMPROVEMENT"
+
+_VALID_SUGGESTION_CATEGORIES = frozenset({
+    CATEGORY_MISSING_INFORMATION,
+    CATEGORY_CONTRADICTION,
+    CATEGORY_SALES_OPPORTUNITY,
+    CATEGORY_TRUST_IMPROVEMENT,
+    CATEGORY_MARKETING_IMPROVEMENT,
+})
+
+# Minimum inbound hits (last 7 days) before a conversation-grounded gap
+# suggestion is emitted with boosted confidence.
+_SIGNAL_PAYMENT_MIN = 5
+_SIGNAL_SHIPPING_MIN = 5
+_SIGNAL_LOCATION_MIN = 3
+_SIGNAL_HANDOFF_PAYMENT_MIN = 3
+
 
 # ── Severity / impact taxonomy ──────────────────────────────────────────────
 
@@ -137,6 +159,7 @@ class CatalogSlice:
     title: str
     has_description: bool = False
     has_image: bool = False
+    price_sar: Optional[float] = None
 
 
 _FP_NORMALIZE_RE = re.compile(r"[\s\u00a0\u200f\u200e]+", re.UNICODE)
@@ -173,6 +196,8 @@ def compute_fingerprint(
     target_kind: str,
     title: str,
     related_section_ids: Sequence[int] = (),
+    category: str = "",
+    problem: str = "",
 ) -> str:
     """Stable 16-char hash identifying a suggestion across re-runs.
 
@@ -180,21 +205,38 @@ def compute_fingerprint(
       * ``type_``               — e.g. ``"missing_required_knowledge"``.
       * ``target_kind``         — e.g. ``"payment_method"``.
       * ``title``               — normalized via ``_normalize_for_fingerprint``.
+      * ``category``            — Knowledge Gap v1 category slug.
+      * ``problem``             — normalized reason/problem snippet.
       * ``related_section_ids`` — sorted before hashing so two findings
         about sections (50, 51) and (51, 50) collide as intended.
-
-    A finding whose title changes cosmetically (polish, whitespace,
-    bidi marks) keeps its fingerprint — that's what lets the
-    suppression/applied filter survive a polish pass.
     """
     parts = [
         (type_ or "").strip().lower(),
         (target_kind or "").strip().lower(),
+        (category or "").strip().lower(),
         _normalize_for_fingerprint(title or ""),
+        _normalize_for_fingerprint((problem or "")[:160]),
         ",".join(str(int(s)) for s in sorted(int(x) for x in related_section_ids or [])),
     ]
     raw = "|".join(parts).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _infer_category(finding: "ImprovementFinding") -> str:
+    """Map legacy ``type`` + rationale keys to Gap Intelligence categories."""
+    keys = set(finding.rationale_keys or [])
+    ftype = (finding.type or "").strip().lower()
+    if ftype == "compliance" or any(k.startswith("compliance:") for k in keys):
+        return CATEGORY_TRUST_IMPROVEMENT
+    if ftype == "behavior_tone":
+        return CATEGORY_MARKETING_IMPROVEMENT
+    if ftype == "product_knowledge_gap" or any(k.startswith("sales:") for k in keys):
+        return CATEGORY_SALES_OPPORTUNITY
+    if ftype == "duplicate_merge" or any(
+        k.startswith("contradiction:") or k.startswith("price:") for k in keys
+    ):
+        return CATEGORY_CONTRADICTION
+    return CATEGORY_MISSING_INFORMATION
 
 
 @dataclass
@@ -237,6 +279,8 @@ class ImprovementFinding:
     intent: str = ""
     artifact_target: str = ""
     summary: str = ""
+    category: str = ""
+    source_reason: str = ""
 
     def __post_init__(self) -> None:
         # Existing factory helpers pre-date ``knowledge_mode``. Infer a
@@ -250,12 +294,18 @@ class ImprovementFinding:
             self.preserve_surface_forms = True
         if self.preserve_surface_forms and not self.examples_to_preserve:
             self.examples_to_preserve = _extract_surface_examples(self.proposed_body)
+        if not self.category:
+            self.category = _infer_category(self)
+        if self.category not in _VALID_SUGGESTION_CATEGORIES:
+            self.category = CATEGORY_MISSING_INFORMATION
         if not self.fingerprint:
             self.fingerprint = compute_fingerprint(
                 type_=self.type,
                 target_kind=self.target_kind,
                 title=self.title,
                 related_section_ids=self.related_section_ids,
+                category=self.category,
+                problem=self.reason or self.source_reason,
             )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -278,6 +328,8 @@ class ImprovementFinding:
             "intent": self.intent or "",
             "artifact_target": self.artifact_target or "",
             "summary": self.summary or "",
+            "category": self.category or CATEGORY_MISSING_INFORMATION,
+            "source_reason": self.source_reason or "",
         }
 
 
@@ -682,13 +734,38 @@ def _row_has_barcode_media(row: _RowView) -> bool:
 # "إذا لا توجد معلومة كافية، اقترح اسأل التاجر لإكمالها وليس نصاً مؤلفاً".
 
 
-def _suggest_missing_payment(idx: int) -> ImprovementFinding:
+def _suggest_missing_payment(
+    idx: int,
+    *,
+    signals: Any = None,
+) -> ImprovementFinding:
+    reason = "لم نجد قسماً واضحاً يشرح طرق الدفع المتاحة في متجرك."
+    source_reason = ""
+    confidence = 0.9
+    count = int(getattr(signals, "payment_questions", 0) or 0) if signals else 0
+    if count >= _SIGNAL_PAYMENT_MIN:
+        days = int(getattr(signals, "window_days", 7) or 7)
+        source_reason = (
+            f"تم رصد {count} سؤالًا متعلقًا بالدفع خلال آخر {days} أيام."
+        )
+        reason = (
+            f"{source_reason} العملاء يسألون كثيرًا عن وسائل الدفع لكن لا "
+            "توجد معلومات دفع واضحة في قاعدة المعرفة."
+        )
+        confidence = min(0.96, 0.80 + count * 0.01)
+    handoff = int(getattr(signals, "human_handoff_after_payment", 0) or 0) if signals else 0
+    if handoff >= _SIGNAL_HANDOFF_PAYMENT_MIN:
+        source_reason = (
+            (source_reason + " " if source_reason else "")
+            + f"تم تحويل {handoff} محادثة لموظف بعد أسئلة دفع."
+        ).strip()
+        confidence = max(confidence, 0.88)
     return ImprovementFinding(
         id=f"sug-{idx}",
         type="missing_required_knowledge",
         severity="high",
         title="أضف سياسة دفع واضحة",
-        reason="لم نجد قسماً واضحاً يشرح طرق الدفع المتاحة في متجرك.",
+        reason=reason,
         expected_impact=(
             "يساعد العملاء على معرفة طرق الدفع المتاحة بسرعة، ويقلل "
             "تكرار سؤال «كيف أدفع؟» وتحويل المحادثة لموظف بشري."
@@ -700,21 +777,41 @@ def _suggest_missing_payment(idx: int) -> ImprovementFinding:
             "بالتحويل البنكي، يمكننا إرسال بيانات التحويل عند الطلب."
         ),
         requires_media=False,
-        confidence=0.9,
-        rationale_keys=["missing:payment_method"],
+        confidence=confidence,
+        related_section_ids=[],
+        rationale_keys=["missing:payment_method", "gap:payment"],
+        category=CATEGORY_MISSING_INFORMATION,
+        source_reason=source_reason,
     )
 
 
-def _suggest_missing_shipping(idx: int) -> ImprovementFinding:
+def _suggest_missing_shipping(
+    idx: int,
+    *,
+    signals: Any = None,
+) -> ImprovementFinding:
+    reason = (
+        "لم نجد قسماً يوضح شركات الشحن، المناطق المغطاة، أو مدة "
+        "التوصيل."
+    )
+    source_reason = ""
+    confidence = 0.9
+    count = int(getattr(signals, "shipping_questions", 0) or 0) if signals else 0
+    if count >= _SIGNAL_SHIPPING_MIN:
+        days = int(getattr(signals, "window_days", 7) or 7)
+        source_reason = (
+            f"تم رصد {count} سؤالًا متعلقًا بالشحن خلال آخر {days} أيام."
+        )
+        reason = (
+            f"{source_reason} لا توجد سياسة شحن واضحة في قاعدة المعرفة."
+        )
+        confidence = min(0.95, 0.78 + count * 0.01)
     return ImprovementFinding(
         id=f"sug-{idx}",
         type="missing_required_knowledge",
         severity="high",
         title="أضف سياسة شحن واضحة",
-        reason=(
-            "لم نجد قسماً يوضح شركات الشحن، المناطق المغطاة، أو مدة "
-            "التوصيل."
-        ),
+        reason=reason,
         expected_impact=(
             "سؤال «كم تستغرق الشحنة؟» من أكثر الأسئلة المتكررة. وجود "
             "سياسة شحن واضحة يقلل التواصل لموظف بشري ويزيد ثقة العميل."
@@ -726,8 +823,10 @@ def _suggest_missing_shipping(idx: int) -> ImprovementFinding:
             "التوصيل المتوقعة [أضف المدة — مثلاً 2 إلى 4 أيام عمل]."
         ),
         requires_media=False,
-        confidence=0.9,
-        rationale_keys=["missing:shipping"],
+        confidence=confidence,
+        rationale_keys=["missing:shipping", "gap:shipping"],
+        category=CATEGORY_MISSING_INFORMATION,
+        source_reason=source_reason,
     )
 
 
@@ -1163,6 +1262,8 @@ def _suggest_product_usage_gap(
 
 def _pass_missing_required(
     rows: List[_RowView], idx_start: int,
+    *,
+    signals: Any = None,
 ) -> List[ImprovementFinding]:
     """Detect missing payment / shipping / return / hours sections."""
     by_kind: Dict[str, List[_RowView]] = {}
@@ -1175,12 +1276,12 @@ def _pass_missing_required(
     has_payment = bool(by_kind.get("payment_method") or by_kind.get("bank_transfer")
                        or by_kind.get("cod"))
     if not has_payment:
-        out.append(_suggest_missing_payment(idx)); idx += 1
+        out.append(_suggest_missing_payment(idx, signals=signals)); idx += 1
 
     has_shipping = bool(by_kind.get("shipping_zones")
                         or by_kind.get("shipping_carrier"))
     if not has_shipping:
-        out.append(_suggest_missing_shipping(idx)); idx += 1
+        out.append(_suggest_missing_shipping(idx, signals=signals)); idx += 1
 
     if not by_kind.get("return_policy"):
         out.append(_suggest_missing_return(idx)); idx += 1
@@ -1189,6 +1290,201 @@ def _pass_missing_required(
         out.append(_suggest_missing_working_hours(idx)); idx += 1
 
     return out
+
+
+def _pass_location_gap_from_signals(
+    rows: List[_RowView],
+    signals: Any,
+    idx_start: int,
+) -> List[ImprovementFinding]:
+    """Conversation-grounded branch/location gap when traffic asks but KB lacks it."""
+    if not signals:
+        return []
+    count = int(getattr(signals, "location_questions", 0) or 0)
+    if count < _SIGNAL_LOCATION_MIN:
+        return []
+    has_branch = bool([
+        r for r in rows
+        if r.kind in ("branches", "store_story")
+        and len((r.body or "").strip()) >= 40
+    ])
+    if has_branch:
+        return []
+    days = int(getattr(signals, "window_days", 7) or 7)
+    source_reason = (
+        f"تم رصد {count} سؤالًا عن موقع/فرع خلال آخر {days} أيام."
+    )
+    return [ImprovementFinding(
+        id=f"sug-{idx_start}",
+        type="missing_required_knowledge",
+        severity="medium",
+        title="أضف موقع الفرع أو رابط الخريطة",
+        reason=(
+            f"{source_reason} لا يوجد قسم واضح يوضح موقع المعرض/الفرع "
+            "أو رابط Google Maps."
+        ),
+        expected_impact=(
+            "يقلل أسئلة «وين موقعكم؟» المتكررة ويمنع الذكاء من إرسال "
+            "رابط المتجر الإلكتروني بدل موقع الفرع."
+        ),
+        target_kind="branches",
+        proposed_body=(
+            "موقعنا/فروعنا: [أضف العنوان أو رابط Google Maps للفرع "
+            "الرئيسي]. ساعات العمل: [أضف الأوقات]."
+        ),
+        requires_media=False,
+        confidence=min(0.94, 0.76 + count * 0.01),
+        rationale_keys=["missing:branches", "gap:location"],
+        category=CATEGORY_MISSING_INFORMATION,
+        source_reason=source_reason,
+    )]
+
+
+_PRICE_NUM_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:ريال|ر\.?س|SAR|sar)?",
+    re.IGNORECASE | re.UNICODE,
+)
+_QUARTER_HINT_RE = re.compile(
+    r"(?:ربع|250\s*(?:جر|gram|g)|250\s*جرام|ربع\s*كilo|ربع\s*كيلو)",
+    re.IGNORECASE | re.UNICODE,
+)
+_KILO_HINT_RE = re.compile(
+    r"(?:كilo|كيلو|1\s*kg|1000\s*(?:جر|gram|g)|كilo\s*واحد)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _parse_price_sar(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", "")
+    m = _PRICE_NUM_RE.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _product_base_for_price(title: str) -> str:
+    """Strip size/unit tokens so quarter vs kilo rows can be paired."""
+    t = re.sub(
+        r"(?:ربع|نصف|250\s*\S*|1000\s*\S*|1\s*kg|كilo|كيلo|كيلو|kg|جرام|gram|g\b)",
+        " ",
+        title or "",
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+    return re.sub(r"\s+", " ", t).strip().lower()[:48]
+
+
+def _pass_price_contradictions(
+    products: Sequence[CatalogSlice],
+    idx_start: int,
+) -> List[ImprovementFinding]:
+    """Simple unit-price sanity check — quarter vs kilo on similar titles."""
+    quarters: List[Tuple[str, float, int]] = []
+    kilos: List[Tuple[str, float, int]] = []
+    for p in products:
+        title = (p.title or "").strip()
+        if not title:
+            continue
+        price = p.price_sar
+        if price is None:
+            continue
+        base = _product_base_for_price(title)
+        if _QUARTER_HINT_RE.search(title):
+            quarters.append((base, price, p.id))
+        elif _KILO_HINT_RE.search(title):
+            kilos.append((base, price, p.id))
+
+    for q_base, q_price, q_id in quarters:
+        for k_base, k_price, k_id in kilos:
+            if not q_base or q_base != k_base:
+                continue
+            if q_price * 4 > k_price * 1.35:
+                return [ImprovementFinding(
+                    id=f"sug-{idx_start}",
+                    type="duplicate_merge",
+                    severity="medium",
+                    title="راجع تضاربًا سعريًا محتملًا",
+                    reason=(
+                        f"سعر «{q_price:.0f}» للربع ×4 يبعد كثيرًا عن سعر "
+                        f"الكilo «{k_price:.0f}» لنفس خط المنتج."
+                    ),
+                    expected_impact=(
+                        "التعارض السعري يربك العملاء ويزيد أسئلة «كم السعر؟» "
+                        "— راجع الأسعار في الكتالوج وقاعدة المعرفة."
+                    ),
+                    target_kind="custom",
+                    proposed_body=(
+                        "راجع أسعار أحجام المنتج (ربع/نصف/كilo) وتأكد أن "
+                        "الأسعار متناسقة في الكتالوج وفي أي FAQ سعري "
+                        "موثق في قاعدة المعرفة."
+                    ),
+                    requires_media=False,
+                    confidence=0.84,
+                    related_section_ids=[q_id, k_id],
+                    rationale_keys=[
+                        "contradiction:price_unit",
+                        f"price:product:{q_id}:{k_id}",
+                    ],
+                    category=CATEGORY_CONTRADICTION,
+                    source_reason=(
+                        "فحص sanity على أسعار الكتالوج — بدون تعديل تلقائي."
+                    ),
+                )]
+    return []
+
+
+_COMPARE_GAP_MIN = 5
+
+
+def _pass_conversation_sales_signals(
+    rows: List[_RowView],
+    signals: Any,
+    idx_start: int,
+) -> List[ImprovementFinding]:
+    """Lightweight sales-loss signal — repeated product comparison questions."""
+    if not signals:
+        return []
+    count = int(getattr(signals, "product_compare_questions", 0) or 0)
+    if count < _COMPARE_GAP_MIN:
+        return []
+    by_kind: Dict[str, List[_RowView]] = {}
+    for r in rows:
+        by_kind.setdefault(r.kind, []).append(r)
+    if by_kind.get("product_compare"):
+        return []
+    days = int(getattr(signals, "window_days", 7) or 7)
+    source_reason = (
+        f"تم رصد {count} سؤالًا عن الفرق بين المنتجات خلال آخر {days} أيام."
+    )
+    return [ImprovementFinding(
+        id=f"sug-{idx_start}",
+        type="product_knowledge_gap",
+        severity="medium",
+        title="أضف مقارنة بين منتجاتك الأكثر طلبًا",
+        reason=(
+            f"{source_reason} لا يوجد قسم يشرح الفروق بين المنتجات "
+            "في قاعدة المعرفة."
+        ),
+        expected_impact=(
+            "يساعد العملاء المترددين على الاختيار بسرعة ويقلل "
+            "«وش الفرق؟» المتكرر قبل الشراء."
+        ),
+        target_kind="product_compare",
+        proposed_body=(
+            "الفرق بين [اسم المنتج A] و[اسم المنتج B]: [أضف الفروق "
+            "الواضحة — الطعم، الحجم، الاستخدام، السعر]. إذا كنت "
+            "محتارًا، [أضف توصية مختصرة حسب الاستخدام]."
+        ),
+        requires_media=False,
+        confidence=min(0.92, 0.74 + count * 0.012),
+        rationale_keys=["sales:product_compare", "gap:compare"],
+        category=CATEGORY_SALES_OPPORTUNITY,
+        source_reason=source_reason,
+    )]
 
 
 def _pass_behavior_tone(
@@ -1485,6 +1781,7 @@ def audit(
     max_suggestions: int = _MAX_SUGGESTIONS,
     min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
     suppressed_fingerprints: Optional[Sequence[str]] = None,
+    conversation_signals: Any = None,
 ) -> List[ImprovementFinding]:
     """Generate up to ``max_suggestions`` deterministic findings.
 
@@ -1511,7 +1808,9 @@ def audit(
     findings: List[ImprovementFinding] = []
     next_idx = 1
 
-    findings.extend(_pass_missing_required(views, next_idx))
+    findings.extend(_pass_missing_required(views, next_idx, signals=conversation_signals))
+    next_idx = len(findings) + 1
+    findings.extend(_pass_location_gap_from_signals(views, conversation_signals, next_idx))
     next_idx = len(findings) + 1
     findings.extend(_pass_behavior_tone(views, next_idx))
     next_idx = len(findings) + 1
@@ -1553,7 +1852,15 @@ def audit(
     findings.extend(_pass_orphan_staff_names(views, next_idx))
     next_idx = len(findings) + 1
 
+    findings.extend(_pass_price_contradictions(products_list, next_idx))
+    next_idx = len(findings) + 1
+
     findings.extend(_pass_product_gaps(views, products_list, next_idx))
+    next_idx = len(findings) + 1
+
+    findings.extend(_pass_conversation_sales_signals(
+        views, conversation_signals, next_idx,
+    ))
 
     # ── Platform-conflict guard ─────────────────────────────────────────
     # When the platform is connected, drop any proposed body that looks

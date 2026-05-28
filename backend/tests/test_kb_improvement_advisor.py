@@ -269,8 +269,8 @@ def test_platform_connected_drops_price_claim_suggestions() -> None:
 
     original = advisor._pass_missing_required
 
-    def _polluted(views, idx_start):
-        out = original(views, idx_start)
+    def _polluted(views, idx_start, signals=None):
+        out = original(views, idx_start, signals=signals)
         out.append(ImprovementFinding(
             id=f"sug-{idx_start + len(out)}",
             type="missing_required_knowledge",
@@ -494,11 +494,15 @@ def test_fingerprint_survives_polish_paraphrase() -> None:
         type_="missing_required_knowledge",
         target_kind="payment_method",
         title="أضف سياسة دفع واضحة",
+        category="MISSING_INFORMATION",
+        problem="x",
     )
     fp_b = compute_fingerprint(
         type_="missing_required_knowledge",
         target_kind="payment_method",
         title="  أضف  سياسة  دفع  واضحة  ",  # whitespace mutation
+        category="MISSING_INFORMATION",
+        problem="x",
     )
     assert fp_a == fp_b
 
@@ -1479,3 +1483,91 @@ def test_surface_protected_findings_bypass_purpose_dedup() -> None:
     ]
     out = _dedup_by_purpose(findings)
     assert [f.id for f in out] == ["sug-1", "sug-2"]
+
+
+def test_payment_gap_boosted_by_conversation_signals() -> None:
+    from modules.ai.knowledge.improvement_advisor import (
+        CATEGORY_MISSING_INFORMATION,
+        audit,
+    )
+    from modules.ai.knowledge.conversation_signal_scanner import (
+        ConversationSignalSummary,
+    )
+
+    signals = ConversationSignalSummary(
+        payment_questions=18,
+        human_handoff_after_payment=4,
+    )
+    findings = audit([], conversation_signals=signals)
+    payment = next(f for f in findings if f.target_kind == "payment_method")
+    assert payment.category == CATEGORY_MISSING_INFORMATION
+    assert "18 سؤال" in payment.source_reason
+    assert payment.confidence >= 0.9
+    assert "وسائل الدفع" in payment.reason
+
+
+def test_location_gap_from_signals_when_no_branch_section() -> None:
+    from modules.ai.knowledge.improvement_advisor import audit
+    from modules.ai.knowledge.conversation_signal_scanner import (
+        ConversationSignalSummary,
+    )
+
+    signals = ConversationSignalSummary(location_questions=11)
+    findings = audit([], conversation_signals=signals)
+    loc = next(f for f in findings if f.target_kind == "branches")
+    assert "11 سؤال" in loc.source_reason
+    assert loc.confidence >= 0.85
+
+
+def test_price_contradiction_quarter_vs_kilo() -> None:
+    from modules.ai.knowledge.improvement_advisor import (
+        CATEGORY_CONTRADICTION,
+        CatalogSlice,
+        audit,
+    )
+
+    products = [
+        CatalogSlice(id=1, title="عسل الطلح ربع كيلو", price_sar=120.0),
+        CatalogSlice(id=2, title="عسل الطلح 1 kg", price_sar=200.0),
+    ]
+    findings = audit([], products=products)
+    price_findings = [f for f in findings if f.category == CATEGORY_CONTRADICTION]
+    assert len(price_findings) == 1
+    assert "تضارب" in price_findings[0].title
+
+
+def test_fingerprint_includes_category_and_problem() -> None:
+    from modules.ai.knowledge.improvement_advisor import compute_fingerprint
+
+    fp_a = compute_fingerprint(
+        type_="missing_required_knowledge",
+        target_kind="payment_method",
+        title="أضف سياسة دفع",
+        category="MISSING_INFORMATION",
+        problem="تم رصد 10 أسئلة دفع",
+    )
+    fp_b = compute_fingerprint(
+        type_="missing_required_knowledge",
+        target_kind="payment_method",
+        title="أضف سياسة دفع",
+        category="MISSING_INFORMATION",
+        problem="تم رصد 20 سؤال دفع",
+    )
+    assert fp_a != fp_b
+
+
+def test_product_compare_sales_signal() -> None:
+    from modules.ai.knowledge.improvement_advisor import (
+        CATEGORY_SALES_OPPORTUNITY,
+        audit,
+    )
+    from modules.ai.knowledge.conversation_signal_scanner import (
+        ConversationSignalSummary,
+    )
+
+    signals = ConversationSignalSummary(product_compare_questions=8)
+    findings = audit([], conversation_signals=signals)
+    sales = [f for f in findings if f.category == CATEGORY_SALES_OPPORTUNITY]
+    assert len(sales) == 1
+    assert sales[0].target_kind == "product_compare"
+

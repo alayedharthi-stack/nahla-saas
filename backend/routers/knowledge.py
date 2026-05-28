@@ -1040,6 +1040,10 @@ from modules.ai.knowledge.improvement_advisor import (  # noqa: E402
     polish_with_gpt,
     record_dismissal,
 )
+from modules.ai.knowledge.conversation_signal_scanner import (  # noqa: E402
+    ConversationSignalSummary,
+    scan_tenant_conversation_signals,
+)
 from sqlalchemy.orm.attributes import flag_modified  # noqa: E402
 
 
@@ -1993,9 +1997,11 @@ def _catalog_slice_for_audit(db: Session, tenant_id: int) -> List[CatalogSlice]:
     500 rows so a merchant with a 50k-SKU catalog doesn't blow the
     request budget.
     """
+    from modules.ai.knowledge.improvement_advisor import _parse_price_sar  # noqa: PLC0415
+
     try:
         rows = (
-            db.query(Product.id, Product.title, Product.description)
+            db.query(Product.id, Product.title, Product.description, Product.price)
             .filter(Product.tenant_id == tenant_id)
             .limit(500)
             .all()
@@ -2014,6 +2020,7 @@ def _catalog_slice_for_audit(db: Session, tenant_id: int) -> List[CatalogSlice]:
             id=int(r.id),
             title=title,
             has_description=bool((r.description or "").strip()),
+            price_sar=_parse_price_sar(r.price),
             # Image presence isn't a field we use yet but the dataclass
             # accepts it; left as False until product image cardinality
             # becomes a V2 signal.
@@ -2072,6 +2079,18 @@ async def improvement_suggestions(
     signal = _platform_signal_for_tenant(db, tenant_id)
     catalog = _catalog_slice_for_audit(db, tenant_id)
 
+    # Scanner is best-effort: failure or empty traffic must never block
+    # the deterministic KB improvement suggestions the merchant already had.
+    conversation_signals: Optional[ConversationSignalSummary] = None
+    try:
+        conversation_signals = scan_tenant_conversation_signals(db, tenant_id)
+    except Exception as exc:  # noqa: BLE001 — guard rail for the endpoint
+        _logger.warning(
+            "[KB.improve] conversation signal scan skipped tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+
     # ── Suppression (KB-Improve V1.1) ───────────────────────────────────
     # Two streams of suppression feed the auditor:
     #   1. Dismissed fingerprints — recorded by the
@@ -2096,6 +2115,7 @@ async def improvement_suggestions(
         products=catalog,
         max_suggestions=max_suggestions,
         suppressed_fingerprints=suppressed_fps,
+        conversation_signals=conversation_signals,
     )
 
     polished = findings
@@ -2122,6 +2142,11 @@ async def improvement_suggestions(
         "platform": signal.platform,
         "scanned_sections": len(rows),
         "model": _POLISHER_MODEL if polish else "deterministic_only",
+        "conversation_signals": (
+            conversation_signals.to_dict()
+            if conversation_signals is not None
+            else ConversationSignalSummary().to_dict()
+        ),
     }
 
 

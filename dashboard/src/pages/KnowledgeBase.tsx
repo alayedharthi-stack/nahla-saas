@@ -1770,6 +1770,42 @@ const TYPE_LABEL_AR: Record<string, string> = {
   compliance: 'صياغة تحتاج مراجعة',
 }
 
+const CATEGORY_BADGE_AR: Record<
+  string,
+  { label: string; bg: string; text: string; dot: string }
+> = {
+  MISSING_INFORMATION: {
+    label: 'معلومات ناقصة',
+    bg: 'bg-emerald-50',
+    text: 'text-emerald-800',
+    dot: 'bg-emerald-500',
+  },
+  CONTRADICTION: {
+    label: 'تعارضات',
+    bg: 'bg-red-50',
+    text: 'text-red-800',
+    dot: 'bg-red-500',
+  },
+  SALES_OPPORTUNITY: {
+    label: 'فرصة بيع',
+    bg: 'bg-sky-50',
+    text: 'text-sky-800',
+    dot: 'bg-sky-500',
+  },
+  TRUST_IMPROVEMENT: {
+    label: 'تحسين ثقة',
+    bg: 'bg-violet-50',
+    text: 'text-violet-800',
+    dot: 'bg-violet-500',
+  },
+  MARKETING_IMPROVEMENT: {
+    label: 'تحسين تسويقي',
+    bg: 'bg-indigo-50',
+    text: 'text-indigo-800',
+    dot: 'bg-indigo-500',
+  },
+}
+
 interface ImprovementSuggestionsCardProps {
   kindLabelByKind: Map<string, string>
   onApproved: (draft: KnowledgeDraft) => void
@@ -1920,9 +1956,11 @@ function ImprovementSuggestionsCard({
           <ul className="space-y-3">
             {visible.map(s => {
               const badge = SEVERITY_BADGE_AR[s.severity]
+              const catBadge = s.category ? CATEGORY_BADGE_AR[s.category] : null
               const targetLabel = kindLabelByKind.get(s.target_kind) || s.target_kind
               const isEditing = editingId === s.id
               const isBusy = busyId === s.id
+              const confidencePct = Math.round((s.confidence || 0) * 100)
               return (
                 <li
                   key={s.id}
@@ -1934,8 +1972,19 @@ function ImprovementSuggestionsCard({
                         {s.title}
                       </p>
                       <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                        {catBadge && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${catBadge.bg} ${catBadge.text}`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${catBadge.dot}`} />
+                            {catBadge.label}
+                          </span>
+                        )}
                         <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${badge.bg} ${badge.text}`}>
                           {badge.label}
+                        </span>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
+                          ثقة {confidencePct}%
                         </span>
                         <span className="text-[10px] text-slate-500">
                           {TYPE_LABEL_AR[s.type] || s.type}
@@ -1961,8 +2010,14 @@ function ImprovementSuggestionsCard({
                     </button>
                   </div>
 
+                  {s.source_reason ? (
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      <span className="font-semibold text-slate-700">السبب:</span>{' '}
+                      {s.source_reason}
+                    </p>
+                  ) : null}
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    <span className="font-semibold text-slate-700">السبب:</span> {s.reason}
+                    <span className="font-semibold text-slate-700">التفاصيل:</span> {s.reason}
                   </p>
                   <p className="text-xs text-slate-600 leading-relaxed">
                     <span className="font-semibold text-slate-700">الأثر المتوقع:</span>{' '}

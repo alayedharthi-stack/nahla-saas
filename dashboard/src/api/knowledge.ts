@@ -430,6 +430,13 @@ export type ImprovementSuggestionType =
 
 export type ImprovementSeverity = 'high' | 'medium' | 'low'
 
+export type SuggestionCategory =
+  | 'MISSING_INFORMATION'
+  | 'CONTRADICTION'
+  | 'SALES_OPPORTUNITY'
+  | 'TRUST_IMPROVEMENT'
+  | 'MARKETING_IMPROVEMENT'
+
 export interface ImprovementSuggestion {
   id: string
   type: ImprovementSuggestionType
@@ -444,6 +451,23 @@ export interface ImprovementSuggestion {
   related_section_ids: number[]
   // KB-Improve V1.1 — stable hash used by reject/approve suppression.
   fingerprint: string
+  // Knowledge Gap Intelligence v1
+  category?: SuggestionCategory
+  source_reason?: string
+}
+
+export interface ConversationSignalSummary {
+  window_days: number
+  scanned_messages: number
+  scanned_conversations: number
+  payment_questions: number
+  shipping_questions: number
+  location_questions: number
+  human_handoff_count: number
+  human_handoff_after_payment: number
+  price_confusion_detected: boolean
+  product_compare_questions: number
+  hesitant_messages: number
 }
 
 export interface ImprovementSuggestionsResponse {
@@ -452,6 +476,7 @@ export interface ImprovementSuggestionsResponse {
   platform: string | null
   scanned_sections: number
   model: string
+  conversation_signals?: ConversationSignalSummary
 }
 
 // Re-export the AIMediaItem-related types from intelligenceLibraries so
