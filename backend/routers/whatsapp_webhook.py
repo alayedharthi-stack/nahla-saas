@@ -7874,6 +7874,7 @@ async def _handle_merchant_message(
                         tenant_id=tenant_id,
                         customer_msg=text or "",
                         reply_text=reply or "",
+                        history=history if isinstance(history, list) else None,
                     )
                     if _sl.fired and _sl.rewrote_reply and _sl.new_reply:
                         reply = _sl.new_reply

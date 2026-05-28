@@ -1733,13 +1733,30 @@ class StoreLinkSafetyNetResult:
         }
 
 
-def _looks_like_store_link_request(customer_msg: str) -> bool:
+def _looks_like_store_link_request(
+    customer_msg: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    order_prep: Any = None,
+) -> bool:
     msg = _normalise_for_match(customer_msg)
     if not msg:
         return False
     # Drop punctuation that fragments the phrase match.
     msg_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", msg)
     msg_compact = re.sub(r"\s+", " ", msg_compact).strip()
+    try:
+        from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+            should_suppress_store_link_intent,
+        )
+        if should_suppress_store_link_intent(
+            customer_msg or "",
+            history=history,
+            order_prep=order_prep,
+        ):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
     for phrase in _STORE_LINK_TRIGGERS_PHRASE:
         if phrase in msg_compact:
             return True
@@ -1938,6 +1955,8 @@ def apply_store_link_safety_net(
     tenant_id: int,
     customer_msg: str,
     reply_text: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+    order_prep: Any = None,
 ) -> StoreLinkSafetyNetResult:
     """Guarantee the store URL lands when the customer asked for it.
 
@@ -1979,7 +1998,11 @@ def apply_store_link_safety_net(
         result.skipped_reason = "flag_disabled"
         return result
 
-    if not _looks_like_store_link_request(customer_msg or ""):
+    if not _looks_like_store_link_request(
+        customer_msg or "",
+        history=history,
+        order_prep=order_prep,
+    ):
         result.skipped_reason = "no_store_link_intent"
         return result
     result.reason = "intent_detected"
@@ -2776,6 +2799,7 @@ def apply_clear_intent_fallback_net(
     *,
     customer_msg: str,
     reply_text: str,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> ClearIntentFallbackResult:
     """Replace a "please repeat" / timeout-apology reply with a
     short intent-aware reply when the customer's message was
@@ -2816,6 +2840,20 @@ def apply_clear_intent_fallback_net(
         # appropriate. Stay out of the way.
         result.skipped_reason = "no_clear_intent"
         return result
+
+    if intent == _INTENT_STORE_LINK:
+        try:
+            from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+                should_suppress_store_link_intent,
+            )
+            if should_suppress_store_link_intent(
+                customer_msg or "",
+                history=history,
+            ):
+                result.skipped_reason = "tracking_link_not_store_link"
+                return result
+        except Exception:  # noqa: BLE001
+            pass
 
     result.customer_intent = intent
     new_reply = _CLEAR_INTENT_REPLIES.get(intent)
@@ -3934,7 +3972,12 @@ def _reply_already_honest(reply: str) -> bool:
     return False
 
 
-def _classify_expected_artifact(customer_msg: str) -> str:
+def _classify_expected_artifact(
+    customer_msg: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    order_prep: Any = None,
+) -> str:
     """Classify the inbound message into an artifact class.
 
     Order matters: we check the most specific intent first so a
@@ -3950,6 +3993,19 @@ def _classify_expected_artifact(customer_msg: str) -> str:
     norm_compact = _normalise_for_match(customer_msg)
     norm_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", norm_compact)
     norm_compact = re.sub(r"\s+", " ", norm_compact).strip()
+
+    try:
+        from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+            should_suppress_store_link_intent,
+        )
+        if should_suppress_store_link_intent(
+            customer_msg,
+            history=history,
+            order_prep=order_prep,
+        ):
+            return "none"
+    except Exception:  # noqa: BLE001
+        pass
 
     # 1. Maps-link intent (location / google maps / lookup)
     for phrase in _LOCATION_LINK_TRIGGERS_PHRASE:
@@ -4149,7 +4205,10 @@ def apply_outbound_artifact_guard(
     """
     result = OutboundArtifactGuardResult()
 
-    expected = _classify_expected_artifact(customer_msg or "")
+    expected = _classify_expected_artifact(
+        customer_msg or "",
+        history=history,
+    )
 
     # History-aware carry-forward (May 2026 #38).
     # If the current message classified as ``"none"`` AND it's
@@ -4166,7 +4225,10 @@ def apply_outbound_artifact_guard(
     if expected == "none" and _is_artifact_complaint(customer_msg or ""):
         prior_msg = _last_customer_msg_from_history(history)
         if prior_msg:
-            prior_expected = _classify_expected_artifact(prior_msg)
+            prior_expected = _classify_expected_artifact(
+                prior_msg,
+                history=history,
+            )
             if prior_expected != "none":
                 expected = prior_expected
                 carryover = True

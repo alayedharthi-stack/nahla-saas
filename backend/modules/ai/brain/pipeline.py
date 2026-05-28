@@ -1884,6 +1884,18 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         )
         return " | ".join(lines)
 
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "tracking_link_follow_up"
+    ):
+        return (
+            "tracking_link_follow_up — العميل لديه طلب نشط/مؤكد ويسأل عن "
+            "رابط التتبع أو متى يصل رابط الشحن. أكدي حالة الطلب الحالية "
+            "(مراجعة/تجهيز/شحن) وطمئني أن رابط التتبع يُرسل هنا فور صدوره. "
+            "ممنوع إرسال رابط المتجر، ممنوع طلب المدينة/الحي/الجوال/العنوان "
+            "من جديد، وممنوع إعادة فتح مسار «أقدر أجهز طلبك» أو checkout."
+        )
+
     parts: List[str] = []
     # ── Relational preference prefix (May 2026 — Tenant 33 #49, Commit 2)
     # When the relational decision router has tagged a goal token on

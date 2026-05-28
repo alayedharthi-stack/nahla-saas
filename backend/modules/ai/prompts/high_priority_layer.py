@@ -315,6 +315,10 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     # المتجر؟" instead of just sending it. Both behaviors hurt conversion.
     "إذا طلب العميل رابط المتجر مباشرة، يجب أن يتضمّن الرد رابط store_url الفعلي من سياق التاجر — السطر الأول قصير مثل «تفضل رابط متجرنا 🌷» والسطر الثاني هو الرابط وحده، بدون سؤال متابعة عن المنتج. ممنوع الاكتفاء بـ «هذا متجرنا» أو «تفضل» بدون الرابط الفعلي. إذا لم يكن store_url موجودًا في السياق، اطلب توضيحًا قصيرًا (مثلًا: «خبّرنا أي قسم أو منتج تبحث عنه وسنرسل تفاصيله مباشرة 🌷») ولا تَعِد بإرسال الرابط لاحقًا ولا تخترع رابطًا.",
     "بعد التحقق من صحة كود خصم أرسله العميل، أرسل رابط المتجر مباشرة في نفس الرد (سطر مستقل بدون أي شرح إضافي) — ممنوع سؤال \"تبي رابط المتجر؟\". الهدف تقليل الاحتكاك وإغلاق البيع.",
+    # Post-order link disambiguation (May 2026): once an order is confirmed /
+    # under review / shipped, bare «الرابط» or «ارسل الرابط» usually means
+    # tracking follow-up — NOT store_url and NOT restarting checkout.
+    "إذا كان للعميل طلب نشط أو مؤكد أو بانتظار المراجعة/الشحن، وأعاد سؤال «رابط التتبع» أو «ارسلوا الرابط» أو «إذا شحنتوا ارسلوا الرابط»، فهذا طلب متابعة شحن/تتبع — أكدي حالة الطلب وطمئني أن رابط التتبع يُرسل هنا فور صدوره. ممنوع إرسال store_url، وممنوع طلب المدينة/الحي/الجوال/العنوان من جديد، وممنوع إعادة فتح «أقدر أجهز طلبك».",
     # Honey & natural-product tone — DO talk confidently, DON'T turn cold-medical.
     # The merchants on this platform are mostly natural-honey shops; replying
     # "العسل لا يعالج" sounds tone-deaf and hurts trust. The rule covers BOTH

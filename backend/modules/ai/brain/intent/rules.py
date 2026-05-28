@@ -343,12 +343,18 @@ _register(RuleSet(
         r"(هل وصل|هل وصلت).{0,15}(الشحنة|الطلبية|الطلب|طلبي|طلبيتي|شحنتي|الشحنه)",
         r"(وصلت|وصلتني).{0,8}(الشحنة|الطلبية|طلبيتي|شحنتي)",
         r"(متى توصل طلبيتي|متى توصل شحنتي)",
-        r"(track|track my order|where is my order|order status|did my (order|shipment) arrive)",
+        # Tracking / shipment link follow-up (May 2026 — post-order guard).
+        # Beats bare PAY_NOW "ارسل الرابط" when the customer is asking
+        # for a tracking URL after checkout, not a store/checkout link.
+        r"(رابط التتبع|رقم التتبع|رابط الشحن|رابط شحن)",
+        r"(ارسل|أرسل|ارسلو|أرسلوا|ارسلي|أرسلي|ابعث|أبعث).{0,20}(التتبع|رقم التتبع|رابط التتبع|رابط الشحن)",
+        r"(تشحن|تشحنو|تشحنه|تشحنها|انشحن|إذا شحن|اذا شحن|لما يشحن|لما تشحن).{0,35}(الرابط|رابط|التتبع|تتبع|اللينك|link)",
+        r"(متى يوصل).{0,20}(رابط|التتبع|تتبع|link)",
+        r"(track|track my order|where is my order|order status|did my (order|shipment) arrive|tracking link|tracking number)",
     ],
-    # Bumped above the default 0.88 so it wins ties against ASK_PRODUCT's
-    # broad "وين" pattern: "وين شحنتي" must classify as TRACK_ORDER, not
-    # ASK_PRODUCT, otherwise we lose the order-tracking flow.
-    confidence=0.92,
+    # Bumped above PAY_NOW (0.90) and ASK_PRODUCT's broad "وين" pattern so
+    # post-order tracking-link asks stay on the order-support path.
+    confidence=0.96,
 ))
 
 # ── Talk to human ─────────────────────────────────────────────────────────────

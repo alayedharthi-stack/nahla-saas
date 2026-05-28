@@ -480,6 +480,66 @@ class DefaultDecisionEngine:
                 reason="customer requested human agent",
             )
 
+        # ── 1.8 Post-order tracking-link guard (May 2026) ───────────────
+        # After an order is confirmed, bare "الرابط" / "ارسل الرابط"
+        # usually means tracking follow-up — not store URL / checkout.
+        try:
+            from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+                has_active_post_order_context,
+                looks_like_payment_link_request,
+                looks_like_tracking_link_request,
+            )
+            _post_order_active = has_active_post_order_context(
+                state=state,
+                history=ctx.history,
+            )
+            _tracking_link_ask = (
+                intent.name == INTENT_TRACK_ORDER
+                or looks_like_tracking_link_request(
+                    ctx.message or "",
+                    history=ctx.history,
+                    state=state,
+                )
+            )
+            if (
+                _post_order_active
+                and _tracking_link_ask
+                and not looks_like_payment_link_request(ctx.message or "")
+            ):
+                if intent.name == INTENT_TRACK_ORDER:
+                    return Decision(
+                        action=ACTION_TRACK_ORDER,
+                        args={"order_id": intent.slots.get("order_id", "")},
+                        reason=(
+                            "post-order tracking-link ask — route to "
+                            "order status / tracking handler"
+                        ),
+                    )
+                logger.info(
+                    "[TRACKING_LINK_GUARD] post-order follow-up — defer to "
+                    "brain | tenant=%s preview=%r order_status=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:60],
+                    getattr(getattr(state, "order_prep", None), "order_status", ""),
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "tracking_link_follow_up",
+                        "intent_hint": "order_tracking",
+                    },
+                    reason=(
+                        "post-order tracking/shipping link follow-up — "
+                        "do not restart checkout or send store URL"
+                    ),
+                    confidence=0.91,
+                )
+        except Exception as _tlg_exc:  # noqa: BLE001
+            logger.debug(
+                "[TRACKING_LINK_GUARD] skipped tenant=%s err=%s",
+                ctx.tenant_id, _tlg_exc,
+            )
+
         # ── 2. Resend payment link / retry order ──────────────────────────
         if intent.name == INTENT_PAY_NOW or (
             state.stage == STAGE_CHECKOUT and intent.name in (INTENT_PAY_NOW, INTENT_START_ORDER)
@@ -1581,6 +1641,40 @@ class DefaultDecisionEngine:
         # placing an order.  If all the specific rules above failed to match,
         # we have a product in focus → continue collecting checkout slots.
         # This is the last line of defence before LLM fallback.
+        try:
+            from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+                has_active_post_order_context,
+                looks_like_tracking_link_request,
+            )
+            if has_active_post_order_context(state=state, history=ctx.history) and (
+                intent.name == INTENT_TRACK_ORDER
+                or looks_like_tracking_link_request(
+                    ctx.message or "",
+                    history=ctx.history,
+                    state=state,
+                )
+            ):
+                logger.info(
+                    "[ORDER FLOW] suppress ordering safety net for post-order "
+                    "tracking follow-up | tenant=%s preview=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "tracking_link_follow_up",
+                        "intent_hint": "order_tracking",
+                    },
+                    reason=(
+                        "ordering_stage_safety_net bypassed — active order "
+                        "exists and customer asked about tracking/shipping link"
+                    ),
+                    confidence=0.88,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         if state.stage in (STAGE_ORDERING, STAGE_DECIDING):
             if state.current_product_focus and facts.orderable and not state.checkout_url:
                 logger.info(
