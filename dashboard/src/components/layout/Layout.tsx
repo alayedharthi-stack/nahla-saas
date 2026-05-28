@@ -196,7 +196,7 @@ export default function Layout() {
   const { t } = useLanguage()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const metaSelector = PAGE_META[pathname] ?? ((_tr: Translations) => ({ title: 'Nahla', subtitle: '' }))
+  const metaSelector = PAGE_META[pathname] ?? ((_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
   const meta = t(metaSelector)
 
   return (
