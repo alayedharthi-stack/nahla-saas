@@ -4,7 +4,7 @@ import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban, FileText,
+  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
@@ -64,6 +64,8 @@ export default function Conversations() {
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
+  const [actionToast, setActionToast] = useState<string | null>(null)
+  const [endingSupervision, setEndingSupervision] = useState(false)
 
   // mobile: 'list' = show list panel, 'chat' = show chat panel
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
@@ -531,6 +533,36 @@ export default function Conversations() {
       await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : 'تعذّر إيقاف الذكاء')
+    }
+  }
+
+  useEffect(() => {
+    if (!actionToast) return
+    const t = window.setTimeout(() => setActionToast(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [actionToast])
+
+  const endHumanSupervisionForSelected = async () => {
+    if (!selected) return
+    const inTakeover =
+      !!selected.needsHuman ||
+      !!selected.handoffActive ||
+      selected.status === 'human'
+    if (!inTakeover) return
+
+    setEndingSupervision(true)
+    try {
+      await featureRealityApi.returnHandoffToAI({
+        customer_phone: selected.phone,
+      })
+      _applyReturnToAIState(selected.phone)
+      setActionToast('تمت إعادة المحادثة إلى الذكاء')
+      await reloadFirstPagePreserveTail({ silent: true })
+      await loadMessagesForOpenChat(selected.phone)
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر إنهاء إشراف الموظف')
+    } finally {
+      setEndingSupervision(false)
     }
   }
 
@@ -1008,6 +1040,21 @@ export default function Conversations() {
                           تولّي
                         </button>
                       )}
+                      {humanTakeover && (
+                        <button
+                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-blue-700 border-blue-200 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
+                          onClick={endHumanSupervisionForSelected}
+                          disabled={endingSupervision}
+                          title="إنهاء إشراف الموظف وإخراج المحادثة من «طلب موظف»"
+                        >
+                          {endingSupervision ? (
+                            <Clock className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          )}
+                          إنهاء إشراف الموظف
+                        </button>
+                      )}
                       {intelligenceOff ? (
                         <button
                           className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
@@ -1057,8 +1104,23 @@ export default function Conversations() {
                 <span>
                   هذه المحادثة <strong>تحت إشراف موظف بشري</strong>
                   {selected.takenOverBy && <> — بواسطة <strong>{selected.takenOverBy}</strong></>}
-                  . لن يرد الذكاء حتى تضغط «تشغيل الذكاء» أعلاه.
+                  . لن يرد الذكاء حتى تضغط «إنهاء إشراف الموظف» أو «تشغيل الذكاء» أعلاه.
                 </span>
+              </div>
+            )}
+
+            {actionToast && (
+              <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-sm text-emerald-800">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                <span className="flex-1">{actionToast}</span>
+                <button
+                  type="button"
+                  onClick={() => setActionToast(null)}
+                  className="text-emerald-700/60 hover:text-emerald-900"
+                  aria-label="إغلاق"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
             )}
 
@@ -1445,6 +1507,21 @@ export default function Conversations() {
                           onClick={handleHandoff}
                         >
                           <UserCheck className="w-3.5 h-3.5" /> تولّي
+                        </button>
+                      )}
+                      {humanTakeover && (
+                        <button
+                          type="button"
+                          className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-blue-50 text-blue-700 font-medium active:bg-blue-100 disabled:opacity-50"
+                          onClick={endHumanSupervisionForSelected}
+                          disabled={endingSupervision}
+                        >
+                          {endingSupervision ? (
+                            <Clock className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          )}
+                          إنهاء إشراف الموظف
                         </button>
                       )}
                       <button
