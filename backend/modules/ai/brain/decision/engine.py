@@ -358,6 +358,22 @@ class DefaultDecisionEngine:
                 "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
                 getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
             )
+            # May 2026 — merchant praise warmth: the compliment pool was
+            # producing literary Gulf-generic lines ("دوم إحساسك") that
+            # bypass persona guidance. Route pure praise/compliment turns
+            # to generative compose with a strict relational goal; keep
+            # thanks/blessing/basmala/prophet on the zero-latency template
+            # path (and strong_praise on its dedicated reciprocal pool).
+            if category == "compliment":
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "merchant_praise_ack",
+                        "social_category": category,
+                    },
+                    reason=f"merchant praise — generative warmth ack ({category})",
+                    confidence=intent.confidence,
+                )
             return Decision(
                 action=ACTION_SOCIAL_REPLY,
                 args={"social_category": category},

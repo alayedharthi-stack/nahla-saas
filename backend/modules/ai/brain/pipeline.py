@@ -1886,6 +1886,25 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "merchant_praise_ack"
+    ):
+        return (
+            "merchant_praise_ack — Generate a short natural Saudi Arabic "
+            "WhatsApp reply. The customer is praising the shop, the service, "
+            "or the merchant personally (ما شاء الله / شغل مرتب / كلك ذوق / …). "
+            "Respond like a real Saudi merchant on WhatsApp: warm reciprocal "
+            "gratitude in 1–2 short lines, emotionally grounded, not poetic. "
+            "Mirror their warmth (name/honorific if they used one) without "
+            "turning it into prose. "
+            "Do NOT pitch products, prices, or checkout. "
+            "Do NOT use literary or Gulf-generic phrasing such as "
+            "«دوم إحساسك» / «دمت بود» / «يسعد مساك على شعورك» / "
+            "«الله يبحث عنك بحسن ظنك» / «والله الثناء منك وسام» unless "
+            "the customer themselves wrote in that highly literary style."
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "tracking_link_follow_up"
     ):
         _args = decision.args or {}

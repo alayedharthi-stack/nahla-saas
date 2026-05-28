@@ -336,6 +336,17 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     # social_classifier.SOCIAL_STRONG_PRAISE branch uses, kept in sync
     # by the test in test_strong_praise_phrasing.py.
     "ممنوع استخدام عبارة «الله يبيض وجهك» (أو أي صيغة من «بيض الله وجهك / بيّضت وجوهنا») في الرد إلا إذا كان نص العميل نفسه يحتوي صراحة على واحدة من العبارات: (بيض الله وجهك / ما قصرت / كفو / رفعت رأسي / رفعتم رأسنا / خدمة كبيرة). في الشكر العادي أو الدعاء البسيط استخدمي ردًا أخف ومختصرًا مثل (الله يسعدك / ويسعد أيامك / حياك الله / آمين وإياك / الله يكرمك / تسلم) — ممنوع «دوم بخير» و«يطري/يطرّي أيامك» و«ولك بمثل ما دعيت» خارج سياق الشكر القوي.",
+    # ── Merchant praise warmth — May 2026 ───────────────────────────────
+    # Production: praise turns ("ما شاء الله شغل مرتب") were answered with
+    # literary Gulf-generic lines that feel AI-polished, not like a Saudi
+    # shop owner on WhatsApp. Keep reciprocity short, warm, and locally
+    # believable — never poetic unless the customer is poetic first.
+    "عند مديح العميل للمتجر أو الخدمة أو التاجر: ردّي بمقابل دافئ قصير "
+    "(سطر أو سطرين) كتاجر سعودي على واتساب — شكر/reciprocity طبيعي، "
+    "يمكن ذكر اسم/لقب العميل إن استخدمه. ممنوع تحويل المديح إلى نثر "
+    "أدبي أو صياغات «مصقولة» مثل (دوم إحساسك / دمت بود / يسعد مساك "
+    "على شعورك / الله يبحث عنك بحسن ظنك / والله الثناء منك وسام). "
+    "ممنوع pitch بيعي أو اقتراح منتج في نفس الرد.",
 )
 
 BASELINE_FORBIDDEN_RULES: tuple[str, ...] = (
