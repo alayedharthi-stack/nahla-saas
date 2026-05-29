@@ -4,7 +4,7 @@ import { isPlatformOwner } from '../auth'
 import {
   Save, Bot, Store, Users, Bell, MessageSquare,
   CheckCircle, AlertCircle, Loader2, Copy,
-  Eye, EyeOff, RefreshCw, UserPlus, Shield, ShieldOff, ToggleLeft, ToggleRight,
+  Eye, EyeOff, RefreshCw, UserPlus, ShieldOff, ToggleLeft, ToggleRight,
   Sparkles, BrainCircuit, ShieldCheck, Code2, ChevronRight,
   HeadphonesIcon, Send, Clock, X, ChevronDown, History,
   AlertTriangle, Wifi, Zap, Package,
@@ -228,97 +228,114 @@ const TAB_LABELS: Record<TabId, string> = {
 
 // ── Tab: Team ────────────────────────────────────────────────────────────────
 
-const MOCK_TEAM = [
-  { name: 'أحمد محمد',     email: 'ahmed@store.sa',   role: 'مالك',          roleKey: 'owner',   avatar: 'أ' },
-  { name: 'سارة الزهراني', email: 'sara@store.sa',    role: 'مدير',          roleKey: 'admin',   avatar: 'س' },
-  { name: 'خالد العمري',   email: 'khalid@store.sa',  role: 'دعم عملاء',     roleKey: 'support', avatar: 'خ' },
-  { name: 'نورة السلمي',   email: 'noura@store.sa',   role: 'مدير تسويق',    roleKey: 'marketing', avatar: 'ن' },
-]
+type AuthMeFull = {
+  user_in_db: {
+    id: number | null
+    email: string | null
+    role: string | null
+  } | null
+  tenant_in_db: {
+    name: string | null
+  } | null
+}
 
-const ROLE_BADGES: Record<string, string> = {
-  owner:     'bg-brand-100 text-brand-700',
-  admin:     'bg-purple-100 text-purple-700',
-  support:   'bg-blue-100 text-blue-700',
-  marketing: 'bg-emerald-100 text-emerald-700',
+function teamRoleLabel(role: string | null | undefined, isAr: boolean): string {
+  const r = role ?? 'merchant'
+  if (isAr) {
+    if (r === 'merchant' || r === 'merchant_admin') return 'مالك'
+    if (r === 'merchant_user') return 'عضو'
+    return r
+  }
+  if (r === 'merchant' || r === 'merchant_admin') return 'Owner'
+  if (r === 'merchant_user') return 'Member'
+  return r
+}
+
+function memberInitial(email: string): string {
+  const local = email.split('@')[0]?.trim() ?? ''
+  return (local[0] ?? email[0] ?? '?').toUpperCase()
 }
 
 function TeamTab() {
+  const { lang } = useLanguage()
+  const isAr = lang === 'ar'
+  const [me, setMe] = useState<AuthMeFull | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/me/full`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('nahla_token') ?? ''}` },
+        })
+        if (res.ok) setMe(await res.json())
+      } catch {
+        /* soft-fail — empty state below */
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [])
+
+  const memberEmail = me?.user_in_db?.email?.trim() || null
+  const memberName = me?.tenant_in_db?.name?.trim() || memberEmail?.split('@')[0] || null
+  const memberRole = me?.user_in_db?.role ?? null
+
   return (
     <div className="space-y-5">
       <Section
-        title="أعضاء الفريق"
-        description="إدارة المستخدمين وصلاحياتهم في لوحة نحلة"
+        title={isAr ? 'أعضاء الفريق' : 'Team members'}
+        description={isAr ? 'المستخدمون المرتبطون بهذا المتجر' : 'Users linked to this store'}
       >
-        <div className="space-y-2">
-          {MOCK_TEAM.map(member => (
-            <div key={member.email} className="flex items-center gap-3 py-3 border-b border-slate-50 last:border-0">
+        {loading ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            {isAr ? 'جاري التحميل…' : 'Loading…'}
+          </div>
+        ) : memberEmail ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-3 py-3 border-b border-slate-50 last:border-0">
               <div className="w-9 h-9 rounded-full bg-brand-100 flex items-center justify-center text-sm font-bold text-brand-600 shrink-0">
-                {member.avatar}
+                {memberInitial(memberEmail)}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900">{member.name}</p>
-                <p className="text-xs text-slate-400 truncate" dir="ltr">{member.email}</p>
+                {memberName && memberName !== memberEmail.split('@')[0] && (
+                  <p className="text-sm font-medium text-slate-900">{memberName}</p>
+                )}
+                <p className={`text-sm ${memberName && memberName !== memberEmail.split('@')[0] ? 'text-xs text-slate-400' : 'font-medium text-slate-900'} truncate`} dir="ltr">
+                  {memberEmail}
+                </p>
               </div>
-              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${ROLE_BADGES[member.roleKey]}`}>
-                {member.role}
+              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-brand-100 text-brand-700">
+                {teamRoleLabel(memberRole, isAr)}
               </span>
-              {member.roleKey !== 'owner' && (
-                <button className="btn-ghost text-xs">تعديل</button>
-              )}
             </div>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="py-8 text-center">
+            <Users className="w-10 h-10 text-slate-200 mx-auto mb-3" />
+            <p className="text-sm font-medium text-slate-700">
+              {isAr ? 'لا يوجد أعضاء فريق بعد.' : 'No team members yet.'}
+            </p>
+            <p className="text-xs text-slate-400 mt-1">
+              {isAr ? 'ستتوفر دعوات الفريق قريباً.' : 'Team invitations will be available soon.'}
+            </p>
+          </div>
+        )}
 
-        <div className="mt-4 flex items-center gap-3">
-          <button className="btn-primary text-sm">
+        <div className="mt-4 space-y-2">
+          <button
+            type="button"
+            disabled
+            title={isAr ? 'دعوات الفريق غير مفعّلة بعد' : 'Team invitations are not enabled yet'}
+            className="btn-primary text-sm opacity-50 cursor-not-allowed"
+          >
             <UserPlus className="w-4 h-4" />
-            دعوة عضو جديد
+            {isAr ? 'دعوة عضو جديد' : 'Invite new member'}
           </button>
-        </div>
-      </Section>
-
-      <Section title="الصلاحيات حسب الدور" description="ملخص ما يستطيع كل دور فعله">
-        <div className="overflow-x-auto -mx-1">
-          <table className="w-full text-sm min-w-[500px]">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="text-start py-2 px-2 text-xs font-medium text-slate-500 w-48">الصلاحية</th>
-                <th className="text-center py-2 px-2 text-xs font-medium text-slate-500">مالك</th>
-                <th className="text-center py-2 px-2 text-xs font-medium text-slate-500">مدير</th>
-                <th className="text-center py-2 px-2 text-xs font-medium text-slate-500">دعم</th>
-                <th className="text-center py-2 px-2 text-xs font-medium text-slate-500">تسويق</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                { label: 'إعدادات النظام',      owner: true,  admin: false, support: false, marketing: false },
-                { label: 'إدارة الفريق',         owner: true,  admin: true,  support: false, marketing: false },
-                { label: 'عرض المحادثات',        owner: true,  admin: true,  support: true,  marketing: false },
-                { label: 'إدارة الطلبات',        owner: true,  admin: true,  support: true,  marketing: false },
-                { label: 'إنشاء الكوبونات',      owner: true,  admin: true,  support: false, marketing: true  },
-                { label: 'إطلاق الحملات',        owner: true,  admin: true,  support: false, marketing: true  },
-                { label: 'عرض التحليلات',        owner: true,  admin: true,  support: false, marketing: true  },
-              ].map(row => (
-                <tr key={row.label} className="border-b border-slate-50 last:border-0">
-                  <td className="py-2 px-2 text-slate-700">{row.label}</td>
-                  {(['owner', 'admin', 'support', 'marketing'] as const).map(role => (
-                    <td key={role} className="py-2 px-2 text-center">
-                      {(row as Record<string, unknown>)[role]
-                        ? <CheckCircle className="w-4 h-4 text-emerald-500 mx-auto" />
-                        : <span className="text-slate-200">—</span>}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="mt-4">
-          <button className="btn-secondary text-sm">
-            <Shield className="w-4 h-4" />
-            تعديل الصلاحيات
-          </button>
+          <p className="text-xs text-slate-400">
+            {isAr ? 'دعوات الفريق غير مفعّلة بعد.' : 'Team invitations are not enabled yet.'}
+          </p>
         </div>
       </Section>
     </div>
