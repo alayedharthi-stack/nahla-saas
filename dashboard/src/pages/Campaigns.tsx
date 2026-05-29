@@ -15,6 +15,7 @@ import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
 import MediaEnvModal from '../components/admin/MediaEnvModal'
 import { canUseInternalDebug } from '../auth'
 import { useLanguage } from '../i18n/context'
+import type { Lang, Translations } from '../i18n/types'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
   CampaignGoal, CustomerSegmentMeta, RecommendedTemplate, TemplateRecommendation,
@@ -91,20 +92,46 @@ const INITIAL_WIZARD: WizardState = {
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-//
-// `STEP_LABELS` is the source of truth for both the breadcrumb and the
-// progress bar — keep it 1-aligned with the `wiz.step` numbering.
 
-const STEP_LABELS = [
-  'هدف الحملة',         // 1
-  'الشريحة المستهدفة',   // 2
-  'اختيار القالب',       // 3
-  'تعبئة المتغيرات',     // 4
-  'المعاينة',            // 5
-  'رسالة اختبار',        // 6
-  'المراجعة النهائية',    // 7
-  'إطلاق الحملة',         // 8
-]
+type CampaignsMgmt = Translations['campaignsMgmt']
+
+const WIZARD_STEP_KEYS = [
+  'goal', 'audience', 'template', 'variables', 'preview', 'testSend', 'review', 'launch',
+] as const
+
+function localeTag(lang: Lang): string {
+  return lang === 'en' ? 'en-US' : 'ar-SA'
+}
+
+function fmtCount(n: number, lang: Lang): string {
+  return n.toLocaleString(localeTag(lang))
+}
+
+function wizardStepLabels(cm: CampaignsMgmt): string[] {
+  return WIZARD_STEP_KEYS.map(k => cm.wizard.steps[k])
+}
+
+function goalDisplayLabel(g: CampaignGoal, lang: Lang): string {
+  return lang === 'en' ? g.label_en : g.label_ar
+}
+
+function goalDisplayDescription(g: CampaignGoal, lang: Lang, cm: CampaignsMgmt): string {
+  return cm.goals[g.key]?.description ?? g.description_ar
+}
+
+function segDisplayLabel(s: CustomerSegmentMeta, lang: Lang): string {
+  return lang === 'en' ? s.label_en : s.label_ar
+}
+
+function segDisplayDescription(s: CustomerSegmentMeta, lang: Lang, cm: CampaignsMgmt): string {
+  const entry = cm.segments[s.key]
+  return entry?.description ?? s.description_ar
+}
+
+function segDisplayCriteria(s: CustomerSegmentMeta, lang: Lang, cm: CampaignsMgmt): string {
+  const entry = cm.segments[s.key]
+  return entry?.criteria ?? s.criteria_ar ?? s.description_ar
+}
 
 // Map lucide-react icon names emitted by the backend (goals/segments)
 // to the actual React components. Using a registry keeps the page
@@ -223,18 +250,21 @@ function Step1Goal({
   goals: CampaignGoal[]
   loading: boolean
 }) {
+  const { t, lang } = useLanguage()
+  const s1 = t(tr => tr.campaignsMgmt.step1)
+  const cm = t(tr => tr.campaignsMgmt)
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16 text-slate-400">
-        <RefreshCw className="w-5 h-5 animate-spin me-2" /> جارٍ تحميل أهداف الحملات…
+        <RefreshCw className="w-5 h-5 animate-spin me-2" /> {s1.loading}
       </div>
     )
   }
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        ابدأ باختيار <span className="font-semibold text-slate-700">هدف الحملة</span>.
-        نحلة ستقترح بعدها الشريحة والقالب الأنسب.
+        {s1.introBefore}<span className="font-semibold text-slate-700">{s1.introBold}</span>{s1.introAfter}
       </p>
       <div className="grid sm:grid-cols-2 gap-3">
         {goals.map(g => {
@@ -264,8 +294,8 @@ function Step1Goal({
                 <GoalIcon name={g.icon} className="w-5 h-5" />
               </span>
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-slate-900">{g.label_ar}</p>
-                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{g.description_ar}</p>
+                <p className="text-sm font-semibold text-slate-900">{goalDisplayLabel(g, lang)}</p>
+                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{goalDisplayDescription(g, lang, cm)}</p>
               </div>
             </button>
           )
@@ -286,6 +316,10 @@ function Step2Segment({
   loading: boolean
   goals: CampaignGoal[]
 }) {
+  const { t, lang } = useLanguage()
+  const s2 = t(tr => tr.campaignsMgmt.step2)
+  const cm = t(tr => tr.campaignsMgmt)
+
   // Reorder so segments "natural" to the chosen goal float to the top —
   // the merchant most often wants those first.
   const ordered = useMemo(() => {
@@ -295,26 +329,28 @@ function Step2Segment({
     return [...natural, ...rest]
   }, [segments, wiz.goalKey])
 
-  const goalLabel = goals.find(g => g.key === wiz.goalKey)?.label_ar
+  const selectedGoal = goals.find(g => g.key === wiz.goalKey)
+  const goalLabel = selectedGoal ? goalDisplayLabel(selectedGoal, lang) : undefined
   const selectedSeg = segments.find(s => s.key === wiz.segmentKey)
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16 text-slate-400">
-        <RefreshCw className="w-5 h-5 animate-spin me-2" /> جارٍ تحميل شرائح العملاء…
+        <RefreshCw className="w-5 h-5 animate-spin me-2" /> {s2.loading}
       </div>
     )
   }
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        اختر الشريحة المستهدفة لحملة <span className="font-semibold text-slate-700">{goalLabel ?? '—'}</span>.
-        الأرقام تعكس عدد العملاء القابل للوصول (لديهم رقم واتساب).
+        {s2.introBefore}<span className="font-semibold text-slate-700">{goalLabel ?? '—'}</span>{s2.introAfter}
       </p>
       {selectedSeg && (
         <div className="bg-brand-50/50 border border-brand-100 rounded-lg p-3 text-xs text-slate-700 leading-relaxed">
-          <span className="font-semibold text-brand-700">معنى «{selectedSeg.label_ar}»: </span>
-          {selectedSeg.criteria_ar || selectedSeg.description_ar}
+          <span className="font-semibold text-brand-700">
+            {s2.criteriaPrefix.replace('{label}', segDisplayLabel(selectedSeg, lang))}
+          </span>
+          {segDisplayCriteria(selectedSeg, lang, cm)}
         </div>
       )}
       <div className="grid sm:grid-cols-2 gap-2 max-h-[26rem] overflow-y-auto pe-1">
@@ -323,7 +359,7 @@ function Step2Segment({
             segment by design, so it's surfaced as a separate card. */}
         <button
           onClick={() => setWiz(w => ({ ...w, segmentKey: 'test_recipients', template: null, variables: {} }))}
-          title="أرسل لعدد محدود من العملاء الذين فعّلت لهم زر «إضافة إلى قائمة اختبار الحملات» داخل بطاقة العميل."
+          title={s2.testListTooltip}
           className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
             wiz.segmentKey === 'test_recipients'
               ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-200'
@@ -335,13 +371,13 @@ function Step2Segment({
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <p className="text-sm font-semibold text-emerald-900 truncate">قائمة اختبار الحملات</p>
+              <p className="text-sm font-semibold text-emerald-900 truncate">{s2.testListTitle}</p>
               <span className="text-[9px] bg-white text-emerald-700 px-1.5 py-0.5 rounded-full font-medium border border-emerald-200 shrink-0">
-                داخلي
+                {s2.testListBadge}
               </span>
             </div>
             <p className="text-[11px] text-emerald-700/80 leading-snug line-clamp-2">
-              أرسل تجريبياً لمجموعة صغيرة قبل الإطلاق على القاعدة كاملة.
+              {s2.testListDesc}
             </p>
           </div>
         </button>
@@ -350,11 +386,12 @@ function Step2Segment({
         {ordered.map(s => {
           const selected = wiz.segmentKey === s.key
           const isNatural = wiz.goalKey ? s.natural_goals.includes(wiz.goalKey) : false
+          const segLabel = segDisplayLabel(s, lang)
           return (
             <button
               key={s.key}
               onClick={() => setWiz(w => ({ ...w, segmentKey: s.key, template: null, variables: {} }))}
-              title={s.criteria_ar || s.description_ar}
+              title={segDisplayCriteria(s, lang, cm)}
               className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
                 selected
                   ? 'border-brand-500 bg-brand-50 ring-2 ring-brand-200'
@@ -368,18 +405,18 @@ function Step2Segment({
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <p className="text-sm font-semibold text-slate-900 truncate">{s.label_ar}</p>
+                  <p className="text-sm font-semibold text-slate-900 truncate">{segLabel}</p>
                   {isNatural && (
                     <span className="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium shrink-0">
-                      موصى به
+                      {s2.recommendedBadge}
                     </span>
                   )}
                 </div>
                 <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">
-                  {s.description_ar}
+                  {segDisplayDescription(s, lang, cm)}
                 </p>
                 <p className="text-[11px] text-slate-400 mt-0.5">
-                  {s.customer_count.toLocaleString('ar-SA')} عميل قابل للوصول
+                  {s2.reachableCount.replace('{count}', fmtCount(s.customer_count, lang))}
                 </p>
               </div>
             </button>
@@ -393,11 +430,12 @@ function Step2Segment({
         {ordered.filter(s => s.key !== 'all').map(s => {
           const audKey = `manual:${s.key}`
           const selected = wiz.segmentKey === audKey
+          const segLabel = segDisplayLabel(s, lang)
           return (
             <button
               key={audKey}
               onClick={() => setWiz(w => ({ ...w, segmentKey: audKey, template: null, variables: {} }))}
-              title={`فقط العملاء الذين قمت بتصنيفهم يدوياً كـ «${s.label_ar}»`}
+              title={s2.manualTooltip.replace('{label}', segLabel)}
               className={`flex items-start gap-3 border rounded-xl p-3 text-start transition-all ${
                 selected
                   ? 'border-amber-500 bg-amber-50 ring-2 ring-amber-200'
@@ -411,13 +449,13 @@ function Step2Segment({
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <p className="text-sm font-semibold text-amber-900 truncate">{s.label_ar}</p>
+                  <p className="text-sm font-semibold text-amber-900 truncate">{segLabel}</p>
                   <span className="text-[9px] bg-white text-amber-700 px-1.5 py-0.5 rounded-full font-medium border border-amber-200 shrink-0">
-                    تصنيف يدوي
+                    {s2.manualBadge}
                   </span>
                 </div>
                 <p className="text-[11px] text-amber-700/80 leading-snug line-clamp-2">
-                  أرسل فقط للعملاء الذين قمت بتصنيفهم يدوياً.
+                  {s2.manualDesc}
                 </p>
               </div>
             </button>
@@ -432,10 +470,10 @@ function Step2Segment({
       <div className="border-t border-slate-100 pt-3 space-y-2">
         <p className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
           <ShieldOff className="w-3.5 h-3.5 text-slate-400" />
-          استبعد التصنيفات (اختياري)
+          {s2.excludeTitle}
         </p>
         <p className="text-[11px] text-slate-500">
-          أي عميل يحمل أحد هذه التصنيفات يدوياً لن يستلم الحملة، حتى لو كان ضمن الشريحة المختارة.
+          {s2.excludeDesc}
         </p>
         <div className="flex flex-wrap gap-1.5">
           {segments.filter(s => s.key !== 'all').map(s => {
@@ -456,7 +494,7 @@ function Step2Segment({
                     : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
                 }`}
               >
-                {active ? '✕ ' : '+ '}{s.label_ar}
+                {active ? '✕ ' : '+ '}{segDisplayLabel(s, lang)}
               </button>
             )
           })}
@@ -1595,6 +1633,12 @@ function Step8Launch({
 function CampaignWizard({
   onClose, onCreated,
 }: { onClose: () => void; onCreated: (c: CampaignRecord) => void }) {
+  const { t, lang } = useLanguage()
+  const wz = t(tr => tr.campaignsMgmt.wizard)
+  const cm = t(tr => tr.campaignsMgmt)
+  const stepLabels = useMemo(() => wizardStepLabels(cm), [cm])
+  const wizardLang = lang === 'en' ? 'en' : 'ar'
+
   const [wiz, setWiz] = useState<WizardState>(INITIAL_WIZARD)
   const [goals, setGoals] = useState<CampaignGoal[]>([])
   const [goalsLoading, setGoalsLoading] = useState(true)
@@ -1656,7 +1700,7 @@ function CampaignWizard({
   useEffect(() => {
     if (wiz.step >= 3 && wiz.goalKey && wiz.segmentKey) {
       setRecoLoading(true)
-      campaignsApi.wizard.templates(wiz.goalKey, wiz.segmentKey, 'ar')
+      campaignsApi.wizard.templates(wiz.goalKey, wiz.segmentKey, wizardLang)
         .then(r => setRecommendation(r))
         .catch(() => setRecommendation(null))
         .finally(() => setRecoLoading(false))
@@ -1664,7 +1708,7 @@ function CampaignWizard({
   // We intentionally re-run whenever the wizard reaches step 3 OR
   // either selector changes underneath, so backtracking from step 4
   // and re-picking a segment refreshes the template list.
-  }, [wiz.step, wiz.goalKey, wiz.segmentKey])
+  }, [wiz.step, wiz.goalKey, wiz.segmentKey, wizardLang])
 
   // Synthesise meta for the two non-registry audience types
   // (`manual:<key>` + `test_recipients`) so the review screen still
@@ -1672,13 +1716,14 @@ function CampaignWizard({
   const segmentMeta: CustomerSegmentMeta | undefined = useMemo(() => {
     const key = wiz.segmentKey || ''
     if (!key) return undefined
+    const tr = cm.testRecipients
     if (key === 'test_recipients') {
       return {
         key: 'test_recipients',
-        label_ar: 'قائمة اختبار الحملات',
-        label_en: 'Campaign test list',
-        description_ar: 'مجموعة داخلية صغيرة لاختبار الحملة قبل الإطلاق.',
-        criteria_ar: 'كل العملاء الذين فعّلت لهم زر «قائمة اختبار الحملات» داخل بطاقة العميل.',
+        label_ar: tr.label,
+        label_en: tr.label,
+        description_ar: tr.description,
+        criteria_ar: tr.criteria,
         icon: 'Beaker',
         natural_goals: [],
         crm_statuses: [],
@@ -1690,16 +1735,22 @@ function CampaignWizard({
       const baseKey = key.slice('manual:'.length)
       const base = segments.find(s => s.key === baseKey)
       if (base) {
+        const baseLabel = segDisplayLabel(base, lang)
+        const manualLabel = lang === 'en'
+          ? `${baseLabel} (${tr.manualSuffix})`
+          : `${base.label_ar} (${tr.manualSuffix})`
         return {
           ...base,
           key,
-          label_ar: `${base.label_ar} (تصنيف يدوي)`,
-          description_ar: 'العملاء الذين قمت بتصنيفهم يدوياً ضمن هذه الفئة.',
+          label_ar: manualLabel,
+          label_en: manualLabel,
+          description_ar: cm.step2.manualDesc,
+          criteria_ar: cm.step2.manualDesc,
         }
       }
     }
     return segments.find(s => s.key === key)
-  }, [segments, wiz.segmentKey])
+  }, [segments, wiz.segmentKey, cm, lang])
   const goalMeta    = goals.find(g => g.key === wiz.goalKey)
 
   const canNext = (): boolean => {
@@ -1868,9 +1919,9 @@ function CampaignWizard({
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div>
-            <h2 className="text-sm font-bold text-slate-900">إنشاء حملة واتساب ذكية</h2>
+            <h2 className="text-sm font-bold text-slate-900">{wz.title}</h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              {STEP_LABELS[wiz.step - 1]} — الخطوة {wiz.step} من {STEP_LABELS.length}
+              {stepLabels[wiz.step - 1]} — {wz.stepProgressMiddle} {wiz.step} {wz.stepProgressOf} {stepLabels.length}
             </p>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
@@ -1881,7 +1932,7 @@ function CampaignWizard({
         {/* Step progress bar */}
         <div className="px-6 pt-4">
           <div className="flex gap-1">
-            {Array.from({ length: STEP_LABELS.length }, (_, i) => (
+            {Array.from({ length: stepLabels.length }, (_, i) => (
               <div
                 key={i}
                 className={`h-1 flex-1 rounded-full transition-colors ${
@@ -1911,7 +1962,7 @@ function CampaignWizard({
             disabled={wiz.step === 1}
             className="btn-ghost text-sm disabled:opacity-30"
           >
-            <ChevronRight className="w-4 h-4" /> السابق
+            <ChevronRight className="w-4 h-4" /> {wz.prev}
           </button>
 
           {wiz.step < 8 && (
@@ -1920,7 +1971,7 @@ function CampaignWizard({
               disabled={!canNext()}
               className="btn-primary text-sm disabled:opacity-40"
             >
-              التالي <ChevronLeft className="w-4 h-4" />
+              {wz.next} <ChevronLeft className="w-4 h-4" />
             </button>
           )}
         </div>

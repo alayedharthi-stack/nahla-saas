@@ -991,6 +991,58 @@ export interface Translations {
     }
   }
 
+  /** Campaigns page — wizard + list (Wave 1C) */
+  campaignsMgmt: {
+    wizard: {
+      title:              string
+      stepProgressMiddle: string
+      stepProgressOf:     string
+      prev:               string
+      next:               string
+      steps: {
+        goal:      string
+        audience:  string
+        template:  string
+        variables: string
+        preview:   string
+        testSend:  string
+        review:    string
+        launch:    string
+      }
+    }
+    step1: {
+      loading:      string
+      introBefore:  string
+      introBold:    string
+      introAfter:   string
+    }
+    step2: {
+      loading:           string
+      introBefore:       string
+      introAfter:        string
+      criteriaPrefix:    string
+      testListTitle:     string
+      testListBadge:     string
+      testListDesc:      string
+      testListTooltip:   string
+      recommendedBadge:  string
+      reachableCount:    string
+      manualBadge:       string
+      manualDesc:        string
+      manualTooltip:     string
+      excludeTitle:      string
+      excludeDesc:       string
+    }
+    goals: Record<string, { description: string }>
+    segments: Record<string, { description: string; criteria: string }>
+    testRecipients: {
+      label:        string
+      description:  string
+      criteria:     string
+      manualSuffix: string
+    }
+  }
+
   /** Merchants (admin) page */
   merchants: {
     title:        string

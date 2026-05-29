@@ -999,6 +999,122 @@ const en: Translations = {
     },
   },
 
+  campaignsMgmt: {
+    wizard: {
+      title:              'Create a smart WhatsApp campaign',
+      stepProgressMiddle: 'Step',
+      stepProgressOf:     'of',
+      prev:               'Previous',
+      next:               'Next',
+      steps: {
+        goal:      'Campaign goal',
+        audience:  'Target audience',
+        template:  'Choose template',
+        variables: 'Fill variables',
+        preview:   'Preview',
+        testSend:  'Test message',
+        review:    'Final review',
+        launch:    'Launch campaign',
+      },
+    },
+    step1: {
+      loading:     'Loading campaign goals…',
+      introBefore: 'Start by choosing a ',
+      introBold:   'campaign goal',
+      introAfter:  '. Nahla will then suggest the best audience and template.',
+    },
+    step2: {
+      loading:          'Loading customer segments…',
+      introBefore:      'Choose the target audience for your ',
+      introAfter:       ' campaign. Counts show reachable customers (with a WhatsApp number).',
+      criteriaPrefix:   'What «{label}» means: ',
+      testListTitle:    'Campaign test list',
+      testListBadge:    'Internal',
+      testListDesc:     'Send to a small group before launching to your full audience.',
+      testListTooltip:  'Send to a limited set of customers you marked with «Add to campaign test list» on the customer card.',
+      recommendedBadge: 'Recommended',
+      reachableCount:   '{count} reachable customers',
+      manualBadge:      'Manual tag',
+      manualDesc:       'Send only to customers you tagged manually.',
+      manualTooltip:    'Only customers you manually tagged as «{label}»',
+      excludeTitle:     'Exclude tags (optional)',
+      excludeDesc:      'Any customer with one of these manual tags will not receive the campaign, even if they match the selected audience.',
+    },
+    goals: {
+      welcome:      { description: 'A first welcome message for customers who signed up recently' },
+      promotion:    { description: 'A time-limited offer or discount to drive purchases' },
+      reactivation: { description: 'Win back customers who stopped buying or engaging' },
+      reorder:      { description: 'Encourage repeat buyers to purchase their favorite products again' },
+      reminder:     { description: 'Remind customers to complete an order, payment, or upcoming date' },
+      broadcast:    { description: 'A broad announcement to all or a large share of your customers' },
+      custom:       { description: 'No recommendations — pick the template and audience yourself' },
+    },
+    segments: {
+      all: {
+        description: 'Every customer in your database',
+        criteria: 'Every customer registered in your store in Nahla, regardless of stage or engagement. Useful for a full-base view or a general announcement.',
+      },
+      new: {
+        description: 'Recently joined customers who have not ordered or ordered only days ago',
+        criteria: 'A customer is in this segment if they just joined (no behavior card yet), are a lead (registered with no order), or are a new customer (first order within the last 30 days).',
+      },
+      promising: {
+        description: 'Customers showing strong interest that is likely to convert',
+        criteria: 'By RFM analysis, these customers are close to becoming repeat buyers. A smart offer now can turn them into loyal customers.',
+      },
+      vip: {
+        description: 'Your highest-spending, most loyal segment',
+        criteria: 'VIP if account status is VIP (lifetime spend ≥ SAR 3,000 or ≥ SAR 2,000 across ≥ 5 orders), or RFM bucket is Champions or Can\'t Lose Them.',
+      },
+      dormant: {
+        description: 'Previously active customers whose engagement has dropped — not lost yet',
+        criteria: 'Account status At Risk (last order 60–90 days ago) or RFM At Risk, About to Sleep, or Needs Attention. Early reactivation is cheaper than win-back later.',
+      },
+      lost: {
+        description: 'Customers who stopped engaging entirely and need win-back',
+        criteria: 'Account status Inactive (no order in 90+ days) or RFM Lost Customers / Hibernating. Usually needs a strong win-back offer with a coupon.',
+      },
+      one_time: {
+        description: 'Customers who completed exactly one order',
+        criteria: 'Total completed orders (excluding cancelled and abandoned carts) equals exactly one. Goal: turn the first purchase into an ongoing relationship.',
+      },
+      repeat: {
+        description: 'Customers with two or more completed orders',
+        criteria: 'Total completed orders ≥ 2. They already trust your store — ideal for loyalty and reorder offers.',
+      },
+      high_spenders: {
+        description: 'Customers with high lifetime spend',
+        criteria: 'Lifetime value (LTV) score ≥ 0.70 on a 0–1 scale. Recalculated automatically after each order — no manual setup required.',
+      },
+      abandoned_cart: {
+        description: 'Customers who started checkout but left before completing',
+        criteria: 'At least one abandoned cart in store orders. Currently Salla-only — other platforms show zero until cart sync is supported.',
+      },
+      no_purchase_30: {
+        description: 'Last order more than 30 days ago (has purchased before)',
+        criteria: 'Customer has ordered before but last order is older than 30 days. Never-purchased customers are excluded.',
+      },
+      no_purchase_60: {
+        description: 'Last order more than 60 days ago (has purchased before)',
+        criteria: 'Customer has ordered before but last order is older than 60 days. Good for a medium-urgency reactivation campaign.',
+      },
+      no_purchase_90: {
+        description: 'Last order more than 90 days ago, or never ordered',
+        criteria: 'Last order older than 90 days or never ordered. Broader segment for a strong win-back attempt.',
+      },
+      unsubscribed: {
+        description: 'Customers who opted out — excluded from all outreach',
+        criteria: 'These customers sent opt-out keywords (e.g. STOP) and all automated and marketing messages were stopped immediately. If they message again they re-enter normal lists.\n\nTip: To win them back, contact them personally — do not send automated messages.',
+      },
+    },
+    testRecipients: {
+      label:        'Campaign test list',
+      description:  'A small internal group to test the campaign before launch.',
+      criteria:     'Every customer you marked with «Campaign test list» on the customer card.',
+      manualSuffix: 'manual tag',
+    },
+  },
+
   security: {
     pageTitle:         'Security & authentication',
     pageSubtitle:      'Turn on two-factor authentication to protect your account from unauthorised sign-in attempts.',
