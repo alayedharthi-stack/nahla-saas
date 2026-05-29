@@ -13,47 +13,69 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.nahla_order_bridge import (  # noqa: E402
+    _resolve_customer_name,
     _resolve_order_amount,
     nahla_wa_external_id,
     upsert_nahla_paid_order,
 )
+
+_DB_KW = {"db": MagicMock(), "tenant_id": 33, "conversation_id": 9063}
 
 
 def test_nahla_wa_external_id_is_stable() -> None:
     assert nahla_wa_external_id(33, 9063) == "nahla-wa-33-9063"
 
 
-def test_resolve_amount_prefers_total_price() -> None:
-    amt, needs_review = _resolve_order_amount(
+def test_resolve_amount_prefers_receipt_over_order_prep() -> None:
+    amt, needs_review, source = _resolve_order_amount(
+        order_prep={"total_price": "250"},
+        brain_state={},
+        receipt_metadata={"pdf_text_preview": "تم التحويل 299 SAR"},
+        line_items=[],
+        **_DB_KW,
+    )
+    assert amt == 299.0
+    assert needs_review is False
+    assert source == "receipt_extraction"
+
+
+def test_resolve_amount_falls_back_to_order_prep_when_no_receipt() -> None:
+    amt, needs_review, source = _resolve_order_amount(
         order_prep={"total_price": "250 ر.س"},
         brain_state={},
         receipt_metadata={},
         line_items=[],
+        **_DB_KW,
     )
     assert amt == 250.0
     assert needs_review is False
-
-
-def test_resolve_amount_falls_back_to_receipt_extraction() -> None:
-    amt, needs_review = _resolve_order_amount(
-        order_prep={},
-        brain_state={},
-        receipt_metadata={"pdf_text_preview": "تم التحويل 180.50 ر.س"},
-        line_items=[],
-    )
-    assert amt == 180.5
-    assert needs_review is False
+    assert source == "order_prep_total_price"
 
 
 def test_resolve_amount_unknown_sets_review_flag() -> None:
-    amt, needs_review = _resolve_order_amount(
+    amt, needs_review, source = _resolve_order_amount(
         order_prep={},
         brain_state={},
         receipt_metadata={},
         line_items=[{"product_name": "عسل", "quantity": 1}],
+        **_DB_KW,
     )
     assert amt is None
     assert needs_review is True
+    assert source == "unknown"
+
+
+def test_resolve_customer_name_rejects_phone_like_db_name() -> None:
+    conv = SimpleNamespace(
+        customer=SimpleNamespace(
+            name="0551308005",
+            phone="966551308005",
+            extra_metadata={},
+        ),
+        extra_metadata={},
+    )
+    assert _resolve_customer_name(conv, {"customer_first_name": "سارة"}) == "سارة"
+    assert _resolve_customer_name(conv, {}) is None
 
 
 def test_upsert_skips_without_confirmed_receipt() -> None:
@@ -119,6 +141,7 @@ def test_upsert_creates_paid_nahla_order_with_nhl_number(monkeypatch: pytest.Mon
     assert result.total == "320.00 ر.س"
     assert result.extra_metadata["source_kind"] == "nahla_order"
     assert result.extra_metadata["needs_amount_review"] is False
+    assert result.extra_metadata["amount_source"] == "order_prep_total_price"
     db.add.assert_called_once()
     db.flush.assert_called_once()
 
@@ -147,7 +170,7 @@ def test_upsert_is_idempotent_on_same_external_id() -> None:
         "payment_receipt_received": True,
         "payment_receipt_at": "2026-05-28T16:26:23+00:00",
         "total_price": "150",
-        "payment_receipt_metadata": {},
+        "payment_receipt_metadata": {"pdf_text_preview": "تم التحويل 299 SAR"},
     }
 
     result = upsert_nahla_paid_order(
@@ -159,8 +182,8 @@ def test_upsert_is_idempotent_on_same_external_id() -> None:
     )
 
     assert result is existing
-    assert existing.total == "150.00 ر.س"
-    assert existing.extra_metadata["needs_amount_review"] is False
+    assert existing.total == "299.00 ر.س"
+    assert existing.extra_metadata["amount_source"] == "receipt_extraction"
     db.flush.assert_not_called()
 
 

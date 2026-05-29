@@ -968,6 +968,12 @@ def _maybe_promote_prior_evidence(
     # inbound's metadata is carried through under
     # ``payment_receipt_metadata`` so support can deep-link the
     # original PDF/image even though it was promoted by a text reply.
+    try:
+        from core.order_flow import _receipt_text_fields  # noqa: PLC0415
+        receipt_text = _receipt_text_fields(md)
+    except Exception:  # noqa: BLE001
+        receipt_text = {}
+
     state_patch: Dict[str, Any] = {
         "awaiting_payment_receipt": False,
         "payment_receipt_received": True,
@@ -984,6 +990,7 @@ def _maybe_promote_prior_evidence(
             "storage_sha256":  md.get("storage_sha256"),
             "original_received_at": getattr(ev, "created_at", None) and
                                     ev.created_at.isoformat(),
+            **receipt_text,
         },
     }
 

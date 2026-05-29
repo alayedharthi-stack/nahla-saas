@@ -17,9 +17,26 @@ logger = logging.getLogger("nahla.order_bridge")
 
 _NAHL_WA_EXT_PREFIX = "nahla-wa-"
 
+_RECEIPT_TEXT_KEYS = (
+    "vision_text",
+    "frame_vision_text",
+    "ocr_text",
+    "pdf_text_preview",
+    "pdf_text_full",
+    "caption",
+    "filename",
+)
+
 
 def nahla_wa_external_id(tenant_id: int, conversation_id: int) -> str:
     return f"{_NAHL_WA_EXT_PREFIX}{tenant_id}-{conversation_id}"
+
+
+def _looks_like_phone(text: str) -> bool:
+    if not text:
+        return False
+    digits = text.lstrip("+").replace(" ", "").replace("-", "")
+    return digits.isdigit() and len(digits) >= 7
 
 
 def _parse_amount(value: Any) -> Optional[float]:
@@ -38,45 +55,138 @@ def _parse_amount(value: Any) -> Optional[float]:
         return None
 
 
-def _resolve_order_amount(
-    *,
-    order_prep: Dict[str, Any],
-    brain_state: Dict[str, Any],
-    receipt_metadata: Dict[str, Any],
-    line_items: List[Dict[str, Any]],
-) -> Tuple[Optional[float], bool]:
-    """
-    Return ``(amount_sar, needs_amount_review)``.
-
-    Priority:
-      1. order_prep.total_price / order_prep.price
-      2. current_product_focus.price
-      3. receipt extraction (compute_receipt_fields)
-      4. line-item unit price × qty
-      5. unknown → None + needs_amount_review=True
-    """
-    for key in ("total_price", "price"):
-        amt = _parse_amount(order_prep.get(key))
-        if amt is not None:
-            return amt, False
-
-    focus = brain_state.get("current_product_focus") or {}
-    if isinstance(focus, dict):
-        amt = _parse_amount(focus.get("price"))
-        if amt is not None:
-            return amt, False
-
+def _extract_receipt_amount(receipt_metadata: Dict[str, Any]) -> Optional[float]:
     try:
         from core.receipt_extraction import compute_receipt_fields  # noqa: PLC0415
 
         fields = compute_receipt_fields(metadata=receipt_metadata or {})
         for extracted in fields.amounts or ():
-            raw_val = getattr(extracted, "value", None)
-            amt = _parse_amount(raw_val)
+            amt = _parse_amount(getattr(extracted, "value", None))
             if amt is not None:
-                return amt, False
+                return amt
     except Exception as exc:  # noqa: BLE001
         logger.debug("[NAHLA_ORDER_BRIDGE] receipt amount extraction failed: %s", exc)
+    return None
+
+
+def _explicit_payment_amount(
+    *,
+    receipt_metadata: Dict[str, Any],
+    order_prep: Dict[str, Any],
+) -> Optional[float]:
+    for container in (receipt_metadata, order_prep):
+        for key in (
+            "confirmed_payment_amount",
+            "payment_amount",
+            "amount",
+            "total_amount",
+            "receipt_amount",
+        ):
+            amt = _parse_amount(container.get(key))
+            if amt is not None:
+                return amt
+    return None
+
+
+def _enrich_receipt_metadata(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: int,
+    receipt_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged = dict(receipt_metadata or {})
+    if any(merged.get(k) for k in _RECEIPT_TEXT_KEYS):
+        return merged
+
+    wa_id = str(merged.get("wa_message_id") or "").strip()
+    if not wa_id or db is None:
+        return merged
+
+    try:
+        from models import MessageEvent  # noqa: PLC0415
+
+        events = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id == conversation_id,
+                MessageEvent.direction == "inbound",
+            )
+            .order_by(MessageEvent.id.desc())
+            .limit(40)
+            .all()
+        )
+        for ev in events:
+            em = getattr(ev, "extra_metadata", None) or {}
+            ni = em.get("normalized_inbound") if isinstance(em.get("normalized_inbound"), dict) else {}
+            nim = ni.get("metadata") if isinstance(ni, dict) and isinstance(ni.get("metadata"), dict) else {}
+            for candidate in (nim, ni, em):
+                if not isinstance(candidate, dict):
+                    continue
+                if str(candidate.get("wa_message_id") or "").strip() != wa_id:
+                    continue
+                for key in _RECEIPT_TEXT_KEYS:
+                    if candidate.get(key) and not merged.get(key):
+                        merged[key] = candidate[key]
+                return merged
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[NAHLA_ORDER_BRIDGE] receipt message lookup failed tenant=%s conv=%s: %s",
+            tenant_id, conversation_id, exc,
+        )
+    return merged
+
+
+def _resolve_order_amount(
+    *,
+    db: Any,
+    tenant_id: int,
+    conversation_id: int,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    receipt_metadata: Dict[str, Any],
+    line_items: List[Dict[str, Any]],
+) -> Tuple[Optional[float], bool, str]:
+    """
+    Return ``(amount_sar, needs_amount_review, amount_source)``.
+
+    Priority (confirmed receipt wins over stale funnel state):
+      1. receipt_extraction
+      2. confirmed_payment_amount / explicit payment fields
+      3. order_prep.total_price / order_prep.price
+      4. current_product_focus.price
+      5. line-item unit price × qty
+      6. unknown
+    """
+    enriched_receipt = _enrich_receipt_metadata(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        receipt_metadata=receipt_metadata,
+    )
+
+    receipt_amt = _extract_receipt_amount(enriched_receipt)
+    if receipt_amt is not None:
+        return receipt_amt, False, "receipt_extraction"
+
+    explicit_amt = _explicit_payment_amount(
+        receipt_metadata=enriched_receipt,
+        order_prep=order_prep,
+    )
+    if explicit_amt is not None:
+        return explicit_amt, False, "confirmed_payment_amount"
+
+    for key in ("total_price", "price"):
+        amt = _parse_amount(order_prep.get(key))
+        if amt is not None:
+            return amt, False, "order_prep_total_price"
+
+    focus = brain_state.get("current_product_focus") or {}
+    if isinstance(focus, dict):
+        amt = _parse_amount(focus.get("price"))
+        if amt is not None:
+            return amt, False, "product_focus_price"
 
     for item in line_items:
         unit = _parse_amount(item.get("unit_price") or item.get("price"))
@@ -86,9 +196,9 @@ def _resolve_order_amount(
         except (TypeError, ValueError):
             qty_n = 1
         if unit is not None:
-            return round(unit * qty_n, 2), False
+            return round(unit * qty_n, 2), False, "line_items"
 
-    return None, True
+    return None, True, "unknown"
 
 
 def _build_line_items(
@@ -142,25 +252,59 @@ def _allocate_nhl_number(db: Any, tenant_id: int) -> str:
     return f"NHL-{tenant_id}-{seq:06d}"
 
 
-def _customer_payload(conversation: Any, order_prep: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
-    customer = getattr(conversation, "customer", None)
-    phone = None
-    name = None
-    if customer is not None:
-        phone = getattr(customer, "phone", None) or getattr(customer, "mobile", None)
-        name = getattr(customer, "name", None)
-    meta = getattr(conversation, "extra_metadata", None) or {}
-    if not phone and isinstance(meta, dict):
-        phone = meta.get("phone")
+def _resolve_customer_name(
+    conversation: Any,
+    order_prep: Dict[str, Any],
+) -> Optional[str]:
+    """Return a human display name — never a bare phone number."""
+    candidates: List[str] = []
+
     first = str(order_prep.get("customer_first_name") or "").strip()
     last = str(order_prep.get("customer_last_name") or "").strip()
-    full_name = " ".join(p for p in (first, last) if p).strip() or (name or "")
+    prep_name = " ".join(p for p in (first, last) if p).strip()
+    if prep_name:
+        candidates.append(prep_name)
+
+    customer = getattr(conversation, "customer", None)
+    if customer is not None:
+        candidates.append(str(getattr(customer, "name", None) or "").strip())
+        cust_meta = getattr(customer, "extra_metadata", None) or {}
+        if isinstance(cust_meta, dict):
+            for key in ("wa_profile_name", "profile_name", "whatsapp_name", "display_name"):
+                candidates.append(str(cust_meta.get(key) or "").strip())
+
+    conv_meta = getattr(conversation, "extra_metadata", None) or {}
+    if isinstance(conv_meta, dict):
+        for key in ("customer_name", "contact_name", "wa_profile_name", "profile_name"):
+            candidates.append(str(conv_meta.get(key) or "").strip())
+
+    for raw in candidates:
+        name = (raw or "").strip()
+        if not name or _looks_like_phone(name):
+            continue
+        return name
+    return None
+
+
+def _customer_payload(
+    conversation: Any,
+    order_prep: Dict[str, Any],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    customer = getattr(conversation, "customer", None)
+    phone = None
+    if customer is not None:
+        phone = getattr(customer, "phone", None) or getattr(customer, "mobile", None)
+    conv_meta = getattr(conversation, "extra_metadata", None) or {}
+    if not phone and isinstance(conv_meta, dict):
+        phone = conv_meta.get("phone")
+
+    display_name = _resolve_customer_name(conversation, order_prep)
     customer_info = {
-        "name":  full_name or None,
+        "name":  display_name,
         "phone": phone,
         "city":  order_prep.get("city"),
     }
-    return full_name or None, customer_info
+    return display_name, customer_info
 
 
 def upsert_nahla_paid_order(
@@ -195,7 +339,10 @@ def upsert_nahla_paid_order(
         external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
         receipt_metadata = dict(order_prep.get("payment_receipt_metadata") or {})
         line_items = _build_line_items(order_prep=order_prep, brain_state=brain_state)
-        amount, needs_review = _resolve_order_amount(
+        amount, needs_review, amount_source = _resolve_order_amount(
+            db=db,
+            tenant_id=tenant_id,
+            conversation_id=int(conversation_id),
             order_prep=order_prep,
             brain_state=brain_state,
             receipt_metadata=receipt_metadata,
@@ -203,6 +350,19 @@ def upsert_nahla_paid_order(
         )
         total_str = _format_total_sar(amount)
         customer_name, customer_info = _customer_payload(conversation, order_prep)
+        fallback_used = amount_source not in (
+            "receipt_extraction",
+            "confirmed_payment_amount",
+        )
+        logger.info(
+            "[NAHLA_ORDER_BRIDGE] amount_source=%s amount_value=%s fallback_used=%s "
+            "tenant=%s conv=%s",
+            amount_source,
+            amount if amount is not None else "unknown",
+            fallback_used,
+            tenant_id,
+            conversation_id,
+        )
 
         confirmed_at = (
             str(order_prep.get("payment_receipt_at") or "").strip()
@@ -217,15 +377,20 @@ def upsert_nahla_paid_order(
         )
 
         base_meta: Dict[str, Any] = {
-            "source_kind":           "nahla_order",
-            "source":                "ai_sales_agent",
-            "created_via":           "nahla_order_bridge",
-            "conversation_id":       conversation_id,
-            "payment_confirmed_at":  confirmed_at,
+            "source_kind":              "nahla_order",
+            "source":                   "ai_sales_agent",
+            "created_via":              "nahla_order_bridge",
+            "conversation_id":          conversation_id,
+            "payment_confirmed_at":     confirmed_at,
             "payment_receipt_metadata": receipt_metadata,
-            "needs_amount_review":   needs_review,
-            "created_at":            confirmed_at,
+            "needs_amount_review":      needs_review,
+            "amount_source":            amount_source,
+            "amount_value":             amount,
+            "amount_fallback_used":     fallback_used,
+            "created_at":               confirmed_at,
         }
+        if customer_name:
+            base_meta["customer_name"] = customer_name
 
         if existing is not None:
             meta = dict(existing.extra_metadata or {})

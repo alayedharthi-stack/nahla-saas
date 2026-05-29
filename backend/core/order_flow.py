@@ -546,6 +546,21 @@ def _compose_receipt_ack(summary: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _receipt_text_fields(inbound_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist OCR/vision text alongside receipt pointers for revenue bridge."""
+    md = inbound_metadata or {}
+    fields = {
+        "vision_text":              md.get("vision_text"),
+        "frame_vision_text":        md.get("frame_vision_text"),
+        "ocr_text":                 md.get("ocr_text"),
+        "pdf_text_preview":         md.get("pdf_text_preview"),
+        "pdf_text_full":            md.get("pdf_text_full"),
+        "caption":                  md.get("caption"),
+        "confirmed_payment_amount": md.get("confirmed_payment_amount") or md.get("amount"),
+    }
+    return {k: v for k, v in fields.items() if v not in (None, "")}
+
+
 def maybe_handle_receipt_inbound(
     *,
     db: Any,
@@ -765,6 +780,7 @@ def maybe_handle_receipt_inbound(
             "storage_url":      (inbound_metadata or {}).get("storage_url"),
             "storage_sha256":   (inbound_metadata or {}).get("storage_sha256"),
             "received_at":      datetime.now(timezone.utc).isoformat(),
+            **_receipt_text_fields(inbound_metadata or {}),
         },
     }
 
@@ -1001,6 +1017,7 @@ def maybe_handle_payment_evidence_inbound(
                 "storage_url":     md.get("storage_url"),
                 "storage_sha256":  md.get("storage_sha256"),
                 "tenant_account_match": _understanding_block,
+                **_receipt_text_fields(md),
             },
         }
         # ``_compose_receipt_ack`` includes the structured address
