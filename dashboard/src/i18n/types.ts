@@ -1041,6 +1041,31 @@ export interface Translations {
       criteria:     string
       manualSuffix: string
     }
+    step3: {
+      loading:            string
+      intro:              string
+      modeManualPill:     string
+      modeAutoPill:       string
+      modeManualTitle:    string
+      modeAutoTitle:      string
+      legendManualDesc:   string
+      legendAutoDesc:     string
+      groupAuto:          string
+      groupManual:        string
+      bestForCampaign:    string
+      emptyDefault:       string
+      emptyNoTemplates:   string
+      emptyPending:       string
+      emptyRejected:      string
+      emptyDraft:         string
+      closestTemplate:    string
+      closestMeta:        string
+      createCtaBefore:    string
+      createCtaLink:       string
+      createCtaAfter:     string
+      /** Maps backend Arabic badge strings → display label (EN block only; AR uses keys as values). */
+      badges: Record<string, string>
+    }
   }
 
   /** Merchants (admin) page */

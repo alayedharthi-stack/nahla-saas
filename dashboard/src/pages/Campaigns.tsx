@@ -133,6 +133,60 @@ function segDisplayCriteria(s: CustomerSegmentMeta, lang: Lang, cm: CampaignsMgm
   return entry?.criteria ?? s.criteria_ar ?? s.description_ar
 }
 
+/** Mode badges emitted by the recommender — shown as pills, not compatibility badges. */
+const RECO_MODE_BADGES = new Set(['✋ يدوي', '🟠 يدوي', '⚡ تلقائي'])
+
+/** Badge colour keyed by canonical Arabic label from the backend recommender. */
+const RECO_BADGE_COLORS: Record<string, string> = {
+  'الأفضل لهذه الحملة':   'bg-emerald-100 text-emerald-700 border-emerald-200',
+  'معتمد من Meta':         'bg-blue-50 text-blue-700 border-blue-200',
+  'متوافق':                 'bg-slate-100 text-slate-600 border-slate-200',
+  'يحتاج مراجعة':           'bg-amber-50 text-amber-700 border-amber-200',
+  'لغة مختلفة':              'bg-amber-50 text-amber-700 border-amber-200',
+  'فئة لا تناسب الهدف':     'bg-rose-50 text-rose-700 border-rose-200',
+}
+
+function recoBadgeLabel(arLabel: string, lang: Lang, map: Record<string, string>): string {
+  if (lang === 'ar') return arLabel
+  return map[arLabel] ?? arLabel
+}
+
+function templatePreviewDir(language: string | null | undefined): 'rtl' | 'ltr' {
+  const lc = (language || '').toLowerCase()
+  return lc === 'en' || lc.startsWith('en_') ? 'ltr' : 'rtl'
+}
+
+function waCategoryLabel(
+  category: string | null | undefined,
+  tm: Translations['templatesMgmt'],
+): string {
+  switch ((category || '').toUpperCase()) {
+    case 'MARKETING':      return tm.categoryMarketing
+    case 'UTILITY':        return tm.categoryUtility
+    case 'AUTHENTICATION': return tm.categoryAuth
+    default:               return category || '—'
+  }
+}
+
+function step3EmptyHint(
+  recommendation: TemplateRecommendation | null,
+  lang: Lang,
+  s3: CampaignsMgmt['step3'],
+): string {
+  if (lang === 'ar') {
+    return recommendation?.suggestion_ar || s3.emptyDefault
+  }
+  const next = recommendation?.next_best_template
+  if (!next) return s3.emptyNoTemplates
+  const name = next.display_name_ar || next.name.replace(/_/g, ' ')
+  switch ((next.status || '').toUpperCase()) {
+    case 'PENDING':  return s3.emptyPending.replace('{name}', name)
+    case 'REJECTED': return s3.emptyRejected.replace('{name}', name)
+    case 'DRAFT':    return s3.emptyDraft.replace('{name}', name)
+    default:         return s3.emptyDefault
+  }
+}
+
 // Map lucide-react icon names emitted by the backend (goals/segments)
 // to the actual React components. Using a registry keeps the page
 // independent of any ad-hoc string-to-icon coupling.
@@ -506,21 +560,17 @@ function Step2Segment({
 
 // ── Step 3: Template selection (with badges + recommendation) ────────────────
 
-function TemplateBadge({ label }: { label: string }) {
-  // Map known labels to a colour. Unknown labels render in slate so a
-  // future backend addition is safe even before we update this map.
-  const map: Record<string, string> = {
-    'الأفضل لهذه الحملة':   'bg-emerald-100 text-emerald-700 border-emerald-200',
-    'معتمد من Meta':         'bg-blue-50 text-blue-700 border-blue-200',
-    'متوافق':                 'bg-slate-100 text-slate-600 border-slate-200',
-    'يحتاج مراجعة':           'bg-amber-50 text-amber-700 border-amber-200',
-    'لغة مختلفة':              'bg-amber-50 text-amber-700 border-amber-200',
-    'فئة لا تناسب الهدف':     'bg-rose-50 text-rose-700 border-rose-200',
-  }
-  const cls = map[label] ?? 'bg-slate-50 text-slate-500 border-slate-200'
+function TemplateBadge({
+  arLabel, lang, badgeMap,
+}: {
+  arLabel: string
+  lang: Lang
+  badgeMap: Record<string, string>
+}) {
+  const cls = RECO_BADGE_COLORS[arLabel] ?? 'bg-slate-50 text-slate-500 border-slate-200'
   return (
     <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${cls}`}>
-      {label}
+      {recoBadgeLabel(arLabel, lang, badgeMap)}
     </span>
   )
 }
@@ -528,13 +578,16 @@ function TemplateBadge({ label }: { label: string }) {
 function RecommendedTemplateCard({
   tpl, selected, onClick,
 }: { tpl: RecommendedTemplate; selected: boolean; onClick: () => void }) {
+  const { t, lang } = useLanguage()
+  const s3 = t(tr => tr.campaignsMgmt.step3)
+  const tm = t(tr => tr.templatesMgmt)
+
   const header = getTemplateHeader(tpl)
   const body   = getTemplateBody(tpl)
   const vars   = extractVariables(body)
   const manual = isManualTemplate(tpl)
   // Prefer the merchant-set display name, then the library's labelled
-  // suggestion (always contains "يدوي" / "تلقائي"), and only fall
-  // back to the raw template name as a last resort.
+  // suggestion, and only fall back to the raw template name as a last resort.
   const displayName =
     tpl.display_name_ar ||
     tpl.library_label_ar ||
@@ -553,7 +606,7 @@ function RecommendedTemplateCard({
     >
       {tpl.is_best && (
         <span className="absolute -top-2 start-3 bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded-full font-semibold flex items-center gap-1">
-          <Star className="w-3 h-3" /> الأفضل لهذه الحملة
+          <Star className="w-3 h-3" /> {s3.bestForCampaign}
         </span>
       )}
       <div className="flex items-center justify-between mb-2 gap-2">
@@ -561,33 +614,35 @@ function RecommendedTemplateCard({
           {displayName}
         </p>
         <div className="flex items-center gap-1 shrink-0">
-          {/* Mode pill — the single most important signal on the
-              card. Orange = merchant types every value; green = Nahla
-              fills values from system data. */}
           <span
             className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
               manual
                 ? 'bg-orange-50 text-orange-700 border-orange-200'
                 : 'bg-emerald-50 text-emerald-700 border-emerald-200'
             }`}
-            title={manual
-              ? 'قالب يدوي — أنت تكتب الكوبون والرابط بنفسك.'
-              : 'قالب تلقائي — نحلة تُعبّئ القيم تلقائياً حسب الإعدادات.'}
+            title={manual ? s3.modeManualTitle : s3.modeAutoTitle}
           >
-            {manual ? '✋ يدوي' : '⚡ تلقائي'}
+            {manual ? s3.modeManualPill : s3.modeAutoPill}
           </span>
-          <Badge label={tpl.category === 'MARKETING' ? 'تسويق' : tpl.category === 'UTILITY' ? 'خدمة' : 'مصادقة'}
-                 variant={tpl.category === 'MARKETING' ? 'amber' : 'blue'} />
+          <Badge
+            label={waCategoryLabel(tpl.category, tm)}
+            variant={tpl.category === 'MARKETING' ? 'amber' : 'blue'}
+          />
         </div>
       </div>
       {header && <p className="text-xs font-medium text-slate-700 mb-1">{header}</p>}
-      <p className="text-xs text-slate-500 line-clamp-2 mb-2" dir="rtl">{body}</p>
+      <p
+        className="text-xs text-slate-500 line-clamp-2 mb-2"
+        dir={templatePreviewDir(tpl.language)}
+      >
+        {body}
+      </p>
       <div className="flex flex-wrap gap-1 mb-2">
         {tpl.badges
-          // Drop the inline mode emoji-badge — the dedicated pill above
-          // is louder; keeping both clutters the card.
-          .filter(b => b !== '✋ يدوي' && b !== '🟠 يدوي' && b !== '⚡ تلقائي')
-          .map(b => <TemplateBadge key={b} label={b} />)}
+          .filter(b => !RECO_MODE_BADGES.has(b))
+          .map(b => (
+            <TemplateBadge key={b} arLabel={b} lang={lang} badgeMap={s3.badges} />
+          ))}
       </div>
       {vars.length > 0 && (
         <div className="flex flex-wrap gap-1">
@@ -596,7 +651,9 @@ function RecommendedTemplateCard({
           ))}
         </div>
       )}
-      <p className="text-[10px] text-slate-400 mt-2">{tpl.reason_ar}</p>
+      {lang === 'ar' && tpl.reason_ar && (
+        <p className="text-[10px] text-slate-400 mt-2">{tpl.reason_ar}</p>
+      )}
     </button>
   )
 }
@@ -609,18 +666,20 @@ function Step3Template({
   recommendation: TemplateRecommendation | null
   loading: boolean
 }) {
+  const { t, lang } = useLanguage()
+  const s3 = t(tr => tr.campaignsMgmt.step3)
+  const tm = t(tr => tr.templatesMgmt)
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-16 text-slate-400">
-        <RefreshCw className="w-5 h-5 animate-spin me-2" /> جارٍ ترتيب القوالب المناسبة…
+        <RefreshCw className="w-5 h-5 animate-spin me-2" /> {s3.loading}
       </div>
     )
   }
   if (!recommendation || recommendation.templates.length === 0) {
     const next = recommendation?.next_best_template
-    const hint =
-      recommendation?.suggestion_ar ||
-      'لا توجد قوالب معتمدة مناسبة لهذا الهدف بعد.'
+    const hint = step3EmptyHint(recommendation, lang, s3)
     return (
       <div className="py-12 text-center space-y-4">
         <FileText className="w-10 h-10 text-slate-200 mx-auto" />
@@ -628,31 +687,29 @@ function Step3Template({
         {next && (
           <div className="max-w-sm mx-auto bg-amber-50 border border-amber-200 rounded-lg p-3 text-start">
             <p className="text-xs font-semibold text-amber-800 mb-1">
-              أقرب قالب لديك
+              {s3.closestTemplate}
             </p>
             <p className="text-sm text-amber-900 truncate">
               {next.display_name_ar || next.name}
             </p>
             <p className="text-[11px] text-amber-700 mt-1">
-              الحالة: {next.status} · اللغة: {next.language || '—'} · الفئة: {next.category || '—'}
+              {s3.closestMeta
+                .replace('{status}', next.status)
+                .replace('{language}', next.language || '—')
+                .replace('{category}', waCategoryLabel(next.category, tm))}
             </p>
           </div>
         )}
         <p className="text-xs text-slate-400">
-          انتقل إلى{' '}
+          {s3.createCtaBefore}
           <Link to="/templates" className="text-brand-500 underline font-medium">
-            قوالب واتساب
+            {s3.createCtaLink}
           </Link>
-          {' '}لإنشاء قالب وإرساله لـ Meta للاعتماد.
+          {s3.createCtaAfter}
         </p>
       </div>
     )
   }
-  // Split templates into auto / manual groups so the merchant never
-  // confuses an auto template (Nahla fills values) with a manual one
-  // (the merchant types values). Both groups stay sorted by the
-  // recommender's score so "الأفضل لهذه الحملة" still surfaces inside
-  // its own group.
   const autoTpls   = recommendation.templates.filter(t => !isManualTemplate(t))
   const manualTpls = recommendation.templates.filter(t =>  isManualTemplate(t))
   const renderGroup = (tpls: RecommendedTemplate[]) => (
@@ -670,23 +727,21 @@ function Step3Template({
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-500">
-        نحلة فلترت {recommendation.total} قالباً مناسباً ورتّبتها حسب الأنسب لحملتك.
+        {s3.intro.replace('{total}', String(recommendation.total))}
       </p>
 
-      {/* Quick legend so the merchant understands the badge before
-          they even click a card. Stays visible above both groups. */}
       <div className="flex flex-wrap gap-3 text-[11px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200 font-bold text-[10px]">
-            ✋ يدوي
+            {s3.modeManualPill}
           </span>
-          <span className="text-slate-600">أنت تكتب الكوبون والرابط بنفسك</span>
+          <span className="text-slate-600">{s3.legendManualDesc}</span>
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold text-[10px]">
-            ⚡ تلقائي
+            {s3.modeAutoPill}
           </span>
-          <span className="text-slate-600">نحلة تُعبّئ القيم تلقائياً حسب الإعدادات</span>
+          <span className="text-slate-600">{s3.legendAutoDesc}</span>
         </span>
       </div>
 
@@ -695,7 +750,7 @@ function Step3Template({
           <section className="space-y-2">
             <h3 className="text-[11px] font-bold text-emerald-700 inline-flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5" />
-              قوالب تلقائية ({autoTpls.length})
+              {s3.groupAuto.replace('{count}', String(autoTpls.length))}
             </h3>
             {renderGroup(autoTpls)}
           </section>
@@ -704,7 +759,7 @@ function Step3Template({
           <section className="space-y-2">
             <h3 className="text-[11px] font-bold text-orange-700 inline-flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5" />
-              قوالب يدوية ({manualTpls.length})
+              {s3.groupManual.replace('{count}', String(manualTpls.length))}
             </h3>
             {renderGroup(manualTpls)}
           </section>
