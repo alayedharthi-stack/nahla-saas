@@ -3013,12 +3013,15 @@ class StoreSyncService:
 
             in_window = odate >= window_start
             if in_window:
-                revenue_period += amt
-                orders_period  += 1
-                if src == "whatsapp":
-                    ai_revenue += amt
-                    ai_orders  += 1
-            if odate_local.isoformat() in revenue_by_day:
+                orders_period += 1
+                # Revenue counts only confirmed/paid orders — never intent,
+                # pending checkout, or abandoned carts.
+                if status == "paid":
+                    revenue_period += amt
+                    if src == "whatsapp":
+                        ai_revenue += amt
+                        ai_orders  += 1
+            if odate_local.isoformat() in revenue_by_day and status == "paid":
                 revenue_by_day[odate_local.isoformat()] += amt
 
             if len(recent_orders_out) < 5:

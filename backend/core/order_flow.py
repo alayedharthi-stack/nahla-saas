@@ -1174,6 +1174,22 @@ def apply_state_patch(
                     conv.last_payment_confirmed_at = datetime.now(timezone.utc)
             except Exception:
                 pass
+            # Phase 1 — bridge confirmed receipt → internal paid order for
+            # dashboard revenue. Additive; never blocks the receipt ACK path.
+            try:
+                from services.nahla_order_bridge import upsert_nahla_paid_order  # noqa: PLC0415
+                upsert_nahla_paid_order(
+                    db,
+                    tenant_id=int(tenant_id),
+                    conversation=conv,
+                    brain_state=bs,
+                    order_prep=op,
+                )
+            except Exception as _bridge_exc:  # noqa: BLE001
+                logger.warning(
+                    "[NAHLA_ORDER_BRIDGE] hook failed tenant=%s conv=%s: %s",
+                    tenant_id, getattr(conv, "id", None), _bridge_exc,
+                )
         db.add(conv)
         db.commit()
         logger.info(
