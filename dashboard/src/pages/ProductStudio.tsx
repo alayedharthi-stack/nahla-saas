@@ -58,15 +58,25 @@ import {
   type StudioFilters,
   type StudioProduct,
 } from '../api/catalog'
+import { useLanguage } from '../i18n/context'
+import type { Lang, Translations } from '../i18n/types'
 
-// ── Source palette (mirrors the badge mapping in WhatsAppCatalog.tsx) ─
+function localeTag(lang: Lang): string {
+  return lang === 'en' ? 'en-US' : 'ar-SA'
+}
 
-const SOURCE_PALETTE: Record<string, { label: string; bg: string; text: string }> = {
-  salla:   { label: 'سلة',     bg: 'bg-orange-50 border-orange-200', text: 'text-orange-700' },
-  zid:     { label: 'زد',      bg: 'bg-violet-50 border-violet-200', text: 'text-violet-700' },
-  meta:    { label: 'Meta',    bg: 'bg-blue-50   border-blue-200',   text: 'text-blue-700'   },
-  manual:  { label: 'يدوي',    bg: 'bg-sky-50    border-sky-200',    text: 'text-sky-700'    },
-  unknown: { label: 'غير محدد', bg: 'bg-slate-50  border-slate-200', text: 'text-slate-600'  },
+function fmtCount(n: number, lang: Lang): string {
+  return n.toLocaleString(localeTag(lang))
+}
+
+type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
+
+const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
+  salla:   { bg: 'bg-orange-50 border-orange-200', text: 'text-orange-700' },
+  zid:     { bg: 'bg-violet-50 border-violet-200', text: 'text-violet-700' },
+  meta:    { bg: 'bg-blue-50   border-blue-200',   text: 'text-blue-700'   },
+  manual:  { bg: 'bg-sky-50    border-sky-200',    text: 'text-sky-700'    },
+  unknown: { bg: 'bg-slate-50  border-slate-200', text: 'text-slate-600'  },
 }
 
 // Channel icon → lucide-react element. Keeps Studio rendering channel
@@ -90,16 +100,21 @@ const CHANNEL_ICON_COLOR: Record<string, string> = {
 
 
 function SourcePill({ source }: { source: ProductSource | string }) {
-  const meta = SOURCE_PALETTE[source] ?? SOURCE_PALETTE.unknown
+  const { t } = useLanguage()
+  const style = SOURCE_STYLES[source] ?? SOURCE_STYLES.unknown
+  const key = (source in SOURCE_STYLES ? source : 'unknown') as CatalogSourceKey
+  const label = t(tr => tr.catalogMgmt.sources[key])
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full border font-semibold text-[11px] px-2 py-0.5 ${meta.bg} ${meta.text}`}>
-      {meta.label}
+    <span className={`inline-flex items-center gap-1 rounded-full border font-semibold text-[11px] px-2 py-0.5 ${style.bg} ${style.text}`}>
+      {label}
     </span>
   )
 }
 
 
 function ReadinessPill({ row }: { row: CatalogProductDiagRow }) {
+  const { t, lang } = useLanguage()
+  const rd = t(tr => tr.catalogMgmt.studio.readiness)
   const b = row.readiness_badge
   if (!b) return <span className="text-[11px] text-slate-400">—</span>
   const palette: Record<string, { bg: string; text: string; dot: string }> = {
@@ -111,10 +126,14 @@ function ReadinessPill({ row }: { row: CatalogProductDiagRow }) {
   const c = palette[b.level] ?? palette.slate
   const label =
     b.blocking_count > 0
-      ? `ناقص في ${b.blocking_count} قناة`
+      ? rd.missingInChannels.replace('{count}', fmtCount(b.blocking_count, lang))
       : b.warn_count > 0
-        ? `جاهز ${b.ready_count}/${b.enabled_total}  ⚠`
-        : `جاهز ${b.ready_count}/${b.enabled_total}`
+        ? rd.readyWithWarn
+            .replace('{ready}', fmtCount(b.ready_count, lang))
+            .replace('{total}', fmtCount(b.enabled_total, lang))
+        : rd.ready
+            .replace('{ready}', fmtCount(b.ready_count, lang))
+            .replace('{total}', fmtCount(b.enabled_total, lang))
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border text-[11px] px-2 py-0.5 ${c.bg} ${c.text}`}>
       <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
@@ -135,6 +154,10 @@ function FiltersBar(props: {
   totalShown: number
   total: number
 }) {
+  const { t, lang } = useLanguage()
+  const f = t(tr => tr.catalogMgmt.studio.filters)
+  const sources = t(tr => tr.catalogMgmt.sources)
+
   const set = (patch: Partial<StudioFilters>) => props.onChange({ ...props.filters, ...patch })
   const clear = () => props.onChange({})
 
@@ -148,7 +171,7 @@ function FiltersBar(props: {
           <input
             value={props.filters.q ?? ''}
             onChange={e => set({ q: e.target.value || undefined })}
-            placeholder="ابحث في العنوان أو SKU أو retailer_id..."
+            placeholder={f.searchPlaceholder}
             className="w-full rounded-xl border border-slate-200 pr-9 pl-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
           />
         </div>
@@ -157,12 +180,12 @@ function FiltersBar(props: {
           onChange={e => set({ source: (e.target.value || undefined) as ProductSource | undefined })}
           className="rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white"
         >
-          <option value="">كل المصادر</option>
-          <option value="salla">سلة</option>
-          <option value="meta">Meta</option>
-          <option value="manual">يدوي</option>
-          <option value="zid">زد</option>
-          <option value="unknown">غير محدد</option>
+          <option value="">{f.allSources}</option>
+          <option value="salla">{sources.salla}</option>
+          <option value="meta">{sources.meta}</option>
+          <option value="manual">{sources.manual}</option>
+          <option value="zid">{sources.zid}</option>
+          <option value="unknown">{sources.unknown}</option>
         </select>
         <select
           value={
@@ -180,9 +203,9 @@ function FiltersBar(props: {
           }
           className="rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white"
         >
-          <option value="">الصورة: الكل</option>
-          <option value="yes">له صورة</option>
-          <option value="no">بدون صورة</option>
+          <option value="">{f.imageAll}</option>
+          <option value="yes">{f.imageYes}</option>
+          <option value="no">{f.imageNo}</option>
         </select>
         <select
           value={
@@ -200,9 +223,9 @@ function FiltersBar(props: {
           }
           className="rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white"
         >
-          <option value="">retailer_id: الكل</option>
-          <option value="yes">له معرّف</option>
-          <option value="no">بدون معرّف</option>
+          <option value="">{f.retailerIdAll}</option>
+          <option value="yes">{f.retailerIdYes}</option>
+          <option value="no">{f.retailerIdNo}</option>
         </select>
         <select
           value={
@@ -220,9 +243,9 @@ function FiltersBar(props: {
           }
           className="rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white"
         >
-          <option value="">التوفر: الكل</option>
-          <option value="yes">متوفر</option>
-          <option value="no">غير متوفر</option>
+          <option value="">{f.stockAll}</option>
+          <option value="yes">{f.stockYes}</option>
+          <option value="no">{f.stockNo}</option>
         </select>
 
         {activeCount > 0 && (
@@ -231,7 +254,7 @@ function FiltersBar(props: {
             onClick={clear}
             className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-rose-600 px-2 py-1 rounded-lg hover:bg-slate-50"
           >
-            <X className="w-3.5 h-3.5" /> مسح ({activeCount})
+            <X className="w-3.5 h-3.5" /> {f.clear.replace('{count}', fmtCount(activeCount, lang))}
           </button>
         )}
       </div>
@@ -239,7 +262,9 @@ function FiltersBar(props: {
       <div className="flex items-center justify-between text-xs text-slate-500">
         <div className="flex items-center gap-1.5">
           <FilterIcon className="w-3.5 h-3.5" />
-          عرض {props.totalShown} من أصل {props.total} منتج
+          {f.showing
+            .replace('{shown}', fmtCount(props.totalShown, lang))
+            .replace('{total}', fmtCount(props.total, lang))}
         </div>
       </div>
     </div>
@@ -259,6 +284,8 @@ function FiltersBar(props: {
 // ─────────────────────────────────────────────────────────────────────
 
 function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) {
+  const { t, lang } = useLanguage()
+  const vs = t(tr => tr.catalogMgmt.studio.variantsSummary)
   const s = props.summary
   if (!s) return null
   const pills: Array<{
@@ -267,15 +294,15 @@ function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) 
     Icon:   typeof Package
     tone:   string
   }> = [
-    { label: 'منتجات', value: s.products,
+    { label: vs.products, value: s.products,
       Icon: Package, tone: 'text-slate-700 bg-slate-50 border-slate-200' },
-    { label: 'الاختلافات', value: s.variants,
+    { label: vs.variants, value: s.variants,
       Icon: Layers, tone: 'text-indigo-700 bg-indigo-50 border-indigo-200' },
-    { label: 'جاهز للواتساب', value: s.whatsapp_ready,
+    { label: vs.whatsappReady, value: s.whatsapp_ready,
       Icon: MessageCircle, tone: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
-    { label: 'جاهز لـ Meta', value: s.meta_ready,
+    { label: vs.metaReady, value: s.meta_ready,
       Icon: ShoppingBag, tone: 'text-sky-700 bg-sky-50 border-sky-200' },
-    { label: 'جاهز لـ Google', value: s.google_ready,
+    { label: vs.googleReady, value: s.google_ready,
       Icon: Sparkles, tone: 'text-amber-700 bg-amber-50 border-amber-200' },
   ]
   return (
@@ -287,7 +314,7 @@ function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) 
             className={`inline-flex items-center gap-1.5 ${p.tone} border rounded-full px-3 py-1 text-xs font-semibold`}
           >
             <p.Icon className="w-3.5 h-3.5" />
-            <span className="font-mono tabular-nums">{p.value.toLocaleString('ar-EG')}</span>
+            <span className="font-mono tabular-nums">{fmtCount(p.value, lang)}</span>
             <span>{p.label}</span>
           </span>
         ))}
@@ -305,11 +332,13 @@ function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) 
 // ─────────────────────────────────────────────────────────────────────
 
 function VariantsDrawer(props: { variants: CatalogProductVariantRow[] }) {
+  const { t } = useLanguage()
+  const vd = t(tr => tr.catalogMgmt.studio.variantsDrawer)
   const real = props.variants.filter(v => !v.is_default)
   if (real.length === 0) {
     return (
       <div className="bg-slate-50 border-t border-slate-200 px-6 py-3 text-xs text-slate-500">
-        لا توجد اختلافات حقيقية لهذا المنتج — متاح كـ SKU واحد فقط.
+        {vd.noVariants}
       </div>
     )
   }
@@ -319,12 +348,12 @@ function VariantsDrawer(props: { variants: CatalogProductVariantRow[] }) {
         <table className="w-full text-xs">
           <thead className="text-[10px] uppercase tracking-wide text-slate-500">
             <tr>
-              <th className="text-right py-1.5 px-2 font-semibold">الخيار</th>
-              <th className="text-right py-1.5 px-2 font-semibold">SKU</th>
-              <th className="text-right py-1.5 px-2 font-semibold">السعر</th>
-              <th className="text-right py-1.5 px-2 font-semibold">المخزون</th>
-              <th className="text-right py-1.5 px-2 font-semibold">retailer_id</th>
-              <th className="text-right py-1.5 px-2 font-semibold">الحالة</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.option}</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.sku}</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.price}</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.stock}</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.retailerId}</th>
+              <th className="text-right py-1.5 px-2 font-semibold">{vd.status}</th>
             </tr>
           </thead>
           <tbody>
@@ -345,12 +374,12 @@ function VariantsDrawer(props: { variants: CatalogProductVariantRow[] }) {
                   {v.stock_quantity ?? '—'}
                 </td>
                 <td className="py-1.5 px-2 font-mono text-[11px] text-slate-500 max-w-[160px] truncate" dir="ltr" title={v.retailer_id ?? ''}>
-                  {v.retailer_id ?? <span className="text-amber-600">مفقود</span>}
+                  {v.retailer_id ?? <span className="text-amber-600">{vd.missing}</span>}
                 </td>
                 <td className="py-1.5 px-2">
                   {v.in_stock
-                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3 h-3" /> متوفر</span>
-                    : <span className="inline-flex items-center gap-1 text-rose-700"><XCircle className="w-3 h-3" /> غير متوفر</span>}
+                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3 h-3" /> {vd.inStock}</span>
+                    : <span className="inline-flex items-center gap-1 text-rose-700"><XCircle className="w-3 h-3" /> {vd.outOfStock}</span>}
                 </td>
               </tr>
             ))}
@@ -367,11 +396,14 @@ function ProductGrid(props: {
   loading: boolean
   onSelect: (id: number) => void
 }) {
+  const { t } = useLanguage()
+  const g = t(tr => tr.catalogMgmt.studio.grid)
+
   if (props.loading) {
     return (
       <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center text-slate-500">
         <Loader2 className="w-7 h-7 animate-spin mx-auto mb-3 text-emerald-500" />
-        <p className="text-sm">جاري تحميل المنتجات...</p>
+        <p className="text-sm">{g.loading}</p>
       </div>
     )
   }
@@ -386,24 +418,23 @@ function ProductGrid(props: {
           <Package className="w-8 h-8 text-emerald-500" />
         </div>
         <h3 className="text-base font-bold text-slate-800 mb-1">
-          لا توجد منتجات تطابق التصفية الحالية
+          {g.emptyTitle}
         </h3>
         <p className="text-sm text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
-          ابدأ بإضافة منتج يدوي، أو استورد المنتجات من Meta Commerce Manager،
-          أو اربط متجر سلة لتُجلب منتجاتك تلقائياً.
+          {g.emptyDesc}
         </p>
         <div className="flex flex-wrap items-center justify-center gap-2">
           <a
             href="#meta-import-section"
             className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
           >
-            استيراد من Meta
+            {g.importFromMeta}
           </a>
           <a
             href="#manual-product-section"
             className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-sm transition"
           >
-            إضافة منتج يدوي
+            {g.addManual}
           </a>
         </div>
       </div>
@@ -417,12 +448,12 @@ function ProductGrid(props: {
           <thead className="bg-slate-50 text-xs text-slate-600 uppercase tracking-wide">
             <tr>
               <th className="text-right py-3 px-3 font-semibold w-10"></th>
-              <th className="text-right py-3 px-3 font-semibold">المنتج</th>
-              <th className="text-right py-3 px-3 font-semibold">المصدر</th>
-              <th className="text-right py-3 px-3 font-semibold">السعر</th>
-              <th className="text-right py-3 px-3 font-semibold">التوفر</th>
-              <th className="text-right py-3 px-3 font-semibold">retailer_id</th>
-              <th className="text-right py-3 px-3 font-semibold">جاهزية النشر</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colProduct}</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colSource}</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colPrice}</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colStock}</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colRetailerId}</th>
+              <th className="text-right py-3 px-3 font-semibold">{g.colReadiness}</th>
               <th className="text-right py-3 px-3 font-semibold w-12"></th>
             </tr>
           </thead>
@@ -452,6 +483,8 @@ function ProductGridRow(props: {
   row: CatalogProductDiagRow
   onSelect: (id: number) => void
 }) {
+  const { t, lang } = useLanguage()
+  const g = t(tr => tr.catalogMgmt.studio.grid)
   const { row } = props
   const [expanded, setExpanded] = useState(false)
   const realVariantCount = row.sellable_variants_count ?? (
@@ -471,8 +504,10 @@ function ProductGridRow(props: {
             if (hasExpandable) setExpanded(v => !v)
           }}
           title={hasExpandable
-            ? (expanded ? 'إخفاء الاختلافات' : `عرض ${realVariantCount} اختلاف`)
-            : 'لا توجد اختلافات'}
+            ? (expanded
+                ? g.hideVariants
+                : g.showVariants.replace('{count}', fmtCount(realVariantCount, lang)))
+            : g.noVariantsTooltip}
         >
           {hasExpandable ? (
             expanded
@@ -510,11 +545,11 @@ function ProductGridRow(props: {
         <td className="py-3 px-3 text-slate-700 font-medium">{row.price ?? '—'}</td>
         <td className="py-3 px-3">
           {row.in_stock
-            ? <span className="text-xs text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> متوفر</span>
-            : <span className="text-xs text-rose-700 inline-flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> غير متوفر</span>}
+            ? <span className="text-xs text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> {g.inStock}</span>
+            : <span className="text-xs text-rose-700 inline-flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> {g.outOfStock}</span>}
         </td>
         <td className="py-3 px-3 font-mono text-[11px] text-slate-500 max-w-[140px] truncate" dir="ltr" title={row.effective_retailer_id ?? ''}>
-          {row.effective_retailer_id ?? <span className="text-amber-600">مفقود</span>}
+          {row.effective_retailer_id ?? <span className="text-amber-600">{g.missing}</span>}
         </td>
         <td className="py-3 px-3"><ReadinessPill row={row} /></td>
         <td className="py-3 px-3 text-slate-400">
@@ -543,6 +578,8 @@ function Pagination(props: {
   total: number
   onChange: (offset: number) => void
 }) {
+  const { t, lang } = useLanguage()
+  const pg = t(tr => tr.catalogMgmt.studio.pagination)
   const page = Math.floor(props.offset / props.limit) + 1
   const totalPages = Math.max(1, Math.ceil(props.total / props.limit))
   const prev = () => props.onChange(Math.max(0, props.offset - props.limit))
@@ -550,21 +587,24 @@ function Pagination(props: {
   if (props.total <= props.limit) return null
   return (
     <div className="flex items-center justify-between text-xs text-slate-600">
-      <div>صفحة {page} من {totalPages}</div>
+      <div>{pg.pageOf
+        .replace('{page}', fmtCount(page, lang))
+        .replace('{totalPages}', fmtCount(totalPages, lang))}
+      </div>
       <div className="flex items-center gap-1">
         <button
           onClick={prev}
           disabled={page === 1}
           className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <ChevronRight className="w-3.5 h-3.5" /> السابق
+          <ChevronRight className="w-3.5 h-3.5" /> {pg.prev}
         </button>
         <button
           onClick={next}
           disabled={page >= totalPages}
           className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          التالي <ChevronLeft className="w-3.5 h-3.5" />
+          {pg.next} <ChevronLeft className="w-3.5 h-3.5" />
         </button>
       </div>
     </div>
@@ -690,25 +730,27 @@ function FieldShell(props: {
 // ─────────────────────────────────────────────────────────────────────
 
 function ChannelBadge(props: { c: ChannelReadiness }) {
+  const { t, lang } = useLanguage()
+  const cb = t(tr => tr.catalogMgmt.studio.channelBadge)
   const Icon = CHANNEL_ICON[props.c.channel] ?? Sparkles
   const iconColor = CHANNEL_ICON_COLOR[props.c.channel] ?? 'text-slate-500'
 
   let pillBg = 'bg-slate-50 border-slate-200', pillText = 'text-slate-600'
   let pillIcon = <span className="w-1.5 h-1.5 rounded-full bg-slate-300" />
-  let label = 'قريباً'
+  let label = cb.planned
   if (props.c.enabled) {
     if (props.c.blocking_count > 0) {
       pillBg = 'bg-rose-50 border-rose-200';     pillText = 'text-rose-700'
       pillIcon = <XCircle className="w-3 h-3" />
-      label = `${props.c.blocking_count} مفقود`
+      label = cb.missing.replace('{count}', fmtCount(props.c.blocking_count, lang))
     } else if (props.c.warnings_count > 0) {
       pillBg = 'bg-amber-50 border-amber-200';   pillText = 'text-amber-700'
       pillIcon = <AlertTriangle className="w-3 h-3" />
-      label = 'جاهز ⚠'
+      label = cb.readyWarn
     } else {
       pillBg = 'bg-emerald-50 border-emerald-200'; pillText = 'text-emerald-700'
       pillIcon = <CheckCircle2 className="w-3 h-3" />
-      label = 'جاهز'
+      label = cb.ready
     }
   }
 
@@ -739,7 +781,7 @@ function ChannelBadge(props: { c: ChannelReadiness }) {
         </div>
         <div className="flex items-center justify-between text-[10px] text-slate-500 mt-1">
           <span>{props.c.score_pct}%</span>
-          {!props.c.enabled && <span>قناة مستقبلية</span>}
+          {!props.c.enabled && <span>{cb.futureChannel}</span>}
         </div>
       </div>
     </div>
@@ -748,6 +790,8 @@ function ChannelBadge(props: { c: ChannelReadiness }) {
 
 
 function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
+  const { t, lang } = useLanguage()
+  const rp = t(tr => tr.catalogMgmt.studio.readinessPanel)
   const issues = useMemo(
     () =>
       props.perChannel
@@ -766,7 +810,7 @@ function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
       </div>
       {issues.length > 0 && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3">
-          <h4 className="text-xs font-bold text-amber-800 mb-2">المشكلات المطلوب معالجتها</h4>
+          <h4 className="text-xs font-bold text-amber-800 mb-2">{rp.issuesTitle}</h4>
           <ul className="text-[11px] text-slate-700 space-y-1">
             {issues.slice(0, 8).map((i, idx) => (
               <li key={idx} className="flex items-start gap-1.5">
@@ -779,7 +823,9 @@ function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
               </li>
             ))}
             {issues.length > 8 && (
-              <li className="text-[11px] text-slate-500">… و{issues.length - 8} مشكلة أخرى</li>
+              <li className="text-[11px] text-slate-500">
+                {rp.moreIssues.replace('{count}', fmtCount(issues.length - 8, lang))}
+              </li>
             )}
           </ul>
         </div>
@@ -797,6 +843,11 @@ function ProductDrawer(props: {
   productId: number
   onClose: () => void
 }) {
+  const { t, dir, lang } = useLanguage()
+  const dr = t(tr => tr.catalogMgmt.studio.drawer)
+  const fld = dr.fields
+  const ph = dr.placeholders
+
   const [data, setData]       = useState<ProductDetailResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [draft, setDraft]     = useState<ReadinessPreviewBody>({})
@@ -867,7 +918,7 @@ function ProductDrawer(props: {
   }, [props])
 
   return (
-    <div className="fixed inset-0 z-50 flex" dir="rtl">
+    <div className="fixed inset-0 z-50 flex" dir={dir}>
       <div className="flex-1 bg-slate-900/40" onClick={props.onClose} />
       <div className="w-full md:w-[680px] bg-slate-50 h-full overflow-y-auto shadow-2xl border-r border-slate-200">
         {/* Drawer header */}
@@ -875,7 +926,7 @@ function ProductDrawer(props: {
           <div className="flex items-center gap-2 min-w-0">
             <Package className="w-5 h-5 text-emerald-600 shrink-0" />
             <h3 className="font-bold text-slate-900 truncate">
-              {loading ? 'تحميل...' : (data?.product.title || 'منتج')}
+              {loading ? dr.loading : (data?.product.title || dr.defaultTitle)}
             </h3>
             {data && <SourcePill source={data.product.source} />}
           </div>
@@ -890,7 +941,7 @@ function ProductDrawer(props: {
         {loading || !data ? (
           <div className="p-8 text-center text-slate-500">
             <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
-            جاري تحميل بيانات المنتج...
+            {dr.loadingData}
           </div>
         ) : (
           <div className="p-5 space-y-5">
@@ -907,7 +958,7 @@ function ProductDrawer(props: {
                 <div className="flex items-center gap-2 text-xs flex-wrap">
                   <span className="text-slate-700 font-semibold">{data.product.price ?? '—'}</span>
                   {data.product.sale_price && (
-                    <span className="text-emerald-700">عرض: {data.product.sale_price}</span>
+                    <span className="text-emerald-700">{dr.saleLabel} {data.product.sale_price}</span>
                   )}
                   {data.product.currency && <span className="text-slate-500">{data.product.currency}</span>}
                 </div>
@@ -916,15 +967,15 @@ function ProductDrawer(props: {
                     retailer_id: <code dir="ltr" className="font-mono">{data.product.effective_retailer_id || '—'}</code>
                   </span>
                   {data.product.in_stock
-                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3 h-3" /> متوفر</span>
-                    : <span className="inline-flex items-center gap-1 text-rose-700"><XCircle className="w-3 h-3" /> غير متوفر</span>}
+                    ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="w-3 h-3" /> {t(tr => tr.catalogMgmt.studio.grid.inStock)}</span>
+                    : <span className="inline-flex items-center gap-1 text-rose-700"><XCircle className="w-3 h-3" /> {t(tr => tr.catalogMgmt.studio.grid.outOfStock)}</span>}
                   {data.product.product_url && (
                     <a
                       href={data.product.product_url}
                       target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-0.5 text-emerald-700 hover:underline"
                     >
-                      صفحة المتجر <ExternalLink className="w-3 h-3" />
+                      {dr.storePage} <ExternalLink className="w-3 h-3" />
                     </a>
                   )}
                 </div>
@@ -935,7 +986,7 @@ function ProductDrawer(props: {
             <div className="bg-white rounded-2xl border border-slate-200 p-4">
               <h3 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-emerald-600" />
-                جاهزية النشر عبر القنوات
+                {dr.readinessTitle}
               </h3>
               <ReadinessPanel perChannel={perChannel} />
             </div>
@@ -947,96 +998,95 @@ function ProductDrawer(props: {
             <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
               <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
                 <Package className="w-4 h-4 text-emerald-600" />
-                بيانات المنتج
+                {dr.productDataTitle}
               </h3>
               <FieldShell
-                fieldName="title" label="العنوان" required
+                fieldName="title" label={fld.title} required
                 value={draft.title ?? ''} onChange={v => update('title', v)}
                 perChannel={perChannel}
               />
               <FieldShell
-                fieldName="description" label="الوصف" multiline
+                fieldName="description" label={fld.description} multiline
                 value={draft.description ?? ''} onChange={v => update('description', v)}
                 perChannel={perChannel}
               />
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
-                  fieldName="price" label="السعر" required
+                  fieldName="price" label={fld.price} required
                   value={draft.price ?? ''} onChange={v => update('price', v)}
                   perChannel={perChannel}
                 />
                 <FieldShell
-                  fieldName="sale_price" label="سعر العرض"
+                  fieldName="sale_price" label={fld.salePrice}
                   value={draft.sale_price ?? ''} onChange={v => update('sale_price', v)}
                   perChannel={perChannel}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
-                  fieldName="currency" label="العملة (ISO)" dir="ltr"
+                  fieldName="currency" label={fld.currency} dir="ltr"
                   value={draft.currency ?? ''} onChange={v => update('currency', v.toUpperCase())}
-                  perChannel={perChannel} placeholder="SAR"
+                  perChannel={perChannel} placeholder={ph.currency}
                 />
                 <FieldShell
-                  fieldName="availability" label="التوفر"
+                  fieldName="availability" label={fld.availability}
                   value={draft.availability ?? ''} onChange={v => update('availability', v)}
-                  perChannel={perChannel} placeholder="in stock"
+                  perChannel={perChannel} placeholder={ph.availability}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
-                  fieldName="image_url" label="رابط الصورة" dir="ltr"
+                  fieldName="image_url" label={fld.imageUrl} dir="ltr"
                   value={draft.image_url ?? ''} onChange={v => update('image_url', v)}
                   perChannel={perChannel}
                 />
                 <FieldShell
-                  fieldName="product_url" label="رابط المنتج" dir="ltr"
+                  fieldName="product_url" label={fld.productUrl} dir="ltr"
                   value={draft.product_url ?? ''} onChange={v => update('product_url', v)}
                   perChannel={perChannel}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
-                  fieldName="brand" label="العلامة التجارية"
+                  fieldName="brand" label={fld.brand}
                   value={draft.brand ?? ''} onChange={v => update('brand', v)}
                   perChannel={perChannel}
                 />
                 <FieldShell
-                  fieldName="category" label="التصنيف"
+                  fieldName="category" label={fld.category}
                   value={draft.category ?? ''} onChange={v => update('category', v)}
                   perChannel={perChannel}
                 />
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <FieldShell
-                  fieldName="condition" label="الحالة"
+                  fieldName="condition" label={fld.condition}
                   value={draft.condition ?? ''} onChange={v => update('condition', v)}
-                  perChannel={perChannel} placeholder="new"
+                  perChannel={perChannel} placeholder={ph.condition}
                 />
                 <FieldShell
-                  fieldName="gtin" label="GTIN" dir="ltr"
+                  fieldName="gtin" label={fld.gtin} dir="ltr"
                   value={draft.gtin ?? ''} onChange={v => update('gtin', v)}
                   perChannel={perChannel}
                 />
                 <FieldShell
-                  fieldName="mpn" label="MPN" dir="ltr"
+                  fieldName="mpn" label={fld.mpn} dir="ltr"
                   value={draft.mpn ?? ''} onChange={v => update('mpn', v)}
                   perChannel={perChannel}
                 />
               </div>
 
               <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-100 rounded-lg p-2 leading-relaxed">
-                ℹ️ هذا المعاينة (Phase 1): العدّادات والـ readiness تتحدّث مباشرة، لكن
-                حفظ التعديلات في الكتالوج المركزي يصبح متاحًا بعد ترقية المخطط في Phase 2.
+                {dr.phase1Note}
               </div>
             </div>
 
             {/* Variants — read-only preview when present */}
             {data.product.variants.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 p-4">
-                <h3 className="text-sm font-bold text-slate-800 mb-2">الاختلافات (Variants)</h3>
+                <h3 className="text-sm font-bold text-slate-800 mb-2">{dr.variantsTitle}</h3>
                 <p className="text-[11px] text-slate-500 mb-3">
-                  {data.product.variants.length} variant — نظام الـ variants الكامل يأتي في Phase 2.
+                  {dr.variantsPhase2Note.replace('{count}', fmtCount(data.product.variants.length, lang))}
                 </p>
                 <ul className="text-xs text-slate-700 space-y-1">
                   {data.product.variants.slice(0, 10).map((v, i) => (

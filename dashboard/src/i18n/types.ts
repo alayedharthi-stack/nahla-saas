@@ -1243,6 +1243,317 @@ export interface Translations {
     }
   }
 
+  /** WhatsApp Catalog page — hub, studio, import, manual entry */
+  catalogMgmt: {
+    loading: string
+    page: {
+      title:          string
+      productCount:   string
+      intro:          string
+      importFromMeta: string
+      addManual:      string
+      resync:         string
+    }
+    diagnostics: {
+      title:                string
+      readyTitle:           string
+      notReadyTitle:        string
+      metaLinked:           string
+      metaNotLinked:        string
+      productSource:        string
+      sourceBreakdownTitle: string
+      noProductsYet:        string
+      coverageTitle:        string
+      coverageDesc:         string
+      coverageHint:         string
+      channelTitle:         string
+      channelConnected:     string
+      channelNotConnected:  string
+    }
+    connectionStatus: {
+      title:                  string
+      whatsappLabel:          string
+      notLinked:              string
+      catalogIdLabel:         string
+      retailerCoverageLabel:  string
+    }
+    studioSection: {
+      title: string
+      intro: string
+    }
+    channelBinding: {
+      title:          string
+      intro:          string
+      catalogIdLabel: string
+      catalogIdHint:  string
+      catalogIdPh:    string
+      enableTitle:    string
+      enableDesc:     string
+      enabled:        string
+      disabled:       string
+      save:           string
+    }
+    tools: {
+      title:         string
+      coverageLabel: string
+      coverageDesc:  string
+      resyncBtn:     string
+      reportTitle:   string
+      scanned:       string
+      assigned:      string
+      alreadySet:    string
+      synthetic:     string
+      published:     string
+      errors:        string
+    }
+    manual: {
+      title:            string
+      explainerStore:   string
+      explainerNoStore: string
+      addNew:           string
+      productName:      string
+      productNamePh:    string
+      price:            string
+      pricePh:          string
+      imageUrl:         string
+      productUrl:       string
+      metaRidLabel:     string
+      metaRidHint:      string
+      metaRidPh:        string
+      description:      string
+      descriptionPh:    string
+      cancel:           string
+      save:             string
+      nameRequired:     string
+    }
+    metaImport: {
+      title:          string
+      intro:          string
+      importBtn:      string
+      hideDetail:     string
+      showDetail:     string
+      reportTitle:    string
+      truncated:      string
+      scanned:        string
+      created:        string
+      updated:        string
+      skippedManual:  string
+      reportErrors:   string
+      pages:          string
+      errors: {
+        connection_not_found:      string
+        catalog_id_missing:        string
+        access_token_missing:      string
+        meta_access_token_missing: string
+        catalog_not_found:         string
+        catalog_type_unsupported:  string
+        meta_http_error:           string
+        defaultUnexpected:         string
+      }
+    }
+    testSend: {
+      title:                string
+      intro:                string
+      phonePlaceholder:     string
+      titlePlaceholder:     string
+      productIdPlaceholder: string
+      sendBtn:              string
+      resultTitle:          string
+      productLabel:         string
+      catalogLine:          string
+      imageLine:            string
+      ctaLine:              string
+      succeeded:            string
+      failed:               string
+      notAttempted:         string
+    }
+    hub: {
+      title:          string
+      intro:          string
+      inputsLabel:    string
+      outputsLabel:   string
+      nahlaCatalog:   string
+      unifiedSource:  string
+      productCount:   string
+      sources: {
+        salla:           string
+        meta:            string
+        manual:          string
+        shopifyPlanned:  string
+      }
+      channels: {
+        whatsapp:       string
+        ai:             string
+        campaigns:      string
+        googlePlanned:  string
+      }
+      subtitles: {
+        sallaUnlinked:          string
+        sallaCount:             string
+        metaImported:           string
+        metaReadyToImport:      string
+        metaNotLinked:          string
+        manualCount:            string
+        manualAlwaysAvailable:  string
+        shopifyPlanned:         string
+        whatsappReady:          string
+        whatsappNeedsCatalogId: string
+        whatsappConnectFirst:   string
+        aiReadsCatalog:         string
+        aiNeedsProducts:        string
+        campaignsAvailable:     string
+        campaignsNeedsProducts: string
+        googlePlanned:          string
+      }
+      nodeStatus: {
+        live:      string
+        active:    string
+        available: string
+        unused:    string
+        planned:   string
+      }
+    }
+    sources: {
+      salla:   string
+      zid:     string
+      meta:    string
+      manual:  string
+      unknown: string
+      mixed:   string
+    }
+    messages: {
+      resyncSuccess:         string
+      resyncFailed:          string
+      loadFailed:            string
+      saveFailed:            string
+      settingsAlreadySaved:  string
+      settingsSaved:         string
+      testFailed:            string
+      catalogIdRequired:     string
+      addProductSuccess:     string
+      addProductFailed:      string
+      unexpectedImport:      string
+    }
+    testResult: {
+      catalogSucceeded: string
+      catalogFailed:    string
+      imageOk:          string
+      imageFailed:      string
+      ctaOk:            string
+      ctaFailed:        string
+    }
+    studio: {
+      filters: {
+        searchPlaceholder: string
+        allSources:        string
+        imageAll:          string
+        imageYes:          string
+        imageNo:           string
+        retailerIdAll:     string
+        retailerIdYes:     string
+        retailerIdNo:      string
+        stockAll:          string
+        stockYes:          string
+        stockNo:           string
+        clear:             string
+        showing:           string
+      }
+      variantsSummary: {
+        products:       string
+        variants:       string
+        whatsappReady:  string
+        metaReady:      string
+        googleReady:    string
+      }
+      variantsDrawer: {
+        noVariants:  string
+        option:      string
+        sku:         string
+        price:       string
+        stock:       string
+        retailerId:  string
+        status:      string
+        missing:     string
+        inStock:     string
+        outOfStock:  string
+      }
+      grid: {
+        loading:           string
+        emptyTitle:        string
+        emptyDesc:         string
+        importFromMeta:    string
+        addManual:         string
+        colProduct:        string
+        colSource:         string
+        colPrice:          string
+        colStock:          string
+        colRetailerId:     string
+        colReadiness:      string
+        hideVariants:      string
+        showVariants:      string
+        noVariantsTooltip: string
+        variantsBadge:     string
+        missing:           string
+        inStock:           string
+        outOfStock:        string
+      }
+      readiness: {
+        missingInChannels: string
+        readyWithWarn:     string
+        ready:             string
+      }
+      pagination: {
+        pageOf: string
+        prev:   string
+        next:   string
+      }
+      channelBadge: {
+        planned:       string
+        missing:       string
+        readyWarn:     string
+        ready:         string
+        futureChannel: string
+      }
+      readinessPanel: {
+        issuesTitle: string
+        moreIssues:  string
+      }
+      drawer: {
+        loading:           string
+        defaultTitle:      string
+        loadingData:       string
+        readinessTitle:    string
+        productDataTitle:  string
+        saleLabel:         string
+        retailerIdLabel:   string
+        storePage:         string
+        phase1Note:        string
+        variantsTitle:     string
+        variantsPhase2Note: string
+        fields: {
+          title:        string
+          description:  string
+          price:        string
+          salePrice:    string
+          currency:     string
+          availability: string
+          imageUrl:     string
+          productUrl:   string
+          brand:        string
+          category:     string
+          condition:    string
+          gtin:         string
+          mpn:          string
+        }
+        placeholders: {
+          currency:     string
+          availability: string
+          condition:    string
+        }
+      }
+    }
+  }
+
   /** Merchants (admin) page */
   merchants: {
     title:        string

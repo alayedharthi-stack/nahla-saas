@@ -32,7 +32,7 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  AlertTriangle, BookOpen, CheckCircle2, ExternalLink, Loader2,
+  AlertTriangle, CheckCircle2, Loader2,
   Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
   Store, MessageCircle, Database, ArrowDown, Bot, Megaphone, ShoppingBag,
   Download, Clock,
@@ -49,25 +49,41 @@ import {
   type MetaImportReport,
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
+import { useLanguage } from '../i18n/context'
+import type { Lang, Translations } from '../i18n/types'
 
-// Source → Arabic label + colour palette mapping. Single source of
-// truth for the source badges that appear on the diagnostics card AND
-// inside the product mapping table.
-const SOURCE_META: Record<DominantSource, { label: string; bg: string; text: string }> = {
-  salla:   { label: 'سلة',    bg: 'bg-orange-50  border-orange-200',  text: 'text-orange-700' },
-  zid:     { label: 'زد',     bg: 'bg-violet-50  border-violet-200',  text: 'text-violet-700' },
-  meta:    { label: 'Meta',   bg: 'bg-blue-50    border-blue-200',    text: 'text-blue-700'   },
-  manual:  { label: 'يدوي',   bg: 'bg-sky-50     border-sky-200',     text: 'text-sky-700'    },
-  unknown: { label: 'غير محدد', bg: 'bg-slate-50  border-slate-200',  text: 'text-slate-600'  },
-  mixed:   { label: 'مختلط',  bg: 'bg-amber-50   border-amber-200',   text: 'text-amber-700'  },
+function localeTag(lang: Lang): string {
+  return lang === 'en' ? 'en-US' : 'ar-SA'
+}
+
+function fmtCount(n: number, lang: Lang): string {
+  return n.toLocaleString(localeTag(lang))
+}
+
+type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
+
+const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
+  salla:   { bg: 'bg-orange-50  border-orange-200',  text: 'text-orange-700' },
+  zid:     { bg: 'bg-violet-50  border-violet-200',  text: 'text-violet-700' },
+  meta:    { bg: 'bg-blue-50    border-blue-200',    text: 'text-blue-700'   },
+  manual:  { bg: 'bg-sky-50     border-sky-200',     text: 'text-sky-700'    },
+  unknown: { bg: 'bg-slate-50   border-slate-200',   text: 'text-slate-600'  },
+  mixed:   { bg: 'bg-amber-50   border-amber-200',   text: 'text-amber-700'  },
+}
+
+function sourceStyle(source: ProductSource | DominantSource) {
+  return SOURCE_STYLES[source] ?? SOURCE_STYLES.unknown
 }
 
 function SourceBadge({ source, size = 'sm' }: { source: ProductSource | DominantSource; size?: 'sm' | 'md' }) {
-  const meta = SOURCE_META[source] ?? SOURCE_META.unknown
+  const { t } = useLanguage()
+  const style = sourceStyle(source)
+  const key = (source in SOURCE_STYLES ? source : 'unknown') as CatalogSourceKey
+  const label = t(tr => tr.catalogMgmt.sources[key])
   const cls = size === 'md' ? 'text-xs px-2.5 py-1' : 'text-[11px] px-2 py-0.5'
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full border font-semibold ${cls} ${meta.bg} ${meta.text}`}>
-      {meta.label}
+    <span className={`inline-flex items-center gap-1 rounded-full border font-semibold ${cls} ${style.bg} ${style.text}`}>
+      {label}
     </span>
   )
 }
@@ -103,6 +119,9 @@ function Card(props: { title: string; icon?: React.ReactNode; children: React.Re
 // ── Page ─────────────────────────────────────────────────────────────
 
 export default function WhatsAppCatalog() {
+  const { t, lang, dir } = useLanguage()
+  const cm = t(tr => tr.catalogMgmt)
+
   const [status, setStatus]         = useState<CatalogStatus | null>(null)
   const [loading, setLoading]       = useState(true)
   const [saving, setSaving]         = useState(false)
@@ -162,15 +181,16 @@ export default function WhatsAppCatalog() {
       const r = await catalogApi.resync()
       setResyncReport(r.report)
       setSuccess(
-        `تمت إعادة المزامنة: تم تعيين retailer_id لـ ${r.report.retailer_id_set} منتج، ` +
-        `${r.report.synthetic_assigned} منها بمعرّف اصطناعي.`,
+        cm.messages.resyncSuccess
+          .replace('{assigned}', fmtCount(r.report.retailer_id_set, lang))
+          .replace('{synthetic}', fmtCount(r.report.synthetic_assigned, lang)),
       )
       // Refresh status + products + diagnostics to reflect new coverage.
       await refresh()
       await loadProducts()
       await loadDiagnostics()
     } catch (e: any) {
-      setError(e?.message ?? 'تعذّر تنفيذ إعادة المزامنة.')
+      setError(e?.message ?? cm.messages.resyncFailed)
     } finally {
       setResyncing(false)
     }
@@ -185,7 +205,7 @@ export default function WhatsAppCatalog() {
       setEnabled(s.connection.catalog_enabled)
       setCatalogId(s.connection.meta_catalog_id ?? '')
     } catch (e: any) {
-      setError(e?.message ?? 'تعذّر جلب حالة الكتالوج.')
+      setError(e?.message ?? cm.messages.loadFailed)
     } finally {
       setLoading(false)
     }
@@ -210,16 +230,16 @@ export default function WhatsAppCatalog() {
       setEnabled(res.status.connection.catalog_enabled)
       setCatalogId(res.status.connection.meta_catalog_id ?? '')
       if (Object.keys(res.applied_changes).length === 0) {
-        setSuccess('الإعدادات محدّثة مسبقاً.')
+        setSuccess(cm.messages.settingsAlreadySaved)
       } else {
-        setSuccess('تم حفظ إعدادات الكتالوج.')
+        setSuccess(cm.messages.settingsSaved)
       }
     } catch (e: any) {
       // Surface the structured 400 (catalog_id_required) clearly.
       if (e?.code === 'catalog_id_required' || (e?.message ?? '').includes('Catalog ID')) {
-        setError('لا يمكن تفعيل الكتالوج بدون إدخال Catalog ID صحيح من Meta Commerce Manager.')
+        setError(cm.messages.catalogIdRequired)
       } else {
-        setError(e?.message ?? 'تعذّر حفظ الإعدادات.')
+        setError(e?.message ?? cm.messages.saveFailed)
       }
     } finally {
       setSaving(false)
@@ -239,7 +259,7 @@ export default function WhatsAppCatalog() {
       })
       setTestResult(result)
     } catch (e: any) {
-      setError(e?.message ?? 'تعذّر تنفيذ الإرسال التجريبي.')
+      setError(e?.message ?? cm.messages.testFailed)
     } finally {
       setTesting(false)
     }
@@ -247,8 +267,8 @@ export default function WhatsAppCatalog() {
 
   if (loading) {
     return (
-      <div className="p-6 flex items-center gap-2 text-slate-500">
-        <Loader2 className="w-5 h-5 animate-spin" /> جاري تحميل حالة الكتالوج...
+      <div className="p-6 flex items-center gap-2 text-slate-500" dir={dir}>
+        <Loader2 className="w-5 h-5 animate-spin" /> {cm.loading}
       </div>
     )
   }
@@ -274,7 +294,7 @@ export default function WhatsAppCatalog() {
   // right horizontal padding; we just let the content fill what's
   // left after the sidebar.
   return (
-    <div className="space-y-6 w-full" dir="rtl">
+    <div className="space-y-6 w-full" dir={dir}>
       {/* ── Header: title + primary CTAs (Meta-style command bar) ──
             Pinned at the top so merchants always see the import +
             add-product actions, regardless of how far down the
@@ -284,19 +304,15 @@ export default function WhatsAppCatalog() {
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">
             <Package className="w-7 h-7 text-emerald-600" />
-            كتالوج المنتجات
+            {cm.page.title}
             {diagnostics && (
               <span className="text-base font-bold text-slate-500 bg-slate-100 rounded-full px-3 py-0.5">
-                {diagnostics.products.total} منتج
+                {cm.page.productCount.replace('{count}', fmtCount(diagnostics.products.total, lang))}
               </span>
             )}
           </h1>
           <p className="text-sm text-slate-500 mt-1.5 leading-relaxed max-w-3xl">
-            كتالوج المنتجات هو المصدر الموحّد لمنتجاتك داخل نحلة.
-            يمكن جلبه تلقائياً من سلة، أو إضافته يدوياً، أو استيراده
-            من Meta، ثم استخدامه في واتساب والذكاء والحملات. يستخدم
-            الذكاء هذا الكتالوج لإرسال كرت منتج رسمي (صورة + سعر +
-            زر شراء) بدلاً من رابط نصي.
+            {cm.page.intro}
           </p>
         </div>
         {/* Primary CTAs — visible above the fold. The Meta import
@@ -310,7 +326,7 @@ export default function WhatsAppCatalog() {
               className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2.5 rounded-xl text-sm transition shadow-sm"
             >
               <Download className="w-4 h-4" />
-              استيراد من Meta
+              {cm.page.importFromMeta}
             </button>
           )}
           <button
@@ -322,7 +338,7 @@ export default function WhatsAppCatalog() {
             className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-sm transition"
           >
             <Package className="w-4 h-4" />
-            إضافة منتج يدوي
+            {cm.page.addManual}
           </button>
           <button
             type="button"
@@ -333,7 +349,7 @@ export default function WhatsAppCatalog() {
             {resyncing
               ? <Loader2 className="w-4 h-4 animate-spin" />
               : <RefreshCw className="w-4 h-4" />}
-            إعادة مزامنة
+            {cm.page.resync}
           </button>
         </div>
       </div>
@@ -350,7 +366,7 @@ export default function WhatsAppCatalog() {
 
       {/* ── Diagnostics snapshot (source-agnostic) ──────────────── */}
       {diagnostics && (
-        <Card title="حالة الكتالوج" icon={<Database className="w-5 h-5 text-emerald-600" />}>
+        <Card title={cm.diagnostics.title} icon={<Database className="w-5 h-5 text-emerald-600" />}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* Readiness pill */}
             <div className={`rounded-xl border p-3 ${
@@ -364,14 +380,23 @@ export default function WhatsAppCatalog() {
                   : <AlertTriangle className="w-5 h-5 text-amber-600" />}
                 <span className="text-sm font-bold text-slate-800">
                   {diagnostics.readiness.catalog_ready
-                    ? 'الكتالوج جاهز للإرسال عبر واتساب'
-                    : 'الكتالوج غير جاهز بعد'}
+                    ? cm.diagnostics.readyTitle
+                    : cm.diagnostics.notReadyTitle}
                 </span>
               </div>
               <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
                 {diagnostics.catalog.catalog_id_present
-                  ? <>تم ربط Meta Catalog بـ ID <code dir="ltr" className="bg-slate-100 px-1 rounded">{diagnostics.catalog.catalog_id}</code></>
-                  : 'لم يتم ربط Meta Catalog بعد — راجع قسم "ربط الكتالوج بواتساب وMeta" أدناه.'}
+                  ? (() => {
+                      const parts = cm.diagnostics.metaLinked.split('{catalogId}')
+                      return (
+                        <>
+                          {parts[0]}
+                          <code dir="ltr" className="bg-slate-100 px-1 rounded">{diagnostics.catalog.catalog_id}</code>
+                          {parts[1] ?? ''}
+                        </>
+                      )
+                    })()
+                  : cm.diagnostics.metaNotLinked}
               </p>
             </div>
 
@@ -379,23 +404,29 @@ export default function WhatsAppCatalog() {
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex items-center gap-2">
                 <Store className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">مصدر المنتجات</span>
+                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.productSource}</span>
                 <SourceBadge source={diagnostics.products.dominant_source} size="md" />
               </div>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {(Object.entries(diagnostics.products.source_breakdown) as Array<[ProductSource, number]>)
                   .filter(([, n]) => n > 0)
-                  .map(([src, n]) => (
+                  .map(([src, n]) => {
+                    const srcKey = (src in SOURCE_STYLES ? src : 'unknown') as CatalogSourceKey
+                    const srcLabel = cm.sources[srcKey]
+                    return (
                     <span
                       key={src}
                       className="inline-flex items-center gap-1 rounded-full bg-white border border-slate-200 text-[11px] px-2 py-0.5 text-slate-600"
-                      title={`${n} منتج من ${SOURCE_META[src]?.label ?? src}`}
+                      title={cm.diagnostics.sourceBreakdownTitle
+                        .replace('{count}', fmtCount(n, lang))
+                        .replace('{source}', srcLabel)}
                     >
-                      <SourceBadge source={src} /> × {n}
+                      <SourceBadge source={src} /> × {fmtCount(n, lang)}
                     </span>
-                  ))}
+                    )
+                  })}
                 {diagnostics.products.total === 0 && (
-                  <span className="text-[11px] text-slate-500">لا توجد منتجات بعد — أضف منتجات يدوياً أو اربط متجر سلة.</span>
+                  <span className="text-[11px] text-slate-500">{cm.diagnostics.noProductsYet}</span>
                 )}
               </div>
             </div>
@@ -404,15 +435,17 @@ export default function WhatsAppCatalog() {
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex items-center gap-2">
                 <Package className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">تغطية retailer_id</span>
+                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.coverageTitle}</span>
               </div>
               <p className="text-xs text-slate-600 mt-1.5">
-                {diagnostics.products.with_effective_retailer_id} من {diagnostics.products.total} منتج
-                ({diagnostics.products.coverage_pct}%) لديها معرّف صالح للإرسال عبر Meta Catalog.
+                {cm.diagnostics.coverageDesc
+                  .replace('{with}', fmtCount(diagnostics.products.with_effective_retailer_id, lang))
+                  .replace('{total}', fmtCount(diagnostics.products.total, lang))
+                  .replace('{pct}', String(diagnostics.products.coverage_pct))}
               </p>
               {diagnostics.products.without_effective_retailer_id > 0 && (
                 <p className="text-[11px] text-amber-700 mt-1">
-                  استخدم زر "إعادة مزامنة وربط" أدناه لتعيين معرّفات للمنتجات غير المربوطة.
+                  {cm.diagnostics.coverageHint}
                 </p>
               )}
             </div>
@@ -421,12 +454,12 @@ export default function WhatsAppCatalog() {
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
               <div className="flex items-center gap-2">
                 <MessageCircle className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">قناة الإرسال</span>
+                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.channelTitle}</span>
               </div>
               <p className="text-xs text-slate-600 mt-1.5">
                 {diagnostics.catalog.whatsapp_connected
-                  ? 'واتساب الأعمال متصل وجاهز للإرسال.'
-                  : 'لم يتم ربط واتساب الأعمال بعد — اربطه من صفحة "واتساب".'}
+                  ? cm.diagnostics.channelConnected
+                  : cm.diagnostics.channelNotConnected}
               </p>
             </div>
           </div>
@@ -449,18 +482,21 @@ export default function WhatsAppCatalog() {
 
       {/* ── Status snapshot ─────────────────────────────────────── */}
       {status && (
-        <Card title="حالة الربط" icon={<ShieldCheck className="w-5 h-5 text-emerald-600" />}>
+        <Card title={cm.connectionStatus.title} icon={<ShieldCheck className="w-5 h-5 text-emerald-600" />}>
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <StatusPill ok={status.eligibility.ok} reason={status.eligibility.reason} />
               <span className="text-xs text-slate-500">
-                واتساب: {status.connection.found ? (status.connection.status ?? '—') : 'غير مربوط'}
+                {cm.connectionStatus.whatsappLabel}{' '}
+                {status.connection.found ? (status.connection.status ?? '—') : cm.connectionStatus.notLinked}
               </span>
               <span className="text-xs text-slate-500">
-                Catalog ID: {status.connection.meta_catalog_id ? status.connection.meta_catalog_id : '—'}
+                {cm.connectionStatus.catalogIdLabel}{' '}
+                {status.connection.meta_catalog_id ? status.connection.meta_catalog_id : '—'}
               </span>
               <span className="text-xs text-slate-500">
-                تغطية retailer_id: {status.coverage.with_retailer_id} / {status.coverage.sample_size}
+                {cm.connectionStatus.retailerCoverageLabel}{' '}
+                {status.coverage.with_retailer_id} / {status.coverage.sample_size}
               </span>
             </div>
             <p className="text-sm text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3">
@@ -485,10 +521,9 @@ export default function WhatsAppCatalog() {
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <Package className="w-5 h-5 text-emerald-600" />
           <div className="flex-1 min-w-0">
-            <h3 className="text-base font-bold text-slate-800">استوديو المنتجات</h3>
+            <h3 className="text-base font-bold text-slate-800">{cm.studioSection.title}</h3>
             <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-              اضغط على أي منتج لفتحه في نافذة جانبية ومعاينة جاهزيته للنشر عبر القنوات
-              (واتساب / Meta / الذكاء / الحملات / Google قريباً) مع عدّادات الحدود الحيّة.
+              {cm.studioSection.intro}
             </p>
           </div>
         </div>
@@ -501,48 +536,35 @@ export default function WhatsAppCatalog() {
             Catalog itself is channel-agnostic; this sub-section is
             specifically the WhatsApp/Meta channel wire-up. */}
       <Card
-        title="ربط الكتالوج بواتساب وMeta"
+        title={cm.channelBinding.title}
         icon={<MessageCircle className="w-5 h-5 text-emerald-600" />}
       >
         <div className="space-y-4">
           <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3">
-            هذا القسم خاص بقناة واتساب فقط. الكتالوج نفسه مستقل ويمكن
-            استخدامه لاحقاً في قنوات أخرى (الحملات، الذكاء، الدفع).
-            هنا فقط نربط منتجات نحلة بـ Meta Commerce Manager ليتمكن
-            واتساب الأعمال من إرسال كرت منتج رسمي.
+            {cm.channelBinding.intro}
           </div>
           <div>
             <label className="block text-sm font-semibold text-slate-700 mb-1">
-              Catalog ID من Meta Commerce Manager
+              {cm.channelBinding.catalogIdLabel}
             </label>
             <input
               type="text"
               dir="ltr"
               value={catalogId}
               onChange={e => setCatalogId(e.target.value)}
-              placeholder="مثال: 1234567890123456"
+              placeholder={cm.channelBinding.catalogIdPh}
               className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
             />
             <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-              افتح{' '}
-              <a
-                href="https://business.facebook.com/commerce/"
-                target="_blank" rel="noopener noreferrer"
-                className="text-emerald-600 hover:underline inline-flex items-center gap-0.5"
-              >
-                Meta Commerce Manager <ExternalLink className="w-3 h-3" />
-              </a>
-              {' '}→ Catalog → Settings → انسخ قيمة <code className="bg-slate-100 px-1 rounded">Catalog ID</code>
-              {' '}والصقها هنا. تأكد أن الكتالوج مرتبط برقم واتساب الأعمال نفسه.
+              {cm.channelBinding.catalogIdHint}
             </p>
           </div>
 
           <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
             <div>
-              <p className="font-semibold text-sm text-slate-800">تفعيل إرسال المنتج عبر الكتالوج</p>
+              <p className="font-semibold text-sm text-slate-800">{cm.channelBinding.enableTitle}</p>
               <p className="text-xs text-slate-500 mt-0.5">
-                عند التفعيل، يستخدم الذكاء كرت المنتج الرسمي من واتساب
-                بدلاً من رابط بسيط — لتجربة أقرب للمتجر الإلكتروني.
+                {cm.channelBinding.enableDesc}
               </p>
             </div>
             <button
@@ -552,7 +574,7 @@ export default function WhatsAppCatalog() {
               aria-pressed={enabled}
             >
               {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-              {enabled ? 'مُفعّل' : 'مُعطّل'}
+              {enabled ? cm.channelBinding.enabled : cm.channelBinding.disabled}
             </button>
           </div>
 
@@ -563,7 +585,7 @@ export default function WhatsAppCatalog() {
               className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
             >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-              حفظ الإعدادات
+              {cm.channelBinding.save}
             </button>
           </div>
         </div>
@@ -572,12 +594,12 @@ export default function WhatsAppCatalog() {
       {/* ── Catalog tools (resync + retailer_id coverage) ───────────
             Catalog-level operations live above the Studio. Per-product
             actions live INSIDE the Studio (the grid + drawer). */}
-      <Card title="أدوات الكتالوج" icon={<RefreshCw className="w-5 h-5 text-emerald-600" />}>
+      <Card title={cm.tools.title} icon={<RefreshCw className="w-5 h-5 text-emerald-600" />}>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
             <div className="space-y-1">
               <p className="text-sm font-semibold text-slate-800">
-                تغطية retailer_id:{' '}
+                {cm.tools.coverageLabel}{' '}
                 <span className="text-emerald-700">
                   {products ? products.coverage.with_rid : '—'}
                 </span>
@@ -592,8 +614,7 @@ export default function WhatsAppCatalog() {
                 )}
               </p>
               <p className="text-xs text-slate-500 leading-relaxed">
-                إعادة المزامنة تربط كل منتج بمعرّف Meta retailer_id تلقائيًا
-                (عبر external_id، أو معرّف اصطناعي إذا لزم). آمنة وتشغّل أكثر من مرة.
+                {cm.tools.coverageDesc}
               </p>
             </div>
             <button
@@ -604,20 +625,20 @@ export default function WhatsAppCatalog() {
               {resyncing
                 ? <Loader2 className="w-4 h-4 animate-spin" />
                 : <RefreshCw className="w-4 h-4" />}
-              إعادة مزامنة وربط
+              {cm.tools.resyncBtn}
             </button>
           </div>
 
           {resyncReport && (
             <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-900 space-y-1">
-              <p className="font-bold">تقرير المزامنة</p>
+              <p className="font-bold">{cm.tools.reportTitle}</p>
               <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
-                <li>تم المسح: {resyncReport.scanned}</li>
-                <li>تم التعيين: {resyncReport.retailer_id_set}</li>
-                <li>كان معيّن مسبقًا: {resyncReport.already_set}</li>
-                <li>معرّف اصطناعي: {resyncReport.synthetic_assigned}</li>
-                <li>تم نشره: {resyncReport.published_stamped}</li>
-                <li>أخطاء: {resyncReport.errors}</li>
+                <li>{cm.tools.scanned} {resyncReport.scanned}</li>
+                <li>{cm.tools.assigned} {resyncReport.retailer_id_set}</li>
+                <li>{cm.tools.alreadySet} {resyncReport.already_set}</li>
+                <li>{cm.tools.synthetic} {resyncReport.synthetic_assigned}</li>
+                <li>{cm.tools.published} {resyncReport.published_stamped}</li>
+                <li>{cm.tools.errors} {resyncReport.errors}</li>
               </ul>
             </div>
           )}
@@ -651,30 +672,28 @@ export default function WhatsAppCatalog() {
       )}
 
       {/* ── Test send ────────────────────────────────────────────── */}
-      <Card title="إرسال تجريبي" icon={<Send className="w-5 h-5 text-emerald-600" />}>
+      <Card title={cm.testSend.title} icon={<Send className="w-5 h-5 text-emerald-600" />}>
         <div className="space-y-3">
           <p className="text-xs text-slate-500 leading-relaxed">
-            أرسل منتجاً اختبارياً إلى رقم واتساب (يفضّل رقمك الشخصي)
-            لمعاينة الكرت الذي سيظهر للعملاء. يمر الإرسال عبر نفس المسار
-            الذي يستخدمه الذكاء — كتالوج، أو صورة + زر، أو رابط CTA.
+            {cm.testSend.intro}
           </p>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <input
               dir="ltr"
-              placeholder="رقم الاستلام (9665XXXXXXXX)"
+              placeholder={cm.testSend.phonePlaceholder}
               value={testTo}
               onChange={e => setTestTo(e.target.value)}
               className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
             />
             <input
-              placeholder="عنوان المنتج (مثال: عسل السمر)"
+              placeholder={cm.testSend.titlePlaceholder}
               value={testTitle}
               onChange={e => setTestTitle(e.target.value)}
               className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
             />
             <input
               dir="ltr"
-              placeholder="أو product_id"
+              placeholder={cm.testSend.productIdPlaceholder}
               value={testProductId}
               onChange={e => {
                 const v = e.target.value.trim()
@@ -690,7 +709,7 @@ export default function WhatsAppCatalog() {
               className="inline-flex items-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
             >
               {testing && <Loader2 className="w-4 h-4 animate-spin" />}
-              إرسال تجريبي
+              {cm.testSend.sendBtn}
             </button>
           </div>
 
@@ -700,19 +719,33 @@ export default function WhatsAppCatalog() {
                 {testResult.ok
                   ? <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                   : <XCircle className="w-4 h-4 text-rose-600" />}
-                نتيجة الإرسال:{' '}
+                {cm.testSend.resultTitle}{' '}
                 <code className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded text-xs">
                   {testResult.final_mode}
                 </code>
               </p>
               <p className="text-xs text-slate-600">
-                المنتج: <strong>{testResult.product.title}</strong>
+                {cm.testSend.productLabel} <strong>{testResult.product.title}</strong>
                 {' '}(retailer_id: <code>{testResult.product.retailer_id ?? '—'}</code>)
               </p>
               <ul className="text-xs text-slate-600 space-y-1">
-                <li>• كتالوج: {testResult.catalog.attempted ? (testResult.catalog.succeeded ? 'نجح ✅' : `فشل (${testResult.catalog.reason})`) : 'لم يُحاول'}</li>
-                <li>• صورة + زر: {testResult.image_cta.attempted ? (testResult.image_cta.image_ok ? 'نجح ✅' : 'فشل') : 'لم يُحاول'}</li>
-                <li>• CTA فقط: {testResult.cta_only.attempted ? (testResult.cta_only.ok ? 'نجح ✅' : 'فشل') : 'لم يُحاول'}</li>
+                <li>{cm.testSend.catalogLine}{' '}
+                  {testResult.catalog.attempted
+                    ? (testResult.catalog.succeeded
+                        ? cm.testResult.catalogSucceeded
+                        : cm.testResult.catalogFailed.replace('{reason}', testResult.catalog.reason ?? ''))
+                    : cm.testSend.notAttempted}
+                </li>
+                <li>{cm.testSend.imageLine}{' '}
+                  {testResult.image_cta.attempted
+                    ? (testResult.image_cta.image_ok ? cm.testResult.imageOk : cm.testResult.imageFailed)
+                    : cm.testSend.notAttempted}
+                </li>
+                <li>{cm.testSend.ctaLine}{' '}
+                  {testResult.cta_only.attempted
+                    ? (testResult.cta_only.ok ? cm.testResult.ctaOk : cm.testResult.ctaFailed)
+                    : cm.testSend.notAttempted}
+                </li>
               </ul>
             </div>
           )}
@@ -746,12 +779,12 @@ export default function WhatsAppCatalog() {
 
 type NodeStatus = 'live' | 'active' | 'available' | 'unused' | 'planned'
 
-const STATUS_STYLES: Record<NodeStatus, { pill: string; dot: string; label: string }> = {
-  live:      { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500',   label: 'مُفعّل' },
-  active:    { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500',   label: 'يغذّي الكتالوج' },
-  available: { pill: 'bg-blue-50    border-blue-200',    dot: 'bg-blue-500',      label: 'متاح' },
-  unused:    { pill: 'bg-slate-50   border-slate-200',   dot: 'bg-slate-300',     label: 'غير مربوط' },
-  planned:   { pill: 'bg-amber-50   border-amber-200',   dot: 'bg-amber-400',     label: 'قريباً' },
+const NODE_STATUS_STYLE: Record<NodeStatus, { pill: string; dot: string }> = {
+  live:      { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500' },
+  active:    { pill: 'bg-emerald-50 border-emerald-200', dot: 'bg-emerald-500' },
+  available: { pill: 'bg-blue-50    border-blue-200',    dot: 'bg-blue-500'    },
+  unused:    { pill: 'bg-slate-50   border-slate-200',   dot: 'bg-slate-300'   },
+  planned:   { pill: 'bg-amber-50   border-amber-200',   dot: 'bg-amber-400'   },
 }
 
 function HubNode(props: {
@@ -760,7 +793,9 @@ function HubNode(props: {
   subtitle?: string
   status: NodeStatus
 }) {
-  const s = STATUS_STYLES[props.status]
+  const { t } = useLanguage()
+  const s = NODE_STATUS_STYLE[props.status]
+  const label = t(tr => tr.catalogMgmt.hub.nodeStatus[props.status])
   return (
     <div className={`relative rounded-xl border p-3 ${s.pill}`}>
       <div className="flex items-center gap-2">
@@ -774,13 +809,15 @@ function HubNode(props: {
       </div>
       <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
         <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
-        <span className="text-[10px] text-slate-600">{s.label}</span>
+        <span className="text-[10px] text-slate-600">{label}</span>
       </div>
     </div>
   )
 }
 
 function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
+  const { t, lang } = useLanguage()
+  const hub = t(tr => tr.catalogMgmt.hub)
   const d = props.diagnostics
   const breakdown = d.products.source_breakdown
 
@@ -805,41 +842,45 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
   const campaignsStatus: NodeStatus = d.products.total > 0 ? 'available' : 'unused'
 
   return (
-    <Card title="بنية الكتالوج (Hub)" icon={<Database className="w-5 h-5 text-emerald-600" />}>
+    <Card title={hub.title} icon={<Database className="w-5 h-5 text-emerald-600" />}>
       <p className="text-xs text-slate-600 leading-relaxed mb-4">
-        كتالوج نحلة هو المصدر المركزي للمنتجات. <strong>المصادر</strong> تغذّي الكتالوج،
-        و<strong>القنوات</strong> تستهلك منه. الذكاء يقرأ من كتالوج نحلة فقط — أبداً
-        من سلة أو Meta مباشرة.
+        {hub.intro}
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr_auto_1fr] gap-3 items-center">
         {/* ── Sources column ── */}
         <div className="space-y-2">
           <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
-            المصادر (Inputs)
+            {hub.inputsLabel}
           </div>
           <HubNode
             icon={<Store className="w-4 h-4 text-orange-600" />}
-            title="سلة"
-            subtitle={sallaCount > 0 ? `${sallaCount} منتج` : 'غير مربوط'}
+            title={hub.sources.salla}
+            subtitle={sallaCount > 0
+              ? hub.subtitles.sallaCount.replace('{count}', fmtCount(sallaCount, lang))
+              : hub.subtitles.sallaUnlinked}
             status={sallaStatus}
           />
           <HubNode
             icon={<Package className="w-4 h-4 text-blue-600" />}
-            title="Meta Catalog"
-            subtitle={metaCount > 0 ? `${metaCount} منتج (مستورد)` : (d.catalog.catalog_id_present ? 'جاهز للاستيراد' : 'لم يُربط بعد')}
+            title={hub.sources.meta}
+            subtitle={metaCount > 0
+              ? hub.subtitles.metaImported.replace('{count}', fmtCount(metaCount, lang))
+              : (d.catalog.catalog_id_present ? hub.subtitles.metaReadyToImport : hub.subtitles.metaNotLinked)}
             status={metaStatus}
           />
           <HubNode
             icon={<Store className="w-4 h-4 text-sky-600" />}
-            title="إدخال يدوي"
-            subtitle={manualCount > 0 ? `${manualCount} منتج` : 'متاح دائماً'}
+            title={hub.sources.manual}
+            subtitle={manualCount > 0
+              ? hub.subtitles.manualCount.replace('{count}', fmtCount(manualCount, lang))
+              : hub.subtitles.manualAlwaysAvailable}
             status={manualStatus}
           />
           <HubNode
             icon={<Clock className="w-4 h-4 text-amber-500" />}
-            title="Shopify / CSV / Zid"
-            subtitle="قريباً"
+            title={hub.sources.shopifyPlanned}
+            subtitle={hub.subtitles.shopifyPlanned}
             status="planned"
           />
         </div>
@@ -855,12 +896,12 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
         {/* ── Catalog Hub (center) ── */}
         <div className="bg-gradient-to-br from-emerald-50 to-emerald-100 border-2 border-emerald-300 rounded-2xl p-4 text-center">
           <Database className="w-8 h-8 text-emerald-700 mx-auto mb-1" />
-          <div className="font-black text-sm text-emerald-900">كتالوج نحلة</div>
+          <div className="font-black text-sm text-emerald-900">{hub.nahlaCatalog}</div>
           <div className="text-xs text-emerald-800 mt-1">
-            {d.products.total} منتج
+            {hub.productCount.replace('{count}', fmtCount(d.products.total, lang))}
           </div>
           <div className="text-[11px] text-emerald-700 mt-1">
-            المصدر الموحّد
+            {hub.unifiedSource}
           </div>
         </div>
 
@@ -875,30 +916,34 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
         {/* ── Channels column ── */}
         <div className="space-y-2">
           <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
-            القنوات (Outputs)
+            {hub.outputsLabel}
           </div>
           <HubNode
             icon={<MessageCircle className="w-4 h-4 text-emerald-600" />}
-            title="WhatsApp Catalog"
-            subtitle={waStatus === 'live' ? 'جاهز للإرسال' : (waStatus === 'available' ? 'يحتاج Meta Catalog ID' : 'اربط واتساب أولاً')}
+            title={hub.channels.whatsapp}
+            subtitle={waStatus === 'live'
+              ? hub.subtitles.whatsappReady
+              : (waStatus === 'available' ? hub.subtitles.whatsappNeedsCatalogId : hub.subtitles.whatsappConnectFirst)}
             status={waStatus}
           />
           <HubNode
             icon={<Bot className="w-4 h-4 text-violet-600" />}
-            title="الذكاء (AI)"
-            subtitle={aiStatus === 'live' ? 'يقرأ من الكتالوج' : 'يحتاج منتجات'}
+            title={hub.channels.ai}
+            subtitle={aiStatus === 'live' ? hub.subtitles.aiReadsCatalog : hub.subtitles.aiNeedsProducts}
             status={aiStatus}
           />
           <HubNode
             icon={<Megaphone className="w-4 h-4 text-rose-600" />}
-            title="الحملات"
-            subtitle={campaignsStatus === 'available' ? 'متاح للاستخدام' : 'يحتاج منتجات'}
+            title={hub.channels.campaigns}
+            subtitle={campaignsStatus === 'available'
+              ? hub.subtitles.campaignsAvailable
+              : hub.subtitles.campaignsNeedsProducts}
             status={campaignsStatus}
           />
           <HubNode
             icon={<ShoppingBag className="w-4 h-4 text-amber-500" />}
-            title="Google Merchant / الدفع"
-            subtitle="قريباً"
+            title={hub.channels.googlePlanned}
+            subtitle={hub.subtitles.googlePlanned}
             status="planned"
           />
         </div>
@@ -917,6 +962,10 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
 // would fail preflight anyway, so showing a button would be confusing.
 
 function MetaImportSection(props: { onChanged: () => Promise<void> }) {
+  const { t } = useLanguage()
+  const mi = t(tr => tr.catalogMgmt.metaImport)
+  const msgs = t(tr => tr.catalogMgmt.messages)
+
   const [busy, setBusy]               = useState(false)
   const [error, setError]             = useState<string | null>(null)
   const [errorDetail, setErrorDetail] = useState<Record<string, any> | null>(null)
@@ -924,15 +973,19 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
   const [report, setReport]           = useState<MetaImportReport | null>(null)
 
   const errorCopy = (code: string | undefined): string => {
+    const errs = mi.errors
     switch (code) {
-      case 'connection_not_found':       return 'لا يوجد ربط واتساب حالياً. يرجى ربط واتساب أولاً.'
-      case 'catalog_id_missing':         return 'يرجى إدخال Meta Catalog ID في قسم "ربط الكتالوج بواتساب وMeta" أعلاه.'
-      case 'access_token_missing':       return 'الرمز المطلوب للوصول إلى Meta غير متوفر. أعد ربط واتساب لتجديده.'
-      case 'meta_access_token_missing':  return 'الاتصال الحالي عبر 360dialog ولا يحمل توكِن Meta Graph. أعد ربط واتساب عبر Meta Embedded Signup مع منح صلاحية catalog_management، أو اطلب من الدعم تفعيل توكِن النظام.'
-      case 'catalog_not_found':          return 'الـ Catalog ID المُدخل غير موجود في Meta. انسخه من Meta Commerce Manager → Catalog → Settings والصقه مرة أخرى. تأكد أنه Catalog ID وليس Commerce Account ID.'
-      case 'catalog_type_unsupported':   return 'نوع الكتالوج غير مدعوم في نحلة (حالياً ندعم Commerce/Products فقط، أما السيارات/الفنادق/الطيران/الوظائف فتحتاج مستوردًا منفصلاً).'
-      case 'meta_http_error':            return 'تعذّر الاتصال بـ Meta Catalog. الـ Catalog ID صحيح من حيث الشكل لكن Meta رفض الطلب — غالباً لأن التوكِن لا يملك صلاحية catalog_management على هذا الكتالوج، أو لأن الكتالوج في Business Manager مختلف عن BM رقم واتساب. راجع التفاصيل أدناه.'
-      default:                           return code ? `خطأ غير متوقع: ${code}` : 'تعذّر تنفيذ الاستيراد.'
+      case 'connection_not_found':       return errs.connection_not_found
+      case 'catalog_id_missing':         return errs.catalog_id_missing
+      case 'access_token_missing':       return errs.access_token_missing
+      case 'meta_access_token_missing':  return errs.meta_access_token_missing
+      case 'catalog_not_found':          return errs.catalog_not_found
+      case 'catalog_type_unsupported':   return errs.catalog_type_unsupported
+      case 'meta_http_error':            return errs.meta_http_error
+      default:
+        return code
+          ? errs.defaultUnexpected.replace('{code}', code)
+          : msgs.unexpectedImport
     }
   }
 
@@ -974,12 +1027,10 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
 
   return (
     <div id="meta-import-section">
-    <Card title="استيراد المنتجات من Meta" icon={<Download className="w-5 h-5 text-emerald-600" />}>
+    <Card title={mi.title} icon={<Download className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-3">
         <p className="text-xs text-slate-600 leading-relaxed">
-          إذا كانت منتجاتك جاهزة بالفعل في Meta Commerce Manager، يمكنك استيرادها مباشرة
-          إلى كتالوج نحلة. الاستيراد آمن وقابل للإعادة (idempotent) — تشغيله مرّة أخرى
-          يحدّث البيانات بدون تكرار. المنتجات اليدوية محميّة من الكتابة فوقها.
+          {mi.intro}
         </p>
 
         {error && (
@@ -995,7 +1046,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
                   onClick={() => setShowDetail(s => !s)}
                   className="text-[11px] underline text-rose-700 hover:text-rose-900"
                 >
-                  {showDetail ? 'إخفاء التفاصيل التقنية' : 'عرض التفاصيل التقنية للدعم'}
+                  {showDetail ? mi.hideDetail : mi.showDetail}
                 </button>
                 {showDetail && (
                   <pre dir="ltr" className="mt-2 bg-white border border-rose-100 rounded-lg p-2 text-[11px] text-slate-700 overflow-x-auto whitespace-pre-wrap leading-relaxed">
@@ -1009,18 +1060,18 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
 
         {report && (
           <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-900 space-y-1">
-            <p className="font-bold">تقرير الاستيراد</p>
+            <p className="font-bold">{mi.reportTitle}</p>
             <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
-              <li>تم المسح: {report.scanned}</li>
-              <li>جديد: {report.created}</li>
-              <li>محدّث: {report.updated}</li>
-              <li>محمي (يدوي): {report.skipped_manual}</li>
-              <li>أخطاء: {report.errors}</li>
-              <li>صفحات: {report.pages_fetched}</li>
+              <li>{mi.scanned} {report.scanned}</li>
+              <li>{mi.created} {report.created}</li>
+              <li>{mi.updated} {report.updated}</li>
+              <li>{mi.skippedManual} {report.skipped_manual}</li>
+              <li>{mi.reportErrors} {report.errors}</li>
+              <li>{mi.pages} {report.pages_fetched}</li>
             </ul>
             {report.truncated && (
               <p className="text-amber-700 mt-1">
-                تنبيه: تم بلوغ حد الصفحات. شغّل الاستيراد مرة أخرى لجلب الباقي.
+                {mi.truncated}
               </p>
             )}
           </div>
@@ -1033,7 +1084,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
           className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
         >
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-          استيراد الآن من Meta
+          {mi.importBtn}
         </button>
       </div>
     </Card>
@@ -1064,8 +1115,10 @@ function ManualProductsSection(props: {
   currentSource: DominantSource
   onChanged: () => Promise<void>
 }) {
-  // ``id="manual-product-section"`` is used by the top-bar CTA so
-  // clicking "إضافة منتج يدوي" up there scrolls down here.
+  const { t } = useLanguage()
+  const manual = t(tr => tr.catalogMgmt.manual)
+  const msgs = t(tr => tr.catalogMgmt.messages)
+
   const [open, setOpen]       = useState(false)
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState<string | null>(null)
@@ -1086,26 +1139,26 @@ function ManualProductsSection(props: {
   const onSubmit = async () => {
     setBusy(true); setError(null); setSuccess(null)
     try {
-      const t = title.trim()
-      if (!t) {
-        setError('اسم المنتج مطلوب.')
+      const productTitle = title.trim()
+      if (!productTitle) {
+        setError(manual.nameRequired)
         setBusy(false)
         return
       }
       const created = await catalogApi.createManualProduct({
-        title:            t,
+        title:            productTitle,
         price:            price.trim() || undefined,
         description:      description.trim() || undefined,
         image_url:        imageUrl.trim() || undefined,
         product_url:      productUrl.trim() || undefined,
         meta_retailer_id: metaRid.trim() || undefined,
       })
-      setSuccess(`تم إضافة "${created.title}" بنجاح إلى الكتالوج.`)
+      setSuccess(msgs.addProductSuccess.replace('{title}', created.title))
       reset()
       setOpen(false)
       await props.onChanged()
     } catch (e: any) {
-      setError(e?.message ?? 'تعذّر إضافة المنتج.')
+      setError(e?.message ?? msgs.addProductFailed)
     } finally {
       setBusy(false)
     }
@@ -1116,12 +1169,12 @@ function ManualProductsSection(props: {
   // merchant ("ابدأ من هنا").
   const explainer =
     props.currentSource === 'salla' || props.currentSource === 'zid'
-      ? 'منتجاتك من المتجر تُجلب تلقائياً. استخدم هذا القسم فقط لإضافة منتج خاص بنحلة (مثلاً عرض ترويجي لا يوجد في المتجر).'
-      : 'إذا لم يكن لديك متجر سلة أو زد، أضف منتجاتك يدوياً هنا ليتمكن الذكاء وواتساب من استخدامها.'
+      ? manual.explainerStore
+      : manual.explainerNoStore
 
   return (
     <div id="manual-product-section">
-    <Card title="إضافة منتج يدوي" icon={<Store className="w-5 h-5 text-emerald-600" />}>
+    <Card title={manual.title} icon={<Store className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-4">
         <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3 leading-relaxed">
           {explainer}
@@ -1145,32 +1198,32 @@ function ManualProductsSection(props: {
             className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
           >
             <Package className="w-4 h-4" />
-            إضافة منتج جديد
+            {manual.addNew}
           </button>
         )}
 
         {open && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">اسم المنتج <span className="text-rose-500">*</span></label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.productName} <span className="text-rose-500">*</span></label>
               <input
                 value={title}
                 onChange={e => setTitle(e.target.value)}
-                placeholder="مثال: عسل سدر فاخر 500 جرام"
+                placeholder={manual.productNamePh}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">السعر</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.price}</label>
               <input
                 value={price}
                 onChange={e => setPrice(e.target.value)}
-                placeholder="مثال: 95 ر.س"
+                placeholder={manual.pricePh}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">رابط الصورة</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.imageUrl}</label>
               <input
                 value={imageUrl}
                 onChange={e => setImageUrl(e.target.value)}
@@ -1180,7 +1233,7 @@ function ManualProductsSection(props: {
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">رابط المنتج</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.productUrl}</label>
               <input
                 value={productUrl}
                 onChange={e => setProductUrl(e.target.value)}
@@ -1191,27 +1244,26 @@ function ManualProductsSection(props: {
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Meta retailer_id (اختياري)
+                {manual.metaRidLabel}
               </label>
               <input
                 value={metaRid}
                 onChange={e => setMetaRid(e.target.value)}
-                placeholder="اتركه فارغاً ليتم توليده تلقائيًا"
+                placeholder={manual.metaRidPh}
                 dir="ltr"
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
               />
               <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                املأ هذا فقط إذا نشرت المنتج في Meta Commerce Manager بمعرّف مخصّص.
-                وإلا، سيستخدم النظام معرّفاً اصطناعياً لعرضه عبر واتساب.
+                {manual.metaRidHint}
               </p>
             </div>
             <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">الوصف</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.description}</label>
               <textarea
                 value={description}
                 onChange={e => setDescription(e.target.value)}
                 rows={3}
-                placeholder="وصف مختصر يظهر مع كرت المنتج."
+                placeholder={manual.descriptionPh}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none resize-none"
               />
             </div>
@@ -1221,7 +1273,7 @@ function ManualProductsSection(props: {
                 onClick={() => { setOpen(false); reset(); setError(null) }}
                 className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition"
               >
-                إلغاء
+                {manual.cancel}
               </button>
               <button
                 type="button"
@@ -1230,7 +1282,7 @@ function ManualProductsSection(props: {
                 className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
               >
                 {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-                حفظ المنتج
+                {manual.save}
               </button>
             </div>
           </div>
