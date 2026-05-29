@@ -1177,6 +1177,70 @@ export interface Translations {
       launchCreateFailed:   string
       launchTimeout:        string
     }
+    list: {
+      pageSubtitle:           string
+      newCampaign:            string
+      stats: {
+        completed:              string
+        totalSent:              string
+        totalSentTooltipBoth:   string
+        totalSentTooltipAccepted: string
+        totalSentFailedSuffix:  string
+        openRateDelivered:      string
+        openRateAccepted:       string
+        openRateTooltipDelivered: string
+        openRateTooltipAccepted:  string
+        openRateTooltipNone:    string
+        conversionRate:         string
+      }
+      failedBanner:           string
+      table: {
+        campaign:   string
+        type:       string
+        status:     string
+        audience:   string
+        sent:       string
+        openRate:   string
+        conversion: string
+      }
+      loading:      string
+      emptyTitle:   string
+      emptyHint:    string
+      waveAdaptive: string
+      waveBatched:  string
+      status: {
+        active:    string
+        scheduled: string
+        completed: string
+        paused:    string
+        draft:     string
+        failed:    string
+      }
+      lifecycle: {
+        draft:                      string
+        waiting_scheduler:          string
+        pending_dispatch:           string
+        sending:                    string
+        sent:                       string
+        partial:                    string
+        partial_minor:              string
+        no_whatsapp_recipients:     string
+        excluded_before_send:       string
+        orphaned_materialized_rows: string
+        unknown_status:             string
+        completed_empty:          string
+        failed:                     string
+        failed_all:                 string
+        unknown:                    string
+      }
+      types: {
+        broadcast:      string
+        abandoned_cart: string
+        vip:            string
+        new_arrivals:   string
+        win_back:       string
+      }
+    }
   }
 
   /** Merchants (admin) page */

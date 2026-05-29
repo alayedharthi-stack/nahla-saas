@@ -107,6 +107,29 @@ function fmtCount(n: number, lang: Lang): string {
   return n.toLocaleString(localeTag(lang))
 }
 
+type CampaignBadgeVariant = 'green' | 'amber' | 'blue' | 'slate' | 'red'
+
+function lifecycleBadgeLabel(
+  lifecycleKey: string,
+  statusKey: string,
+  list: CampaignsMgmt['list'],
+): string {
+  const lc = list.lifecycle[lifecycleKey as keyof typeof list.lifecycle]
+  if (lc) return lc
+  const st = list.status[statusKey as keyof typeof list.status]
+  return st ?? list.status.draft
+}
+
+function lifecycleBadgeVariant(lifecycleKey: string, statusKey: string): CampaignBadgeVariant {
+  return LIFECYCLE_META[lifecycleKey]?.variant
+    ?? STATUS_META[statusKey]?.variant
+    ?? STATUS_META.draft.variant
+}
+
+function typeBadgeLabel(typeKey: string, list: CampaignsMgmt['list']): string {
+  return list.types[typeKey as keyof typeof list.types] ?? typeKey
+}
+
 function wizardStepLabels(cm: CampaignsMgmt): string[] {
   return WIZARD_STEP_KEYS.map(k => cm.wizard.steps[k])
 }
@@ -293,12 +316,12 @@ const GOAL_TO_LEGACY_TYPE: Record<string, string> = {
   custom:       'broadcast',
 }
 
-const TYPE_META: Record<string, { label: string; icon: React.ReactNode }> = {
-  broadcast:     { label: 'بث جماعي',      icon: <Megaphone   className="w-3.5 h-3.5 text-blue-500" />  },
-  abandoned_cart:{ label: 'عربة متروكة',   icon: <ShoppingCart className="w-3.5 h-3.5 text-amber-500" /> },
-  vip:           { label: 'VIP',           icon: <Crown       className="w-3.5 h-3.5 text-purple-500" /> },
-  new_arrivals:  { label: 'وصول جديد',     icon: <Zap         className="w-3.5 h-3.5 text-emerald-500" /> },
-  win_back:      { label: 'استرجاع',       icon: <Users       className="w-3.5 h-3.5 text-rose-500" />   },
+const TYPE_ICONS: Record<string, React.ReactNode> = {
+  broadcast:      <Megaphone    className="w-3.5 h-3.5 text-blue-500" />,
+  abandoned_cart: <ShoppingCart className="w-3.5 h-3.5 text-amber-500" />,
+  vip:            <Crown        className="w-3.5 h-3.5 text-purple-500" />,
+  new_arrivals:   <Zap          className="w-3.5 h-3.5 text-emerald-500" />,
+  win_back:       <Users        className="w-3.5 h-3.5 text-rose-500" />,
 }
 
 // ── WhatsApp preview bubble ───────────────────────────────────────────────────
@@ -3026,13 +3049,19 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   onCheck: (id: number, v: boolean) => void
   onDelete: (id: number) => void
 }) {
+  const { t, lang } = useLanguage()
+  const list = t(tr => tr.campaignsMgmt.list)
+
   // Prefer the granular lifecycle label (e.g. "ينتظر بدء الإرسال")
   // over the raw status pill ("نشطة"). Fall back to STATUS_META if
   // the backend didn't ship a lifecycle key (older clients hitting a
   // freshly redeployed backend).
   const lifecycleKey = campaign.lifecycle || campaign.status || 'draft'
-  const sm = LIFECYCLE_META[lifecycleKey] ?? STATUS_META[campaign.status] ?? STATUS_META['draft']
-  const tm = TYPE_META[campaign.campaign_type] ?? TYPE_META['broadcast']
+  const smLabel = lifecycleBadgeLabel(lifecycleKey, campaign.status, list)
+  const smVariant = lifecycleBadgeVariant(lifecycleKey, campaign.status)
+  const typeKey = campaign.campaign_type || 'broadcast'
+  const tmLabel = typeBadgeLabel(typeKey, list)
+  const tmIcon = TYPE_ICONS[typeKey] ?? TYPE_ICONS.broadcast
   // Per-row "معدل القراءة" — prefer the canonical stats object so
   // we use ``read / delivered`` (same denominator as the summary
   // tile above). When delivered=0 (e.g. early in the dispatch
@@ -3404,10 +3433,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           <p className="text-[10px] text-slate-400 font-mono mt-0.5">{campaign.template_name?.replace(/_/g, ' ')}</p>
         </td>
         <td className="px-5 py-3.5">
-          <span className="flex items-center gap-1.5 text-xs text-slate-600">{tm.icon} {tm.label}</span>
+          <span className="flex items-center gap-1.5 text-xs text-slate-600">{tmIcon} {tmLabel}</span>
         </td>
         <td className="px-5 py-3.5">
-          <Badge label={sm.label} variant={sm.variant} dot />
+          <Badge label={smLabel} variant={smVariant} dot />
           {/* Wave/Batch indicator: surface the chosen strategy
               right under the status pill so the merchant can
               tell "إرسال على دفعات" apart from a stalled
@@ -3419,8 +3448,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               <Badge
                 label={
                   campaign.send_strategy === 'adaptive'
-                    ? 'إرسال تلقائي على دفعات'
-                    : 'إرسال على دفعات'
+                    ? list.waveAdaptive
+                    : list.waveBatched
                 }
                 variant="purple"
               />
@@ -3476,9 +3505,9 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             </button>
           )}
         </td>
-        <td className="px-5 py-3.5 text-xs text-slate-700">{campaign.audience_count.toLocaleString('ar-SA')}</td>
+        <td className="px-5 py-3.5 text-xs text-slate-700">{fmtCount(campaign.audience_count, lang)}</td>
         <td className="px-5 py-3.5">
-          <span className="text-xs text-slate-700">{campaign.sent_count.toLocaleString('ar-SA')}</span>
+          <span className="text-xs text-slate-700">{fmtCount(campaign.sent_count, lang)}</span>
           {failedCount > 0 && (
             <span className="text-[10px] text-red-500 block mt-0.5">
               {failedCount} فشلت
@@ -3573,7 +3602,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       </tr>
       {diagnostic && (
         <tr className="bg-slate-50/70">
-          <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
+          <td colSpan={CAMPAIGN_TABLE_COL_COUNT} className="px-6 py-3">
             {/* Provider-side billing/account block — must render
                 BEFORE the diagnostic dump so the merchant sees the
                 escalation workflow first instead of getting lost
@@ -3624,7 +3653,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       )}
       {showErrors && hasErrors && (
         <tr className="bg-red-50/60">
-          <td colSpan={TABLE_HEADERS.length} className="px-6 py-3">
+          <td colSpan={CAMPAIGN_TABLE_COL_COUNT} className="px-6 py-3">
             <div className="rounded-lg bg-red-100/80 border border-red-200 p-3">
               <p className="text-xs font-semibold text-red-700 mb-1.5 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5" />
@@ -3650,7 +3679,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-const TABLE_HEADERS = ['', 'الحملة', 'النوع', 'الحالة', 'الجمهور', 'الإرسال', 'معدل القراءة', 'التحويل', '']
+/** Checkbox + 7 data columns + actions */
+const CAMPAIGN_TABLE_COL_COUNT = 9
 
 export default function Campaigns() {
   const [showWizard, setShowWizard] = useState(false)
@@ -3664,7 +3694,21 @@ export default function Campaigns() {
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
+  const list = t(tr => tr.campaignsMgmt.list)
+
+  const tableHeaders = useMemo(
+    () => [
+      list.table.campaign,
+      list.table.type,
+      list.table.status,
+      list.table.audience,
+      list.table.sent,
+      list.table.openRate,
+      list.table.conversion,
+    ],
+    [list],
+  )
 
   const loadCampaigns = useCallback(() => {
     setLoading(true)
@@ -3788,7 +3832,7 @@ export default function Campaigns() {
     <div className="space-y-6">
       <PageHeader
         title={t(tr => tr.pages.campaigns.title)}
-        subtitle="حملات واتساب ذكية مبنية على شرائح نحلة وقوالب Meta المعتمدة"
+        subtitle={list.pageSubtitle}
         action={
           <div className="flex items-center gap-2">
             {adminMode && (
@@ -3810,7 +3854,7 @@ export default function Campaigns() {
               </>
             )}
             <button onClick={() => setShowWizard(true)} className="btn-primary text-sm">
-              <Plus className="w-4 h-4" /> حملة جديدة
+              <Plus className="w-4 h-4" /> {list.newCampaign}
             </button>
           </div>
         }
@@ -3838,48 +3882,58 @@ export default function Campaigns() {
         // tooltips make the denominator explicit so the merchant
         // never has to guess what 54% means.
       >
-        <StatCard label="حملات مكتملة" value={stats.completed.toString()} icon={CheckCircle} />
+        <StatCard label={list.stats.completed} value={stats.completed.toString()} icon={CheckCircle} />
         <div
           title={
             stats.totalDelivered > 0
-              ? `قبلتها Meta: ${stats.totalSent.toLocaleString('ar-SA')} · وصلت: ${stats.totalDelivered.toLocaleString('ar-SA')}`
-              : `قبلتها Meta: ${stats.totalSent.toLocaleString('ar-SA')}`
+              ? list.stats.totalSentTooltipBoth
+                  .replace('{accepted}', fmtCount(stats.totalSent, lang))
+                  .replace('{delivered}', fmtCount(stats.totalDelivered, lang))
+              : list.stats.totalSentTooltipAccepted
+                  .replace('{accepted}', fmtCount(stats.totalSent, lang))
           }
         >
           <StatCard
-            label="إجمالي المُرسَل (قبلتها Meta)"
-            value={`${stats.totalSent.toLocaleString('ar-SA')}${stats.totalFailed > 0 ? ` / ${stats.totalFailed} فشلت` : ''}`}
+            label={list.stats.totalSent}
+            value={`${fmtCount(stats.totalSent, lang)}${
+              stats.totalFailed > 0
+                ? list.stats.totalSentFailedSuffix.replace('{n}', fmtCount(stats.totalFailed, lang))
+                : ''
+            }`}
             icon={Send}
           />
         </div>
         <div
           title={
             stats.openRateBasis === 'delivered'
-              ? `معدل القراءة من الواصل = ${stats.totalRead.toLocaleString('ar-SA')} / ${stats.totalDelivered.toLocaleString('ar-SA')}`
+              ? list.stats.openRateTooltipDelivered
+                  .replace('{read}', fmtCount(stats.totalRead, lang))
+                  .replace('{delivered}', fmtCount(stats.totalDelivered, lang))
               : stats.openRateBasis === 'accepted'
-                ? `معدل القراءة من المُقبَل (Meta) = ${stats.totalRead.toLocaleString('ar-SA')} / ${stats.totalSent.toLocaleString('ar-SA')} — لم تصلنا بعد إيصالات «وصلت للعميل»`
-                : 'لا توجد رسائل مُقبَلة بعد'
+                ? list.stats.openRateTooltipAccepted
+                    .replace('{read}', fmtCount(stats.totalRead, lang))
+                    .replace('{accepted}', fmtCount(stats.totalSent, lang))
+                : list.stats.openRateTooltipNone
           }
         >
           <StatCard
             label={
               stats.openRateBasis === 'delivered'
-                ? 'معدل القراءة (من الواصل)'
-                : 'معدل القراءة (من المُقبَل)'
+                ? list.stats.openRateDelivered
+                : list.stats.openRateAccepted
             }
             value={`${stats.openRate}%`}
             icon={BarChart2}
           />
         </div>
-        <StatCard label="معدل التحويل" value={`${stats.convRate}%`} icon={TrendingUp} />
+        <StatCard label={list.stats.conversionRate} value={`${stats.convRate}%`} icon={TrendingUp} />
       </div>
 
       {stats.failedCampaigns > 0 && (
         <div className="rounded-lg bg-red-50 border border-red-200 p-3 flex items-center gap-2">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
           <p className="text-sm text-red-700">
-            يوجد <strong>{stats.failedCampaigns}</strong> حملة فشلت في الإرسال.
-            اضغط على "عرض سبب الفشل" في العمود لمعرفة التفاصيل.
+            {list.failedBanner.replace('{count}', fmtCount(stats.failedCampaigns, lang))}
           </p>
         </div>
       )}
@@ -3918,22 +3972,22 @@ export default function Campaigns() {
                     }
                   </button>
                 </th>
-                {TABLE_HEADERS.slice(1).map(h => (
+                {tableHeaders.map(h => (
                   <th key={h} className="px-5 py-3 text-start font-medium">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading && (
-                <tr><td colSpan={TABLE_HEADERS.length} className="px-5 py-10 text-center text-slate-400">
-                  <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" /> جارٍ تحميل الحملات…
+                <tr><td colSpan={CAMPAIGN_TABLE_COL_COUNT} className="px-5 py-10 text-center text-slate-400">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" /> {list.loading}
                 </td></tr>
               )}
               {!loading && campaigns.length === 0 && (
-                <tr><td colSpan={TABLE_HEADERS.length} className="px-5 py-12 text-center text-slate-400">
+                <tr><td colSpan={CAMPAIGN_TABLE_COL_COUNT} className="px-5 py-12 text-center text-slate-400">
                   <Megaphone className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-                  <p className="text-sm">لا توجد حملات بعد.</p>
-                  <p className="text-xs mt-1">ابدأ بإنشاء أول حملة واتساب لعملائك.</p>
+                  <p className="text-sm">{list.emptyTitle}</p>
+                  <p className="text-xs mt-1">{list.emptyHint}</p>
                 </td></tr>
               )}
               {!loading && campaigns.map(c => (
