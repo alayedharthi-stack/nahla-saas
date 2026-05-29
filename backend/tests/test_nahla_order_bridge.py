@@ -1,4 +1,4 @@
-"""Tests for Phase 1 Nahla internal order bridge."""
+"""Tests for Nahla internal order bridge (Phase 1 + Phase 2)."""
 from __future__ import annotations
 
 import sys
@@ -13,13 +13,64 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.nahla_order_bridge import (  # noqa: E402
+    _build_sync_snapshot,
+    _meaningful_delta,
     _resolve_customer_name,
     _resolve_order_amount,
+    compute_kpi_totals,
     nahla_wa_external_id,
+    sync_nahla_wa_order,
     upsert_nahla_paid_order,
 )
 
 _DB_KW = {"db": MagicMock(), "tenant_id": 33, "conversation_id": 9063}
+
+
+def _enable_draft_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NAHLA_ORDER_DRAFT_BRIDGE_ENABLED", "1")
+    monkeypatch.setenv("NAHLA_ORDER_DRAFT_BRIDGE_TENANTS", "33")
+
+
+def _conv(**kwargs):
+    defaults = {
+        "id": 9063,
+        "tenant_id": 33,
+        "customer_id": 1,
+        "customer": SimpleNamespace(
+            id=1,
+            tenant_id=33,
+            phone="966551308005",
+            name="Customer",
+            extra_metadata={},
+        ),
+        "extra_metadata": {},
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+def _draft_prep(**extra):
+    base = {
+        "product_id": "prod-99",
+        "quantity": 1,
+        "customer_first_name": "Ahmad",
+        "city": "Riyadh",
+        "payment_receipt_received": False,
+        "awaiting_payment_receipt": False,
+        "order_status": "",
+    }
+    base.update(extra)
+    return base
+
+
+def _brain(**extra):
+    base = {
+        "stage": "ordering",
+        "current_product_focus": {"title": "Honey", "price": "320", "id": 9},
+        "checkout_url": "",
+    }
+    base.update(extra)
+    return base
 
 
 def test_nahla_wa_external_id_is_stable() -> None:
@@ -32,6 +83,7 @@ def test_resolve_amount_prefers_receipt_over_order_prep() -> None:
         brain_state={},
         receipt_metadata={"pdf_text_preview": "تم التحويل 299 SAR"},
         line_items=[],
+        is_paid_path=True,
         **_DB_KW,
     )
     assert amt == 299.0
@@ -45,6 +97,7 @@ def test_resolve_amount_falls_back_to_order_prep_when_no_receipt() -> None:
         brain_state={},
         receipt_metadata={},
         line_items=[],
+        is_paid_path=False,
         **_DB_KW,
     )
     assert amt == 250.0
@@ -58,6 +111,7 @@ def test_resolve_amount_unknown_sets_review_flag() -> None:
         brain_state={},
         receipt_metadata={},
         line_items=[{"product_name": "عسل", "quantity": 1}],
+        is_paid_path=False,
         **_DB_KW,
     )
     assert amt is None
@@ -80,11 +134,10 @@ def test_resolve_customer_name_rejects_phone_like_db_name() -> None:
 
 def test_upsert_skips_without_confirmed_receipt() -> None:
     db = MagicMock()
-    conv = SimpleNamespace(id=1, customer=None, extra_metadata={})
     result = upsert_nahla_paid_order(
         db,
         tenant_id=33,
-        conversation=conv,
+        conversation=_conv(id=1),
         brain_state={},
         order_prep={"payment_receipt_received": False},
     )
@@ -110,11 +163,6 @@ def test_upsert_creates_paid_nahla_order_with_nhl_number(monkeypatch: pytest.Mon
         lambda _db, _tid: "NHL-33-000001",
     )
 
-    conv = SimpleNamespace(
-        id=9063,
-        customer=SimpleNamespace(phone="966551308005", name="Customer"),
-        extra_metadata={},
-    )
     order_prep = {
         "payment_receipt_received": True,
         "payment_receipt_at": "2026-05-28T16:26:23+00:00",
@@ -127,7 +175,7 @@ def test_upsert_creates_paid_nahla_order_with_nhl_number(monkeypatch: pytest.Mon
     result = upsert_nahla_paid_order(
         db,
         tenant_id=33,
-        conversation=conv,
+        conversation=_conv(),
         brain_state={"current_product_focus": {"title": "Honey", "price": "320"}},
         order_prep=order_prep,
     )
@@ -140,8 +188,11 @@ def test_upsert_creates_paid_nahla_order_with_nhl_number(monkeypatch: pytest.Mon
     assert result.source == "whatsapp"
     assert result.total == "320.00 ر.س"
     assert result.extra_metadata["source_kind"] == "nahla_order"
+    assert result.extra_metadata["lifecycle"] == "paid"
+    assert result.extra_metadata["origin"] == "whatsapp_ai"
+    assert result.extra_metadata["created_by"] == "ai_assistant"
+    assert result.extra_metadata["counts_in_revenue"] is True
     assert result.extra_metadata["needs_amount_review"] is False
-    assert result.extra_metadata["amount_source"] == "order_prep_total_price"
     db.add.assert_called_once()
     db.flush.assert_called_once()
 
@@ -149,7 +200,11 @@ def test_upsert_creates_paid_nahla_order_with_nhl_number(monkeypatch: pytest.Mon
 def test_upsert_is_idempotent_on_same_external_id() -> None:
     existing = SimpleNamespace(
         id=55,
-        extra_metadata={"created_at": "2026-05-20T00:00:00+00:00"},
+        tenant_id=33,
+        extra_metadata={
+            "created_at": "2026-05-20T00:00:00+00:00",
+            "last_sync_snapshot": {},
+        },
         total=None,
         status="paid",
         source="whatsapp",
@@ -161,11 +216,6 @@ def test_upsert_is_idempotent_on_same_external_id() -> None:
     db = MagicMock()
     db.query.return_value.filter_by.return_value.first.return_value = existing
 
-    conv = SimpleNamespace(
-        id=9063,
-        customer=SimpleNamespace(phone="966551308005", name="عميل"),
-        extra_metadata={},
-    )
     order_prep = {
         "payment_receipt_received": True,
         "payment_receipt_at": "2026-05-28T16:26:23+00:00",
@@ -176,7 +226,7 @@ def test_upsert_is_idempotent_on_same_external_id() -> None:
     result = upsert_nahla_paid_order(
         db,
         tenant_id=33,
-        conversation=conv,
+        conversation=_conv(),
         brain_state={},
         order_prep=order_prep,
     )
@@ -187,24 +237,257 @@ def test_upsert_is_idempotent_on_same_external_id() -> None:
     db.flush.assert_not_called()
 
 
-def test_dashboard_revenue_only_counts_paid_status() -> None:
-    """Mirror store_sync KPI rule — revenue sums paid rows only."""
-    PAID = frozenset({"paid", "confirmed", "completed"})
+def test_draft_creates_pending_payment_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = None
+
+    class _Order:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            self.id = 201
+
+    import models  # noqa: WPS433
+
+    monkeypatch.setattr(models, "Order", _Order)
+    monkeypatch.setattr(
+        "services.nahla_order_bridge._allocate_nhl_number",
+        lambda _db, _tid: "NHL-33-000002",
+    )
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(),
+        trigger="brain_save",
+    )
+
+    assert result is not None
+    assert result.status == "pending_payment"
+    assert result.extra_metadata["lifecycle"] == "whatsapp_draft"
+    assert result.extra_metadata["counts_in_revenue"] is False
+    assert result.extra_metadata["origin"] == "whatsapp_ai"
+    assert result.total == "320.00 ر.س"
+
+
+def test_draft_skipped_when_flag_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NAHLA_ORDER_DRAFT_BRIDGE_ENABLED", raising=False)
+    db = MagicMock()
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(),
+    )
+    assert result is None
+    db.query.assert_not_called()
+
+
+def test_draft_skipped_for_non_allowlisted_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    db = MagicMock()
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=34,
+        conversation=_conv(id=100, tenant_id=34, customer_id=2, customer=SimpleNamespace(
+            id=2, tenant_id=34, phone="966500000000", name="X", extra_metadata={},
+        )),
+        brain_state=_brain(),
+        order_prep=_draft_prep(),
+    )
+    assert result is None
+    db.query.assert_not_called()
+
+
+def test_tenant_ownership_mismatch_blocks_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    db = MagicMock()
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(tenant_id=34),
+        brain_state=_brain(),
+        order_prep=_draft_prep(),
+    )
+    assert result is None
+    db.query.assert_not_called()
+
+
+def test_spam_guard_skips_when_no_material_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    snap = _build_sync_snapshot(_draft_prep(), _brain(), lifecycle="whatsapp_draft")
+    existing = SimpleNamespace(
+        id=77,
+        tenant_id=33,
+        status="pending_payment",
+        total="320.00 ر.س",
+        source="whatsapp",
+        is_abandoned=False,
+        line_items=[],
+        customer_name="Ahmad",
+        customer_info={},
+        extra_metadata={"last_sync_snapshot": snap, "lifecycle": "whatsapp_draft"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = existing
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(),
+        trigger="brain_save",
+    )
+
+    assert result is existing
+    db.add.assert_not_called()
+
+
+def test_spam_guard_allows_update_when_city_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    snap = _build_sync_snapshot(_draft_prep(city=""), _brain(), lifecycle="whatsapp_draft")
+    existing = SimpleNamespace(
+        id=77,
+        tenant_id=33,
+        status="pending_payment",
+        total="320.00 ر.س",
+        source="whatsapp",
+        is_abandoned=False,
+        line_items=[],
+        customer_name="Ahmad",
+        customer_info={},
+        extra_metadata={"last_sync_snapshot": snap, "lifecycle": "whatsapp_draft"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = existing
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(city="Jeddah"),
+        trigger="brain_save",
+    )
+
+    assert result is existing
+    db.add.assert_called_once()
+
+
+def test_draft_promotes_to_paid(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    snap = _build_sync_snapshot(_draft_prep(), _brain(), lifecycle="whatsapp_draft")
+    existing = SimpleNamespace(
+        id=88,
+        tenant_id=33,
+        status="pending_payment",
+        total="320.00 ر.س",
+        external_id="nahla-wa-33-9063",
+        external_order_number="NHL-33-000003",
+        source="whatsapp",
+        is_abandoned=False,
+        line_items=[],
+        customer_name="Ahmad",
+        customer_info={},
+        extra_metadata={"last_sync_snapshot": snap, "lifecycle": "whatsapp_draft"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = existing
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(
+            payment_receipt_received=True,
+            payment_receipt_at="2026-05-29T12:00:00+00:00",
+            payment_receipt_metadata={"pdf_text_preview": "تم التحويل 320 SAR"},
+        ),
+        trigger="state_patch",
+    )
+
+    assert result is existing
+    assert existing.status == "paid"
+    assert existing.extra_metadata["lifecycle"] == "paid"
+    assert existing.extra_metadata["counts_in_revenue"] is True
+
+
+def test_paid_order_not_downgraded_by_draft_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    snap = _build_sync_snapshot(
+        _draft_prep(payment_receipt_received=True),
+        _brain(),
+        lifecycle="paid",
+    )
+    existing = SimpleNamespace(
+        id=99,
+        tenant_id=33,
+        status="paid",
+        total="320.00 ر.س",
+        source="whatsapp",
+        is_abandoned=False,
+        line_items=[],
+        customer_name="Ahmad",
+        customer_info={},
+        extra_metadata={"last_sync_snapshot": snap, "lifecycle": "paid"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = existing
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(stage="ordering"),
+        order_prep=_draft_prep(),
+        trigger="brain_save",
+    )
+
+    assert result is existing
+    assert existing.status == "paid"
+    db.add.assert_not_called()
+
+
+def test_draft_order_counts_in_orders_but_not_revenue() -> None:
+    """Draft pending_payment must not inflate sales / ai_revenue KPIs."""
     rows = [
-        ("paid", "whatsapp", 100.0),
-        ("pending", "whatsapp", 200.0),
-        ("paid", "salla", 50.0),
-        ("under_review", "whatsapp", 75.0),
+        SimpleNamespace(status="pending_payment", source="whatsapp", total="500.00 ر.س"),
+        SimpleNamespace(status="paid", source="whatsapp", total="100.00 ر.س"),
+        SimpleNamespace(status="paid", source="salla", total="50.00 ر.س"),
     ]
+    totals = compute_kpi_totals(rows)
 
-    revenue = 0.0
-    ai_revenue = 0.0
-    for status_raw, src, amt in rows:
-        status = "paid" if status_raw in PAID else "pending"
-        if status == "paid":
-            revenue += amt
-            if src == "whatsapp":
-                ai_revenue += amt
+    assert totals["orders_count"] == 3.0
+    assert totals["revenue"] == 150.0
+    assert totals["ai_revenue"] == 100.0
 
-    assert revenue == 150.0
-    assert ai_revenue == 100.0
+
+def test_meaningful_delta_detects_awaiting_payment_flip() -> None:
+    prev = _build_sync_snapshot(_draft_prep(), _brain(), lifecycle="whatsapp_draft")
+    curr = _build_sync_snapshot(
+        _draft_prep(awaiting_payment_receipt=True, order_status="awaiting_receipt"),
+        _brain(),
+        lifecycle="whatsapp_draft",
+    )
+    ok, reason = _meaningful_delta(prev, curr)
+    assert ok is True
+    assert reason.startswith("changed:")
+
+
+def test_dashboard_revenue_only_counts_paid_status() -> None:
+    rows = [
+        SimpleNamespace(status="paid", source="whatsapp", total="100.00 ر.س"),
+        SimpleNamespace(status="pending_payment", source="whatsapp", total="200.00 ر.س"),
+        SimpleNamespace(status="paid", source="salla", total="50.00 ر.س"),
+        SimpleNamespace(status="under_review", source="whatsapp", total="75.00 ر.س"),
+    ]
+    totals = compute_kpi_totals(rows)
+    assert totals["orders_count"] == 4.0
+    assert totals["revenue"] == 150.0
+    assert totals["ai_revenue"] == 100.0

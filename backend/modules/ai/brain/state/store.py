@@ -277,6 +277,25 @@ class DefaultStateStore:
             except Exception as _exc:
                 logger.debug("[StateStore] flag_modified unavailable: %s", _exc)
 
+            # Phase 2 — draft/paid order bridge after brain state persist.
+            try:
+                from services.nahla_order_bridge import sync_nahla_wa_order  # noqa: PLC0415
+                _bs = state.to_dict()
+                sync_nahla_wa_order(
+                    db,
+                    tenant_id=int(tenant_id),
+                    conversation=conv,
+                    brain_state=_bs,
+                    order_prep=_bs.get("order_prep") or {},
+                    trigger="brain_save",
+                    customer=customer,
+                )
+            except Exception as _bridge_exc:  # noqa: BLE001
+                logger.warning(
+                    "[NAHLA_ORDER_BRIDGE] brain_save hook failed tenant=%s conv=%s: %s",
+                    tenant_id, getattr(conv, "id", None), _bridge_exc,
+                )
+
             db.commit()
 
             # Verify the write actually landed. We refresh the row from DB

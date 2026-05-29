@@ -1,21 +1,54 @@
 """
 services/nahla_order_bridge.py
 ──────────────────────────────
-Phase 1 — confirmed WhatsApp bank-transfer receipt → internal paid Order.
+Phase 1+2 — WhatsApp funnel → internal Nahla orders (draft → paid).
 
-Additive bridge only. Does NOT touch the conversation brain, payment
-classifier, or store adapters. Called from ``order_flow.apply_state_patch``
-when ``payment_receipt_received`` flips to True.
+Additive bridge only. Does NOT touch the brain, payment classifier,
+or store adapters.
+
+Phase 1: confirmed receipt → ``status=paid``
+Phase 2: checkout funnel   → ``status=pending_payment`` (draft), then promote
 """
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.order_bridge")
 
 _NAHL_WA_EXT_PREFIX = "nahla-wa-"
+
+_PAID_STATUSES = frozenset({
+    "paid", "completed", "complete", "confirmed", "delivered",
+    "delivering", "shipped", "out_for_delivery", "fulfilled",
+})
+
+_SYNC_FIELDS = (
+    "product_id",
+    "quantity",
+    "stage",
+    "order_status",
+    "awaiting_payment_receipt",
+    "payment_receipt_received",
+    "customer_first_name",
+    "customer_last_name",
+    "city",
+    "short_address_code",
+    "google_maps_url",
+    "address_line",
+    "lifecycle",
+)
+
+_PAID_ENRICHMENT_FIELDS = frozenset({
+    "customer_first_name",
+    "customer_last_name",
+    "city",
+    "short_address_code",
+    "google_maps_url",
+    "address_line",
+})
 
 _RECEIPT_TEXT_KEYS = (
     "vision_text",
@@ -30,6 +63,225 @@ _RECEIPT_TEXT_KEYS = (
 
 def nahla_wa_external_id(tenant_id: int, conversation_id: int) -> str:
     return f"{_NAHL_WA_EXT_PREFIX}{tenant_id}-{conversation_id}"
+
+
+def _draft_bridge_enabled(tenant_id: int) -> bool:
+    raw = (os.environ.get("NAHLA_ORDER_DRAFT_BRIDGE_ENABLED") or "").strip().lower()
+    if raw not in ("1", "true", "yes", "on"):
+        return False
+    allowlist = (os.environ.get("NAHLA_ORDER_DRAFT_BRIDGE_TENANTS") or "").strip()
+    if allowlist:
+        allowed = {t.strip() for t in allowlist.split(",") if t.strip()}
+        return str(tenant_id) in allowed
+    return True
+
+
+def _assert_tenant_ownership(
+    *,
+    tenant_id: int,
+    conversation: Any,
+    customer: Any = None,
+    existing_order: Any = None,
+) -> bool:
+    tid = int(tenant_id)
+    conv_tid = getattr(conversation, "tenant_id", None)
+    if conv_tid is None or int(conv_tid) != tid:
+        logger.error(
+            "[NAHLA_ORDER_BRIDGE] action=skip skip_reason=tenant_ownership_mismatch "
+            "param_tenant=%s conv_tenant=%s conv=%s",
+            tid, conv_tid, getattr(conversation, "id", None),
+        )
+        return False
+    cust = customer if customer is not None else getattr(conversation, "customer", None)
+    if cust is not None:
+        cust_tid = getattr(cust, "tenant_id", None)
+        if cust_tid is None or int(cust_tid) != tid:
+            logger.error(
+                "[NAHLA_ORDER_BRIDGE] action=skip skip_reason=tenant_ownership_mismatch "
+                "param_tenant=%s customer_tenant=%s customer=%s",
+                tid, cust_tid, getattr(cust, "id", None),
+            )
+            return False
+        conv_cid = getattr(conversation, "customer_id", None)
+        cust_id = getattr(cust, "id", None)
+        if conv_cid is not None and cust_id is not None and int(conv_cid) != int(cust_id):
+            logger.error(
+                "[NAHLA_ORDER_BRIDGE] action=skip skip_reason=customer_conversation_mismatch "
+                "conv=%s conv_customer_id=%s customer_id=%s",
+                getattr(conversation, "id", None), conv_cid, cust_id,
+            )
+            return False
+    if existing_order is not None:
+        order_tid = getattr(existing_order, "tenant_id", None)
+        if order_tid is None or int(order_tid) != tid:
+            logger.error(
+                "[NAHLA_ORDER_BRIDGE] action=skip skip_reason=tenant_ownership_mismatch "
+                "param_tenant=%s order_tenant=%s order_id=%s",
+                tid, order_tid, getattr(existing_order, "id", None),
+            )
+            return False
+    return True
+
+
+def _is_paid(order: Any) -> bool:
+    return str(getattr(order, "status", "") or "").lower() in _PAID_STATUSES
+
+
+def _draft_eligible(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+) -> Tuple[bool, str]:
+    if bool(order_prep.get("payment_receipt_received")):
+        return False, "paid_path"
+
+    product_id = str(order_prep.get("product_id") or "").strip()
+    stage = str(brain_state.get("stage") or "")
+    awaiting = bool(order_prep.get("awaiting_payment_receipt"))
+    order_status = str(order_prep.get("order_status") or "")
+
+    if awaiting or order_status in ("awaiting_payment", "awaiting_receipt"):
+        if product_id:
+            return True, "awaiting_payment_receipt+product_id"
+        return False, "awaiting_payment_no_product"
+
+    if stage in ("ordering", "deciding", "checkout") and product_id:
+        focus = brain_state.get("current_product_focus") or {}
+        if isinstance(focus, dict) and focus.get("title") and focus.get("price") is not None:
+            return True, "product_id+stage_ordering"
+
+    return False, "not_in_funnel"
+
+
+def _scope_ok(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+) -> Tuple[bool, str]:
+    if bool(order_prep.get("payment_receipt_received")):
+        return True, "paid_promotion"
+    if str(brain_state.get("checkout_url") or "").strip():
+        return False, "salla_checkout_active"
+    return True, "nahla_native_funnel"
+
+
+def _build_sync_snapshot(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    *,
+    lifecycle: str,
+) -> Dict[str, Any]:
+    return {
+        "product_id":               str(order_prep.get("product_id") or ""),
+        "quantity":                 order_prep.get("quantity") or 1,
+        "stage":                    str(brain_state.get("stage") or ""),
+        "order_status":             str(order_prep.get("order_status") or ""),
+        "awaiting_payment_receipt": bool(order_prep.get("awaiting_payment_receipt")),
+        "payment_receipt_received": bool(order_prep.get("payment_receipt_received")),
+        "customer_first_name":      str(order_prep.get("customer_first_name") or ""),
+        "customer_last_name":       str(order_prep.get("customer_last_name") or ""),
+        "city":                     str(order_prep.get("city") or ""),
+        "short_address_code":       str(order_prep.get("short_address_code") or ""),
+        "google_maps_url":          str(order_prep.get("google_maps_url") or ""),
+        "address_line":             str(order_prep.get("address_line") or ""),
+        "lifecycle":                lifecycle,
+    }
+
+
+def _meaningful_delta(
+    prev: Optional[Dict[str, Any]],
+    curr: Dict[str, Any],
+) -> Tuple[bool, str]:
+    if not prev:
+        return True, "first_sync"
+    for key in _SYNC_FIELDS:
+        if prev.get(key) != curr.get(key):
+            return True, f"changed:{key}"
+    return False, "no_material_change"
+
+
+def _should_update_paid_order(
+    prev_snap: Optional[Dict[str, Any]],
+    curr_snap: Dict[str, Any],
+    order_prep: Dict[str, Any],
+) -> Tuple[bool, str]:
+    if curr_snap.get("lifecycle") == "whatsapp_draft":
+        return False, "paid_immutable:lifecycle_downgrade"
+
+    if bool(order_prep.get("payment_receipt_received")):
+        return True, "lifecycle:promote_paid"
+
+    if not prev_snap:
+        return False, "paid_immutable:no_snapshot"
+
+    changed = {k for k in _SYNC_FIELDS if prev_snap.get(k) != curr_snap.get(k)}
+    if not changed:
+        return False, "paid_immutable:no_material_change"
+
+    blocked = changed - _PAID_ENRICHMENT_FIELDS - {"payment_receipt_received", "lifecycle"}
+    if blocked:
+        return False, f"paid_immutable:fields={','.join(sorted(blocked))}"
+
+    if changed & _PAID_ENRICHMENT_FIELDS:
+        return True, "paid_enrichment:address_or_customer"
+
+    return False, "paid_immutable:no_allowed_change"
+
+
+def _resolve_sync_action(
+    *,
+    existing: Any,
+    is_paid_path: bool,
+    prev_snap: Optional[Dict[str, Any]],
+    curr_snap: Dict[str, Any],
+    order_prep: Dict[str, Any],
+) -> Tuple[bool, str, str]:
+    if is_paid_path:
+        if existing is None:
+            return True, "lifecycle:promote_paid", "create"
+        if _is_paid(existing):
+            ok, reason = _should_update_paid_order(prev_snap, curr_snap, order_prep)
+            return ok, reason, "update" if ok else "skip"
+        return True, "lifecycle:promote_paid", "promote_paid"
+
+    if existing is None:
+        return True, "first_sync", "create"
+
+    if _is_paid(existing):
+        ok, reason = _should_update_paid_order(prev_snap, curr_snap, order_prep)
+        return ok, reason, "update" if ok else "skip"
+
+    ok, reason = _meaningful_delta(prev_snap, curr_snap)
+    return ok, reason, "update" if ok else "skip"
+
+
+def _log_bridge(
+    *,
+    external_id: str,
+    tenant_id: int,
+    conversation_id: Any,
+    action: str,
+    reason: str,
+    status: str = "n/a",
+    lifecycle: str = "n/a",
+    eligibility_reason: str = "n/a",
+    skip_reason: str = "",
+    trigger: str = "unknown",
+    **extra: Any,
+) -> None:
+    parts = [
+        f"[NAHLA_ORDER_BRIDGE] external_id={external_id}",
+        f"tenant={tenant_id} conv={conversation_id}",
+        f"action={action}",
+        f"reason={reason}",
+        f"status={status}",
+        f"lifecycle={lifecycle}",
+        f"eligibility_reason={eligibility_reason}",
+        f"trigger={trigger}",
+    ]
+    if skip_reason:
+        parts.append(f"skip_reason={skip_reason}")
+    for key, val in extra.items():
+        parts.append(f"{key}={val}")
+    logger.info(" ".join(parts))
 
 
 def _looks_like_phone(text: str) -> bool:
@@ -147,18 +399,8 @@ def _resolve_order_amount(
     brain_state: Dict[str, Any],
     receipt_metadata: Dict[str, Any],
     line_items: List[Dict[str, Any]],
+    is_paid_path: bool,
 ) -> Tuple[Optional[float], bool, str]:
-    """
-    Return ``(amount_sar, needs_amount_review, amount_source)``.
-
-    Priority (confirmed receipt wins over stale funnel state):
-      1. receipt_extraction
-      2. confirmed_payment_amount / explicit payment fields
-      3. order_prep.total_price / order_prep.price
-      4. current_product_focus.price
-      5. line-item unit price × qty
-      6. unknown
-    """
     enriched_receipt = _enrich_receipt_metadata(
         db,
         tenant_id=tenant_id,
@@ -166,16 +408,17 @@ def _resolve_order_amount(
         receipt_metadata=receipt_metadata,
     )
 
-    receipt_amt = _extract_receipt_amount(enriched_receipt)
-    if receipt_amt is not None:
-        return receipt_amt, False, "receipt_extraction"
+    if is_paid_path:
+        receipt_amt = _extract_receipt_amount(enriched_receipt)
+        if receipt_amt is not None:
+            return receipt_amt, False, "receipt_extraction"
 
-    explicit_amt = _explicit_payment_amount(
-        receipt_metadata=enriched_receipt,
-        order_prep=order_prep,
-    )
-    if explicit_amt is not None:
-        return explicit_amt, False, "confirmed_payment_amount"
+        explicit_amt = _explicit_payment_amount(
+            receipt_metadata=enriched_receipt,
+            order_prep=order_prep,
+        )
+        if explicit_amt is not None:
+            return explicit_amt, False, "confirmed_payment_amount"
 
     for key in ("total_price", "price"):
         amt = _parse_amount(order_prep.get(key))
@@ -198,7 +441,7 @@ def _resolve_order_amount(
         if unit is not None:
             return round(unit * qty_n, 2), False, "line_items"
 
-    return None, True, "unknown"
+    return None, not is_paid_path, "unknown"
 
 
 def _build_line_items(
@@ -256,7 +499,6 @@ def _resolve_customer_name(
     conversation: Any,
     order_prep: Dict[str, Any],
 ) -> Optional[str]:
-    """Return a human display name — never a bare phone number."""
     candidates: List[str] = []
 
     first = str(order_prep.get("customer_first_name") or "").strip()
@@ -307,36 +549,191 @@ def _customer_payload(
     return display_name, customer_info
 
 
-def upsert_nahla_paid_order(
+def _base_metadata(
+    *,
+    conversation_id: int,
+    lifecycle: str,
+    is_paid_path: bool,
+    receipt_metadata: Dict[str, Any],
+    amount: Optional[float],
+    amount_source: str,
+    needs_review: bool,
+    fallback_used: bool,
+    customer_name: Optional[str],
+    confirmed_at: str,
+    now_iso: str,
+) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {
+        "source_kind":          "nahla_order",
+        "lifecycle":            lifecycle,
+        "origin":               "whatsapp_ai",
+        "created_by":           "ai_assistant",
+        "source":               "ai_sales_agent",
+        "created_via":          "nahla_order_bridge",
+        "conversation_id":      conversation_id,
+        "needs_amount_review":  needs_review,
+        "amount_source":        amount_source,
+        "amount_value":         amount,
+        "amount_fallback_used": fallback_used,
+        "counts_in_revenue":    is_paid_path,
+        "last_synced_at":       now_iso,
+    }
+    if is_paid_path:
+        meta["payment_confirmed_at"] = confirmed_at
+        meta["payment_receipt_metadata"] = receipt_metadata
+        meta["created_at"] = confirmed_at
+    else:
+        meta["draft_created_at"] = now_iso
+        meta["counts_in_revenue"] = False
+    if customer_name:
+        meta["customer_name"] = customer_name
+    return meta
+
+
+def sync_nahla_wa_order(
     db: Any,
     *,
     tenant_id: int,
     conversation: Any,
     brain_state: Dict[str, Any],
     order_prep: Dict[str, Any],
+    trigger: str = "unknown",
+    customer: Any = None,
 ) -> Optional[Any]:
     """
-    Upsert a paid Nahla-native order for a confirmed transfer receipt.
+    Upsert a Nahla-native WhatsApp order — draft (pending_payment) or paid.
 
     Idempotent on ``external_id = nahla-wa-{tenant_id}-{conversation_id}``.
-    Never raises — failures are logged and swallowed so receipt ACK flow
-    is never blocked.
+    Never raises.
     """
-    if not bool(order_prep.get("payment_receipt_received")):
-        return None
-
     conversation_id = getattr(conversation, "id", None)
     if not conversation_id:
-        logger.info(
-            "[NAHLA_ORDER_BRIDGE] skip — missing conversation_id tenant=%s",
-            tenant_id,
+        _log_bridge(
+            external_id="n/a",
+            tenant_id=tenant_id,
+            conversation_id="n/a",
+            action="skip",
+            reason="missing_conversation_id",
+            skip_reason="missing_conversation_id",
+            trigger=trigger,
         )
         return None
+
+    cust = customer if customer is not None else getattr(conversation, "customer", None)
+    if not _assert_tenant_ownership(
+        tenant_id=tenant_id,
+        conversation=conversation,
+        customer=cust,
+    ):
+        _log_bridge(
+            external_id=nahla_wa_external_id(tenant_id, int(conversation_id)),
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            action="skip",
+            reason="tenant_ownership_mismatch",
+            skip_reason="tenant_ownership_mismatch",
+            trigger=trigger,
+        )
+        return None
+
+    external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
+    is_paid_path = bool(order_prep.get("payment_receipt_received"))
+    eligibility_reason = "n/a"
+
+    if is_paid_path:
+        eligibility_reason = "paid_promotion"
+    else:
+        if not _draft_bridge_enabled(tenant_id):
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason="draft_bridge_disabled",
+                skip_reason="draft_bridge_disabled",
+                trigger=trigger,
+            )
+            return None
+        eligible, eligibility_reason = _draft_eligible(order_prep, brain_state)
+        if not eligible:
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason="not_eligible",
+                eligibility_reason=eligibility_reason,
+                skip_reason="not_eligible",
+                trigger=trigger,
+            )
+            return None
+        scope_ok, scope_reason = _scope_ok(order_prep, brain_state)
+        if not scope_ok:
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason=scope_reason,
+                eligibility_reason=eligibility_reason,
+                skip_reason=scope_reason,
+                trigger=trigger,
+            )
+            return None
+
+    lifecycle = "paid" if is_paid_path else "whatsapp_draft"
+    curr_snap = _build_sync_snapshot(order_prep, brain_state, lifecycle=lifecycle)
 
     try:
         from models import Order  # noqa: PLC0415
 
-        external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
+        existing = (
+            db.query(Order)
+            .filter_by(tenant_id=tenant_id, external_id=external_id)
+            .first()
+        )
+
+        if existing is not None and not _assert_tenant_ownership(
+            tenant_id=tenant_id,
+            conversation=conversation,
+            customer=cust,
+            existing_order=existing,
+        ):
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason="tenant_ownership_mismatch",
+                skip_reason="order_tenant_mismatch",
+                trigger=trigger,
+            )
+            return None
+
+        prev_snap = (existing.extra_metadata or {}).get("last_sync_snapshot") if existing else None
+        sync_ok, sync_reason, bridge_action = _resolve_sync_action(
+            existing=existing,
+            is_paid_path=is_paid_path,
+            prev_snap=prev_snap,
+            curr_snap=curr_snap,
+            order_prep=order_prep,
+        )
+
+        if not sync_ok:
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason=sync_reason,
+                status=str(getattr(existing, "status", "n/a") if existing else "n/a"),
+                lifecycle=str((existing.extra_metadata or {}).get("lifecycle", "n/a") if existing else "n/a"),
+                eligibility_reason=eligibility_reason,
+                skip_reason=sync_reason,
+                trigger=trigger,
+            )
+            return existing
+
         receipt_metadata = dict(order_prep.get("payment_receipt_metadata") or {})
         line_items = _build_line_items(order_prep=order_prep, brain_state=brain_state)
         amount, needs_review, amount_source = _resolve_order_amount(
@@ -347,6 +744,7 @@ def upsert_nahla_paid_order(
             brain_state=brain_state,
             receipt_metadata=receipt_metadata,
             line_items=line_items,
+            is_paid_path=is_paid_path,
         )
         total_str = _format_total_sar(amount)
         customer_name, customer_info = _customer_payload(conversation, order_prep)
@@ -354,55 +752,52 @@ def upsert_nahla_paid_order(
             "receipt_extraction",
             "confirmed_payment_amount",
         )
-        logger.info(
-            "[NAHLA_ORDER_BRIDGE] amount_source=%s amount_value=%s fallback_used=%s "
-            "tenant=%s conv=%s",
-            amount_source,
-            amount if amount is not None else "unknown",
-            fallback_used,
-            tenant_id,
-            conversation_id,
-        )
-
         confirmed_at = (
             str(order_prep.get("payment_receipt_at") or "").strip()
             or datetime.now(timezone.utc).isoformat()
         )
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        existing = (
-            db.query(Order)
-            .filter_by(tenant_id=tenant_id, external_id=external_id)
-            .first()
+        target_status = "paid" if is_paid_path else "pending_payment"
+        base_meta = _base_metadata(
+            conversation_id=int(conversation_id),
+            lifecycle=lifecycle,
+            is_paid_path=is_paid_path,
+            receipt_metadata=receipt_metadata,
+            amount=amount,
+            amount_source=amount_source,
+            needs_review=needs_review,
+            fallback_used=fallback_used,
+            customer_name=customer_name,
+            confirmed_at=confirmed_at,
+            now_iso=now_iso,
         )
-
-        base_meta: Dict[str, Any] = {
-            "source_kind":              "nahla_order",
-            "source":                   "ai_sales_agent",
-            "created_via":              "nahla_order_bridge",
-            "conversation_id":          conversation_id,
-            "payment_confirmed_at":     confirmed_at,
-            "payment_receipt_metadata": receipt_metadata,
-            "needs_amount_review":      needs_review,
-            "amount_source":            amount_source,
-            "amount_value":             amount,
-            "amount_fallback_used":     fallback_used,
-            "created_at":               confirmed_at,
-        }
-        if customer_name:
-            base_meta["customer_name"] = customer_name
+        base_meta["last_sync_snapshot"] = curr_snap
 
         if existing is not None:
             meta = dict(existing.extra_metadata or {})
+            if _is_paid(existing) and not is_paid_path:
+                _log_bridge(
+                    external_id=external_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    action="skip",
+                    reason="paid_immutable",
+                    status=existing.status,
+                    lifecycle=meta.get("lifecycle", "paid"),
+                    skip_reason="paid_immutable",
+                    trigger=trigger,
+                )
+                return existing
+
             meta.update(base_meta)
-            if total_str:
-                existing.total = total_str
-                meta["needs_amount_review"] = False
-            elif meta.get("needs_amount_review") is None:
-                meta["needs_amount_review"] = needs_review
-            existing.status = "paid"
+            existing.status = target_status
             existing.source = "whatsapp"
             existing.is_abandoned = False
+            if total_str and (is_paid_path or not _is_paid(existing)):
+                existing.total = total_str
+            if is_paid_path and total_str:
+                meta["needs_amount_review"] = False
             existing.line_items = line_items or existing.line_items
             if customer_name:
                 existing.customer_name = customer_name
@@ -410,11 +805,18 @@ def upsert_nahla_paid_order(
                 existing.customer_info = {**(existing.customer_info or {}), **customer_info}
             existing.extra_metadata = meta
             db.add(existing)
-            logger.info(
-                "[NAHLA_ORDER_BRIDGE] updated tenant=%s conv=%s order_id=%s "
-                "external_id=%s amount=%s needs_review=%s",
-                tenant_id, conversation_id, existing.id, external_id,
-                total_str or "unknown", meta.get("needs_amount_review"),
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action=bridge_action,
+                reason=sync_reason,
+                status=target_status,
+                lifecycle=lifecycle,
+                eligibility_reason=eligibility_reason,
+                trigger=trigger,
+                amount_source=amount_source,
+                amount_value=amount if amount is not None else "unknown",
             )
             return existing
 
@@ -422,7 +824,7 @@ def upsert_nahla_paid_order(
             tenant_id             = tenant_id,
             external_id           = external_id,
             external_order_number = _allocate_nhl_number(db, tenant_id),
-            status                = "paid",
+            status                = target_status,
             total                 = total_str,
             customer_name         = customer_name,
             customer_info         = customer_info,
@@ -434,16 +836,86 @@ def upsert_nahla_paid_order(
         )
         db.add(order)
         db.flush()
-        logger.info(
-            "[NAHLA_ORDER_BRIDGE] created tenant=%s conv=%s order_id=%s "
-            "external_id=%s number=%s amount=%s needs_review=%s",
-            tenant_id, conversation_id, order.id, external_id,
-            order.external_order_number, total_str or "unknown", needs_review,
+        _log_bridge(
+            external_id=external_id,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            action=bridge_action,
+            reason=sync_reason,
+            status=target_status,
+            lifecycle=lifecycle,
+            eligibility_reason=eligibility_reason,
+            trigger=trigger,
+            amount_source=amount_source,
+            amount_value=amount if amount is not None else "unknown",
+            order_id=order.id,
+            number=order.external_order_number,
         )
         return order
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[NAHLA_ORDER_BRIDGE] upsert failed tenant=%s conv=%s: %s",
-            tenant_id, conversation_id, exc,
+            "[NAHLA_ORDER_BRIDGE] external_id=%s action=skip skip_reason=upsert_failed "
+            "tenant=%s conv=%s trigger=%s err=%s",
+            external_id, tenant_id, conversation_id, trigger, exc,
         )
         return None
+
+
+def upsert_nahla_paid_order(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    brain_state: Dict[str, Any],
+    order_prep: Dict[str, Any],
+) -> Optional[Any]:
+    """Phase 1 entry — confirmed receipt → paid order."""
+    if not bool(order_prep.get("payment_receipt_received")):
+        return None
+    return sync_nahla_wa_order(
+        db,
+        tenant_id=tenant_id,
+        conversation=conversation,
+        brain_state=brain_state,
+        order_prep=order_prep,
+        trigger="paid_upsert",
+    )
+
+
+def compute_kpi_totals(orders: List[Any]) -> Dict[str, float]:
+    """
+    Mirror store_sync revenue rules for tests.
+
+    Draft ``pending_payment`` rows count in ``orders_count`` but never in
+    ``revenue`` or ``ai_revenue``.
+    """
+    PAID = frozenset({
+        "paid", "completed", "complete", "confirmed", "delivered",
+        "delivering", "shipped", "out_for_delivery", "fulfilled",
+    })
+    WA_SOURCES = frozenset({"whatsapp", "ai_sales_agent", "ai_sales", "ai"})
+
+    orders_count = 0
+    revenue = 0.0
+    ai_revenue = 0.0
+
+    for order in orders:
+        orders_count += 1
+        raw_status = str(getattr(order, "status", "") or "").lower()
+        status = "paid" if raw_status in PAID else "pending"
+        total = getattr(order, "total", None) or ""
+        try:
+            amt = float(str(total).replace(",", "").split()[0])
+        except Exception:
+            amt = 0.0
+        src = (getattr(order, "source", None) or "").strip().lower()
+        if status == "paid":
+            revenue += amt
+            if src in WA_SOURCES:
+                ai_revenue += amt
+
+    return {
+        "orders_count": float(orders_count),
+        "revenue":      revenue,
+        "ai_revenue":   ai_revenue,
+    }
