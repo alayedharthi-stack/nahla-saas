@@ -1139,6 +1139,37 @@ def maybe_handle_map_image_inbound(
     }
 
 
+def _name_field_looks_like_phone(text: str) -> bool:
+    digits = str(text or "").lstrip("+").replace(" ", "").replace("-", "")
+    return bool(digits) and digits.isdigit() and len(digits) >= 7
+
+
+def _protect_customer_name_patch(
+    existing_op: Dict[str, Any],
+    state_patch: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Drop empty/phone-like name patches that would erase a captured name."""
+    if not state_patch:
+        return state_patch
+    filtered = dict(state_patch)
+    for field in ("customer_first_name", "customer_last_name"):
+        if field not in filtered:
+            continue
+        incoming = str(filtered.get(field) or "").strip()
+        existing = str(existing_op.get(field) or "").strip()
+        if existing and not _name_field_looks_like_phone(existing):
+            if not incoming or _name_field_looks_like_phone(incoming):
+                logger.info(
+                    "[ORDER_NAME_PATCH] blocked overwrite field=%s existing=%r "
+                    "incoming=%r source=apply_state_patch",
+                    field,
+                    existing,
+                    incoming,
+                )
+                del filtered[field]
+    return filtered
+
+
 def apply_state_patch(
     db: Any,
     *,
@@ -1170,6 +1201,9 @@ def apply_state_patch(
         meta = dict(conv.extra_metadata or {})
         bs = dict(meta.get("brain_state") or {})
         op = dict(bs.get("order_prep") or bs.get("order_preparation") or {})
+        state_patch = _protect_customer_name_patch(op, state_patch)
+        if not state_patch:
+            return False
         before = {k: op.get(k) for k in state_patch.keys()}
         op.update(state_patch)
         bs["order_prep"] = op

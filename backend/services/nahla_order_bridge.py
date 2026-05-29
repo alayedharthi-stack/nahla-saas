@@ -516,6 +516,30 @@ def _lookup_catalog_product_title(
     return None
 
 
+def _collect_cart_item_titles(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    existing_meta: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Titles from cart/line_items on prep, brain state, or prior order metadata."""
+    titles: List[str] = []
+    for container in (order_prep, brain_state, existing_meta or {}):
+        if not isinstance(container, dict):
+            continue
+        for key in ("line_items", "cart_items", "items"):
+            raw_items = container.get(key)
+            if not isinstance(raw_items, list):
+                continue
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                for field in ("title", "product_name", "name"):
+                    name = str(item.get(field) or "").strip()
+                    if name and name != "منتج":
+                        titles.append(name)
+    return titles
+
+
 def _resolve_product_title(
     *,
     db: Any,
@@ -528,17 +552,28 @@ def _resolve_product_title(
     if not isinstance(focus, dict):
         focus = {}
     meta = existing_meta or {}
+
+    product_name = str(order_prep.get("product_name") or "").strip()
+    if product_name and product_name != "منتج":
+        return product_name
+
+    for raw in (focus.get("title"), focus.get("name")):
+        name = str(raw or "").strip()
+        if name and name != "منتج":
+            return name
+
+    for title in _collect_cart_item_titles(order_prep, brain_state, meta):
+        return title
+
     for raw in (
-        focus.get("title"),
-        focus.get("name"),
-        order_prep.get("selected_product"),
-        order_prep.get("product_name"),
         order_prep.get("product_title"),
+        order_prep.get("selected_product"),
         meta.get("product_title"),
     ):
         name = str(raw or "").strip()
         if name and name != "منتج":
             return name
+
     product_ref = focus.get("id") or order_prep.get("product_id")
     looked_up = _lookup_catalog_product_title(db, tenant_id, product_ref)
     if looked_up:
@@ -616,6 +651,15 @@ def _customer_payload(
         phone = order_prep.get("customer_phone")
 
     display_name = _resolve_customer_name(conversation, order_prep)
+    if not display_name:
+        logger.info(
+            "[ORDER_NAME_FALLBACK] prep_first=%r prep_last=%r phone=%r "
+            "conv_id=%s",
+            order_prep.get("customer_first_name"),
+            order_prep.get("customer_last_name"),
+            phone,
+            getattr(conversation, "id", None),
+        )
     customer_info = {
         "name":           display_name,
         "phone":          phone,

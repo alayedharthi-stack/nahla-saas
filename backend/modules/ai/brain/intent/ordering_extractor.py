@@ -152,6 +152,12 @@ _LABEL_CITY_RE = re.compile(
     re.IGNORECASE | re.UNICODE | re.MULTILINE,
 )
 
+# Strip list prefixes like "1- ", "2.", "١- " before name heuristics.
+_NUMBERED_LINE_PREFIX_RE = re.compile(
+    r"^\s*(?:[1-9][0-9]?|[١٢٣٤٥٦٧٨٩][٠-٩]{0,2})\s*[-–—.)]\s*",
+    re.UNICODE,
+)
+
 
 def extract_ordering_slots(message: str) -> Dict[str, Any]:
     """
@@ -216,8 +222,28 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
             slots["customer_name"] = " ".join(p for p in (name_first, name_last) if p).strip()
 
     if slots:
+        if slots.get("customer_first_name") or slots.get("customer_name"):
+            logger.info(
+                "[ORDER_NAME_CAPTURE] source=ordering_extractor "
+                "first=%r last=%r full=%r short_code=%r",
+                slots.get("customer_first_name"),
+                slots.get("customer_last_name"),
+                slots.get("customer_name"),
+                slots.get("short_address_code"),
+            )
         logger.debug("[OrderingExtractor] slots=%s", slots)
     return slots
+
+
+def _strip_numbered_list_prefix(line: str) -> str:
+    """Remove leading ``1-`` / ``2.`` / ``١-`` list markers from a line."""
+    text = (line or "").strip()
+    for _ in range(3):
+        m = _NUMBERED_LINE_PREFIX_RE.match(text)
+        if not m:
+            break
+        text = text[m.end():].strip()
+    return text
 
 
 def _extract_labeled_name(text: str) -> str:
@@ -277,7 +303,10 @@ def _detect_name(text: str, already_extracted: Dict[str, Any]) -> tuple[str, str
         return "", ""
 
     # Prefer the first line that doesn't look like an address/URL/code.
-    for line in lines:
+    for raw_line in lines:
+        line = _strip_numbered_list_prefix(raw_line)
+        if not line:
+            continue
         if "http" in line.lower() or "://" in line:
             continue
         if already_extracted.get("short_address_code") and \
@@ -286,6 +315,9 @@ def _detect_name(text: str, already_extracted: Dict[str, Any]) -> tuple[str, str
         normalized = _normalize_arabic(line)
         if normalized in _SAUDI_CITIES:
             continue  # this line is a city, not a name
+        # Reject lines that still contain address codes (4 letters + 4 digits).
+        if re.search(r"[A-Za-z]{4}\d{4}", line.upper()):
+            continue
         if _DIGIT_RE.search(line):
             continue
         candidate = _clean_name_candidate(line)

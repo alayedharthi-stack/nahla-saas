@@ -1432,6 +1432,34 @@ def _looks_like_phone_name(text: str) -> bool:
     return digits.isdigit() and len(digits) >= 7
 
 
+def _prep_has_real_name(prep: OrderPreparationState) -> bool:
+    first = str(prep.customer_first_name or "").strip()
+    last = str(prep.customer_last_name or "").strip()
+    if first and not _looks_like_phone_name(first):
+        return True
+    return bool(last and not _looks_like_phone_name(last))
+
+
+def _should_patch_customer_first(prep: OrderPreparationState, incoming: str) -> bool:
+    incoming = str(incoming or "").strip()
+    if not incoming or _looks_like_phone_name(incoming):
+        return False
+    existing = str(prep.customer_first_name or "").strip()
+    if existing and not _looks_like_phone_name(existing):
+        return False
+    return True
+
+
+def _should_patch_customer_last(prep: OrderPreparationState, incoming: str) -> bool:
+    incoming = str(incoming or "").strip()
+    if not incoming or _looks_like_phone_name(incoming):
+        return False
+    existing = str(prep.customer_last_name or "").strip()
+    if existing and not _looks_like_phone_name(existing):
+        return False
+    return True
+
+
 def _filter_missing_phone_if_known(
     missing: List[str],
     customer_phone: Optional[str],
@@ -1459,7 +1487,29 @@ def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None
 
 
 def _merge_message_details(prep: OrderPreparationState, slots: dict, message: str) -> None:
-    slots = slots or {}
+    from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots
+
+    slots = dict(slots or {})
+
+    if not (
+        slots.get("customer_first_name")
+        or slots.get("customer_name")
+        or slots.get("full_name")
+        or slots.get("first_name")
+    ):
+        extracted = extract_ordering_slots(message) or {}
+        for key in (
+            "customer_name",
+            "customer_first_name",
+            "customer_last_name",
+            "city",
+            "short_address_code",
+            "google_maps_url",
+            "latitude",
+            "longitude",
+        ):
+            if extracted.get(key) and not slots.get(key):
+                slots[key] = extracted[key]
 
     quantity = _to_int(slots.get("quantity"))
     if quantity:
@@ -1483,9 +1533,23 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     if full_name and not (first_name or last_name):
         first_name, last_name = _split_name(full_name)
 
-    if first_name:
+    if _should_patch_customer_first(prep, first_name):
+        if first_name != prep.customer_first_name:
+            logger.info(
+                "[ORDER_NAME_PATCH] field=customer_first_name before=%r after=%r "
+                "source=merge_message_details",
+                prep.customer_first_name,
+                first_name,
+            )
         prep.customer_first_name = first_name
-    if last_name:
+    if _should_patch_customer_last(prep, last_name):
+        if last_name != prep.customer_last_name:
+            logger.info(
+                "[ORDER_NAME_PATCH] field=customer_last_name before=%r after=%r "
+                "source=merge_message_details",
+                prep.customer_last_name,
+                last_name,
+            )
         prep.customer_last_name = last_name
     if city:
         prep.city = city

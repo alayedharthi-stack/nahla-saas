@@ -508,6 +508,50 @@ def test_build_line_items_uses_product_title_from_order_prep() -> None:
     assert items[0]["unit_price"] == 99.0
 
 
+def test_build_line_items_uses_focus_title_not_generic() -> None:
+    items, title = _build_line_items(
+        db=MagicMock(),
+        tenant_id=33,
+        order_prep={"quantity": 1},
+        brain_state={
+            "current_product_focus": {
+                "title": "عسل طلح ربع كيلو",
+                "id": 9,
+                "price": "320",
+            },
+        },
+    )
+    assert title == "عسل طلح ربع كيلو"
+    assert items[0]["product_name"] == "عسل طلح ربع كيلو"
+    assert items[0]["title"] == "عسل طلح ربع كيلو"
+    assert title != "منتج"
+
+
+def test_build_line_items_prefers_order_prep_name_over_focus() -> None:
+    items, title = _build_line_items(
+        db=MagicMock(),
+        tenant_id=33,
+        order_prep={"product_name": "من prep", "quantity": 1},
+        brain_state={"current_product_focus": {"title": "من focus"}},
+    )
+    assert title == "من prep"
+    assert items[0]["title"] == "من prep"
+
+
+def test_build_line_items_uses_cart_line_item_title() -> None:
+    items, title = _build_line_items(
+        db=MagicMock(),
+        tenant_id=33,
+        order_prep={
+            "quantity": 1,
+            "line_items": [{"title": "عسل سدر", "quantity": 1}],
+        },
+        brain_state={},
+    )
+    assert title == "عسل سدر"
+    assert items[0]["product_name"] == "عسل سدر"
+
+
 def test_customer_payload_auto_fills_whatsapp_phone() -> None:
     conv = SimpleNamespace(
         customer=SimpleNamespace(

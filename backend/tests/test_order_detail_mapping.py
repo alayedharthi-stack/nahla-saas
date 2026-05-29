@@ -9,8 +9,14 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from modules.ai.brain.execution.orders import _filter_missing_phone_if_known  # noqa: E402
+from modules.ai.brain.execution.orders import (  # noqa: E402
+    _filter_missing_phone_if_known,
+    _missing_checkout_fields,
+    _seed_checkout_state,
+)
+from modules.ai.brain.types import OrderPreparationState  # noqa: E402
 from routers.orders import _resolve_customer_display  # noqa: E402
+from services.nahla_order_bridge import _customer_payload  # noqa: E402
 
 
 def test_resolve_customer_display_prefers_metadata_name_over_phone() -> None:
@@ -45,3 +51,29 @@ def test_filter_missing_phone_if_unknown_keeps_phone_slot() -> None:
         "",
     )
     assert missing == ["customer_phone", "city"]
+
+
+def test_whatsapp_phone_seeded_and_excluded_from_missing_slots() -> None:
+    prep = OrderPreparationState()
+    ctx = SimpleNamespace(customer_phone="966551308005", profile={})
+    _seed_checkout_state(prep, ctx)
+    assert prep.customer_phone == "966551308005"
+
+    missing = _missing_checkout_fields(prep, is_sa=True)
+    missing = _filter_missing_phone_if_known(
+        missing + ["customer_phone"],
+        ctx.customer_phone,
+    )
+    assert "customer_phone" not in missing
+
+    conv = SimpleNamespace(
+        customer=SimpleNamespace(
+            phone="966551308005",
+            name="",
+            extra_metadata={},
+        ),
+        extra_metadata={},
+    )
+    _, info = _customer_payload(conv, prep.to_dict())
+    assert info["phone"] == "966551308005"
+    assert info["shipping_phone"] == "966551308005"
