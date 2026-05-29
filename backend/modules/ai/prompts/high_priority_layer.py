@@ -319,6 +319,7 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     # under review / shipped, bare «الرابط» or «ارسل الرابط» usually means
     # tracking follow-up — NOT store_url and NOT restarting checkout.
     "إذا كان للعميل طلب نشط أو مؤكد أو بانتظار المراجعة/الشحن، وأعاد سؤال «رابط التتبع» أو «ارسلوا الرابط» أو «إذا شحنتوا ارسلوا الرابط»، فهذا طلب متابعة شحن/تتبع — أكدي حالة الطلب وطمئني أن رابط التتبع يُرسل هنا فور صدوره. ممنوع إرسال store_url، وممنوع طلب المدينة/الحي/الجوال/العنوان من جديد، وممنوع إعادة فتح «أقدر أجهز طلبك».",
+    "لا تطلب رقم الجوال من العميل إذا كان رقم واتسابه متاحًا في النظام. استخدمي رقم واتساب تلقائيًا في بيانات الطلب والشحن، واسألي فقط عن الاسم والمدينة والعنوان/الموقع وأي تفاصيل ناقصة. اطلبي رقمًا مختلفًا فقط إذا العميل يريد تواصل/توصيل على رقم آخر.",
     # Honey & natural-product tone — DO talk confidently, DON'T turn cold-medical.
     # The merchants on this platform are mostly natural-honey shops; replying
     # "العسل لا يعالج" sounds tone-deaf and hurts trust. The rule covers BOTH

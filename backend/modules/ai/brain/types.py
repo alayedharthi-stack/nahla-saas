@@ -109,6 +109,8 @@ class OrderPreparationState:
     address_line: str = ""
     resolution_source: str = ""
     missing_fields: List[str] = field(default_factory=list)
+    # WhatsApp conversation phone — auto-filled; never ask customer unless missing/invalid.
+    customer_phone: str = ""
     # Tracks which product this prep belongs to (used to detect product change)
     product_id: str = ""
     # Set to True when a Salla order creation attempt failed with this data
@@ -229,6 +231,7 @@ class OrderPreparationState:
             "address_line": self.address_line,
             "resolution_source": self.resolution_source,
             "missing_fields": list(self.missing_fields or []),
+            "customer_phone": str(self.customer_phone or ""),
             "product_id": self.product_id,
             "last_order_failed": self.last_order_failed,
             "salla_failure_count": self.salla_failure_count,
@@ -284,6 +287,7 @@ class OrderPreparationState:
                 for item in (raw.get("missing_fields") or [])
                 if str(item).strip()
             ],
+            customer_phone=str(raw.get("customer_phone", "") or ""),
             product_id=str(raw.get("product_id", "") or ""),
             last_order_failed=bool(raw.get("last_order_failed", False)),
             salla_failure_count=int(raw.get("salla_failure_count") or 0),

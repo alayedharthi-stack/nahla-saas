@@ -120,12 +120,15 @@ def _looks_like_phone(text: str) -> bool:
 
 def _resolve_customer_display(order: Order, customer_lookup: Optional[Dict[str, str]] = None) -> str:
     """
-    display_name = order.customer_name → customer_info.name →
-                   Customer table lookup by phone → phone → "—"
+    display_name = metadata.customer_name → order.customer_name → customer_info.name →
+                   Customer lookup (incl. WA profile) → phone → "—"
     Never returns blank so the merchant always has something to act on.
-    Salla's per-order payload often omits the customer name even though
-    the customer record itself has one — we cross-reference by phone.
     """
+    meta = order.extra_metadata or {}
+    meta_name = str(meta.get("customer_name") or "").strip()
+    if meta_name and not _looks_like_phone(meta_name):
+        return meta_name
+
     direct = (getattr(order, "customer_name", None) or "").strip()
     if direct and not _looks_like_phone(direct):
         return direct
@@ -133,10 +136,10 @@ def _resolve_customer_display(order: Order, customer_lookup: Optional[Dict[str, 
     name = (info.get("name") or "").strip()
     if name and not _looks_like_phone(name):
         return name
-    phone = (info.get("phone") or info.get("mobile") or "").strip()
+    phone = (info.get("phone") or info.get("mobile") or info.get("shipping_phone") or "").strip()
     if customer_lookup and phone:
-        looked_up = customer_lookup.get(phone)
-        if looked_up:
+        looked_up = customer_lookup.get(phone) or customer_lookup.get(_normalise_phone_key(phone))
+        if looked_up and not _looks_like_phone(looked_up):
             return looked_up
     return direct or name or phone or "—"
 
@@ -295,20 +298,34 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
 
 
 def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
-    """phone → name map used to fill in missing names on order rows."""
+    """phone → display name map used to fill in missing names on order rows."""
     out: Dict[str, str] = {}
     for cust in (
         db.query(Customer)
-        .filter(Customer.tenant_id == tenant_id, Customer.name.isnot(None))
+        .filter(Customer.tenant_id == tenant_id)
         .all()
     ):
-        if not cust.name:
+        phone = (cust.phone or "").strip()
+        if not phone:
             continue
-        if cust.phone:
-            out[cust.phone.strip()] = cust.name.strip()
-            digits = cust.phone.strip().lstrip("+").replace(" ", "").replace("-", "")
-            if digits:
-                out[digits] = cust.name.strip()
+        meta = cust.extra_metadata or {}
+        candidates = []
+        if isinstance(meta, dict):
+            for key in ("wa_profile_name", "profile_name", "whatsapp_name", "display_name"):
+                candidates.append(str(meta.get(key) or "").strip())
+        if cust.name:
+            candidates.append(str(cust.name).strip())
+        display = ""
+        for raw in candidates:
+            if raw and not _looks_like_phone(raw):
+                display = raw
+                break
+        if not display:
+            continue
+        out[phone] = display
+        digits = _normalise_phone_key(phone)
+        if digits:
+            out[digits] = display
     return out
 
 
@@ -566,11 +583,19 @@ def _serialise_order(
 
     customer_info = order.customer_info or {}
     line_items    = order.line_items or []
+    order_meta    = order.extra_metadata or {}
+    meta_product  = str(order_meta.get("product_title") or "").strip()
 
     item_titles: List[str] = []
     detailed_items: List[Dict[str, Any]] = []
     for item in line_items:
-        name = item.get("product_name") or item.get("title") or item.get("name") or "منتج"
+        name = (
+            item.get("product_name")
+            or item.get("title")
+            or item.get("name")
+            or meta_product
+            or "منتج"
+        )
         qty  = int(item.get("quantity") or 1)
         item_titles.append(f"{name} ×{qty}")
         if detailed:

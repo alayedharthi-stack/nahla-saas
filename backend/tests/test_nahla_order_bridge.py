@@ -13,10 +13,13 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.nahla_order_bridge import (  # noqa: E402
+    _build_line_items,
     _build_sync_snapshot,
+    _customer_payload,
     _meaningful_delta,
     _resolve_customer_name,
     _resolve_order_amount,
+    _resolve_product_title,
     compute_kpi_totals,
     nahla_wa_external_id,
     sync_nahla_wa_order,
@@ -478,6 +481,56 @@ def test_meaningful_delta_detects_awaiting_payment_flip() -> None:
     ok, reason = _meaningful_delta(prev, curr)
     assert ok is True
     assert reason.startswith("changed:")
+
+
+def test_resolve_customer_name_prefers_wa_profile_over_phone_db_name() -> None:
+    conv = SimpleNamespace(
+        customer=SimpleNamespace(
+            name="0551308005",
+            phone="966551308005",
+            extra_metadata={"wa_profile_name": "سارة"},
+        ),
+        extra_metadata={},
+    )
+    assert _resolve_customer_name(conv, {}) == "سارة"
+
+
+def test_build_line_items_uses_product_title_from_order_prep() -> None:
+    items, title = _build_line_items(
+        db=MagicMock(),
+        tenant_id=33,
+        order_prep={"product_name": "عسل طلح ربع كيلو", "quantity": 1, "price": "99"},
+        brain_state={},
+    )
+    assert title == "عسل طلح ربع كيلو"
+    assert items[0]["product_name"] == "عسل طلح ربع كيلو"
+    assert items[0]["title"] == "عسل طلح ربع كيلو"
+    assert items[0]["unit_price"] == 99.0
+
+
+def test_customer_payload_auto_fills_whatsapp_phone() -> None:
+    conv = SimpleNamespace(
+        customer=SimpleNamespace(
+            name="0551308005",
+            phone="966551308005",
+            extra_metadata={"wa_profile_name": "سارة"},
+        ),
+        extra_metadata={},
+    )
+    name, info = _customer_payload(conv, {"customer_phone": "966551308005"})
+    assert name == "سارة"
+    assert info["phone"] == "966551308005"
+    assert info["shipping_phone"] == "966551308005"
+
+
+def test_resolve_product_title_from_focus() -> None:
+    title = _resolve_product_title(
+        db=MagicMock(),
+        tenant_id=33,
+        order_prep={},
+        brain_state={"current_product_focus": {"title": "Honey Jar", "price": "120"}},
+    )
+    assert title == "Honey Jar"
 
 
 def test_dashboard_revenue_only_counts_paid_status() -> None:

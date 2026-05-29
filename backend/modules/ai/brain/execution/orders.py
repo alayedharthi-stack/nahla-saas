@@ -382,6 +382,7 @@ class DraftOrderHandler:
         # Country-aware address rules
         is_sa = _is_saudi_customer(ctx.customer_phone)
         missing = _missing_checkout_fields(prep, is_sa=is_sa)
+        missing = _filter_missing_phone_if_known(missing, ctx.customer_phone)
         prep.missing_fields = missing
 
         # ── Verbose checkpoint: show exactly what's collected vs. missing ──────
@@ -1008,6 +1009,9 @@ class DraftOrderHandler:
             _slots_to_collect = [
                 _slot_map[m] for m in _missing_payload_fields if m in _slot_map
             ]
+            _slots_to_collect = _filter_missing_phone_if_known(
+                _slots_to_collect, ctx.customer_phone,
+            )
             _hard_errors = [m for m in _missing_payload_fields if m not in _slot_map]
 
             logger.error(
@@ -1421,15 +1425,37 @@ class TrackOrderHandler:
         )
 
 
+def _looks_like_phone_name(text: str) -> bool:
+    if not text:
+        return False
+    digits = text.lstrip("+").replace(" ", "").replace("-", "")
+    return digits.isdigit() and len(digits) >= 7
+
+
+def _filter_missing_phone_if_known(
+    missing: List[str],
+    customer_phone: Optional[str],
+) -> List[str]:
+    """Drop ``customer_phone`` slot when WhatsApp already supplied the number."""
+    if not missing:
+        return missing
+    phone = str(customer_phone or "").strip()
+    if not phone:
+        return missing
+    return [slot for slot in missing if slot != "customer_phone"]
+
+
 def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None:
     full_name = str(ctx.profile.get("name") or "").strip()
     first, last = _split_name(full_name)
-    if not prep.customer_first_name and first:
+    if not prep.customer_first_name and first and not _looks_like_phone_name(first):
         prep.customer_first_name = first
     if not prep.customer_last_name and last:
         prep.customer_last_name = last
     if not prep.customer_email:
         prep.customer_email = str(ctx.profile.get("email") or "").strip()
+    if not prep.customer_phone:
+        prep.customer_phone = str(ctx.customer_phone or "").strip()
 
 
 def _merge_message_details(prep: OrderPreparationState, slots: dict, message: str) -> None:

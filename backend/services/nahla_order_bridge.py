@@ -446,31 +446,104 @@ def _resolve_order_amount(
 
 def _build_line_items(
     *,
+    db: Any,
+    tenant_id: int,
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+    existing_meta: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
     focus = brain_state.get("current_product_focus") or {}
     if not isinstance(focus, dict):
         focus = {}
-    product_name = (
-        str(focus.get("title") or focus.get("name") or order_prep.get("selected_product") or "")
-        .strip()
-        or "منتج"
+    product_name = _resolve_product_title(
+        db=db,
+        tenant_id=tenant_id,
+        order_prep=order_prep,
+        brain_state=brain_state,
+        existing_meta=existing_meta,
     )
     qty_raw = order_prep.get("quantity") or 1
     try:
         quantity = max(int(qty_raw), 1)
     except (TypeError, ValueError):
         quantity = 1
-    unit_price = _parse_amount(focus.get("price") or order_prep.get("total_price") or order_prep.get("price"))
+    unit_price = _parse_amount(
+        focus.get("price") or order_prep.get("total_price") or order_prep.get("price")
+    )
+    product_id = focus.get("id") or order_prep.get("product_id")
     item: Dict[str, Any] = {
         "product_name": product_name,
-        "quantity":     quantity,
-        "product_id":   focus.get("id") or order_prep.get("product_id"),
+        "title":          product_name,
+        "name":           product_name,
+        "quantity":       quantity,
+        "product_id":     product_id,
     }
     if unit_price is not None:
         item["unit_price"] = unit_price
-    return [item]
+        item["price"] = unit_price
+    return [item], product_name
+
+
+def _lookup_catalog_product_title(
+    db: Any,
+    tenant_id: int,
+    product_ref: Any,
+) -> Optional[str]:
+    if not product_ref or db is None:
+        return None
+    ref = str(product_ref).strip()
+    if not ref:
+        return None
+    try:
+        from models import Product  # noqa: PLC0415
+
+        q = db.query(Product).filter(Product.tenant_id == tenant_id)
+        row = None
+        if ref.isdigit():
+            row = q.filter(Product.id == int(ref)).first()
+        if row is None:
+            row = q.filter(
+                (Product.external_id == ref) | (Product.sku == ref)
+            ).first()
+        if row and row.title:
+            title = str(row.title).strip()
+            return title or None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[NAHLA_ORDER_BRIDGE] product title lookup failed tenant=%s ref=%s: %s",
+            tenant_id, ref, exc,
+        )
+    return None
+
+
+def _resolve_product_title(
+    *,
+    db: Any,
+    tenant_id: int,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    existing_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    focus = brain_state.get("current_product_focus") or {}
+    if not isinstance(focus, dict):
+        focus = {}
+    meta = existing_meta or {}
+    for raw in (
+        focus.get("title"),
+        focus.get("name"),
+        order_prep.get("selected_product"),
+        order_prep.get("product_name"),
+        order_prep.get("product_title"),
+        meta.get("product_title"),
+    ):
+        name = str(raw or "").strip()
+        if name and name != "منتج":
+            return name
+    product_ref = focus.get("id") or order_prep.get("product_id")
+    looked_up = _lookup_catalog_product_title(db, tenant_id, product_ref)
+    if looked_up:
+        return looked_up
+    return "منتج"
 
 
 def _format_total_sar(amount: Optional[float]) -> Optional[str]:
@@ -509,11 +582,11 @@ def _resolve_customer_name(
 
     customer = getattr(conversation, "customer", None)
     if customer is not None:
-        candidates.append(str(getattr(customer, "name", None) or "").strip())
         cust_meta = getattr(customer, "extra_metadata", None) or {}
         if isinstance(cust_meta, dict):
             for key in ("wa_profile_name", "profile_name", "whatsapp_name", "display_name"):
                 candidates.append(str(cust_meta.get(key) or "").strip())
+        candidates.append(str(getattr(customer, "name", None) or "").strip())
 
     conv_meta = getattr(conversation, "extra_metadata", None) or {}
     if isinstance(conv_meta, dict):
@@ -539,13 +612,18 @@ def _customer_payload(
     conv_meta = getattr(conversation, "extra_metadata", None) or {}
     if not phone and isinstance(conv_meta, dict):
         phone = conv_meta.get("phone")
+    if not phone:
+        phone = order_prep.get("customer_phone")
 
     display_name = _resolve_customer_name(conversation, order_prep)
     customer_info = {
-        "name":  display_name,
-        "phone": phone,
-        "city":  order_prep.get("city"),
+        "name":           display_name,
+        "phone":          phone,
+        "shipping_phone": phone,
+        "city":           order_prep.get("city"),
     }
+    if phone:
+        customer_info["mobile"] = phone
     return display_name, customer_info
 
 
@@ -560,6 +638,7 @@ def _base_metadata(
     needs_review: bool,
     fallback_used: bool,
     customer_name: Optional[str],
+    product_title: Optional[str],
     confirmed_at: str,
     now_iso: str,
 ) -> Dict[str, Any]:
@@ -587,6 +666,8 @@ def _base_metadata(
         meta["counts_in_revenue"] = False
     if customer_name:
         meta["customer_name"] = customer_name
+    if product_title and product_title != "منتج":
+        meta["product_title"] = product_title
     return meta
 
 
@@ -735,7 +816,14 @@ def sync_nahla_wa_order(
             return existing
 
         receipt_metadata = dict(order_prep.get("payment_receipt_metadata") or {})
-        line_items = _build_line_items(order_prep=order_prep, brain_state=brain_state)
+        existing_meta = dict(existing.extra_metadata or {}) if existing is not None else {}
+        line_items, product_title = _build_line_items(
+            db=db,
+            tenant_id=tenant_id,
+            order_prep=order_prep,
+            brain_state=brain_state,
+            existing_meta=existing_meta,
+        )
         amount, needs_review, amount_source = _resolve_order_amount(
             db=db,
             tenant_id=tenant_id,
@@ -769,6 +857,7 @@ def sync_nahla_wa_order(
             needs_review=needs_review,
             fallback_used=fallback_used,
             customer_name=customer_name,
+            product_title=product_title,
             confirmed_at=confirmed_at,
             now_iso=now_iso,
         )
