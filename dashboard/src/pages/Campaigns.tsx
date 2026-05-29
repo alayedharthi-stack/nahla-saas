@@ -168,6 +168,32 @@ function waCategoryLabel(
   }
 }
 
+function waLanguageDisplay(
+  code: string | null | undefined,
+  tm: Translations['templatesMgmt'],
+): string {
+  switch (code) {
+    case 'ar':    return tm.create.step1.langArabic
+    case 'en':    return tm.create.step1.langEnglish
+    case 'en_US': return tm.create.step1.langEnglishUS
+    default:      return code || '—'
+  }
+}
+
+function formatStrategyDelay(
+  seconds: number,
+  ss: CampaignsMgmt['step7']['sendStrategy'],
+): string {
+  if (seconds <= 0) return ss.delayNone
+  if (seconds < 60) return ss.delaySeconds.replace('{n}', String(seconds))
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return ss.delayMinutes.replace('{n}', String(minutes))
+  const hours = (seconds / 3600).toFixed(1).replace(/\.0$/, '')
+  if (Number(hours) < 24) return ss.delayHours.replace('{n}', hours)
+  const days = (seconds / 86400).toFixed(1).replace(/\.0$/, '')
+  return ss.delayDays.replace('{n}', days)
+}
+
 function step3EmptyHint(
   recommendation: TemplateRecommendation | null,
   lang: Lang,
@@ -277,10 +303,23 @@ const TYPE_META: Record<string, { label: string; icon: React.ReactNode }> = {
 
 // ── WhatsApp preview bubble ───────────────────────────────────────────────────
 
-function WaPreview({ header, body, footer }: { header: string; body: string; footer: string }) {
+function WaPreview({
+  header, body, footer, language,
+}: {
+  header: string
+  body: string
+  footer: string
+  language: string
+}) {
+  const { t } = useLanguage()
+  const readReceipt = t(tr => tr.templatesMgmt.previewReadReceipt)
+  const dir = templatePreviewDir(language)
   return (
     <div className="bg-[#e5ddd5] rounded-xl p-4 min-h-32 flex items-end">
-      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs p-3 text-sm space-y-1" dir="rtl">
+      <div
+        className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs p-3 text-sm space-y-1"
+        dir={dir}
+      >
         {header && <p className="font-semibold text-slate-900 text-xs">{header}</p>}
         {body && (
           <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">
@@ -288,7 +327,9 @@ function WaPreview({ header, body, footer }: { header: string; body: string; foo
           </p>
         )}
         {footer && <p className="text-slate-400 text-[10px] mt-1">{footer}</p>}
-        <p className="text-[10px] text-slate-300 text-end">✓✓ الآن</p>
+        <p className={`text-[10px] text-slate-300 ${dir === 'rtl' ? 'text-end' : 'text-start'}`}>
+          {readReceipt}
+        </p>
       </div>
     </div>
   )
@@ -784,20 +825,7 @@ function Step3Template({
 //   {{4}} → store_name / tracking_url  (from settings)
 //   {{5}} → coupon_code  (auto-generated)
 //   {{6}} → store_url  (from settings)
-const AUTO_RESOLVE_VARS: Record<string, { label: string; source: string }> = {
-  '{{1}}': { label: 'اسم العميل',        source: 'من بيانات العميل تلقائياً' },
-  '{{2}}': { label: 'رابط السلة / المنتج', source: 'رابط ديناميكي لكل عميل حسب السلة أو الطلب' },
-  '{{3}}': { label: 'كود الخصم',          source: 'يُولّد تلقائياً من نظام الكوبونات لكل عميل' },
-  '{{4}}': { label: 'اسم المتجر',         source: 'من إعدادات المتجر تلقائياً' },
-  '{{5}}': { label: 'كوبون إضافي',        source: 'يُولّد تلقائياً من نظام الكوبونات' },
-  '{{6}}': { label: 'رابط المتجر',        source: 'من إعدادات المتجر تلقائياً' },
-}
-
-// Fallback for any var beyond {{6}} that might appear in custom templates.
-const MANUAL_VAR_HINTS: Record<string, string> = {
-  '{{7}}': 'قيمة مخصصة',
-  '{{8}}': 'قيمة مخصصة',
-}
+const AUTO_VAR_KEYS = new Set(['{{1}}', '{{2}}', '{{3}}', '{{4}}', '{{5}}', '{{6}}'])
 
 // Goals where the merchant is sending a one-off marketing message and
 // every input must come from THEM, not from a service binding. The
@@ -845,10 +873,17 @@ function allVarsAutoResolved(
   tpl: { mode?: 'manual' | 'auto' } | null | undefined = null,
 ): boolean {
   if (isManualMode(goalKey, tpl)) return false
-  return vars.length > 0 && vars.every(v => v in AUTO_RESOLVE_VARS)
+  return vars.length > 0 && vars.every(v => AUTO_VAR_KEYS.has(v))
 }
 
 function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispatch<React.SetStateAction<WizardState>> }) {
+  const { t } = useLanguage()
+  const s4 = t(tr => tr.campaignsMgmt.step4)
+
+  const autoVarInfo = (v: string) => s4.autoVars[v as keyof typeof s4.autoVars]
+  const manualVarHint = (v: string) =>
+    s4.manualVarHints[v as keyof typeof s4.manualVarHints] ?? s4.dynamicValue
+
   const body = getTemplateBody(wiz.template!)
   const vars = extractVariables(body)
 
@@ -858,14 +893,14 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
   // every dynamic value themselves — no coupon code, cart URL, or
   // service-bound value is silently inherited.
   const manualMode = isManualMode(wiz.goalKey, wiz.template)
-  const autoVars   = manualMode ? [] : vars.filter(v => v in AUTO_RESOLVE_VARS)
-  const manualVars = manualMode ? vars : vars.filter(v => !(v in AUTO_RESOLVE_VARS))
+  const autoVars   = manualMode ? [] : vars.filter(v => AUTO_VAR_KEYS.has(v))
+  const manualVars = manualMode ? vars : vars.filter(v => !AUTO_VAR_KEYS.has(v))
 
   if (vars.length === 0) {
     return (
       <div className="py-10 text-center text-sm text-slate-400 flex flex-col items-center gap-2">
         <CheckCircle className="w-8 h-8 text-emerald-400" />
-        هذا القالب لا يحتوي على متغيرات — يمكنك المتابعة مباشرة.
+        {s4.noVars}
       </div>
     )
   }
@@ -878,14 +913,12 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
           <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center">
             <Sparkles className="w-6 h-6 text-emerald-500" />
           </div>
-          <p className="text-sm font-semibold text-slate-800">جميع المتغيرات تُعبّأ تلقائياً</p>
-          <p className="text-xs text-slate-500 max-w-sm">
-            سيتم استبدال المتغيرات ببيانات كل عميل تلقائياً عند الإرسال — لا حاجة لإدخال أي شيء.
-          </p>
+          <p className="text-sm font-semibold text-slate-800">{s4.allAutoTitle}</p>
+          <p className="text-xs text-slate-500 max-w-sm">{s4.allAutoDesc}</p>
         </div>
         <div className="space-y-2">
           {autoVars.map(v => {
-            const info = AUTO_RESOLVE_VARS[v]!
+            const info = autoVarInfo(v)!
             return (
               <div key={v} className="flex items-center gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3">
                 <span className="font-mono text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded text-[11px]">{v}</span>
@@ -907,9 +940,9 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
     <div className="space-y-4">
       {autoVars.length > 0 && (
         <div className="space-y-2 mb-2">
-          <p className="text-xs text-emerald-700 font-medium">✓ يتم تعبئتها تلقائياً لكل عميل:</p>
+          <p className="text-xs text-emerald-700 font-medium">{s4.autoFilledHeader}</p>
           {autoVars.map(v => {
-            const info = AUTO_RESOLVE_VARS[v]!
+            const info = autoVarInfo(v)!
             return (
               <div key={v} className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2">
                 <span className="font-mono text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded text-[10px]">{v}</span>
@@ -921,14 +954,12 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
         </div>
       )}
       <p className="text-xs text-slate-500">
-        {manualMode
-          ? 'أدخل القيم يدوياً لكل متغير. هذه الحملة مستقلة تماماً — لن يتم ربطها بأي خدمة أو كوبون تلقائي.'
-          : 'أدخل القيم للمتغيرات التالية — ستُستخدم نفس القيمة لجميع المستلمين في هذه الحملة.'}
+        {manualMode ? s4.manualIntroManual : s4.manualIntroMixed}
       </p>
       {manualVars.map(v => {
         const hint = manualMode
-          ? AUTO_RESOLVE_VARS[v]?.label ?? MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'
-          : MANUAL_VAR_HINTS[v] ?? 'قيمة ديناميكية'
+          ? autoVarInfo(v)?.label ?? manualVarHint(v)
+          : manualVarHint(v)
         return (
           <div key={v}>
             <label className="label flex items-center gap-2">
@@ -937,7 +968,7 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
             </label>
             <input
               className="input text-sm"
-              placeholder={`مثال: ${hint}`}
+              placeholder={s4.placeholderExample.replace('{hint}', hint)}
               value={wiz.variables[v] ?? ''}
               onChange={e => setWiz(w => ({ ...w, variables: { ...w.variables, [v]: e.target.value } }))}
             />
@@ -951,28 +982,36 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
 // ── Step 5: Preview ───────────────────────────────────────────────────────────
 
 function Step5Preview({ wiz }: { wiz: WizardState }) {
+  const { t } = useLanguage()
+  const s5 = t(tr => tr.campaignsMgmt.step5)
+  const tm = t(tr => tr.templatesMgmt)
+
   const body   = renderTemplate(getTemplateBody(wiz.template!),   wiz.variables)
   const header = renderTemplate(getTemplateHeader(wiz.template!), wiz.variables)
   const footer = getTemplateFooter(wiz.template!)
+  const tplName = wiz.template!.display_name_ar || wiz.template!.name.replace(/_/g, ' ')
   return (
     <div className="space-y-4">
-      <p className="text-xs text-slate-500">
-        هذا ما سيراه العميل عند فتح واتساب. أي قيم متغيرات تركتها فارغة ستظهر بـ <code className="font-mono">{'{{N}}'}</code>.
-      </p>
+      <p className="text-xs text-slate-500">{s5.intro}</p>
       <div className="grid sm:grid-cols-2 gap-4">
-        <WaPreview header={header} body={body} footer={footer} />
+        <WaPreview
+          header={header}
+          body={body}
+          footer={footer}
+          language={wiz.template!.language}
+        />
         <div className="space-y-2 text-xs">
           <div className="bg-slate-50 rounded-xl px-3 py-2">
-            <p className="text-slate-400">القالب</p>
-            <p className="font-medium text-slate-800">{wiz.template!.display_name_ar || wiz.template!.name.replace(/_/g, ' ')}</p>
+            <p className="text-slate-400">{s5.labelTemplate}</p>
+            <p className="font-medium text-slate-800">{tplName}</p>
           </div>
           <div className="bg-slate-50 rounded-xl px-3 py-2">
-            <p className="text-slate-400">اللغة</p>
-            <p className="font-medium text-slate-800">{wiz.template!.language}</p>
+            <p className="text-slate-400">{s5.labelLanguage}</p>
+            <p className="font-medium text-slate-800">{waLanguageDisplay(wiz.template!.language, tm)}</p>
           </div>
           <div className="bg-slate-50 rounded-xl px-3 py-2">
-            <p className="text-slate-400">الفئة</p>
-            <p className="font-medium text-slate-800">{wiz.template!.category}</p>
+            <p className="text-slate-400">{s5.labelCategory}</p>
+            <p className="font-medium text-slate-800">{waCategoryLabel(wiz.template!.category, tm)}</p>
           </div>
         </div>
       </div>
@@ -990,18 +1029,22 @@ function Step6TestSend({
   onTestSend: () => void
   testLoading: boolean
 }) {
+  const { t } = useLanguage()
+  const s6 = t(tr => tr.campaignsMgmt.step6)
+
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
         <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
         <p className="text-xs text-amber-800">
-          سيتم إرسال رسالة اختبار <span className="font-semibold">حقيقية</span> إلى الرقم المُدخل عبر واتساب.
-          استخدم رقمك أو رقم زميل لمراجعة الشكل النهائي قبل الإطلاق.
+          {s6.warningBefore}
+          <span className="font-semibold">{s6.warningStrong}</span>
+          {s6.warningAfter}
         </p>
       </div>
 
       <div>
-        <label className="label">رقم الجوال للاختبار (صيغة دولية)</label>
+        <label className="label">{s6.phoneLabel}</label>
         <div className="flex gap-2">
           <input
             className="input text-sm flex-1"
@@ -1019,12 +1062,10 @@ function Step6TestSend({
             className="btn-primary text-sm shrink-0"
           >
             {testLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            إرسال اختبار
+            {s6.sendTest}
           </button>
         </div>
-        <p className="text-[11px] text-slate-400 mt-1">
-          القيم الفارغة في المتغيرات سيتم تعبئتها ببيانات تجريبية لأغراض الاختبار فقط.
-        </p>
+        <p className="text-[11px] text-slate-400 mt-1">{s6.mockDataNote}</p>
       </div>
 
       {wiz.testSent && !wiz.testError && (
@@ -1217,6 +1258,9 @@ function SendStrategyPicker({
   setWiz: React.Dispatch<React.SetStateAction<WizardState>>
   audienceCount: number
 }) {
+  const { t, lang } = useLanguage()
+  const ss = t(tr => tr.campaignsMgmt.step7.sendStrategy)
+
   const [preview, setPreview] = useState<PreflightStrategyResponse | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -1242,17 +1286,6 @@ function SendStrategyPicker({
   const threshold = preview?.threshold_recipients_for_waves ?? 500
   const tooSmall = audienceCount > 0 && audienceCount < threshold
 
-  const formatDelay = (seconds: number): string => {
-    if (seconds <= 0) return 'بدون فاصل'
-    if (seconds < 60) return `${seconds} ثانية`
-    const minutes = Math.round(seconds / 60)
-    if (minutes < 60) return `${minutes} دقيقة`
-    const hours = (seconds / 3600).toFixed(1).replace(/\.0$/, '')
-    if (Number(hours) < 24) return `${hours} ساعة`
-    const days = (seconds / 86400).toFixed(1).replace(/\.0$/, '')
-    return `${days} يوم`
-  }
-
   const options: Array<{
     id: WizardState['sendStrategy']
     label: string
@@ -1261,22 +1294,33 @@ function SendStrategyPicker({
   }> = [
     {
       id: 'immediate',
-      label: 'إرسال فوري',
-      desc: 'دفعة واحدة الآن. مناسب للحملات الصغيرة.',
+      label: ss.immediateLabel,
+      desc: ss.immediateDesc,
       icon: <Send className="w-3.5 h-3.5" />,
     },
     {
       id: 'adaptive',
-      label: 'تلقائي حسب جودة الرقم',
-      desc: 'نحلة تختار حجم الدفعة وفترات الإرسال تلقائياً.',
+      label: ss.adaptiveLabel,
+      desc: ss.adaptiveDesc,
       icon: <Sparkles className="w-3.5 h-3.5" />,
     },
     {
       id: 'batched',
-      label: 'إرسال على دفعات يدوياً',
-      desc: 'حدد حجم الدفعة والفاصل الزمني بنفسك.',
+      label: ss.batchedLabel,
+      desc: ss.batchedDesc,
       icon: <Repeat className="w-3.5 h-3.5" />,
     },
+  ]
+
+  const batchDelayOptions: Array<{ value: number; label: string }> = [
+    { value: 900,   label: ss.delay15m },
+    { value: 1800,  label: ss.delay30m },
+    { value: 3600,  label: ss.delay1h },
+    { value: 7200,  label: ss.delay2h },
+    { value: 14400, label: ss.delay4h },
+    { value: 21600, label: ss.delay6h },
+    { value: 43200, label: ss.delay12h },
+    { value: 86400, label: ss.delay24h },
   ]
 
   const proposed = preview?.proposed
@@ -1285,10 +1329,10 @@ function SendStrategyPicker({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <label className="label mb-0">استراتيجية الإرسال</label>
+        <label className="label mb-0">{ss.title}</label>
         {preview?.current_quality?.nahla_tier && (
           <Badge
-            label={`جودة الرقم: ${preview.current_quality.nahla_tier}`}
+            label={ss.qualityBadge.replace('{tier}', preview.current_quality.nahla_tier)}
             variant="blue"
           />
         )}
@@ -1304,7 +1348,7 @@ function SendStrategyPicker({
               type="button"
               disabled={disabled}
               onClick={() => setWiz((w) => ({ ...w, sendStrategy: opt.id }))}
-              className={`flex flex-col items-start gap-1 border rounded-xl px-3 py-2 text-xs text-right transition-all ${
+              className={`flex flex-col items-start gap-1 border rounded-xl px-3 py-2 text-xs text-start transition-all ${
                 active
                   ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-200 text-brand-700'
                   : disabled
@@ -1325,8 +1369,9 @@ function SendStrategyPicker({
         <div className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
           <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <p>
-            الجمهور الحالي ({audienceCount.toLocaleString('ar-SA')} مستلم) أقل من الحد الأدنى
-            لتقسيم الحملات ({threshold.toLocaleString('ar-SA')}). سيتم الإرسال مباشرة بدون دفعات.
+            {ss.tooSmall
+              .replace('{count}', fmtCount(audienceCount, lang))
+              .replace('{threshold}', fmtCount(threshold, lang))}
           </p>
         </div>
       )}
@@ -1334,32 +1379,29 @@ function SendStrategyPicker({
       {wiz.sendStrategy === 'batched' && !tooSmall && (
         <div className="grid sm:grid-cols-2 gap-2">
           <div>
-            <label className="label text-[11px]">حجم الدفعة</label>
+            <label className="label text-[11px]">{ss.batchSizeLabel}</label>
             <select
               className="input text-sm"
               value={wiz.batchSize}
               onChange={(e) => setWiz((w) => ({ ...w, batchSize: Number(e.target.value) }))}
             >
               {[100, 250, 500, 1000, 2000, 3000, 5000].map((n) => (
-                <option key={n} value={n}>{n.toLocaleString('ar-SA')} مستلم</option>
+                <option key={n} value={n}>
+                  {fmtCount(n, lang)} {ss.batchRecipient}
+                </option>
               ))}
             </select>
           </div>
           <div>
-            <label className="label text-[11px]">الفاصل بين الدفعات</label>
+            <label className="label text-[11px]">{ss.delayBetweenLabel}</label>
             <select
               className="input text-sm"
               value={wiz.delayBetweenBatchesSec}
               onChange={(e) => setWiz((w) => ({ ...w, delayBetweenBatchesSec: Number(e.target.value) }))}
             >
-              <option value={900}>15 دقيقة</option>
-              <option value={1800}>30 دقيقة</option>
-              <option value={3600}>1 ساعة</option>
-              <option value={7200}>2 ساعة</option>
-              <option value={14400}>4 ساعات</option>
-              <option value={21600}>6 ساعات</option>
-              <option value={43200}>12 ساعة</option>
-              <option value={86400}>24 ساعة</option>
+              {batchDelayOptions.map(({ value, label }) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
           </div>
         </div>
@@ -1369,7 +1411,7 @@ function SendStrategyPicker({
         <div className="rounded-xl border border-brand-200 bg-brand-50/60 p-3 space-y-1.5">
           <p className="text-xs font-semibold text-brand-700 flex items-center gap-1.5">
             <BarChart2 className="w-3.5 h-3.5" />
-            خطة الإرسال
+            {ss.planTitle}
           </p>
           {(() => {
             const p = proposed || {
@@ -1380,14 +1422,18 @@ function SendStrategyPicker({
               strategy: adaptive!.strategy,
               downgraded_to_immediate: false,
             }
+            const delayLabel = formatStrategyDelay(p.delay_between_batches_sec, ss)
             return (
               <>
                 <p className="text-[11px] text-slate-700 leading-relaxed">
-                  <strong>{p.total_waves.toLocaleString('ar-SA')}</strong> دفعة ×{' '}
-                  <strong>{p.batch_size.toLocaleString('ar-SA')}</strong> مستلم،
-                  فاصل <strong>{formatDelay(p.delay_between_batches_sec)}</strong>.
+                  {ss.planSummary
+                    .replace('{waves}', fmtCount(p.total_waves, lang))
+                    .replace('{batch}', fmtCount(p.batch_size, lang))
+                    .replace('{delay}', delayLabel)}
                 </p>
-                <p className="text-[10.5px] text-slate-500 leading-relaxed">{p.reason}</p>
+                {lang === 'ar' && p.reason && (
+                  <p className="text-[10.5px] text-slate-500 leading-relaxed">{p.reason}</p>
+                )}
               </>
             )
           })()}
@@ -1408,18 +1454,32 @@ function Step7Review({
   segmentMeta: CustomerSegmentMeta | undefined
   goalMeta: CampaignGoal | undefined
 }) {
+  const { t, lang } = useLanguage()
+  const s7 = t(tr => tr.campaignsMgmt.step7)
+  const tm = t(tr => tr.templatesMgmt)
+
+  const segmentSummary = segmentMeta
+    ? s7.segmentCount
+        .replace('{label}', segDisplayLabel(segmentMeta, lang))
+        .replace('{count}', fmtCount(segmentMeta.customer_count, lang))
+    : '—'
+  const tplName = wiz.template?.display_name_ar || wiz.template?.name.replace(/_/g, ' ') || '—'
+
+  const formatDelayOption = (minutes: number): string =>
+    minutes < 60
+      ? s7.delayMinutes.replace('{n}', String(minutes))
+      : s7.delayHours.replace('{n}', String(minutes / 60))
+
   return (
     <div className="space-y-5">
-      <p className="text-xs text-slate-500">
-        راجع تفاصيل الحملة وأكمل اسم الحملة، الجدولة، والكوبون قبل الإطلاق.
-      </p>
+      <p className="text-xs text-slate-500">{s7.intro}</p>
 
       <div className="grid sm:grid-cols-2 gap-3 text-xs">
         {[
-          ['الهدف',   goalMeta?.label_ar ?? '—'],
-          ['الشريحة', segmentMeta ? `${segmentMeta.label_ar} (${segmentMeta.customer_count.toLocaleString('ar-SA')} عميل)` : '—'],
-          ['القالب',  wiz.template?.display_name_ar || wiz.template?.name.replace(/_/g, ' ') || '—'],
-          ['اللغة',   wiz.template?.language ?? '—'],
+          [s7.summaryGoal,     goalMeta ? goalDisplayLabel(goalMeta, lang) : '—'],
+          [s7.summarySegment,  segmentSummary],
+          [s7.summaryTemplate, tplName],
+          [s7.summaryLanguage, wiz.template ? waLanguageDisplay(wiz.template.language, tm) : '—'],
         ].map(([k, v]) => (
           <div key={k} className="bg-slate-50 rounded-xl px-3 py-2">
             <p className="text-slate-400">{k}</p>
@@ -1429,22 +1489,22 @@ function Step7Review({
       </div>
 
       <div>
-        <label className="label">اسم الحملة <span className="text-rose-500">*</span></label>
+        <label className="label">{s7.campaignNameLabel} <span className="text-rose-500">*</span></label>
         <input
           className="input text-sm"
-          placeholder="مثال: حملة رمضان 2026"
+          placeholder={s7.campaignNamePlaceholder}
           value={wiz.campaignName}
           onChange={e => setWiz(w => ({ ...w, campaignName: e.target.value }))}
         />
       </div>
 
       <div className="space-y-2">
-        <label className="label">الجدولة</label>
+        <label className="label">{s7.scheduleLabel}</label>
         <div className="grid sm:grid-cols-3 gap-2">
           {([
-            { id: 'immediate' as ScheduleType, label: 'إرسال فوري',     icon: <Send className="w-3.5 h-3.5" /> },
-            { id: 'scheduled' as ScheduleType, label: 'وقت محدد',        icon: <Clock className="w-3.5 h-3.5" /> },
-            { id: 'delayed'   as ScheduleType, label: 'بعد تأخير',       icon: <RefreshCw className="w-3.5 h-3.5" /> },
+            { id: 'immediate' as ScheduleType, label: s7.scheduleImmediate, icon: <Send className="w-3.5 h-3.5" /> },
+            { id: 'scheduled' as ScheduleType, label: s7.scheduleScheduled, icon: <Clock className="w-3.5 h-3.5" /> },
+            { id: 'delayed'   as ScheduleType, label: s7.scheduleDelayed,   icon: <RefreshCw className="w-3.5 h-3.5" /> },
           ] as const).map(opt => (
             <button
               key={opt.id}
@@ -1474,7 +1534,7 @@ function Step7Review({
             onChange={e => setWiz(w => ({ ...w, delayMinutes: Number(e.target.value) }))}
           >
             {[15, 30, 60, 120, 360, 720, 1440].map(m => (
-              <option key={m} value={m}>{m < 60 ? `${m} دقيقة` : `${m / 60} ساعة`}</option>
+              <option key={m} value={m}>{formatDelayOption(m)}</option>
             ))}
           </select>
         )}
@@ -1499,18 +1559,15 @@ function Step7Review({
             3. everything else  → opt-in auto-coupon toggle. */}
       {wiz.goalKey === 'reminder' ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-1">
-          <p className="text-xs font-semibold text-emerald-700">الكوبونات والروابط تلقائية بالكامل</p>
-          <p className="text-[11px] text-emerald-600 leading-relaxed">
-            رابط السلة المتروكة يُرسل تلقائياً لكل عميل حسب سلته، والكوبون يُولّد فريداً لكل عميل من نظام الكوبونات في نحلة.
-            لا تحتاج لكتابة أي شيء.
-          </p>
+          <p className="text-xs font-semibold text-emerald-700">{s7.couponReminderTitle}</p>
+          <p className="text-[11px] text-emerald-600 leading-relaxed">{s7.couponReminderDesc}</p>
         </div>
       ) : isManualMode(wiz.goalKey, wiz.template) ? (
         <div className="space-y-2">
-          <label className="label mb-0">كود خصم يدوي (اختياري)</label>
+          <label className="label mb-0">{s7.couponManualLabel}</label>
           <input
             className="input text-sm"
-            placeholder="مثال: WELCOME10"
+            placeholder={s7.couponManualPlaceholder}
             value={wiz.couponCode}
             onChange={e => setWiz(w => ({
               ...w,
@@ -1519,15 +1576,13 @@ function Step7Review({
             }))}
           />
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            {isManualTemplate(wiz.template)
-              ? 'القالب الذي اخترته يدوي بطبيعته — التاجر يكتب الكوبون والرابط بنفسه ولا يولّد نظام الكوبونات قيماً تلقائية.'
-              : 'هذه الحملة مستقلة. لن يقوم نظام الكوبونات بتوليد كوبون لكل عميل — سيظهر الكود كما كتبتَه (أو يبقى الحقل فارغاً) إذا لم تدخل أي قيمة.'}
+            {isManualTemplate(wiz.template) ? s7.couponManualTplHint : s7.couponManualGoalHint}
           </p>
         </div>
       ) : (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <label className="label mb-0">كوبون خصم تلقائي</label>
+            <label className="label mb-0">{s7.couponAutoLabel}</label>
             <button
               type="button"
               onClick={() => setWiz(w => ({ ...w, autoCoupon: !w.autoCoupon }))}
@@ -1543,9 +1598,7 @@ function Step7Review({
 
           {wiz.autoCoupon ? (
             <div className="space-y-2">
-              <p className="text-[11px] text-slate-500">
-                حدد نسبة الخصم فقط — النظام سيولّد كوبوناً فريداً لكل عميل تلقائياً ويوزعه عند الإرسال.
-              </p>
+              <p className="text-[11px] text-slate-500">{s7.couponAutoDesc}</p>
               <div className="flex flex-wrap gap-2">
                 {[5, 10, 15, 20, 25, 30].map(pct => (
                   <button
@@ -1564,13 +1617,11 @@ function Step7Review({
               </div>
               <div className="flex items-center gap-2 text-[11px] text-emerald-600 bg-emerald-50 border border-emerald-100 rounded-lg p-2">
                 <CheckCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>سيتم توليد كوبون خصم {wiz.discountPercent}% فريد لكل عميل عند الإرسال</span>
+                <span>{s7.couponAutoConfirm.replace('{percent}', String(wiz.discountPercent))}</span>
               </div>
             </div>
           ) : (
-            <p className="text-[11px] text-slate-400">
-              لن يتم إرفاق كوبون مع هذه الحملة.
-            </p>
+            <p className="text-[11px] text-slate-400">{s7.couponAutoOff}</p>
           )}
         </div>
       )}
@@ -1590,81 +1641,106 @@ function Step8Launch({
   onLaunch: () => void
   error: string
 }) {
+  const { t, lang } = useLanguage()
+  const s8 = t(tr => tr.campaignsMgmt.step8)
+
+  const segmentLabel = segmentMeta ? segDisplayLabel(segmentMeta, lang) : '—'
+  const countLabel = segmentMeta ? fmtCount(segmentMeta.customer_count, lang) : '—'
+  const tplName = wiz.template?.display_name_ar || wiz.template?.name || '—'
+
+  const scheduleLabel =
+    wiz.scheduleType === 'immediate' ? s8.scheduleImmediate
+      : wiz.scheduleType === 'scheduled' ? wiz.scheduleTime
+        : s8.scheduleDelayed.replace('{minutes}', String(wiz.delayMinutes))
+
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-3 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
         <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm font-semibold text-emerald-800">جاهز للإطلاق</p>
+          <p className="text-sm font-semibold text-emerald-800">{s8.readyTitle}</p>
           <p className="text-xs text-emerald-700 mt-0.5">
-            ستُرسل الحملة إلى{' '}
-            <span className="font-bold">
-              {segmentMeta?.customer_count.toLocaleString('ar-SA') ?? '—'}
-            </span>
-            {' '}عميل من شريحة <span className="font-semibold">{segmentMeta?.label_ar ?? '—'}</span>.
+            {s8.readyDesc
+              .replace('{count}', countLabel)
+              .replace('{segment}', segmentLabel)}
           </p>
         </div>
       </div>
 
       {/* Anti-duplicate trust card — surfaces the back-end protection
        *  guarantee (idempotent send + N-day frequency cap) right
-       *  before the merchant clicks "إطلاق الحملة الآن". This is the
+       *  before the merchant clicks launch. This is the
        *  single most important psychological signal before sending
        *  thousands of marketing messages. */}
       <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-2">
         <div className="flex items-start gap-3">
           <Shield className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
           <div className="flex-1 space-y-1.5">
-            <p className="text-sm font-semibold text-blue-900">🛡️ حماية ذكية من التكرار</p>
-            <p className="text-xs text-blue-800 leading-relaxed">
-              اطمئن، نحلة تمنع تكرار إرسال الحملات التسويقية لنفس العميل حتى في حال:
-            </p>
+            <p className="text-sm font-semibold text-blue-900">{s8.protectionTitle}</p>
+            <p className="text-xs text-blue-800 leading-relaxed">{s8.protectionIntro}</p>
             <ul className="text-[11px] text-blue-800 leading-relaxed space-y-0.5 list-none">
-              <li>• توقّف الإرسال بسبب خطأ مؤقت</li>
-              <li>• انقطاع الاتصال أو إعادة تشغيل الحملة</li>
-              <li>• إعادة محاولة الإرسال لاحقاً من نفس الحملة</li>
+              <li>• {s8.protectionBullet1}</li>
+              <li>• {s8.protectionBullet2}</li>
+              <li>• {s8.protectionBullet3}</li>
             </ul>
             <p className="text-[11px] text-blue-700 leading-relaxed pt-1">
-              لن نرسل الرسالة لنفس العميل مرة أخرى إذا تم تسجيل النجاح من قبل،
-              ولن نرسلها إذا استلم حملة تسويقية أخرى خلال آخر{' '}
-              <span className="font-semibold">{protection.frequency_cap_days}</span> يوم.
+              {s8.protectionFooter.replace('{days}', String(protection.frequency_cap_days))}
             </p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2 pt-1 border-t border-blue-200/60">
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-white px-2 py-1 rounded-full border border-blue-200">
             <Clock className="w-3 h-3" />
-            مدة الحماية: {protection.frequency_cap_days} يوم
+            {s8.protectionDaysBadge.replace('{days}', String(protection.frequency_cap_days))}
           </span>
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-white px-2 py-1 rounded-full border border-emerald-200">
             <CheckCircle className="w-3 h-3" />
-            استكمال آمن للحملة
+            {s8.protectionSafeBadge}
           </span>
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700 bg-white px-2 py-1 rounded-full border border-blue-200">
             <RefreshCw className="w-3 h-3" />
-            إرسال مقاوم للتكرار (idempotent)
+            {s8.protectionIdempotentBadge}
           </span>
         </div>
       </div>
 
       <div className="bg-slate-50 rounded-xl p-4 space-y-1 text-xs">
-        <div className="flex justify-between"><span className="text-slate-500">اسم الحملة</span><span className="font-semibold text-slate-800">{wiz.campaignName}</span></div>
-        <div className="flex justify-between"><span className="text-slate-500">القالب</span><span className="text-slate-800">{wiz.template?.display_name_ar || wiz.template?.name}</span></div>
-        <div className="flex justify-between"><span className="text-slate-500">الجدولة</span><span className="text-slate-800">
-          {wiz.scheduleType === 'immediate' ? 'فوري'
-            : wiz.scheduleType === 'scheduled' ? wiz.scheduleTime
-            : `بعد ${wiz.delayMinutes} دقيقة`}
-        </span></div>
+        <div className="flex justify-between">
+          <span className="text-slate-500">{s8.summaryCampaignName}</span>
+          <span className="font-semibold text-slate-800">{wiz.campaignName}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-500">{s8.summaryTemplate}</span>
+          <span className="text-slate-800">{tplName}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-500">{s8.summarySchedule}</span>
+          <span className="text-slate-800">{scheduleLabel}</span>
+        </div>
         {wiz.goalKey === 'reminder' ? (
-          <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">تلقائي لكل عميل</span></div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">{s8.summaryCoupon}</span>
+            <span className="text-emerald-600">{s8.couponAutoPerCustomer}</span>
+          </div>
         ) : isManualMode(wiz.goalKey, wiz.template) ? (
           wiz.couponCode.trim() ? (
-            <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-slate-800 font-mono">{wiz.couponCode.trim()}</span></div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">{s8.summaryCoupon}</span>
+              <span className="text-slate-800 font-mono">{wiz.couponCode.trim()}</span>
+            </div>
           ) : (
-            <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-slate-400">بدون</span></div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">{s8.summaryCoupon}</span>
+              <span className="text-slate-400">{s8.couponNone}</span>
+            </div>
           )
         ) : wiz.autoCoupon ? (
-          <div className="flex justify-between"><span className="text-slate-500">الكوبون</span><span className="text-emerald-600">خصم {wiz.discountPercent}% تلقائي لكل عميل</span></div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">{s8.summaryCoupon}</span>
+            <span className="text-emerald-600">
+              {s8.couponAutoPercent.replace('{percent}', String(wiz.discountPercent))}
+            </span>
+          </div>
         ) : null}
       </div>
 
@@ -1677,7 +1753,7 @@ function Step8Launch({
 
       <button onClick={onLaunch} disabled={saving} className="btn-primary text-sm w-full justify-center">
         {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-        {saving ? 'جارٍ الإطلاق…' : 'إطلاق الحملة الآن'}
+        {saving ? s8.launching : s8.launchBtn}
       </button>
     </div>
   )
@@ -1848,6 +1924,7 @@ function CampaignWizard({
 
   const handleTestSend = async () => {
     if (!wiz.testPhone || !wiz.template) return
+    const s6 = cm.step6
     setTestLoading(true)
     setWiz(w => ({ ...w, testSent: false, testError: '', testMessage: '', testSimulated: false }))
     try {
@@ -1860,19 +1937,19 @@ function CampaignWizard({
         setWiz(w => ({
           ...w, testSent: true, testSimulated: res.simulated,
           testMessage: res.simulated
-            ? (res.error_message || 'تمت محاكاة الإرسال — لا يوجد اتصال واتساب مفعّل.')
-            : `تم إرسال رسالة اختبار إلى ${res.to}. تحقّق من واتساب الآن.`,
+            ? (res.error_message || s6.testSimulatedFallback)
+            : s6.testSent.replace('{phone}', res.to),
           testError: '',
         }))
       } else {
         setWiz(w => ({
           ...w, testSent: true, testSimulated: false,
           testMessage: '',
-          testError: res.error_message || 'فشل إرسال رسالة الاختبار.',
+          testError: res.error_message || s6.testFailedFallback,
         }))
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'حدث خطأ غير متوقع.'
+      const msg = e instanceof Error ? e.message : s6.unexpectedError
       setWiz(w => ({ ...w, testSent: true, testError: msg }))
     } finally {
       setTestLoading(false)
@@ -1881,6 +1958,7 @@ function CampaignWizard({
 
   const handleLaunch = async () => {
     if (!wiz.template || !wiz.goalKey || !wiz.segmentKey) return
+    const s8 = cm.step8
     setSaving(true)
     setError('')
     try {
@@ -1942,7 +2020,7 @@ function CampaignWizard({
       onCreated(created)
       onClose()
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'حدث خطأ أثناء إنشاء الحملة. حاول مجدداً.'
+      const msg = e instanceof Error ? e.message : s8.launchCreateFailed
       // Treat a frontend timeout as a *soft* error: the campaign was
       // almost certainly created (POST /campaigns returns in <1 s
       // now that dispatch runs on a background thread, but
@@ -1951,15 +2029,9 @@ function CampaignWizard({
       // — surface a clear "click again to recover" message. The
       // idempotency key above guarantees the retry will NOT
       // duplicate the dispatch.
-      const isTimeout = /انتهت مهلة الطلب|signal timed out|aborted/i.test(msg)
+      const isTimeout = /انتهت مهلة الطلب|signal timed out|aborted|timed out/i.test(msg)
       if (isTimeout) {
-        setError(
-          'انتهت مهلة الطلب قبل وصول رد الخادم، لكن الحملة على الأرجح '
-          + 'تم إنشاؤها وبدأ إرسالها في الخلفية. اضغط «إطلاق الحملة الآن» '
-          + 'مرة أخرى — حماية التكرار في الخادم ستعيد نفس الحملة بدلاً '
-          + 'من إنشاء حملة جديدة، أو أغلق هذه النافذة وافتح الحملة من '
-          + 'القائمة لرؤية حالة الإرسال.'
-        )
+        setError(s8.launchTimeout)
       } else {
         setError(msg)
       }

@@ -1066,6 +1066,117 @@ export interface Translations {
       /** Maps backend Arabic badge strings → display label (EN block only; AR uses keys as values). */
       badges: Record<string, string>
     }
+    step4: {
+      noVars:              string
+      allAutoTitle:        string
+      allAutoDesc:         string
+      autoFilledHeader:    string
+      manualIntroManual:   string
+      manualIntroMixed:    string
+      placeholderExample:  string
+      dynamicValue:        string
+      autoVars: Record<string, { label: string; source: string }>
+      manualVarHints: Record<string, string>
+    }
+    step5: {
+      intro:           string
+      labelTemplate:   string
+      labelLanguage:   string
+      labelCategory:   string
+    }
+    step6: {
+      warningBefore:         string
+      warningStrong:         string
+      warningAfter:          string
+      phoneLabel:            string
+      sendTest:              string
+      mockDataNote:          string
+      testSent:              string
+      testSimulatedFallback: string
+      testFailedFallback:    string
+      unexpectedError:       string
+    }
+    step7: {
+      intro:                    string
+      summaryGoal:              string
+      summarySegment:           string
+      summaryTemplate:          string
+      summaryLanguage:          string
+      segmentCount:             string
+      campaignNameLabel:        string
+      campaignNamePlaceholder:  string
+      scheduleLabel:            string
+      scheduleImmediate:        string
+      scheduleScheduled:        string
+      scheduleDelayed:          string
+      delayMinutes:             string
+      delayHours:               string
+      couponReminderTitle:      string
+      couponReminderDesc:       string
+      couponManualLabel:        string
+      couponManualPlaceholder:  string
+      couponManualTplHint:      string
+      couponManualGoalHint:     string
+      couponAutoLabel:          string
+      couponAutoDesc:           string
+      couponAutoConfirm:        string
+      couponAutoOff:            string
+      sendStrategy: {
+        title:           string
+        qualityBadge:    string
+        tooSmall:        string
+        batchSizeLabel:  string
+        delayBetweenLabel: string
+        planTitle:       string
+        planSummary:     string
+        batchRecipient:  string
+        delayNone:       string
+        delaySeconds:    string
+        delayMinutes:    string
+        delayHours:      string
+        delayDays:       string
+        delay15m:        string
+        delay30m:        string
+        delay1h:         string
+        delay2h:         string
+        delay4h:         string
+        delay6h:         string
+        delay12h:        string
+        delay24h:        string
+        immediateLabel:  string
+        immediateDesc:   string
+        adaptiveLabel:   string
+        adaptiveDesc:    string
+        batchedLabel:    string
+        batchedDesc:     string
+      }
+    }
+    step8: {
+      readyTitle:           string
+      readyDesc:            string
+      protectionTitle:      string
+      protectionIntro:      string
+      protectionBullet1:    string
+      protectionBullet2:    string
+      protectionBullet3:    string
+      protectionFooter:     string
+      protectionDaysBadge:  string
+      protectionSafeBadge:  string
+      protectionIdempotentBadge: string
+      summaryCampaignName:  string
+      summaryTemplate:      string
+      summarySchedule:      string
+      summaryCoupon:        string
+      scheduleImmediate:    string
+      scheduleDelayed:      string
+      couponAutoPerCustomer: string
+      couponNone:           string
+      couponAutoPercent:    string
+      launchBtn:            string
+      launching:            string
+      launchCreateFailed:   string
+      launchTimeout:        string
+    }
   }
 
   /** Merchants (admin) page */
