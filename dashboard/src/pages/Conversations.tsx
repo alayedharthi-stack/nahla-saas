@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
+import { customersApi } from '../api/customers'
 import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 
@@ -54,6 +55,21 @@ const filterLabels: Record<string, string> = {
   closed:       'مغلقة',
 }
 
+function _normalizePhoneDigits(phone: string): string {
+  return (phone || '').replace(/\D/g, '')
+}
+
+async function _resolveCustomerIdByPhone(phone: string): Promise<number | null> {
+  const digits = _normalizePhoneDigits(phone)
+  if (!digits) return null
+  const res = await customersApi.list({ search: phone, perPage: 20, page: 1 })
+  const match = res.customers.find((c) => {
+    const cd = _normalizePhoneDigits(c.phone)
+    return cd === digits || cd.endsWith(digits.slice(-9)) || digits.endsWith(cd.slice(-9))
+  })
+  return match?.id ?? null
+}
+
 export default function Conversations() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
@@ -66,6 +82,10 @@ export default function Conversations() {
   const [searchQuery, setSearchQuery] = useState('')
   const [actionToast, setActionToast] = useState<string | null>(null)
   const [endingSupervision, setEndingSupervision] = useState(false)
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
+  const [campaignExcludeConfirm, setCampaignExcludeConfirm] = useState(false)
+  const [excludingFromCampaigns, setExcludingFromCampaigns] = useState(false)
+  const headerMenuRef = useRef<HTMLDivElement | null>(null)
 
   // mobile: 'list' = show list panel, 'chat' = show chat panel
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
@@ -542,6 +562,43 @@ export default function Conversations() {
     return () => window.clearTimeout(t)
   }, [actionToast])
 
+  useEffect(() => {
+    setHeaderMenuOpen(false)
+    setCampaignExcludeConfirm(false)
+  }, [selected?.phone])
+
+  useEffect(() => {
+    if (!headerMenuOpen) return
+    const onDocClick = (event: MouseEvent) => {
+      if (headerMenuRef.current && !headerMenuRef.current.contains(event.target as Node)) {
+        setHeaderMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [headerMenuOpen])
+
+  const confirmExcludeFromCampaigns = async () => {
+    if (!selected) return
+    setExcludingFromCampaigns(true)
+    try {
+      const customerId = await _resolveCustomerIdByPhone(selected.phone)
+      if (!customerId) {
+        throw new Error('لم يُعثر على سجل العميل — تأكد أن الرقم مسجّل في قائمة العملاء.')
+      }
+      await customersApi.updateMarketingPreferences(customerId, {
+        marketing_opt_out_manual: true,
+      })
+      setCampaignExcludeConfirm(false)
+      setHeaderMenuOpen(false)
+      setActionToast('تم استبعاد العميل من الحملات التسويقية')
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'تعذّر استبعاد العميل من الحملات')
+    } finally {
+      setExcludingFromCampaigns(false)
+    }
+  }
+
   const endHumanSupervisionForSelected = async () => {
     if (!selected) return
     const inTakeover =
@@ -557,6 +614,7 @@ export default function Conversations() {
       })
       _applyReturnToAIState(selected.phone)
       setActionToast('تمت إعادة المحادثة إلى الذكاء')
+      setHeaderMenuOpen(false)
       await reloadFirstPagePreserveTail({ silent: true })
       await loadMessagesForOpenChat(selected.phone)
     } catch (e) {
@@ -1020,79 +1078,118 @@ export default function Conversations() {
                 </p>
               </div>
 
-              {/* تحكم بالذكاء: زر واحد (تشغيل / إيقاف مؤقت) + تولّي اختياري */}
-              <div className="flex items-center gap-1 flex-wrap justify-end">
+              {/* زر أساسي واحد + قائمة ⋮ */}
+              <div className="flex items-center gap-1 shrink-0">
                 {!_isBlocked(selected) && (() => {
                   const humanTakeover =
                     !!selected.needsHuman ||
                     !!selected.handoffActive ||
                     selected.status === 'human'
                   const intelligenceOff = humanTakeover || !!selected.aiPaused
-                  return (
-                    <>
-                      {!humanTakeover && (
-                        <button
-                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3"
-                          onClick={handleHandoff}
-                          title="تولّي المحادثة بدلاً من الذكاء (تنتقل لتبويب «بشري»)"
-                        >
-                          <UserCheck className="w-3.5 h-3.5" />
-                          تولّي
-                        </button>
-                      )}
-                      {humanTakeover && (
-                        <button
-                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-blue-700 border-blue-200 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
-                          onClick={endHumanSupervisionForSelected}
-                          disabled={endingSupervision}
-                          title="إنهاء إشراف الموظف وإخراج المحادثة من «طلب موظف»"
-                        >
-                          {endingSupervision ? (
-                            <Clock className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <RotateCcw className="w-3.5 h-3.5" />
-                          )}
-                          إنهاء إشراف الموظف
-                        </button>
-                      )}
-                      {intelligenceOff ? (
-                        <button
-                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
-                          onClick={resumeIntelligenceForSelected}
-                          title="استئناف ردود الذكاء الآلية (يشمل إنهاء التولّي البشري إن وُجد)"
-                        >
-                          <Play className="w-3.5 h-3.5" />
-                          تشغيل الذكاء
-                        </button>
-                      ) : (
-                        <button
-                          className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
-                          onClick={pauseIntelligenceForSelected}
-                          title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
-                        >
-                          <Pause className="w-3.5 h-3.5" />
-                          إيقاف الذكاء مؤقتاً
-                        </button>
-                      )}
-                    </>
+                  return intelligenceOff ? (
+                    <button
+                      className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                      onClick={resumeIntelligenceForSelected}
+                      title="استئناف ردود الذكاء الآلية"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      تشغيل الذكاء
+                    </button>
+                  ) : (
+                    <button
+                      className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                      onClick={pauseIntelligenceForSelected}
+                      title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
+                    >
+                      <Pause className="w-3.5 h-3.5" />
+                      إيقاف الذكاء
+                    </button>
                   )
                 })()}
-                <button
-                  className="hidden sm:flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-rose-600 border-rose-200 bg-rose-50 hover:bg-rose-100"
-                  onClick={handleBlockNumber}
-                  title="إضافة الرقم لقائمة الأرقام الممنوعة (الذكاء لن يرد عليه أبداً)"
-                >
-                  <Ban className="w-3.5 h-3.5" />
-                  حظر الرقم
-                </button>
-                <button
-                  className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 active:bg-slate-200"
-                  onClick={() => {
-                    // Show context menu — future feature
-                  }}
-                >
-                  <MoreVertical className="w-4 h-4" />
-                </button>
+
+                <div className="relative" ref={headerMenuRef}>
+                  <button
+                    type="button"
+                    className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-500 active:bg-slate-200"
+                    onClick={() => setHeaderMenuOpen((open) => !open)}
+                    aria-label="المزيد من الإجراءات"
+                    aria-expanded={headerMenuOpen}
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                  </button>
+
+                  {headerMenuOpen && selected && (() => {
+                    const humanTakeover =
+                      !!selected.needsHuman ||
+                      !!selected.handoffActive ||
+                      selected.status === 'human'
+                    return (
+                      <div
+                        className="absolute end-0 top-full mt-1 w-56 bg-white rounded-xl shadow-lg border border-slate-200 py-1 z-50"
+                        dir="rtl"
+                      >
+                        {!_isBlocked(selected) && !humanTakeover && (
+                          <button
+                            type="button"
+                            className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
+                            onClick={() => {
+                              setHeaderMenuOpen(false)
+                              void handleHandoff()
+                            }}
+                          >
+                            <UserCheck className="w-4 h-4 text-slate-500" />
+                            تولّي المحادثة
+                          </button>
+                        )}
+                        {humanTakeover && (
+                          <button
+                            type="button"
+                            className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                            onClick={() => {
+                              setHeaderMenuOpen(false)
+                              void endHumanSupervisionForSelected()
+                            }}
+                            disabled={endingSupervision}
+                          >
+                            {endingSupervision ? (
+                              <Clock className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <RotateCcw className="w-4 h-4" />
+                            )}
+                            إنهاء إشراف الموظف
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
+                          onClick={() => {
+                            setHeaderMenuOpen(false)
+                            setCampaignExcludeConfirm(true)
+                          }}
+                        >
+                          <Megaphone className="w-4 h-4 text-violet-500" />
+                          استبعاد من الحملات
+                        </button>
+                        {!_isBlocked(selected) && (
+                          <>
+                            <div className="my-1 border-t border-slate-100" />
+                            <button
+                              type="button"
+                              className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-rose-600 hover:bg-rose-50"
+                              onClick={() => {
+                                setHeaderMenuOpen(false)
+                                void handleBlockNumber()
+                              }}
+                            >
+                              <Ban className="w-4 h-4" />
+                              حظر الرقم
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )
+                  })()}
+                </div>
               </div>
             </div>
 
@@ -1104,8 +1201,55 @@ export default function Conversations() {
                 <span>
                   هذه المحادثة <strong>تحت إشراف موظف بشري</strong>
                   {selected.takenOverBy && <> — بواسطة <strong>{selected.takenOverBy}</strong></>}
-                  . لن يرد الذكاء حتى تضغط «إنهاء إشراف الموظف» أو «تشغيل الذكاء» أعلاه.
+                  . لن يرد الذكاء حتى تضغط «تشغيل الذكاء» أو «إنهاء إشراف الموظف» من قائمة ⋮.
                 </span>
+              </div>
+            )}
+
+            {campaignExcludeConfirm && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
+                onClick={() => { if (!excludingFromCampaigns) setCampaignExcludeConfirm(false) }}
+              >
+                <div
+                  className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4"
+                  dir="rtl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-violet-100 rounded-xl flex items-center justify-center shrink-0">
+                      <Megaphone className="w-5 h-5 text-violet-600" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-base font-semibold text-slate-900">استبعاد من الحملات</h3>
+                      <p className="text-xs text-slate-500 mt-0.5 truncate">{selected.customer}</p>
+                    </div>
+                  </div>
+
+                  <p className="text-sm text-slate-600 leading-relaxed">
+                    سيتم استبعاد هذا العميل من الحملات التسويقية فقط، وسيبقى الذكاء والردود الآلية تعمل بشكل طبيعي.
+                  </p>
+
+                  <div className="flex gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setCampaignExcludeConfirm(false)}
+                      disabled={excludingFromCampaigns}
+                      className="flex-1 btn-secondary text-sm"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { void confirmExcludeFromCampaigns() }}
+                      disabled={excludingFromCampaigns}
+                      className="flex-1 inline-flex items-center justify-center gap-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {excludingFromCampaigns ? <Clock className="w-4 h-4 animate-spin" /> : <Megaphone className="w-4 h-4" />}
+                      {excludingFromCampaigns ? 'جارٍ الاستبعاد…' : 'استبعاد'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1489,7 +1633,7 @@ export default function Conversations() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Reply bar — mobile quick actions */}
+            {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}
             <div className="sm:hidden flex items-center gap-2 px-3 py-2 bg-white border-t border-slate-100">
               {!_isBlocked(selected) &&
                 (() => {
@@ -1499,55 +1643,29 @@ export default function Conversations() {
                     selected.status === 'human'
                   const intelligenceOff = humanTakeover || !!selected.aiPaused
                   return (
-                    <>
-                      {!humanTakeover && (
-                        <button
-                          className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-amber-50 text-amber-600 font-medium active:bg-amber-100"
-                          type="button"
-                          onClick={handleHandoff}
-                        >
-                          <UserCheck className="w-3.5 h-3.5" /> تولّي
-                        </button>
+                    <button
+                      type="button"
+                      className={`w-full flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium active:opacity-90 ${
+                        intelligenceOff
+                          ? 'bg-emerald-50 text-emerald-700'
+                          : 'bg-amber-50 text-amber-700'
+                      }`}
+                      onClick={
+                        intelligenceOff
+                          ? resumeIntelligenceForSelected
+                          : pauseIntelligenceForSelected
+                      }
+                    >
+                      {intelligenceOff ? (
+                        <>
+                          <Play className="w-3.5 h-3.5" /> تشغيل الذكاء
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="w-3.5 h-3.5" /> إيقاف الذكاء
+                        </>
                       )}
-                      {humanTakeover && (
-                        <button
-                          type="button"
-                          className="flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg bg-blue-50 text-blue-700 font-medium active:bg-blue-100 disabled:opacity-50"
-                          onClick={endHumanSupervisionForSelected}
-                          disabled={endingSupervision}
-                        >
-                          {endingSupervision ? (
-                            <Clock className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <RotateCcw className="w-3.5 h-3.5" />
-                          )}
-                          إنهاء إشراف الموظف
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium active:opacity-90 ${
-                          intelligenceOff
-                            ? 'bg-emerald-50 text-emerald-700'
-                            : 'bg-amber-50 text-amber-700'
-                        }`}
-                        onClick={
-                          intelligenceOff
-                            ? resumeIntelligenceForSelected
-                            : pauseIntelligenceForSelected
-                        }
-                      >
-                        {intelligenceOff ? (
-                          <>
-                            <Play className="w-3.5 h-3.5" /> تشغيل الذكاء
-                          </>
-                        ) : (
-                          <>
-                            <Pause className="w-3.5 h-3.5" /> إيقاف الذكاء مؤقتاً
-                          </>
-                        )}
-                      </button>
-                    </>
+                    </button>
                   )
                 })()}
             </div>
