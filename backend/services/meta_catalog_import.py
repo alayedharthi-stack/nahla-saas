@@ -32,6 +32,13 @@ adopt that catalog as the seed for Nahla's local catalog so:
 
 Import contract
 ───────────────
+* **Meta field mapping (stable contract for AI commerce + WhatsApp cards):**
+  Meta Graph ``id`` is stored as ``Product.external_id`` (there is no
+  separate ``meta_product_id`` column). Meta Graph ``retailer_id`` is
+  stored as ``Product.meta_retailer_id``. Official WhatsApp product
+  messages resolve the send SKU via :func:`core.catalog.effective_retailer_id`
+  (``meta_retailer_id`` first, then ``external_id``). AI product lookup
+  reads the same tenant-scoped ``products`` rows — never live Meta APIs.
 * Idempotent: rows are matched by ``meta_retailer_id`` first, then by
   ``external_id``. Re-running the import refreshes title / description
   / price / image without creating duplicates.
