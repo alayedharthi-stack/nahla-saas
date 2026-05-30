@@ -502,33 +502,28 @@ class DefaultDecisionEngine:
         # When no tracking URL exists yet, route to the LLM with a strict
         # response_goal so the customer always gets a natural reply.
         try:
+            from core.active_order_context import prepare_tracking_follow_up_decision  # noqa: PLC0415
             from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
-                build_tracking_follow_up_args,
-                looks_like_payment_link_request,
                 should_use_generative_tracking_follow_up,
             )
+            _bundle = getattr(ctx, "commerce_bundle", None) or {}
             if should_use_generative_tracking_follow_up(
                 ctx.message or "",
                 history=ctx.history,
                 state=state,
+                commerce_bundle=_bundle,
             ):
+                _track_args = prepare_tracking_follow_up_decision(ctx)
                 logger.info(
                     "[TRACKING_LINK_GUARD] generative follow-up | tenant=%s "
                     "preview=%r order_status=%r",
                     ctx.tenant_id,
                     (ctx.message or "")[:60],
-                    build_tracking_follow_up_args(
-                        state=state,
-                        history=ctx.history,
-                    ).get("order_status", ""),
+                    _track_args.get("order_status", ""),
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
-                    args=build_tracking_follow_up_args(
-                        state=state,
-                        history=ctx.history,
-                        tracking_available=False,
-                    ),
+                    args=_track_args,
                     reason=(
                         "post-order tracking/shipping link follow-up — "
                         "generative reply (no tracking URL yet); do not "
@@ -571,22 +566,20 @@ class DefaultDecisionEngine:
         # ── 3. Track order ────────────────────────────────────────────────
         if intent.name == INTENT_TRACK_ORDER:
             try:
+                from core.active_order_context import prepare_tracking_follow_up_decision  # noqa: PLC0415
                 from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
-                    build_tracking_follow_up_args,
                     should_use_generative_tracking_follow_up,
                 )
+                _bundle = getattr(ctx, "commerce_bundle", None) or {}
                 if should_use_generative_tracking_follow_up(
                     ctx.message or "",
                     history=ctx.history,
                     state=state,
+                    commerce_bundle=_bundle,
                 ):
                     return Decision(
                         action=ACTION_LLM_REPLY,
-                        args=build_tracking_follow_up_args(
-                            state=state,
-                            history=ctx.history,
-                            tracking_available=False,
-                        ),
+                        args=prepare_tracking_follow_up_decision(ctx),
                         reason=(
                             "track_order intent but customer asked for a "
                             "future tracking link — generative follow-up"
@@ -1684,14 +1677,16 @@ class DefaultDecisionEngine:
         # we have a product in focus → continue collecting checkout slots.
         # This is the last line of defence before LLM fallback.
         try:
+            from core.active_order_context import prepare_tracking_follow_up_decision  # noqa: PLC0415
             from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
-                build_tracking_follow_up_args,
                 should_use_generative_tracking_follow_up,
             )
+            _bundle = getattr(ctx, "commerce_bundle", None) or {}
             if should_use_generative_tracking_follow_up(
                 ctx.message or "",
                 history=ctx.history,
                 state=state,
+                commerce_bundle=_bundle,
             ):
                 logger.info(
                     "[ORDER FLOW] suppress ordering safety net for post-order "
@@ -1701,11 +1696,7 @@ class DefaultDecisionEngine:
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
-                    args=build_tracking_follow_up_args(
-                        state=state,
-                        history=ctx.history,
-                        tracking_available=False,
-                    ),
+                    args=prepare_tracking_follow_up_decision(ctx),
                     reason=(
                         "ordering_stage_safety_net bypassed — active order "
                         "exists and customer asked about tracking/shipping link"

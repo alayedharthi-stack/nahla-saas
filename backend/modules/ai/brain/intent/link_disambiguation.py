@@ -387,8 +387,16 @@ def has_active_post_order_context(
     state: Any = None,
     order_prep: Any = None,
     history: Optional[List[Dict[str, Any]]] = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Unified post-order detector for brain + safety-net layers."""
+    try:
+        from core.active_order_context import structured_indicates_post_order  # noqa: PLC0415
+
+        if structured_indicates_post_order(commerce_bundle):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
     if brain_state_indicates_post_order(state):
         return True
     if order_prep_indicates_post_order(order_prep):
@@ -451,6 +459,7 @@ def looks_like_tracking_link_request(
     history: Optional[List[Dict[str, Any]]] = None,
     state: Any = None,
     order_prep: Any = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """True when the customer is asking about shipment / tracking links."""
     norm = _normalise(message)
@@ -476,6 +485,7 @@ def looks_like_tracking_link_request(
         state=state,
         order_prep=order_prep,
         history=history,
+        commerce_bundle=commerce_bundle,
     )
     if not post_order:
         return False
@@ -498,6 +508,7 @@ def should_suppress_store_link_intent(
     history: Optional[List[Dict[str, Any]]] = None,
     state: Any = None,
     order_prep: Any = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Gate store-link safety nets / artifact injection for non-store asks."""
     if looks_like_physical_location_request(message):
@@ -507,6 +518,7 @@ def should_suppress_store_link_intent(
         history=history,
         state=state,
         order_prep=order_prep,
+        commerce_bundle=commerce_bundle,
     )
 
 
@@ -592,6 +604,13 @@ def extract_order_reference(
 
 def is_pre_ship_status(status: str) -> bool:
     slug = str(status or "").strip().lower()
+    try:
+        from core.active_order_context import is_pre_ship_canonical  # noqa: PLC0415
+
+        if slug in {"pending_review", "confirmed", "preparing", "shipped", "delivered"}:
+            return is_pre_ship_canonical(slug)
+    except Exception:  # noqa: BLE001
+        pass
     if slug in _SHIPPED_STATUSES:
         return False
     return slug in PRE_SHIP_STATUSES or not slug
@@ -603,6 +622,7 @@ def should_use_generative_tracking_follow_up(
     history: Optional[List[Dict[str, Any]]] = None,
     state: Any = None,
     order_prep: Any = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """True when the brain (not a template) should answer a tracking-link ask."""
     if looks_like_payment_link_request(message):
@@ -613,6 +633,7 @@ def should_use_generative_tracking_follow_up(
         state=state,
         order_prep=order_prep,
         history=history,
+        commerce_bundle=commerce_bundle,
     ):
         return False
     if not looks_like_tracking_link_request(
@@ -620,13 +641,24 @@ def should_use_generative_tracking_follow_up(
         history=history,
         state=state,
         order_prep=order_prep,
+        commerce_bundle=commerce_bundle,
     ):
         return False
-    status = resolve_order_status(
-        state=state,
-        order_prep=order_prep,
-        history=history,
-    )
+    try:
+        from core.active_order_context import resolve_order_status as _resolve_status  # noqa: PLC0415
+
+        status, _mode = _resolve_status(
+            commerce_bundle=commerce_bundle,
+            state=state,
+            order_prep=order_prep,
+            history=history,
+        )
+    except Exception:  # noqa: BLE001
+        status = resolve_order_status(
+            state=state,
+            order_prep=order_prep,
+            history=history,
+        )
     return is_pre_ship_status(status)
 
 
@@ -635,17 +667,40 @@ def build_tracking_follow_up_args(
     state: Any = None,
     history: Optional[List[Dict[str, Any]]] = None,
     tracking_available: bool = False,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Decision args for ``ACTION_LLM_REPLY`` tracking follow-up turns."""
+    try:
+        from core.active_order_context import (  # noqa: PLC0415
+            resolve_order_reference as _resolve_ref,
+            resolve_order_status as _resolve_status,
+            tracking_available_from_bundle,
+        )
+
+        order_ref, _ref_mode = _resolve_ref(
+            commerce_bundle=commerce_bundle,
+            state=state,
+            history=history,
+        )
+        status, _status_mode = _resolve_status(
+            commerce_bundle=commerce_bundle,
+            state=state,
+            order_prep=getattr(state, "order_prep", None) if state else None,
+            history=history,
+        )
+        if commerce_bundle is not None:
+            tracking_available = tracking_available_from_bundle(commerce_bundle)
+    except Exception:  # noqa: BLE001
+        order_ref = extract_order_reference(state=state, history=history)
+        status = resolve_order_status(state=state, history=history)
+
     args: Dict[str, Any] = {
         "topic": "tracking_link_follow_up",
         "intent_hint": "order_tracking",
         "tracking_available": bool(tracking_available),
     }
-    order_ref = extract_order_reference(state=state, history=history)
     if order_ref:
         args["order_reference"] = order_ref
-    status = resolve_order_status(state=state, history=history)
     if status:
         args["order_status"] = status
     return args

@@ -555,6 +555,19 @@ class MerchantBrain:
             )
             merchant_context = {}
 
+        commerce_bundle: Dict[str, Any] = {}
+        try:
+            from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
+
+            commerce_bundle = load_commerce_bundle_from_db(
+                db, tenant_id, customer_phone,
+            )
+        except Exception as _cb_exc:  # noqa: BLE001
+            logger.debug(
+                "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
+                tenant_id, _cb_exc,
+            )
+
         ctx = BrainContext(
             tenant_id      = tenant_id,
             customer_phone = customer_phone,
@@ -570,6 +583,7 @@ class MerchantBrain:
             tenant_context = tenant_ctx,
             merchant_context = merchant_context,
             human_priority = bool(human_priority),
+            commerce_bundle  = commerce_bundle,
         )
         if human_priority:
             logger.info(

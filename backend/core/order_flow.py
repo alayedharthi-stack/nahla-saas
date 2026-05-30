@@ -1208,6 +1208,20 @@ def apply_state_patch(
         op.update(state_patch)
         bs["order_prep"] = op
         meta["brain_state"] = bs
+        try:
+            from core.active_order_context import maybe_persist_from_patch  # noqa: PLC0415
+
+            maybe_persist_from_patch(
+                meta,
+                brain_state=bs,
+                order_prep=op,
+                state_patch=state_patch,
+            )
+        except Exception as _aoc_exc:  # noqa: BLE001
+            logger.warning(
+                "[ACTIVE_ORDER_CONTEXT] persist hook failed tenant=%s: %s",
+                tenant_id, _aoc_exc,
+            )
         conv.extra_metadata = meta
         try:
             flag_modified(conv, "extra_metadata")

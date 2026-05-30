@@ -259,6 +259,21 @@ class DefaultStateStore:
 
             meta = dict(conv.extra_metadata or {})
             meta[_STATE_KEY] = state.to_dict()
+            _bs = state.to_dict()
+            _op = _bs.get("order_prep") or {}
+            try:
+                from core.active_order_context import maybe_persist_from_brain_save  # noqa: PLC0415
+
+                maybe_persist_from_brain_save(
+                    meta,
+                    brain_state=_bs,
+                    order_prep=_op,
+                )
+            except Exception as _aoc_exc:  # noqa: BLE001
+                logger.warning(
+                    "[ACTIVE_ORDER_CONTEXT] brain_save persist failed tenant=%s: %s",
+                    tenant_id, _aoc_exc,
+                )
             conv.extra_metadata = meta
 
             # JSONB without MutableDict.as_mutable() does NOT track in-place

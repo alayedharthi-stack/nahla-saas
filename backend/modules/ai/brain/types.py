@@ -733,6 +733,9 @@ class BrainContext:
     # way without the AI competing with them. Strictly turn-local —
     # NOT persisted on the Conversation row.
     human_priority: bool = False
+    # Structured post-order commerce context loaded from
+    # ``Conversation.extra_metadata`` (Phase A). Empty dict when absent.
+    commerce_bundle: Dict[str, Any] = field(default_factory=dict)
     # Relational layer verdict for THIS turn (May 2026 — Tenant 33 #49,
     # Commit 1 of the relational architecture rollout). Computed in
     # ``Pipeline.process`` when ``RELATIONAL_LAYER_ENABLED`` is on.

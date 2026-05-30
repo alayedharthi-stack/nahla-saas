@@ -233,6 +233,39 @@ class TestDecisionEnginePostOrder:
         assert d.args.get("topic") == "tracking_link_follow_up"
         assert d.args.get("tracking_available") is False
 
+    def test_tracking_resolves_from_structured_context_only(self):
+        from modules.ai.brain.intent.link_disambiguation import (
+            has_active_post_order_context,
+            should_use_generative_tracking_follow_up,
+            build_tracking_follow_up_args,
+        )
+
+        bundle = {
+            "active_order_id": "262511443",
+            "active_order_context": {
+                "order_id": "262511443",
+                "order_status": "pending_review",
+                "raw_order_status": "under_review",
+                "shipping_status": "not_shipped",
+                "tracking_url": None,
+                "tracking_number": None,
+                "product_summary": "عسل سدر",
+            },
+            "recent_order_ids": ["262511443"],
+        }
+        assert has_active_post_order_context(commerce_bundle=bundle, history=[]) is True
+        assert should_use_generative_tracking_follow_up(
+            "رابط التتبع",
+            history=[],
+            commerce_bundle=bundle,
+        ) is True
+        args = build_tracking_follow_up_args(
+            commerce_bundle=bundle,
+            history=[],
+        )
+        assert args["order_reference"] == "262511443"
+        assert args["tracking_available"] is False
+
     def test_post_order_context_survives_product_questions_in_between(self):
         from modules.ai.brain.intent.link_disambiguation import (
             has_active_post_order_context,
