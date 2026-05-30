@@ -56,7 +56,125 @@ class ProductSearchHandler:
                 },
             )
 
+        from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+            _product_key,
+            next_catalog_browse_batch,
+            resolve_product_breadth_from_context,
+        )
+        breadth = resolve_product_breadth_from_context(ctx, decision)
+        fetch_limit = breadth.search_fetch_limit
+        source = str(decision.args.get("source") or "").strip().lower()
+
+        def _format_result(
+            products: List[Dict[str, Any]],
+            *,
+            query: str,
+            browse_pool: List[Dict[str, Any]] | None = None,
+            browse_offset: int | None = None,
+        ) -> ActionResult:
+            lines = []
+            for p in products:
+                price_str = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
+                line = f"• {p['title']} — {price_str}"
+                if p.get("sku"):
+                    line += f" [SKU: {p['sku']}]"
+                lines.append(line)
+            after_search = decision.args.get("after_search", "")
+            suggest_narrow = len(products) > breadth.display_limit and not after_search
+            selected_product = products[0] if len(products) == 1 else None
+            payload: Dict[str, Any] = {
+                "products": products,
+                "product_lines": "\n".join(lines),
+                "count": len(products),
+                "query": query,
+                "suggest_narrow": suggest_narrow,
+                "after_search": after_search,
+                "product": selected_product,
+                "product_breadth": breadth.to_log_dict(),
+            }
+            if browse_pool is not None:
+                payload["browse_pool"] = browse_pool
+            if browse_offset is not None:
+                payload["browse_offset"] = browse_offset
+            return ActionResult(success=True, data=payload)
+
+        # Verbatim repeat — same list the customer already saw.
+        replay_candidates = decision.args.get("replay_candidates")
+        if replay_candidates:
+            products = _apply_affinity_boost(list(replay_candidates), ctx)
+            return _format_result(products, query=str(decision.args.get("query") or ""))
+
         query = decision.args.get("query", ctx.message)
+        state = getattr(ctx, "state", None)
+
+        # Progressive browse — next unseen slice, never repeat last turn.
+        if source == "show_more":
+            pool = list(getattr(state, "catalog_browse_pool", None) or [])
+            offset = int(getattr(state, "catalog_browse_offset", 0) or 0)
+            shown_keys = [
+                _product_key(p)
+                for p in (getattr(state, "last_search_candidates", None) or [])
+            ]
+            batch, next_offset = next_catalog_browse_batch(
+                pool,
+                offset=offset,
+                exclude_keys=shown_keys,
+                limit=fetch_limit,
+            )
+            refreshed_pool = pool
+            if not batch:
+                runtime = CommerceToolRuntime(
+                    ctx._db,  # type: ignore[attr-defined]
+                    tenant_id=ctx.tenant_id,
+                    customer_phone=ctx.customer_phone,
+                    customer_id=ctx.customer_id,
+                    tenant_context=ctx.tenant_context,
+                )
+                q = str(query or getattr(state, "last_browse_query", "") or "")
+                runtime_result = await runtime.execute(
+                    "search_products",
+                    {"query": q, "limit": max(fetch_limit, 12)},
+                )
+                refreshed_pool = list(runtime_result.payload.get("products") or [])
+                if not refreshed_pool and not q:
+                    runtime_result = await runtime.execute(
+                        "search_products",
+                        {"limit": max(fetch_limit, 12)},
+                    )
+                    refreshed_pool = list(runtime_result.payload.get("products") or [])
+                refreshed_pool = _apply_affinity_boost(refreshed_pool, ctx)
+                seen = {
+                    _product_key(p)
+                    for p in (pool + list(getattr(state, "last_search_candidates", None) or []))
+                }
+                batch, next_offset = next_catalog_browse_batch(
+                    refreshed_pool,
+                    offset=0,
+                    exclude_keys=list(seen),
+                    limit=fetch_limit,
+                )
+            products = _apply_affinity_boost(batch, ctx)
+            logger.info(
+                "[ORDER FLOW] show_more_batch | tenant=%s shown_before=%d "
+                "batch=%d next_offset=%d pool=%d",
+                ctx.tenant_id,
+                len(shown_keys),
+                len(products),
+                next_offset,
+                len(refreshed_pool),
+            )
+            if not products:
+                return ActionResult(
+                    success=False,
+                    error="no_more_products",
+                    data={"message": "no_more_products"},
+                )
+            return _format_result(
+                products,
+                query=str(query or getattr(state, "last_browse_query", "") or ""),
+                browse_pool=refreshed_pool,
+                browse_offset=next_offset,
+            )
 
         try:
             runtime = CommerceToolRuntime(
@@ -68,13 +186,16 @@ class ProductSearchHandler:
             )
             runtime_result = await runtime.execute(
                 "search_products",
-                {"query": query, "limit": 8},
+                {"query": query, "limit": fetch_limit},
             )
             products = list(runtime_result.payload.get("products") or [])
 
-            # If search produced nothing but products exist → fallback to top 8
+            # If search produced nothing but products exist → fallback to top sellers
             if not products:
-                runtime_result = await runtime.execute("search_products", {"limit": 8})
+                runtime_result = await runtime.execute(
+                    "search_products",
+                    {"limit": fetch_limit},
+                )
                 products = list(runtime_result.payload.get("products") or [])
 
             if not products:
@@ -87,29 +208,11 @@ class ProductSearchHandler:
             # Re-rank by customer affinity before formatting lines
             products = _apply_affinity_boost(products, ctx)
 
-            lines = []
-            for p in products:
-                price_str = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
-                line = f"• {p['title']} — {price_str}"
-                if p.get("sku"):
-                    line += f" [SKU: {p['sku']}]"
-                lines.append(line)
-
-            after_search = decision.args.get("after_search", "")
-            suggest_narrow = len(products) > 3 and not after_search
-            selected_product = products[0] if len(products) == 1 else None
-
-            return ActionResult(
-                success=True,
-                data={
-                    "products":      products,
-                    "product_lines": "\n".join(lines),
-                    "count":         len(products),
-                    "query":         query,
-                    "suggest_narrow": suggest_narrow,
-                    "after_search":   after_search,
-                    "product":        selected_product,
-                },
+            return _format_result(
+                products,
+                query=str(query or ""),
+                browse_pool=products,
+                browse_offset=0,
             )
 
         except Exception as exc:

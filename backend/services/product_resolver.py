@@ -459,7 +459,7 @@ def extract_product_markers(
     reply_text: str,
     *,
     customer_id: Optional[int] = None,
-    max_attachments: int = 3,
+    max_attachments: int = 2,
 ) -> tuple[str, List[ProductResolution], List[str]]:
     """Strip ``[PRODUCT:<query>]`` tokens from ``reply_text``.
 
@@ -469,9 +469,8 @@ def extract_product_markers(
         removed (the customer never sees ``[PRODUCT:...]``).
       * ``resolutions``      — the resolved products in the
         order the LLM cited them. Deduped by ``id``. Capped at
-        ``max_attachments`` (default 3 — products are heavier UX
-        than payment barcodes, but a customer asking "إيش
-        عندكم؟" reasonably gets a small line-up).
+        ``max_attachments`` (default 2 — aligned with
+        ``LIMIT_RECOMMENDATION_BREADTH`` catalog-card policy).
       * ``missing_queries``  — queries the LLM emitted that did
         not resolve. Logged + can be appended to the reply text
         as "تأكد من اسم المنتج…" if the caller wants.

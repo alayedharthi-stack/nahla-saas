@@ -200,6 +200,15 @@ class DefaultComposer:
             rejected = decision.args.get("rejected_product")
             if rejected:
                 alts = decision.args.get("alternatives") or data.get("products") or []
+                from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                    apply_display_slice,
+                    resolve_product_breadth_from_context,
+                )
+                breadth = resolve_product_breadth_from_context(ctx, result.decision)
+                alts, breadth_meta = apply_display_slice(alts, breadth)
+                result.data["pending_candidates"] = alts
+                result.data["product_breadth"] = breadth.to_log_dict()
+                result.data["product_breadth_meta"] = breadth_meta
                 logger.error(
                     "[ORDER FLOW] product_unavailable_alternatives fired | "
                     "rejected=%r alts_count=%d",
@@ -237,13 +246,28 @@ class DefaultComposer:
             if not safe_products:
                 return T.no_products(variant=self._variant_idx(ctx))
 
+            from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                apply_display_slice,
+                log_product_breadth,
+                resolve_product_breadth_from_context,
+            )
+            breadth = resolve_product_breadth_from_context(ctx, result.decision)
+            candidates, breadth_meta = apply_display_slice(safe_products, breadth)
+            log_product_breadth(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                breadth=breadth,
+                total=len(safe_products),
+                shown=len(candidates),
+                action=action,
+            )
+            result.data["product_breadth"] = breadth.to_log_dict()
+            result.data["product_breadth_meta"] = breadth_meta
+
             # INVARIANT: pending_candidates = EXACTLY the products shown in
             # the numbered list.  The customer reads "1. بنطلون" and expects
             # sending "1" to give them بنطلون — any mismatch causes the
             # "بلوزة غير متوفر" bug.
-            # WA quick-reply buttons are capped at 3 (platform limit) but
-            # the candidates list holds ALL shown products.
-            candidates = safe_products   # all of them — shown & stored
+            # WA quick-reply buttons are capped at 3 (platform limit).
             wa_buttons = []
             for i, p in enumerate(candidates[:3], 1):
                 raw_title = str(p.get("title") or "")
@@ -254,12 +278,19 @@ class DefaultComposer:
                     "reply": {"id": f"pick_{i}", "title": title or str(i)},
                 })
             result.data["pending_buttons"] = wa_buttons
-            # Store ALL candidates so pick-by-number always resolves correctly.
             result.data["pending_candidates"] = candidates
             variant = self._variant_idx(ctx)
-            text = T.narrow_choices(products=candidates, variant=variant)
+            text = T.narrow_choices(
+                products=candidates,
+                variant=variant,
+                show_more_hint=bool(breadth_meta.get("show_more_hint")),
+            )
             if self._is_duplicate(text, ctx):
-                text = T.narrow_choices(products=candidates, variant=(variant + 1) % 3)
+                text = T.narrow_choices(
+                    products=candidates,
+                    variant=(variant + 1) % 3,
+                    show_more_hint=bool(breadth_meta.get("show_more_hint")),
+                )
             return text
 
         # ── Draft order ────────────────────────────────────────────────────
@@ -475,10 +506,28 @@ class DefaultComposer:
 
         # ── Narrow choices ─────────────────────────────────────────────────
         if action == ACTION_NARROW:
+            from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                apply_display_slice,
+                resolve_product_breadth_from_context,
+            )
+            breadth = resolve_product_breadth_from_context(ctx, result.decision)
+            products, breadth_meta = apply_display_slice(
+                list(data.get("products") or []),
+                breadth,
+            )
+            result.data["pending_candidates"] = products
             variant = self._variant_idx(ctx)
-            text = T.narrow_choices(products=data.get("products", []), variant=variant)
+            text = T.narrow_choices(
+                products=products,
+                variant=variant,
+                show_more_hint=bool(breadth_meta.get("show_more_hint")),
+            )
             if self._is_duplicate(text, ctx):
-                text = T.narrow_choices(products=data.get("products", []), variant=(variant + 1) % 3)
+                text = T.narrow_choices(
+                    products=products,
+                    variant=(variant + 1) % 3,
+                    show_more_hint=bool(breadth_meta.get("show_more_hint")),
+                )
             return text
 
         # ── Handoff ────────────────────────────────────────────────────────

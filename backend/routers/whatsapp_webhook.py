@@ -5816,7 +5816,6 @@ async def _handle_merchant_message(
                         if _early_barcode_image else
                         "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
                     )
-                    # 1) warm text reply
                     _text_ok = await _send_whatsapp_message(
                         phone_id=phone_id, to=to, text=_intro_text,
                         _tenant_id=tenant_id, _db=db,
@@ -6231,6 +6230,7 @@ async def _handle_merchant_message(
                         "name":  getattr(customer, "name", None) or "",
                         "email": getattr(customer, "email", None) or "",
                         "id":    getattr(customer, "id", None),
+                        "inbound_metadata": dict(inbound_metadata or {}),
                     }
                     if customer is not None:
                         full_profile = svc.ensure_profile(customer)
@@ -7576,13 +7576,59 @@ async def _handle_merchant_message(
                     tenant_id, _mk_exc,
                 )
 
+        # ── Non-commerce safety gate (May 2026) ─────────────────────
+        # Suppress product markers, safety nets, visual enforcement,
+        # and catalog sends when inbound media/text is social/religious.
+        _commerce_blocked = False
+        _positive_commerce = False
+        _catalog_card_limit = 2
+        try:
+            from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+                has_positive_commerce_intent,
+                resolve_commerce_block,
+            )
+            from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
+                resolve_breadth_for_inbound,
+            )
+            _bs_for_nc = ((convo.extra_metadata or {}).get("brain_state") or {})
+            _intent_for_nc = str(_bs_for_nc.get("last_intent") or "")
+            _nc_turn = resolve_commerce_block(
+                text or "",
+                inbound_metadata=inbound_metadata,
+                intent_name=_intent_for_nc or None,
+            )
+            _commerce_blocked = _nc_turn is not None
+            _positive_commerce = has_positive_commerce_intent(_intent_for_nc)
+            _catalog_card_limit = resolve_breadth_for_inbound(
+                message=text or "",
+                inbound_metadata=inbound_metadata,
+                brain_state=_bs_for_nc,
+            ).catalog_card_limit
+            if _commerce_blocked:
+                logger.info(
+                    "[NON_COMMERCE_BLOCK] tenant=%s suppressing commerce "
+                    "escalation category=%s source=%s",
+                    tenant_id,
+                    _nc_turn.category if _nc_turn else "?",
+                    _nc_turn.source if _nc_turn else "?",
+                )
+        except Exception as _nc_exc:  # noqa: BLE001
+            logger.debug(
+                "[NON_COMMERCE_BLOCK] tenant=%s gate skipped: %s",
+                tenant_id, _nc_exc,
+            )
+
         # ── [PRODUCT:<query>] markers ──────────────────────────────
         # Resolve LLM-cited products against the synced catalog and
         # collect them as product-card attachments. The actual send
         # (image + caption + cta_url button) lives further down in
         # the outbound dispatch loop.
         _product_attachments: List[Dict[str, Any]] = []
-        if reply and "[PRODUCT:" in reply.upper():
+        if (
+            not _commerce_blocked
+            and reply
+            and "[PRODUCT:" in reply.upper()
+        ):
             try:
                 from services.product_resolver import (  # noqa: PLC0415
                     extract_product_markers as _extract_products,
@@ -7602,7 +7648,7 @@ async def _handle_merchant_message(
                     _extract_products(
                         db, tenant_id, reply,
                         customer_id=_cust_id_for_aff,
-                        max_attachments=3,
+                        max_attachments=_catalog_card_limit,
                     )
                 )
                 if _cleaned_reply3 != reply:
@@ -7750,37 +7796,57 @@ async def _handle_merchant_message(
             except Exception:
                 pass
 
-            # Product safety net
-            try:
-                _pn = _sn_product(
-                    db,
-                    tenant_id=tenant_id,
-                    customer_msg=text or "",
-                    existing_product_attachments=_product_attachments,
-                    detected_markers=_marker_detected["product"],
-                    customer_id=_cust_id_sn,
-                )
-                if _pn.fired and _pn.extra_attachment:
-                    _product_attachments.append(_pn.extra_attachment)
-                    _marker_resolved["product"] += 1
-                if _pn.fired or _pn.skipped_reason not in {"claude_marker_present", "already_attached", "no_intent_or_class", "empty_msg"}:
-                    # Only log "interesting" outcomes — silence the
-                    # boring "marker already there" case to keep log
-                    # volume sane (those are the common path).
-                    _payload = {
-                        "event":             "safety_net",
-                        "tenant_id":         tenant_id,
-                        "conversation_id":   getattr(convo, "id", None),
-                        **_pn.to_log_dict(),
-                    }
-                    logger.info(
-                        "[SAFETY_NET:product] "
-                        + _json_sn.dumps(_payload, ensure_ascii=False)
+            # Product safety net — skipped on non-commerce turns and when
+            # recommendation-breadth cap is already reached.
+            if not _commerce_blocked:
+                try:
+                    _pn = _sn_product(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_msg=text or "",
+                        existing_product_attachments=_product_attachments,
+                        detected_markers=_marker_detected["product"],
+                        customer_id=_cust_id_sn,
                     )
-            except Exception as _spe:  # noqa: BLE001
-                logger.warning(
-                    "[SAFETY_NET:product] failed tenant=%s err=%s",
-                    tenant_id, _spe,
+                    if (
+                        _pn.fired
+                        and _pn.extra_attachment
+                        and len(_product_attachments) < _catalog_card_limit
+                    ):
+                        _product_attachments.append(_pn.extra_attachment)
+                        _marker_resolved["product"] += 1
+                    elif _pn.fired and _pn.extra_attachment:
+                        logger.info(
+                            "[RECOMMENDATION_BREADTH] tenant=%s "
+                            "skipping product safety net append "
+                            "reason=catalog_card_limit limit=%d count=%d",
+                            tenant_id,
+                            _catalog_card_limit,
+                            len(_product_attachments),
+                        )
+                    if _pn.fired or _pn.skipped_reason not in {"claude_marker_present", "already_attached", "no_intent_or_class", "empty_msg"}:
+                        # Only log "interesting" outcomes — silence the
+                        # boring "marker already there" case to keep log
+                        # volume sane (those are the common path).
+                        _payload = {
+                            "event":             "safety_net",
+                            "tenant_id":         tenant_id,
+                            "conversation_id":   getattr(convo, "id", None),
+                            **_pn.to_log_dict(),
+                        }
+                        logger.info(
+                            "[SAFETY_NET:product] "
+                            + _json_sn.dumps(_payload, ensure_ascii=False)
+                        )
+                except Exception as _spe:  # noqa: BLE001
+                    logger.warning(
+                        "[SAFETY_NET:product] failed tenant=%s err=%s",
+                        tenant_id, _spe,
+                    )
+            else:
+                logger.info(
+                    "[SAFETY_NET:product] tenant=%s skipped reason=non_commerce_block",
+                    tenant_id,
                 )
 
             # Media-key safety net
@@ -8764,7 +8830,13 @@ async def _handle_merchant_message(
                     str(_a.get("media_type") or "").lower().startswith("image")
                     for _a in (_media_attachments or [])
                 )
-                if not _vp_wants:
+                if _commerce_blocked:
+                    logger.info(
+                        "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
+                        "reason=non_commerce_block inbound=%r",
+                        tenant_id, (text or "")[:80],
+                    )
+                elif not _vp_wants:
                     logger.debug(
                         "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
                         "reason=not_visual_intent inbound=%r brain_action=%s",
@@ -8779,6 +8851,17 @@ async def _handle_merchant_message(
                         str(_vp_has_marker).lower(),
                         len(_product_attachments or []),
                         len(_media_attachments or []),
+                    )
+                elif len(_product_attachments or []) >= _catalog_card_limit:
+                    logger.info(
+                        "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
+                        "reason=catalog_card_limit limit=%d count=%d "
+                        "inbound=%r brain_action=%s",
+                        tenant_id,
+                        _catalog_card_limit,
+                        len(_product_attachments or []),
+                        (text or "")[:80],
+                        _br_action or "?",
                     )
                 else:
                     _candidate_title, _candidate_source = _pick_candidate(
@@ -8896,6 +8979,20 @@ async def _handle_merchant_message(
                     "failed: %s", tenant_id, _vp_exc,
                 )
 
+            # LIMIT_RECOMMENDATION_BREADTH — cap stacked catalog cards per turn.
+            if (
+                _product_attachments
+                and len(_product_attachments) > _catalog_card_limit
+            ):
+                logger.info(
+                    "[RECOMMENDATION_BREADTH] tenant=%s trimming product cards "
+                    "count=%d limit=%d",
+                    tenant_id,
+                    len(_product_attachments),
+                    _catalog_card_limit,
+                )
+                _product_attachments = _product_attachments[:_catalog_card_limit]
+
             # Concatenate library media + product cards into one
             # ordered list so the customer sees them in the same
             # sequence the LLM intended. Library media go FIRST
@@ -8905,6 +9002,33 @@ async def _handle_merchant_message(
             _all_attachments = list(_media_attachments) + list(
                 _product_attachments  # may be empty
             )
+
+            # ── [PAYMENT_BARCODE_ATTACH] lifecycle probe ─────────────
+            try:
+                _pbc_attachments = [
+                    a for a in (_media_attachments or [])
+                    if isinstance(a, dict)
+                    and (
+                        (a.get("media_key") or "").strip().lower()
+                        in ("payment_rajhi_barcode",)
+                        or "barcode" in (a.get("media_key") or "").lower()
+                        or a.get("payment_barcode_route")
+                    )
+                ]
+                if _pbc_attachments:
+                    logger.info(
+                        "[PAYMENT_BARCODE_ATTACH] tenant=%s conversation_id=%s "
+                        "attachments_count=%d media_keys=%s media_ids=%s "
+                        "all_attachments_count=%d",
+                        tenant_id,
+                        getattr(convo, "id", None),
+                        len(_pbc_attachments),
+                        [a.get("media_key") for a in _pbc_attachments],
+                        [a.get("id") for a in _pbc_attachments],
+                        len(_all_attachments),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
 
             # Phase 4: cache the WhatsAppConnection once per turn so
             # the catalog send helper doesn't re-query for every
@@ -8987,6 +9111,8 @@ async def _handle_merchant_message(
                             phone_id=phone_id,
                             to=to,
                             attachment=_att,
+                            block_commerce_escalation=_commerce_blocked,
+                            positive_commerce_intent=_positive_commerce,
                         )
                     except Exception as _cat_exc:  # noqa: BLE001
                         # _try_send_catalog_product is documented to
@@ -9051,6 +9177,23 @@ async def _handle_merchant_message(
                             "[AIMedia.validate] tenant=%s id=%s SKIPPED reason=%s",
                             tenant_id, _att.get("id"), _why,
                         )
+                        if (_att.get("media_key") or "").strip().lower().endswith(
+                            "_barcode"
+                        ) or "barcode" in (str(_att.get("media_key") or "").lower()):
+                            logger.info(
+                                "[PAYMENT_BARCODE_SEND] tenant=%s conversation_id=%s "
+                                "calling_send_media=false media_key=%s media_id=%s "
+                                "reason=%s storage_kind=%s storage_path=%s "
+                                "file_url=%s",
+                                tenant_id,
+                                getattr(convo, "id", None),
+                                _att.get("media_key") or "-",
+                                _att.get("id") or "-",
+                                _why or "-",
+                                _att.get("storage_kind") or "-",
+                                (_att.get("storage_path") or "-")[:120],
+                                (_att.get("file_url") or "-")[:120],
+                            )
                         continue
                     _att = _normed or _att
 
@@ -9064,6 +9207,32 @@ async def _handle_merchant_message(
                 # ``None`` for the non-product path and matches the
                 # previous behaviour exactly.
                 _caption = _att.get("caption") if _is_product else None
+                if (
+                    not _is_product
+                    and (
+                        (_att.get("media_key") or "").strip().lower().endswith("_barcode")
+                        or "barcode" in (str(_att.get("media_key") or "").lower())
+                    )
+                ):
+                    logger.info(
+                        "[PAYMENT_BARCODE_SEND] tenant=%s conversation_id=%s "
+                        "calling_send_media=true media_key=%s media_id=%s "
+                        "media_type=%s file_url=%s",
+                        tenant_id,
+                        getattr(convo, "id", None),
+                        _att.get("media_key") or "-",
+                        _att.get("id") or "-",
+                        _media_type_norm,
+                        (_att.get("file_url") or "-")[:120],
+                    )
+                    logger.info(
+                        "[PAYMENT_BARCODE_PROVIDER] tenant=%s conversation_id=%s "
+                        "payload_type=%s media_url=%s",
+                        tenant_id,
+                        getattr(convo, "id", None),
+                        _media_type_norm,
+                        (_att.get("file_url") or "-")[:120],
+                    )
                 try:
                     _media_ok = await _send_media_message(
                         phone_id=phone_id,
@@ -9093,6 +9262,25 @@ async def _handle_merchant_message(
                             tenant_id, to, _att.get("id"),
                             _media_type_norm, _media_ok,
                         )
+                        if (
+                            not _is_product
+                            and (
+                                (_att.get("media_key") or "").strip().lower().endswith(
+                                    "_barcode"
+                                )
+                                or "barcode" in (
+                                    str(_att.get("media_key") or "").lower()
+                                )
+                            )
+                        ):
+                            logger.info(
+                                "[PAYMENT_BARCODE_PROVIDER_RESPONSE] tenant=%s "
+                                "conversation_id=%s payload_type=%s status=%s",
+                                tenant_id,
+                                getattr(convo, "id", None),
+                                _media_type_norm,
+                                "ok" if _media_ok else "failed",
+                            )
 
                     # ── OUTBOUND_MEDIA_ATTACH (May 2026 #29) ─────────────────
                     # Structured per-attachment audit line. Distinct from
@@ -10261,6 +10449,8 @@ async def _try_send_catalog_product(
     phone_id: str,
     to: str,
     attachment: Dict[str, Any],
+    block_commerce_escalation: bool = False,
+    positive_commerce_intent: bool = False,
 ) -> bool:
     """Phase 4 — attempt a Meta WhatsApp Catalog send for one product
     attachment. Returns ``True`` iff the catalog message landed at
@@ -10300,13 +10490,20 @@ async def _try_send_catalog_product(
     """
     if not attachment or attachment.get("kind") != "product_card":
         return False
+    if tenant_id is None:
+        return False
     try:
-        from core.catalog import (  # noqa: PLC0415
-            effective_retailer_id, effective_variant_retailer_id,
-            is_catalog_eligible,
-        )
         from services.whatsapp_platform.catalog_sender import (  # noqa: PLC0415
             send_single_product_message,
+        )
+        from services.catalog_product_orchestrator import (  # noqa: PLC0415
+            ProductCardSendAction,
+            catalog_send_retailer_id,
+            evaluate_product_card_send,
+            log_product_card_decision,
+            query_retailer_id_collision_peer_ids,
+            resolve_attachment_retailer_id,
+            should_attempt_catalog_send,
         )
     except Exception as imp_exc:  # noqa: BLE001
         logger.debug(
@@ -10315,31 +10512,56 @@ async def _try_send_catalog_product(
         )
         return False
 
-    # ── Variant intelligence (Phase 3 — migration 0064) ──────────────────
-    # If the customer has already picked a variant for this product in
-    # the current turn, the resolver flagged it on the attachment via
-    # ``picked_variant_id`` / ``picked_variant_retailer_id``. We honour
-    # that pick first so a card for "M / Red" goes out for the right
-    # SKU and not the parent's default.
-    picked_variant_rid = (attachment.get("picked_variant_retailer_id") or "").strip()
+    product_row = None
+    if db is not None and attachment.get("id"):
+        try:
+            from database.models import Product  # noqa: PLC0415
+            product_row = (
+                db.query(Product)
+                .filter(
+                    Product.id == attachment.get("id"),
+                    Product.tenant_id == tenant_id,
+                )
+                .first()
+            )
+        except Exception as q_exc:  # noqa: BLE001
+            logger.debug(
+                "[CATALOG] tenant=%s product lookup failed (will fall "
+                "back to attachment external_id): %s",
+                tenant_id, q_exc,
+            )
 
-    # Multi-variant short-circuit. When the resolver flagged
-    # ``needs_variant_choice`` AND the customer hasn't pinned one
-    # yet, we DON'T send a catalog card — we ship the variant
-    # question template and persist the awaiting flag so the next
-    # turn can map the customer's pick. Feature-flagged via
-    # ``CATALOG_VARIANT_SEND`` so operators can roll the entire
-    # variant-aware send path back without redeploying.
-    import os as _os  # noqa: PLC0415
-    _variant_send_enabled = (_os.getenv("CATALOG_VARIANT_SEND", "true")
-                             or "").strip().lower() not in {
-                                 "false", "0", "off", "no", "",
-                             }
-    if (
-        _variant_send_enabled
-        and not picked_variant_rid
-        and bool(attachment.get("needs_variant_choice"))
-    ):
+    try:
+        candidate_rid = resolve_attachment_retailer_id(attachment, product_row)
+        peer_ids: List[int] = []
+        if db is not None and candidate_rid and attachment.get("id"):
+            peer_ids = query_retailer_id_collision_peer_ids(
+                db,
+                tenant_id=int(tenant_id),
+                retailer_id=candidate_rid,
+                exclude_product_id=int(attachment.get("id")),
+                limit=2,
+            )
+        decision = evaluate_product_card_send(
+            tenant_id=int(tenant_id),
+            connection=connection,
+            attachment=attachment,
+            product_row=product_row,
+            collision_peer_ids=peer_ids or None,
+            block_commerce_escalation=block_commerce_escalation,
+            positive_commerce_intent=positive_commerce_intent,
+        )
+        log_product_card_decision(
+            decision, tenant_id=tenant_id, attachment=attachment,
+        )
+    except Exception as orch_exc:  # noqa: BLE001
+        logger.debug(
+            "[CATALOG] tenant=%s orchestrator decision failed: %s",
+            tenant_id, orch_exc,
+        )
+        return False
+
+    if decision.action == ProductCardSendAction.VARIANT_PROMPT:
         try:
             from modules.ai.brain.compose.templates import (  # noqa: PLC0415
                 ask_product_variants as _ask_variants,
@@ -10366,8 +10588,6 @@ async def _try_send_catalog_product(
                     tenant_id, attachment.get("id"),
                     len(attachment.get("variants") or []),
                 )
-                # Persist the awaiting-choice marker on the conversation
-                # so the next inbound digit maps to a variant pick.
                 try:
                     from core.order_flow import apply_state_patch  # noqa: PLC0415
                     apply_state_patch(
@@ -10386,66 +10606,19 @@ async def _try_send_catalog_product(
                         "failed (non-fatal): %s",
                         tenant_id, _patch_exc,
                     )
-                # Return True so the caller skips the legacy image+CTA
-                # path; we've already delivered a meaningful turn.
                 return True
             except Exception as _prompt_exc:  # noqa: BLE001
                 logger.warning(
                     "[CATALOG_VARIANT_PROMPT] tenant=%s prompt path "
-                    "failed, falling through to default-variant card: %s",
+                    "failed, falling through to legacy: %s",
                     tenant_id, _prompt_exc,
                 )
 
-    # Honour an explicit `meta_retailer_id` override when set. One
-    # cheap SELECT keyed on (id, tenant_id) — we already have both
-    # ids in scope, so this is index-perfect on the products PK.
-    retailer_id = ""
-    product_row = None
-    if db is not None and attachment.get("id") and tenant_id is not None:
-        try:
-            from database.models import Product  # noqa: PLC0415
-            product_row = (
-                db.query(Product)
-                .filter(Product.id == attachment.get("id"),
-                        Product.tenant_id == tenant_id)
-                .first()
-            )
-        except Exception as q_exc:  # noqa: BLE001
-            logger.debug(
-                "[CATALOG] tenant=%s product lookup failed (will fall "
-                "back to attachment external_id): %s",
-                tenant_id, q_exc,
-            )
-
-    # ── Variant-aware retailer_id resolution ─────────────────────────────
-    # Priority: explicit attachment pick → variant resolver helper
-    # (reads default_variant.retailer_id when the parent loaded its
-    # relationship) → legacy meta_retailer_id/external_id chain.
-    if picked_variant_rid:
-        retailer_id = picked_variant_rid
-    elif product_row is not None:
-        retailer_id = (
-            effective_variant_retailer_id(product_row)
-            or effective_retailer_id(product_row)
-        )
-    if not retailer_id:
-        # Fallback path: the attachment dict carries external_id from
-        # the resolver. effective_retailer_id treats it as the
-        # default retailer id when no explicit override exists.
-        retailer_id = effective_retailer_id(attachment)
-
-    elig = is_catalog_eligible(
-        connection,
-        products=[product_row] if product_row is not None else [attachment],
-    )
-    if not elig.ok:
-        # Eligibility miss — silent here; sender module already logs
-        # [CATALOG_NOT_ELIGIBLE] when invoked. We bail out so the
-        # caller routes to the legacy image+CTA path immediately.
+    if not should_attempt_catalog_send(decision):
         return False
+
+    retailer_id = catalog_send_retailer_id(decision)
     if not retailer_id:
-        # Shouldn't happen given the eligibility check above also
-        # validates retailer_id presence, but defensive.
         return False
 
     logger.info(
@@ -10456,10 +10629,6 @@ async def _try_send_catalog_product(
         attachment.get("confidence"),
     )
 
-    # Build the body text. Prefer the resolver's caption (already
-    # contains title + price + short description in Arabic). Cap at
-    # the sender's body limit — the sender will truncate again
-    # defensively but we save bytes when the caption is huge.
     body_text = (
         attachment.get("caption")
         or attachment.get("title")
@@ -10478,10 +10647,6 @@ async def _try_send_catalog_product(
             footer_text=None,
         )
     except Exception as send_exc:  # noqa: BLE001
-        # The sender module is documented to NEVER raise for routine
-        # failures — only programmer errors raise. Treat this as a
-        # bug-grade issue and route to fallback so the conversation
-        # still gets a reply.
         logger.error(
             "[CATALOG_FALLBACK_TEXT] tenant=%s product_id=%s "
             "reason=sender_exception err=%s",
