@@ -1949,6 +1949,14 @@ class WhatsAppConnection(Base):
         Boolean, nullable=False, server_default=sa.text("false"),
     )
 
+    # Meta catalog import diagnostics (migration 0071) — operational
+    # visibility only; does not affect send / AI resolution paths.
+    meta_import_status       = Column(String(32), nullable=True)
+    meta_import_last_at      = Column(DateTime(timezone=True), nullable=True)
+    meta_import_last_error   = Column(Text, nullable=True)
+    meta_import_last_report  = Column(JSONB, nullable=True)
+    meta_import_token_source = Column(String(64), nullable=True)
+
     extra_metadata    = Column(JSONB, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
     updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -60,6 +60,15 @@ function fmtCount(n: number, lang: Lang): string {
   return n.toLocaleString(localeTag(lang))
 }
 
+function fmtImportAt(iso: string | null, lang: Lang): string {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString(localeTag(lang))
+  } catch {
+    return iso
+  }
+}
+
 type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
 
 const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
@@ -461,6 +470,88 @@ export default function WhatsAppCatalog() {
                   ? cm.diagnostics.channelConnected
                   : cm.diagnostics.channelNotConnected}
               </p>
+            </div>
+
+            {/* Last Meta import */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-center gap-2">
+                <Clock className="w-5 h-5 text-slate-500" />
+                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.importTitle}</span>
+              </div>
+              {!diagnostics.import.status ? (
+                <p className="text-xs text-slate-600 mt-1.5">{cm.diagnostics.importNever}</p>
+              ) : (
+                <>
+                  <p className="text-xs text-slate-600 mt-1.5">
+                    {diagnostics.import.status === 'running' && cm.diagnostics.importStatusRunning}
+                    {diagnostics.import.status === 'success' && cm.diagnostics.importStatusSuccess}
+                    {diagnostics.import.status === 'failed' && cm.diagnostics.importStatusFailed}
+                    {diagnostics.import.last_at && (
+                      <>
+                        {' · '}
+                        {cm.diagnostics.importLastAt.replace(
+                          '{at}',
+                          fmtImportAt(diagnostics.import.last_at, lang),
+                        )}
+                      </>
+                    )}
+                  </p>
+                  {diagnostics.import.last_report && (
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      {cm.diagnostics.importCounts
+                        .replace('{scanned}', fmtCount(diagnostics.import.last_report.scanned ?? 0, lang))
+                        .replace('{created}', fmtCount(diagnostics.import.last_report.created ?? 0, lang))
+                        .replace('{updated}', fmtCount(diagnostics.import.last_report.updated ?? 0, lang))}
+                    </p>
+                  )}
+                  {diagnostics.import.status === 'failed' && diagnostics.import.last_error && (
+                    <p className="text-[11px] text-rose-700 mt-1">{diagnostics.import.last_error}</p>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* WhatsApp Commerce readiness checklist */}
+            <div className={`rounded-xl border p-3 md:col-span-2 ${
+              diagnostics.whatsapp_readiness.ready
+                ? 'bg-emerald-50 border-emerald-200'
+                : 'bg-amber-50 border-amber-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                {diagnostics.whatsapp_readiness.ready
+                  ? <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                  : <AlertTriangle className="w-5 h-5 text-amber-600" />}
+                <span className="text-sm font-bold text-slate-800">
+                  {diagnostics.whatsapp_readiness.ready
+                    ? cm.diagnostics.commerceReadyTitle
+                    : cm.diagnostics.commerceNotReadyTitle}
+                </span>
+              </div>
+              <ul className="mt-2 space-y-1">
+                {diagnostics.whatsapp_readiness.checks.map((check) => {
+                  const labelKey = check.key as keyof typeof cm.diagnostics.checkLabels
+                  const label = cm.diagnostics.checkLabels[labelKey] ?? check.key
+                  return (
+                    <li key={check.key} className="flex items-center gap-2 text-xs text-slate-700">
+                      {check.ok
+                        ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        : <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />}
+                      <span>{label}</span>
+                      {check.key === 'products_with_retailer_id' && typeof check.count === 'number' && (
+                        <span className="text-slate-500">({fmtCount(check.count, lang)})</span>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+              {diagnostics.whatsapp_readiness.missing_requirements.length > 0 && (
+                <p className="text-[11px] text-amber-800 mt-2">
+                  {cm.diagnostics.missingRequirements}:{' '}
+                  {diagnostics.whatsapp_readiness.missing_requirements
+                    .map((key) => cm.diagnostics.checkLabels[key as keyof typeof cm.diagnostics.checkLabels] ?? key)
+                    .join(lang === 'ar' ? '، ' : ', ')}
+                </p>
+              )}
             </div>
           </div>
         </Card>

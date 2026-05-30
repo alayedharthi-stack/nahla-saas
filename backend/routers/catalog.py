@@ -248,6 +248,15 @@ def _status_payload(db: Session, tenant_id: int, *, sample: int = 5) -> Dict[str
         coverage=coverage,
     )
 
+    catalog_id = (getattr(conn, "meta_catalog_id", None) or "").strip() if conn else ""
+    catalog_enabled = bool(getattr(conn, "catalog_enabled", False)) if conn else False
+    wa_connected = bool(
+        conn
+        and getattr(conn, "status", "") == "connected"
+        and getattr(conn, "sending_enabled", False)
+    )
+    _, with_rid_total = _product_retailer_coverage(db, tenant_id)
+
     return {
         "tenant_id":       tenant_id,
         "connection":      conn_block,
@@ -255,6 +264,14 @@ def _status_payload(db: Session, tenant_id: int, *, sample: int = 5) -> Dict[str
         "products_sample": products_sample,
         "coverage":        coverage,
         "advice":          advice,
+        "import":          _import_metadata_block(conn),
+        "whatsapp_readiness": _whatsapp_commerce_readiness(
+            conn=conn,
+            catalog_id=catalog_id,
+            catalog_enabled=catalog_enabled,
+            wa_connected=wa_connected,
+            with_rid=with_rid_total,
+        ),
     }
 
 
@@ -1470,6 +1487,75 @@ async def admin_catalog_resync(
 # three other dashboards.
 
 
+def _product_retailer_coverage(db: Session, tenant_id: int) -> tuple[int, int]:
+    """Return ``(total, with_effective_retailer_id)`` for *tenant_id*."""
+    products = (
+        db.query(Product)
+          .filter(Product.tenant_id == tenant_id)
+          .all()
+    )
+    total = len(products)
+    with_rid = sum(1 for p in products if effective_retailer_id(p))
+    return total, with_rid
+
+
+def _import_metadata_block(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
+    """Last Meta catalog import run — persisted on WhatsAppConnection."""
+    if conn is None:
+        return {
+            "status":       None,
+            "last_at":      None,
+            "last_error":   None,
+            "last_report":  None,
+            "token_source": None,
+        }
+    last_at = getattr(conn, "meta_import_last_at", None)
+    return {
+        "status":       getattr(conn, "meta_import_status", None),
+        "last_at":      last_at.isoformat() if last_at else None,
+        "last_error":   getattr(conn, "meta_import_last_error", None),
+        "last_report":  getattr(conn, "meta_import_last_report", None),
+        "token_source": getattr(conn, "meta_import_token_source", None),
+    }
+
+
+def _whatsapp_commerce_readiness(
+    *,
+    conn: Optional[WhatsAppConnection],
+    catalog_id: str,
+    catalog_enabled: bool,
+    wa_connected: bool,
+    with_rid: int,
+) -> Dict[str, Any]:
+    """Structured checklist for WhatsApp Commerce catalog sends."""
+    phone_number_id = (
+        (getattr(conn, "phone_number_id", None) or "").strip() if conn else ""
+    )
+    graph_token_ok = False
+    if conn is not None:
+        from services.meta_catalog_import import _select_graph_token  # noqa: PLC0415
+        graph_token_ok = bool(_select_graph_token(conn).get("token"))
+
+    checks: List[Dict[str, Any]] = [
+        {"key": "whatsapp_connected", "ok": wa_connected},
+        {"key": "phone_number_id", "ok": bool(phone_number_id)},
+        {"key": "meta_catalog_id", "ok": bool(catalog_id)},
+        {"key": "catalog_enabled", "ok": catalog_enabled},
+        {"key": "graph_token_available", "ok": graph_token_ok},
+        {
+            "key": "products_with_retailer_id",
+            "ok": with_rid > 0,
+            "count": with_rid,
+        },
+    ]
+    missing = [c["key"] for c in checks if not c["ok"]]
+    return {
+        "ready":                len(missing) == 0,
+        "checks":               checks,
+        "missing_requirements": missing,
+    }
+
+
 def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
     """Build the diagnostics payload for *tenant_id*.
 
@@ -1529,6 +1615,13 @@ def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
         and catalog_enabled
         and with_rid > 0
     )
+    whatsapp_readiness = _whatsapp_commerce_readiness(
+        conn=conn,
+        catalog_id=catalog_id,
+        catalog_enabled=catalog_enabled,
+        wa_connected=wa_connected,
+        with_rid=with_rid,
+    )
 
     return {
         "catalog": {
@@ -1545,8 +1638,11 @@ def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
             "source_breakdown":               breakdown,
             "dominant_source":                dom,
         },
+        "import": _import_metadata_block(conn),
+        "whatsapp_readiness": whatsapp_readiness,
         "readiness": {
-            "catalog_ready":  catalog_ready,
+            "catalog_ready":           catalog_ready,
+            "whatsapp_commerce_ready": whatsapp_readiness["ready"],
         },
     }
 

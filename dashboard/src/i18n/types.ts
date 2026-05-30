@@ -1269,6 +1269,24 @@ export interface Translations {
       channelTitle:         string
       channelConnected:     string
       channelNotConnected:  string
+      importTitle:          string
+      importNever:          string
+      importLastAt:         string
+      importStatusRunning:  string
+      importStatusSuccess:  string
+      importStatusFailed:   string
+      importCounts:         string
+      commerceReadyTitle:   string
+      commerceNotReadyTitle: string
+      missingRequirements:  string
+      checkLabels: {
+        whatsapp_connected:       string
+        phone_number_id:          string
+        meta_catalog_id:          string
+        catalog_enabled:          string
+        graph_token_available:    string
+        products_with_retailer_id: string
+      }
     }
     connectionStatus: {
       title:                  string

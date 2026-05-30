@@ -105,6 +105,7 @@ import re
 import time
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -826,6 +827,48 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Import metadata persistence (PR2 — diagnostics only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _persist_import_running(
+    db: Session, conn: WhatsAppConnection, token_source: str,
+) -> None:
+    conn.meta_import_status = "running"
+    conn.meta_import_token_source = token_source or None
+    db.commit()
+
+
+def _persist_import_success(
+    db: Session,
+    conn: WhatsAppConnection,
+    report: ImportReport,
+    token_source: str,
+) -> None:
+    conn.meta_import_status = "success"
+    conn.meta_import_last_at = datetime.now(timezone.utc)
+    conn.meta_import_last_error = None
+    conn.meta_import_last_report = report.to_dict()
+    conn.meta_import_token_source = token_source or None
+    db.commit()
+
+
+def _persist_import_failed(
+    db: Session,
+    conn: WhatsAppConnection,
+    error: str,
+    *,
+    token_source: Optional[str] = None,
+) -> None:
+    conn.meta_import_status = "failed"
+    conn.meta_import_last_at = datetime.now(timezone.utc)
+    conn.meta_import_last_error = (error or "")[:2000]
+    if token_source:
+        conn.meta_import_token_source = token_source
+    db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -885,6 +928,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         )
     catalog_id = (conn.meta_catalog_id or "").strip()
     if not catalog_id:
+        _persist_import_failed(db, conn, "catalog_id_missing")
         raise MetaCatalogImportError(
             "catalog_id_missing",
             "Meta Catalog ID is not configured on the WhatsApp connection.",
@@ -898,6 +942,10 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
     token_pick = _select_graph_token(conn)
     token = token_pick["token"]
     if not token:
+        _persist_import_failed(
+            db, conn, "meta_access_token_missing",
+            token_source=token_pick.get("token_source"),
+        )
         raise MetaCatalogImportError(
             "meta_access_token_missing",
             "Meta catalog import requires a Meta Graph API access "
@@ -921,8 +969,42 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             },
         )
 
+    _persist_import_running(db, conn, token_pick["token_source"])
     report = ImportReport()
+    try:
+        report = _import_from_meta_body(
+            db, tenant_id, conn, catalog_id, token, token_pick, report,
+            discovery_only=_discovery_only,
+        )
+    except MetaCatalogImportError as exc:
+        _persist_import_failed(
+            db, conn, exc.code,
+            token_source=token_pick.get("token_source"),
+        )
+        raise
+    except Exception as exc:
+        _persist_import_failed(
+            db, conn, f"{type(exc).__name__}: {exc}"[:500],
+            token_source=token_pick.get("token_source"),
+        )
+        raise
+    _persist_import_success(db, conn, report, token_pick["token_source"])
+    return report
 
+
+def _import_from_meta_body(
+    db: Session,
+    tenant_id: int,
+    conn: WhatsAppConnection,
+    catalog_id: str,
+    token: str,
+    token_pick: Dict[str, Any],
+    report: ImportReport,
+    *,
+    discovery_only: bool,
+) -> ImportReport:
+    """Core import logic — separated so ``import_from_meta`` can wrap
+    persistence around hard failures without changing upsert behaviour."""
     # ── Catalog preflight discovery (May 2026 #19g) ───────────
     # Two cheap GETs against the catalog object itself BEFORE we
     # try any item edge. This is the authoritative source of
@@ -1027,7 +1109,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
     # call so the two logs are guaranteed to agree (no risk of a
     # race between two os.getenv reads if some upstream code
     # mutates the env mid-request).
-    if _discovery_only:
+    if discovery_only:
         report.discovery_only = True
         # ``logger.warning`` (not info) so this branch is visually
         # impossible to miss in Railway's default INFO-and-above

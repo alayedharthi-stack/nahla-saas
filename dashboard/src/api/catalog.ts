@@ -413,6 +413,25 @@ export interface CatalogDiagnostics {
   }
   readiness: {
     catalog_ready:  boolean
+    whatsapp_commerce_ready: boolean
+  }
+  import: {
+    status:       string | null
+    last_at:      string | null
+    last_error:   string | null
+    last_report:  {
+      scanned?:        number
+      created?:        number
+      updated?:        number
+      skipped_manual?: number
+      errors?:         number
+    } | null
+    token_source: string | null
+  }
+  whatsapp_readiness: {
+    ready:                boolean
+    checks:               Array<{ key: string; ok: boolean; count?: number }>
+    missing_requirements: string[]
   }
 }
 
