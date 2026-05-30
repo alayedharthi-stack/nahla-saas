@@ -902,6 +902,31 @@ _SOCIAL_GENERAL_COURTESY_VARIANTS = [
     "يامرحبا 🌹\nوش اللي تحتاجه؟",
 ]
 
+_SOCIAL_WARM_ACK_VARIANTS = [
+    "هلا وغلا 🌹\nأهلاً فيك.",
+    "الله يحييك 🌹",
+    "تسلم 🤍",
+]
+
+_SOCIAL_EID_GREETING_VARIANTS = [
+    "كل عام وأنتم بخير 🤍\nتقبل الله طاعتكم.",
+    "عيدكم مبارك 🌹\nالله يبارك فيكم.",
+    "تقبل الله منا ومنكم 🌷\nعساكم من عواده.",
+    "كل عام وأنت بخير 🌹\nالله يجعل أيامكم مباركة.",
+]
+
+_SOCIAL_DUA_VARIANTS = [
+    "آمين يارب 🤍\nجزاك الله خير.",
+    "آمين وإياك 🌹\nتقبل الله.",
+    "الله يتقبل 🤍\nبارك الله فيك.",
+]
+
+_SOCIAL_CONDOLENCE_VARIANTS = [
+    "الله يرحمه ويغفر له 🤍",
+    "إنا لله وإنا إليه راجعون 🌷",
+    "الله يصبركم ويعظم أجركم 🤍",
+]
+
 _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
     "thanks":             _SOCIAL_THANKS_VARIANTS,
     "blessing":           _SOCIAL_BLESSING_VARIANTS,
@@ -911,6 +936,15 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
     "general_courtesy":   _SOCIAL_GENERAL_COURTESY_VARIANTS,
     # May 2026 #8 — reserved pool for explicit heavy praise only.
     "strong_praise":      _SOCIAL_STRONG_PRAISE_VARIANTS,
+    # May 2026 — non-commerce media safety layer.
+    "eid_greeting":       _SOCIAL_EID_GREETING_VARIANTS,
+    "dua":                _SOCIAL_DUA_VARIANTS,
+    "condolence":         _SOCIAL_CONDOLENCE_VARIANTS,
+    "religious_media":    _SOCIAL_DUA_VARIANTS,
+    "social_forward":     _SOCIAL_WARM_ACK_VARIANTS,
+    "morning_greeting":   _SOCIAL_WARM_ACK_VARIANTS,
+    "emotional_personal": _SOCIAL_BLESSING_VARIANTS,
+    "informational_only": _SOCIAL_WARM_ACK_VARIANTS,
 }
 
 
@@ -1132,6 +1166,25 @@ _NARROW_CHOICES_HEADERS = [
     "عندي عدة منتجات قد تعجبك — أيها يناسبك؟",
     "لقيت أكثر من خيار، اختر اللي يهمك:",
 ]
+
+_NARROW_FOCUSED_HEADERS: Dict[int, List[str]] = {
+    1: [
+        "هذا الخيار الأقرب لطلبك 👌",
+        "لقيت منتجاً واحداً يناسب بحثك 👌",
+    ],
+    2: [
+        "وجدت خيارين قد يناسبانك 👌",
+        "عندي خيارين — أيّهما تفضّل؟ 👌",
+    ],
+    3: [
+        "وجدت 3 خيارات تناسبك — اختر الأنسب 👌",
+        "لقيت 3 خيارات مركّزة — أيها يناسبك؟ 👌",
+    ],
+}
+
+_NARROW_SHOW_MORE_HINT = (
+    "\n\nإذا حاب تشوف خيارات أكثر، قول «وريني باقي الخيارات»."
+)
 _NARROW_CHOICES_CLOSINGS = [
     "أخبرني برقم الخيار أو اسم المنتج لأساعدك أكثر.",
     "أرسل رقم المنتج أو اكتب اسمه وأكمل معك.",
@@ -1139,7 +1192,13 @@ _NARROW_CHOICES_CLOSINGS = [
 ]
 
 
-def narrow_choices(products: List[Dict[str, Any]], variant: int = 0, **_: Any) -> str:
+def narrow_choices(
+    products: List[Dict[str, Any]],
+    variant: int = 0,
+    *,
+    show_more_hint: bool = False,
+    **_: Any,
+) -> str:
     """Show a numbered product list.
 
     CRITICAL: the index shown here (1, 2, 3 …) MUST match the index stored
@@ -1148,19 +1207,31 @@ def narrow_choices(products: List[Dict[str, Any]], variant: int = 0, **_: Any) -
     "listed then immediately rejected" bug (e.g. customer sees "1. بنطلون"
     but system rejects "بلوزة" because candidates were stored in a different
     order or were truncated).
+
+    When ``show_more_hint`` is True, a single-line continuation prompt is
+    appended so the customer can ask for more options without a wall of SKUs.
     """
     if not products:
         return generic_fallback()
     v = variant % 3
-    lines = [_NARROW_CHOICES_HEADERS[v] + "\n"]
-    for i, p in enumerate(products, 1):   # show ALL — no [:3] truncation
+    count = len(products)
+    if count <= 3:
+        bucket = _NARROW_FOCUSED_HEADERS.get(count) or _NARROW_FOCUSED_HEADERS[3]
+        header = bucket[v % len(bucket)]
+    else:
+        header = _NARROW_CHOICES_HEADERS[v]
+    lines = [header + "\n"]
+    for i, p in enumerate(products, 1):
         price_str = f"{p['price']} ريال" if p.get("price") else ""
         line = f"{i}. *{p['title']}*"
         if price_str:
             line += f" — {price_str}"
         lines.append(line)
-    lines.append("\n" + _NARROW_CHOICES_CLOSINGS[v])
-    return "\n".join(lines)
+    closing = _NARROW_CHOICES_CLOSINGS[v]
+    out = "\n".join(lines) + "\n\n" + closing
+    if show_more_hint:
+        out += _NARROW_SHOW_MORE_HINT
+    return out
 
 
 _GENERIC_FALLBACK_VARIANTS = [

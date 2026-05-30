@@ -159,12 +159,12 @@ class TestOrchestratorDecisions:
             connection=_conn(),
             attachment=_attachment(id=10, external_id="same-rid"),
             product_row=products[0],
-            tenant_products=products,
+            collision_peer_ids=[11],
         )
         assert d.action == ProductCardSendAction.FALLBACK_LEGACY
         assert d.reason == REASON_RETAILER_ID_COLLISION
         assert d.log_event == "CATALOG_RID_COLLISION"
-        assert sorted(d.diagnostics["collision_owner_ids"]) == [10, 11]
+        assert sorted(d.diagnostics["collision_peer_ids"]) == [11]
 
     def test_synthetic_retailer_id_fallback(self):
         d = evaluate_product_card_send(
@@ -253,12 +253,80 @@ class TestStructuredLogShape:
             connection=_conn(),
             attachment=_attachment(external_id="dup"),
             product_row=products[0],
-            tenant_products=products,
+            collision_peer_ids=[11],
         )
         payload = d.to_log_dict(tenant_id=1, product_id=10, confidence="fts")
         assert payload["event"] == "CATALOG_RID_COLLISION"
         assert payload["action"] == "fallback_legacy"
-        assert payload["collision_count"] == 2
+        assert payload["collision_count"] == 1
+
+
+class TestCollisionQuery:
+    def test_query_finds_peer_by_external_id_when_meta_empty(self):
+        from sqlalchemy import JSON, create_engine
+        from sqlalchemy.dialects.postgresql import JSONB
+        from sqlalchemy.orm import sessionmaker
+        from models import Base, Product
+        from services.catalog_product_orchestrator import (
+            query_retailer_id_collision_peer_ids,
+        )
+
+        engine = create_engine("sqlite:///:memory:")
+        saved = []
+        for table in Base.metadata.sorted_tables:
+            for col in table.columns:
+                if isinstance(col.type, JSONB):
+                    saved.append((col, col.type))
+                    col.type = JSON()
+        Base.metadata.create_all(engine)
+        for col, orig in saved:
+            col.type = orig
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        db.add(Product(id=1, tenant_id=5, external_id="RID-X", title="a"))
+        db.add(Product(id=2, tenant_id=5, external_id="RID-X", title="b"))
+        db.commit()
+        peers = query_retailer_id_collision_peer_ids(
+            db, tenant_id=5, retailer_id="RID-X", exclude_product_id=1, limit=2,
+        )
+        assert peers == [2]
+        db.close()
+
+    def test_query_finds_meta_vs_external_effective_match(self):
+        from sqlalchemy import JSON, create_engine
+        from sqlalchemy.dialects.postgresql import JSONB
+        from sqlalchemy.orm import sessionmaker
+        from models import Base, Product
+        from services.catalog_product_orchestrator import (
+            query_retailer_id_collision_peer_ids,
+        )
+
+        engine = create_engine("sqlite:///:memory:")
+        saved = []
+        for table in Base.metadata.sorted_tables:
+            for col in table.columns:
+                if isinstance(col.type, JSONB):
+                    saved.append((col, col.type))
+                    col.type = JSON()
+        Base.metadata.create_all(engine)
+        for col, orig in saved:
+            col.type = orig
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        db.add(Product(
+            id=1, tenant_id=5, meta_retailer_id="RID-Z", external_id="other",
+            title="a",
+        ))
+        db.add(Product(
+            id=2, tenant_id=5, meta_retailer_id=None, external_id="RID-Z",
+            title="b",
+        ))
+        db.commit()
+        peers = query_retailer_id_collision_peer_ids(
+            db, tenant_id=5, retailer_id="RID-Z", exclude_product_id=1, limit=2,
+        )
+        assert peers == [2]
+        db.close()
 
 
 class TestAttachmentImmutability:

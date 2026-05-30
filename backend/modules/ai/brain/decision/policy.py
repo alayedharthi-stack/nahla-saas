@@ -42,6 +42,9 @@ from .actions import (
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_RECOMMEND_ADDON,
+    ACTION_SEARCH_PRODUCTS,
+    ACTION_NARROW,
+    ACTION_SOCIAL_REPLY,
 )
 
 logger = logging.getLogger("nahla.brain.policy")
@@ -78,6 +81,7 @@ class RealPolicyGate:
     def gate(self, decision: Decision, ctx: BrainContext) -> Decision:
         try:
             decision = self._block_list(decision, ctx)
+            decision = self._non_commerce_clamp(decision, ctx)
             decision = self._working_hours(decision, ctx)
             decision = self._coupon_cap(decision, ctx)
             decision = self._price_range(decision, ctx)
@@ -206,6 +210,41 @@ class RealPolicyGate:
                     confidence=1.0,
                 )
         return decision
+
+    # ── Rule 0b: non-commerce media clamp (May 2026) ───────────────────────
+
+    _NON_COMMERCE_BLOCKED_ACTIONS = frozenset({
+        ACTION_SEARCH_PRODUCTS,
+        ACTION_NARROW,
+        ACTION_RECOMMEND_ADDON,
+        ACTION_SUGGEST_COUPON,
+        ACTION_PROPOSE_DRAFT_ORDER,
+    })
+
+    def _non_commerce_clamp(self, decision: Decision, ctx: BrainContext) -> Decision:
+        """Suppress catalog / recommendation actions on social/religious media."""
+        if not getattr(ctx, "block_commerce_escalation", False):
+            return decision
+        if decision.action not in self._NON_COMMERCE_BLOCKED_ACTIONS:
+            return decision
+        category = str(getattr(ctx, "non_commerce_category", "") or "religious_media")
+        logger.info(
+            "[PolicyGate] non_commerce_clamp tenant=%s action=%s → social_reply "
+            "category=%s",
+            getattr(ctx, "tenant_id", None),
+            decision.action,
+            category,
+        )
+        return Decision(
+            action=ACTION_SOCIAL_REPLY,
+            args={
+                "social_category": category,
+                "block_commerce_escalation": True,
+                "policy_reason": "non_commerce_clamp",
+            },
+            reason=f"non-commerce clamp blocked {decision.action}",
+            confidence=0.94,
+        )
 
     # ── Rule 1: working hours ─────────────────────────────────────────────────
     # Orders and payment links are ALWAYS allowed regardless of working hours —

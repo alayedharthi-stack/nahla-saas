@@ -344,8 +344,12 @@ class MerchantConversationState:
     order_prep: OrderPreparationState = field(default_factory=OrderPreparationState)
     turn: int = 0
     updated_at: str = ""
-    # Last ≤3 products shown as numbered list — used to resolve numeric picks
+    # Last products shown as numbered list — used to resolve numeric picks
     last_search_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    # Full fetched pool + cursor for progressive "باقي الخيارات" browsing.
+    catalog_browse_pool: List[Dict[str, Any]] = field(default_factory=list)
+    catalog_browse_offset: int = 0
+    last_browse_query: str = ""
     # Last recent turns cached in state so thin-LLM and automations can share
     # the same short-term memory without re-querying unrelated tables.
     recent_messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -432,6 +436,9 @@ class MerchantConversationState:
             "turn": self.turn,
             "updated_at": self.updated_at,
             "last_search_candidates": self.last_search_candidates,
+            "catalog_browse_pool": self.catalog_browse_pool,
+            "catalog_browse_offset": self.catalog_browse_offset,
+            "last_browse_query": self.last_browse_query,
             "recent_messages": self.recent_messages,
             "conversation_summary": self.conversation_summary,
             "cart_items": self.cart_items,
@@ -473,6 +480,9 @@ class MerchantConversationState:
             turn=int(d.get("turn", 0)),
             updated_at=d.get("updated_at", ""),
             last_search_candidates=list(d.get("last_search_candidates") or []),
+            catalog_browse_pool=list(d.get("catalog_browse_pool") or []),
+            catalog_browse_offset=int(d.get("catalog_browse_offset", 0) or 0),
+            last_browse_query=str(d.get("last_browse_query", "") or ""),
             recent_messages=list(d.get("recent_messages") or []),
             conversation_summary=str(d.get("conversation_summary", "") or ""),
             cart_items=list(d.get("cart_items") or []),
@@ -675,6 +685,9 @@ class BrainReplyState:
     platform_kb_mode: bool = False
     platform_topic: str = ""
     platform_kb_excerpt: str = ""
+    # When True, suppress [PRODUCT:...] vocabulary and catalog escalation
+    # for social / religious / greeting media (May 2026 non-commerce gate).
+    non_commerce_block_mode: bool = False
     # True after the bot has introduced itself ("أنا نحلة" / "أنا
     # مساعدتك الذكية") once in this conversation. The HIGH PRIORITY
     # block reads this field and FORBIDS the LLM from re-introducing
@@ -733,6 +746,9 @@ class BrainContext:
     # way without the AI competing with them. Strictly turn-local —
     # NOT persisted on the Conversation row.
     human_priority: bool = False
+    # Non-commerce safety layer — blocks catalog / recommendation escalation.
+    block_commerce_escalation: bool = False
+    non_commerce_category: str = ""
     # Structured post-order commerce context loaded from
     # ``Conversation.extra_metadata`` (Phase A). Empty dict when absent.
     commerce_bundle: Dict[str, Any] = field(default_factory=dict)

@@ -1761,12 +1761,68 @@ async def _process_video(
     except Exception:
         pass
 
+    combined = _apply_non_commerce_media_gate(
+        combined=combined,
+        base_meta=base_meta,
+        caption=caption,
+        media_type="video",
+        topic_hints=list(base_meta.get("topic_hints") or []),
+        tenant_id=tenant_id,
+        media_id=media_id,
+    )
+
     return MediaNormalizationResult(
         normalized_type="video",
         text=combined,
         metadata=base_meta,
         should_process=True,
     )
+
+
+def _apply_non_commerce_media_gate(
+    *,
+    combined: str,
+    base_meta: Dict[str, Any],
+    caption: str = "",
+    media_type: str = "image",
+    topic_hints: Optional[list] = None,
+    tenant_id: Any = None,
+    media_id: Any = None,
+) -> str:
+    """Tag inbound media as non-commercial when OCR/vision is social/religious."""
+    try:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            NON_COMMERCE_IMAGE_TAG,
+            NON_COMMERCE_VIDEO_TAG,
+            classify_non_commerce,
+        )
+        nc = classify_non_commerce(
+            combined,
+            media_type=media_type,
+            topic_hints=list(topic_hints or []),
+        )
+        if nc is None:
+            return combined
+        base_meta["block_commerce_escalation"] = True
+        base_meta["non_commerce_category"] = nc.category
+        base_meta["non_commerce_source"] = nc.source
+        tag = (
+            NON_COMMERCE_IMAGE_TAG
+            if media_type == "image"
+            else NON_COMMERCE_VIDEO_TAG
+        )
+        logger.info(
+            "[NON_COMMERCE_BLOCK] tenant=%s media_id=%s media_type=%s "
+            "category=%s source=%s block_commerce_escalation=true",
+            tenant_id, media_id, media_type, nc.category, nc.source,
+        )
+        return f"{tag}\n{combined}"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[NON_COMMERCE_BLOCK] classification skipped tenant=%s err=%s",
+            tenant_id, exc,
+        )
+        return combined
 
 
 # ── Image ───────────────────────────────────────────────────────────
@@ -2071,6 +2127,15 @@ async def _process_image(
             "[تصنيف الصورة: لقطة خرائط — لا يمكن استخراج "
             "إحداثيات دقيقة من صورة]\n"
         ) + combined
+
+    combined = _apply_non_commerce_media_gate(
+        combined=combined,
+        base_meta=base_meta,
+        caption=caption,
+        media_type="image",
+        tenant_id=tenant_id,
+        media_id=media_id,
+    )
 
     # Mandatory per-image classification trace (May 2026 hotfix #2).
     # Operators must be able to grep one log line to see exactly

@@ -40,6 +40,7 @@ from ..types import (
 )
 from .platform_classifier import classify_platform
 from .social_classifier import classify_social
+from .non_commerce_classifier import classify_non_commerce
 
 
 @dataclass
@@ -513,6 +514,23 @@ def match_top_k(message: str, *, k: int = 3) -> List[Tuple[float, "Intent"]]:
             ),
         ))
 
+    non_commerce = classify_non_commerce(message)
+    if non_commerce is not None:
+        out.append((
+            non_commerce.confidence,
+            Intent(
+                name=INTENT_SOCIAL,
+                confidence=non_commerce.confidence,
+                slots={
+                    "social_category": non_commerce.social_category,
+                    "block_commerce_escalation": True,
+                    "non_commerce_source": non_commerce.source,
+                },
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
+
     platform = classify_platform(message)
     if platform is not None:
         out.append((
@@ -589,6 +607,24 @@ def match(message: str) -> Optional[Intent]:
                 name=INTENT_SOCIAL,
                 confidence=social.confidence,
                 slots={"social_category": social.category},
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
+
+    # ── Layer 1b: non-commerce media / long OCR greetings (May 2026) ───
+    non_commerce = classify_non_commerce(message)
+    if non_commerce is not None:
+        candidates.append((
+            non_commerce.confidence,
+            Intent(
+                name=INTENT_SOCIAL,
+                confidence=non_commerce.confidence,
+                slots={
+                    "social_category": non_commerce.social_category,
+                    "block_commerce_escalation": True,
+                    "non_commerce_source": non_commerce.source,
+                },
                 raw_message=message,
                 extraction_method="rules",
             ),

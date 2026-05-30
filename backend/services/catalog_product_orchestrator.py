@@ -91,6 +91,8 @@ REASON_PRODUCT_NOT_FOUND = "product_not_found"
 REASON_TENANT_NOT_SEND_READY = "tenant_not_send_ready"
 REASON_VARIANT_CHOICE_REQUIRED = "variant_choice_required"
 REASON_WEAK_CONFIDENCE = "weak_confidence"
+REASON_NON_COMMERCE_BLOCKED = "non_commerce_blocked"
+REASON_NO_POSITIVE_COMMERCE = "no_positive_commerce"
 REASON_RETAILER_ID_COLLISION = "retailer_id_collision"
 REASON_SYNTHETIC_RETAILER_ID = "synthetic_retailer_id"
 REASON_NO_RETAILER_ID = "no_retailer_id"
@@ -220,13 +222,62 @@ def retailer_id_has_collision(
     return len(count_retailer_id_owners(products, retailer_id)) > 1
 
 
+def query_retailer_id_collision_peer_ids(
+    db: Any,
+    *,
+    tenant_id: int,
+    retailer_id: str,
+    exclude_product_id: Optional[int] = None,
+    limit: int = 2,
+) -> List[int]:
+    """Return up to *limit* peer product ids sharing *retailer_id* (effective).
+
+    Scoped strictly to *tenant_id*, excludes *exclude_product_id* (the
+    attachment under evaluation). One indexed query — never loads the
+    full tenant catalog.
+    """
+    rid = (retailer_id or "").strip()
+    if not rid or db is None:
+        return []
+    try:
+        from models import Product as _Product  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        from database.models import Product as _Product  # noqa: PLC0415
+
+    from sqlalchemy import and_, func, or_  # noqa: PLC0415
+
+    meta_trim = func.trim(_Product.meta_retailer_id)
+    ext_trim = func.trim(_Product.external_id)
+    meta_empty = or_(
+        _Product.meta_retailer_id.is_(None),
+        meta_trim == "",
+    )
+    effective_match = or_(
+        meta_trim == rid,
+        and_(meta_empty, ext_trim == rid),
+    )
+
+    q = (
+        db.query(_Product.id)
+        .filter(_Product.tenant_id == tenant_id)
+        .filter(effective_match)
+    )
+    if exclude_product_id is not None:
+        q = q.filter(_Product.id != int(exclude_product_id))
+    rows = q.limit(max(1, int(limit))).all()
+    return [int(r[0] if isinstance(r, tuple) else r.id) for r in rows]
+
+
 def evaluate_product_card_send(
     *,
     tenant_id: int,
     connection: Any,
     attachment: Dict[str, Any],
     product_row: Optional[Any] = None,
+    collision_peer_ids: Optional[List[int]] = None,
     tenant_products: Optional[List[Any]] = None,
+    block_commerce_escalation: bool = False,
+    positive_commerce_intent: bool = False,
 ) -> ProductCardSendDecision:
     """Pure decision function — no I/O, no sends, no side effects.
 
@@ -242,9 +293,13 @@ def evaluate_product_card_send(
         Optional pre-loaded ``Product`` ORM row. When omitted, collision
         checks use *tenant_products* only; tenant isolation on the row
         is skipped unless *product_row* is supplied by the caller.
+    collision_peer_ids:
+        Peer product ids returned by
+        :func:`query_retailer_id_collision_peer_ids` — any non-empty list
+        triggers collision fallback. Prefer this over *tenant_products*.
     tenant_products:
-        All products for collision detection. Caller should pass a
-        tenant-scoped list; this function never opens a DB session.
+        Deprecated in-memory collision scan — retained for unit tests only.
+        Production wiring MUST use *collision_peer_ids* from the scoped query.
 
     Phase A: callers pass pre-fetched rows. Phase B wiring may load
     ``product_row`` inside ``_try_send_catalog_product`` before invoking
@@ -255,6 +310,13 @@ def evaluate_product_card_send(
     :class:`ProductCardSendDecision` only — never written back onto the dict.
     """
     # Read-only contract — attachment must not be mutated anywhere below.
+    if block_commerce_escalation:
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_NON_COMMERCE_BLOCKED,
+            diagnostics={"block_commerce_escalation": True},
+        )
+
     if not attachment or attachment.get("kind") != "product_card":
         return _decision(
             ProductCardSendAction.FALLBACK_LEGACY,
@@ -311,6 +373,24 @@ def evaluate_product_card_send(
             diagnostics={"confidence": confidence},
         )
 
+    # ── Positive commerce intent gate (May 2026) ────────────────────
+    # Weak / missing attachment confidence requires explicit commerce
+    # intent — unless ops disabled the legacy weak-confidence block.
+    if (
+        not positive_commerce_intent
+        and confidence in {"", "weak", "low"}
+        and not (confidence == "weak" and not weak_confidence_block_enabled())
+    ):
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_NO_POSITIVE_COMMERCE,
+            tenant_send_ready=True,
+            diagnostics={
+                "confidence": confidence or "missing",
+                "positive_commerce_intent": False,
+            },
+        )
+
     retailer_id = resolve_attachment_retailer_id(attachment, product_row)
     if not retailer_id:
         return _decision(
@@ -328,6 +408,18 @@ def evaluate_product_card_send(
         )
 
     # ── Collision — ALWAYS fallback ───────────────────────────────────
+    if collision_peer_ids:
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_RETAILER_ID_COLLISION,
+            tenant_send_ready=True,
+            retailer_id=retailer_id,
+            log_event="CATALOG_RID_COLLISION",
+            diagnostics={
+                "collision_peer_ids":  list(collision_peer_ids),
+                "collision_count":     len(collision_peer_ids),
+            },
+        )
     if tenant_products is not None and retailer_id_has_collision(
         tenant_products, retailer_id,
     ):

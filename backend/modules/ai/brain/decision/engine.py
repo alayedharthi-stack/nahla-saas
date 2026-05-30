@@ -69,6 +69,33 @@ from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 logger = logging.getLogger("nahla.brain.decision")
 
 
+def _is_commerce_blocked(ctx: BrainContext) -> bool:
+    """True when non-commerce safety layer forbids catalog escalation."""
+    try:
+        slots = getattr(ctx.intent, "slots", None) or {}
+        if slots.get("block_commerce_escalation"):
+            return True
+        from ..intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
+        intent = getattr(ctx, "intent", None)
+        nc = resolve_commerce_block(
+            ctx.message or "",
+            intent_name=getattr(intent, "name", None),
+            intent_confidence=getattr(intent, "confidence", None),
+        )
+        if nc is not None:
+            logger.info(
+                "[NON_COMMERCE_BLOCK] tenant=%s category=%s source=%s preview=%r",
+                getattr(ctx, "tenant_id", None),
+                nc.category,
+                nc.source,
+                (ctx.message or "")[:60],
+            )
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 # ── Direct Answer First (DAF) — first-turn welcome bypass ────────────────────
 #
 # Production regression (May 2026 #20 — "voice note with invoice question"):
@@ -379,6 +406,32 @@ class DefaultDecisionEngine:
                 args={"social_category": category},
                 reason=f"social courtesy ack ({category})",
                 confidence=intent.confidence,
+            )
+
+        # ── 0a.5 Non-commerce media / greeting OCR (May 2026) ───────────────
+        # Long Eid dua / greeting images bypass ``classify_social`` length
+        # limits but still carry zero buying intent. When the classifier
+        # (or intent slots) marks the turn, block ALL commerce branches
+        # below — including text-pattern top_products / replay fallbacks
+        # and LLM catalog drift — and respond socially instead.
+        if _is_commerce_blocked(ctx):
+            nc_category = str(
+                (intent.slots or {}).get("social_category") or "religious_media"
+            )
+            logger.info(
+                "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
+                getattr(ctx, "tenant_id", None),
+                nc_category,
+                (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_SOCIAL_REPLY,
+                args={
+                    "social_category": nc_category,
+                    "block_commerce_escalation": True,
+                },
+                reason=f"non-commerce safety gate ({nc_category})",
+                confidence=max(float(intent.confidence or 0.0), 0.94),
             )
 
         # ── 0b. Platform / SaaS inquiry (May 2026 #4) ───────────────────────
@@ -1123,14 +1176,19 @@ class DefaultDecisionEngine:
         ]
         _is_top_seller_req = any(p in _msg_norm for p in _TOP_SELLER_PATTERNS)
 
-        # ── 3.8b Replay last list ─────────────────────────────────────────
-        _REPLAY_PATTERNS = [
+        # ── 3.8b Show more / replay list ──────────────────────────────────
+        _SHOW_MORE_PATTERNS = [
+            "باقي الخيارات", "وريني باقي", "خيارات اكثر", "خيارات أكثر",
+            "more options", "show more",
+        ]
+        _REPEAT_PATTERNS = [
             "مره ثانيه", "مره اخرى", "مرة اخرى", "مرة ثانية",
             "كرر", "اعد", "اعيد", "وريني الخيارات",
             "وريني تاني", "وريني ثاني", "ارسل مره", "ارسل تاني",
             "repeat", "show again", "list again",
         ]
-        _is_replay_req = any(p in _msg_norm for p in _REPLAY_PATTERNS)
+        _is_show_more_req = any(p in _msg_norm for p in _SHOW_MORE_PATTERNS)
+        _is_repeat_req = any(p in _msg_norm for p in _REPEAT_PATTERNS)
 
         # ── 3.8c Extract product name from order phrases ──────────────────
         # "أبغى أطلب X" / "ابي اطلب X" / "اطلب X" / "أريد X"
@@ -1153,7 +1211,7 @@ class DefaultDecisionEngine:
                 _extracted_product_query = _extracted
 
         # ── 3.8a handler ─────────────────────────────────────────────────
-        if _is_top_seller_req and facts.has_products:
+        if _is_top_seller_req and facts.has_products and not _is_commerce_blocked(ctx):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
                 "tenant=%s intent=%s msg=%r",
@@ -1166,8 +1224,26 @@ class DefaultDecisionEngine:
                 confidence=0.92,
             )
 
-        # ── 3.8b handler ─────────────────────────────────────────────────
-        if _is_replay_req and facts.has_products:
+        # ── 3.8b handler — show NEXT options (not a repeat) ───────────────
+        if _is_show_more_req and facts.has_products and not _is_commerce_blocked(ctx):
+            logger.info(
+                "[ORDER FLOW] show_more_candidates | offset=%d pool=%d tenant=%s",
+                int(getattr(state, "catalog_browse_offset", 0) or 0),
+                len(getattr(state, "catalog_browse_pool", None) or []),
+                ctx.tenant_id,
+            )
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={
+                    "query": str(getattr(state, "last_browse_query", "") or ""),
+                    "source": "show_more",
+                },
+                reason="text-pattern: show more product options",
+                confidence=0.90,
+            )
+
+        # ── 3.8c handler — verbatim repeat of last list ───────────────────
+        if _is_repeat_req and facts.has_products and not _is_commerce_blocked(ctx):
             _last_cands = list(state.last_search_candidates or [])
             if _last_cands:
                 logger.info(
@@ -1198,7 +1274,7 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.8c handler ─────────────────────────────────────────────────
-        if _extracted_product_query and facts.has_products:
+        if _extracted_product_query and facts.has_products and not _is_commerce_blocked(ctx):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
                 "query=%r tenant=%s intent=%s",
@@ -1534,6 +1610,16 @@ class DefaultDecisionEngine:
 
         # ── 7. Ask about product or price ─────────────────────────────────
         if intent.name in (INTENT_ASK_PRODUCT, INTENT_ASK_PRICE):
+            if _is_commerce_blocked(ctx):
+                return Decision(
+                    action=ACTION_SOCIAL_REPLY,
+                    args={
+                        "social_category": "religious_media",
+                        "block_commerce_escalation": True,
+                    },
+                    reason="non-commerce block overrides ask_product/price on social OCR",
+                    confidence=0.94,
+                )
             if facts.has_products:
                 query = (
                     intent.slots.get("product_query")
@@ -1869,6 +1955,16 @@ class DefaultDecisionEngine:
             )
 
         # ── 9. Fallback: LLM ─────────────────────────────────────────────
+        if _is_commerce_blocked(ctx):
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "non_commerce_media",
+                    "block_commerce_escalation": True,
+                },
+                reason="non-commerce media — LLM reply without catalog tools",
+                confidence=0.88,
+            )
         return Decision(
             action=ACTION_LLM_REPLY,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",

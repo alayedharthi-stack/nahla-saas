@@ -515,6 +515,18 @@ class MerchantBrain:
 
         intent: Intent = await self._classifier.classify(message, history, state_for_classify)
 
+        _nc_match = None
+        try:
+            from .intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
+            _nc_match = resolve_commerce_block(
+                message,
+                inbound_metadata=(profile or {}).get("inbound_metadata"),
+                intent_name=intent.name,
+                intent_confidence=intent.confidence,
+            )
+        except Exception:  # noqa: BLE001
+            _nc_match = None
+
         # ── 2. Load state + facts ─────────────────────────────────────────
         state: MerchantConversationState = state_for_classify
         facts: CommerceFacts             = self._facts_loader.load(db, tenant_id)
@@ -584,6 +596,10 @@ class MerchantBrain:
             merchant_context = merchant_context,
             human_priority = bool(human_priority),
             commerce_bundle  = commerce_bundle,
+            block_commerce_escalation=bool(_nc_match),
+            non_commerce_category=(
+                str(_nc_match.category) if _nc_match else ""
+            ),
         )
         if human_priority:
             logger.info(
@@ -891,14 +907,23 @@ class MerchantBrain:
             or result.data.get("recommended_products")
             or []
         )
+        _breadth_cap = 16
+        _pb = result.data.get("product_breadth") or {}
+        if _pb.get("policy_enabled", True) and _pb.get("display_limit"):
+            _breadth_cap = max(1, int(_pb["display_limit"]))
+
         if decision.args.get("rejected_product"):
             # Customer picked a product that was not orderable. The decision
             # engine routed to ACTION_SEARCH_PRODUCTS with alternatives.
             # Clear product focus so we don't loop on the rejected product,
             # and replace candidates with the orderable alternatives.
             new_state.current_product_focus = None
-            alts = decision.args.get("alternatives") or _search_products
-            new_state.last_search_candidates = list(alts)[:16]
+            alts = (
+                result.data.get("pending_candidates")
+                or decision.args.get("alternatives")
+                or _search_products
+            )
+            new_state.last_search_candidates = list(alts)[:_breadth_cap]
             logger.info(
                 "[ORDER FLOW] rejected unorderable pick — replaced candidates | "
                 "rejected=%r new_count=%d",
@@ -910,9 +935,8 @@ class MerchantBrain:
             # product into ACTION_PROPOSE_DRAFT_ORDER. Clear candidates.
             new_state.last_search_candidates = []
         elif _search_products:
-            # Cap to 16 so picks like "14" remain meaningful (top-seller lists
-            # often exceed 8 items) while state stays small.
-            new_state.last_search_candidates = list(_search_products)[:16]
+            # Must match numbered list shown to the customer (breadth policy).
+            new_state.last_search_candidates = list(_search_products)[:_breadth_cap]
 
             # ── Diagnostic: log what we stored vs what was old focus ──────────
             _old_focus_title = (new_state.current_product_focus or {}).get("title")
@@ -1299,6 +1323,21 @@ class MerchantBrain:
                     _cand.get("stock_qty"), _cand.get("in_stock"),
                     _cand.get("status"),
                 )
+
+        # ── 7b-2. Progressive browse pool for "باقي الخيارات" ─────────────
+        _src = str((decision.args or {}).get("source") or "").strip().lower()
+        _browse_pool = result.data.get("browse_pool")
+        _browse_offset = result.data.get("browse_offset")
+        if _browse_pool is not None and _src not in {"replay"}:
+            new_state.catalog_browse_pool = list(_browse_pool)
+        if _browse_offset is not None and _src == "show_more":
+            new_state.catalog_browse_offset = int(_browse_offset)
+        elif _pending_after_compose and _src not in {"replay", "show_more"}:
+            new_state.catalog_browse_offset = len(_pending_after_compose)
+        if str(result.data.get("query") or (decision.args or {}).get("query") or "").strip():
+            new_state.last_browse_query = str(
+                result.data.get("query") or (decision.args or {}).get("query") or ""
+            ).strip()
 
         asked_now = _infer_last_question(decision, result, suggestion)
         if asked_now:
@@ -1726,6 +1765,20 @@ def _build_reply_state(
     platform_kb_mode = False
     platform_topic = ""
     platform_kb_excerpt = ""
+    non_commerce_block_mode = bool(
+        (decision.args or {}).get("block_commerce_escalation")
+    )
+    if not non_commerce_block_mode:
+        try:
+            from .intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
+            _nc = resolve_commerce_block(
+                ctx.message or "",
+                intent_name=getattr(ctx.intent, "name", None),
+                intent_confidence=getattr(ctx.intent, "confidence", None),
+            )
+            non_commerce_block_mode = _nc is not None
+        except Exception:  # noqa: BLE001
+            pass
     if decision.action == ACTION_PLATFORM_REPLY:
         platform_kb_mode = True
         platform_topic = str((decision.args or {}).get("platform_topic") or "general_platform")
@@ -1815,6 +1868,7 @@ def _build_reply_state(
         platform_kb_mode=platform_kb_mode,
         platform_topic=platform_topic,
         platform_kb_excerpt=platform_kb_excerpt,
+        non_commerce_block_mode=non_commerce_block_mode,
         relational_frame=(
             _stance_result.stance if _stance_result
             and _stance_result.stance != "unknown" else ""

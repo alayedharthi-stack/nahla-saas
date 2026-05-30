@@ -140,6 +140,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     kb_block = _structured_kb or overlay_buckets.get("facts", "")
 
     _platform_mode = bool(getattr(state, "platform_kb_mode", False))
+    _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
     if _platform_mode:
         excerpt = str(getattr(state, "platform_kb_excerpt", "") or "").strip()
         _ptopic = str(getattr(state, "platform_topic", "") or "").strip()
@@ -191,11 +192,18 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         resolver_overlay = ""
 
     tools_parts: list[str] = []
-    if not _platform_mode:
+    if not _platform_mode and not _non_commerce_mode:
         if libraries_text:
             tools_parts.append(libraries_text)
         if resolver_overlay:
             tools_parts.append(resolver_overlay)
+    elif _non_commerce_mode:
+        tools_parts.append(
+            "## أدوات المنتجات\n"
+            "معطّلة لهذه الجولة — العميل أرسل محتوى اجتماعي/ديني/تهنئة "
+            "بدون نية شراء. **ممنوع** اقتراح منتجات أو ‎[PRODUCT:...]‎ "
+            "أو ‎[MEDIA_KEY:...]‎ أو أي CTA بيعي."
+        )
     else:
         # Hide product/media marker vocabulary so the model cannot drift
         # into catalogue tooling on a platform-intent turn.
