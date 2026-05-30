@@ -1,0 +1,423 @@
+"""
+services/catalog_product_orchestrator.py
+────────────────────────────────────────
+Decision-only runtime layer for AI-driven official WhatsApp product cards.
+
+This module evaluates a ``product_card`` attachment and returns a structured
+decision — it does NOT send messages, reorder the dispatch loop, or mutate
+product resolution behaviour.
+
+Approved architecture (Phase A skeleton — not yet wired into
+``whatsapp_webhook._try_send_catalog_product``):
+
+  three resolution paths → one ``product_card`` attachment dict → orchestrator
+  → (future) catalog_sender / legacy fallback
+
+Invariants
+──────────
+* Stateless — no caching, persistence, or background work.
+* Tenant-scoped reads only — ``Product.tenant_id == tenant_id`` enforced.
+* Send readiness uses ``evaluate_tenant_catalog_send_readiness`` — NOT the
+  PR2 Graph import token checklist.
+* Weak confidence blocks catalog when ``CATALOG_WEAK_CONFIDENCE_BLOCK=true``
+  (default).
+* Retailer-id collision ALWAYS falls back — never sends official card.
+* Out-of-stock products may still receive catalog cards; ``stock_warning``
+  is diagnostics-only.
+
+Attachment immutability (commerce runtime boundary)
+───────────────────────────────────────────────────
+The ``product_card`` attachment dict is a **shared contract** across brain
+markers, visual enforcement, safety nets, the dispatch loop, fallback
+layers, delivery guards, and future commerce skills.
+
+This module MUST treat every *attachment* as read-only:
+
+  * MAY derive runtime values (``retailer_id``, diagnostics, decisions).
+  * MAY return normalized values on :class:`ProductCardSendDecision`.
+  * MUST NOT mutate the attachment dict in place — no writes, pop, update,
+    injected retailer_ids, rewritten confidence/URLs/captions/titles/ids.
+
+Phase B wiring contract (``_try_send_catalog_product``)
+───────────────────────────────────────────────────────
+The orchestrator is **decision-only policy** — not a transport layer,
+fallback sender, payload mutator, or delivery replacement.
+
+  1. ``decision = evaluate_product_card_send(...)`` — read-only on *attachment*.
+  2. ``log_product_card_decision(decision, ...)``.
+  3. ``VARIANT_PROMPT`` → delegate to the **existing** variant-question branch
+     in the webhook (unchanged transport; returns ``True`` to skip legacy).
+  4. ``decision.action != SEND_CATALOG`` (all other actions) → ``return False``
+     so legacy image+CTA, CTA-only, delivery guards, and rescue paths run
+     unchanged.
+  5. ``SEND_CATALOG`` → call ``catalog_sender`` with ``decision.retailer_id``
+     (never write retailer_id back onto *attachment*).
+
+Text-first continuity, dispatch order, and fallback ownership stay in the
+webhook — the orchestrator never sends messages.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from core.catalog import (
+    effective_retailer_id,
+    effective_variant_retailer_id,
+    evaluate_tenant_catalog_send_readiness,
+    is_catalog_eligible,
+    is_synthetic_retailer_id,
+)
+
+logger = logging.getLogger("nahla.catalog_orchestrator")
+
+
+class ProductCardSendAction(str, Enum):
+    """Closed action set — callers map these to existing send paths."""
+
+    SEND_CATALOG = "send_catalog"
+    FALLBACK_LEGACY = "fallback_legacy"
+    FALLBACK_CTA_ONLY = "fallback_cta_only"
+    VARIANT_PROMPT = "variant_prompt"
+
+
+# Closed reason vocabulary for logs, metrics, and tests.
+REASON_OK = "ok"
+REASON_TENANT_MISMATCH = "tenant_mismatch"
+REASON_PRODUCT_NOT_FOUND = "product_not_found"
+REASON_TENANT_NOT_SEND_READY = "tenant_not_send_ready"
+REASON_VARIANT_CHOICE_REQUIRED = "variant_choice_required"
+REASON_WEAK_CONFIDENCE = "weak_confidence"
+REASON_RETAILER_ID_COLLISION = "retailer_id_collision"
+REASON_SYNTHETIC_RETAILER_ID = "synthetic_retailer_id"
+REASON_NO_RETAILER_ID = "no_retailer_id"
+REASON_CATALOG_NOT_ELIGIBLE = "catalog_not_eligible"
+REASON_NOT_PRODUCT_CARD = "not_product_card"
+
+
+def weak_confidence_block_enabled() -> bool:
+    """When True (default), ``confidence=weak`` → legacy fallback."""
+    raw = (os.getenv("CATALOG_WEAK_CONFIDENCE_BLOCK", "true") or "").strip().lower()
+    return raw not in {"false", "0", "off", "no", ""}
+
+
+def variant_send_enabled() -> bool:
+    """Mirrors ``CATALOG_VARIANT_SEND`` in ``whatsapp_webhook``."""
+    raw = (os.getenv("CATALOG_VARIANT_SEND", "true") or "").strip().lower()
+    return raw not in {"false", "0", "off", "no", ""}
+
+
+@dataclass(frozen=True)
+class ProductCardSendDecision:
+    """Outcome of :func:`evaluate_product_card_send`.
+
+    ``log_event`` is the primary grep token:
+      * ``CATALOG_ORCHESTRATE`` — normal decision trail
+      * ``CATALOG_RID_COLLISION`` — collision-specific (reason also set)
+    """
+
+    action: ProductCardSendAction
+    reason: str
+    retailer_id: str = ""
+    stock_warning: bool = False
+    log_event: str = "CATALOG_ORCHESTRATE"
+    tenant_send_ready: bool = False
+    product_ready: bool = False
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_log_dict(
+        self,
+        *,
+        tenant_id: Optional[int],
+        product_id: Optional[Any] = None,
+        confidence: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Structured payload for ``[CATALOG_ORCHESTRATE]`` / collision logs."""
+        return {
+            "event":           self.log_event,
+            "tenant_id":       tenant_id,
+            "product_id":      product_id,
+            "action":          self.action.value,
+            "reason":          self.reason,
+            "retailer_id":     self.retailer_id or None,
+            "stock_warning":   self.stock_warning,
+            "confidence":      confidence,
+            "tenant_ready":    self.tenant_send_ready,
+            "product_ready":   self.product_ready,
+            **self.diagnostics,
+        }
+
+
+def _decision(
+    action: ProductCardSendAction,
+    reason: str,
+    *,
+    retailer_id: str = "",
+    stock_warning: bool = False,
+    log_event: str = "CATALOG_ORCHESTRATE",
+    tenant_send_ready: bool = False,
+    product_ready: bool = False,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> ProductCardSendDecision:
+    return ProductCardSendDecision(
+        action=action,
+        reason=reason,
+        retailer_id=retailer_id,
+        stock_warning=stock_warning,
+        log_event=log_event,
+        tenant_send_ready=tenant_send_ready,
+        product_ready=product_ready,
+        diagnostics=diagnostics or {},
+    )
+
+
+def resolve_attachment_retailer_id(
+    attachment: Dict[str, Any],
+    product_row: Any,
+) -> str:
+    """Variant-aware retailer id — mirrors ``_try_send_catalog_product``."""
+    picked = (attachment.get("picked_variant_retailer_id") or "").strip()
+    if picked:
+        return picked
+    if product_row is not None:
+        rid = (
+            effective_variant_retailer_id(product_row)
+            or effective_retailer_id(product_row)
+        )
+        if rid:
+            return rid
+    return effective_retailer_id(attachment)
+
+
+def count_retailer_id_owners(
+    products: List[Any],
+    retailer_id: str,
+) -> List[int]:
+    """Return product ids in *products* sharing *retailer_id* (effective)."""
+    rid = (retailer_id or "").strip()
+    if not rid:
+        return []
+    owners: List[int] = []
+    for p in products:
+        eff = effective_variant_retailer_id(p) or effective_retailer_id(p)
+        if eff == rid:
+            pid = getattr(p, "id", None)
+            if pid is None and isinstance(p, dict):
+                pid = p.get("id")
+            if pid is not None:
+                owners.append(int(pid))
+    return owners
+
+
+def retailer_id_has_collision(
+    products: List[Any],
+    retailer_id: str,
+) -> bool:
+    """True when more than one product in the tenant scope shares *retailer_id*."""
+    return len(count_retailer_id_owners(products, retailer_id)) > 1
+
+
+def evaluate_product_card_send(
+    *,
+    tenant_id: int,
+    connection: Any,
+    attachment: Dict[str, Any],
+    product_row: Optional[Any] = None,
+    tenant_products: Optional[List[Any]] = None,
+) -> ProductCardSendDecision:
+    """Pure decision function — no I/O, no sends, no side effects.
+
+    Parameters
+    ──────────
+    tenant_id:
+        JWT-scoped tenant for this turn.
+    connection:
+        Cached ``WhatsAppConnection`` for the tenant (may be None).
+    attachment:
+        Standard ``product_card`` dict from the resolver / safety nets.
+    product_row:
+        Optional pre-loaded ``Product`` ORM row. When omitted, collision
+        checks use *tenant_products* only; tenant isolation on the row
+        is skipped unless *product_row* is supplied by the caller.
+    tenant_products:
+        All products for collision detection. Caller should pass a
+        tenant-scoped list; this function never opens a DB session.
+
+    Phase A: callers pass pre-fetched rows. Phase B wiring may load
+    ``product_row`` inside ``_try_send_catalog_product`` before invoking
+    this helper — still one scoped query, no orchestrator-owned session.
+
+    **Attachment immutability:** *attachment* is read-only input. Derived
+    values (``retailer_id``, eligibility, stock flags) are returned on the
+    :class:`ProductCardSendDecision` only — never written back onto the dict.
+    """
+    # Read-only contract — attachment must not be mutated anywhere below.
+    if not attachment or attachment.get("kind") != "product_card":
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_NOT_PRODUCT_CARD,
+        )
+
+    # ── Tenant send readiness (NOT import / Graph token checklist) ──
+    tenant_ready = evaluate_tenant_catalog_send_readiness(connection)
+    if not tenant_ready.ready:
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_TENANT_NOT_SEND_READY,
+            tenant_send_ready=False,
+            diagnostics={
+                "tenant_send_reason": tenant_ready.reason,
+                "tenant_checks":      tenant_ready.checks,
+            },
+        )
+
+    # ── Variant choice short-circuit ────────────────────────────────
+    picked_variant_rid = (attachment.get("picked_variant_retailer_id") or "").strip()
+    if (
+        variant_send_enabled()
+        and not picked_variant_rid
+        and bool(attachment.get("needs_variant_choice"))
+    ):
+        return _decision(
+            ProductCardSendAction.VARIANT_PROMPT,
+            REASON_VARIANT_CHOICE_REQUIRED,
+            tenant_send_ready=True,
+            diagnostics={"variant_count": len(attachment.get("variants") or [])},
+        )
+
+    # ── Tenant isolation on loaded product row ────────────────────────
+    if product_row is not None:
+        row_tid = getattr(product_row, "tenant_id", None)
+        if row_tid is None and isinstance(product_row, dict):
+            row_tid = product_row.get("tenant_id")
+        if row_tid is not None and int(row_tid) != int(tenant_id):
+            return _decision(
+                ProductCardSendAction.FALLBACK_LEGACY,
+                REASON_TENANT_MISMATCH,
+                tenant_send_ready=True,
+                diagnostics={"row_tenant_id": row_tid},
+            )
+
+    # ── Weak confidence gate ────────────────────────────────────────
+    confidence = (attachment.get("confidence") or "").strip().lower()
+    if weak_confidence_block_enabled() and confidence == "weak":
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_WEAK_CONFIDENCE,
+            tenant_send_ready=True,
+            diagnostics={"confidence": confidence},
+        )
+
+    retailer_id = resolve_attachment_retailer_id(attachment, product_row)
+    if not retailer_id:
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_NO_RETAILER_ID,
+            tenant_send_ready=True,
+        )
+
+    if is_synthetic_retailer_id(retailer_id):
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_SYNTHETIC_RETAILER_ID,
+            tenant_send_ready=True,
+            retailer_id=retailer_id,
+        )
+
+    # ── Collision — ALWAYS fallback ───────────────────────────────────
+    if tenant_products is not None and retailer_id_has_collision(
+        tenant_products, retailer_id,
+    ):
+        owners = count_retailer_id_owners(tenant_products, retailer_id)
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_RETAILER_ID_COLLISION,
+            tenant_send_ready=True,
+            retailer_id=retailer_id,
+            log_event="CATALOG_RID_COLLISION",
+            diagnostics={
+                "collision_owner_ids": owners,
+                "collision_count":     len(owners),
+            },
+        )
+
+    # ── Per-product catalog eligibility ─────────────────────────────
+    product_target = product_row if product_row is not None else attachment
+    elig = is_catalog_eligible(connection, products=[product_target])
+    if not elig.ok:
+        return _decision(
+            ProductCardSendAction.FALLBACK_LEGACY,
+            REASON_CATALOG_NOT_ELIGIBLE,
+            tenant_send_ready=True,
+            retailer_id=retailer_id,
+            diagnostics={"eligibility_reason": elig.reason},
+        )
+
+    # ── Stock warning (diagnostics only — no block) ─────────────────
+    in_stock = attachment.get("in_stock")
+    if in_stock is None and product_row is not None:
+        in_stock = getattr(product_row, "in_stock", True)
+    stock_warning = in_stock is False
+
+    # ── CTA-only hint when no image (caller still owns send) ─────────
+    has_image = bool((attachment.get("file_url") or "").strip())
+    action = ProductCardSendAction.SEND_CATALOG
+    if not has_image and not (attachment.get("product_url") or "").strip():
+        # Nothing to render in legacy either — still send_catalog attempt
+        # first; provider may succeed with catalog-only body.
+        pass
+    elif not has_image:
+        action = ProductCardSendAction.FALLBACK_CTA_ONLY
+
+    return _decision(
+        action,
+        REASON_OK,
+        retailer_id=retailer_id,
+        stock_warning=stock_warning,
+        tenant_send_ready=True,
+        product_ready=True,
+        diagnostics={"has_image_url": has_image},
+    )
+
+
+def should_attempt_catalog_send(decision: ProductCardSendDecision) -> bool:
+    """True only when Phase B wiring should invoke ``catalog_sender``.
+
+    All other actions (except ``VARIANT_PROMPT``, handled by the existing
+    webhook branch) should ``return False`` from ``_try_send_catalog_product``
+    and let legacy / CTA / delivery-guard paths proceed unchanged.
+    """
+    return decision.action == ProductCardSendAction.SEND_CATALOG
+
+
+def catalog_send_retailer_id(decision: ProductCardSendDecision) -> str:
+    """Retailer id for ``catalog_sender`` — sourced from decision, not attachment."""
+    return (decision.retailer_id or "").strip()
+
+
+def log_product_card_decision(
+    decision: ProductCardSendDecision,
+    *,
+    tenant_id: Optional[int],
+    attachment: Dict[str, Any],
+) -> None:
+    """Emit the approved structured log line — safe to call from wiring layer."""
+    payload = decision.to_log_dict(
+        tenant_id=tenant_id,
+        product_id=attachment.get("id"),
+        confidence=attachment.get("confidence"),
+    )
+    line = (
+        f"[{decision.log_event}] tenant={tenant_id} product_id={payload.get('product_id')} "
+        f"action={payload['action']} reason={payload['reason']} "
+        f"retailer_id={payload.get('retailer_id')} stock_warning={payload['stock_warning']}"
+    )
+    if decision.reason == REASON_RETAILER_ID_COLLISION:
+        logger.warning("%s owners=%s", line, payload.get("collision_owner_ids"))
+    elif decision.action == ProductCardSendAction.SEND_CATALOG:
+        logger.info(line)
+    else:
+        logger.info(line)

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger("nahla.catalog")
 
@@ -510,12 +510,141 @@ def catalog_summary(connection: Any) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WhatsApp commerce readiness — shared by dashboard diagnostics + orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two distinct surfaces (approved architecture):
+#
+#   * **Operational / import diagnostics** — ``whatsapp_commerce_diagnostics_readiness``
+#     includes Graph import token availability for the PR2 dashboard checklist.
+#     NOT used as a hard gate for catalog card sends.
+#
+#   * **Send readiness** — ``evaluate_tenant_catalog_send_readiness`` mirrors
+#     ``is_catalog_eligible`` plus connection health (status, sending_enabled,
+#     phone_number_id). Used by the product-card orchestrator only.
+
+
+@dataclass(frozen=True)
+class TenantCatalogSendReadiness:
+    """Runtime send gate for official WhatsApp catalog cards.
+
+    Deliberately excludes Graph import token checks — coexistence / D360
+    sends use ``provider_send_message``, not Meta Graph import tokens.
+    """
+    ready: bool
+    reason: str
+    checks: Dict[str, bool]
+
+
+def evaluate_tenant_catalog_send_readiness(connection: Any) -> TenantCatalogSendReadiness:
+    """Decide whether *connection* can attempt catalog card sends at all.
+
+    Closed ``reason`` vocabulary (first failure wins):
+
+    * ``ok``
+    * ``connection_missing``
+    * ``whatsapp_not_connected``
+    * ``phone_number_id_missing``
+    * ``catalog_disabled`` / ``catalog_id_missing`` — from ``is_catalog_eligible``
+    """
+    if connection is None:
+        return TenantCatalogSendReadiness(
+            ready=False,
+            reason="connection_missing",
+            checks={"connection_present": False},
+        )
+
+    wa_connected = (
+        getattr(connection, "status", "") == "connected"
+        and bool(getattr(connection, "sending_enabled", False))
+    )
+    phone_ok = bool((getattr(connection, "phone_number_id", None) or "").strip())
+
+    checks: Dict[str, bool] = {
+        "connection_present":   True,
+        "whatsapp_connected":   wa_connected,
+        "phone_number_id":      phone_ok,
+    }
+
+    if not wa_connected:
+        return TenantCatalogSendReadiness(
+            ready=False, reason="whatsapp_not_connected", checks=checks,
+        )
+    if not phone_ok:
+        return TenantCatalogSendReadiness(
+            ready=False, reason="phone_number_id_missing", checks=checks,
+        )
+
+    elig = is_catalog_eligible(connection, products=None)
+    checks["catalog_enabled"] = elig.reason != "catalog_disabled"
+    checks["meta_catalog_id"] = elig.reason != "catalog_id_missing"
+    if not elig.ok:
+        return TenantCatalogSendReadiness(
+            ready=False, reason=elig.reason, checks=checks,
+        )
+
+    return TenantCatalogSendReadiness(ready=True, reason="ok", checks=checks)
+
+
+def whatsapp_commerce_diagnostics_readiness(
+    *,
+    connection: Any,
+    catalog_id: str,
+    catalog_enabled: bool,
+    wa_connected: bool,
+    with_rid: int,
+) -> Dict[str, Any]:
+    """PR2 operational checklist for dashboard / support diagnostics.
+
+    Includes ``graph_token_available`` (import path) — informational only,
+    not a send gate. Lazy-imports ``_select_graph_token`` so callers that
+    only need send readiness never pay the import cost.
+    """
+    phone_number_id = (
+        (getattr(connection, "phone_number_id", None) or "").strip()
+        if connection else ""
+    )
+    graph_token_ok = False
+    if connection is not None:
+        from services.meta_catalog_import import _select_graph_token  # noqa: PLC0415
+        graph_token_ok = bool(_select_graph_token(connection).get("token"))
+
+    checks: List[Dict[str, Any]] = [
+        {"key": "whatsapp_connected", "ok": wa_connected},
+        {"key": "phone_number_id", "ok": bool(phone_number_id)},
+        {"key": "meta_catalog_id", "ok": bool(catalog_id)},
+        {"key": "catalog_enabled", "ok": catalog_enabled},
+        {"key": "graph_token_available", "ok": graph_token_ok},
+        {
+            "key": "products_with_retailer_id",
+            "ok": with_rid > 0,
+            "count": with_rid,
+        },
+    ]
+    missing = [c["key"] for c in checks if not c["ok"]]
+    return {
+        "ready":                len(missing) == 0,
+        "checks":               checks,
+        "missing_requirements": missing,
+    }
+
+
+def is_synthetic_retailer_id(retailer_id: str) -> bool:
+    """True when *retailer_id* was assigned by ``canonical_retailer_id`` fallback."""
+    return str(retailer_id or "").strip().startswith("nahla_p_")
+
+
 __all__: List[str] = [
     "CatalogEligibility",
+    "TenantCatalogSendReadiness",
     "assign_canonical_retailer_id",
     "canonical_retailer_id",
     "catalog_summary",
     "effective_retailer_id",
     "effective_variant_retailer_id",
+    "evaluate_tenant_catalog_send_readiness",
     "is_catalog_eligible",
+    "is_synthetic_retailer_id",
+    "whatsapp_commerce_diagnostics_readiness",
 ]

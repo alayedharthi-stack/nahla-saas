@@ -70,6 +70,7 @@ from core.catalog import (
     is_catalog_eligible,
     product_source,
     source_breakdown,
+    whatsapp_commerce_diagnostics_readiness,
 )
 from core.database import get_db
 from core.plan_entitlements import (
@@ -1527,33 +1528,14 @@ def _whatsapp_commerce_readiness(
     wa_connected: bool,
     with_rid: int,
 ) -> Dict[str, Any]:
-    """Structured checklist for WhatsApp Commerce catalog sends."""
-    phone_number_id = (
-        (getattr(conn, "phone_number_id", None) or "").strip() if conn else ""
+    """Structured checklist for WhatsApp Commerce — dashboard diagnostics."""
+    return whatsapp_commerce_diagnostics_readiness(
+        connection=conn,
+        catalog_id=catalog_id,
+        catalog_enabled=catalog_enabled,
+        wa_connected=wa_connected,
+        with_rid=with_rid,
     )
-    graph_token_ok = False
-    if conn is not None:
-        from services.meta_catalog_import import _select_graph_token  # noqa: PLC0415
-        graph_token_ok = bool(_select_graph_token(conn).get("token"))
-
-    checks: List[Dict[str, Any]] = [
-        {"key": "whatsapp_connected", "ok": wa_connected},
-        {"key": "phone_number_id", "ok": bool(phone_number_id)},
-        {"key": "meta_catalog_id", "ok": bool(catalog_id)},
-        {"key": "catalog_enabled", "ok": catalog_enabled},
-        {"key": "graph_token_available", "ok": graph_token_ok},
-        {
-            "key": "products_with_retailer_id",
-            "ok": with_rid > 0,
-            "count": with_rid,
-        },
-    ]
-    missing = [c["key"] for c in checks if not c["ok"]]
-    return {
-        "ready":                len(missing) == 0,
-        "checks":               checks,
-        "missing_requirements": missing,
-    }
 
 
 def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
