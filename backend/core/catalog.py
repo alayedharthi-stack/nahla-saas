@@ -606,16 +606,23 @@ def whatsapp_commerce_diagnostics_readiness(
         if connection else ""
     )
     graph_token_ok = False
+    graph_token_source = None
     if connection is not None:
-        from services.meta_catalog_import import _select_graph_token  # noqa: PLC0415
-        graph_token_ok = bool(_select_graph_token(connection).get("token"))
+        from services.meta_catalog_import import describe_graph_token_selection  # noqa: PLC0415
+        pick = describe_graph_token_selection(connection)
+        graph_token_ok = bool(pick.get("token_present"))
+        graph_token_source = pick.get("token_source")
 
     checks: List[Dict[str, Any]] = [
         {"key": "whatsapp_connected", "ok": wa_connected},
         {"key": "phone_number_id", "ok": bool(phone_number_id)},
         {"key": "meta_catalog_id", "ok": bool(catalog_id)},
         {"key": "catalog_enabled", "ok": catalog_enabled},
-        {"key": "graph_token_available", "ok": graph_token_ok},
+        {
+            "key": "graph_token_available",
+            "ok": graph_token_ok,
+            "token_source": graph_token_source,
+        },
         {
             "key": "products_with_retailer_id",
             "ok": with_rid > 0,

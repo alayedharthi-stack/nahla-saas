@@ -110,13 +110,20 @@ class TestChooseItemEdge:
         from services.meta_catalog_import import CatalogDiscovery, _choose_item_edge
         d = CatalogDiscovery(catalog_id="X",
                              supported_edges=["products", "feeds"])
-        assert _choose_item_edge(d) == ("products", "product_items")
+        assert _choose_item_edge(d) == ("products", "items")
 
-    def test_falls_back_to_product_items_for_legacy_catalogs(self):
-        from services.meta_catalog_import import CatalogDiscovery, _choose_item_edge
+    def test_choose_item_edges_full_chain_when_metadata_empty(self):
+        from services.meta_catalog_import import (
+            CatalogDiscovery, _choose_item_edges, CATALOG_ITEM_EDGE_ORDER,
+        )
+        d = CatalogDiscovery(catalog_id="X", supported_edges=[])
+        assert _choose_item_edges(d) == list(CATALOG_ITEM_EDGE_ORDER)
+
+    def test_legacy_product_items_only_catalog(self):
+        from services.meta_catalog_import import CatalogDiscovery, _choose_item_edges
         d = CatalogDiscovery(catalog_id="X",
                              supported_edges=["product_items", "feeds"])
-        assert _choose_item_edge(d) == ("product_items", "items")
+        assert _choose_item_edges(d) == ["product_items"]
 
     def test_picks_items_for_transactable_items_catalogs(self):
         from services.meta_catalog_import import CatalogDiscovery, _choose_item_edge
@@ -124,16 +131,38 @@ class TestChooseItemEdge:
                              supported_edges=["items", "feeds"])
         assert _choose_item_edge(d) == ("items", "product_items")
 
-    def test_unknown_catalog_falls_back_to_legacy_defaults(self):
+    def test_unknown_catalog_falls_back_to_products_first(self):
         from services.meta_catalog_import import (
             CatalogDiscovery, _choose_item_edge,
             META_CATALOG_EDGE_PRIMARY, META_CATALOG_EDGE_FALLBACK,
+            CATALOG_ITEM_EDGE_ORDER,
         )
         d = CatalogDiscovery(catalog_id="X", supported_edges=[])
-        assert _choose_item_edge(d) == (
-            META_CATALOG_EDGE_PRIMARY,
-            META_CATALOG_EDGE_FALLBACK,
+        assert META_CATALOG_EDGE_PRIMARY == "products"
+        assert META_CATALOG_EDGE_FALLBACK == "items"
+        assert _choose_item_edge(d) == ("products", "items")
+        assert list(CATALOG_ITEM_EDGE_ORDER) == ["products", "items", "product_items"]
+
+
+class TestUnsupportedEdgeDetection:
+    def test_product_items_nonexistent_field_is_unsupported_edge(self):
+        from services.meta_catalog_import import is_unsupported_catalog_edge_error
+        assert is_unsupported_catalog_edge_error({
+            "code": 100,
+            "message": "(#100) Tried accessing nonexistent field (product_items)",
+        })
+
+    def test_classify_does_not_treat_as_permission_failure(self):
+        from services.meta_catalog_import import (
+            classify_meta_graph_error,
+            GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE,
         )
+        c = classify_meta_graph_error(
+            {"meta_code": 100, "meta_message": "(#100) Tried accessing nonexistent field (product_items)"},
+            token_source="platform_system_user",
+        )
+        assert c["result_code"] == GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE
+        assert c["permission_category"] == "unsupported_catalog_edge"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -693,3 +722,104 @@ class TestImportUsesDiscoveredEdge:
         assert not any("/123/items" in c for c in scripted.calls)
         assert not any("/123/product_items" in c for c in scripted.calls)
         assert report.edge_used == "products"
+
+
+class TestImportEdgeFallbackChain:
+    def test_product_items_unsupported_falls_back_to_products(
+        self, monkeypatch, _stub_db,
+    ):
+        """Production incident: product_items returned code=100 but /products works."""
+        from services import meta_catalog_import as mci
+        from services.meta_catalog_import import (
+            CatalogDiscovery, import_from_meta,
+        )
+
+        monkeypatch.delenv("META_CATALOG_DISCOVERY_ONLY", raising=False)
+        good = CatalogDiscovery(
+            catalog_id="123", ok=True, vertical="commerce",
+            supported_edges=[],
+        )
+        _patch_preflight(monkeypatch, discovery=good)
+        monkeypatch.setattr(
+            mci, "_choose_item_edges",
+            lambda d: ["product_items", "products"],
+        )
+
+        page_payload = {
+            "data": [
+                {
+                    "id": "META-1",
+                    "retailer_id": "SKU-1",
+                    "name": "Honey",
+                    "price": "99 SAR",
+                    "image_url": "https://cdn.example/h.jpg",
+                },
+            ],
+            "paging": {},
+        }
+        scripted = _ScriptedClient([
+            (
+                "/123/product_items",
+                _FakeResponse(400, {
+                    "error": {
+                        "code": 100,
+                        "message": "(#100) Tried accessing nonexistent field (product_items)",
+                    },
+                }),
+            ),
+            ("/123/products", _FakeResponse(200, page_payload)),
+        ])
+        _patch_httpx_client(monkeypatch, scripted)
+
+        def _fake_upsert(db, tenant_id, row, report):
+            report.scanned += 1
+            report.created += 1
+
+        monkeypatch.setattr(mci, "_process_one_meta_product", _fake_upsert)
+
+        report = import_from_meta(_stub_db, tenant_id=1)
+
+        assert report.edge_used == "products"
+        assert report.unsupported_edges == ["product_items"]
+        assert "product_items" in report.attempted_edges
+        assert "products" in report.attempted_edges
+        assert report.created == 1
+        assert report.scanned == 1
+        assert any("/123/products" in c for c in scripted.calls)
+
+    def test_all_edges_unsupported_raises_with_diagnostics(
+        self, monkeypatch, _stub_db,
+    ):
+        from services import meta_catalog_import as mci
+        from services.meta_catalog_import import (
+            CatalogDiscovery, MetaCatalogImportError, import_from_meta,
+        )
+
+        monkeypatch.delenv("META_CATALOG_DISCOVERY_ONLY", raising=False)
+        _patch_preflight(monkeypatch, discovery=CatalogDiscovery(
+            catalog_id="123", ok=True, vertical="commerce",
+        ))
+        monkeypatch.setattr(
+            mci, "_choose_item_edges", lambda d: ["product_items", "products"],
+        )
+
+        err_body = {
+            "error": {
+                "code": 100,
+                "message": "(#100) Tried accessing nonexistent field (product_items)",
+            },
+        }
+        scripted = _ScriptedClient([
+            ("/123/product_items", _FakeResponse(400, err_body)),
+            ("/123/products", _FakeResponse(400, {
+                "error": {"code": 100, "message": "(#100) Tried accessing nonexistent field (products)"},
+            })),
+        ])
+        _patch_httpx_client(monkeypatch, scripted)
+
+        with pytest.raises(MetaCatalogImportError) as exc_info:
+            import_from_meta(_stub_db, tenant_id=1)
+
+        detail = exc_info.value.detail
+        assert detail["unsupported_edges"] == ["product_items", "products"]
+        assert detail["result_code"] == "unsupported_catalog_edge"

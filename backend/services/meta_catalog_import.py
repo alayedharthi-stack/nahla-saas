@@ -176,21 +176,13 @@ PAGE_SIZE: int          = 100   # Meta hard-caps at 100 per page anyway
 MAX_PAGES: int          = 5     # safety budget — 500 products / call
 REQUEST_TIMEOUT: float  = 30.0  # seconds — Meta is usually <3s
 
-# ── Catalog edge selection (May 2026 #19f) ───────────────────────────
-# Meta exposes the same catalog rows under multiple edge names
-# depending on the catalog type / API version. Production incident:
-#
-#   GET /v21.0/{catalog_id}/products
-#   → (#100) Tried accessing nonexisting field (products)
-#
-# Commerce catalogs (the ones bound to WhatsApp / Instagram Shopping)
-# expose their rows under ``/items``. The legacy "Marketing API
-# product catalog" edge ``/products`` was retired for those catalogs
-# somewhere around v18 / v19. We default to ``/items`` and fall back
-# to ``/product_items`` if Meta tells us that edge doesn't exist
-# either (some very old catalogs only respond to product_items).
-META_CATALOG_EDGE_PRIMARY  = "items"
-META_CATALOG_EDGE_FALLBACK = "product_items"
+# Commerce catalogs expose rows under different edge names depending on
+# catalog type / API version. Prefer ``/products`` (works for catalog
+# 1430031051699225-style Commerce Manager catalogs), then ``/items``,
+# then legacy ``/product_items``.
+CATALOG_ITEM_EDGE_ORDER: Tuple[str, ...] = ("products", "items", "product_items")
+META_CATALOG_EDGE_PRIMARY  = CATALOG_ITEM_EDGE_ORDER[0]
+META_CATALOG_EDGE_FALLBACK = CATALOG_ITEM_EDGE_ORDER[1]
 
 # Field set tuned for ``ProductItem`` objects on Commerce catalogs.
 # ``sale_price`` / ``brand`` / ``condition`` weren't requested by the
@@ -327,10 +319,9 @@ class MetaCatalogImportError(RuntimeError):
     * ``connection_not_found``        → 404
     * ``catalog_id_missing``          → 400 (merchant must wire Meta first)
     * ``access_token_missing``        → 400 (no token at all on conn)
-    * ``meta_access_token_missing``   → 400 (token exists but is the wrong
-                                             kind — typically a 360dialog
-                                             D360-API-KEY where Graph
-                                             requires Meta OAuth)
+    * ``meta_access_token_missing``   → 400 (no Graph-compatible token)
+    * ``graph_token_invalid``         → 401 (OAuth code 190 / expired token)
+    * ``graph_token_no_catalog_access`` → 403 (token valid but cannot read catalog)
     * ``catalog_not_found``           → 404 (preflight GET /{catalog_id}
                                              failed — the ID does not
                                              resolve to any object Meta
@@ -425,21 +416,26 @@ class ImportReport:
     discovery_only:  bool = False
     # The edge actually used to fetch items. Empty when the run
     # was discovery-only or when no edge was attempted at all.
-    edge_used:       str = ""
+    edge_used:         str = ""
+    attempted_edges:   List[str] = field(default_factory=list)
+    unsupported_edges: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "scanned":         self.scanned,
-            "created":         self.created,
-            "updated":         self.updated,
-            "skipped_manual":  self.skipped_manual,
-            "errors":          self.errors,
-            "pages_fetched":   self.pages_fetched,
-            "truncated":       self.truncated,
-            "error_samples":   self.error_samples[:10],
-            "discovery":       self.discovery.to_dict() if self.discovery else None,
-            "discovery_only":  self.discovery_only,
-            "edge_used":       self.edge_used or None,
+            "scanned":           self.scanned,
+            "created":           self.created,
+            "updated":           self.updated,
+            "skipped_manual":    self.skipped_manual,
+            "errors":            self.errors,
+            "pages_fetched":     self.pages_fetched,
+            "truncated":         self.truncated,
+            "error_samples":     self.error_samples[:10],
+            "discovery":         self.discovery.to_dict() if self.discovery else None,
+            "discovery_only":    self.discovery_only,
+            "edge_used":         self.edge_used or None,
+            "selected_edge":     self.edge_used or None,
+            "attempted_edges":   list(self.attempted_edges),
+            "unsupported_edges": list(self.unsupported_edges),
         }
 
 
@@ -670,30 +666,63 @@ def _preflight_catalog_discovery(
     return out
 
 
-def _choose_item_edge(discovery: CatalogDiscovery) -> Tuple[str, str]:
-    """Pick the best item-edge name to fetch products from, based on
-    the discovery output. Returns ``(primary_edge, fallback_edge)``.
+def _choose_item_edges(discovery: CatalogDiscovery) -> List[str]:
+    """Return an ordered list of item-edge names to try for *discovery*.
 
-    Selection rules (most specific first):
-      1. If ``products`` is in supported_edges → use it (this is
-         what Commerce ProductCatalog objects support natively).
-      2. Else if ``product_items`` is there → use it (some legacy
-         catalogs only expose this name).
-      3. Else if ``items`` is there → use it (rare; some
-         transactable-items catalogs).
-      4. Else fall back to the historical default ``items`` and
-         leave ``product_items`` as a one-shot fallback. The
-         caller will surface a ``catalog_type_unsupported`` error
-         if BOTH attempts also fail.
+    When ``supported_edges`` from ``?metadata=1`` is non-empty, prefer
+    edges Meta advertised — still ordered ``products`` → ``items`` →
+    ``product_items``. When metadata is empty (common when ``?metadata=1``
+    fails), try the full default chain so catalogs that only expose
+    ``/products`` are not stuck on legacy ``/items`` defaults.
     """
-    edges = set(discovery.supported_edges or [])
-    if "products" in edges:
-        return "products", "product_items"
-    if "product_items" in edges:
-        return "product_items", "items"
-    if "items" in edges:
-        return "items", "product_items"
-    return META_CATALOG_EDGE_PRIMARY, META_CATALOG_EDGE_FALLBACK
+    advertised = {
+        str(e).strip()
+        for e in (discovery.supported_edges or [])
+        if str(e).strip()
+    }
+    if advertised:
+        ordered = [e for e in CATALOG_ITEM_EDGE_ORDER if e in advertised]
+        if ordered:
+            return ordered
+    return list(CATALOG_ITEM_EDGE_ORDER)
+
+
+def _choose_item_edge(discovery: CatalogDiscovery) -> Tuple[str, str]:
+    """Pick primary + first fallback edge — backward-compatible wrapper."""
+    edges = _choose_item_edges(discovery)
+    primary = edges[0]
+    try:
+        idx = CATALOG_ITEM_EDGE_ORDER.index(primary)
+        fallback = (
+            CATALOG_ITEM_EDGE_ORDER[idx + 1]
+            if idx + 1 < len(CATALOG_ITEM_EDGE_ORDER)
+            else primary
+        )
+    except ValueError:
+        fallback = edges[1] if len(edges) > 1 else primary
+    return primary, fallback
+
+
+def is_unsupported_catalog_edge_error(meta_err: Optional[Dict[str, Any]]) -> bool:
+    """True when Meta rejects an item *edge* name (code 100 nonexisting field).
+
+    Example: ``(#100) Tried accessing nonexistent field (product_items)``.
+    This is NOT a token/permission failure — caller should try the next edge.
+    """
+    err = meta_err or {}
+    code = err.get("code")
+    if code is None:
+        code = err.get("meta_code")
+    if int(code or 0) != 100:
+        return False
+    msg = str(err.get("message") or err.get("meta_message") or "").lower()
+    if "nonexisting field" not in msg and "nonexistent field" not in msg:
+        return False
+    for edge in CATALOG_ITEM_EDGE_ORDER:
+        if edge in msg:
+            return True
+    # Generic code-100 on an item-edge GET — still treat as edge mismatch.
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -740,6 +769,415 @@ _TOKEN_SOURCE_MERCHANT_OAUTH  = "merchant_meta_oauth"
 _TOKEN_SOURCE_PLATFORM_SYSTEM = "platform_system_user"
 _TOKEN_SOURCE_NONE            = "none"
 
+# Closed result codes for diagnostics / API (never include token values).
+GRAPH_RESULT_OK                        = "ok"
+GRAPH_RESULT_TOKEN_MISSING             = "graph_token_missing"
+GRAPH_RESULT_TOKEN_INVALID             = "graph_token_invalid"
+GRAPH_RESULT_TOKEN_NO_CATALOG_ACCESS   = "graph_token_no_catalog_access"
+GRAPH_RESULT_CATALOG_NOT_FOUND         = "catalog_not_found"
+GRAPH_RESULT_CATALOG_ID_MISSING        = "catalog_id_missing"
+GRAPH_RESULT_CONNECTION_MISSING        = "connection_missing"
+GRAPH_RESULT_META_HTTP_ERROR           = "meta_http_error"
+GRAPH_RESULT_TRANSPORT_ERROR           = "transport_error"
+GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE  = "unsupported_catalog_edge"
+
+
+def _looks_like_meta_graph_token(token: str) -> bool:
+    """True when *token* plausibly is a Meta Graph OAuth / system-user token.
+
+    Coexistence / 360dialog merchants normally store a short D360 API key in
+    ``access_token`` — those must never be sent to graph.facebook.com. A
+    long ``EAA…`` token stored on the same row is treated as merchant Meta
+    OAuth and preferred over the platform fallback.
+    """
+    t = (token or "").strip()
+    if len(t) < 80:
+        return False
+    if t.upper().startswith("D360-"):
+        return False
+    return True
+
+
+def classify_meta_graph_error(
+    error: Optional[Dict[str, Any]] = None,
+    *,
+    http_status: Optional[int] = None,
+    token_source: Optional[str] = None,
+    stage: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Map a Meta Graph failure to a safe, closed result vocabulary.
+
+    Returns ``result_code``, ``permission_category``, and ``action_required``
+    — never raw tokens.
+    """
+    err = dict(error or {})
+    meta_code = err.get("meta_code")
+    if meta_code is None:
+        meta_code = err.get("code")
+    meta_subcode = err.get("meta_subcode") or err.get("error_subcode")
+    meta_type = str(err.get("meta_type") or err.get("type") or "")
+    meta_message = str(err.get("meta_message") or err.get("message") or "")
+    status = http_status if http_status is not None else err.get("status")
+
+    if token_source in (_TOKEN_SOURCE_NONE, None, "") and stage != "catalog_id_check":
+        return {
+            "result_code":          GRAPH_RESULT_TOKEN_MISSING,
+            "permission_category":  "token_missing",
+            "action_required": (
+                "Connect WhatsApp via Meta Embedded Signup with catalog_management, "
+                "or configure the platform WHATSAPP_TOKEN system-user token in Railway."
+            ),
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    msg_lower = meta_message.lower()
+    if is_unsupported_catalog_edge_error(
+        {"code": meta_code, "message": meta_message},
+    ):
+        return {
+            "result_code":          GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE,
+            "permission_category":  "unsupported_catalog_edge",
+            "action_required":      (
+                "Meta rejected the catalog item edge — try another edge "
+                "(products / items / product_items). This is not a token issue."
+            ),
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    if meta_code in (190, 102) or (
+        meta_type == "OAuthException" and "invalid" in msg_lower and "token" in msg_lower
+    ):
+        src = token_source or _TOKEN_SOURCE_NONE
+        if src == _TOKEN_SOURCE_PLATFORM_SYSTEM:
+            action = (
+                "The platform WHATSAPP_TOKEN is invalid or expired. Update it in "
+                "Railway with a valid Meta system-user token that has "
+                "catalog_management on this catalog's Business Manager."
+            )
+        else:
+            action = (
+                "The merchant Meta OAuth token is invalid or expired. Ask the merchant "
+                "to reconnect WhatsApp via Meta Embedded Signup and grant "
+                "catalog_management."
+            )
+        return {
+            "result_code":          GRAPH_RESULT_TOKEN_INVALID,
+            "permission_category":  "invalid_token",
+            "action_required":      action,
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    is_not_found = (
+        meta_code in (803, 100)
+        and ("does not exist" in msg_lower or "cannot be loaded" in msg_lower)
+    ) or status == 404
+    if is_not_found:
+        return {
+            "result_code":          GRAPH_RESULT_CATALOG_NOT_FOUND,
+            "permission_category":  "catalog_not_found",
+            "action_required": (
+                "Verify the Catalog ID in Nahla matches Commerce Manager → Catalog → "
+                "Settings. If the ID is correct, the selected token may belong to a "
+                "different Business Manager than the catalog owner."
+            ),
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    permission_codes = {10, 200, 294}
+    if (
+        status in (401, 403)
+        or meta_code in permission_codes
+        or (meta_type == "OAuthException" and meta_code not in (190, 102, 803, 100))
+    ):
+        src = token_source or _TOKEN_SOURCE_NONE
+        if src == _TOKEN_SOURCE_PLATFORM_SYSTEM:
+            action = (
+                "The platform WHATSAPP_TOKEN cannot read this catalog. Grant the Nahla "
+                "system user catalog_management (and Business access to the merchant's "
+                "catalog) in Meta Business Settings, or ask the merchant to reconnect "
+                "via Meta Embedded Signup so a merchant OAuth token is on file."
+            )
+        elif src == _TOKEN_SOURCE_MERCHANT_OAUTH:
+            action = (
+                "The merchant Meta token lacks catalog_management on this catalog. "
+                "Ask the merchant to reconnect via Meta Embedded Signup and grant "
+                "catalog permissions, or share the catalog with Nahla's Business Manager."
+            )
+        else:
+            action = (
+                "No Graph-compatible token can access this catalog. Configure "
+                "WHATSAPP_TOKEN or merchant Meta OAuth with catalog_management."
+            )
+        return {
+            "result_code":          GRAPH_RESULT_TOKEN_NO_CATALOG_ACCESS,
+            "permission_category":  "insufficient_catalog_access",
+            "action_required":      action,
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    if stage in ("catalog_info_transport", "transport"):
+        return {
+            "result_code":          GRAPH_RESULT_TRANSPORT_ERROR,
+            "permission_category":  "transport",
+            "action_required":      "Meta Graph API transport error — retry or check network.",
+            "meta_code":            meta_code,
+            "meta_subcode":         meta_subcode,
+            "meta_type":            meta_type or None,
+            "http_status":          status,
+        }
+
+    return {
+        "result_code":          GRAPH_RESULT_META_HTTP_ERROR,
+        "permission_category":  "meta_http_error",
+        "action_required":      (
+            "Meta Graph API returned an error during catalog import. Check admin "
+            "graph-import diagnostics for result_code and fbtrace_id."
+        ),
+        "meta_code":            meta_code,
+        "meta_subcode":         meta_subcode,
+        "meta_type":            meta_type or None,
+        "http_status":          status,
+    }
+
+
+def _import_error_code_from_classification(result_code: str) -> str:
+    """Map diagnostics result_code → :class:`MetaCatalogImportError` ``.code``."""
+    return {
+        GRAPH_RESULT_TOKEN_MISSING:           "meta_access_token_missing",
+        GRAPH_RESULT_TOKEN_INVALID:           "graph_token_invalid",
+        GRAPH_RESULT_TOKEN_NO_CATALOG_ACCESS: "graph_token_no_catalog_access",
+        GRAPH_RESULT_CATALOG_NOT_FOUND:       "catalog_not_found",
+        GRAPH_RESULT_TRANSPORT_ERROR:         "meta_http_error",
+        GRAPH_RESULT_META_HTTP_ERROR:         "meta_http_error",
+    }.get(result_code, "meta_http_error")
+
+
+def sanitize_token_pick(token_pick: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip secrets from :func:`_select_graph_token` output for API responses."""
+    return {
+        "token_source":              token_pick.get("token_source"),
+        "provider":                  token_pick.get("provider"),
+        "connection_type":           token_pick.get("connection_type"),
+        "token_tail":                token_pick.get("token_tail"),
+        "token_len":                 token_pick.get("token_len"),
+        "token_present":             bool(token_pick.get("token")),
+        "platform_token_configured": bool((WA_TOKEN or "").strip()),
+        "considered":                list(token_pick.get("considered") or []),
+    }
+
+
+def describe_graph_token_selection(conn: Any) -> Dict[str, Any]:
+    """Safe token-selection snapshot for diagnostics — no raw token."""
+    return sanitize_token_pick(_select_graph_token(conn))
+
+
+def _probe_products_page(
+    client: httpx.Client,
+    *,
+    catalog_id: str,
+    token: str,
+    edge: str = "products",
+    limit: int = 1,
+) -> Dict[str, Any]:
+    """Cheap ``GET /{catalog_id}/{edge}?limit=1`` probe — diagnostics only."""
+    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/{edge}"
+    params = {
+        "fields":       "id,name,retailer_id",
+        "limit":        str(max(1, int(limit))),
+        "access_token": token,
+    }
+    out: Dict[str, Any] = {"edge": edge, "ok": False}
+    try:
+        resp = client.get(url, params=params)
+    except Exception as exc:  # noqa: BLE001
+        out.update({
+            "http_status": None,
+            "error": {
+                "stage":     "products_probe_transport",
+                "exc_class": exc.__class__.__name__,
+                "exc_msg":   str(exc)[:200],
+            },
+        })
+        return out
+
+    out["http_status"] = resp.status_code
+    if resp.status_code >= 400:
+        meta_err = _parse_meta_error(resp)
+        out["error"] = {
+            "stage":        "products_probe_http_error",
+            "status":       resp.status_code,
+            "meta_code":    meta_err.get("code"),
+            "meta_subcode": meta_err.get("error_subcode"),
+            "meta_type":    meta_err.get("type"),
+            "meta_message": str(meta_err.get("message") or "")[:500],
+            "fbtrace_id":   meta_err.get("fbtrace_id"),
+        }
+        return out
+
+    try:
+        body = resp.json() or {}
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = {
+            "stage":     "products_probe_json_decode",
+            "exc_class": exc.__class__.__name__,
+        }
+        return out
+
+    data = body.get("data") if isinstance(body, dict) else None
+    out["ok"] = True
+    out["sample_count"] = len(data) if isinstance(data, list) else 0
+    return out
+
+
+def build_graph_import_diagnostics(
+    conn: Any,
+    *,
+    tenant_id: Optional[int] = None,
+    run_preflight: bool = False,
+) -> Dict[str, Any]:
+    """Safe Graph import diagnostics — token source + optional live preflight.
+
+    Never includes raw access tokens. When *run_preflight* is True, performs
+    read-only Graph GETs against the configured ``meta_catalog_id``.
+    """
+    if conn is None:
+        return {
+            "provider":               None,
+            "connection_type":        None,
+            "meta_catalog_id_present": False,
+            "meta_catalog_id":        "",
+            "token_selection":        None,
+            "preflight":              None,
+            "products_probe":         None,
+            "result_code":            GRAPH_RESULT_CONNECTION_MISSING,
+            "action_required":        "Connect WhatsApp before importing a Meta catalog.",
+        }
+
+    catalog_id = (getattr(conn, "meta_catalog_id", None) or "").strip()
+    token_pick = _select_graph_token(conn)
+    safe_pick = sanitize_token_pick(token_pick)
+    provider = safe_pick.get("provider")
+    connection_type = safe_pick.get("connection_type")
+
+    base: Dict[str, Any] = {
+        "provider":                provider,
+        "connection_type":         connection_type,
+        "meta_catalog_id_present": bool(catalog_id),
+        "meta_catalog_id":         catalog_id,
+        "token_selection":         safe_pick,
+        "preflight":               None,
+        "products_probe":          None,
+        "result_code":             None,
+        "action_required":         None,
+    }
+
+    if not catalog_id:
+        base["result_code"] = GRAPH_RESULT_CATALOG_ID_MISSING
+        base["action_required"] = "Set the Meta Catalog ID on the WhatsApp connection."
+        return base
+
+    if not token_pick.get("token"):
+        classified = classify_meta_graph_error(token_source=_TOKEN_SOURCE_NONE)
+        base.update({
+            "result_code":           classified["result_code"],
+            "action_required":       classified["action_required"],
+            "permission_category":   classified["permission_category"],
+        })
+        return base
+
+    if not run_preflight:
+        base["result_code"] = GRAPH_RESULT_OK if safe_pick.get("token_present") else GRAPH_RESULT_TOKEN_MISSING
+        return base
+
+    token = token_pick["token"]
+    token_source = token_pick.get("token_source")
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+        discovery = _preflight_catalog_discovery(
+            client,
+            tenant_id=int(tenant_id or getattr(conn, "tenant_id", 0) or 0),
+            catalog_id=catalog_id,
+            token=token,
+        )
+        preflight: Dict[str, Any] = {
+            "ok":            discovery.ok,
+            "http_status":   discovery.http_status,
+            "catalog_type":  discovery.catalog_type or None,
+            "vertical":      discovery.vertical or None,
+            "name":          discovery.name or None,
+            "product_count": discovery.product_count,
+            "business_id":   discovery.business_id or None,
+            "business_name": discovery.business_name or None,
+            "supported_edges": list(discovery.supported_edges or []),
+        }
+        if not discovery.ok:
+            classified = classify_meta_graph_error(
+                discovery.error,
+                http_status=discovery.http_status,
+                token_source=token_source,
+            )
+            preflight.update({
+                "result_code":         classified["result_code"],
+                "permission_category": classified["permission_category"],
+                "meta_code":           classified.get("meta_code"),
+                "meta_subcode":        classified.get("meta_subcode"),
+                "meta_type":           classified.get("meta_type"),
+                "meta_message_category": (
+                    str((discovery.error or {}).get("meta_message") or "")[:200] or None
+                ),
+            })
+            base["preflight"] = preflight
+            base["result_code"] = classified["result_code"]
+            base["action_required"] = classified["action_required"]
+            base["permission_category"] = classified["permission_category"]
+            return base
+
+        edge = "products"
+        if discovery.supported_edges:
+            if "products" in discovery.supported_edges:
+                edge = "products"
+            elif "product_items" in discovery.supported_edges:
+                edge = "product_items"
+            elif "items" in discovery.supported_edges:
+                edge = "items"
+        products_probe = _probe_products_page(
+            client, catalog_id=catalog_id, token=token, edge=edge, limit=1,
+        )
+        products_probe["edge"] = edge
+        if products_probe.get("ok"):
+            classified = {"result_code": GRAPH_RESULT_OK, "permission_category": "ok", "action_required": None}
+        else:
+            classified = classify_meta_graph_error(
+                products_probe.get("error") or {},
+                http_status=products_probe.get("http_status"),
+                token_source=token_source,
+                stage=str((products_probe.get("error") or {}).get("stage") or ""),
+            )
+            products_probe["result_code"] = classified["result_code"]
+            products_probe["permission_category"] = classified["permission_category"]
+
+        preflight["result_code"] = GRAPH_RESULT_OK
+        base["preflight"] = preflight
+        base["products_probe"] = products_probe
+        base["result_code"] = classified["result_code"]
+        base["action_required"] = classified.get("action_required")
+        base["permission_category"] = classified.get("permission_category")
+        return base
+
 
 def _select_graph_token(conn: Any) -> Dict[str, Any]:
     """Pick a Graph API-compatible token for the Catalog endpoints.
@@ -771,8 +1209,13 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
 
     considered: List[Dict[str, Any]] = []
 
-    # ── Slot 1: merchant Meta OAuth (only when provider=meta) ──
-    if provider == "meta":
+    # ── Slot 1: merchant Meta OAuth ─────────────────────────────
+    # provider=meta always; coexistence may store a long EAA token on
+    # the same row alongside (or instead of) a short D360 API key.
+    merchant_oauth_eligible = (
+        provider == "meta" or _looks_like_meta_graph_token(raw_token)
+    )
+    if merchant_oauth_eligible:
         if raw_token:
             return {
                 "token":           raw_token,
@@ -791,10 +1234,10 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
         considered.append({
             "source": _TOKEN_SOURCE_MERCHANT_OAUTH,
             "reason": (
-                f"skipped — provider={provider or '<unset>'} is not 'meta', "
-                f"so conn.access_token is a non-Graph credential "
-                f"(typically a 360dialog D360-API-KEY) and would trigger "
-                f"OAuthException code=190 against graph.facebook.com."
+                f"skipped — provider={provider or '<unset>'} and "
+                f"conn.access_token is not a Meta Graph token "
+                f"(len={len(raw_token)}, typically a 360dialog D360-API-KEY). "
+                f"Sending it to graph.facebook.com would trigger OAuthException code=190."
             ),
         })
 
@@ -846,6 +1289,21 @@ def _persist_import_success(
     token_source: str,
 ) -> None:
     conn.meta_import_status = "success"
+    conn.meta_import_last_at = datetime.now(timezone.utc)
+    conn.meta_import_last_error = None
+    conn.meta_import_last_report = report.to_dict()
+    conn.meta_import_token_source = token_source or None
+    db.commit()
+
+
+def _persist_import_discovery_only(
+    db: Session,
+    conn: WhatsAppConnection,
+    report: ImportReport,
+    token_source: str,
+) -> None:
+    """Discovery-only kill-switch — preflight ran but no products were fetched."""
+    conn.meta_import_status = "discovery_only"
     conn.meta_import_last_at = datetime.now(timezone.utc)
     conn.meta_import_last_error = None
     conn.meta_import_last_report = report.to_dict()
@@ -959,6 +1417,14 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
                 "catalog_id":       catalog_id,
                 "token_source":     token_pick["token_source"],
                 "considered":       token_pick["considered"],
+                "result_code":      GRAPH_RESULT_TOKEN_MISSING,
+                "permission_category": "token_missing",
+                "action_required":  (
+                    "Connect WhatsApp via Meta Embedded Signup with "
+                    "catalog_management, or set WHATSAPP_TOKEN in Railway "
+                    "to a platform system-user token with catalog access."
+                ),
+                "platform_token_configured": bool((WA_TOKEN or "").strip()),
                 "hint": (
                     "Ask the merchant to reconnect WhatsApp via Meta "
                     "Embedded Signup and grant the 'catalog_management' "
@@ -988,7 +1454,12 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             token_source=token_pick.get("token_source"),
         )
         raise
-    _persist_import_success(db, conn, report, token_pick["token_source"])
+    if report.discovery_only:
+        _persist_import_discovery_only(
+            db, conn, report, token_pick["token_source"],
+        )
+    else:
+        _persist_import_success(db, conn, report, token_pick["token_source"])
     return report
 
 
@@ -1024,34 +1495,32 @@ def _import_from_meta_body(
     # cause is a Commerce Account ID or a deleted catalog pasted
     # into the dashboard by the merchant.
     if not discovery.ok:
-        meta_err = discovery.error or {}
-        meta_code = meta_err.get("meta_code")
-        # Meta returns ``code=803`` ("Some of the aliases you
-        # requested do not exist") OR ``code=100`` with the
-        # nonexisting-object message for a bad catalog_id.
-        is_not_found = (
-            meta_code in (803, 100)
-            and "does not exist" in str(meta_err.get("meta_message") or "").lower()
-        ) or (meta_err.get("status") == 404)
+        classified = classify_meta_graph_error(
+            discovery.error,
+            http_status=discovery.http_status,
+            token_source=token_pick.get("token_source"),
+            stage="preflight_discovery",
+        )
+        err_code = _import_error_code_from_classification(classified["result_code"])
         raise MetaCatalogImportError(
-            "catalog_not_found" if is_not_found else "meta_http_error",
+            err_code,
             "Preflight catalog discovery failed — the configured "
             "catalog_id does not resolve to a Meta object the "
             "current token can read.",
             detail={
-                "stage":      "preflight_discovery",
-                "catalog_id": catalog_id,
-                "discovery":  discovery.to_dict(),
-                "token_source": token_pick["token_source"],
-                "provider":     token_pick["provider"],
-                "hint": (
-                    "Ask the merchant to re-copy the Catalog ID from "
-                    "Meta Commerce Manager → Catalog → Settings. If "
-                    "the ID is correct, the token may lack "
-                    "catalog_management scope on this catalog, OR "
-                    "the catalog may belong to a different Business "
-                    "Manager than the merchant's WhatsApp BM."
-                ),
+                "stage":               "preflight_discovery",
+                "catalog_id":          catalog_id,
+                "discovery":           discovery.to_dict(),
+                "token_source":        token_pick["token_source"],
+                "provider":            token_pick["provider"],
+                "connection_type":     token_pick.get("connection_type"),
+                "result_code":         classified["result_code"],
+                "permission_category": classified["permission_category"],
+                "action_required":     classified["action_required"],
+                "meta_code":           classified.get("meta_code"),
+                "meta_subcode":        classified.get("meta_subcode"),
+                "meta_type":           classified.get("meta_type"),
+                "http_status":         classified.get("http_status"),
             },
         )
 
@@ -1086,17 +1555,22 @@ def _import_from_meta_body(
     # WOULD have been chosen — operators reading the diagnostic
     # log can sanity-check the routing without re-running the
     # import with the kill-switch flipped off.
+    edge_candidates = _choose_item_edges(discovery)
     primary_edge, fallback_edge = _choose_item_edge(discovery)
-    edge_choice = {
-        "primary":          primary_edge,
-        "fallback":         fallback_edge,
-        "supported_edges":  list(discovery.supported_edges or []),
+    edge_choice: Dict[str, Any] = {
+        "primary":           primary_edge,
+        "fallback":          fallback_edge,
+        "candidates":        list(edge_candidates),
+        "supported_edges":   list(discovery.supported_edges or []),
+        "attempted_edges":   report.attempted_edges,
+        "unsupported_edges": report.unsupported_edges,
+        "selected_edge":     None,
     }
     logger.info(
         "[META_IMPORT][EDGE_CHOICE] tenant=%s catalog_id=%s "
-        "primary_edge=/%s fallback_edge=/%s supported_edges=%s "
+        "candidates=%s primary_edge=/%s fallback_edge=/%s supported_edges=%s "
         "catalog_type=%r vertical=%r",
-        tenant_id, catalog_id, primary_edge, fallback_edge,
+        tenant_id, catalog_id, edge_candidates, primary_edge, fallback_edge,
         discovery.supported_edges,
         discovery.catalog_type, discovery.vertical,
     )
@@ -1133,7 +1607,8 @@ def _import_from_meta_body(
         )
         return report
 
-    current_edge = primary_edge
+    current_edge = edge_candidates[0]
+    edge_candidate_idx = 0
     next_url: Optional[str] = (
         f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
         f"/{catalog_id}/{current_edge}"
@@ -1167,28 +1642,24 @@ def _import_from_meta_body(
     # edge fallback, so we can't use page_idx for the raise-vs-
     # soft-fail decision anymore.
     _first_real_attempt = True
-    _fallback_tried     = False
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-        # MAX_PAGES + 1 budget so a single ``/items`` → ``/product_items``
-        # fallback retry doesn't eat into the 5-page paging budget.
-        for page_idx in range(MAX_PAGES + 1):
+        page_idx = 0
+        while page_idx <= MAX_PAGES:
             if next_url is None:
                 break
 
-            # Build a logging-friendly view of the URL we're about
-            # to hit. For the first page ``first_params`` carries
-            # the access_token separately; for subsequent pages
-            # Meta echoes the token inside ``next_url`` directly,
-            # which is why ``_mask_url`` exists.
+            if page_idx == 0 and current_edge not in report.attempted_edges:
+                report.attempted_edges.append(current_edge)
+
             log_url = _mask_url(next_url)
             logger.info(
                 "[META_IMPORT][REQ] page=%d tenant=%s catalog_id=%s "
                 "edge=%s graph_url=%s has_first_params=%s token=%s "
-                "fallback_tried=%s first_real_attempt=%s",
+                "edge_candidate_idx=%d first_real_attempt=%s",
                 page_idx, tenant_id, catalog_id, current_edge, log_url,
                 first_params is not None, _mask_token(token),
-                _fallback_tried, _first_real_attempt,
+                edge_candidate_idx, _first_real_attempt,
             )
 
             _t0 = time.perf_counter()
@@ -1296,6 +1767,8 @@ def _import_from_meta_body(
                 except Exception:  # noqa: BLE001
                     _meta_err = {}
 
+                _meta_msg = str(_meta_err.get("message") or "")
+
                 logger.error(
                     "[META_IMPORT][HTTP_ERROR] page=%d tenant=%s catalog_id=%s "
                     "edge=%s status=%d meta_code=%s meta_subcode=%s meta_type=%s "
@@ -1309,69 +1782,118 @@ def _import_from_meta_body(
                     _meta_err.get("fbtrace_id"),
                 )
 
-                # ── Edge fallback (May 2026 #19f) ─────────────────
-                # Meta returns code=100 / "nonexisting field" when
-                # the catalog isn't a Commerce catalog and doesn't
-                # expose ``/items``. Retry once on ``/product_items``
-                # before bubbling up the error. We only attempt the
-                # fallback on the FIRST page of the FIRST edge —
-                # any other failure mode (auth, rate-limit) shouldn't
-                # cycle through edge names.
-                _meta_msg = str(_meta_err.get("message") or "")
-                _is_nonexisting_field = (
+                # ── Edge fallback — try next candidate on page 0 ──
+                # Meta code=100 / "nonexisting field (EDGE)" means this
+                # catalog does not expose that edge — NOT a permission error.
+                if (
                     page_idx == 0
-                    and current_edge == primary_edge
-                    and _meta_err.get("code") == 100
-                    and "nonexisting field" in _meta_msg.lower()
-                )
-                if _is_nonexisting_field and not _fallback_tried:
-                    logger.warning(
-                        "[META_IMPORT][ENDPOINT_FALLBACK] tenant=%s "
-                        "catalog_id=%s from=/%s to=/%s reason=%r "
-                        "discovered_edges=%s",
-                        tenant_id, catalog_id,
-                        primary_edge, fallback_edge,
-                        _meta_msg[:_RESP_PREVIEW_CAP],
-                        discovery.supported_edges,
-                    )
-                    _fallback_tried = True
-                    # NOTE: we KEEP _first_real_attempt=True so a
-                    # subsequent failure still raises hard rather
-                    # than being silently swallowed as a "page 1+"
-                    # soft-fail.
-                    current_edge = fallback_edge
-                    next_url = (
-                        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-                        f"/{catalog_id}/{current_edge}"
-                    )
-                    # Restore first_params so the retry carries
-                    # fields + limit + access_token again.
-                    first_params = {
-                        "fields":       META_CATALOG_FIELDS,
-                        "limit":        str(PAGE_SIZE),
-                        "access_token": token,
-                    }
-                    continue
+                    and _first_real_attempt
+                    and is_unsupported_catalog_edge_error(_meta_err)
+                ):
+                    if current_edge not in report.unsupported_edges:
+                        report.unsupported_edges.append(current_edge)
+                    edge_candidate_idx += 1
+                    if edge_candidate_idx < len(edge_candidates):
+                        next_edge = edge_candidates[edge_candidate_idx]
+                        logger.warning(
+                            "[META_IMPORT][ENDPOINT_FALLBACK] tenant=%s "
+                            "catalog_id=%s from=/%s to=/%s reason=%r "
+                            "unsupported_edges=%s candidates=%s",
+                            tenant_id, catalog_id,
+                            current_edge, next_edge,
+                            _meta_msg[:_RESP_PREVIEW_CAP],
+                            report.unsupported_edges,
+                            edge_candidates,
+                        )
+                        current_edge = next_edge
+                        next_url = (
+                            f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                            f"/{catalog_id}/{current_edge}"
+                        )
+                        first_params = {
+                            "fields":       META_CATALOG_FIELDS,
+                            "limit":        str(PAGE_SIZE),
+                            "access_token": token,
+                        }
+                        continue  # retry page 0 — do not advance page_idx
 
-                if _first_real_attempt:
+                    classified = classify_meta_graph_error(
+                        {
+                            "meta_code":    _meta_err.get("code"),
+                            "meta_subcode": _meta_err.get("error_subcode"),
+                            "meta_type":    _meta_err.get("type"),
+                            "meta_message": str(_meta_err.get("message") or ""),
+                            "status":       resp.status_code,
+                        },
+                        http_status=resp.status_code,
+                        token_source=token_pick.get("token_source"),
+                        stage="http_error",
+                    )
                     raise MetaCatalogImportError(
                         "meta_http_error",
+                        f"Meta returned {resp.status_code}: {_body_preview}",
+                        detail={
+                            "stage":               "http_error",
+                            "status":              resp.status_code,
+                            "page":                page_idx,
+                            "edge":                current_edge,
+                            "graph_url":           log_url,
+                            "catalog_id":          catalog_id,
+                            "body_preview":        _body_preview,
+                            "meta_code":           _meta_err.get("code"),
+                            "meta_subcode":        _meta_err.get("error_subcode"),
+                            "meta_type":           _meta_err.get("type"),
+                            "meta_message":        str(_meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
+                            "fbtrace_id":          _meta_err.get("fbtrace_id"),
+                            "attempted_edges":     list(report.attempted_edges),
+                            "unsupported_edges":   list(report.unsupported_edges),
+                            "edge_candidates":     list(edge_candidates),
+                            "result_code":         classified["result_code"],
+                            "permission_category": classified["permission_category"],
+                            "action_required":     classified["action_required"],
+                        },
+                    )
+
+                if _first_real_attempt:
+                    classified = classify_meta_graph_error(
+                        {
+                            "meta_code":    _meta_err.get("code"),
+                            "meta_subcode": _meta_err.get("error_subcode"),
+                            "meta_type":    _meta_err.get("type"),
+                            "meta_message": str(_meta_err.get("message") or ""),
+                            "status":       resp.status_code,
+                        },
+                        http_status=resp.status_code,
+                        token_source=token_pick.get("token_source"),
+                        stage="http_error",
+                    )
+                    err_code = _import_error_code_from_classification(
+                        classified["result_code"],
+                    )
+                    raise MetaCatalogImportError(
+                        err_code,
                         f"Meta returned {resp.status_code}: "
                         f"{_body_preview}",
                         detail={
-                            "stage":          "http_error",
-                            "status":         resp.status_code,
-                            "page":           page_idx,
-                            "edge":           current_edge,
-                            "graph_url":      log_url,
-                            "catalog_id":     catalog_id,
-                            "elapsed_ms":     round(_elapsed_ms, 1),
-                            "body_preview":   _body_preview,
-                            "meta_code":      _meta_err.get("code"),
-                            "meta_subcode":   _meta_err.get("error_subcode"),
-                            "meta_type":      _meta_err.get("type"),
-                            "meta_message":   str(_meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
-                            "fbtrace_id":     _meta_err.get("fbtrace_id"),
+                            "stage":               "http_error",
+                            "status":              resp.status_code,
+                            "page":                page_idx,
+                            "edge":                current_edge,
+                            "graph_url":           log_url,
+                            "catalog_id":          catalog_id,
+                            "elapsed_ms":          round(_elapsed_ms, 1),
+                            "body_preview":        _body_preview,
+                            "meta_code":           _meta_err.get("code"),
+                            "meta_subcode":        _meta_err.get("error_subcode"),
+                            "meta_type":           _meta_err.get("type"),
+                            "meta_message":        str(_meta_err.get("message") or "")[:_RESP_PREVIEW_CAP],
+                            "fbtrace_id":          _meta_err.get("fbtrace_id"),
+                            "token_source":        token_pick.get("token_source"),
+                            "provider":            token_pick.get("provider"),
+                            "connection_type":     token_pick.get("connection_type"),
+                            "result_code":         classified["result_code"],
+                            "permission_category": classified["permission_category"],
+                            "action_required":     classified["action_required"],
                         },
                     )
                 logger.warning(
@@ -1415,6 +1937,7 @@ def _import_from_meta_body(
             # surfaces a fallback chain.
             if not report.edge_used:
                 report.edge_used = current_edge
+                edge_choice["selected_edge"] = current_edge
             logger.info(
                 "[META_IMPORT][PAGE_OK] page=%d tenant=%s catalog_id=%s "
                 "edge=%s row_count=%d total_scanned_before=%d",
@@ -1441,6 +1964,7 @@ def _import_from_meta_body(
             next_url = paging.get("next")
             if next_url is None:
                 break
+            page_idx += 1
 
         if next_url is not None:
             report.truncated = True
@@ -1650,4 +2174,6 @@ __all__ = [
     "ImportReport",
     "MetaCatalogImportError",
     "import_from_meta",
+    "is_unsupported_catalog_edge_error",
+    "_choose_item_edges",
 ]

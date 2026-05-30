@@ -425,13 +425,37 @@ export interface CatalogDiagnostics {
       updated?:        number
       skipped_manual?: number
       errors?:         number
+      discovery_only?: boolean
     } | null
     token_source: string | null
+    discovery_only?: boolean
+    products_imported?: boolean
   }
   whatsapp_readiness: {
     ready:                boolean
-    checks:               Array<{ key: string; ok: boolean; count?: number }>
+    checks:               Array<{ key: string; ok: boolean; count?: number; token_source?: string | null }>
     missing_requirements: string[]
+  }
+  graph_import?: {
+    provider:                string | null
+    connection_type:         string | null
+    meta_catalog_id_present: boolean
+    meta_catalog_id:         string
+    result_code:             string | null
+    action_required:         string | null
+    permission_category?:    string | null
+    token_selection: {
+      token_source:              string | null
+      provider:                  string | null
+      connection_type:           string | null
+      token_tail:                string | null
+      token_len:                 number | null
+      token_present:             boolean
+      platform_token_configured: boolean
+      considered:                Array<{ source: string; reason: string }>
+    } | null
+    preflight?: Record<string, unknown> | null
+    products_probe?: Record<string, unknown> | null
   }
 }
 

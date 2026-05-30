@@ -1504,19 +1504,26 @@ def _import_metadata_block(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]
     """Last Meta catalog import run — persisted on WhatsAppConnection."""
     if conn is None:
         return {
-            "status":       None,
-            "last_at":      None,
-            "last_error":   None,
-            "last_report":  None,
-            "token_source": None,
+            "status":            None,
+            "last_at":           None,
+            "last_error":        None,
+            "last_report":       None,
+            "token_source":      None,
+            "discovery_only":    False,
+            "products_imported": False,
         }
     last_at = getattr(conn, "meta_import_last_at", None)
+    last_report = getattr(conn, "meta_import_last_report", None) or {}
+    created = int(last_report.get("created") or 0)
+    updated = int(last_report.get("updated") or 0)
     return {
         "status":       getattr(conn, "meta_import_status", None),
         "last_at":      last_at.isoformat() if last_at else None,
         "last_error":   getattr(conn, "meta_import_last_error", None),
-        "last_report":  getattr(conn, "meta_import_last_report", None),
+        "last_report":  last_report or None,
         "token_source": getattr(conn, "meta_import_token_source", None),
+        "discovery_only": bool(last_report.get("discovery_only")),
+        "products_imported": (created + updated) > 0,
     }
 
 
@@ -1538,7 +1545,12 @@ def _whatsapp_commerce_readiness(
     )
 
 
-def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
+def _diagnostics_payload(
+    db: Session,
+    tenant_id: int,
+    *,
+    graph_preflight: bool = False,
+) -> Dict[str, Any]:
     """Build the diagnostics payload for *tenant_id*.
 
     Three sections in the return value:
@@ -1605,6 +1617,13 @@ def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
         with_rid=with_rid,
     )
 
+    from services.meta_catalog_import import build_graph_import_diagnostics  # noqa: PLC0415
+    graph_import = build_graph_import_diagnostics(
+        conn,
+        tenant_id=tenant_id,
+        run_preflight=graph_preflight,
+    )
+
     return {
         "catalog": {
             "catalog_id_present":  bool(catalog_id),
@@ -1621,6 +1640,7 @@ def _diagnostics_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
             "dominant_source":                dom,
         },
         "import": _import_metadata_block(conn),
+        "graph_import": graph_import,
         "whatsapp_readiness": whatsapp_readiness,
         "readiness": {
             "catalog_ready":           catalog_ready,
@@ -1648,6 +1668,10 @@ async def merchant_catalog_diagnostics(
 @admin_router.get("/diagnostics")
 async def admin_catalog_diagnostics(
     tenant_id: int = Query(..., ge=1),
+    preflight: bool = Query(
+        False,
+        description="When true, perform live Meta Graph preflight (admin only).",
+    ),
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
@@ -1655,7 +1679,30 @@ async def admin_catalog_diagnostics(
     callable for any tenant. Used by support to triage "my products
     don't show up in WhatsApp" tickets without asking the merchant to
     re-share their dashboard."""
-    return _diagnostics_payload(db, tenant_id)
+    return _diagnostics_payload(db, tenant_id, graph_preflight=preflight)
+
+
+@admin_router.get("/graph-import-diagnostics")
+async def admin_graph_import_diagnostics(
+    tenant_id: int = Query(..., ge=1),
+    preflight: bool = Query(
+        True,
+        description="Perform live Meta Graph catalog + products probe.",
+    ),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Admin-only Graph import permission diagnostics — never exposes tokens."""
+    from services.meta_catalog_import import build_graph_import_diagnostics  # noqa: PLC0415
+
+    conn = (
+        db.query(WhatsAppConnection)
+          .filter(WhatsAppConnection.tenant_id == tenant_id)
+          .first()
+    )
+    return build_graph_import_diagnostics(
+        conn, tenant_id=tenant_id, run_preflight=preflight,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1917,13 +1964,15 @@ async def merchant_catalog_import_from_meta(
         # "ضع Catalog ID" vs "أعد المصادقة" vs "نحتاج Meta OAuth
         # token لإستيراد الكتالوج، لا يكفي 360dialog").
         status = {
-            "connection_not_found":      404,
-            "catalog_id_missing":        400,
-            "access_token_missing":      400,
-            "meta_access_token_missing": 400,
-            "catalog_not_found":         404,
-            "catalog_type_unsupported":  400,
-            "meta_http_error":           502,
+            "connection_not_found":              404,
+            "catalog_id_missing":                400,
+            "access_token_missing":              400,
+            "meta_access_token_missing":         400,
+            "graph_token_invalid":               401,
+            "graph_token_no_catalog_access":     403,
+            "catalog_not_found":                 404,
+            "catalog_type_unsupported":          400,
+            "meta_http_error":                   502,
         }.get(exc.code, 500)
 
         # ``logger.exception`` (not ``logger.error``) so Railway
@@ -1977,13 +2026,15 @@ async def admin_catalog_import_from_meta(
             detail_payload["raw_detail"] = str(_exc_detail)[:2000]
 
         status = {
-            "connection_not_found":      404,
-            "catalog_id_missing":        400,
-            "access_token_missing":      400,
-            "meta_access_token_missing": 400,
-            "catalog_not_found":         404,
-            "catalog_type_unsupported":  400,
-            "meta_http_error":           502,
+            "connection_not_found":              404,
+            "catalog_id_missing":                400,
+            "access_token_missing":              400,
+            "meta_access_token_missing":         400,
+            "graph_token_invalid":               401,
+            "graph_token_no_catalog_access":     403,
+            "catalog_not_found":                 404,
+            "catalog_type_unsupported":          400,
+            "meta_http_error":                   502,
         }.get(exc.code, 500)
         logger.exception(
             "[META_IMPORT][API_ERROR] admin tenant=%s code=%s status=%d detail=%s",

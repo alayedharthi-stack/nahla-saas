@@ -1274,8 +1274,11 @@ export interface Translations {
       importLastAt:         string
       importStatusRunning:  string
       importStatusSuccess:  string
+      importStatusDiscoveryOnly: string
+      importDiscoveryOnlyHint: string
       importStatusFailed:   string
       importCounts:         string
+      graphTokenSource:     string
       commerceReadyTitle:   string
       commerceNotReadyTitle: string
       missingRequirements:  string

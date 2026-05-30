@@ -108,9 +108,15 @@ class _ProductQuery:
                 self._retailer_ids.add(str(val))
         return self
 
+    def _matches_tenant(self, p: _StoredProduct) -> bool:
+        return self._tenant_id is None or p.tenant_id == self._tenant_id
+
+    def all(self) -> List[_StoredProduct]:
+        return [p for p in self._db.products if self._matches_tenant(p)]
+
     def first(self) -> Optional[_StoredProduct]:
         for p in self._db.products:
-            if self._tenant_id is not None and p.tenant_id != self._tenant_id:
+            if not self._matches_tenant(p):
                 continue
             if not self._external_ids and not self._retailer_ids:
                 return p
@@ -327,6 +333,28 @@ class TestMetaProductIdMapping:
         assert db.products[0].title == "Updated Title"
         assert db.products[0].meta_retailer_id == "R-1"
         assert db.products[0].external_id == "META-1"
+
+    def test_reimport_backfills_missing_meta_retailer_id(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _InMemoryCatalogDb({10: _Conn(tenant_id=10)})
+        _patch_assign_canonical_noop(monkeypatch)
+        # Legacy row: external_id set, meta_retailer_id empty
+        legacy = _StoredProduct(
+            id=1, tenant_id=10, external_id="META-LEG", title="Legacy",
+            meta_retailer_id=None, source="meta",
+        )
+        db.products.append(legacy)
+
+        report = ImportReport()
+        _process_one_meta_product(
+            db, 10,
+            {"id": "META-LEG", "retailer_id": "SKU-LEG", "name": "Legacy"},
+            report,
+        )
+        assert report.updated == 1
+        assert db.products[0].meta_retailer_id == "SKU-LEG"
+        assert effective_retailer_id(db.products[0]) == "SKU-LEG"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

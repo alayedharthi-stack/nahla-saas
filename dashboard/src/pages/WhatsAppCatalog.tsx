@@ -485,6 +485,7 @@ export default function WhatsAppCatalog() {
                   <p className="text-xs text-slate-600 mt-1.5">
                     {diagnostics.import.status === 'running' && cm.diagnostics.importStatusRunning}
                     {diagnostics.import.status === 'success' && cm.diagnostics.importStatusSuccess}
+                    {diagnostics.import.status === 'discovery_only' && cm.diagnostics.importStatusDiscoveryOnly}
                     {diagnostics.import.status === 'failed' && cm.diagnostics.importStatusFailed}
                     {diagnostics.import.last_at && (
                       <>
@@ -504,8 +505,26 @@ export default function WhatsAppCatalog() {
                         .replace('{updated}', fmtCount(diagnostics.import.last_report.updated ?? 0, lang))}
                     </p>
                   )}
+                  {diagnostics.import.discovery_only && (
+                    <p className="text-[11px] text-amber-800 mt-1">
+                      {cm.diagnostics.importDiscoveryOnlyHint}
+                    </p>
+                  )}
                   {diagnostics.import.status === 'failed' && diagnostics.import.last_error && (
                     <p className="text-[11px] text-rose-700 mt-1">{diagnostics.import.last_error}</p>
+                  )}
+                  {diagnostics.graph_import?.token_selection?.token_source && (
+                    <p className="text-[11px] text-slate-600 mt-1">
+                      {cm.diagnostics.graphTokenSource.replace(
+                        '{source}',
+                        diagnostics.graph_import.token_selection.token_source,
+                      )}
+                    </p>
+                  )}
+                  {diagnostics.graph_import?.action_required && (
+                    <p className="text-[11px] text-amber-800 mt-1">
+                      {diagnostics.graph_import.action_required}
+                    </p>
                   )}
                 </>
               )}

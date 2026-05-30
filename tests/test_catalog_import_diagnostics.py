@@ -30,12 +30,21 @@ from routers.catalog import (  # noqa: E402
 )
 from services.meta_catalog_import import (  # noqa: E402
     CatalogDiscovery,
+    GRAPH_RESULT_TOKEN_INVALID,
+    GRAPH_RESULT_TOKEN_MISSING,
+    GRAPH_RESULT_TOKEN_NO_CATALOG_ACCESS,
     ImportReport,
     MetaCatalogImportError,
     _persist_import_failed,
     _persist_import_running,
     _persist_import_success,
+    _looks_like_meta_graph_token,
+    _select_graph_token,
+    build_graph_import_diagnostics,
+    classify_meta_graph_error,
+    describe_graph_token_selection,
     import_from_meta,
+    sanitize_token_pick,
 )
 
 
@@ -124,7 +133,7 @@ def _patch_preflight(monkeypatch, discovery):
 
 
 class TestImportFromMetaPersistsSuccess:
-    def test_discovery_only_run_persists_success(self, monkeypatch):
+    def test_discovery_only_run_persists_discovery_only_status(self, monkeypatch):
         conn = _TrackingConn()
         db = _TrackingDb(conn)
         ok = CatalogDiscovery(catalog_id="CAT-1", ok=True, vertical="commerce")
@@ -133,7 +142,7 @@ class TestImportFromMetaPersistsSuccess:
         report = import_from_meta(db, tenant_id=1)
 
         assert report.discovery_only is True
-        assert conn.meta_import_status == "success"
+        assert conn.meta_import_status == "discovery_only"
         assert conn.meta_import_last_report["discovery_only"] is True
         assert conn.meta_import_token_source is not None
 
@@ -174,6 +183,21 @@ class TestDiagnosticsPayload:
         block = _import_metadata_block(None)
         assert block["status"] is None
         assert block["last_report"] is None
+        assert block["discovery_only"] is False
+        assert block["products_imported"] is False
+
+    def test_import_metadata_block_discovery_only_flags(self):
+        conn = _TrackingConn()
+        conn.meta_import_status = "discovery_only"
+        conn.meta_import_last_report = {
+            "discovery_only": True,
+            "scanned": 0,
+            "created": 0,
+            "updated": 0,
+        }
+        block = _import_metadata_block(conn)
+        assert block["discovery_only"] is True
+        assert block["products_imported"] is False
 
     def test_whatsapp_readiness_missing_requirements(self, monkeypatch):
         conn = _TrackingConn(catalog_enabled=False, meta_catalog_id="")
@@ -208,3 +232,99 @@ class TestDiagnosticsPayload:
         assert "whatsapp_readiness" in payload
         assert payload["readiness"]["whatsapp_commerce_ready"] is True
         assert payload["whatsapp_readiness"]["ready"] is True
+        assert "graph_import" in payload
+        assert payload["graph_import"]["token_selection"]["token_source"] == "merchant_meta_oauth"
+
+
+class TestGraphTokenSelection:
+    def test_dialog360_short_key_skipped_for_graph(self, monkeypatch):
+        monkeypatch.setattr(
+            "services.meta_catalog_import.WA_TOKEN",
+            "platform_graph_token_for_tests_only_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        )
+        conn = _TrackingConn(
+            provider="dialog360",
+            connection_type="coexistence",
+            access_token="short-d360-like-key-xx",
+        )
+        pick = _select_graph_token(conn)
+        assert pick["token_source"] == "platform_system_user"
+        assert "token" not in sanitize_token_pick(pick)
+
+    def test_coexistence_long_eaa_token_preferred(self, monkeypatch):
+        monkeypatch.setattr("services.meta_catalog_import.WA_TOKEN", "platform_fallback")
+        merchant = "EAA" + ("x" * 120)
+        conn = _TrackingConn(
+            provider="dialog360",
+            connection_type="coexistence",
+            access_token=merchant,
+        )
+        pick = _select_graph_token(conn)
+        assert pick["token_source"] == "merchant_meta_oauth"
+        assert pick["token"] == merchant
+
+    def test_describe_never_includes_raw_token(self):
+        conn = _TrackingConn(access_token="secret_graph_token_value_xxxxxxxx")
+        desc = describe_graph_token_selection(conn)
+        assert "secret_graph_token_value" not in str(desc)
+        assert desc["token_present"] is True
+        assert "token" not in desc
+
+
+class TestGraphErrorClassification:
+    def test_missing_token(self):
+        c = classify_meta_graph_error(token_source="none")
+        assert c["result_code"] == GRAPH_RESULT_TOKEN_MISSING
+
+    def test_invalid_oauth_190(self):
+        c = classify_meta_graph_error(
+            {"meta_code": 190, "meta_type": "OAuthException", "meta_message": "Invalid OAuth access token"},
+            token_source="platform_system_user",
+        )
+        assert c["result_code"] == GRAPH_RESULT_TOKEN_INVALID
+
+    def test_permission_denied(self):
+        c = classify_meta_graph_error(
+            {"meta_code": 10, "meta_type": "OAuthException", "meta_message": "Permission denied"},
+            http_status=403,
+            token_source="platform_system_user",
+        )
+        assert c["result_code"] == GRAPH_RESULT_TOKEN_NO_CATALOG_ACCESS
+
+
+class TestGraphImportDiagnosticsBuilder:
+    def test_no_connection(self):
+        d = build_graph_import_diagnostics(None)
+        assert d["result_code"] == "connection_missing"
+
+    def test_no_catalog_id(self):
+        conn = _TrackingConn(meta_catalog_id="")
+        d = build_graph_import_diagnostics(conn)
+        assert d["result_code"] == "catalog_id_missing"
+
+    def test_token_missing_when_no_sources(self, monkeypatch):
+        monkeypatch.setattr("services.meta_catalog_import.WA_TOKEN", "")
+        conn = _TrackingConn(
+            provider="dialog360",
+            connection_type="coexistence",
+            access_token="short-d360-key",
+        )
+        d = build_graph_import_diagnostics(conn, run_preflight=False)
+        assert d["result_code"] == GRAPH_RESULT_TOKEN_MISSING
+        assert d["action_required"]
+
+    def test_diagnostics_payload_includes_graph_import(self):
+        conn = _TrackingConn()
+        db = _DiagDb(conn, [])
+        payload = _diagnostics_payload(db, tenant_id=1)  # type: ignore[arg-type]
+        assert payload["graph_import"]["provider"] == "meta"
+        assert payload["graph_import"]["token_selection"]["token_present"] is True
+
+
+class TestLooksLikeMetaGraphToken:
+    def test_short_is_false(self):
+        assert _looks_like_meta_graph_token("D360-abc") is False
+        assert _looks_like_meta_graph_token("short") is False
+
+    def test_long_eaa_is_true(self):
+        assert _looks_like_meta_graph_token("EAA" + ("a" * 100)) is True
