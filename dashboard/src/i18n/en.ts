@@ -569,6 +569,16 @@ const en: Translations = {
       excludedFromCampaigns: 'Customer excluded from marketing campaigns',
       resumedToAI: 'Conversation returned to AI',
     },
+    editCustomerName: {
+      title:         'Edit customer name',
+      fieldLabel:    'Customer name',
+      save:          'Save',
+      cancel:        'Cancel',
+      nameRequired:  'Enter a customer name',
+      nameTooLong:   'Name must be {max} characters or fewer',
+      toastSuccess:  'Customer name updated',
+      toastError:    'Could not update customer name — changes were reverted',
+    },
     confirm: {
       blockNumber: 'The number {phone} will be added to the blocklist and will not receive AI messages. Continue?',
     },

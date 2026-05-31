@@ -596,6 +596,16 @@ export interface Translations {
       excludedFromCampaigns: string
       resumedToAI: string
     }
+    editCustomerName: {
+      title: string
+      fieldLabel: string
+      save: string
+      cancel: string
+      nameRequired: string
+      nameTooLong: string
+      toastSuccess: string
+      toastError: string
+    }
     confirm: {
       blockNumber: string
     }

@@ -4,13 +4,14 @@ import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2,
+  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
 import { customersApi } from '../api/customers'
 import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
+import EditCustomerNameModal from '../components/conversations/EditCustomerNameModal'
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 import { useDashboardPoll } from '../lib/dashboardPolling'
@@ -58,6 +59,16 @@ async function _resolveCustomerIdByPhone(phone: string): Promise<number | null> 
     return cd === digits || cd.endsWith(digits.slice(-9)) || digits.endsWith(cd.slice(-9))
   })
   return match?.id ?? null
+}
+
+function conversationHasDisplayName(c: { customer: string; phone: string }, phonesMatch: (a?: string | null, b?: string | null) => boolean): boolean {
+  if (!c.customer?.trim()) return false
+  return !phonesMatch(c.customer, c.phone)
+}
+
+function conversationEditInitialName(c: { customer: string; phone: string }, phonesMatch: (a?: string | null, b?: string | null) => boolean): string {
+  if (!conversationHasDisplayName(c, phonesMatch)) return ''
+  return c.customer.trim()
 }
 
 export default function Conversations() {
@@ -110,6 +121,9 @@ export default function Conversations() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [actionToast, setActionToast] = useState<string | null>(null)
+  const [actionErrorToast, setActionErrorToast] = useState<string | null>(null)
+  const [editNameOpen, setEditNameOpen] = useState(false)
+  const [editNameSaving, setEditNameSaving] = useState(false)
   const [endingSupervision, setEndingSupervision] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
   const [campaignExcludeConfirm, setCampaignExcludeConfirm] = useState(false)
@@ -511,6 +525,60 @@ export default function Conversations() {
     setSelected(prev => prev && prev.phone === phone ? { ...prev, ...patch } : prev)
   }
 
+  const _applyCustomerNameByPhone = (phone: string, newName: string) => {
+    setConversations(prev =>
+      prev.map(c => (phonesMatch(c.phone, phone) ? { ...c, customer: newName } : c)),
+    )
+    setSelected(prev =>
+      prev && phonesMatch(prev.phone, phone) ? { ...prev, customer: newName } : prev,
+    )
+  }
+
+  const openEditCustomerName = () => {
+    if (!selected) return
+    setEditNameOpen(true)
+  }
+
+  const handleSaveCustomerName = async (newName: string) => {
+    if (!selected || editNameSaving) return
+    const phone = selected.phone
+    const trimmed = newName.trim()
+    const snapshot = conversations
+      .filter(c => phonesMatch(c.phone, phone))
+      .map(c => ({ id: c.id, customer: c.customer }))
+
+    setEditNameSaving(true)
+    _applyCustomerNameByPhone(phone, trimmed)
+
+    try {
+      const customerId = await _resolveCustomerIdByPhone(phone)
+      if (!customerId) {
+        throw new Error(cp.errors.customerNotFound)
+      }
+      await customersApi.update(customerId, { name: trimmed })
+      setEditNameOpen(false)
+      setActionErrorToast(null)
+      setActionToast(cp.editCustomerName.toastSuccess)
+    } catch {
+      setConversations(prev =>
+        prev.map(c => {
+          const snap = snapshot.find(s => s.id === c.id)
+          return snap ? { ...c, customer: snap.customer } : c
+        }),
+      )
+      setSelected(prev => {
+        if (!prev) return prev
+        const snap = snapshot.find(s => s.id === prev.id)
+        return snap ? { ...prev, customer: snap.customer } : prev
+      })
+      setEditNameOpen(false)
+      setActionToast(null)
+      setActionErrorToast(cp.editCustomerName.toastError)
+    } finally {
+      setEditNameSaving(false)
+    }
+  }
+
   const handleHandoff = async () => {
     if (!selected) return
     try {
@@ -594,6 +662,12 @@ export default function Conversations() {
     const t = window.setTimeout(() => setActionToast(null), 4000)
     return () => window.clearTimeout(t)
   }, [actionToast])
+
+  useEffect(() => {
+    if (!actionErrorToast) return
+    const t = window.setTimeout(() => setActionErrorToast(null), 5000)
+    return () => window.clearTimeout(t)
+  }, [actionErrorToast])
 
   useEffect(() => {
     setHeaderMenuOpen(false)
@@ -1104,13 +1178,30 @@ export default function Conversations() {
                 {initials(selected.customer)}
               </div>
 
-              {/* Name + phone */}
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-slate-900 truncate">{selected.customer}</p>
-                <p className="text-xs text-slate-400 flex items-center gap-1 truncate">
-                  <Phone className="w-3 h-3 shrink-0" />
-                  {selected.phone}
-                </p>
+              {/* Name + phone — click to edit customer name */}
+              <div className="flex-1 min-w-0 group">
+                <button
+                  type="button"
+                  onClick={openEditCustomerName}
+                  className="flex items-center gap-1.5 min-w-0 w-full text-start rounded-md -mx-1 px-1 py-0.5 hover:bg-slate-50 transition-colors"
+                  title={cp.editCustomerName.title}
+                >
+                  <p className="text-sm font-semibold text-slate-900 truncate flex-1 min-w-0">
+                    {conversationHasDisplayName(selected, phonesMatch)
+                      ? selected.customer
+                      : selected.phone}
+                  </p>
+                  <Pencil
+                    aria-hidden="true"
+                    className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  />
+                </button>
+                {conversationHasDisplayName(selected, phonesMatch) && (
+                  <p className="text-xs text-slate-400 flex items-center gap-1 truncate px-1">
+                    <Phone className="w-3 h-3 shrink-0" />
+                    {selected.phone}
+                  </p>
+                )}
               </div>
 
               {/* زر أساسي واحد + قائمة ⋮ */}
@@ -1293,14 +1384,39 @@ export default function Conversations() {
                 <span className="flex-1">{actionToast}</span>
                 <button
                   type="button"
+                  className="p-1 rounded hover:bg-emerald-100 text-emerald-600"
                   onClick={() => setActionToast(null)}
-                  className="text-emerald-700/60 hover:text-emerald-900"
                   aria-label={cp.actions.close}
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             )}
+
+            {actionErrorToast && (
+              <div className="flex items-center gap-2 px-4 py-2.5 bg-rose-50 border-b border-rose-200 text-sm text-rose-800">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span className="flex-1">{actionErrorToast}</span>
+                <button
+                  type="button"
+                  className="p-1 rounded hover:bg-rose-100 text-rose-600"
+                  onClick={() => setActionErrorToast(null)}
+                  aria-label={cp.actions.close}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            <EditCustomerNameModal
+              open={editNameOpen}
+              onClose={() => { if (!editNameSaving) setEditNameOpen(false) }}
+              initialName={selected ? conversationEditInitialName(selected, phonesMatch) : ''}
+              saving={editNameSaving}
+              onSave={(name) => { void handleSaveCustomerName(name) }}
+              labels={cp.editCustomerName}
+              dir={dir}
+            />
 
             {/* AI paused banner (manual pause path only — takeover has its
                 own banner above). */}

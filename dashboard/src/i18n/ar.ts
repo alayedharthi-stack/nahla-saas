@@ -573,6 +573,16 @@ const ar: Translations = {
       excludedFromCampaigns: 'تم استبعاد العميل من الحملات التسويقية',
       resumedToAI: 'تمت إعادة المحادثة إلى الذكاء',
     },
+    editCustomerName: {
+      title:         'تعديل اسم العميل',
+      fieldLabel:    'اسم العميل',
+      save:          'حفظ',
+      cancel:        'إلغاء',
+      nameRequired:  'أدخل اسم العميل',
+      nameTooLong:   'الاسم يجب ألا يتجاوز {max} حرفًا',
+      toastSuccess:  'تم تحديث اسم العميل',
+      toastError:    'تعذّر تحديث اسم العميل — تمت استعادة الاسم السابق',
+    },
     confirm: {
       blockNumber: 'سيتم إضافة الرقم {phone} لقائمة الأرقام الممنوعة، ولن يتلقى الذكاء أي رسالة من هذا الرقم. متابعة؟',
     },
