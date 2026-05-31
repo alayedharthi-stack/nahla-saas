@@ -22,6 +22,7 @@ from ..decision.actions import (
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_NARROW,
+    ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_OUT_OF_SCOPE,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
@@ -266,6 +267,36 @@ class _LLMReplyHandler:
         )
 
 
+class _OrderContextUpdateHandler:
+    """Attach map/address/shipping updates to an active order funnel."""
+
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from .orders import DraftOrderHandler
+
+        product = decision.args.get("forced_product") or decision.args.get("product")
+        if not product:
+            try:
+                from ..order_context_gate import _resolve_product_for_update  # noqa: PLC0415
+                product = _resolve_product_for_update(ctx)
+            except Exception:  # noqa: BLE001
+                product = None
+
+        draft_args = dict(decision.args or {})
+        draft_args["order_context_update"] = True
+        draft_args["source"] = "order_context_update"
+        if product:
+            draft_args["product"] = product
+            draft_args["forced_product"] = product
+
+        draft_decision = Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args=draft_args,
+            reason=decision.reason,
+            confidence=decision.confidence,
+        )
+        return await DraftOrderHandler().handle(draft_decision, ctx)
+
+
 class _StashAddressPreProductHandler:
     """Stash address signals captured BEFORE a product was picked.
 
@@ -323,6 +354,7 @@ class DefaultActionExecutor:
             ACTION_OUT_OF_SCOPE:        _OutOfScopeHandler(),
             ACTION_SOCIAL_REPLY:        _SocialReplyHandler(),
             ACTION_PLATFORM_REPLY:      _PlatformReplyHandler(),
+            ACTION_ORDER_CONTEXT_UPDATE: _OrderContextUpdateHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

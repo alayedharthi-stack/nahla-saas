@@ -7580,8 +7580,10 @@ async def _handle_merchant_message(
         # Suppress product markers, safety nets, visual enforcement,
         # and catalog sends when inbound media/text is social/religious.
         _commerce_blocked = False
+        _fulfillment_discovery_blocked = False
         _positive_commerce = False
         _catalog_card_limit = 2
+        _bs_for_nc: dict = {}
         try:
             from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
                 has_positive_commerce_intent,
@@ -7589,6 +7591,9 @@ async def _handle_merchant_message(
             )
             from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
                 resolve_breadth_for_inbound,
+            )
+            from modules.ai.brain.order_context_gate import (  # noqa: PLC0415
+                should_suppress_product_escalation,
             )
             _bs_for_nc = ((convo.extra_metadata or {}).get("brain_state") or {})
             _intent_for_nc = str(_bs_for_nc.get("last_intent") or "")
@@ -7598,6 +7603,11 @@ async def _handle_merchant_message(
                 intent_name=_intent_for_nc or None,
             )
             _commerce_blocked = _nc_turn is not None
+            _fulfillment_discovery_blocked = should_suppress_product_escalation(
+                message=text or "",
+                brain_state=_bs_for_nc,
+                intent_name=_intent_for_nc or None,
+            )
             _positive_commerce = has_positive_commerce_intent(_intent_for_nc)
             _catalog_card_limit = resolve_breadth_for_inbound(
                 message=text or "",
@@ -7612,11 +7622,22 @@ async def _handle_merchant_message(
                     _nc_turn.category if _nc_turn else "?",
                     _nc_turn.source if _nc_turn else "?",
                 )
+            if _fulfillment_discovery_blocked:
+                logger.info(
+                    "[FULFILLMENT_LOCK] tenant=%s suppressing product escalation "
+                    "webhook=1 preview=%r",
+                    tenant_id,
+                    (text or "")[:80],
+                )
         except Exception as _nc_exc:  # noqa: BLE001
             logger.debug(
                 "[NON_COMMERCE_BLOCK] tenant=%s gate skipped: %s",
                 tenant_id, _nc_exc,
             )
+
+        _product_escalation_blocked = (
+            _commerce_blocked or _fulfillment_discovery_blocked
+        )
 
         # ── [PRODUCT:<query>] markers ──────────────────────────────
         # Resolve LLM-cited products against the synced catalog and
@@ -7625,7 +7646,7 @@ async def _handle_merchant_message(
         # the outbound dispatch loop.
         _product_attachments: List[Dict[str, Any]] = []
         if (
-            not _commerce_blocked
+            not _product_escalation_blocked
             and reply
             and "[PRODUCT:" in reply.upper()
         ):
@@ -7798,7 +7819,7 @@ async def _handle_merchant_message(
 
             # Product safety net — skipped on non-commerce turns and when
             # recommendation-breadth cap is already reached.
-            if not _commerce_blocked:
+            if not _product_escalation_blocked:
                 try:
                     _pn = _sn_product(
                         db,
@@ -7844,9 +7865,15 @@ async def _handle_merchant_message(
                         tenant_id, _spe,
                     )
             else:
+                _sn_skip_reason = (
+                    "fulfillment_lock"
+                    if _fulfillment_discovery_blocked
+                    else "non_commerce_block"
+                )
                 logger.info(
-                    "[SAFETY_NET:product] tenant=%s skipped reason=non_commerce_block",
+                    "[SAFETY_NET:product] tenant=%s skipped reason=%s",
                     tenant_id,
+                    _sn_skip_reason,
                 )
 
             # Media-key safety net
@@ -8830,11 +8857,18 @@ async def _handle_merchant_message(
                     str(_a.get("media_type") or "").lower().startswith("image")
                     for _a in (_media_attachments or [])
                 )
-                if _commerce_blocked:
+                if _product_escalation_blocked:
+                    _vp_skip_reason = (
+                        "fulfillment_lock"
+                        if _fulfillment_discovery_blocked
+                        else "non_commerce_block"
+                    )
                     logger.info(
                         "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
-                        "reason=non_commerce_block inbound=%r",
-                        tenant_id, (text or "")[:80],
+                        "reason=%s inbound=%r",
+                        tenant_id,
+                        _vp_skip_reason,
+                        (text or "")[:80],
                     )
                 elif not _vp_wants:
                     logger.debug(

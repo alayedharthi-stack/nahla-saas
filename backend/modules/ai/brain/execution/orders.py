@@ -274,6 +274,28 @@ class DraftOrderHandler:
             )
 
         _merge_message_details(prep, ctx.intent.slots, ctx.message)
+        if decision.args.get("order_context_update"):
+            _fulfillment_slots = {
+                k: v
+                for k, v in (decision.args or {}).items()
+                if k in {
+                    "google_maps_url", "location_url", "short_address_code",
+                    "city", "address", "address_line", "street", "district",
+                    "postal_code", "building_number", "additional_number",
+                    "latitude", "longitude", "customer_first_name",
+                    "customer_last_name", "customer_name", "full_name",
+                } and v
+            }
+            if _fulfillment_slots:
+                _merge_message_details(prep, _fulfillment_slots, ctx.message)
+                logger.info(
+                    "[ORDER CONTEXT UPDATE] tenant=%s kind=%s maps=%s short=%s city=%r",
+                    ctx.tenant_id,
+                    decision.args.get("fulfillment_kind"),
+                    bool(prep.google_maps_url),
+                    bool(prep.short_address_code),
+                    prep.city,
+                )
         await _resolve_checkout_address(prep)
 
         if _had_prep_before:

@@ -533,12 +533,55 @@ class MerchantBrain:
             log_pre_commerce_shortcut,
             should_pre_commerce_shortcut,
         )
-        _pre_commerce_shortcut = should_pre_commerce_shortcut(intent, _nc_match)
-        if _pre_commerce_shortcut:
+        _commerce_bundle_early: Dict[str, Any] = {}
+        try:
+            from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
+
+            _commerce_bundle_early = load_commerce_bundle_from_db(
+                db, tenant_id, customer_phone,
+            )
+        except Exception:  # noqa: BLE001
+            _commerce_bundle_early = {}
+
+        _order_fulfillment_skip = False
+        try:
+            from .order_context_gate import (  # noqa: PLC0415
+                log_order_context_block,
+                should_skip_catalog_preload,
+            )
+
+            _order_fulfillment_skip = should_skip_catalog_preload(
+                message=message or "",
+                state=state_for_classify,
+                intent=intent,
+                commerce_bundle=_commerce_bundle_early,
+            )
+            if _order_fulfillment_skip:
+                log_order_context_block(
+                    tenant_id=tenant_id,
+                    reason="skip_catalog_preload",
+                    preview=(message or "")[:80],
+                )
+        except Exception:  # noqa: BLE001
+            _order_fulfillment_skip = False
+
+        _pre_commerce_shortcut = (
+            should_pre_commerce_shortcut(intent, _nc_match)
+            or _order_fulfillment_skip
+        )
+        if _pre_commerce_shortcut and not _order_fulfillment_skip:
             log_pre_commerce_shortcut(
                 tenant_id=tenant_id,
                 intent=intent,
                 nc_match=_nc_match,
+            )
+        elif _pre_commerce_shortcut and _order_fulfillment_skip:
+            logger.info(
+                "[ORDER_CONTEXT_GATE] tenant=%s skip_catalog_preload=1 "
+                "intent=%s preview=%r",
+                tenant_id,
+                getattr(intent, "name", "?"),
+                (message or "")[:80],
             )
 
         # ── 2. Load state + facts ─────────────────────────────────────────
@@ -586,7 +629,7 @@ class MerchantBrain:
             try:
                 from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
 
-                commerce_bundle = load_commerce_bundle_from_db(
+                commerce_bundle = _commerce_bundle_early or load_commerce_bundle_from_db(
                     db, tenant_id, customer_phone,
                 )
             except Exception as _cb_exc:  # noqa: BLE001
@@ -1192,8 +1235,11 @@ class MerchantBrain:
             slim_merchant_ctx = {
                 "tenant_id": tenant_id,
                 "ai_settings": _ai_settings_for_prompt,
-                "pre_commerce_social": True,
             }
+            if _order_fulfillment_skip:
+                slim_merchant_ctx["order_fulfillment_update"] = True
+            elif should_pre_commerce_shortcut(intent, _nc_match):
+                slim_merchant_ctx["pre_commerce_social"] = True
         elif isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
             mc = ctx.merchant_context
             try:

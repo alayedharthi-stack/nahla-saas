@@ -52,6 +52,7 @@ from ..decision.actions import (
     ACTION_NARROW,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
@@ -293,8 +294,8 @@ class DefaultComposer:
                 )
             return text
 
-        # ── Draft order ────────────────────────────────────────────────────
-        if action == ACTION_PROPOSE_DRAFT_ORDER:
+        # ── Draft order / active-order location update ─────────────────────
+        if action in (ACTION_PROPOSE_DRAFT_ORDER, ACTION_ORDER_CONTEXT_UPDATE):
             if not result.success:
                 return T.generic_fallback(variant=self._variant_idx(ctx))
             # The product reference we have can't be resolved on the store

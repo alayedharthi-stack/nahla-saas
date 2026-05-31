@@ -76,6 +76,9 @@ ACTION_OUT_OF_SCOPE        = "out_of_scope_reply"
 ACTION_SOCIAL_REPLY        = "social_reply"
 ACTION_PLATFORM_REPLY      = "platform_reply"
 
+# Customer updates delivery location / address while an order is active.
+ACTION_ORDER_CONTEXT_UPDATE = "order_context_update"
+
 ALL_ACTIONS = [
     ACTION_GREET,
     ACTION_FAQ_REPLY,
@@ -94,4 +97,5 @@ ALL_ACTIONS = [
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SOCIAL_REPLY,
     ACTION_PLATFORM_REPLY,
+    ACTION_ORDER_CONTEXT_UPDATE,
 ]

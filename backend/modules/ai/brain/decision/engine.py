@@ -208,6 +208,44 @@ class DefaultDecisionEngine:
             "longitude",
         }
 
+        def _product_discovery_blocked() -> bool:
+            try:
+                from ..order_context_gate import (  # noqa: PLC0415
+                    fulfillment_lock_reason,
+                    log_fulfillment_lock,
+                    log_order_context_block,
+                    should_block_product_discovery,
+                )
+                if should_block_product_discovery(ctx):
+                    _reason = fulfillment_lock_reason(ctx) or "fulfillment_session"
+                    log_fulfillment_lock(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        reason=_reason,
+                        preview=(ctx.message or "")[:80],
+                    )
+                    log_order_context_block(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        reason=_reason,
+                        preview=(ctx.message or "")[:80],
+                    )
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+        def _fulfillment_locked_fallback() -> Optional[Decision]:
+            try:
+                from ..order_context_gate import (  # noqa: PLC0415
+                    try_fulfillment_lock_continuation,
+                    try_order_context_update_decision,
+                )
+                _upd = try_order_context_update_decision(ctx)
+                if _upd is not None:
+                    return _upd
+                return try_fulfillment_lock_continuation(ctx)
+            except Exception:  # noqa: BLE001
+                return None
+
         # ── -1. Prediction confirmation (absolute highest priority) ─────────
         # ── Variant choice gate (Phase 3 — migration 0064) ─────────────
         # The customer asked for a parent product that had 2+ in-stock
@@ -434,6 +472,29 @@ class DefaultDecisionEngine:
                 confidence=max(float(intent.confidence or 0.0), 0.94),
             )
 
+        # ── 0a.6 Active-order fulfillment / location update (May 2026) ─────
+        # Maps links + "أبغى الطلبية تجي الموقع ذا" during checkout must
+        # attach to order_prep — never fall through to catalog search.
+        try:
+            from ..order_context_gate import (  # noqa: PLC0415
+                log_order_context_block,
+                try_order_context_update_decision,
+            )
+            _order_ctx_decision = try_order_context_update_decision(ctx)
+            if _order_ctx_decision is not None:
+                log_order_context_block(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    reason=str(_order_ctx_decision.reason or "fulfillment_update"),
+                    preview=(ctx.message or "")[:80],
+                )
+                return _order_ctx_decision
+        except Exception as _oc_exc:  # noqa: BLE001
+            logger.debug(
+                "[ORDER_CONTEXT_GATE] update routing skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _oc_exc,
+            )
+
         # ── 0b. Platform / SaaS inquiry (May 2026 #4) ───────────────────────
         # Customer is asking about Nahla (the platform) itself —
         # subscription, API, dashboard, Meta linking, campaigns.
@@ -483,6 +544,12 @@ class DefaultDecisionEngine:
         _msg_words  = set(_msg_lower.split())
         _is_confirm = bool(_msg_words & _CONFIRM_KEYWORDS)
         _has_prep   = bool(getattr(state, "order_prep", None))
+        try:
+            from ..order_context_gate import has_explicit_commerce_topic_change  # noqa: PLC0415
+
+            _explicit_commerce_switch = has_explicit_commerce_topic_change(ctx.message or "")
+        except Exception:  # noqa: BLE001
+            _explicit_commerce_switch = False
 
         if (
             state.stage in (STAGE_ORDERING, STAGE_DECIDING)
@@ -491,6 +558,7 @@ class DefaultDecisionEngine:
             and not state.checkout_url
             and (_is_confirm or _has_prep)
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
+            and not _explicit_commerce_switch
         ):
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
@@ -938,6 +1006,10 @@ class DefaultDecisionEngine:
             # can pick by number from a fresh list. Never show a bare
             # "ما المنتج؟" clarification when we can show real options.
             if facts.has_products:
+                if _product_discovery_blocked():
+                    _fb = _fulfillment_locked_fallback()
+                    if _fb is not None:
+                        return _fb
                 logger.info(
                     "[ORDER FLOW] numeric_pick_no_candidates → showing_top_products "
                     "tenant=%s intent=%s",
@@ -1142,6 +1214,7 @@ class DefaultDecisionEngine:
             and state.current_product_focus
             and not state.checkout_url
             and not _active_candidates          # GUARD: no pending list
+            and not _explicit_commerce_switch
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
@@ -1208,10 +1281,17 @@ class DefaultDecisionEngine:
             _STOP = {"شي", "شيء", "منتج", "بضاعه", "بضاعة", "حاجه", "حاجة", "طلب"}
             _norm_extracted = _normalize_ar(_extracted)
             if _norm_extracted and _norm_extracted not in _STOP and len(_norm_extracted) >= 2:
-                _extracted_product_query = _extracted
+                from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
+                if not is_order_fulfillment_product_query(_extracted):
+                    _extracted_product_query = _extracted
 
         # ── 3.8a handler ─────────────────────────────────────────────────
-        if _is_top_seller_req and facts.has_products and not _is_commerce_blocked(ctx):
+        if (
+            _is_top_seller_req
+            and facts.has_products
+            and not _is_commerce_blocked(ctx)
+            and not _product_discovery_blocked()
+        ):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
                 "tenant=%s intent=%s msg=%r",
@@ -1225,7 +1305,12 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.8b handler — show NEXT options (not a repeat) ───────────────
-        if _is_show_more_req and facts.has_products and not _is_commerce_blocked(ctx):
+        if (
+            _is_show_more_req
+            and facts.has_products
+            and not _is_commerce_blocked(ctx)
+            and not _product_discovery_blocked()
+        ):
             logger.info(
                 "[ORDER FLOW] show_more_candidates | offset=%d pool=%d tenant=%s",
                 int(getattr(state, "catalog_browse_offset", 0) or 0),
@@ -1243,7 +1328,12 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.8c handler — verbatim repeat of last list ───────────────────
-        if _is_repeat_req and facts.has_products and not _is_commerce_blocked(ctx):
+        if (
+            _is_repeat_req
+            and facts.has_products
+            and not _is_commerce_blocked(ctx)
+            and not _product_discovery_blocked()
+        ):
             _last_cands = list(state.last_search_candidates or [])
             if _last_cands:
                 logger.info(
@@ -1274,7 +1364,12 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.8c handler ─────────────────────────────────────────────────
-        if _extracted_product_query and facts.has_products and not _is_commerce_blocked(ctx):
+        if (
+            _extracted_product_query
+            and facts.has_products
+            and not _is_commerce_blocked(ctx)
+            and not _product_discovery_blocked()
+        ):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
                 "query=%r tenant=%s intent=%s",
@@ -1303,6 +1398,7 @@ class DefaultDecisionEngine:
             and facts.has_products
             and intent.name in (INTENT_GENERAL, INTENT_ASK_PRODUCT, INTENT_ASK_PRICE)
             and _PRICE_REFINE_RE.search(ctx.message or "")
+            and not _product_discovery_blocked()
         ):
             # Extract optional price ceiling (e.g. "أقل من 150 ريال")
             _price_max: float | None = None
@@ -1418,6 +1514,17 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_LOCATION:
+            try:
+                from ..order_context_gate import (  # noqa: PLC0415
+                    has_active_order_context,
+                    try_order_context_update_decision,
+                )
+                if has_active_order_context(ctx):
+                    _loc_update = try_order_context_update_decision(ctx)
+                    if _loc_update is not None:
+                        return _loc_update
+            except Exception:  # noqa: BLE001
+                pass
             # Physical-shop / Google-Maps questions get their own
             # FAQ topic so the deterministic template + maps resolver
             # chain can deliver the maps URL. Routing this to
@@ -1582,9 +1689,10 @@ class DefaultDecisionEngine:
                     or _extracted_product_query
                 )
                 if not query:
-                    # Customer said "أبغى أطلب" with no product mentioned →
-                    # show top products instead of asking a clarifying question.
-                    # A product list is far more useful and converts better.
+                    if _product_discovery_blocked():
+                        _fb = _fulfillment_locked_fallback()
+                        if _fb is not None:
+                            return _fb
                     logger.info(
                         "[ORDER FLOW] intent_rule_matched | rule=top_products "
                         "reason=start_order_no_query tenant=%s",
@@ -1596,6 +1704,10 @@ class DefaultDecisionEngine:
                         reason="start_order with no product query — show top products",
                         confidence=0.85,
                     )
+                if _product_discovery_blocked():
+                    _fb = _fulfillment_locked_fallback()
+                    if _fb is not None:
+                        return _fb
                 logger.info(
                     "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
                     "query=%r tenant=%s",
@@ -1620,6 +1732,10 @@ class DefaultDecisionEngine:
                     reason="non-commerce block overrides ask_product/price on social OCR",
                     confidence=0.94,
                 )
+            if _product_discovery_blocked():
+                _fb = _fulfillment_locked_fallback()
+                if _fb is not None:
+                    return _fb
             if facts.has_products:
                 query = (
                     intent.slots.get("product_query")
@@ -1655,6 +1771,7 @@ class DefaultDecisionEngine:
             and ctx.sales_context
             and ctx.sales_context.recommendations
             and intent.name in (INTENT_START_ORDER, INTENT_PAY_NOW, INTENT_ASK_PRODUCT)
+            and not _product_discovery_blocked()
         ):
             return Decision(
                 action=ACTION_RECOMMEND_ADDON,
@@ -1882,6 +1999,10 @@ class DefaultDecisionEngine:
             # Product focus was lost (unsyncable product cleared it) and
             # NO order progress exists → fall back to searching.
             if not state.current_product_focus and facts.has_products:
+                if _product_discovery_blocked():
+                    _fb = _fulfillment_locked_fallback()
+                    if _fb is not None:
+                        return _fb
                 _query = (
                     intent.slots.get("product_query")
                     or intent.slots.get("product_name")
