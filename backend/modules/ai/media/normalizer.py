@@ -1825,6 +1825,56 @@ def _apply_non_commerce_media_gate(
         return combined
 
 
+def _apply_semantic_media_classification(
+    *,
+    base_meta: Dict[str, Any],
+    text_blob: str = "",
+    caption: str = "",
+    filename: str = "",
+    normalized_type: str = "",
+    tenant_id: Any = None,
+) -> None:
+    """Semantic media layer — must run before payment ack short-circuits."""
+    try:
+        from modules.ai.media.semantic_classifier import (  # noqa: PLC0415
+            apply_semantic_payment_override,
+            classify_media_semantic,
+            log_attachment_ack_mode,
+            log_media_classification,
+        )
+
+        sem = classify_media_semantic(
+            text_blob=text_blob,
+            caption=caption,
+            filename=filename,
+            normalized_type=normalized_type,
+            non_commerce_category=base_meta.get("non_commerce_category"),
+            payment_evidence_status=base_meta.get("payment_evidence_status"),
+            pdf_kind=base_meta.get("pdf_kind"),
+            image_kind=base_meta.get("image_kind"),
+        )
+        base_meta.update(sem.to_metadata())
+        overridden = apply_semantic_payment_override(base_meta)
+        base_meta.update(overridden)
+        log_media_classification(
+            tenant_id=tenant_id,
+            category=str(base_meta.get("media_semantic_category") or sem.category),
+            ack_mode=str(base_meta.get("attachment_ack_mode") or sem.ack_mode),
+            reason=sem.reason,
+            normalized_type=normalized_type,
+        )
+        log_attachment_ack_mode(
+            tenant_id=tenant_id,
+            mode=str(base_meta.get("attachment_ack_mode") or sem.ack_mode),
+            category=str(base_meta.get("media_semantic_category") or sem.category),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[MEDIA_CLASSIFICATION] skipped tenant=%s err=%s",
+            tenant_id, exc,
+        )
+
+
 # ── Image ───────────────────────────────────────────────────────────
 
 
@@ -2135,6 +2185,14 @@ async def _process_image(
         media_type="image",
         tenant_id=tenant_id,
         media_id=media_id,
+    )
+
+    _apply_semantic_media_classification(
+        base_meta=base_meta,
+        text_blob=vision_text or "",
+        caption=caption,
+        normalized_type="image",
+        tenant_id=tenant_id,
     )
 
     # Mandatory per-image classification trace (May 2026 hotfix #2).
@@ -2675,6 +2733,23 @@ async def _process_document(
             "ولا تغيّر حالة الطلب — اكتفِ برد قصير حسب السياق."
         )
     combined = "\n".join(pieces)
+
+    combined = _apply_non_commerce_media_gate(
+        combined=combined,
+        base_meta=base_meta,
+        caption=caption,
+        media_type="document",
+        tenant_id=tenant_id,
+        media_id=media_id,
+    )
+    _apply_semantic_media_classification(
+        base_meta=base_meta,
+        text_blob=extracted_text or "",
+        caption=caption,
+        filename=filename or "",
+        normalized_type="document",
+        tenant_id=tenant_id,
+    )
 
     logger.info(
         "[ORDER_FLOW_STATE] inbound_document tenant=%s media_id=%s "

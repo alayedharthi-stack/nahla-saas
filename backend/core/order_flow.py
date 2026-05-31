@@ -844,6 +844,35 @@ def maybe_handle_payment_evidence_inbound(
     ):
         return None
 
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    summary = _focus_summary(bs)
+    awaiting = bool(summary.get("awaiting_payment_receipt"))
+    has_active_order = bool(summary.get("selected_product"))
+
+    try:
+        from modules.ai.media.semantic_classifier import (  # noqa: PLC0415
+            allows_payment_media_ack,
+            log_payment_media_rejected,
+        )
+
+        if not allows_payment_media_ack(
+            semantic_category=str(md.get("media_semantic_category") or ""),
+            payment_evidence_status=pe_status,
+            awaiting_payment_receipt=awaiting,
+            has_active_order=has_active_order,
+        ):
+            log_payment_media_rejected(
+                tenant_id=tenant_id,
+                reason="semantic_not_payment",
+                category=str(md.get("media_semantic_category") or ""),
+            )
+            return None
+    except Exception as _sem_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_MEDIA_REJECTED] semantic gate skipped tenant=%s err=%s",
+            tenant_id, _sem_exc,
+        )
+
     # Belt-and-braces: also look at the kind slot in case a future
     # caller forgets to thread the payment-evidence status through.
     kind = md.get("pdf_kind") or md.get("image_kind")
@@ -862,11 +891,6 @@ def maybe_handle_payment_evidence_inbound(
             "tenant=%s err=%s", tenant_id, exc,
         )
         return None
-
-    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
-    summary = _focus_summary(bs)
-    awaiting = bool(summary.get("awaiting_payment_receipt"))
-    has_active_order = bool(summary.get("selected_product"))
 
     # ── Active-order promotion (May 2026 hotfix) ───────────────────
     # When the customer already has an active order AND we were
