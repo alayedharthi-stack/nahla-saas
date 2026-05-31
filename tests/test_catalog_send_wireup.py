@@ -110,6 +110,7 @@ def _seed_connection(
         phone_number_id=phone_number_id,
         connection_type="direct",
         provider="meta",
+        status="connected",
         meta_catalog_id=meta_catalog_id,
         catalog_enabled=catalog_enabled,
         access_token="dummy-token",
@@ -539,3 +540,91 @@ class TestAttachmentOnlyPath:
 
         assert result is True
         assert captured["payload"]["interactive"]["action"]["product_retailer_id"] == "ext-LOST"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6. Orchestrator gating (Phase B)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorGating:
+    def test_retailer_id_collision_skips_provider(self):
+        helper = _get_helper()
+        db = _make_db()
+        _seed_tenant(db)
+        conn = _seed_connection(db)
+        _seed_product(db, product_id=501, external_id="dup-rid")
+        _seed_product(db, product_id=502, external_id="dup-rid", title="Other")
+
+        hit = {"n": 0}
+
+        async def fake_send(*args, **kwargs):
+            hit["n"] += 1
+            return {"messages": [{"id": "wamid.NO"}]}, None
+
+        with patch(_PROVIDER_PATCH_PATH, new=fake_send):
+            result = _run(helper(
+                db=db,
+                connection=conn,
+                tenant_id=77,
+                phone_id="PH",
+                to="+966555111222",
+                attachment=_attachment(product_id=501, external_id="dup-rid"),
+            ))
+
+        assert result is False
+        assert hit["n"] == 0
+
+    def test_weak_confidence_skips_provider(self, monkeypatch):
+        monkeypatch.delenv("CATALOG_WEAK_CONFIDENCE_BLOCK", raising=False)
+        helper = _get_helper()
+        db = _make_db()
+        _seed_tenant(db)
+        conn = _seed_connection(db)
+        _seed_product(db)
+
+        hit = {"n": 0}
+
+        async def fake_send(*args, **kwargs):
+            hit["n"] += 1
+            return {"messages": [{"id": "wamid.NO"}]}, None
+
+        att = _attachment(confidence="weak")
+        with patch(_PROVIDER_PATCH_PATH, new=fake_send):
+            result = _run(helper(
+                db=db,
+                connection=conn,
+                tenant_id=77,
+                phone_id="PH",
+                to="+966555111222",
+                attachment=att,
+            ))
+
+        assert result is False
+        assert hit["n"] == 0
+
+    def test_attachment_unchanged_after_helper(self):
+        import copy
+
+        helper = _get_helper()
+        db = _make_db()
+        _seed_tenant(db)
+        conn = _seed_connection(db)
+        _seed_product(db)
+        att = _attachment()
+        snap = copy.deepcopy(att)
+
+        async def fake_send(*args, **kwargs):
+            return {"messages": [{"id": "wamid.OK"}]}, None
+
+        with patch(_PROVIDER_PATCH_PATH, new=fake_send):
+            _run(helper(
+                db=db,
+                connection=conn,
+                tenant_id=77,
+                phone_id="PH",
+                to="+966555111222",
+                attachment=att,
+            ))
+
+        assert att == snap
+        assert "retailer_id" not in att
