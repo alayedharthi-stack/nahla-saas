@@ -3,6 +3,22 @@
 .env
 .env.*
 
+# ── Migration / cutover artifacts (contain DSNs and operational metadata) ────
+# These are produced by scripts/ during database migration / cutover work.
+# They are intentionally kept locally for rollback evidence and audit, but
+# MUST NEVER be committed because they include DATABASE_URL with passwords.
+_*.json
+_*.txt
+_*.log
+_*.err
+nahla-backups/
+*.dump
+
+# ── Standalone audit/trace outputs ────────────────────────────────────────────
+audit_*.txt
+pg_logs_*.txt
+trace_*.txt
+
 # ── Python compiled / cache ───────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
