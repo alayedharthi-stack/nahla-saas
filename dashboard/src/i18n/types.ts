@@ -2,6 +2,9 @@
  * Master translation shape.
  * Every key here must be present in both ar.ts and en.ts.
  */
+import type { CustomersPageLabels } from './customersPageLabels'
+import type { CampaignsListLabels } from './campaignsListPageLabels'
+
 export interface Translations {
   /** Language metadata */
   meta: {
@@ -366,6 +369,338 @@ export interface Translations {
     statusCancelled:string
     sourceAI:       string
     sourceManual:   string
+    periodToday:        string
+    periodLast7Days:    string
+    periodThisMonth:    string
+    sectionTitle:       string
+    chartTitle:         string
+    chartSubtitle:      string
+    chartRevenueLabel:  string
+    messagesSent:       string
+    currency:           string
+    viewPlans:          string
+    noConversationsYet: string
+    noOrdersYet:        string
+    convStatusActive:   string
+    convStatusHuman:    string
+    convStatusClosed:   string
+    chartDays: {
+      mon: string
+      tue: string
+      wed: string
+      thu: string
+      fri: string
+      sat: string
+      sun: string
+    }
+    waUsage: {
+      title: string
+      emergencyStop: string
+      campaignsStopped: string
+      nearLimit90: string
+      used70: string
+      conversationsUnit: string
+      details: string
+      upgrade: string
+      emergencyBanner: string
+      campaignsBanner: string
+      campaignsBannerNote: string
+      nearLimitBanner: string
+      upgradeLink: string
+      upgradeNowLink: string
+      metaTier: {
+        title: string
+        staleValue: string
+        hint: string
+        verifyInMeta: string
+        source: string
+        lastSynced: string
+        numberQuality: string
+        qualityExcellent: string
+        qualityMedium: string
+        qualityLow: string
+        refreshNow: string
+        refreshing: string
+        refreshAriaLabel: string
+      }
+      sync: {
+        never: string
+        unavailable: string
+        momentsAgo: string
+        minutesAgo: string
+        hoursAgo: string
+      }
+      diagnostics: {
+        updatedFromProvider: string
+        notFromProvider: string
+        provider: string
+        hideDetails: string
+        technicalDetails: string
+        tierHint: string
+        errorPrefix: string
+      }
+    }
+  }
+
+  /** Orders page — static UI only */
+  ordersPage: {
+    cards: {
+      totalOrders: string
+      needsFollowUpNow: string
+      pendingPayment: string
+      completedToday: string
+      whatsappOrdersToday: string
+      whatsappRevenueToday: string
+      todayRevenue: string
+    }
+    tabs: {
+      all: string
+      needsAction: string
+      store: string
+      whatsapp: string
+      pending: string
+      paid: string
+      cancelled: string
+    }
+    table: {
+      order: string
+      customer: string
+      amount: string
+      status: string
+      source: string
+      products: string
+      date: string
+    }
+    status: {
+      paid: string
+      pending: string
+      failed: string
+      cancelled: string
+    }
+    source: {
+      salla: string
+      zid: string
+      shopify: string
+      whatsapp: string
+      manual: string
+    }
+    badges: {
+      createdByAI: string
+      fromStore: string
+      needsAction: string
+      paymentLink: string
+    }
+    empty: string
+    showing: string
+    currency: string
+  }
+
+  /** Conversations page — static UI only */
+  conversationsPage: {
+    title: string
+    unreadCount: string
+    searchPlaceholder: string
+    emptyList: string
+    emptyDetailTitle: string
+    emptyDetailSubtitle: string
+    loadMore: string
+    loadingMore: string
+    refreshNow: string
+    noMessages: string
+    filters: {
+      all: string
+      active: string
+      human: string
+      agentReq: string
+      paused: string
+      blocked: string
+      paid: string
+      unsubscribed: string
+      closed: string
+    }
+    badges: {
+      customerMessage: string
+      aiResponse: string
+      system: string
+      requestsStaff: string
+      openConversation: string
+      humanReply: string
+      paymentConfirmed: string
+      unsubscribed: string
+      pendingUnsub: string
+    }
+    senderTypes: {
+      ai: string
+      campaign: string
+      automation: string
+      cod: string
+      manual: string
+      system: string
+    }
+    actions: {
+      resumeAI: string
+      pauseAI: string
+      moreActions: string
+      takeOver: string
+      endSupervision: string
+      excludeCampaigns: string
+      blockNumber: string
+      sendTemplate: string
+      back: string
+      close: string
+      cancel: string
+      exclude: string
+      excluding: string
+    }
+    banners: {
+      humanSupervision: string
+      aiPaused: string
+      unsubscribed: string
+      pendingUnsub: string
+      excludeModalTitle: string
+      excludeModalBody: string
+    }
+    pauseReasons: {
+      manual: string
+      humanHandoff: string
+      manualTakeover: string
+      supportEscalation: string
+      botLoop: string
+      rateLimit: string
+      internalNumber: string
+    }
+    delivery: {
+      notSent: string
+      pending: string
+      failed: string
+      awaitingWamid: string
+      sent: string
+    }
+    replyPlaceholder: string
+    aiHandlingHint: string
+    unsubscribedFilterHint: string
+    errors: {
+      refreshFailed: string
+      loadMoreFailed: string
+      sendReplyFailed: string
+      handoffFailed: string
+      pauseFailed: string
+      customerNotFound: string
+      excludeFailed: string
+      resumeFailed: string
+      blockFailed: string
+      unpauseFailed: string
+    }
+    toasts: {
+      excludedFromCampaigns: string
+      resumedToAI: string
+    }
+    confirm: {
+      blockNumber: string
+    }
+    loadingMessages: string
+    conversationTags: {
+      staff_request: string
+      human_active: string
+      ai_paused: string
+      blocked: string
+      unsubscribed: string
+      pending_unsub: string
+      paid: string
+      closed: string
+      customer_message: string
+      open: string
+    }
+    sendErrors: {
+      default: { label: string; advice: string }
+      out_of_24h_window: { label: string; advice: string }
+      not_on_whatsapp: { label: string; advice: string }
+      invalid_phone: { label: string; advice: string }
+      user_not_opted_in: { label: string; advice: string }
+      marketing_blocked: { label: string; advice: string }
+      rate_limit: { label: string; advice: string }
+      template_not_found: { label: string; advice: string }
+      template_paused: { label: string; advice: string }
+      policy_violation: { label: string; advice: string }
+      auth_error: { label: string; advice: string }
+      unknown: { label: string; advice: string }
+    }
+  }
+
+  /** Customers page — static UI only; dynamic customer data stays as API values */
+  customersPage: CustomersPageLabels
+
+  /** Analytics page */
+  analyticsPage: {
+    title: string
+    subtitle: string
+    cards: {
+      revenue: string
+      conversionRate: string
+      orders: string
+      conversations: string
+    }
+    revenueTrend: string
+    last6Months: string
+    todayRevenue: string
+    loading: string
+    revenueLabel: string
+    convVsConv: string
+    conversationsBar: string
+    conversionsBar: string
+    orderSources: string
+    topProducts: string
+    table: {
+      rank: string
+      product: string
+      orders: string
+      revenue: string
+      trend: string
+    }
+    noProductData: string
+    currency: string
+  }
+
+  /** Sales Agent / AI logs page */
+  salesAgentPage: {
+    title: string
+    interactionsRecorded: string
+    refresh: string
+    searchPlaceholder: string
+    loading: string
+    noResults: string
+    allIntents: string
+    stats: {
+      total: string
+      ordersCreated: string
+      paymentsSent: string
+      handoffs: string
+      avgConfidence: string
+    }
+    table: {
+      time: string
+      customer: string
+      intent: string
+      confidence: string
+      order: string
+    }
+    detail: {
+      customerMessage: string
+      aiReply: string
+      yes: string
+    }
+    flags: {
+      catalogUsed: string
+      catalogNotUsed: string
+      orderCreated: string
+      orderNotCreated: string
+      paymentLinkSent: string
+      paymentLinkNotSent: string
+      handoff: string
+      noHandoff: string
+    }
+    showing: string
+    loadError: string
   }
 
   /** WhatsApp Connect page */
@@ -1177,70 +1512,7 @@ export interface Translations {
       launchCreateFailed:   string
       launchTimeout:        string
     }
-    list: {
-      pageSubtitle:           string
-      newCampaign:            string
-      stats: {
-        completed:              string
-        totalSent:              string
-        totalSentTooltipBoth:   string
-        totalSentTooltipAccepted: string
-        totalSentFailedSuffix:  string
-        openRateDelivered:      string
-        openRateAccepted:       string
-        openRateTooltipDelivered: string
-        openRateTooltipAccepted:  string
-        openRateTooltipNone:    string
-        conversionRate:         string
-      }
-      failedBanner:           string
-      table: {
-        campaign:   string
-        type:       string
-        status:     string
-        audience:   string
-        sent:       string
-        openRate:   string
-        conversion: string
-      }
-      loading:      string
-      emptyTitle:   string
-      emptyHint:    string
-      waveAdaptive: string
-      waveBatched:  string
-      status: {
-        active:    string
-        scheduled: string
-        completed: string
-        paused:    string
-        draft:     string
-        failed:    string
-      }
-      lifecycle: {
-        draft:                      string
-        waiting_scheduler:          string
-        pending_dispatch:           string
-        sending:                    string
-        sent:                       string
-        partial:                    string
-        partial_minor:              string
-        no_whatsapp_recipients:     string
-        excluded_before_send:       string
-        orphaned_materialized_rows: string
-        unknown_status:             string
-        completed_empty:          string
-        failed:                     string
-        failed_all:                 string
-        unknown:                    string
-      }
-      types: {
-        broadcast:      string
-        abandoned_cart: string
-        vip:            string
-        new_arrivals:   string
-        win_back:       string
-      }
-    }
+    list: CampaignsListLabels
   }
 
   /** WhatsApp Catalog page — hub, studio, import, manual entry */
@@ -1371,6 +1643,20 @@ export interface Translations {
         meta_http_error:           string
         defaultUnexpected:         string
       }
+    }
+    importedProducts: {
+      title:        string
+      intro:        string
+      count:        string
+      loading:      string
+      loadFailed:   string
+      emptyTitle:   string
+      emptyDesc:    string
+      colProduct:   string
+      colPrice:     string
+      colRetailerId: string
+      colSource:    string
+      noImage:      string
     }
     testSend: {
       title:                string

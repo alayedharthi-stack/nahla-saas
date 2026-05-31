@@ -1599,7 +1599,7 @@ export default function Settings() {
     .map(id => ({
       id,
       // Use our own label map for the new 'support' tab, fallback to i18n for others
-      label: TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]),
+      label: TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]), // i18n-static: allow — id is SettingsTabKey
       icon: TAB_ICONS[id],
     }))
 

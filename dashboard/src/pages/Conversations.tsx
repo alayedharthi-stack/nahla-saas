@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
-  UserCheck, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
+  UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X,
+  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
@@ -14,6 +14,8 @@ import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 import { useDashboardPoll } from '../lib/dashboardPolling'
+import { useLanguage } from '../i18n/context'
+import { UI_ONLY_GUARD, resolveOutboundSendError } from '../i18n/uiOnly'
 
 const LIST_PAGE_LIMIT = 60
 const LIST_POLL_MS = 32_000
@@ -29,30 +31,18 @@ function logConversationsUiFetch(meta: {
   console.warn('[CONV_LIST_FETCH]', JSON.stringify(meta))
 }
 
-const EVENT_BADGE: Record<MessageEventType, { label: string; icon: React.ReactNode; cls: string }> = {
-  ai:         { label: 'ذكاء اصطناعي', icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
-  campaign:   { label: 'حملة تسويقية', icon: <Megaphone className="w-3 h-3" />, cls: 'bg-blue-50 text-blue-600 border-blue-200' },
-  automation: { label: 'طيار آلي', icon: <Zap className="w-3 h-3" />, cls: 'bg-amber-50 text-amber-600 border-amber-200' },
-  cod:        { label: 'تأكيد طلب COD', icon: <PackageCheck className="w-3 h-3" />, cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
-  manual:     { label: 'رد يدوي', icon: <User className="w-3 h-3" />, cls: 'bg-slate-50 text-slate-600 border-slate-200' },
-  system:     { label: 'نظام', icon: <MessageSquare className="w-3 h-3" />, cls: 'bg-purple-50 text-purple-600 border-purple-200' },
-  customer:   { label: '', icon: null, cls: '' },
+const SENDER_TYPE_STYLES: Record<MessageEventType, { icon: React.ReactNode; cls: string }> = {
+  ai:         { icon: <Bot className="w-3 h-3" />, cls: 'bg-brand-50 text-brand-600 border-brand-200' },
+  campaign:   { icon: <Megaphone className="w-3 h-3" />, cls: 'bg-blue-50 text-blue-600 border-blue-200' },
+  automation: { icon: <Zap className="w-3 h-3" />, cls: 'bg-amber-50 text-amber-600 border-amber-200' },
+  cod:        { icon: <PackageCheck className="w-3 h-3" />, cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' },
+  manual:     { icon: <User className="w-3 h-3" />, cls: 'bg-slate-50 text-slate-600 border-slate-200' },
+  system:     { icon: <MessageSquare className="w-3 h-3" />, cls: 'bg-purple-50 text-purple-600 border-purple-200' },
+  customer:   { icon: null, cls: '' },
 }
 
 interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
-}
-
-const filterLabels: Record<string, string> = {
-  all:          'الكل',
-  active:       'نشطة',
-  human:        'بشري',
-  agent_req:    'طلب موظف',
-  paused:       'متوقف الذكاء',
-  blocked:      'محظور',
-  paid:         'طلبات مدفوعة',
-  unsubscribed: 'ألغى الاشتراك',
-  closed:       'مغلقة',
 }
 
 function _normalizePhoneDigits(phone: string): string {
@@ -71,6 +61,45 @@ async function _resolveCustomerIdByPhone(phone: string): Promise<number | null> 
 }
 
 export default function Conversations() {
+  // UI_ONLY_GUARD: only static labels use t(); customer names, phones, message bodies stay as API data.
+  void UI_ONLY_GUARD
+
+  const { t, dir, isRTL, lang } = useLanguage()
+  const cp = t(tr => tr.conversationsPage)
+
+  const filterLabels = useMemo(() => ({
+    all:          cp.filters.all,
+    active:       cp.filters.active,
+    human:        cp.filters.human,
+    agent_req:    cp.filters.agentReq,
+    paused:       cp.filters.paused,
+    blocked:      cp.filters.blocked,
+    paid:         cp.filters.paid,
+    unsubscribed: cp.filters.unsubscribed,
+    closed:       cp.filters.closed,
+  }), [cp])
+
+  const eventBadge = useMemo(() => ({
+    ai:         { ...SENDER_TYPE_STYLES.ai,         label: cp.senderTypes.ai },
+    campaign:   { ...SENDER_TYPE_STYLES.campaign,   label: cp.senderTypes.campaign },
+    automation: { ...SENDER_TYPE_STYLES.automation, label: cp.senderTypes.automation },
+    cod:        { ...SENDER_TYPE_STYLES.cod,        label: cp.senderTypes.cod },
+    manual:     { ...SENDER_TYPE_STYLES.manual,     label: cp.senderTypes.manual },
+    system:     { ...SENDER_TYPE_STYLES.system,     label: cp.senderTypes.system },
+    customer:   { ...SENDER_TYPE_STYLES.customer,   label: '' },
+  }), [cp])
+
+  const pauseReasonLabel = (reason: AIPauseReason) => {
+    if (reason === 'manual' || reason === 'manual_pause') return cp.pauseReasons.manual
+    if (reason === 'human_handoff') return cp.pauseReasons.humanHandoff
+    if (reason === 'manual_takeover') return cp.pauseReasons.manualTakeover
+    if (reason === 'support_escalation') return cp.pauseReasons.supportEscalation
+    if (reason === 'bot_loop_detected') return cp.pauseReasons.botLoop
+    if (reason === 'rate_limit') return cp.pauseReasons.rateLimit
+    if (reason === 'internal_number') return cp.pauseReasons.internalNumber
+    return reason
+  }
+
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const requestedPhone = searchParams.get('phone')?.trim() || null
@@ -110,6 +139,7 @@ export default function Conversations() {
 
   const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
   const [hasMoreServer, setHasMoreServer]      = useState(false)
+  const [loadingMessages, setLoadingMessages] = useState(false)
   const [loadingMore, setLoadingMore]           = useState(false)
 
   const phonesMatch = (a?: string | null, b?: string | null) => {
@@ -206,7 +236,7 @@ export default function Conversations() {
       }
       logFetchFail(`/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`, t0, err)
       if (!opts?.silent) {
-        setListStaleBanner('تعذّر تحديث المحادثات مؤقتًا، سنعيد المحاولة تلقائيًا.')
+        setListStaleBanner(cp.errors.refreshFailed)
       }
       scheduleListReconnect()
     } finally {
@@ -281,7 +311,7 @@ export default function Conversations() {
         return
       }
       logFetchFail(`/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`, t0, err)
-      setListStaleBanner('تعذّر تحديث المحادثات مؤقتًا، سنعيد المحاولة تلقائيًا.')
+      setListStaleBanner(cp.errors.refreshFailed)
       scheduleListReconnect()
     } finally {
       if (gen === listReqGen.current) listBusyRef.current = false
@@ -337,7 +367,7 @@ export default function Conversations() {
           t0,
           err,
         )
-        setListStaleBanner('تعذّر تحميل المزيد مؤقتًا، حاول خلال ثوانٍ.')
+        setListStaleBanner(cp.errors.loadMoreFailed)
       }
     } finally {
       setLoadingMore(false)
@@ -350,6 +380,7 @@ export default function Conversations() {
     const ac = new AbortController()
     msgsCtrlRef.current = ac
     const t0 = performance.now()
+    setLoadingMessages(true)
     try {
       const { messages } = await featureRealityApi.conversationMessages(phone, {
         signal: ac.signal,
@@ -364,6 +395,8 @@ export default function Conversations() {
     } catch (err: unknown) {
       if (ac.signal.aborted) return
       logFetchFail(`/conversations/messages/${encodeURIComponent(phone)}`, t0, err, phone)
+    } finally {
+      if (!ac.signal.aborted) setLoadingMessages(false)
     }
   }
 
@@ -462,7 +495,7 @@ export default function Conversations() {
       await loadMessagesForOpenChat(selected.phone)
       await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إرسال الرد')
+      alert(e instanceof Error ? e.message : cp.errors.sendReplyFailed)
     }
   }
 
@@ -498,7 +531,7 @@ export default function Conversations() {
       })
       await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر تحويل المحادثة')
+      alert(e instanceof Error ? e.message : cp.errors.handoffFailed)
     }
   }
 
@@ -552,7 +585,7 @@ export default function Conversations() {
       })
       await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إيقاف الذكاء')
+      alert(e instanceof Error ? e.message : cp.errors.pauseFailed)
     }
   }
 
@@ -584,16 +617,16 @@ export default function Conversations() {
     try {
       const customerId = await _resolveCustomerIdByPhone(selected.phone)
       if (!customerId) {
-        throw new Error('لم يُعثر على سجل العميل — تأكد أن الرقم مسجّل في قائمة العملاء.')
+        throw new Error(cp.errors.customerNotFound)
       }
       await customersApi.updateMarketingPreferences(customerId, {
         marketing_opt_out_manual: true,
       })
       setCampaignExcludeConfirm(false)
       setHeaderMenuOpen(false)
-      setActionToast('تم استبعاد العميل من الحملات التسويقية')
+      setActionToast(cp.toasts.excludedFromCampaigns)
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر استبعاد العميل من الحملات')
+      alert(e instanceof Error ? e.message : cp.errors.excludeFailed)
     } finally {
       setExcludingFromCampaigns(false)
     }
@@ -613,12 +646,12 @@ export default function Conversations() {
         customer_phone: selected.phone,
       })
       _applyReturnToAIState(selected.phone)
-      setActionToast('تمت إعادة المحادثة إلى الذكاء')
+      setActionToast(cp.toasts.resumedToAI)
       setHeaderMenuOpen(false)
       await reloadFirstPagePreserveTail({ silent: true })
       await loadMessagesForOpenChat(selected.phone)
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إنهاء إشراف الموظف')
+      alert(e instanceof Error ? e.message : cp.errors.resumeFailed)
     } finally {
       setEndingSupervision(false)
     }
@@ -652,15 +685,14 @@ export default function Conversations() {
       await reloadFirstPagePreserveTail({ silent: true })
       await loadMessagesForOpenChat(selected.phone)
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر تشغيل الذكاء')
+      alert(e instanceof Error ? e.message : cp.errors.unpauseFailed)
     }
   }
 
   const handleBlockNumber = async () => {
     if (!selected) return
     const ok = window.confirm(
-      `سيتم إضافة الرقم ${selected.phone} لقائمة الأرقام الممنوعة، ` +
-      'ولن يتلقى الذكاء أي رسالة من هذا الرقم. متابعة؟',
+      cp.confirm.blockNumber.replace('{phone}', selected.phone),
     )
     if (!ok) return
     console.log('[AI_PAUSE_UI] request blocklist add phone=', selected.phone)
@@ -677,7 +709,7 @@ export default function Conversations() {
       _optimisticUpdate(selected.phone, { isBlocked: true })
       await reloadFirstPagePreserveTail({ silent: true })
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر حظر الرقم')
+      alert(e instanceof Error ? e.message : cp.errors.blockFailed)
     }
   }
 
@@ -773,8 +805,12 @@ export default function Conversations() {
   // We break out of Layout's p-3 padding via -m-3 / md:-m-6 so the component
   // is edge-to-edge, then reclaim full viewport height.
   // ─────────────────────────────────────────────────────────────────────────────
+  const BackIcon = isRTL ? ArrowRight : ArrowLeft
+
   return (
-    <div className="
+    <div
+      dir={dir}
+      className="
       -m-3 md:-m-6
       flex overflow-hidden
       h-[calc(100dvh-3.5rem)] md:h-[calc(100dvh-4rem)]
@@ -790,11 +826,11 @@ export default function Conversations() {
 
         {/* List header (mobile) */}
         <div className="flex items-center justify-between px-4 py-3 bg-brand-600 md:bg-white md:border-b md:border-slate-100">
-          <h2 className="text-base font-bold text-white md:text-slate-900">المحادثات</h2>
+          <h2 className="text-base font-bold text-white md:text-slate-900">{cp.title}</h2>
           <div className="flex items-center gap-2">
             <span className="text-xs text-white/70 md:hidden">
               {conversations.filter(c => c.unread > 0).length > 0
-                ? `${conversations.filter(c => c.unread > 0).length} غير مقروءة`
+                ? cp.unreadCount.replace('{count}', String(conversations.filter(c => c.unread > 0).length))
                 : ''}
             </span>
           </div>
@@ -806,7 +842,7 @@ export default function Conversations() {
             <Search className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
             <input
               className="w-full ps-9 pe-3 py-2 bg-white rounded-full text-sm border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-200 placeholder:text-slate-400"
-              placeholder="ابحث في المحادثات…"
+              placeholder={cp.searchPlaceholder}
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
@@ -877,8 +913,7 @@ export default function Conversations() {
           <div className="mx-3 my-2 flex items-start gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-500">
             <BellOff className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
             <span>
-              إذا كنت تريد استعادة هؤلاء العملاء، ننصحك بالتواصل معهم شخصياً لمعرفة أسباب الإلغاء ومحاولة استعادتهم.
-              سيعودون تلقائياً فور إرسالهم أي رسالة.
+              {cp.unsubscribedFilterHint}
             </span>
           </div>
         )}
@@ -896,7 +931,7 @@ export default function Conversations() {
                   void replaceFirstPageFromServer()
                 }}
               >
-                تحديث الآن
+                {cp.refreshNow}
               </button>
             </div>
           </div>
@@ -907,7 +942,7 @@ export default function Conversations() {
           {sortedFiltered.length === 0 && (
             <li className="py-20 text-center">
               <Bot className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-              <p className="text-sm text-slate-400">لا توجد محادثات</p>
+              <p className="text-sm text-slate-400">{cp.emptyList}</p>
             </li>
           )}
           {sortedFiltered.map((c) => {
@@ -978,22 +1013,22 @@ export default function Conversations() {
                         isn't fatiguing. */}
                     {awaitingAgent && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-300 shadow-sm animate-pulse">
-                        <AlertTriangle className="w-2.5 h-2.5" /> يطلب موظف
+                        <AlertTriangle className="w-2.5 h-2.5" /> {cp.badges.requestsStaff}
                       </span>
                     )}
                     {c.lastPaymentConfirmedAt && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
-                        <PackageCheck className="w-2.5 h-2.5" /> دفع مؤكد
+                        <PackageCheck className="w-2.5 h-2.5" /> {cp.badges.paymentConfirmed}
                       </span>
                     )}
                     {/* Unsubscribe badges */}
                     {c.isUnsubscribed ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-300">
-                        <BellOff className="w-2.5 h-2.5" /> ألغى الاشتراك
+                        <BellOff className="w-2.5 h-2.5" /> {cp.badges.unsubscribed}
                       </span>
                     ) : c.pendingUnsubscribe ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-200">
-                        <BellOff className="w-2.5 h-2.5" /> بانتظار تأكيد الإلغاء
+                        <BellOff className="w-2.5 h-2.5" /> {cp.badges.pendingUnsub}
                       </span>
                     ) : null}
                     {/* Secondary status — only shown if the row is NOT
@@ -1001,16 +1036,16 @@ export default function Conversations() {
                         already conveys the strongest signal we have). */}
                     {!awaitingAgent && c.status === 'human' ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-orange-50 text-orange-600 border border-orange-200">
-                        <User className="w-3 h-3" /> رد بشري
+                        <User className="w-3 h-3" /> {cp.badges.humanReply}
                       </span>
-                    ) : !awaitingAgent && !c.isUnsubscribed && !c.pendingUnsubscribe && c.lastMsgType && c.lastMsgType !== 'customer' && EVENT_BADGE[c.lastMsgType] ? (
-                      <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${EVENT_BADGE[c.lastMsgType].cls}`}>
-                        {EVENT_BADGE[c.lastMsgType].icon}
-                        {EVENT_BADGE[c.lastMsgType].label}
+                    ) : !awaitingAgent && !c.isUnsubscribed && !c.pendingUnsubscribe && c.lastMsgType && c.lastMsgType !== 'customer' && eventBadge[c.lastMsgType] ? (
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${eventBadge[c.lastMsgType].cls}`}>
+                        {eventBadge[c.lastMsgType].icon}
+                        {eventBadge[c.lastMsgType].label}
                       </span>
                     ) : !awaitingAgent && !c.isUnsubscribed && !c.pendingUnsubscribe && c.unread > 0 ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-green-50 text-green-600 border border-green-200">
-                        <MessageSquare className="w-2.5 h-2.5" /> رسالة عميل
+                        <MessageSquare className="w-2.5 h-2.5" /> {cp.badges.customerMessage}
                       </span>
                     ) : null}
                   </div>
@@ -1027,7 +1062,7 @@ export default function Conversations() {
               onClick={() => void appendNextPage()}
               className="w-full py-2 text-xs font-medium text-brand-700 bg-brand-50 rounded-lg hover:bg-brand-100 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loadingMore ? 'جاري التحميل…' : 'تحميل المزيد من المحادثات'}
+              {loadingMore ? cp.loadingMore : cp.loadMore}
             </button>
           </div>
         )}
@@ -1045,8 +1080,8 @@ export default function Conversations() {
               <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <Bot className="w-10 h-10 text-slate-300" />
               </div>
-              <p className="text-sm font-medium text-slate-500">اختر محادثة للعرض</p>
-              <p className="text-xs text-slate-400 mt-1">ستظهر المحادثات هنا عند وصول رسائل من العملاء</p>
+              <p className="text-sm font-medium text-slate-500">{cp.emptyDetailTitle}</p>
+              <p className="text-xs text-slate-400 mt-1">{cp.emptyDetailSubtitle}</p>
             </div>
           </div>
         ) : (
@@ -1057,9 +1092,9 @@ export default function Conversations() {
               <button
                 onClick={goBackToList}
                 className="md:hidden -ms-1 p-2 rounded-full hover:bg-slate-100 text-slate-600 active:bg-slate-200 transition-colors"
-                aria-label="رجوع"
+                aria-label={cp.actions.back}
               >
-                <ArrowRight className="w-5 h-5" />
+                <BackIcon className="w-5 h-5" />
               </button>
 
               {/* Avatar */}
@@ -1090,19 +1125,19 @@ export default function Conversations() {
                     <button
                       className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
                       onClick={resumeIntelligenceForSelected}
-                      title="استئناف ردود الذكاء الآلية"
+                      title={cp.actions.resumeAI}
                     >
                       <Play className="w-3.5 h-3.5" />
-                      تشغيل الذكاء
+                      {cp.actions.resumeAI}
                     </button>
                   ) : (
                     <button
                       className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
                       onClick={pauseIntelligenceForSelected}
-                      title="إيقاف الردود الآلية مؤقتاً بدون تحويل للموظف"
+                      title={cp.actions.pauseAI}
                     >
                       <Pause className="w-3.5 h-3.5" />
-                      إيقاف الذكاء
+                      {cp.actions.pauseAI}
                     </button>
                   )
                 })()}
@@ -1112,7 +1147,7 @@ export default function Conversations() {
                     type="button"
                     className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-500 active:bg-slate-200"
                     onClick={() => setHeaderMenuOpen((open) => !open)}
-                    aria-label="المزيد من الإجراءات"
+                    aria-label={cp.actions.moreActions}
                     aria-expanded={headerMenuOpen}
                   >
                     <MoreVertical className="w-4 h-4" />
@@ -1126,7 +1161,7 @@ export default function Conversations() {
                     return (
                       <div
                         className="absolute end-0 top-full mt-1 w-56 bg-white rounded-xl shadow-lg border border-slate-200 py-1 z-50"
-                        dir="rtl"
+                        dir={dir}
                       >
                         {!_isBlocked(selected) && !humanTakeover && (
                           <button
@@ -1138,7 +1173,7 @@ export default function Conversations() {
                             }}
                           >
                             <UserCheck className="w-4 h-4 text-slate-500" />
-                            تولّي المحادثة
+                            {cp.actions.takeOver}
                           </button>
                         )}
                         {humanTakeover && (
@@ -1156,7 +1191,7 @@ export default function Conversations() {
                             ) : (
                               <RotateCcw className="w-4 h-4" />
                             )}
-                            إنهاء إشراف الموظف
+                            {cp.actions.endSupervision}
                           </button>
                         )}
                         <button
@@ -1168,7 +1203,7 @@ export default function Conversations() {
                           }}
                         >
                           <Megaphone className="w-4 h-4 text-violet-500" />
-                          استبعاد من الحملات
+                          {cp.actions.excludeCampaigns}
                         </button>
                         {!_isBlocked(selected) && (
                           <>
@@ -1182,7 +1217,7 @@ export default function Conversations() {
                               }}
                             >
                               <Ban className="w-4 h-4" />
-                              حظر الرقم
+                              {cp.actions.blockNumber}
                             </button>
                           </>
                         )}
@@ -1199,9 +1234,8 @@ export default function Conversations() {
               <div className="flex items-center gap-2.5 px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-sm text-blue-700">
                 <UserCheck className="w-4 h-4 shrink-0 text-blue-500" />
                 <span>
-                  هذه المحادثة <strong>تحت إشراف موظف بشري</strong>
-                  {selected.takenOverBy && <> — بواسطة <strong>{selected.takenOverBy}</strong></>}
-                  . لن يرد الذكاء حتى تضغط «تشغيل الذكاء» أو «إنهاء إشراف الموظف» من قائمة ⋮.
+                  <strong>{cp.banners.humanSupervision}</strong>
+                  {selected.takenOverBy && <> — <strong>{selected.takenOverBy}</strong></>}
                 </span>
               </div>
             )}
@@ -1213,7 +1247,7 @@ export default function Conversations() {
               >
                 <div
                   className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4"
-                  dir="rtl"
+                  dir={dir}
                   onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center gap-3">
@@ -1221,13 +1255,13 @@ export default function Conversations() {
                       <Megaphone className="w-5 h-5 text-violet-600" />
                     </div>
                     <div className="min-w-0">
-                      <h3 className="text-base font-semibold text-slate-900">استبعاد من الحملات</h3>
+                      <h3 className="text-base font-semibold text-slate-900">{cp.banners.excludeModalTitle}</h3>
                       <p className="text-xs text-slate-500 mt-0.5 truncate">{selected.customer}</p>
                     </div>
                   </div>
 
                   <p className="text-sm text-slate-600 leading-relaxed">
-                    سيتم استبعاد هذا العميل من الحملات التسويقية فقط، وسيبقى الذكاء والردود الآلية تعمل بشكل طبيعي.
+                    {cp.banners.excludeModalBody}
                   </p>
 
                   <div className="flex gap-3 pt-1">
@@ -1237,7 +1271,7 @@ export default function Conversations() {
                       disabled={excludingFromCampaigns}
                       className="flex-1 btn-secondary text-sm"
                     >
-                      إلغاء
+                      {cp.actions.cancel}
                     </button>
                     <button
                       type="button"
@@ -1246,7 +1280,7 @@ export default function Conversations() {
                       className="flex-1 inline-flex items-center justify-center gap-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {excludingFromCampaigns ? <Clock className="w-4 h-4 animate-spin" /> : <Megaphone className="w-4 h-4" />}
-                      {excludingFromCampaigns ? 'جارٍ الاستبعاد…' : 'استبعاد'}
+                      {excludingFromCampaigns ? cp.actions.excluding : cp.actions.exclude}
                     </button>
                   </div>
                 </div>
@@ -1261,7 +1295,7 @@ export default function Conversations() {
                   type="button"
                   onClick={() => setActionToast(null)}
                   className="text-emerald-700/60 hover:text-emerald-900"
-                  aria-label="إغلاق"
+                  aria-label={cp.actions.close}
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -1274,22 +1308,13 @@ export default function Conversations() {
               <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
                 <Pause className="w-4 h-4 shrink-0 text-amber-500" />
                 <span>
-                  الذكاء <strong>متوقف مؤقتاً لهذه المحادثة</strong>
+                  <strong>{cp.banners.aiPaused}</strong>
                   {selected.aiPausedReason && (
                     <>
-                      {' '}— السبب:{' '}
-                      <strong>
-                        {(selected.aiPausedReason === 'manual' || selected.aiPausedReason === 'manual_pause') && 'إيقاف يدوي'}
-                        {selected.aiPausedReason === 'human_handoff' && 'تحويل لموظف'}
-                        {selected.aiPausedReason === 'manual_takeover' && 'تولّي بشري'}
-                        {selected.aiPausedReason === 'support_escalation' && 'تصعيد للدعم'}
-                        {selected.aiPausedReason === 'bot_loop_detected' && 'تم اكتشاف دوامة ردود آلية'}
-                        {selected.aiPausedReason === 'rate_limit' && 'تجاوز الحد الأقصى للردود'}
-                        {selected.aiPausedReason === 'internal_number' && 'رقم داخلي / محظور'}
-                      </strong>
+                      {' '}—{' '}
+                      <strong>{pauseReasonLabel(selected.aiPausedReason)}</strong>
                     </>
                   )}
-                  . الرسائل تُحفظ بدون إرسال أي رد آلي. اضغط «تشغيل الذكاء» للاستئناف.
                 </span>
               </div>
             )}
@@ -1298,18 +1323,13 @@ export default function Conversations() {
             {selected.isUnsubscribed && (
               <div className="flex items-center gap-2.5 px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-sm text-slate-600">
                 <BellOff className="w-4 h-4 shrink-0 text-slate-500" />
-                <span>
-                  هذا العميل <strong>ألغى اشتراكه</strong> — لن يتلقى أي رسائل آلية أو حملات.
-                  إذا أرسل رسالة جديدة، سيعود تلقائياً للقوائم العادية.
-                </span>
+                <span>{cp.banners.unsubscribed}</span>
               </div>
             )}
             {!selected.isUnsubscribed && selected.pendingUnsubscribe && (
               <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
                 <BellOff className="w-4 h-4 shrink-0 text-amber-500" />
-                <span>
-                  هذا العميل <strong>بانتظار تأكيد إلغاء الاشتراك</strong> — النظام في انتظار رده خلال 24 ساعة.
-                </span>
+                <span>{cp.banners.pendingUnsub}</span>
               </div>
             )}
 
@@ -1318,8 +1338,14 @@ export default function Conversations() {
               className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
               style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
             >
-              {selected.messages.length === 0 && (
-                <div className="text-center py-10 text-xs text-slate-400">لا توجد رسائل بعد</div>
+              {loadingMessages && selected.messages.length === 0 && (
+                <div className="flex items-center justify-center py-10 gap-2 text-xs text-slate-400">
+                  <Loader2 className="w-4 h-4 animate-spin text-brand-500" />
+                  {cp.loadingMessages}
+                </div>
+              )}
+              {!loadingMessages && selected.messages.length === 0 && (
+                <div className="text-center py-10 text-xs text-slate-400">{cp.noMessages}</div>
               )}
 
               {selected.messages.map((m, idx) => {
@@ -1345,10 +1371,10 @@ export default function Conversations() {
                     <div className={`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1`}>
                       <div className={`flex flex-col ${isOut ? 'items-end' : 'items-start'} max-w-[78%] md:max-w-md`}>
                         {/* Smart event badge */}
-                        {isOut && m.eventType && m.eventType !== 'customer' && EVENT_BADGE[m.eventType] && (
-                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border mb-0.5 ${EVENT_BADGE[m.eventType].cls}`}>
-                            {EVENT_BADGE[m.eventType].icon}
-                            {EVENT_BADGE[m.eventType].label}
+                        {isOut && m.eventType && m.eventType !== 'customer' && eventBadge[m.eventType] && (
+                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border mb-0.5 ${eventBadge[m.eventType].cls}`}>
+                            {eventBadge[m.eventType].icon}
+                            {eventBadge[m.eventType].label}
                           </span>
                         )}
 
@@ -1453,7 +1479,7 @@ export default function Conversations() {
                                           merchant's outbox. */}
                                       {isOut && m.sendStatus === 'failed' && (
                                         <span className="absolute -top-2 start-2 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm">
-                                          لم تُرسَل
+                                          {cp.delivery.notSent}
                                         </span>
                                       )}
                                     </div>
@@ -1505,13 +1531,15 @@ export default function Conversations() {
                             the message. Backend stamps this via
                             `core.outbound_send_status` from the WhatsApp
                             wire-layer outcome. */}
-                        {isOut && m.sendStatus === 'failed' && m.sendError && (
+                        {isOut && m.sendStatus === 'failed' && m.sendError && (() => {
+                          const errCopy = resolveOutboundSendError(m.sendError, cp, lang)
+                          return (
                           <div
                             className="mt-1 px-2 py-1 rounded-md text-[11px] bg-red-50 text-red-700 border border-red-200 flex items-start gap-1.5 max-w-full"
                             title={
                               [
-                                m.sendError.labelAr,
-                                m.sendError.adviceAr,
+                                errCopy.label,
+                                errCopy.advice,
                                 m.sendError.code != null ? `Meta code=${m.sendError.code}` : null,
                                 m.sendError.subcode != null ? `subcode=${m.sendError.subcode}` : null,
                               ].filter(Boolean).join(' • ')
@@ -1519,17 +1547,10 @@ export default function Conversations() {
                           >
                             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-[1px]" />
                             <div className="flex flex-col leading-tight gap-1 min-w-0">
-                              <span className="font-medium">لم تُرسَل: {m.sendError.labelAr}</span>
-                              {m.sendError.adviceAr && (
-                                <span className="text-red-600/80">{m.sendError.adviceAr}</span>
+                              <span className="font-medium">{cp.delivery.notSent}: {errCopy.label}</span>
+                              {errCopy.advice && (
+                                <span className="text-red-600/80">{errCopy.advice}</span>
                               )}
-                              {/* ── 24h-window CTA ─────────────────────────
-                                  Meta forbids free-text replies after 24h
-                                  of customer silence — the only way back
-                                  in is an approved Message Template. We
-                                  surface the deep link inline so the
-                                  merchant doesn't have to translate
-                                  "out_of_24h_window" themselves. */}
                               {m.sendError.key === 'out_of_24h_window' && (
                                 <button
                                   type="button"
@@ -1543,12 +1564,13 @@ export default function Conversations() {
                                   className="self-start mt-0.5 inline-flex items-center gap-1 px-2 py-1 rounded-md bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-[11px] font-semibold transition-colors"
                                 >
                                   <FileText className="w-3 h-3" />
-                                  إرسال قالب واتساب
+                                  {cp.actions.sendTemplate}
                                 </button>
                               )}
                             </div>
                           </div>
-                        )}
+                          )
+                        })()}
 
                         {/* Time + send-status icon */}
                         <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>
@@ -1582,14 +1604,14 @@ export default function Conversations() {
                                 return (
                                   <Clock
                                     className="w-3.5 h-3.5 text-slate-300 animate-pulse"
-                                    aria-label="بانتظار التسليم"
+                                    aria-label={cp.delivery.pending}
                                   />
                                 )
                               case 'failed':
                                 return (
                                   <AlertCircle
                                     className="w-3.5 h-3.5 text-red-500"
-                                    aria-label="فشل الإرسال"
+                                    aria-label={cp.delivery.failed}
                                   />
                                 )
                               case 'sent': {
@@ -1599,14 +1621,14 @@ export default function Conversations() {
                                   return (
                                     <Check
                                       className="w-3.5 h-3.5 text-slate-400"
-                                      aria-label="استُلمت من المزود لكن بانتظار wamid"
+                                      aria-label={cp.delivery.awaitingWamid}
                                     />
                                   )
                                 }
                                 return (
                                   <CheckCheck
                                     className="w-3.5 h-3.5 text-brand-400"
-                                    aria-label="مُرسَلة"
+                                    aria-label={cp.delivery.sent}
                                   />
                                 )
                               }
@@ -1619,7 +1641,7 @@ export default function Conversations() {
                                 return (
                                   <CheckCheck
                                     className="w-3.5 h-3.5 text-brand-400"
-                                    aria-label="مُرسَلة"
+                                    aria-label={cp.delivery.sent}
                                   />
                                 )
                             }
@@ -1658,11 +1680,11 @@ export default function Conversations() {
                     >
                       {intelligenceOff ? (
                         <>
-                          <Play className="w-3.5 h-3.5" /> تشغيل الذكاء
+                          <Play className="w-3.5 h-3.5" /> {cp.actions.resumeAI}
                         </>
                       ) : (
                         <>
-                          <Pause className="w-3.5 h-3.5" /> إيقاف الذكاء
+                          <Pause className="w-3.5 h-3.5" /> {cp.actions.pauseAI}
                         </>
                       )}
                     </button>
@@ -1679,7 +1701,7 @@ export default function Conversations() {
                   value={reply}
                   onChange={handleTextareaInput}
                   onKeyDown={handleKeyDown}
-                  placeholder="اكتب رسالة…"
+                  placeholder={cp.replyPlaceholder}
                   className="
                     flex-1 resize-none rounded-2xl border border-slate-200 px-4 py-2.5
                     text-sm leading-relaxed bg-slate-50
@@ -1707,7 +1729,7 @@ export default function Conversations() {
               {selected.status !== 'human' && (
                 <p className="text-xs text-slate-400 mt-1.5 flex items-center gap-1 px-1">
                   <Bot className="w-3 h-3 text-brand-400 shrink-0" />
-                  نحلة تتولى هذه المحادثة — اضغط «تولّ» للرد يدوياً
+                  {cp.aiHandlingHint}
                 </p>
               )}
             </div>

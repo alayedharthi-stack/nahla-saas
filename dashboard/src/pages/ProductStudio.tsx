@@ -103,7 +103,7 @@ function SourcePill({ source }: { source: ProductSource | string }) {
   const { t } = useLanguage()
   const style = SOURCE_STYLES[source] ?? SOURCE_STYLES.unknown
   const key = (source in SOURCE_STYLES ? source : 'unknown') as CatalogSourceKey
-  const label = t(tr => tr.catalogMgmt.sources[key])
+  const label = t(tr => tr.catalogMgmt.sources[key]) // i18n-static: allow — key is CatalogSourceKey
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border font-semibold text-[11px] px-2 py-0.5 ${style.bg} ${style.text}`}>
       {label}

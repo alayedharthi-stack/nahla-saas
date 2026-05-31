@@ -37,7 +37,12 @@ import {
 import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
+import ToggleSwitch from '../components/ui/ToggleSwitch'
 import { useLanguage } from '../i18n/context'
+import { UI_ONLY_GUARD } from '../i18n/uiOnly'
+import { paginationChevrons } from '../lib/paginationIcons'
+import type { Lang } from '../i18n/types'
+import type { CustomersPageLabels } from '../i18n/customersPageLabels'
 import {
   customersApi,
   type CustomerRecord,
@@ -105,21 +110,27 @@ function rfmVariant(score: number): 'green' | 'amber' | 'red' | 'blue' | 'slate'
   return 'slate'
 }
 
-function formatDate(dateStr: string | null): string {
+function customerLocale(lang: Lang): string {
+  return lang === 'ar' ? 'ar-SA' : 'en-US'
+}
+
+function segmentDisplayLabel(seg: CustomerSegmentMeta, lang: Lang): string {
+  return lang === 'en' ? (seg.label_en || seg.label_ar) : seg.label_ar
+}
+
+function formatCustomerDate(dateStr: string | null, locale: string): string {
   if (!dateStr) return '—'
   try {
-    return new Date(dateStr).toLocaleDateString('ar-SA', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    })
-  } catch {
-    return '—'
-  }
+    return new Date(dateStr).toLocaleDateString(locale, { year: 'numeric', month: 'short', day: 'numeric' })
+  } catch { return '—' }
 }
 
 export default function Customers() {
-  useLanguage()
+  void UI_ONLY_GUARD
+  const { tStatic, dir, lang, isRTL } = useLanguage()
+  const cu = tStatic(tr => tr.customersPage)
+  const locale = customerLocale(lang)
+  const { Prev: PrevIcon, Next: NextIcon } = paginationChevrons(isRTL)
   const navigate = useNavigate()
 
   const [customers, setCustomers] = useState<CustomerRecord[]>([])
@@ -233,7 +244,7 @@ export default function Customers() {
       .trim()
       .replace(/\s+/g, ' ')
     if (trimmed.length > INLINE_NAME_MAX_LEN) {
-      setInlineEditError(`الاسم طويل جداً (الحد ${INLINE_NAME_MAX_LEN} حرفاً)`)
+      setInlineEditError(cu.inlineEdit.nameTooLong.replace('{max}', String(INLINE_NAME_MAX_LEN)))
       return
     }
     // No-op shortcut: if the merchant didn't actually change the
@@ -283,23 +294,22 @@ export default function Customers() {
       setInlineNameToast({
         ok: true,
         text: _wasCleared
-          ? 'تم حذف اسم العميل (سيظهر "بدون اسم")'
-          : 'تم تحديث اسم العميل',
+          ? cu.inlineEdit.nameCleared
+          : cu.inlineEdit.nameUpdated,
       })
       cancelInlineEdit()
     } catch (err: any) {
       const msg =
         err?.detail
         || err?.message
-        || 'تعذّر تحديث اسم العميل. حاول مرة أخرى.'
+        || cu.inlineEdit.updateFailed
       setInlineEditError(
         typeof msg === 'string' ? msg : JSON.stringify(msg),
       )
     } finally {
       setInlineEditSaving(false)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inlineEditValue, cancelInlineEdit])
+  }, [inlineEditValue, cancelInlineEdit, cu])
   // Per-row edit state — keyed by customer_id. Initialised from the
   // preview response (which merges in any saved draft) and mutated
   // in-place as the merchant toggles chips. Autosave watches the
@@ -437,7 +447,7 @@ export default function Customers() {
 
   const handleAdd = async () => {
     if (!addName.trim() || !addPhone.trim()) {
-      setAddError('الاسم ورقم الواتساب مطلوبان')
+      setAddError(cu.addModal.nameRequired)
       return
     }
     setAddLoading(true)
@@ -455,7 +465,7 @@ export default function Customers() {
       load()
     } catch (err: any) {
       const msg =
-        err?.detail || err?.message || 'حدث خطأ أثناء إضافة العميل'
+        err?.detail || err?.message || cu.addModal.addFailed
       setAddError(typeof msg === 'string' ? msg : JSON.stringify(msg))
     } finally {
       setAddLoading(false)
@@ -463,14 +473,14 @@ export default function Customers() {
   }
 
   const handleDelete = async (id: number) => {
-    if (!confirm('هل أنت متأكد من حذف هذا العميل؟')) return
+    if (!confirm(cu.deleteModal.singleConfirm)) return
     try {
       await customersApi.delete(id)
       setSelectedCustomer(null)
       setSelectedIds(prev => { const s = new Set(prev); s.delete(id); return s })
       load()
     } catch {
-      alert('حدث خطأ أثناء الحذف')
+      alert(cu.deleteModal.deleteFailed)
     }
   }
 
@@ -504,7 +514,7 @@ export default function Customers() {
       setSelectedCustomer(null)
       load()
     } catch {
-      alert('حدث خطأ أثناء الحذف')
+      alert(cu.deleteModal.deleteFailed)
     } finally {
       setDeleteLoading(false)
     }
@@ -593,7 +603,7 @@ export default function Customers() {
       setNameCleanupSaveState('saved')
       setNameCleanupLastSavedAt(new Date().toISOString())
     } catch (err: any) {
-      const msg = err?.detail || err?.message || 'تعذر تحميل المعاينة'
+      const msg = err?.detail || err?.message || cu.nameCleanup.loadPreviewFailed
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
       setNameCleanupItems([])
       setNameCleanupSummary(null)
@@ -685,7 +695,7 @@ export default function Customers() {
       setNameCleanupSaveState('saved')
     } catch (err: any) {
       // Surface but keep the dirty flag so the next debounce retries.
-      const msg = err?.detail || err?.message || 'تعذر حفظ المسودة'
+      const msg = err?.detail || err?.message || cu.nameCleanup.saveDraftFailed
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
       setNameCleanupSaveState('error')
     } finally {
@@ -697,7 +707,7 @@ export default function Customers() {
         void flushCleanupAutosave()
       }
     }
-  }, [])
+  }, [cu])
 
   // Mark a single row dirty AND schedule a debounced autosave run.
   const queueCleanupAutosave = useCallback(() => {
@@ -890,7 +900,7 @@ export default function Customers() {
         })
       }
     } catch (err: any) {
-      const msg = err?.detail || err?.message || 'تعذر تنفيذ الإجراء'
+      const msg = err?.detail || err?.message || cu.nameCleanup.actionFailed
       setNameCleanupError(
         typeof msg === 'string' ? msg : JSON.stringify(msg),
       )
@@ -909,14 +919,14 @@ export default function Customers() {
   // Discard every draft row server-side; reload the modal to see
   // pristine cleaner defaults again.
   const discardCleanupDraft = async () => {
-    if (!confirm('سيتم تجاهل جميع التعديلات المحفوظة في المسودة. هل أنت متأكد؟')) {
+    if (!confirm(cu.draftDiscardConfirm)) {
       return
     }
     try {
       await customersApi.nameCleanupDraftDiscard()
       await openNameCleanup()
     } catch (err: any) {
-      const msg = err?.detail || err?.message || 'تعذر تجاهل المسودة'
+      const msg = err?.detail || err?.message || cu.nameCleanup.discardFailed
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
     }
   }
@@ -1094,7 +1104,7 @@ export default function Customers() {
           return {
             customer_id: it.customer_id,
             new_name:    resolved,
-            reason:      wasEdited ? `تعديل يدوي — ${it.reason}` : it.reason,
+            reason:      wasEdited ? cu.nameCleanup.manualEditReason.replace('{reason}', it.reason) : it.reason,
             confidence:  it.confidence,
           }
         })
@@ -1124,7 +1134,7 @@ export default function Customers() {
       })
       load()
     } catch (err: any) {
-      const msg = err?.detail || err?.message || 'تعذر تطبيق التنظيف'
+      const msg = err?.detail || err?.message || cu.nameCleanup.applyFailed
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
     } finally {
       setNameCleanupApplying(false)
@@ -1167,7 +1177,7 @@ export default function Customers() {
       })
       load()
     } catch (err: any) {
-      const msg = err?.detail || err?.message || 'تعذر تطبيق التنظيف'
+      const msg = err?.detail || err?.message || cu.nameCleanup.applyFailed
       setNameCleanupError(typeof msg === 'string' ? msg : JSON.stringify(msg))
     } finally {
       setNameCleanupApplying(false)
@@ -1178,7 +1188,7 @@ export default function Customers() {
   const someSelected = selectedIds.size > 0 && !allCurrentSelected
 
   return (
-    <div className="space-y-5">
+    <div dir={dir} className="space-y-5">
       {/* ── Inline name-edit toast ────────────────────────────────────
           Floating notification rendered at the bottom of the viewport
           so it never covers the row the merchant just edited. Auto-
@@ -1200,31 +1210,31 @@ export default function Customers() {
       )}
 
       <PageHeader
-        title="العملاء"
-        subtitle="إدارة وتصنيف العملاء"
+        title={cu.title}
+        subtitle={cu.subtitle}
         action={
           <div className="flex items-center gap-2">
             <button
               onClick={openNameCleanup}
               className="btn-secondary text-sm flex items-center gap-2"
-              title="إزالة الكلمات التجارية ('عميل'، 'customer'...) وأرقام الجوال من حقل الاسم — يعمل على المتجر الحالي فقط"
+              title={cu.actions.cleanNamesTitle}
             >
               <Sparkles className="w-4 h-4" />
-              تنظيف أسماء العملاء
+              {cu.actions.cleanNames}
             </button>
             <button
               onClick={() => navigate('/customers/import')}
               className="btn-secondary text-sm flex items-center gap-2"
             >
               <Upload className="w-4 h-4" />
-              استيراد العملاء
+              {cu.actions.importCustomers}
             </button>
             <button
               onClick={() => setShowAdd(true)}
               className="btn-primary text-sm flex items-center gap-2"
             >
               <UserPlus className="w-4 h-4" />
-              إضافة عميل
+              {cu.actions.addCustomer}
             </button>
           </div>
         }
@@ -1233,7 +1243,7 @@ export default function Customers() {
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          label="إجمالي العملاء"
+          label={cu.cards.total}
           value={String(metrics?.totalCustomers ?? total)}
           change={0}
           icon={Users}
@@ -1241,7 +1251,7 @@ export default function Customers() {
           iconBg="bg-brand-50"
         />
         <StatCard
-          label="عملاء VIP"
+          label={cu.cards.vip}
           value={String(metrics?.vipCustomers ?? 0)}
           change={0}
           icon={Crown}
@@ -1249,7 +1259,7 @@ export default function Customers() {
           iconBg="bg-amber-50"
         />
         <StatCard
-          label="في خطر المغادرة"
+          label={cu.cards.atRisk}
           value={String((metrics?.atRiskCustomers ?? 0) + (metrics?.inactiveCustomers ?? 0))}
           change={0}
           icon={AlertTriangle}
@@ -1257,7 +1267,7 @@ export default function Customers() {
           iconBg="bg-red-50"
         />
         <StatCard
-          label="عملاء نشطون"
+          label={cu.cards.active}
           value={String(metrics?.activeCustomers ?? 0)}
           change={0}
           icon={ShoppingCart}
@@ -1276,13 +1286,16 @@ export default function Customers() {
         <div className="flex items-center gap-2 px-1">
           <Tag className="w-3.5 h-3.5 text-slate-400" />
           <span className="text-[11px] font-semibold text-slate-600">
-            شرائح العملاء
+            {cu.segments.title}
           </span>
           <span className="text-[10px] text-slate-400">
-            تشمل التصنيف الذكي والتصنيف اليدوي معاً
+            {cu.segments.subtitle}
           </span>
         </div>
         <SegmentChips
+          cu={cu}
+          lang={lang}
+          locale={locale}
           segments={segments}
           loading={segmentsLoading}
           active={segmentKey}
@@ -1298,7 +1311,8 @@ export default function Customers() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="بحث بالاسم أو رقم الهاتف..."
+            placeholder={cu.searchPlaceholder}
+            dir={dir}
             className="w-full ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
           />
         </div>
@@ -1312,13 +1326,16 @@ export default function Customers() {
           <select
             value={manualSegmentKey}
             onChange={(e) => setManualSegmentKey(e.target.value)}
+            dir={dir}
             className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
-            title="فلترة حسب العملاء المُصنَّفين يدوياً فقط"
+            title={cu.filters.manualSegmentTitle}
           >
-            <option value="">عرض الكل</option>
-            <option value="none">— بدون أي تصنيف يدوي —</option>
+            <option value="">{cu.filters.showAll}</option>
+            <option value="none">{cu.filters.noManualTag}</option>
             {segments.filter(s => s.key !== 'all').map(s => (
-              <option key={s.key} value={s.key}>يدوي فقط: {s.label_ar}</option>
+              <option key={s.key} value={s.key}>
+                {cu.filters.manualOnly.replace('{label}', segmentDisplayLabel(s, lang))}
+              </option>
             ))}
           </select>
         </div>
@@ -1329,12 +1346,13 @@ export default function Customers() {
           <select
             value={marketingOptOutFilter}
             onChange={(e) => setMarketingOptOutFilter(e.target.value as 'all' | 'in' | 'out')}
+            dir={dir}
             className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
-            title="فلترة حسب الاستبعاد التسويقي اليدوي"
+            title={cu.filters.marketingTitle}
           >
-            <option value="all">كل العملاء</option>
-            <option value="in">المؤهلون للحملات</option>
-            <option value="out">المستبعدون يدوياً</option>
+            <option value="all">{cu.filters.marketingAll}</option>
+            <option value="in">{cu.filters.marketingIn}</option>
+            <option value="out">{cu.filters.marketingOut}</option>
           </select>
         </div>
 
@@ -1344,7 +1362,7 @@ export default function Customers() {
           className="btn-secondary text-sm flex items-center gap-2"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          تحديث
+          {cu.actions.refresh}
         </button>
 
         {/* Bulk actions — only visible when items are selected */}
@@ -1354,7 +1372,7 @@ export default function Customers() {
             className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 hover:bg-red-100 px-3 py-2 rounded-lg transition-colors"
           >
             <Trash2 className="w-4 h-4" />
-            حذف المحدد ({selectedIds.size})
+            {cu.actions.deleteSelected} ({selectedIds.size})
           </button>
         )}
 
@@ -1364,23 +1382,24 @@ export default function Customers() {
           className="flex items-center gap-2 text-sm text-red-500 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 px-3 py-2 rounded-lg transition-colors"
         >
           <Trash2 className="w-4 h-4" />
-          حذف الكل
+          {cu.actions.deleteAll}
         </button>
       </div>
 
       {/* Table */}
       <div className="card overflow-hidden">
         {loading ? (
-          <div className="flex items-center justify-center py-16">
+          <div className="flex flex-col items-center justify-center py-16 gap-3">
             <div className="w-8 h-8 border-4 border-brand-200 border-t-brand-500 rounded-full animate-spin" />
+            <span className="text-sm text-slate-400">{cu.loading}</span>
           </div>
         ) : customers.length === 0 ? (
           <div className="text-center py-16 text-sm text-slate-400">
-            لا يوجد عملاء
+            {cu.table.empty}
           </div>
         ) : (
-          <div className="overflow-x-auto overflow-y-auto max-h-[60vh]">
-            <table className="w-full text-xs">
+          <div className="overflow-x-auto overflow-y-auto max-h-[60vh]" dir={dir}>
+            <table className="w-full text-xs" dir={dir}>
               <thead className="sticky top-0 z-10">
                 <tr className="border-b border-slate-100 bg-slate-50">
                   {/* Select-all checkbox */}
@@ -1388,7 +1407,7 @@ export default function Customers() {
                     <button
                       onClick={toggleSelectAll}
                       className="text-slate-400 hover:text-brand-500 transition-colors"
-                      title={allCurrentSelected ? 'إلغاء تحديد الكل' : 'تحديد الكل'}
+                      title={allCurrentSelected ? cu.table.deselectAll : cu.table.selectAll}
                     >
                       {allCurrentSelected ? (
                         <CheckSquare className="w-4 h-4 text-brand-500" />
@@ -1399,16 +1418,16 @@ export default function Customers() {
                       )}
                     </button>
                   </th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">الاسم</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">الهاتف</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">البريد</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">الحالة</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.name}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.phone}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.email}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.status}</th>
                   <th className="text-start px-3 py-3 font-medium text-slate-500">RFM</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">القطاع الذكي</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">الطلبات</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">الإنفاق</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">آخر طلب</th>
-                  <th className="text-start px-3 py-3 font-medium text-slate-500">المصدر</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.smartSegment}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.orders}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.spend}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.lastOrder}</th>
+                  <th className="text-start px-3 py-3 font-medium text-slate-500">{cu.table.source}</th>
                   <th className="px-3 py-3 w-10" />
                 </tr>
               </thead>
@@ -1464,14 +1483,14 @@ export default function Customers() {
                                 }}
                                 disabled={inlineEditSaving}
                                 maxLength={INLINE_NAME_MAX_LEN}
-                                placeholder="اسم العميل"
+                                placeholder={cu.table.namePlaceholder}
                                 className="px-2 py-1 text-sm border border-brand-300 rounded-md focus:outline-none focus:ring-2 focus:ring-brand-200 disabled:bg-slate-50 disabled:text-slate-400 w-full"
                                 dir="auto"
                               />
                               <button
                                 onClick={(e) => { e.stopPropagation(); saveInlineEdit(c) }}
                                 disabled={inlineEditSaving}
-                                title="حفظ (Enter)"
+                                title={cu.table.saveTitle}
                                 className="p-1 rounded-md bg-brand-500 hover:bg-brand-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 {inlineEditSaving
@@ -1481,7 +1500,7 @@ export default function Customers() {
                               <button
                                 onClick={(e) => { e.stopPropagation(); cancelInlineEdit() }}
                                 disabled={inlineEditSaving}
-                                title="إلغاء (Esc)"
+                                title={cu.table.cancelTitle}
                                 className="p-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 <X className="w-3.5 h-3.5" />
@@ -1532,9 +1551,9 @@ export default function Customers() {
                               <span
                                 className="font-normal italic text-slate-400 cursor-pointer"
                                 onClick={() => setSelectedCustomer(c)}
-                                title="هذا العميل بلا اسم — استخدم القلم لإضافة اسم"
+                                title={cu.table.noNameTitle}
                               >
-                                بدون اسم
+                                {cu.table.noName}
                               </span>
                             )}
                             <button
@@ -1544,30 +1563,30 @@ export default function Customers() {
                                 startInlineEdit(c)
                               }}
                               className="inline-flex items-center justify-center w-6 h-6 rounded-md text-slate-400 hover:text-brand-600 hover:bg-brand-50 focus:text-brand-600 focus:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-200 transition-colors shrink-0"
-                              title="تعديل سريع للاسم"
-                              aria-label="تعديل اسم العميل"
+                              title={cu.table.quickEditName}
+                              aria-label={cu.table.editNameAria}
                             >
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
                             {c.manual_name_override && (
                               <span
                                 className="inline-flex items-center gap-0.5 bg-emerald-50 text-emerald-700 text-[10px] font-medium px-1.5 py-0.5 rounded-full border border-emerald-200"
-                                title="الاسم محرّر يدوياً — لن يُعدّله التنظيف التلقائي"
+                                title={cu.table.manualEditHint}
                               >
                                 <ShieldCheck className="w-2.5 h-2.5" />
-                                محرّر
+                                {cu.table.editedBadge}
                               </span>
                             )}
                             {c.is_unsubscribed && (
                               <span className="inline-flex items-center gap-0.5 bg-red-100 text-red-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-red-200">
                                 <BellOff className="w-2.5 h-2.5" />
-                                ألغى الاشتراك
+                                {cu.table.unsubscribed}
                               </span>
                             )}
                             {!c.is_unsubscribed && c.pending_unsubscribe && (
                               <span className="inline-flex items-center gap-0.5 bg-amber-100 text-amber-700 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-amber-200">
                                 <BellOff className="w-2.5 h-2.5" />
-                                بانتظار تأكيد الإلغاء
+                                {cu.table.pendingUnsub}
                               </span>
                             )}
                           </div>
@@ -1595,10 +1614,10 @@ export default function Customers() {
                         {c.orders_count ?? c.total_orders}
                       </td>
                       <td className="px-3 py-3 text-slate-700 whitespace-nowrap cursor-pointer" onClick={() => setSelectedCustomer(c)}>
-                        {(c.total_spent ?? c.total_spend).toLocaleString('ar-SA')} ر.س
+                        {(c.total_spent ?? c.total_spend).toLocaleString(locale)} {cu.currency}
                       </td>
                       <td className="px-3 py-3 text-slate-500 whitespace-nowrap cursor-pointer" onClick={() => setSelectedCustomer(c)}>
-                        {formatDate(c.last_order_date ?? c.last_order_at)}
+                        {formatCustomerDate(c.last_order_date ?? c.last_order_at, locale)}
                       </td>
                       <td className="px-3 py-3 cursor-pointer" onClick={() => setSelectedCustomer(c)}>
                         {c.source === 'manual' ? (
@@ -1612,7 +1631,7 @@ export default function Customers() {
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDelete(c.id) }}
                           className="text-slate-300 hover:text-red-500 transition-colors"
-                          title="حذف العميل"
+                          title={cu.table.deleteCustomer}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1629,22 +1648,27 @@ export default function Customers() {
         {pages > 1 && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100">
             <span className="text-xs text-slate-500">
-              صفحة {page} من {pages} ({total} عميل)
+              {cu.table.pageOf
+                .replace('{page}', String(page))
+                .replace('{pages}', String(pages))
+                .replace('{total}', String(total))}
             </span>
             <div className="flex gap-2">
               <button
                 disabled={page <= 1}
                 onClick={() => setPage((p) => p - 1)}
-                className="btn-secondary text-xs py-1 px-3 disabled:opacity-40"
+                className="btn-secondary text-xs py-1 px-3 disabled:opacity-40 inline-flex items-center gap-1"
               >
-                السابق
+                <PrevIcon className="w-3.5 h-3.5" />
+                {cu.table.prev}
               </button>
               <button
                 disabled={page >= pages}
                 onClick={() => setPage((p) => p + 1)}
-                className="btn-secondary text-xs py-1 px-3 disabled:opacity-40"
+                className="btn-secondary text-xs py-1 px-3 disabled:opacity-40 inline-flex items-center gap-1"
               >
-                التالي
+                {cu.table.next}
+                <NextIcon className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -1658,8 +1682,8 @@ export default function Customers() {
           scoped to the current tenant on the backend; this UI just
           shows whatever the preview endpoint returned. */}
       {nameCleanupOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+        <div dir={dir} className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div dir={dir} className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
               <div className="flex items-center gap-2">
                 <div className="w-9 h-9 rounded-lg bg-brand-50 text-brand-600 flex items-center justify-center">
@@ -1667,10 +1691,10 @@ export default function Customers() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-slate-900">
-                    تنظيف أسماء العملاء
+                    {cu.nameCleanup.title}
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    معاينة الأسماء المُقترحة قبل التطبيق — يعمل فقط على عملاء المتجر الحالي
+                    {cu.nameCleanup.subtitle}
                   </p>
                 </div>
               </div>
@@ -1688,7 +1712,7 @@ export default function Customers() {
               {nameCleanupLoading && (
                 <div className="flex flex-col items-center justify-center py-12 text-slate-500 text-sm gap-3">
                   <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
-                  جاري فحص أسماء العملاء...
+                  {cu.nameCleanup.scanning}
                 </div>
               )}
 
@@ -1702,9 +1726,9 @@ export default function Customers() {
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 text-sm p-3 flex items-center gap-2">
                   <ShieldCheck className="w-5 h-5" />
                   <span>
-                    تم تطبيق {nameCleanupResult.applied} تغيير
+                    {cu.nameCleanup.appliedSummary.replace('{applied}', String(nameCleanupResult.applied))}
                     {nameCleanupResult.skipped > 0
-                      ? ` — تخطّينا ${nameCleanupResult.skipped} (تم تنظيفها مسبقاً أو غير موجودة)`
+                      ? cu.nameCleanup.skippedSuffix.replace('{skipped}', String(nameCleanupResult.skipped))
                       : ''}
                   </span>
                 </div>
@@ -1714,33 +1738,33 @@ export default function Customers() {
                 <>
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-slate-500">إجمالي العملاء</div>
+                      <div className="text-slate-500">{cu.nameCleanup.totalCustomers}</div>
                       <div className="text-lg font-semibold text-slate-800 mt-1">
-                        {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                        {nameCleanupSummary.totalCustomers.toLocaleString(locale)}
                       </div>
                       <div className="text-[10px] text-slate-400 mt-0.5">
-                        فُحص {nameCleanupSummary.totalScanned.toLocaleString('ar-EG')} عميل
+                        {cu.nameCleanup.scanned.replace('{count}', nameCleanupSummary.totalScanned.toLocaleString(locale))}
                       </div>
                     </div>
                     <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3">
-                      <div className="text-blue-700">أسماء تحتاج تنظيف</div>
+                      <div className="text-blue-700">{cu.nameCleanup.needsCleanup}</div>
                       <div className="text-lg font-semibold text-blue-800 mt-1">
-                        {nameCleanupSummary.matchCount.toLocaleString('ar-EG')}
+                        {nameCleanupSummary.matchCount.toLocaleString(locale)}
                       </div>
                       <div className="text-[10px] text-blue-500 mt-0.5">
-                        من أصل {nameCleanupSummary.totalCustomers.toLocaleString('ar-EG')}
+                        {cu.nameCleanup.ofTotal.replace('{total}', nameCleanupSummary.totalCustomers.toLocaleString(locale))}
                       </div>
                     </div>
                     <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
-                      <div className="text-emerald-700">ثقة عالية</div>
+                      <div className="text-emerald-700">{cu.nameCleanup.highConfidence}</div>
                       <div className="text-lg font-semibold text-emerald-800 mt-1">
-                        {nameCleanupSummary.highConfidence.toLocaleString('ar-EG')}
+                        {nameCleanupSummary.highConfidence.toLocaleString(locale)}
                       </div>
                     </div>
                     <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
-                      <div className="text-amber-700">تحتاج مراجعة</div>
+                      <div className="text-amber-700">{cu.nameCleanup.needsReview}</div>
                       <div className="text-lg font-semibold text-amber-800 mt-1">
-                        {nameCleanupSummary.lowConfidence.toLocaleString('ar-EG')}
+                        {nameCleanupSummary.lowConfidence.toLocaleString(locale)}
                       </div>
                     </div>
                   </div>
@@ -1749,11 +1773,9 @@ export default function Customers() {
                     <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-xs p-3 flex items-start gap-2">
                       <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
                       <div>
-                        النتائج الكثيرة جداً — نعرض أول {nameCleanupSummary.maxItems.toLocaleString('ar-EG')} اسم فقط
-                        (المجموع {nameCleanupSummary.matchCount.toLocaleString('ar-EG')}).
-                        طبّق هذه الدفعة ثم أعد فتح الأداة لإكمال البقية، أو استخدم
-                        &quot;تطبيق ذوي الثقة العالية فقط&quot; لتنفيذ كل الأسماء عالية الثقة
-                        دفعة واحدة (يعمل على جميع العملاء وليس على المعروضين فقط).
+                        {cu.nameCleanup.tooManyResults
+                          .replace('{max}', nameCleanupSummary.maxItems.toLocaleString(locale))
+                          .replace('{match}', nameCleanupSummary.matchCount.toLocaleString(locale))}
                       </div>
                     </div>
                   )}
@@ -1767,27 +1789,27 @@ export default function Customers() {
                     {nameCleanupSaveState === 'saving' && (
                       <span className="inline-flex items-center gap-1 text-blue-600">
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        جاري حفظ المسودة...
+                        {cu.nameCleanup.savingDraft}
                       </span>
                     )}
                     {nameCleanupSaveState === 'saved' && nameCleanupLastSavedAt && (
                       <span className="inline-flex items-center gap-1 text-emerald-600">
                         <Check className="w-3.5 h-3.5" />
-                        تم الحفظ
+                        {cu.nameCleanup.saved}
                       </span>
                     )}
                     {nameCleanupSaveState === 'error' && (
                       <span className="inline-flex items-center gap-1 text-rose-600">
                         <AlertTriangle className="w-3.5 h-3.5" />
-                        فشل الحفظ — سنحاول مجدداً
+                        {cu.nameCleanup.saveFailed}
                       </span>
                     )}
                     {nameCleanupSummary.draftEdited > 0 && (
                       <span className="text-slate-500">
-                        مسودة محفوظة: {nameCleanupSummary.draftEdited.toLocaleString('ar-EG')}
+                        {cu.nameCleanup.draftSaved.replace('{edited}', nameCleanupSummary.draftEdited.toLocaleString(locale))}
                         {nameCleanupSummary.draftSkipped > 0 && (
                           <span className="text-slate-400">
-                            {' '}+ {nameCleanupSummary.draftSkipped.toLocaleString('ar-EG')} متخطى
+                            {' '}{cu.nameCleanup.draftSkipped.replace('{skipped}', nameCleanupSummary.draftSkipped.toLocaleString(locale))}
                           </span>
                         )}
                       </span>
@@ -1801,10 +1823,10 @@ export default function Customers() {
                       onClick={openNameCleanup}
                       disabled={nameCleanupLoading || nameCleanupApplying}
                       className="btn-secondary text-xs px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-40"
-                      title="إعادة فحص قاعدة العملاء كاملة من جديد"
+                      title={cu.nameCleanup.rescanTitle}
                     >
                       <RefreshCw className="w-3 h-3" />
-                      إعادة الفحص
+                      {cu.nameCleanup.rescan}
                     </button>
                     <button
                       type="button"
@@ -1815,7 +1837,7 @@ export default function Customers() {
                       className="btn-secondary text-xs px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-40"
                     >
                       <Save className="w-3 h-3" />
-                      حفظ ومتابعة لاحقاً
+                      {cu.nameCleanup.saveContinue}
                     </button>
                     {nameCleanupSummary.draftEdited + nameCleanupSummary.draftSkipped > 0 && (
                       <button
@@ -1823,10 +1845,10 @@ export default function Customers() {
                         onClick={discardCleanupDraft}
                         disabled={nameCleanupApplying}
                         className="text-xs px-2.5 py-1 flex items-center gap-1.5 text-slate-500 hover:text-rose-600 disabled:opacity-40"
-                        title="حذف جميع التعديلات المحفوظة في المسودة"
+                        title={cu.nameCleanup.discardDraftTitle}
                       >
                         <Trash2 className="w-3 h-3" />
-                        تجاهل المسودة
+                        {cu.nameCleanup.discardDraft}
                       </button>
                     )}
                   </div>
@@ -1843,29 +1865,32 @@ export default function Customers() {
               {!nameCleanupLoading && nameCleanupItems.length > 0 && nameCleanupCategoryCounts && (
                 <div className="flex items-center gap-1.5 flex-wrap pb-1 border-b border-slate-100">
                   <Filter className="w-3 h-3 text-slate-400" />
-                  <span className="text-[11px] text-slate-500">حسب السبب:</span>
+                  <span className="text-[11px] text-slate-500">{cu.nameCleanup.byReason}</span>
                   {([
-                    { key: 'any',                   label: 'الكل' },
-                    { key: 'source_label_name',     label: 'مصدر تسويقي' },
-                    { key: 'location_label_name',   label: 'مدينة / موقع' },
-                    { key: 'placeholder_name',      label: 'بدون اسم / عام' },
-                    { key: 'suspicious_suffix',     label: 'كلمة زائدة' },
-                    { key: 'generic_bad_name',      label: 'اسم غير حقيقي' },
-                    { key: 'other',                 label: 'أخرى' },
-                  ] as { key: 'any' | NameCleanupCategory; label: string }[]).map(c => {
-                    const count = c.key === 'any'
+                    'any',
+                    'source_label_name',
+                    'location_label_name',
+                    'placeholder_name',
+                    'suspicious_suffix',
+                    'generic_bad_name',
+                    'other',
+                  ] as const).map(key => {
+                    const label = key === 'any'
+                      ? cu.nameCleanup.categories.all
+                      : cu.nameCleanup.categories[key]
+                    const count = key === 'any'
                       ? Object.values(nameCleanupCategoryCounts).reduce((a, b) => a + b, 0)
-                      : (nameCleanupCategoryCounts[c.key as NameCleanupCategory] ?? 0)
+                      : (nameCleanupCategoryCounts[key as NameCleanupCategory] ?? 0)
                     // Don't render zero-count category chips except
                     // ``any`` (always available) — keeps the chip row
                     // short on clean tenants.
-                    if (count === 0 && c.key !== 'any') return null
-                    const active = nameCleanupCategory === c.key
+                    if (count === 0 && key !== 'any') return null
+                    const active = nameCleanupCategory === key
                     return (
                       <button
-                        key={c.key}
+                        key={key}
                         type="button"
-                        onClick={() => setNameCleanupCategory(c.key)}
+                        onClick={() => setNameCleanupCategory(key)}
                         className={
                           'text-[11px] px-2 py-0.5 rounded-full border transition ' +
                           (active
@@ -1873,12 +1898,12 @@ export default function Customers() {
                             : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')
                         }
                       >
-                        {c.label}
+                        {label}
                         <span className={
                           'ms-1 text-[10px] ' +
                           (active ? 'text-rose-50' : 'text-slate-400')
                         }>
-                          ({count.toLocaleString('ar-EG')})
+                          ({count.toLocaleString(locale)})
                         </span>
                       </button>
                     )
@@ -1890,13 +1915,28 @@ export default function Customers() {
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Filter className="w-3 h-3 text-slate-400" />
                   {([
-                    { key: 'all',     label: 'الكل',                 count: nameCleanupItems.filter(it => !cleanupRowIsSkipped(it.customer_id)).length },
-                    { key: 'pending', label: 'غير منظف',             count: nameCleanupItems.filter(it => !cleanupRowIsEdited(it.customer_id)).length },
-                    { key: 'edited',  label: 'تم تعديله يدوياً',     count: nameCleanupItems.filter(it => cleanupRowIsEdited(it.customer_id) && !cleanupRowIsSkipped(it.customer_id)).length },
-                    { key: 'high',    label: 'تنظيف تلقائي (ثقة عالية)', count: nameCleanupItems.filter(it => it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id)).length },
-                    { key: 'low',     label: 'يحتاج مراجعة',         count: nameCleanupItems.filter(it => it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id)).length },
-                    { key: 'opted_out', label: 'مستبعد من الحملات', count: nameCleanupItems.filter(it => it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id)).length },
-                  ] as { key: CleanupFilter; label: string; count: number }[]).map(f => (
+                    'all',
+                    'pending',
+                    'edited',
+                    'high',
+                    'low',
+                    'opted_out',
+                  ] as const).map(key => ({
+                    key,
+                    label: cu.nameCleanup.filters[key],
+                    count:
+                      key === 'all'
+                        ? nameCleanupItems.filter(it => !cleanupRowIsSkipped(it.customer_id)).length
+                        : key === 'pending'
+                          ? nameCleanupItems.filter(it => !cleanupRowIsEdited(it.customer_id)).length
+                          : key === 'edited'
+                            ? nameCleanupItems.filter(it => cleanupRowIsEdited(it.customer_id) && !cleanupRowIsSkipped(it.customer_id)).length
+                            : key === 'high'
+                              ? nameCleanupItems.filter(it => it.confidence === 'high' && !cleanupRowIsSkipped(it.customer_id)).length
+                              : key === 'low'
+                                ? nameCleanupItems.filter(it => it.confidence === 'low' && !cleanupRowIsSkipped(it.customer_id)).length
+                                : nameCleanupItems.filter(it => it.marketing_opt_out_manual && !cleanupRowIsSkipped(it.customer_id)).length,
+                  })).map(f => (
                     <button
                       key={f.key}
                       type="button"
@@ -1913,7 +1953,7 @@ export default function Customers() {
                         'ms-1 text-[10px] ' +
                         (nameCleanupFilter === f.key ? 'text-brand-50' : 'text-slate-400')
                       }>
-                        ({f.count.toLocaleString('ar-EG')})
+                        ({f.count.toLocaleString(locale)})
                       </span>
                     </button>
                   ))}
@@ -1923,8 +1963,8 @@ export default function Customers() {
               {!nameCleanupLoading && nameCleanupItems.length === 0 && !nameCleanupError && (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 text-slate-600 text-sm p-6 text-center">
                   {nameCleanupResult
-                    ? 'لا توجد أسماء أخرى تحتاج تنظيفاً. يمكنك إغلاق النافذة أو الضغط على "إعادة الفحص" لإعادة المسح.'
-                    : 'جميع أسماء العملاء في هذا المتجر تبدو نظيفة — لا يوجد ما يحتاج إلى تغيير.'}
+                    ? cu.nameCleanup.emptyAfterApply
+                    : cu.nameCleanup.emptyClean}
                 </div>
               )}
 
@@ -1955,37 +1995,40 @@ export default function Customers() {
                           )}
                           <span>
                             {allVisibleSelected
-                              ? 'إلغاء تحديد المعروض'
-                              : `تحديد الكل في الصفحة الحالية${
+                              ? cu.nameCleanup.deselectVisible
+                              : cu.nameCleanup.selectAllVisible.replace(
+                                  '{count}',
                                   visibleCleanupItems.length
-                                    ? ` (${visibleCleanupItems.length.toLocaleString('ar-EG')})`
-                                    : ''
-                                }`}
+                                    ? ` (${visibleCleanupItems.length.toLocaleString(locale)})`
+                                    : '',
+                                )}
                           </span>
                         </button>
                       )
                     })()}
                     <span className="text-slate-500">
-                      {nameCleanupSelected.size.toLocaleString('ar-EG')} / {visibleCleanupItems.length.toLocaleString('ar-EG')} محدد
+                      {cu.nameCleanup.selectedOf
+                        .replace('{selected}', nameCleanupSelected.size.toLocaleString(locale))
+                        .replace('{visible}', visibleCleanupItems.length.toLocaleString(locale))}
                       {visibleCleanupItems.length !== nameCleanupItems.length && (
                         <span className="text-slate-400 ms-1">
-                          (من {nameCleanupItems.length.toLocaleString('ar-EG')})
+                          {cu.nameCleanup.ofTotalItems.replace('{total}', nameCleanupItems.length.toLocaleString(locale))}
                         </span>
                       )}
                     </span>
                     <span className="text-slate-400 text-[10px] hidden sm:inline">
-                      • انقر على الصف لتحديد العميل
+                      {cu.nameCleanup.clickRowHint}
                     </span>
                     {cleanupDriftedCount > 0 && (
                       <button
                         type="button"
                         onClick={refreshCleanupView}
                         className="ms-auto inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 text-[11px]"
-                        title="بعض الصفوف خرجت من شروط هذا الفلتر بعد التعديل. اضغط لتحديث المعاينة وفلترة من جديد — دون أن يفقد التاجر تعديلاته المحفوظة."
+                        title={cu.nameCleanup.refreshPreviewTitle}
                       >
                         <RotateCcw className="w-3 h-3" />
                         <span>
-                          تحديث المعاينة ({cleanupDriftedCount.toLocaleString('ar-EG')})
+                          {cu.nameCleanup.refreshPreview.replace('{count}', cleanupDriftedCount.toLocaleString(locale))}
                         </span>
                       </button>
                     )}
@@ -1993,7 +2036,7 @@ export default function Customers() {
                   <div className="max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
                     {visibleCleanupItems.length === 0 ? (
                       <div className="py-10 text-center text-xs text-slate-500">
-                        لا توجد أسماء ضمن هذا الفلتر.
+                        {cu.nameCleanup.noRowsInFilter}
                       </div>
                     ) : visibleCleanupItems.map((it) => {
                       const checked = nameCleanupSelected.has(it.customer_id)
@@ -2060,7 +2103,7 @@ export default function Customers() {
                             onClick={stopAnd(() => toggleCleanupRow(it.customer_id))}
                             disabled={isSkipped}
                             className="mt-0.5 text-slate-400 hover:text-brand-600 disabled:opacity-30"
-                            aria-label={checked ? 'إلغاء التحديد' : 'تحديد العميل'}
+                            aria-label={checked ? cu.nameCleanup.deselect : cu.nameCleanup.selectCustomer}
                           >
                             {checked ? (
                               <CheckSquare className="w-4 h-4 text-brand-600" />
@@ -2091,37 +2134,34 @@ export default function Customers() {
                                     "this is a city name" without
                                     parsing the Arabic reason text. */}
                                 {it.category && (() => {
-                                  const map: Record<string, { label: string; variant: 'amber' | 'purple' | 'blue' | 'green' | 'slate' }> = {
-                                    source_label_name:    { label: 'مصدر',         variant: 'amber'  },
-                                    location_label_name:  { label: 'مدينة',        variant: 'blue'   },
-                                    placeholder_name:     { label: 'بدون اسم',     variant: 'slate'  },
-                                    suspicious_suffix:    { label: 'كلمة زائدة',   variant: 'purple' },
-                                    generic_bad_name:     { label: 'غير حقيقي',    variant: 'slate'  },
-                                    other:                { label: 'تنظيف',        variant: 'slate'  },
+                                  const badgeLabel = cu.nameCleanup.categoryBadges[it.category as keyof typeof cu.nameCleanup.categoryBadges]
+                                  const variantMap: Record<string, 'amber' | 'purple' | 'blue' | 'green' | 'slate'> = {
+                                    source_label_name:    'amber',
+                                    location_label_name:  'blue',
+                                    placeholder_name:     'slate',
+                                    suspicious_suffix:    'purple',
+                                    generic_bad_name:     'slate',
+                                    other:                'slate',
                                   }
-                                  const m = map[it.category]
-                                  return m ? <Badge label={m.label} variant={m.variant} /> : null
+                                  const variant = variantMap[it.category]
+                                  return badgeLabel && variant
+                                    ? <Badge label={badgeLabel} variant={variant} />
+                                    : null
                                 })()}
                                 {it.marketing_opt_out_manual && (
-                                  // Distinct badge — three states never
-                                  // conflate: "مستبعد من الحملات"
-                                  // (merchant-driven), "ألغى الاشتراك"
-                                  // (customer-driven), "تم حجبه تلقائياً"
-                                  // (Quality Engine). Three buckets, three
-                                  // badges, three audit trails.
                                   <Badge
-                                    label="مستبعد من الحملات"
+                                    label={cu.nameCleanup.excludedFromCampaigns}
                                     variant="purple"
                                   />
                                 )}
                                 {isEdited && !isSkipped && (
-                                  <Badge label="معدّل" variant="blue" />
+                                  <Badge label={cu.nameCleanup.modified} variant="blue" />
                                 )}
                                 {isSkipped && (
-                                  <Badge label="متخطى" variant="slate" />
+                                  <Badge label={cu.nameCleanup.skipped} variant="slate" />
                                 )}
                                 <Badge
-                                  label={isHigh ? 'ثقة عالية' : 'مراجعة'}
+                                  label={isHigh ? cu.nameCleanup.highConf : cu.nameCleanup.review}
                                   variant={isHigh ? 'green' : 'amber'}
                                 />
                               </div>
@@ -2133,7 +2173,7 @@ export default function Customers() {
                             <div className="flex flex-wrap items-center gap-1.5">
                               {tokens.length === 0 ? (
                                 <span className="text-slate-400 text-xs">
-                                  لا توجد كلمات
+                                  {cu.nameCleanup.noWords}
                                 </span>
                               ) : (
                                 tokens.map((tok, idx) => {
@@ -2149,7 +2189,7 @@ export default function Customers() {
                                           ? 'border-slate-200 bg-slate-50 text-slate-400 line-through hover:text-slate-600'
                                           : 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100')
                                       }
-                                      title={isDropped ? 'إعادة هذه الكلمة' : 'حذف هذه الكلمة'}
+                                      title={isDropped ? cu.nameCleanup.restoreWord : cu.nameCleanup.removeWord}
                                     >
                                       <span>{tok}</span>
                                       {isDropped ? (
@@ -2166,7 +2206,7 @@ export default function Customers() {
                             {/* Resolved value preview + per-row actions */}
                             <div className="flex items-center justify-between gap-2 flex-wrap">
                               <div className="text-xs">
-                                <span className="text-slate-500 me-1">الناتج:</span>
+                                <span className="text-slate-500 me-1">{cu.nameCleanup.resultLabel}</span>
                                 {resolved ? (
                                   <span className="font-medium text-slate-800">
                                     {resolved}
@@ -2174,7 +2214,7 @@ export default function Customers() {
                                 ) : (
                                   <span className="inline-flex items-center gap-1 text-rose-600 font-medium">
                                     <Trash2 className="w-3 h-3" />
-                                    سيُمسح الاسم
+                                    {cu.nameCleanup.willClearName}
                                   </span>
                                 )}
                               </div>
@@ -2186,7 +2226,7 @@ export default function Customers() {
                                     className="text-[11px] text-slate-500 hover:text-slate-700 inline-flex items-center gap-1"
                                   >
                                     <RotateCcw className="w-3 h-3" />
-                                    إعادة المقترح
+                                    {cu.nameCleanup.resetSuggestion}
                                   </button>
                                 )}
                                 <button
@@ -2198,10 +2238,10 @@ export default function Customers() {
                                       ? 'border-slate-400 bg-slate-100 text-slate-700'
                                       : 'border-slate-200 text-slate-500 hover:bg-slate-50')
                                   }
-                                  title="تخطّى هذا الصف — لن يظهر في جلسات المراجعة القادمة"
+                                  title={cu.nameCleanup.skipRow}
                                 >
                                   <SkipForward className="w-3 h-3" />
-                                  {isSkipped ? 'متخطى' : 'تخطّى'}
+                                  {isSkipped ? cu.nameCleanup.skipped : cu.nameCleanup.skip}
                                 </button>
                                 <button
                                   type="button"
@@ -2214,7 +2254,7 @@ export default function Customers() {
                                   }
                                 >
                                   <Trash2 className="w-3 h-3" />
-                                  مسح الاسم بالكامل
+                                  {cu.nameCleanup.clearEntireName}
                                 </button>
                                 {/*
                                  * Inline marketing opt-out. The button
@@ -2249,14 +2289,14 @@ export default function Customers() {
                                   }
                                   title={
                                     it.marketing_opt_out_manual
-                                      ? 'إعادة تفعيل التسويق لهذا العميل'
-                                      : 'استبعاد العميل من الحملات التسويقية (لا يتأثر استقبال رسائله)'
+                                      ? cu.nameCleanup.reEnableMarketing
+                                      : cu.nameCleanup.excludeFromCampaigns
                                   }
                                 >
                                   <UserMinus className="w-3 h-3" />
                                   {it.marketing_opt_out_manual
-                                    ? 'إعادة تفعيل التسويق'
-                                    : 'استبعاد من الحملات'}
+                                    ? cu.nameCleanup.reEnableMarketingShort
+                                    : cu.nameCleanup.excludeShort}
                                 </button>
                               </div>
                             </div>
@@ -2272,14 +2312,10 @@ export default function Customers() {
                 <div className="rounded-lg border border-blue-100 bg-blue-50/60 text-blue-800 text-[11px] p-3 leading-relaxed space-y-1">
                   <div>
                     <Info className="w-3.5 h-3.5 inline me-1" />
-                    اضغط على أي كلمة لحذفها (تظهر مشطوبة) أو لإعادتها — أو استخدم زر
-                    &quot;مسح الاسم بالكامل&quot; لمسح الاسم كلياً وترك الحملات تستخدم
-                    العبارة الافتراضية.
+                    {cu.nameCleanup.helpPrimary}
                   </div>
                   <div className="ps-5">
-                    بعد التطبيق، تستخدم الحملات الاسم المحفوظ مباشرة — إذا أصبح الاسم فارغاً تُستخدم
-                    العبارة &quot;عميلنا الغالي&quot;. كل التغييرات تُحفظ في سجل تدقيق
-                    داخلي قابل للمراجعة.
+                    {cu.nameCleanup.helpSecondary}
                   </div>
                 </div>
               )}
@@ -2292,7 +2328,7 @@ export default function Customers() {
                 disabled={nameCleanupApplying}
                 className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40"
               >
-                إغلاق
+                {cu.nameCleanup.close}
               </button>
               <div className="flex items-center gap-2">
                 <button
@@ -2303,10 +2339,10 @@ export default function Customers() {
                     || (nameCleanupSummary?.highConfidence ?? 0) === 0
                   }
                   className="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5 disabled:opacity-40"
-                  title="تطبيق كل المقترحات عالية الثقة دون مراجعة فردية"
+                  title={cu.nameCleanup.applyHighTitle}
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  تطبيق ذوي الثقة العالية فقط
+                  {cu.nameCleanup.applyHighOnly}
                 </button>
                 <button
                   onClick={applyCleanupSelected}
@@ -2314,8 +2350,8 @@ export default function Customers() {
                   className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5 disabled:opacity-40"
                   title={
                     nameCleanupSelected.size === 0
-                      ? 'حدد الصفوف التي تريد تطبيق التنظيف عليها أولاً'
-                      : `سيتم تطبيق التنظيف على ${nameCleanupSelected.size} عميل`
+                      ? cu.nameCleanup.applySelectedHint
+                      : cu.nameCleanup.applySelectedTitle.replace('{count}', String(nameCleanupSelected.size))
                   }
                 >
                   {nameCleanupApplying ? (
@@ -2323,14 +2359,9 @@ export default function Customers() {
                   ) : (
                     <CheckSquare className="w-3.5 h-3.5" />
                   )}
-                  {/* Hide the trailing count when no rows are
-                      selected so the disabled state doesn't read
-                      as "تطبيق المحدد (0)" which looks like a
-                      legitimate target — the label stays neutral
-                      until the merchant ticks something. */}
                   {nameCleanupSelected.size === 0
-                    ? 'تطبيق المحدد'
-                    : `تطبيق المحدد (${nameCleanupSelected.size.toLocaleString('ar-EG')})`}
+                    ? cu.nameCleanup.applySelected
+                    : cu.nameCleanup.applySelectedCount.replace('{count}', nameCleanupSelected.size.toLocaleString(locale))}
                 </button>
               </div>
             </div>
@@ -2340,11 +2371,11 @@ export default function Customers() {
 
       {/* Add Customer Modal */}
       {showAdd && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+        <div dir={dir} className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div dir={dir} className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-900">
-                إضافة عميل جديد
+                {cu.addModal.title}
               </h3>
               <button
                 onClick={() => {
@@ -2361,13 +2392,13 @@ export default function Customers() {
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">
                   <User className="w-3.5 h-3.5 inline me-1" />
-                  الاسم *
+                  {cu.addModal.nameLabel}
                 </label>
                 <input
                   type="text"
                   value={addName}
                   onChange={(e) => setAddName(e.target.value)}
-                  placeholder="اسم العميل"
+                  placeholder={cu.table.namePlaceholder}
                   className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none"
                 />
               </div>
@@ -2375,7 +2406,7 @@ export default function Customers() {
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">
                   <Phone className="w-3.5 h-3.5 inline me-1" />
-                  رقم الواتساب *
+                  {cu.addModal.phoneLabel}
                 </label>
                 <input
                   dir="ltr"
@@ -2390,7 +2421,7 @@ export default function Customers() {
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">
                   <Mail className="w-3.5 h-3.5 inline me-1" />
-                  البريد الإلكتروني
+                  {cu.addModal.emailLabel}
                 </label>
                 <input
                   dir="ltr"
@@ -2417,7 +2448,7 @@ export default function Customers() {
                 }}
                 className="btn-secondary text-sm"
               >
-                إلغاء
+                {cu.addModal.cancel}
               </button>
               <button
                 onClick={handleAdd}
@@ -2427,7 +2458,7 @@ export default function Customers() {
                 {addLoading && (
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 )}
-                إضافة
+                {cu.addModal.submit}
               </button>
             </div>
           </div>
@@ -2436,8 +2467,8 @@ export default function Customers() {
 
       {/* ── Bulk / Delete-All Confirmation Modal ─────────────────────────── */}
       {deleteModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+        <div dir={dir} className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div dir={dir} className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
             {/* Danger header */}
             <div className="bg-red-600 rounded-t-2xl px-6 py-5 flex items-start gap-3">
               <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center shrink-0">
@@ -2445,10 +2476,12 @@ export default function Customers() {
               </div>
               <div>
                 <h3 className="text-base font-bold text-white">
-                  {deleteModal === 'all' ? '⚠️ حذف جميع العملاء' : `⚠️ حذف ${selectedIds.size} عميل`}
+                  {deleteModal === 'all'
+                    ? cu.deleteModal.deleteAllTitle
+                    : cu.deleteModal.deleteSelectedTitle.replace('{count}', String(selectedIds.size))}
                 </h3>
                 <p className="text-red-100 text-xs mt-1">
-                  هذا الإجراء لا يمكن التراجع عنه
+                  {cu.deleteModal.irreversible}
                 </p>
               </div>
             </div>
@@ -2458,31 +2491,29 @@ export default function Customers() {
               <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-2">
                 <p className="text-sm font-semibold text-red-800">
                   {deleteModal === 'all'
-                    ? `سيتم حذف جميع العملاء (${total.toLocaleString('ar-SA')} عميل) بشكل دائم.`
-                    : `سيتم حذف ${selectedIds.size} عميل محدد بشكل دائم.`
-                  }
+                    ? cu.deleteModal.deleteAllBody.replace('{total}', total.toLocaleString(locale))
+                    : cu.deleteModal.deleteSelectedBody.replace('{count}', String(selectedIds.size))}
                 </p>
-                <ul className="text-xs text-red-700 space-y-1 list-disc list-inside">
-                  <li>لن تتمكن من استعادة هذه البيانات</li>
-                  <li>سيتم حذف جميع معلومات العملاء وبياناتهم</li>
-                  <li>قد تتأثر الحملات والأتمتة المرتبطة بهم</li>
+                <ul className="text-xs text-red-700 space-y-1 list-disc ps-5">
+                  <li>{cu.deleteModal.bulletNoRestore}</li>
+                  <li>{cu.deleteModal.bulletDataGone}</li>
+                  <li>{cu.deleteModal.bulletCampaigns}</li>
                 </ul>
               </div>
 
               {/* Confirmation input */}
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-2">
-                  للتأكيد، اكتب كلمة{' '}
+                  {cu.deleteModal.confirmPrompt}{' '}
                   <span className="font-mono font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">
-                    احذف
-                  </span>{' '}
-                  في الحقل أدناه:
+                    {cu.deleteModal.confirmWord}
+                  </span>
                 </label>
                 <input
                   type="text"
                   value={deleteConfirmText}
                   onChange={e => setDeleteConfirmText(e.target.value)}
-                  placeholder="اكتب: احذف"
+                  placeholder={cu.deleteModal.confirmPlaceholder.replace('{word}', cu.deleteModal.confirmWord)}
                   className="w-full px-3 py-2 text-sm border-2 border-slate-200 rounded-lg focus:ring-0 focus:border-red-400 outline-none transition-colors"
                   autoFocus
                 />
@@ -2495,11 +2526,11 @@ export default function Customers() {
                   className="flex-1 btn-secondary text-sm"
                   disabled={deleteLoading}
                 >
-                  إلغاء
+                  {cu.deleteModal.cancel}
                 </button>
                 <button
                   onClick={handleBulkDelete}
-                  disabled={deleteConfirmText !== 'احذف' || deleteLoading}
+                  disabled={deleteConfirmText !== cu.deleteModal.confirmWord || deleteLoading}
                   className="flex-1 flex items-center justify-center gap-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {deleteLoading ? (
@@ -2507,7 +2538,7 @@ export default function Customers() {
                   ) : (
                     <Trash2 className="w-4 h-4" />
                   )}
-                  {deleteLoading ? 'جارٍ الحذف...' : 'حذف نهائي'}
+                  {deleteLoading ? cu.deleteModal.deleting : cu.deleteModal.confirmDelete}
                 </button>
               </div>
             </div>
@@ -2517,15 +2548,15 @@ export default function Customers() {
 
       {/* Customer Detail Side Panel */}
       {selectedCustomer && (
-        <div className="fixed inset-0 bg-black/40 flex justify-end z-50">
+        <div dir={dir} className="fixed inset-0 bg-black/40 flex justify-end z-50">
           <div
             className="absolute inset-0"
             onClick={() => setSelectedCustomer(null)}
           />
-          <div className="relative bg-white w-full max-w-sm shadow-xl overflow-y-auto">
+          <div dir={dir} className="relative bg-white w-full max-w-sm h-full max-h-dvh shadow-xl overflow-y-auto">
             <div className="sticky top-0 bg-white border-b border-slate-100 px-5 py-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-900">
-                تفاصيل العميل
+                {cu.drawer.title}
               </h3>
               <button
                 onClick={() => setSelectedCustomer(null)}
@@ -2550,20 +2581,20 @@ export default function Customers() {
                   <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-xs text-red-700 text-center space-y-1">
                     <p className="font-semibold flex items-center justify-center gap-1">
                       <BellOff className="w-3.5 h-3.5" />
-                      ألغى الاشتراك
+                      {cu.drawer.unsubscribedTitle}
                     </p>
-                    <p className="text-red-500">مستثنى من الحملات والطيار الآلي والذكاء</p>
-                    <p className="text-slate-500 text-[10px]">يعود تلقائياً عند إرساله أي رسالة</p>
+                    <p className="text-red-500">{cu.drawer.unsubscribedBody}</p>
+                    <p className="text-slate-500 text-[10px]">{cu.drawer.unsubscribedNote}</p>
                   </div>
                 )}
                 {!selectedCustomer.is_unsubscribed && selectedCustomer.pending_unsubscribe && (
                   <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800 text-center space-y-1">
                     <p className="font-semibold flex items-center justify-center gap-1">
                       <BellOff className="w-3.5 h-3.5" />
-                      بانتظار تأكيد إلغاء الاشتراك
+                      {cu.drawer.pendingUnsubTitle}
                     </p>
-                    <p className="text-amber-700">طلب الإلغاء — أُرسلت له رسالة تأكيد بزرين</p>
-                    <p className="text-slate-500 text-[10px]">يتم إيقاف الأتمتة والذكاء حتى يضغط "نعم متأكد" أو "تراجع"</p>
+                    <p className="text-amber-700">{cu.drawer.pendingUnsubBody}</p>
+                    <p className="text-slate-500 text-[10px]">{cu.drawer.pendingUnsubNote}</p>
                   </div>
                 )}
                 <div className="flex flex-wrap items-center justify-center gap-1.5">
@@ -2571,7 +2602,7 @@ export default function Customers() {
                     label={selectedCustomer.status_label}
                     variant={segmentVariant(selectedCustomer.status)}
                   />
-                  <span className="text-[10px] text-slate-400 px-1">تصنيف ذكي</span>
+                  <span className="text-[10px] text-slate-400 px-1">{cu.drawer.smartClassification}</span>
                 </div>
                 {selectedCustomer.source === 'manual' && (
                   <span className="block text-xs text-blue-600">
@@ -2585,6 +2616,9 @@ export default function Customers() {
                   free-form tags by design (segment_key MUST validate
                   against `services.nahla_segments`). */}
               <ManualSegmentsSection
+                cu={cu}
+                lang={lang}
+                dir={dir}
                 customer={selectedCustomer}
                 segments={segments}
                 onChange={async (next) => {
@@ -2617,73 +2651,71 @@ export default function Customers() {
                   <p className="text-lg font-bold text-slate-900">
                     {selectedCustomer.orders_count ?? selectedCustomer.total_orders}
                   </p>
-                  <p className="text-xs text-slate-500">الطلبات</p>
+                  <p className="text-xs text-slate-500">{cu.drawer.orders}</p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
-                    {(selectedCustomer.total_spent ?? selectedCustomer.total_spend).toLocaleString('ar-SA')}
+                    {(selectedCustomer.total_spent ?? selectedCustomer.total_spend).toLocaleString(locale)}
                   </p>
-                  <p className="text-xs text-slate-500">الإنفاق (ر.س)</p>
+                  <p className="text-xs text-slate-500">{cu.drawer.spend.replace('{currency}', cu.currency)}</p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
-                    {(selectedCustomer.avg_order_value ?? selectedCustomer.average_order_value).toLocaleString(
-                      'ar-SA',
-                    )}
+                    {(selectedCustomer.avg_order_value ?? selectedCustomer.average_order_value).toLocaleString(locale)}
                   </p>
                   <p className="text-xs text-slate-500">
-                    متوسط الطلب (ر.س)
+                    {cu.drawer.avgOrder.replace('{currency}', cu.currency)}
                   </p>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3 text-center">
                   <p className="text-lg font-bold text-slate-900">
                     {Math.round(selectedCustomer.churn_risk_score * 100)}%
                   </p>
-                  <p className="text-xs text-slate-500">خطر المغادرة</p>
+                  <p className="text-xs text-slate-500">{cu.drawer.churnRisk}</p>
                 </div>
               </div>
 
               <div className="space-y-2 text-xs">
                 <div className="flex justify-between">
-                  <span className="text-slate-500">قطاع RFM</span>
+                  <span className="text-slate-500">{cu.drawer.rfmSegment}</span>
                   <span className="text-slate-700">
                     {selectedCustomer.rfm_segment_label || '—'}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">درجة RFM</span>
+                  <span className="text-slate-500">{cu.drawer.rfmScore}</span>
                   <span className="text-slate-700 font-mono">
                     {selectedCustomer.rfm_scores?.code || selectedCustomer.rfm_code || '000'}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">أول طلب</span>
+                  <span className="text-slate-500">{cu.drawer.firstOrder}</span>
                   <span className="text-slate-700">
-                    {formatDate(selectedCustomer.first_order_date ?? selectedCustomer.first_order_at)}
+                    {formatCustomerDate(selectedCustomer.first_order_date ?? selectedCustomer.first_order_at, locale)}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">آخر طلب</span>
+                  <span className="text-slate-500">{cu.drawer.lastOrder}</span>
                   <span className="text-slate-700">
-                    {formatDate(selectedCustomer.last_order_date ?? selectedCustomer.last_order_at)}
+                    {formatCustomerDate(selectedCustomer.last_order_date ?? selectedCustomer.last_order_at, locale)}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">أول ظهور</span>
+                  <span className="text-slate-500">{cu.drawer.firstSeen}</span>
                   <span className="text-slate-700">
-                    {formatDate(selectedCustomer.first_seen_at)}
+                    {formatCustomerDate(selectedCustomer.first_seen_at, locale)}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">آخر إعادة حساب</span>
+                  <span className="text-slate-500">{cu.drawer.lastRecalc}</span>
                   <span className="text-slate-700">
-                    {formatDate(selectedCustomer.metrics_computed_at)}
+                    {formatCustomerDate(selectedCustomer.metrics_computed_at, locale)}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-500">عميل متكرر</span>
+                  <span className="text-slate-500">{cu.drawer.returning}</span>
                   <span className="text-slate-700">
-                    {selectedCustomer.is_returning ? 'نعم' : 'لا'}
+                    {selectedCustomer.is_returning ? cu.yes : cu.no}
                   </span>
                 </div>
               </div>
@@ -2692,7 +2724,7 @@ export default function Customers() {
                 onClick={() => handleDelete(selectedCustomer.id)}
                 className="w-full text-xs text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg py-2 transition-colors"
               >
-                حذف العميل
+                {cu.drawer.deleteCustomer}
               </button>
             </div>
           </div>
@@ -2715,6 +2747,9 @@ export default function Customers() {
  * cannot inject arbitrary strings.
  */
 interface ManualSegmentsSectionProps {
+  cu: CustomersPageLabels
+  lang: Lang
+  dir: 'ltr' | 'rtl'
   customer: CustomerRecord
   segments: CustomerSegmentMeta[]
   onChange: (next: CustomerRecord) => void | Promise<void>
@@ -2722,7 +2757,7 @@ interface ManualSegmentsSectionProps {
 }
 
 function ManualSegmentsSection({
-  customer, segments, onChange, onRequireListReload,
+  cu, lang, dir, customer, segments, onChange, onRequireListReload,
 }: ManualSegmentsSectionProps) {
   const [adding, setAdding] = useState<string>('')
   const [busy, setBusy] = useState<string | null>(null)
@@ -2760,7 +2795,7 @@ function ManualSegmentsSection({
     try {
       const res = await customersApi.overrideSegment(customer.id, key, mode)
       if (!res.ok) {
-        setError(res.message || 'تعذر تحديث التصنيف')
+        setError(res.message || cu.manualSegments.updateSegmentFailed)
         return
       }
       // Optimistic merge: rebuild the segment_sources map from the
@@ -2798,9 +2833,10 @@ function ManualSegmentsSection({
       const manual_segments = Object.entries(nextSources || {})
         .filter(([, v]) => v?.manual_include)
         .map(([k]) => k)
-      const manual_segments_labels = manual_segments.map(
-        k => segments.find(s => s.key === k)?.label_ar || k,
-      )
+      const manual_segments_labels = manual_segments.map(k => {
+        const seg = segments.find(s => s.key === k)
+        return seg ? segmentDisplayLabel(seg, lang) : k
+      })
       await onChange({
         ...customer,
         segment_sources: nextSources,
@@ -2812,7 +2848,7 @@ function ManualSegmentsSection({
       // merchant sees the new counts immediately.
       onRequireListReload?.()
     } catch (err: any) {
-      setError(err?.detail || err?.message || 'تعذر تحديث التصنيف')
+      setError(err?.detail || err?.message || cu.manualSegments.updateSegmentFailed)
     } finally {
       setBusy(null)
     }
@@ -2832,7 +2868,7 @@ function ManualSegmentsSection({
       })
       onRequireListReload?.()
     } catch (err: any) {
-      setError(err?.detail || err?.message || 'تعذر تحديث التفضيل')
+      setError(err?.detail || err?.message || cu.manualSegments.updatePrefFailed)
     } finally {
       setBusy(null)
     }
@@ -2850,7 +2886,7 @@ function ManualSegmentsSection({
         is_campaign_test_recipient: res.is_campaign_test_recipient,
       })
     } catch (err: any) {
-      setError(err?.detail || err?.message || 'تعذر تحديث قائمة الاختبار')
+      setError(err?.detail || err?.message || cu.manualSegments.updateTestFailed)
     } finally {
       setBusy(null)
     }
@@ -2878,10 +2914,10 @@ function ManualSegmentsSection({
       <div className="flex items-center justify-between">
         <h5 className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
           <Tag className="w-3.5 h-3.5 text-slate-400" />
-          شرائح هذا العميل
+          {cu.manualSegments.title}
         </h5>
         <span className="text-[10px] text-slate-400">
-          التصنيف الذكي مع إمكانية التعديل
+          {cu.manualSegments.subtitle}
         </span>
       </div>
 
@@ -2906,9 +2942,9 @@ function ManualSegmentsSection({
           const isMember     = !!src.is_member
           const isOverridden = src.manual_include || src.manual_exclude
           const overrideKind = src.manual_exclude
-            ? 'مستبعد يدويًا'
+            ? cu.manualSegments.manuallyExcluded
             : src.manual_include
-              ? 'مضاف يدويًا'
+              ? cu.manualSegments.manuallyAdded
               : ''
           const pillCls = isMember
             ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
@@ -2926,11 +2962,11 @@ function ManualSegmentsSection({
                   className={`inline-flex items-center gap-1 text-[11px] font-semibold border px-2 py-0.5 rounded-full ${pillCls}`}
                   title={
                     isMember
-                      ? 'العميل ضمن هذه الشريحة حالياً.'
-                      : 'العميل خارج هذه الشريحة حالياً.'
+                      ? cu.manualSegments.inSegmentTitle
+                      : cu.manualSegments.outSegmentTitle
                   }
                 >
-                  {s.label_ar}
+                  {segmentDisplayLabel(s, lang)}
                 </span>
                 {isOverridden && (
                   <span
@@ -2939,7 +2975,7 @@ function ManualSegmentsSection({
                         ? 'bg-rose-50 text-rose-700 border border-rose-100'
                         : 'bg-amber-50 text-amber-700 border border-amber-100'
                     }`}
-                    title="تم تعديل التصنيف يدوياً — اضغط ↻ للعودة للتصنيف التلقائي."
+                    title={cu.manualSegments.overrideHint}
                   >
                     {overrideKind}
                   </span>
@@ -2951,7 +2987,7 @@ function ManualSegmentsSection({
                   disabled={busy === s.key || src.manual_include}
                   onClick={() => handleOverride(s.key, 'force_include')}
                   className="p-1 rounded hover:bg-emerald-50 text-emerald-600 disabled:opacity-30 disabled:hover:bg-transparent"
-                  title="إضافة لهذا التصنيف"
+                  title={cu.manualSegments.addToSegment}
                 >
                   <Plus className="w-3.5 h-3.5" />
                 </button>
@@ -2960,7 +2996,7 @@ function ManualSegmentsSection({
                   disabled={busy === s.key || src.manual_exclude}
                   onClick={() => handleOverride(s.key, 'force_exclude')}
                   className="p-1 rounded hover:bg-rose-50 text-rose-600 disabled:opacity-30 disabled:hover:bg-transparent"
-                  title="استبعاد من هذا التصنيف"
+                  title={cu.manualSegments.excludeFromSegment}
                 >
                   <Minus className="w-3.5 h-3.5" />
                 </button>
@@ -2969,7 +3005,7 @@ function ManualSegmentsSection({
                   disabled={busy === s.key || !isOverridden}
                   onClick={() => handleOverride(s.key, 'auto')}
                   className="p-1 rounded hover:bg-slate-100 text-slate-500 disabled:opacity-30 disabled:hover:bg-transparent"
-                  title="العودة للتصنيف التلقائي"
+                  title={cu.manualSegments.resetToAuto}
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
@@ -2992,12 +3028,13 @@ function ManualSegmentsSection({
           <select
             value={adding}
             onChange={(e) => setAdding(e.target.value)}
+            dir={dir}
             className="flex-1 ps-2 pe-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
             disabled={!!busy}
           >
-            <option value="">إضافة سريعة لشريحة…</option>
+            <option value="">{cu.manualSegments.quickAddPlaceholder}</option>
             {addableSegments.map(s => (
-              <option key={s.key} value={s.key}>{s.label_ar}</option>
+              <option key={s.key} value={s.key}>{segmentDisplayLabel(s, lang)}</option>
             ))}
           </select>
           <button
@@ -3011,7 +3048,7 @@ function ManualSegmentsSection({
             className="text-xs font-semibold text-brand-600 bg-brand-50 hover:bg-brand-100 border border-brand-200 px-2.5 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1"
           >
             <Plus className="w-3.5 h-3.5" />
-            إضافة
+            {cu.manualSegments.add}
           </button>
         </div>
       )}
@@ -3025,30 +3062,20 @@ function ManualSegmentsSection({
       {/* Marketing opt-out (manual exclusion) */}
       <div className="border-t border-slate-100 pt-3 space-y-2">
         <label className="flex items-start gap-2.5 cursor-pointer select-none">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={optedOut}
-            onClick={handleToggleOptOut}
+          <ToggleSwitch
+            checked={optedOut}
             disabled={busy === '__opt__'}
-            className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              optedOut ? 'bg-red-500' : 'bg-slate-200'
-            } ${busy === '__opt__' ? 'opacity-50' : ''}`}
-          >
-            <span
-              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                optedOut ? 'translate-x-4' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-          <div className="flex-1 -mt-0.5">
+            onClick={handleToggleOptOut}
+            activeClass="bg-red-500"
+            inactiveClass="bg-slate-200"
+          />
+          <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-slate-800 flex items-center gap-1">
               <ShieldOff className="w-3.5 h-3.5 text-slate-400" />
-              استبعاد من الحملات التسويقية
+              {cu.manualSegments.optOutTitle}
             </p>
             <p className="text-[11px] text-slate-500 leading-snug">
-              لن يدخل في أي حملة تسويقية يدوية. لا يؤثر على رسائل
-              الطلبات أو الأتمتات الخدمية أو نافذة 24 ساعة.
+              {cu.manualSegments.optOutBody}
             </p>
           </div>
         </label>
@@ -3056,30 +3083,20 @@ function ManualSegmentsSection({
         {/* Quick "add to campaign test list" — internal flag, no
             merchant-visible tag is created. */}
         <label className="flex items-start gap-2.5 cursor-pointer select-none">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={isTestRecipient}
-            onClick={handleToggleTest}
+          <ToggleSwitch
+            checked={isTestRecipient}
             disabled={busy === '__test__'}
-            className={`mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              isTestRecipient ? 'bg-emerald-500' : 'bg-slate-200'
-            } ${busy === '__test__' ? 'opacity-50' : ''}`}
-          >
-            <span
-              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                isTestRecipient ? 'translate-x-4' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-          <div className="flex-1 -mt-0.5">
+            onClick={handleToggleTest}
+            activeClass="bg-emerald-500"
+            inactiveClass="bg-slate-200"
+          />
+          <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold text-slate-800 flex items-center gap-1">
               <Beaker className="w-3.5 h-3.5 text-slate-400" />
-              إضافة إلى قائمة اختبار الحملات
+              {cu.manualSegments.testListTitle}
             </p>
             <p className="text-[11px] text-slate-500 leading-snug">
-              مجموعة داخلية صغيرة لاختبار الحملة قبل الإطلاق الكامل.
-              لا يُنشئ تصنيفاً ظاهراً للتاجر.
+              {cu.manualSegments.testListBody}
             </p>
           </div>
         </label>
@@ -3102,13 +3119,16 @@ function ManualSegmentsSection({
  * library — we use a small, fixed visual treatment per chip instead.
  */
 interface SegmentChipsProps {
+  cu: CustomersPageLabels
+  lang: Lang
+  locale: string
   segments: CustomerSegmentMeta[]
   loading: boolean
   active: string
   onSelect: (key: string) => void
 }
 
-function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps) {
+function SegmentChips({ cu, lang, locale, segments, loading, active, onSelect }: SegmentChipsProps) {
   const [openInfo, setOpenInfo] = useState<string | null>(null)
 
   if (loading) {
@@ -3130,6 +3150,7 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
       <div className="flex items-center gap-2 overflow-x-auto pb-1 -mb-1">
         {segments.map(seg => {
           const isActive = active === seg.key
+          const segLabel = segmentDisplayLabel(seg, lang)
           return (
             <div key={seg.key} className="relative shrink-0">
               <button
@@ -3147,7 +3168,7 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
                 }
               >
                 {seg.key === 'unsubscribed' && <BellOff className="w-3 h-3 shrink-0" />}
-                <span>{seg.label_ar}</span>
+                <span>{segLabel}</span>
                 <span
                   className={
                     'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
@@ -3156,11 +3177,11 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
                       : (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'))
                   }
                 >
-                  {seg.customer_count.toLocaleString('ar-SA')}
+                  {seg.customer_count.toLocaleString(locale)}
                 </span>
                 <button
                   type="button"
-                  aria-label={`تعريف شريحة ${seg.label_ar}`}
+                  aria-label={cu.segments.segmentInfoAria.replace('{label}', segLabel)}
                   onClick={(e) => {
                     e.stopPropagation()
                     setOpenInfo(openInfo === seg.key ? null : seg.key)
@@ -3182,52 +3203,50 @@ function SegmentChips({ segments, loading, active, onSelect }: SegmentChipsProps
         })}
       </div>
 
-      {/* Lightweight inline info card — opens under the chips, NOT a modal,
-          so the merchant can keep scanning the table while reading. */}
       {popoverSeg && (
         <div className="relative bg-white border border-slate-200 rounded-lg shadow-sm p-4">
           <button
             type="button"
             onClick={() => setOpenInfo(null)}
             className="absolute top-3 end-3 text-slate-400 hover:text-slate-600"
-            aria-label="إغلاق التعريف"
+            aria-label={cu.segments.closeDefinition}
           >
             <X className="w-4 h-4" />
           </button>
           <p className="text-sm font-semibold text-slate-800 mb-1">
-            {popoverSeg.label_ar}
+            {segmentDisplayLabel(popoverSeg, lang)}
           </p>
           <p className="text-xs text-slate-500 leading-relaxed mb-3">
             {popoverSeg.criteria_ar || popoverSeg.description_ar}
           </p>
           <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
-            <span>عدد الحالي: <span className="text-slate-600 font-medium">{popoverSeg.customer_count.toLocaleString('ar-SA')}</span></span>
+            <span>{cu.segments.currentCount}: <span className="text-slate-600 font-medium">{popoverSeg.customer_count.toLocaleString(locale)}</span></span>
             {popoverSeg.crm_statuses.length > 0 && (
-              <span>حالات CRM: <span className="font-mono text-slate-600">{popoverSeg.crm_statuses.join(' · ')}</span></span>
+              <span>{cu.segments.crmStatuses}: <span className="font-mono text-slate-600">{popoverSeg.crm_statuses.join(' · ')}</span></span>
             )}
             {popoverSeg.rfm_buckets.length > 0 && (
-              <span>RFM: <span className="font-mono text-slate-600">{popoverSeg.rfm_buckets.join(' · ')}</span></span>
+              <span>{cu.segments.rfmBuckets}: <span className="font-mono text-slate-600">{popoverSeg.rfm_buckets.join(' · ')}</span></span>
             )}
           </div>
         </div>
       )}
 
-      {/* Active filter hint — visible even when no info popover is open. */}
       {activeSeg && active !== 'all' && active !== 'unsubscribed' && (
         <p className="text-[11px] text-slate-500 ps-1">
-          عرض {activeSeg.customer_count.toLocaleString('ar-SA')} عميل ضمن «{activeSeg.label_ar}»
+          {cu.segments.showingFilter
+            .replace('{count}', activeSeg.customer_count.toLocaleString(locale))
+            .replace('{label}', segmentDisplayLabel(activeSeg, lang))}
         </p>
       )}
 
-      {/* Special notice when merchant is viewing the Unsubscribed segment */}
       {active === 'unsubscribed' && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 text-xs text-red-700">
           <BellOff className="w-4 h-4 mt-0.5 shrink-0 text-red-400" />
           <div className="space-y-0.5">
-            <p className="font-semibold">هؤلاء العملاء ألغوا الاشتراك في التواصل</p>
-            <p className="text-red-600">مستثنون تلقائياً من جميع الحملات والطيار الآلي والذكاء الاصطناعي.</p>
+            <p className="font-semibold">{cu.segments.unsubscribedNoticeTitle}</p>
+            <p className="text-red-600">{cu.segments.unsubscribedNoticeBody}</p>
             <p className="text-slate-500 mt-1">
-              💡 إذا كنت تريد استعادتهم، ننصحك بالتواصل معهم <strong>شخصياً</strong> لمعرفة الأسباب ومحاولة استعادتهم. عند إرسالهم أي رسالة سيعودون تلقائياً للقوائم العادية.
+              {cu.segments.unsubscribedHint}
             </p>
           </div>
         </div>

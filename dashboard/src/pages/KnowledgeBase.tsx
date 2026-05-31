@@ -2341,12 +2341,12 @@ export default function KnowledgeBase() {
     return (
       <div className="space-y-6">
         <PageHeader
-          title="مركز معرفة المتجر الذكي"
+          title={t(tr => tr.pages.knowledgeBase.title)}
           subtitle={t(tr => tr.pages.knowledgeBase.subtitle)}
         />
         <div className="flex items-center justify-center py-20 gap-2 text-slate-400 text-sm">
           <Loader2 className="w-4 h-4 animate-spin text-brand-500" />
-          جاري التحميل...
+          {t(tr => tr.common.loading)}
         </div>
       </div>
     )
@@ -2355,7 +2355,7 @@ export default function KnowledgeBase() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="مركز معرفة المتجر الذكي"
+        title={t(tr => tr.pages.knowledgeBase.title)}
         subtitle={t(tr => tr.pages.knowledgeBase.subtitle)}
         action={
           <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-brand-50 text-brand-700 text-[11px] font-semibold">

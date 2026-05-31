@@ -13,18 +13,13 @@ import StatCard from '../components/ui/StatCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
+import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { apiCall } from '../api/client'
 
-// Placeholder chart data — replaced with real data when store is synced
-const PLACEHOLDER_CHART = [
-  { day: 'الاثنين', revenue: 0 },
-  { day: 'الثلاثاء', revenue: 0 },
-  { day: 'الأربعاء', revenue: 0 },
-  { day: 'الخميس', revenue: 0 },
-  { day: 'الجمعة', revenue: 0 },
-  { day: 'السبت', revenue: 0 },
-  { day: 'الأحد', revenue: 0 },
-]
+// UI_ONLY_GUARD: only static labels use t(); merchant/customer data stays as API values.
+
+// Placeholder chart day keys — localized labels applied in component
+const PLACEHOLDER_CHART_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const
 
 const statusVariant = (s: string) =>
   s === 'paid'    ? 'green'  :
@@ -33,10 +28,10 @@ const statusVariant = (s: string) =>
 
 type Period = 'today' | 'last_7_days' | 'this_month'
 
-const PERIOD_LABEL_AR: Record<Period, string> = {
-  today:        'اليوم',
-  last_7_days:  'آخر 7 أيام',
-  this_month:   'هذا الشهر',
+const PERIOD_KEYS: Record<Period, 'periodToday' | 'periodLast7Days' | 'periodThisMonth'> = {
+  today:        'periodToday',
+  last_7_days:  'periodLast7Days',
+  this_month:   'periodThisMonth',
 }
 
 interface OverviewStats {
@@ -89,24 +84,39 @@ const TIER_SOURCE_LABEL: Record<string, string> = {
   dialog360:  '360dialog (Coexistence)',
 }
 
-function formatSyncedAt(iso: string | null | undefined): string {
-  if (!iso) return 'لم تتم المزامنة بعد'
+function formatSyncedAt(
+  iso: string | null | undefined,
+  sync: { never: string; unavailable: string; momentsAgo: string; minutesAgo: string; hoursAgo: string },
+  locale: string,
+): string {
+  if (!iso) return sync.never
   try {
     const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return 'غير متاح'
+    if (Number.isNaN(d.getTime())) return sync.unavailable
     const diffMin = Math.round((Date.now() - d.getTime()) / 60_000)
-    if (diffMin < 1)   return 'قبل لحظات'
-    if (diffMin < 60)  return `قبل ${diffMin} دقيقة`
-    if (diffMin < 1440) return `قبل ${Math.round(diffMin / 60)} ساعة`
-    return d.toLocaleString('ar-SA', { dateStyle: 'short', timeStyle: 'short' })
+    if (diffMin < 1)   return sync.momentsAgo
+    if (diffMin < 60)  return sync.minutesAgo.replace('{count}', String(diffMin))
+    if (diffMin < 1440) return sync.hoursAgo.replace('{count}', String(Math.round(diffMin / 60)))
+    return d.toLocaleString(locale, { dateStyle: 'short', timeStyle: 'short' })
   } catch {
-    return 'غير متاح'
+    return sync.unavailable
   }
 }
 
 export default function Overview() {
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
   const ov = t(tr => tr.overview)
+  const wu = ov.waUsage
+  const mt = wu.metaTier
+  const sync = wu.sync
+  const diag = wu.diagnostics
+  void UI_ONLY_GUARD
+  const locale = lang === 'ar' ? 'ar-SA' : 'en-US'
+  const periodLabel = (p: Period) => ov[PERIOD_KEYS[p]]
+  const chartPlaceholder = PLACEHOLDER_CHART_KEYS.map(k => ({
+    day: ov.chartDays[k],
+    revenue: 0,
+  }))
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
@@ -168,7 +178,7 @@ export default function Overview() {
       if (syncStatus) {
         setStats({
           period:               (syncStatus.period as Period) ?? period,
-          period_label_ar:      syncStatus.period_label_ar ?? PERIOD_LABEL_AR[period],
+          period_label_ar:      syncStatus.period_label_ar ?? periodLabel(period),
           conversations:        syncStatus.conversations  ?? syncStatus.conversations_today ?? 0,
           orders:               syncStatus.orders         ?? syncStatus.orders_today        ?? 0,
           revenue:              syncStatus.revenue        ?? syncStatus.revenue_today       ?? 0,
@@ -181,14 +191,14 @@ export default function Overview() {
           ai_orders:            syncStatus.ai_orders           ?? 0,
           recent_conversations: syncStatus.recent_conversations ?? [],
           recent_orders:        syncStatus.recent_orders        ?? [],
-          revenue_chart:        syncStatus.revenue_chart        ?? PLACEHOLDER_CHART,
+          revenue_chart:        syncStatus.revenue_chart        ?? chartPlaceholder,
         })
       }
     }).finally(() => setLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period])
 
-  const revenueData         = stats?.revenue_chart        ?? PLACEHOLDER_CHART
+  const revenueData         = stats?.revenue_chart        ?? chartPlaceholder
   const recentConversations = stats?.recent_conversations ?? []
   const recentOrders        = stats?.recent_orders        ?? []
   const hasRealData         = (stats?.orders_today ?? 0) > 0 || recentOrders.length > 0
@@ -200,7 +210,9 @@ export default function Overview() {
   const kpiConversations = stats?.conversations ?? stats?.conversations_today ?? 0
   const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
   const kpiMessagesSent  = stats?.messages_sent ?? 0
-  const periodLabelAr    = stats?.period_label_ar ?? PERIOD_LABEL_AR[period]
+  const periodLabelDisplay = lang === 'en'
+    ? periodLabel(period)
+    : (stats?.period_label_ar ?? periodLabel(period))
 
   const statusLabel = (s: string) => {
     if (s === 'paid')    return ov.statusPaid
@@ -221,7 +233,7 @@ export default function Overview() {
             <div>
               <p className="text-xs text-white/80 font-medium">{ov.aiSalesLabel}</p>
               <p className="text-2xl font-black text-white leading-none mt-0.5">
-                {(stats?.ai_revenue ?? 0).toLocaleString('ar-SA')} <span className="text-sm font-bold text-white/90">ر.س</span>
+                {(stats?.ai_revenue ?? 0).toLocaleString(locale)} <span className="text-sm font-bold text-white/90">{ov.currency}</span>
               </p>
             </div>
           </div>
@@ -240,7 +252,7 @@ export default function Overview() {
               className="flex items-center gap-1.5 text-xs font-bold bg-brand-500 hover:bg-brand-600 text-white rounded-xl px-3 py-2 transition-colors shrink-0"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              عرض الباقات
+              {ov.viewPlans}
             </Link>
           </div>
         </div>
@@ -295,26 +307,26 @@ export default function Overview() {
               <div className="flex items-center gap-2 mb-2 flex-wrap">
                 <MessageSquare className={`w-4 h-4 shrink-0 ${iconColor}`} />
                 <span className="text-sm font-semibold text-slate-700">
-                  استخدام واتساب هذا الشهر
+                  {wu.title}
                 </span>
                 {waUsage.emergency_stop && (
                   <span className="flex items-center gap-1 text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> إيقاف طارئ
+                    <AlertTriangle className="w-3 h-3" /> {wu.emergencyStop}
                   </span>
                 )}
                 {waUsage.marketing_blocked && !waUsage.emergency_stop && (
                   <span className="flex items-center gap-1 text-xs font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> الحملات متوقفة
+                    <AlertTriangle className="w-3 h-3" /> {wu.campaignsStopped}
                   </span>
                 )}
                 {isWarning90 && (
                   <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> اقتربت من الحد — 90%
+                    <AlertTriangle className="w-3 h-3" /> {wu.nearLimit90}
                   </span>
                 )}
                 {isWarning70 && (
                   <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
-                    <AlertTriangle className="w-3 h-3" /> 70% مستخدم
+                    <AlertTriangle className="w-3 h-3" /> {wu.used70}
                   </span>
                 )}
               </div>
@@ -329,7 +341,7 @@ export default function Overview() {
 
               <div className="flex items-center justify-between mt-1.5">
                 <span className="text-xs text-slate-500">
-                  {`${waUsage.conversations_used.toLocaleString('ar-SA')} / ${waUsage.conversations_limit.toLocaleString('ar-SA')} محادثة`}
+                  {`${waUsage.conversations_used.toLocaleString(locale)} / ${waUsage.conversations_limit.toLocaleString(locale)} ${wu.conversationsUnit}`}
                 </span>
                 <span className={`text-xs font-bold ${pctColor}`}>
                   {waUsage.usage_pct}%
@@ -344,7 +356,7 @@ export default function Overview() {
                 className="flex items-center gap-1.5 text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 bg-white px-3 py-1.5 rounded-xl transition-colors"
               >
                 <ExternalLink className="w-3 h-3" />
-                تفاصيل
+                {wu.details}
               </Link>
               {(waUsage.marketing_blocked || isWarning90 || isWarning70) && (
                 <Link
@@ -358,7 +370,7 @@ export default function Overview() {
                   }`}
                 >
                   <ArrowUp className="w-3.5 h-3.5" />
-                  ارقِّ
+                  {wu.upgrade}
                 </Link>
               )}
             </div>
@@ -367,20 +379,20 @@ export default function Overview() {
           {/* Alert messages */}
           {waUsage.emergency_stop && (
             <p className="text-xs text-red-700 mt-2 font-medium bg-red-100 rounded-lg px-3 py-2">
-              ⛔ جميع الرسائل متوقفة — تجاوزت الحد بشكل كبير. يرجى ترقية باقتك.
+              {wu.emergencyBanner}
             </p>
           )}
           {waUsage.marketing_blocked && !waUsage.emergency_stop && (
             <p className="text-xs text-orange-700 mt-2 font-medium bg-orange-50 rounded-lg px-3 py-2">
-              📣 الحملات التسويقية متوقفة حتى نهاية الشهر.
-              ردود خدمة العملاء <strong>تعمل بشكل طبيعي</strong>.
-              <Link to="/billing" className="underline mr-1 font-bold">ارقِّ باقتك</Link> لاستئناف الحملات.
+              {wu.campaignsBanner}{' '}
+              {wu.campaignsBannerNote}{' '}
+              <Link to="/billing" className="underline mr-1 font-bold">{wu.upgradeLink}</Link>
             </p>
           )}
           {isWarning90 && (
             <p className="text-xs text-red-700 mt-2 font-medium bg-red-50 rounded-lg px-3 py-2">
-              ⚠️ اقتربت من حد المحادثات الشهري — ستتوقف الحملات عند الوصول إلى 100%.
-              <Link to="/billing" className="underline mr-1 font-bold">ارقِّ الآن</Link>
+              {wu.nearLimitBanner}{' '}
+              <Link to="/billing" className="underline mr-1 font-bold">{wu.upgradeNowLink}</Link>
             </p>
           )}
 
@@ -399,33 +411,17 @@ export default function Overview() {
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-xs font-semibold text-slate-600">حد Meta الحالي</p>
+                    <p className="text-xs font-semibold text-slate-600">{mt.title}</p>
                     {waUsage.meta_tier_is_stale && (
                       <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded-full">
-                        قيمة قديمة
+                        {mt.staleValue}
                       </span>
                     )}
                   </div>
                   <p className="text-sm font-bold text-slate-800 mt-0.5">{waUsage.meta_tier_label}</p>
-                  {/* Hint: explain what the tier actually means.
-                      Merchants often confuse Meta's TIER_X with a
-                      monthly cap — it's not. It's the number of NEW
-                      customers you can business-initiate with per 24h.
-                      Surfacing the real semantics here cuts the
-                      "why does it say 250 when Meta gave me 100k?"
-                      support load to zero. */}
                   <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
-                    عدد العملاء الجدد الذين يمكنك بدء محادثة معهم خلال 24 ساعة (حد Meta للحساب) — وليس الحد الشهري للباقة.
+                    {mt.hint}
                   </p>
-                  {/* Direct verification link to Meta WhatsApp Manager.
-                      Provider-agnostic: whether the merchant connected
-                      via Meta direct or a relay (360dialog today, others
-                      tomorrow), the source of truth for the actual tier
-                      always lives in Meta Business Manager. Surfacing
-                      this link removes any "but I trust Meta more than
-                      this dashboard" objection — and lets the merchant
-                      report back the canonical number if the cached
-                      value is wrong. */}
                   <a
                     href="https://business.facebook.com/wa/manage/phone-numbers/"
                     target="_blank"
@@ -433,18 +429,18 @@ export default function Overview() {
                     className="inline-flex items-center gap-1 mt-1 text-[11px] font-medium text-brand-600 hover:text-brand-700"
                   >
                     <ExternalLink className="w-3 h-3" />
-                    تحقق مباشرة من Meta Business Manager
+                    {mt.verifyInMeta}
                   </a>
                   <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500 flex-wrap">
                     {waUsage.meta_tier_source && (
                       <span>
-                        المصدر: <strong className="text-slate-700">
+                        {mt.source}: <strong className="text-slate-700">
                           {TIER_SOURCE_LABEL[waUsage.meta_tier_source] || waUsage.meta_tier_source}
                         </strong>
                       </span>
                     )}
                     <span>
-                      آخر مزامنة: <strong className="text-slate-700">{formatSyncedAt(waUsage.meta_tier_last_synced_at)}</strong>
+                      {mt.lastSynced}: <strong className="text-slate-700">{formatSyncedAt(waUsage.meta_tier_last_synced_at, sync, locale)}</strong>
                     </span>
                   </div>
                 </div>
@@ -452,13 +448,13 @@ export default function Overview() {
                 <div className="flex items-center gap-2 shrink-0">
                   {waUsage.meta_quality_rating && (
                     <div className="text-center">
-                      <p className="text-[10px] text-slate-500">جودة الرقم</p>
+                      <p className="text-[10px] text-slate-500">{mt.numberQuality}</p>
                       <span className={`inline-block mt-0.5 text-xs font-bold px-2 py-0.5 rounded-full ${
                         waUsage.meta_quality_rating === 'GREEN'  ? 'bg-emerald-100 text-emerald-700'
                         : waUsage.meta_quality_rating === 'YELLOW' ? 'bg-amber-100 text-amber-700'
                         : 'bg-red-100 text-red-700'
                       }`}>
-                        {waUsage.meta_quality_rating === 'GREEN' ? 'ممتازة' : waUsage.meta_quality_rating === 'YELLOW' ? 'متوسطة' : 'منخفضة'}
+                        {waUsage.meta_quality_rating === 'GREEN' ? mt.qualityExcellent : waUsage.meta_quality_rating === 'YELLOW' ? mt.qualityMedium : mt.qualityLow}
                       </span>
                     </div>
                   )}
@@ -467,38 +463,30 @@ export default function Overview() {
                     onClick={refreshMetaTier}
                     disabled={tierRefreshing}
                     className="flex items-center gap-1 text-xs font-medium text-slate-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    aria-label="تحديث حد Meta الآن"
+                    aria-label={mt.refreshAriaLabel}
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${tierRefreshing ? 'animate-spin' : ''}`} />
-                    {tierRefreshing ? 'جاري التحديث…' : 'تحديث الآن'}
+                    {tierRefreshing ? mt.refreshing : mt.refreshNow}
                   </button>
                 </div>
               </div>
 
-              {/* ── Diagnostic panel ─────────────────────────────────────
-                  Surfaces the raw provider response so the merchant
-                  can see EXACTLY what came back when they hit "تحديث
-                  الآن". This is the difference between guessing and
-                  knowing: if the provider returned no tier field at
-                  all, we surface that here instead of silently keeping
-                  a stale cached value. Provider-agnostic — works the
-                  same regardless of how the connection was made. */}
               {tierDiagnostics && (
                 <div className="mt-3 border-t border-slate-200 pt-2.5">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-2 flex-wrap text-[11px]">
                       {tierDiagnostics.updated ? (
                         <span className="font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
-                          ✓ تم تحديث القيمة من المزوّد
+                          {diag.updatedFromProvider}
                         </span>
                       ) : (
                         <span className="font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
-                          ⚠ المزوّد لم يُعد قيمة tier — القيمة المعروضة من التخزين المؤقت
+                          {diag.notFromProvider}
                         </span>
                       )}
                       {tierDiagnostics.provider && (
                         <span className="text-slate-500">
-                          المزوّد: <strong className="text-slate-700">{tierDiagnostics.provider}</strong>
+                          {diag.provider}: <strong className="text-slate-700">{tierDiagnostics.provider}</strong>
                         </span>
                       )}
                     </div>
@@ -507,7 +495,7 @@ export default function Overview() {
                       onClick={() => setShowTierDiag(v => !v)}
                       className="text-[11px] font-medium text-brand-600 hover:text-brand-700"
                     >
-                      {showTierDiag ? 'إخفاء التفاصيل' : 'تفاصيل تقنية'}
+                      {showTierDiag ? diag.hideDetails : diag.technicalDetails}
                     </button>
                   </div>
                   {showTierDiag && (
@@ -519,7 +507,7 @@ export default function Overview() {
                         >
                           <div className="text-emerald-300 break-all">{entry.path}</div>
                           {entry.error ? (
-                            <div className="text-red-300 mt-0.5">error: {entry.error}</div>
+                            <div className="text-red-300 mt-0.5">{diag.errorPrefix}: {entry.error}</div>
                           ) : (
                             <div className="text-slate-300 mt-0.5">
                               <pre className="whitespace-pre-wrap break-all">{JSON.stringify(entry.body, null, 2)}</pre>
@@ -528,8 +516,7 @@ export default function Overview() {
                         </div>
                       ))}
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        إذا لم يحتوِ أي رد على <code className="bg-slate-100 px-1 rounded">messaging_limit_tier</code>،
-                        فإن المزوّد لا يكشف هذه القيمة وعليك التحقق مباشرة من Meta Business Manager أعلاه.
+                        {diag.tierHint}
                       </p>
                     </div>
                   )}
@@ -547,10 +534,10 @@ export default function Overview() {
           param; the cards re-render with the response in place (no full
           spinner) to keep scanning smooth. */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h2 className="text-sm font-bold text-slate-700">نظرة عامة</h2>
+        <h2 className="text-sm font-bold text-slate-700">{ov.sectionTitle}</h2>
         <div
           role="tablist"
-          aria-label="نطاق زمني"
+          aria-label={ov.sectionTitle}
           className="inline-flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1 text-xs font-medium"
         >
           {(['today', 'last_7_days', 'this_month'] as const).map((p) => (
@@ -566,7 +553,7 @@ export default function Overview() {
                   : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
               }`}
             >
-              {PERIOD_LABEL_AR[p]}
+              {periodLabel(p)}
             </button>
           ))}
         </div>
@@ -585,25 +572,25 @@ export default function Overview() {
       }`}>
         <StatCard
           label={ov.kpiRevenue}
-          subLabel={periodLabelAr}
-          value={loading ? '—' : `${kpiRevenue.toLocaleString('ar-SA')} ر.س`}
+          subLabel={periodLabelDisplay}
+          value={loading ? '—' : `${kpiRevenue.toLocaleString(locale)} ${ov.currency}`}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={ov.kpiConversations}
-          subLabel={periodLabelAr}
-          value={loading ? '—' : kpiConversations.toLocaleString('ar-SA')}
+          subLabel={periodLabelDisplay}
+          value={loading ? '—' : kpiConversations.toLocaleString(locale)}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
         {kpiMessagesSent > 0 && (
           <StatCard
-            label="رسائل مُرسلة"
-            subLabel={`${periodLabelAr} • حملات Meta`}
-            value={loading ? '—' : kpiMessagesSent.toLocaleString('ar-SA')}
+            label={ov.messagesSent}
+            subLabel={`${periodLabelDisplay} • Meta`}
+            value={loading ? '—' : kpiMessagesSent.toLocaleString(locale)}
             icon={MessageSquare}
             iconColor="text-amber-600"
             iconBg="bg-amber-50"
@@ -611,7 +598,7 @@ export default function Overview() {
         )}
         <StatCard
           label={ov.kpiOrders}
-          subLabel={periodLabelAr}
+          subLabel={periodLabelDisplay}
           value={loading ? '—' : String(kpiOrders)}
           icon={ShoppingCart}
           iconColor="text-brand-600"
@@ -619,7 +606,7 @@ export default function Overview() {
         />
         <StatCard
           label={ov.kpiAiRate}
-          subLabel={periodLabelAr}
+          subLabel={periodLabelDisplay}
           value={loading ? '—' : `${(stats?.ai_rate ?? 0).toFixed(1)}%`}
           icon={TrendingUp}
           iconColor="text-purple-600"
@@ -635,8 +622,8 @@ export default function Overview() {
       <div className="card p-5">
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">الإيرادات — آخر 7 أيام</h2>
-            <p className="text-xs text-slate-400 mt-0.5">رسم بياني ثابت — مستقل عن النطاق أعلاه</p>
+            <h2 className="text-sm font-semibold text-slate-900">{ov.chartTitle}</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{ov.chartSubtitle}</p>
           </div>
         </div>
         <ResponsiveContainer width="100%" height={220}>
@@ -655,7 +642,7 @@ export default function Overview() {
             <YAxis tick={{ fontSize: 11, fill: 'currentColor' }} axisLine={false} tickLine={false} className="text-slate-400 dark:text-slate-500" />
             <Tooltip
               contentStyle={{ fontSize: 12, border: '1px solid #e2e8f0', borderRadius: 8, boxShadow: '0 4px 6px -1px rgb(0 0 0 / .1)' }}
-              formatter={(v: number) => [`${v.toLocaleString('ar-SA')} ر.س`, 'الإيرادات']}
+              formatter={(v: number) => [`${v.toLocaleString(locale)} ${ov.currency}`, ov.chartRevenueLabel]}
             />
             <Area type="monotone" dataKey="revenue" stroke="#f59e0b" strokeWidth={2} fill="url(#colorRevenue)" />
           </AreaChart>
@@ -674,7 +661,7 @@ export default function Overview() {
           </div>
           {recentConversations.length === 0 ? (
             <div className="py-10 text-center text-xs text-slate-400">
-              {loading ? 'جاري التحميل...' : 'لا توجد محادثات بعد — ابدأ بتفعيل WhatsApp'}
+              {loading ? t(tr => tr.common.loading) : ov.noConversationsYet}
             </div>
           ) : (
             <ul className="divide-y divide-slate-100">
@@ -697,7 +684,7 @@ export default function Overview() {
                   <div className="flex flex-col items-end gap-1 shrink-0">
                     <span className="text-xs text-slate-400">{c.time}</span>
                     <Badge
-                      label={c.status === 'active' ? 'نشطة' : c.status === 'human' ? 'بشري' : 'مغلقة'}
+                      label={c.status === 'active' ? ov.convStatusActive : c.status === 'human' ? ov.convStatusHuman : ov.convStatusClosed}
                       variant={c.status === 'active' ? 'green' : c.status === 'human' ? 'amber' : 'slate'}
                       dot
                     />
@@ -718,7 +705,7 @@ export default function Overview() {
           </div>
           {recentOrders.length === 0 ? (
             <div className="py-10 text-center text-xs text-slate-400">
-              {loading ? 'جاري التحميل...' : 'لا توجد طلبات بعد — قم بربط متجرك'}
+              {loading ? t(tr => tr.common.loading) : ov.noOrdersYet}
             </div>
           ) : (
           <ul className="divide-y divide-slate-100">

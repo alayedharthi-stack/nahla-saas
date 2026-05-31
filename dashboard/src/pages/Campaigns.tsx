@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Plus, Send, Users, ShoppingCart, BarChart2, CheckCircle, XCircle,
-  Megaphone, ChevronRight, ChevronLeft, Tag, Crown, Zap, Clock,
+  Megaphone, Tag, Crown, Zap, Clock,
   Smartphone, AlertCircle, RefreshCw, X, MessageSquare, FileText,
   HandHeart, Repeat, Bell, Settings2, Sparkles, Moon, UserPlus, UserX,
   Calendar, ShoppingBag, TrendingUp, Star, Trash2, CheckSquare, Square,
@@ -13,9 +13,21 @@ import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
 import MediaEnvModal from '../components/admin/MediaEnvModal'
+import ToggleSwitch from '../components/ui/ToggleSwitch'
 import { canUseInternalDebug } from '../auth'
 import { useLanguage } from '../i18n/context'
 import type { Lang, Translations } from '../i18n/types'
+import type { CampaignsListLabels } from '../i18n/campaignsListPageLabels'
+import {
+  buildCampaignDiagnosticLines,
+  buildDispatchPollLines,
+  campaignErrorLabel,
+  campaignLastErrorDisplay,
+  excludeReasonLabel,
+  lifecycleLabelFromList,
+} from '../i18n/campaignRuntimeLabels'
+import { UI_ONLY_GUARD } from '../i18n/uiOnly'
+import { paginationChevrons } from '../lib/paginationIcons'
 import {
   campaignsApi, CampaignRecord, CreateCampaignPayload,
   CampaignGoal, CustomerSegmentMeta, RecommendedTemplate, TemplateRecommendation,
@@ -95,6 +107,30 @@ const INITIAL_WIZARD: WizardState = {
 
 type CampaignsMgmt = Translations['campaignsMgmt']
 
+type CampaignBadgeVariant = 'green' | 'amber' | 'blue' | 'slate' | 'red'
+
+const STATUS_VARIANT: Record<string, CampaignBadgeVariant> = {
+  active: 'green', scheduled: 'amber', completed: 'blue', paused: 'amber', draft: 'slate', failed: 'red',
+}
+
+const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
+  draft: 'slate',
+  waiting_scheduler: 'amber',
+  pending_dispatch: 'amber',
+  sending: 'green',
+  sent: 'blue',
+  partial: 'amber',
+  partial_minor: 'blue',
+  no_whatsapp_recipients: 'slate',
+  excluded_before_send: 'amber',
+  orphaned_materialized_rows: 'amber',
+  unknown_status: 'amber',
+  completed_empty: 'slate',
+  failed: 'red',
+  failed_all: 'red',
+  unknown: 'slate',
+}
+
 const WIZARD_STEP_KEYS = [
   'goal', 'audience', 'template', 'variables', 'preview', 'testSend', 'review', 'launch',
 ] as const
@@ -107,26 +143,19 @@ function fmtCount(n: number, lang: Lang): string {
   return n.toLocaleString(localeTag(lang))
 }
 
-type CampaignBadgeVariant = 'green' | 'amber' | 'blue' | 'slate' | 'red'
-
 function lifecycleBadgeLabel(
   lifecycleKey: string,
   statusKey: string,
-  list: CampaignsMgmt['list'],
+  list: CampaignsListLabels,
 ): string {
-  const lc = list.lifecycle[lifecycleKey as keyof typeof list.lifecycle]
-  if (lc) return lc
-  const st = list.status[statusKey as keyof typeof list.status]
-  return st ?? list.status.draft
+  return lifecycleLabelFromList(lifecycleKey, statusKey, list)
 }
 
 function lifecycleBadgeVariant(lifecycleKey: string, statusKey: string): CampaignBadgeVariant {
-  return LIFECYCLE_META[lifecycleKey]?.variant
-    ?? STATUS_META[statusKey]?.variant
-    ?? STATUS_META.draft.variant
+  return LIFECYCLE_VARIANT[lifecycleKey] ?? STATUS_VARIANT[statusKey] ?? 'slate'
 }
 
-function typeBadgeLabel(typeKey: string, list: CampaignsMgmt['list']): string {
+function typeBadgeLabel(typeKey: string, list: CampaignsListLabels): string {
   return list.types[typeKey as keyof typeof list.types] ?? typeKey
 }
 
@@ -157,7 +186,10 @@ function segDisplayCriteria(s: CustomerSegmentMeta, lang: Lang, cm: CampaignsMgm
 }
 
 /** Mode badges emitted by the recommender — shown as pills, not compatibility badges. */
-const RECO_MODE_BADGES = new Set(['✋ يدوي', '🟠 يدوي', '⚡ تلقائي'])
+const RECO_MODE_BADGES = new Set([
+  '✋ يدوي', '🟠 يدوي', '⚡ تلقائي',
+  '✋ Manual', '🟠 Manual', '⚡ Automatic',
+])
 
 /** Badge colour keyed by canonical Arabic label from the backend recommender. */
 const RECO_BADGE_COLORS: Record<string, string> = {
@@ -247,60 +279,6 @@ const ICON_REGISTRY: Record<string, React.ComponentType<{ className?: string }>>
 function GoalIcon({ name, className }: { name: string; className?: string }) {
   const Cmp = ICON_REGISTRY[name] ?? Megaphone
   return <Cmp className={className} />
-}
-
-const STATUS_META: Record<string, { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' }> = {
-  active:    { label: 'نشطة',    variant: 'green' },
-  scheduled: { label: 'مجدولة',  variant: 'amber' },
-  completed: { label: 'مكتملة',  variant: 'blue'  },
-  paused:    { label: 'موقوفة',  variant: 'amber' },
-  draft:     { label: 'مسودة',   variant: 'slate' },
-  failed:    { label: 'فشلت',    variant: 'red'   },
-}
-
-/**
- * Granular lifecycle labels surfaced on top of the raw ``status``
- * column. The backend computes the lifecycle verb from status +
- * recipient counters (see ``_classify_campaign_lifecycle``), so the
- * UI just renders.
- *
- * IMPORTANT: a campaign whose async dispatch task died silently shows
- * up as ``status='active'`` but ``lifecycle='pending_dispatch'`` — we
- * render the lifecycle label so the merchant doesn't trust a "نشطة"
- * pill on an inert campaign.
- */
-const LIFECYCLE_META: Record<string, { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' }> = {
-  draft:                   { label: 'مسودة',                  variant: 'slate' },
-  waiting_scheduler:       { label: 'بانتظار المُجدول',        variant: 'amber' },
-  pending_dispatch:        { label: 'ينتظر بدء الإرسال',       variant: 'amber' },
-  sending:                 { label: 'جاري الإرسال',            variant: 'green' },
-  sent:                    { label: 'تم الإرسال',              variant: 'blue'  },
-  partial:                 { label: 'أُرسل جزئياً',             variant: 'amber' },
-  // ``partial_minor`` = sent>0 with only minor failures (e.g. some
-  // customers don't have WhatsApp). The campaign worked — we just
-  // didn't reach 100% — so we render it green, not amber.
-  partial_minor:           { label: 'أُرسل بنجاح',              variant: 'blue'  },
-  // ``no_whatsapp_recipients`` = sent==0 but every failure is minor.
-  // Not the campaign's fault; surface it with a calm slate badge so
-  // the merchant doesn't think the platform broke.
-  no_whatsapp_recipients:  { label: 'لا يوجد عملاء على واتساب', variant: 'slate' },
-  // ``excluded_before_send`` = audience matched > 0 customers but every
-  // one was filtered out before we even wrote a send-log row (no phone,
-  // opted-out, etc.). Different from ``completed_empty`` (zero
-  // audience) — the merchant needs the explicit breakdown.
-  excluded_before_send:    { label: 'استبعد كل العملاء قبل الإرسال', variant: 'amber' },
-  // ``orphaned_materialized_rows`` = the audience funnel claims rows
-  // were created but campaign_send_logs is empty now. Almost always a
-  // data inconsistency that needs a manual dispatch-now.
-  orphaned_materialized_rows: { label: 'صفوف مفقودة من السجل', variant: 'amber' },
-  // ``unknown_status`` = rows exist but their status values aren't
-  // recognised (legacy / hand-edited). We surface this distinctly so
-  // the merchant doesn't read it as "no recipients".
-  unknown_status:          { label: 'حالة إرسال غير معروفة',   variant: 'amber' },
-  completed_empty:         { label: 'اكتملت بلا مستلمين',       variant: 'slate' },
-  failed:                  { label: 'فشل الإرسال',              variant: 'red'   },
-  failed_all:              { label: 'فشل الإرسال للجميع',       variant: 'red'   },
-  unknown:                 { label: 'غير معروفة',              variant: 'slate' },
 }
 
 // Map the new goal keys back to the legacy `campaign_type` enum the
@@ -1124,9 +1102,22 @@ function Step6TestSend({
 // come in a follow-up once the backend exposes the mutators).
 
 function WavesPanel({ campaignId }: { campaignId: number }) {
+  const { tStatic, lang, dir } = useLanguage()
+  const list = tStatic(tr => tr.campaignsMgmt.list)
+  const wv = list.waves
+  const locale = localeTag(lang)
+
   const [data, setData] = useState<CampaignWavesResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const waveStatusVariant: Record<
+    CampaignWaveRow['status'],
+    'green' | 'amber' | 'blue' | 'slate' | 'red' | 'purple'
+  > = {
+    pending: 'slate', dispatching: 'blue', completed: 'green',
+    failed: 'red', paused: 'amber', cancelled: 'slate',
+  }
 
   const fetchWaves = useCallback(
     async (signal?: AbortSignal) => {
@@ -1136,13 +1127,13 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
         setError(null)
       } catch (e: unknown) {
         if (signal?.aborted) return
-        const message = e instanceof Error ? e.message : 'تعذر تحميل الدفعات'
+        const message = e instanceof Error ? e.message : wv.loadFailed
         setError(message)
       } finally {
         setLoading(false)
       }
     },
-    [campaignId],
+    [campaignId, wv.loadFailed],
   )
 
   useEffect(() => {
@@ -1163,7 +1154,7 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
   if (loading) return null
   if (error) {
     return (
-      <div className="mt-3 text-[11px] text-slate-500">{error}</div>
+      <div dir={dir} className="mt-3 text-[11px] text-slate-500">{error}</div>
     )
   }
   if (!data || data.send_strategy === 'immediate' || data.waves.length === 0) {
@@ -1174,40 +1165,32 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
   const totalSent = data.waves.reduce((acc, w) => acc + w.sent_count, 0)
   const totalFailed = data.waves.reduce((acc, w) => acc + w.failed_count, 0)
 
-  const statusMeta: Record<
-    CampaignWaveRow['status'],
-    { label: string; variant: 'green' | 'amber' | 'blue' | 'slate' | 'red' | 'purple' }
-  > = {
-    pending:     { label: 'بانتظار الإطلاق', variant: 'slate'  },
-    dispatching: { label: 'جارٍ الإرسال',    variant: 'blue'   },
-    completed:   { label: 'مكتملة',          variant: 'green'  },
-    failed:      { label: 'فشلت',           variant: 'red'    },
-    paused:      { label: 'موقوفة',          variant: 'amber'  },
-    cancelled:   { label: 'ملغية',          variant: 'slate'  },
-  }
-
   return (
-    <div className="mt-3 bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <div dir={dir} className="mt-3 bg-white border border-slate-200 rounded-xl overflow-hidden">
       <div className="px-4 py-3 bg-gradient-to-l from-purple-50 to-white border-b border-slate-200">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
             <p className="text-sm font-semibold text-slate-800 flex items-center gap-2">
               <Repeat className="w-4 h-4 text-purple-500" />
-              جدول الدفعات
+              {wv.title}
             </p>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              استراتيجية {data.send_strategy === 'adaptive' ? 'تلقائية' : 'يدوية'}
+              {data.send_strategy === 'adaptive' ? wv.strategyAdaptive : wv.strategyManual}
               {' • '}
-              {data.total_waves} دفعة
-              {data.batch_size ? ` • ${data.batch_size.toLocaleString('ar-SA')}/دفعة` : ''}
+              {wv.waveCount.replace('{count}', String(data.total_waves))}
+              {data.batch_size
+                ? ` • ${data.batch_size.toLocaleString(locale)}${wv.perBatch}`
+                : ''}
             </p>
           </div>
           <div className="text-[11px] text-slate-600">
-            <span className="text-emerald-600 font-semibold">{totalSent.toLocaleString('ar-SA')}</span>
+            <span className="text-emerald-600 font-semibold">{totalSent.toLocaleString(locale)}</span>
             <span className="text-slate-400 mx-1">/</span>
-            <span>{totalPlanned.toLocaleString('ar-SA')}</span>
+            <span>{totalPlanned.toLocaleString(locale)}</span>
             {totalFailed > 0 && (
-              <span className="text-rose-500 mr-2"> • فشل {totalFailed.toLocaleString('ar-SA')}</span>
+              <span className="text-rose-500 ms-2">
+                {wv.failedSuffix.replace('{n}', totalFailed.toLocaleString(locale))}
+              </span>
             )}
           </div>
         </div>
@@ -1215,12 +1198,13 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
 
       <div className="divide-y divide-slate-100">
         {data.waves.map((w) => {
-          const sm = statusMeta[w.status]
+          const statusLabel = wv.statuses[w.status]
+          const variant = waveStatusVariant[w.status]
           const pct = w.planned_recipients > 0
             ? Math.min(100, Math.round((w.sent_count / w.planned_recipients) * 100))
             : 0
           const scheduledLabel = w.scheduled_at
-            ? new Date(w.scheduled_at).toLocaleString('ar-SA', {
+            ? new Date(w.scheduled_at).toLocaleString(locale, {
                 day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
               })
             : '—'
@@ -1233,7 +1217,9 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
                   </div>
                   <div>
                     <p className="text-xs font-medium text-slate-800">
-                      دفعة {w.wave_index} من {w.total_waves}
+                      {wv.waveOf
+                        .replace('{index}', String(w.wave_index))
+                        .replace('{total}', String(w.total_waves))}
                     </p>
                     <p className="text-[10px] text-slate-500 flex items-center gap-1">
                       <Clock className="w-3 h-3" /> {scheduledLabel}
@@ -1242,9 +1228,9 @@ function WavesPanel({ campaignId }: { campaignId: number }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-[10.5px] text-slate-500">
-                    {w.sent_count.toLocaleString('ar-SA')} / {w.planned_recipients.toLocaleString('ar-SA')}
+                    {w.sent_count.toLocaleString(locale)} / {w.planned_recipients.toLocaleString(locale)}
                   </span>
-                  <Badge label={sm.label} variant={sm.variant} />
+                  <Badge label={statusLabel} variant={variant} />
                 </div>
               </div>
               <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden">
@@ -1281,7 +1267,7 @@ function SendStrategyPicker({
   setWiz: React.Dispatch<React.SetStateAction<WizardState>>
   audienceCount: number
 }) {
-  const { t, lang } = useLanguage()
+  const { t, lang, dir } = useLanguage()
   const ss = t(tr => tr.campaignsMgmt.step7.sendStrategy)
 
   const [preview, setPreview] = useState<PreflightStrategyResponse | null>(null)
@@ -1405,6 +1391,7 @@ function SendStrategyPicker({
             <label className="label text-[11px]">{ss.batchSizeLabel}</label>
             <select
               className="input text-sm"
+              dir={dir}
               value={wiz.batchSize}
               onChange={(e) => setWiz((w) => ({ ...w, batchSize: Number(e.target.value) }))}
             >
@@ -1419,6 +1406,7 @@ function SendStrategyPicker({
             <label className="label text-[11px]">{ss.delayBetweenLabel}</label>
             <select
               className="input text-sm"
+              dir={dir}
               value={wiz.delayBetweenBatchesSec}
               onChange={(e) => setWiz((w) => ({ ...w, delayBetweenBatchesSec: Number(e.target.value) }))}
             >
@@ -1477,7 +1465,7 @@ function Step7Review({
   segmentMeta: CustomerSegmentMeta | undefined
   goalMeta: CampaignGoal | undefined
 }) {
-  const { t, lang } = useLanguage()
+  const { t, lang, dir } = useLanguage()
   const s7 = t(tr => tr.campaignsMgmt.step7)
   const tm = t(tr => tr.templatesMgmt)
 
@@ -1553,6 +1541,7 @@ function Step7Review({
         {wiz.scheduleType === 'delayed' && (
           <select
             className="input text-sm mt-2"
+            dir={dir}
             value={wiz.delayMinutes}
             onChange={e => setWiz(w => ({ ...w, delayMinutes: Number(e.target.value) }))}
           >
@@ -1606,17 +1595,10 @@ function Step7Review({
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <label className="label mb-0">{s7.couponAutoLabel}</label>
-            <button
-              type="button"
+            <ToggleSwitch
+              checked={wiz.autoCoupon}
               onClick={() => setWiz(w => ({ ...w, autoCoupon: !w.autoCoupon }))}
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
-                wiz.autoCoupon ? 'bg-brand-500' : 'bg-slate-300'
-              }`}
-            >
-              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
-                wiz.autoCoupon ? 'translate-x-[18px]' : 'translate-x-[3px]'
-              }`} />
-            </button>
+            />
           </div>
 
           {wiz.autoCoupon ? (
@@ -1787,9 +1769,10 @@ function Step8Launch({
 function CampaignWizard({
   onClose, onCreated,
 }: { onClose: () => void; onCreated: (c: CampaignRecord) => void }) {
-  const { t, lang } = useLanguage()
+  const { t, lang, dir, isRTL } = useLanguage()
   const wz = t(tr => tr.campaignsMgmt.wizard)
   const cm = t(tr => tr.campaignsMgmt)
+  const { Prev: PrevIcon, Next: NextIcon } = paginationChevrons(isRTL)
   const stepLabels = useMemo(() => wizardStepLabels(cm), [cm])
   const wizardLang = lang === 'en' ? 'en' : 'ar'
 
@@ -2064,8 +2047,8 @@ function CampaignWizard({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[92vh]">
+    <div dir={dir} className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div dir={dir} className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div>
@@ -2110,18 +2093,18 @@ function CampaignWizard({
           <button
             onClick={prev}
             disabled={wiz.step === 1}
-            className="btn-ghost text-sm disabled:opacity-30"
+            className="btn-ghost text-sm disabled:opacity-30 inline-flex items-center gap-1"
           >
-            <ChevronRight className="w-4 h-4" /> {wz.prev}
+            <PrevIcon className="w-4 h-4" /> {wz.prev}
           </button>
 
           {wiz.step < 8 && (
             <button
               onClick={next}
               disabled={!canNext()}
-              className="btn-primary text-sm disabled:opacity-40"
+              className="btn-primary text-sm disabled:opacity-40 inline-flex items-center gap-1"
             >
-              {wz.next} <ChevronLeft className="w-4 h-4" />
+              {wz.next} <NextIcon className="w-4 h-4" />
             </button>
           )}
         </div>
@@ -2133,6 +2116,8 @@ function CampaignWizard({
 // ── Debug template link (fetches from API and shows JSON) ─────────────────────
 
 function DebugTemplateLink({ templateId }: { templateId: string }) {
+  const { tStatic } = useLanguage()
+  const dt = tStatic(tr => tr.campaignsMgmt.list.diagnostics.debugTemplate)
   const [data, setData] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -2142,7 +2127,7 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
     try {
       const result = await campaignsApi.debugTemplate(templateId)
       setData(result)
-    } catch { setData({ error: 'فشل جلب بيانات التشخيص' }) }
+    } catch { setData({ error: dt.loadFailed }) }
     finally { setLoading(false) }
   }
 
@@ -2152,7 +2137,7 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
         onClick={handleClick}
         className="text-[10px] text-blue-600 hover:underline flex items-center gap-1"
       >
-        🔍 {loading ? 'جارٍ الفحص…' : data ? 'إخفاء التشخيص' : 'فحص القالب والحمولة المُرسلة'}
+        🔍 {loading ? dt.loading : data ? dt.hide : dt.show}
       </button>
       {data && (
         <pre className="mt-1.5 text-[9px] bg-slate-900 text-green-300 rounded p-2 overflow-x-auto max-h-60 leading-relaxed" dir="ltr">
@@ -2200,29 +2185,32 @@ function ProviderBlockBanner({
   onCopyBundle: () => void
   bundleStatus: 'idle' | 'loading' | 'copied' | 'error'
 }) {
+  const { tStatic, lang, dir } = useLanguage()
+  const list = tStatic(tr => tr.campaignsMgmt.list)
+  const pb = list.diagnostics.providerBlock
+
   const bundleLabel =
-    bundleStatus === 'loading' ? 'جاري التحضير…'
-    : bundleStatus === 'copied'  ? '✓ تم النسخ — الصق في تذكرة 360dialog'
-    : bundleStatus === 'error'   ? 'تعذر النسخ — حاول مجدداً'
-    : 'نسخ تقرير الدعم'
+    bundleStatus === 'loading' ? pb.bundleLoading
+    : bundleStatus === 'copied'  ? pb.bundleCopied
+    : bundleStatus === 'error'   ? pb.bundleError
+    : pb.copyBundle
 
   return (
-    <div className="mb-3 rounded-xl border-2 border-rose-200 bg-rose-50/80 p-4 shadow-sm">
+    <div dir={dir} className="mb-3 rounded-xl border-2 border-rose-200 bg-rose-50/80 p-4 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="shrink-0 rounded-full bg-rose-100 p-2">
           <AlertTriangle className="w-5 h-5 text-rose-600" />
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-bold text-rose-900 leading-snug">
-            مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog
+            {pb.title}
           </p>
           <p className="mt-1 text-xs text-rose-800 leading-relaxed">
-            {block.support_message_ar ||
-              'هذه الحالة من جانب المزود (Meta / 360dialog) ولا يمكن استعادتها من جانبنا. تم إيقاف إعادة الإرسال التلقائي لهذه الحملة.'}
+            {lang === 'ar' && block.support_message_ar
+              ? block.support_message_ar
+              : pb.fallbackBody}
           </p>
 
-          {/* Per-error breakdown — surfaces the exact reasons so the
-              support engineer has the context up front. */}
           {block.error_keys && block.error_keys.length > 0 && (
             <ul className="mt-2 space-y-1">
               {block.error_keys.map(k => (
@@ -2233,7 +2221,9 @@ function ProviderBlockBanner({
                   <span className="inline-flex items-center rounded-md bg-rose-100 px-1.5 py-0.5 font-mono text-[10px] text-rose-700 border border-rose-200">
                     {k.key}
                   </span>
-                  <span className="flex-1">{k.label_ar}</span>
+                  <span className="flex-1">
+                    {campaignErrorLabel(k.key, k.label_ar, list.runtime, lang)}
+                  </span>
                   <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-rose-700 border border-rose-200">
                     {k.count}
                   </span>
@@ -2260,7 +2250,7 @@ function ProviderBlockBanner({
               {bundleLabel}
             </button>
             <span className="text-[10px] text-rose-700/80">
-              التقرير يتضمن phone_number_id واسم القالب وعيّنة من ردّ Meta الخام.
+              {pb.bundleHint}
             </span>
           </div>
         </div>
@@ -2275,8 +2265,12 @@ function ExcludedCustomersDrillDown({
 }: {
   rows: NonNullable<CampaignDebugSnapshot['sample_excluded_before_send']>
 }) {
-  // Map reason_key → small badge colour. ``unknown`` is amber (data
-  // smell — we should know why) rather than red.
+  const { tStatic, lang, dir } = useLanguage()
+  const list = tStatic(tr => tr.campaignsMgmt.list)
+  const ex = list.diagnostics.excluded
+  const ff = list.diagnostics.fieldFlags
+  const fv = list.diagnostics.fieldValues
+
   const reasonVariant: Record<string, string> = {
     no_phone:              'bg-rose-100 text-rose-700 border-rose-200',
     phone_not_normalized:  'bg-amber-100 text-amber-700 border-amber-200',
@@ -2287,9 +2281,9 @@ function ExcludedCustomersDrillDown({
     unknown:               'bg-amber-100 text-amber-700 border-amber-200',
   }
   return (
-    <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+    <div dir={dir} className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
       <p className="text-[11px] font-semibold text-slate-700 mb-2">
-        تفاصيل المستبعدين (أول {rows.length}):
+        {ex.title.replace('{count}', String(rows.length))}
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         {rows.map(row => (
@@ -2306,78 +2300,78 @@ function ExcludedCustomersDrillDown({
                   reasonVariant[row.reason_key] || reasonVariant.unknown
                 }`}
               >
-                {row.reason_label_ar}
+                {excludeReasonLabel(row.reason_key, row.reason_label_ar, list.runtime, lang)}
               </span>
             </div>
             <p className="text-[10px] text-slate-500 font-mono mb-1.5" dir="ltr">
-              {row.phone_masked || '— بدون رقم —'}
+              {row.phone_masked || ex.noPhone}
             </p>
             <div className="flex flex-wrap gap-1">
-              <FieldFlag label="رقم" value={row.fields.has_phone} />
-              <FieldFlag label="مُطبَّع" value={row.fields.phone_normalized_valid} />
+              <FieldFlag label={ff.phone} value={row.fields.has_phone} valueLabels={fv} />
+              <FieldFlag label={ff.normalized} value={row.fields.phone_normalized_valid} valueLabels={fv} />
               <FieldFlag
-                label="ألغى الاشتراك"
+                label={ff.unsubscribed}
                 value={row.fields.is_unsubscribed}
                 invert
+                valueLabels={fv}
               />
               <FieldFlag
-                label="قيد الإلغاء"
+                label={ff.pendingUnsub}
                 value={row.fields.pending_unsubscribe}
                 invert
+                valueLabels={fv}
               />
               <FieldFlag
-                label="إلغاء تسويق"
+                label={ff.marketingOptOut}
                 value={row.fields.marketing_opt_out}
                 invert
+                valueLabels={fv}
               />
-              {/* Tri-state has_whatsapp — null renders neutral grey
-                  (we haven't been told yet, so we'd have TRIED to send
-                  via Meta and let it tell us). Only explicit false
-                  blocks the send. */}
               <FieldFlag
-                label="واتساب"
+                label={ff.whatsapp}
                 value={row.fields.has_whatsapp}
                 triState
+                valueLabels={fv}
               />
             </div>
           </div>
         ))}
       </div>
       <p className="text-[10px] text-slate-500 mt-2 leading-relaxed">
-        ملاحظة: <strong>واتساب=غير معروف</strong> ليست سبب استبعاد —
-        نُرسل عبر Meta وهو من يؤكّد. فقط <strong>واتساب=لا</strong>
-        المؤكَّد من فشل سابق هو الحاجز.
+        {ex.notePrefix}
+        <strong>{ex.noteStrongUnknown}</strong>
+        {ex.noteMiddle}
+        <strong>{ex.noteStrongNo}</strong>
+        {ex.noteSuffix}
       </p>
     </div>
   )
 }
 
 function FieldFlag({
-  label, value, invert, triState,
+  label, value, invert, triState, valueLabels,
 }: {
   label: string
   value: boolean | null
-  /** When true, ``value=true`` is the BAD state (red). Otherwise
-   *  ``value=true`` is the GOOD state (green). */
   invert?: boolean
-  /** Three-valued: null renders neutral grey ("غير معروف"). */
   triState?: boolean
+  valueLabels: CampaignsListLabels['diagnostics']['fieldValues']
 }) {
   let color: string
   let text: string
   if (triState && value === null) {
     color = 'bg-slate-100 text-slate-500 border-slate-200'
-    text = 'غير معروف'
+    text = valueLabels.unknown
   } else if (value === true) {
     color = invert
       ? 'bg-rose-100 text-rose-700 border-rose-200'
       : 'bg-emerald-100 text-emerald-700 border-emerald-200'
-    text = 'نعم'
+    text = valueLabels.yes
   } else {
     color = invert
       ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
       : 'bg-rose-100 text-rose-700 border-rose-200'
-    text = 'لا'
+    text = valueLabels.no
   }
   return (
     <span className={`text-[9.5px] px-1.5 py-0.5 rounded border ${color}`}>
@@ -2400,17 +2394,17 @@ function UnknownMetaErrorsPanel({
 }: {
   rows: NonNullable<CampaignDebugSnapshot['sample_failed']>
 }) {
+  const { tStatic, dir } = useLanguage()
+  const um = tStatic(tr => tr.campaignsMgmt.list.diagnostics.unknownMeta)
+
   return (
-    <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50/60 p-3">
+    <div dir={dir} className="mt-3 rounded-lg border border-amber-300 bg-amber-50/60 p-3">
       <p className="text-[11px] font-semibold text-amber-800 mb-2 flex items-center gap-1">
         <AlertCircle className="w-3.5 h-3.5" />
-        Meta أعادت خطأ غير مصنّف بعد — افحص الرد الخام أدناه ({rows.length})
+        {um.title.replace('{count}', String(rows.length))}
       </p>
       <p className="text-[10px] text-amber-700 leading-relaxed mb-2">
-        كل عينة فشل صنّفها النظام كـ «خطأ غير مصنّف». افحص قسم
-        «العيّنات الخام من Meta» في الأسفل — يحوي ردّ Meta الكامل لكل
-        محاولة (request + response + code + subcode + type + message).
-        أرسل لقطة منها للدعم لإضافة الكود إلى المُصنِّف.
+        {um.body}
       </p>
       <div className="space-y-2">
         {rows.map((r, i) => (
@@ -2430,9 +2424,9 @@ function UnknownMetaErrorsPanel({
                     .catch(() => {})
                 }
                 className="text-[10px] text-amber-700 hover:text-amber-900 flex items-center gap-1"
-                title="نسخ السطر التقني الكامل"
+                title={um.copyTitle}
               >
-                <Copy className="w-3 h-3" /> نسخ
+                <Copy className="w-3 h-3" /> {um.copy}
               </button>
             </div>
             <div className="grid grid-cols-2 gap-1 text-[10px] mb-1.5">
@@ -2482,31 +2476,30 @@ function RawMetaSamplesPanel({
 }: {
   samples: NonNullable<CampaignDebugSnapshot['raw_meta_error_samples']>
 }) {
+  const { tStatic, dir } = useLanguage()
+  const rm = tStatic(tr => tr.campaignsMgmt.list.diagnostics.rawMeta)
   const [openIdx, setOpenIdx] = useState<number | null>(null)
   const copyAll = () => {
     const payload = JSON.stringify(samples, null, 2)
     navigator.clipboard.writeText(payload).catch(() => {})
   }
   return (
-    <div className="mt-3 rounded-lg border border-slate-300 bg-slate-50/70 p-3">
+    <div dir={dir} className="mt-3 rounded-lg border border-slate-300 bg-slate-50/70 p-3">
       <div className="flex items-center justify-between mb-2 gap-2">
         <p className="text-[11px] font-semibold text-slate-700 flex items-center gap-1">
-          🔬 العيّنات الخام من Meta ({samples.length})
+          🔬 {rm.title.replace('{count}', String(samples.length))}
         </p>
         <button
           type="button"
           onClick={copyAll}
           className="text-[10px] text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-200 rounded px-1.5 py-0.5 bg-white"
-          title="نسخ كل العيّنات كـ JSON"
+          title={rm.copyAllTitle}
         >
-          <Copy className="w-3 h-3" /> نسخ الكل
+          <Copy className="w-3 h-3" /> {rm.copyAll}
         </button>
       </div>
       <p className="text-[10px] text-slate-600 leading-relaxed mb-2">
-        كل عينة تحوي الطلب والاستجابة الكاملين — مفيد للتأكد من
-        ``template.name`` و``language.code`` وعدد المتغيّرات قبل
-        تقديم تذكرة للدعم. عند اختلاف هيكل القالب عن البايلود
-        تظهر شارة "اختلاف القالب" مع التفاصيل.
+        {rm.intro}
       </p>
       <div className="space-y-2">
         {samples.map((s, i) => {
@@ -2532,8 +2525,8 @@ function RawMetaSamplesPanel({
                 <span className="text-slate-700 font-mono flex items-center gap-2" dir="ltr">
                   {s.ts.slice(0, 19).replace('T', ' ')} • {s.recipient}
                   {diff.length > 0 && (
-                    <span className="bg-rose-100 text-rose-700 border border-rose-200 rounded px-1.5 py-0.5 font-sans" dir="rtl">
-                      اختلاف القالب ({diff.length})
+                    <span className="bg-rose-100 text-rose-700 border border-rose-200 rounded px-1.5 py-0.5 font-sans">
+                      {rm.templateMismatch.replace('{count}', String(diff.length))}
                     </span>
                   )}
                 </span>
@@ -2557,9 +2550,9 @@ function RawMetaSamplesPanel({
                       type="button"
                       onClick={copyOne}
                       className="text-[10px] text-slate-600 hover:text-slate-900 flex items-center gap-1 border border-slate-200 rounded px-1.5 py-0.5 bg-slate-50"
-                      title="نسخ السطر التقني الكامل لهذه العينة"
+                      title={rm.copySampleTitle}
                     >
-                      <Copy className="w-3 h-3" /> Copy raw Meta error
+                      <Copy className="w-3 h-3" /> {rm.copySample}
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-1 text-[10px]">
@@ -2589,7 +2582,7 @@ function RawMetaSamplesPanel({
                   {diff.length > 0 && (
                     <div className="rounded-md border border-rose-200 bg-rose-50/70 p-2">
                       <p className="text-[10.5px] font-semibold text-rose-800 mb-1">
-                        🧩 اختلاف بين القالب المعتمد والبايلود المُرسَل
+                        🧩 {rm.payloadDiffTitle}
                       </p>
                       <ul className="space-y-0.5">
                         {diff.map((d, k) => (
@@ -2600,7 +2593,7 @@ function RawMetaSamplesPanel({
                             <span className="bg-rose-100 border border-rose-200 rounded px-1 py-0.5 font-mono text-[9.5px]" dir="ltr">
                               {d.component}{d.index != null ? `#${d.index}` : ''}
                             </span>
-                            <span>{d.message_ar}</span>
+                            <span dir="auto">{d.message_ar}</span>
                             <span className="text-[9.5px] text-rose-500 font-mono" dir="ltr">
                               (expected={String(d.expected)}, sent={String(d.sent)})
                             </span>
@@ -2611,7 +2604,7 @@ function RawMetaSamplesPanel({
                   )}
                   <div>
                     <p className="text-[10px] font-semibold text-slate-600 mb-1">
-                      Request payload (masked):
+                      {rm.requestPayload}
                     </p>
                     <pre
                       className="text-[9.5px] bg-slate-900 text-emerald-200 rounded p-2 overflow-x-auto max-h-56 leading-relaxed whitespace-pre-wrap break-words"
@@ -2622,7 +2615,7 @@ function RawMetaSamplesPanel({
                   </div>
                   <div>
                     <p className="text-[10px] font-semibold text-slate-600 mb-1">
-                      Response payload (raw):
+                      {rm.responsePayload}
                     </p>
                     <pre
                       className="text-[9.5px] bg-slate-900 text-rose-200 rounded p-2 overflow-x-auto max-h-56 leading-relaxed whitespace-pre-wrap break-words"
@@ -2679,10 +2672,12 @@ function DeliverySummaryPanel({
   summary: NonNullable<CampaignDebugSnapshot['delivery_summary']>
   sample:  CampaignDebugSnapshot['sample_sent'] | null
 }) {
+  const { tStatic, dir } = useLanguage()
+  const dl = tStatic(tr => tr.campaignsMgmt.list.diagnostics.delivery)
+  const stages = dl.stages
+
   const total = summary.accepted_by_provider
   if (total === 0 && summary.missing_provider_message_id === 0) {
-    // No sent rows at all — nothing to show; the regular counters
-    // already explain why ("audience zero", "all skipped", etc.).
     return null
   }
 
@@ -2706,12 +2701,6 @@ function DeliverySummaryPanel({
     )
   }
 
-  const stageLabel: Record<string, string> = {
-    accepted_by_provider: 'قبلتها Meta',
-    delivered:            'وصلت للعميل',
-    read:                 'قرأها العميل',
-    failed_after_accept:  'فشلت بعد القبول',
-  }
   const stageTone: Record<string, string> = {
     accepted_by_provider: 'text-slate-600',
     delivered:            'text-sky-700',
@@ -2720,33 +2709,32 @@ function DeliverySummaryPanel({
   }
 
   return (
-    <div className="mt-3 rounded-lg bg-white border border-slate-200 p-3">
+    <div dir={dir} className="mt-3 rounded-lg bg-white border border-slate-200 p-3">
       <div className="flex items-center justify-between mb-2">
         <h4 className="text-[12px] font-bold text-slate-800">
-          📬 توصيل الحملة (من Meta status webhook)
+          📬 {dl.title}
         </h4>
         <span className="text-[10.5px] text-slate-500">
-          {summary.delivered}/{total} وصلت
+          {dl.deliveredOf.replace('{delivered}', String(summary.delivered)).replace('{total}', String(total))}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        {pill('قبلتها Meta',         summary.accepted_by_provider, 'slate')}
-        {pill('وصلت للعميل',         summary.delivered,            'sky')}
-        {pill('قرأها العميل',        summary.read,                 'emerald')}
-        {pill('فشلت بعد القبول',     summary.failed_after_accept,  'amber')}
-        {pill('لم تصل بعد',          summary.unknown_delivery,     'slate')}
+        {pill(stages.accepted_by_provider, summary.accepted_by_provider, 'slate')}
+        {pill(stages.delivered,            summary.delivered,            'sky')}
+        {pill(stages.read,                 summary.read,                 'emerald')}
+        {pill(stages.failed_after_accept,  summary.failed_after_accept,  'amber')}
+        {pill(stages.unknown_delivery,      summary.unknown_delivery,     'slate')}
       </div>
       {summary.missing_provider_message_id > 0 && (
         <div className="mt-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11.5px] px-3 py-2">
-          ⛔ {summary.missing_provider_message_id} صف مُعلَّم
-          {' '}"تم الإرسال" بدون provider_message_id — لا يجوز اعتبارها
-          مُرسلة فعلاً. راجع لوج الإرسال.
+          ⛔ {dl.missingWamid.replace('{n}', String(summary.missing_provider_message_id))}
+          {' '}{dl.missingWamidSuffix}
         </div>
       )}
       {sample && sample.length > 0 && (
         <div className="mt-2 border-t border-slate-100 pt-2">
           <div className="text-[11px] text-slate-500 mb-1">
-            عينة آخر إرسالات:
+            {dl.sampleTitle}
           </div>
           <ul className="space-y-0.5">
             {sample.slice(0, 5).map((row, idx) => (
@@ -2756,11 +2744,11 @@ function DeliverySummaryPanel({
               >
                 <span className="text-slate-600">{row.phone}</span>
                 <span className={stageTone[row.delivery_stage] || 'text-slate-600'}>
-                  {stageLabel[row.delivery_stage] || row.delivery_stage}
+                  {stages[row.delivery_stage as keyof typeof stages] || row.delivery_stage}
                 </span>
                 {!row.has_provider_message_id && (
                   <span className="text-rose-700 text-[10px] ms-1">
-                    (بدون wamid)
+                    {dl.noWamid}
                   </span>
                 )}
               </li>
@@ -2778,6 +2766,9 @@ function RetryHealthPanel({
 }: {
   health: NonNullable<CampaignDebugSnapshot['retry_health']>
 }) {
+  const { tStatic, dir } = useLanguage()
+  const rh = tStatic(tr => tr.campaignsMgmt.list.diagnostics.retryHealth)
+
   const storm = health.retry_storm_detected
   const atCeiling = health.rows_at_attempt_ceiling > 0
   const zombies = health.zombie_sending_count > 0
@@ -2792,21 +2783,21 @@ function RetryHealthPanel({
   const icon = storm ? '🚨' : atCeiling || zombies ? '⚠️' : '🛡️'
   const headline =
     storm
-      ? `تم رصد retry storm — حدّ المحاولات تجاوز ${health.attempt_circuit_breaker}`
+      ? rh.stormHeadline.replace('{limit}', String(health.attempt_circuit_breaker))
       : atCeiling
-      ? `${health.rows_at_attempt_ceiling} صف وصل إلى الحد الأقصى للمحاولات`
+      ? rh.ceilingHeadline.replace('{count}', String(health.rows_at_attempt_ceiling))
       : zombies
-      ? `${health.zombie_sending_count} صف عالق في sending`
-      : 'حماية المحاولات نشطة وكل الصفوف ضمن الحدود الآمنة'
+      ? rh.zombieHeadline.replace('{count}', String(health.zombie_sending_count))
+      : rh.okHeadline
   return (
-    <div className={`mt-3 rounded-lg border ${tone} p-3`}>
+    <div dir={dir} className={`mt-3 rounded-lg border ${tone} p-3`}>
       <p className={`text-[11px] font-semibold ${titleTone} mb-2 flex items-center gap-1`}>
-        {icon} صحة المحاولات (Retry Health)
+        {icon} {rh.title}
       </p>
       <p className={`text-[10.5px] mb-2 ${titleTone}`}>{headline}</p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10.5px]">
         <RetryMetric
-          label="أقصى محاولات"
+          label={rh.maxAttempts}
           value={health.max_attempt_count}
           tone={
             health.max_attempt_count > health.attempt_circuit_breaker ? 'rose'
@@ -2815,32 +2806,29 @@ function RetryHealthPanel({
           }
         />
         <RetryMetric
-          label="صفوف بلغت الحد"
+          label={rh.rowsAtCeiling}
           value={health.rows_at_attempt_ceiling}
           tone={health.rows_at_attempt_ceiling > 0 ? 'amber' : 'slate'}
         />
         <RetryMetric
-          label="صفوف عالقة (sending)"
+          label={rh.zombieRows}
           value={health.zombie_sending_count}
           tone={health.zombie_sending_count > 0 ? 'amber' : 'slate'}
         />
         <RetryMetric
-          label="MAX_SEND_ATTEMPTS"
+          label={rh.maxSendAttempts}
           value={health.max_send_attempts}
           tone="slate"
         />
       </div>
       {storm && (
         <p className="mt-2 text-[10.5px] text-rose-700 leading-relaxed">
-          تم إيقاف الصفوف المتأثرة تلقائياً (error_code=retry_storm). راجع
-          لوغات Railway للبحث عن{' '}
-          <code className="font-mono">campaign_send_retry_storm</code>.
+          {rh.stormNote}
         </p>
       )}
       {!storm && zombies && (
         <p className="mt-2 text-[10.5px] text-amber-700 leading-relaxed">
-          ستعيدها watchdog إلى queued تلقائياً عند إطلاق الإرسال التالي
-          (timeout = {health.sending_timeout_seconds}s).
+          {rh.zombieNote.replace('{seconds}', String(health.sending_timeout_seconds))}
         </p>
       )}
     </div>
@@ -2883,17 +2871,21 @@ function StatusBreakdownPanel({
   breakdown: NonNullable<CampaignDebugSnapshot['status_breakdown']>
   raw: CampaignDebugSnapshot['status_breakdown_raw'] | null | undefined
 }) {
+  const { tStatic, dir } = useLanguage()
+  const sb = tStatic(tr => tr.campaignsMgmt.list.diagnostics.statusBreakdown)
+  const rowLabels = sb.rows
+
   const items: Array<{ key: string; label: string; value: number; tone: 'slate' | 'sky' | 'emerald' | 'rose' | 'amber' }> = [
-    { key: 'queued',                   label: 'في الطابور',        value: breakdown.queued,                   tone: 'sky' },
-    { key: 'sending',                  label: 'جارٍ الإرسال',      value: breakdown.sending,                  tone: 'sky' },
-    { key: 'sent',                     label: 'تم الإرسال',        value: breakdown.sent,                     tone: 'emerald' },
-    { key: 'failed',                   label: 'فشل',               value: breakdown.failed,                   tone: 'rose' },
-    { key: 'skipped_duplicate',        label: 'تخطّي تكرار',       value: breakdown.skipped_duplicate,        tone: 'slate' },
-    { key: 'skipped_invalid',          label: 'بيانات غير صالحة',   value: breakdown.skipped_invalid,          tone: 'slate' },
-    { key: 'skipped_unsubscribed',     label: 'ألغى الاشتراك',     value: breakdown.skipped_unsubscribed,     tone: 'slate' },
-    { key: 'skipped_unreachable',      label: 'غير قابل للوصول',   value: breakdown.skipped_unreachable,      tone: 'slate' },
-    { key: 'skipped_manual_exclusion', label: 'مستبعد يدوياً',     value: breakdown.skipped_manual_exclusion, tone: 'slate' },
-    { key: 'unknown_status',           label: 'حالة غير معروفة',   value: breakdown.unknown_status,           tone: 'amber' },
+    { key: 'queued',                   label: rowLabels.queued,                   value: breakdown.queued,                   tone: 'sky' },
+    { key: 'sending',                  label: rowLabels.sending,                  value: breakdown.sending,                  tone: 'sky' },
+    { key: 'sent',                     label: rowLabels.sent,                     value: breakdown.sent,                     tone: 'emerald' },
+    { key: 'failed',                   label: rowLabels.failed,                   value: breakdown.failed,                   tone: 'rose' },
+    { key: 'skipped_duplicate',        label: rowLabels.skipped_duplicate,        value: breakdown.skipped_duplicate,        tone: 'slate' },
+    { key: 'skipped_invalid',          label: rowLabels.skipped_invalid,          value: breakdown.skipped_invalid,          tone: 'slate' },
+    { key: 'skipped_unsubscribed',     label: rowLabels.skipped_unsubscribed,     value: breakdown.skipped_unsubscribed,     tone: 'slate' },
+    { key: 'skipped_unreachable',      label: rowLabels.skipped_unreachable,      value: breakdown.skipped_unreachable,      tone: 'slate' },
+    { key: 'skipped_manual_exclusion', label: rowLabels.skipped_manual_exclusion, value: breakdown.skipped_manual_exclusion, tone: 'slate' },
+    { key: 'unknown_status',           label: rowLabels.unknown_status,           value: breakdown.unknown_status,           tone: 'amber' },
   ]
   const total = items.reduce((s, it) => s + (it.value || 0), 0)
   const toneClasses: Record<typeof items[number]['tone'], string> = {
@@ -2916,9 +2908,9 @@ function StatusBreakdownPanel({
       )
     : []
   return (
-    <div className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
+    <div dir={dir} className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
       <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
-        📊 توزيع حالات صفوف الإرسال ({total})
+        📊 {sb.title.replace('{total}', String(total))}
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-1.5">
         {items.map(it => (
@@ -2937,7 +2929,7 @@ function StatusBreakdownPanel({
       {exoticRaw.length > 0 && (
         <div className="mt-2 rounded border border-amber-200 bg-amber-50/60 p-2">
           <p className="text-[10.5px] font-semibold text-amber-800 mb-1">
-            ⚠️ قيم حالة غير قانونية مرصودة:
+            ⚠️ {sb.exoticTitle}
           </p>
           <ul className="space-y-0.5">
             {exoticRaw.map(([k, v]) => (
@@ -2961,6 +2953,9 @@ function SampleRowsPanel({
 }: {
   rows: NonNullable<CampaignDebugSnapshot['sample_rows']>
 }) {
+  const { tStatic, dir } = useLanguage()
+  const sr = tStatic(tr => tr.campaignsMgmt.list.diagnostics.sampleRows)
+
   const statusTone = (status: string): string => {
     if (status === 'sent') return 'bg-emerald-100 text-emerald-700 border-emerald-200'
     if (status === 'failed') return 'bg-rose-100 text-rose-700 border-rose-200'
@@ -2969,21 +2964,21 @@ function SampleRowsPanel({
     return 'bg-amber-100 text-amber-700 border-amber-200'
   }
   return (
-    <div className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
+    <div dir={dir} className="mt-3 rounded-lg border border-slate-300 bg-white p-3">
       <p className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1">
-        🔎 أول {rows.length} صفوف من سجل الإرسال
+        🔎 {sr.title.replace('{count}', String(rows.length))}
       </p>
       <div className="overflow-x-auto">
         <table className="w-full text-[10.5px] border-separate border-spacing-y-1">
           <thead>
-            <tr className="text-slate-500 text-right">
-              <th className="px-2 font-medium">#</th>
-              <th className="px-2 font-medium">رقم العميل</th>
-              <th className="px-2 font-medium">الحالة</th>
-              <th className="px-2 font-medium">سبب التخطّي</th>
-              <th className="px-2 font-medium">رمز الخطأ</th>
-              <th className="px-2 font-medium">محاولات</th>
-              <th className="px-2 font-medium">آخر تعديل</th>
+            <tr className="text-slate-500 text-start">
+              <th className="px-2 font-medium">{sr.colId}</th>
+              <th className="px-2 font-medium">{sr.colPhone}</th>
+              <th className="px-2 font-medium">{sr.colStatus}</th>
+              <th className="px-2 font-medium">{sr.colSkip}</th>
+              <th className="px-2 font-medium">{sr.colError}</th>
+              <th className="px-2 font-medium">{sr.colAttempts}</th>
+              <th className="px-2 font-medium">{sr.colUpdated}</th>
             </tr>
           </thead>
           <tbody>
@@ -3013,35 +3008,6 @@ function SampleRowsPanel({
 
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
-/** Append frequency-cap audit lines to the diagnostic ``pre`` block —
- * surfaces WHICH phone was capped and WHEN the last successful Meta
- * send happened so merchants stop blaming "ghost" prior sends. */
-function appendFrequencyCapDiagnostic(lines: string[], snap: CampaignDebugSnapshot) {
-  const fc = snap.frequency_cap
-  if (!fc || fc.capped_count <= 0) return
-  lines.push(
-    `⏱️ حد التكرار (${fc.cap_days} يوماً): تم تخطّي ${fc.capped_count} عميل بسبب إرسال تسويقي ناجح سابق (مسجّل لدى Meta فقط).`,
-  )
-  if (fc.last_successful_sent_at) {
-    let agg = `   أحدث إرسال ناجح في السجل: ${fc.last_successful_sent_at}`
-    if (fc.last_successful_campaign_id != null) {
-      agg += ` (حملة #${fc.last_successful_campaign_id})`
-    }
-    lines.push(agg)
-  }
-  const rows = (fc.frequency_cap_source_rows?.length ?? 0) > 0
-    ? fc.frequency_cap_source_rows
-    : fc.source_rows
-  for (const row of rows || []) {
-    const cid =
-      row.last_successful_campaign_id != null
-        ? `#${row.last_successful_campaign_id}`
-        : '—'
-    const ts = row.last_successful_sent_at ?? '—'
-    lines.push(`   • ${row.phone_masked}: آخر نجاح ${ts} (${cid})`)
-  }
-}
-
 function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   campaign: CampaignRecord
   onStatusChange: (id: number, status: string) => void
@@ -3049,8 +3015,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   onCheck: (id: number, v: boolean) => void
   onDelete: (id: number) => void
 }) {
-  const { t, lang } = useLanguage()
-  const list = t(tr => tr.campaignsMgmt.list)
+  const { tStatic, lang, dir } = useLanguage()
+  const list = tStatic(tr => tr.campaignsMgmt.list)
+  const rowLabels = list.row
+  const dr = list.diagnostics.report
 
   // Prefer the granular lifecycle label (e.g. "ينتظر بدء الإرسال")
   // over the raw status pill ("نشطة"). Fall back to STATUS_META if
@@ -3196,99 +3164,15 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setProviderBlock(snap.provider_block || null)
       setDeliverySummary(snap.delivery_summary || null)
       setSampleSent(snap.sample_sent || null)
-      const r = snap.recipients
-      const total = r.total || campaign.audience_count || 0
-      const skipped = r.skipped_duplicate + r.skipped_invalid +
-                      r.skipped_unsubscribed + r.skipped_unreachable +
-                      r.skipped_manual_exclusion
-      const wa = snap.wa_connection
-        ? `${snap.wa_connection.status} / ${snap.wa_connection.phone_number_id ?? '—'}`
-        : 'لا اتصال'
-      const tpl = snap.template
-        ? `${snap.template.name} (${snap.template.status})`
-        : 'القالب غير موجود'
-      const lines = [
-        `📤 تم الإرسال إلى ${r.sent} من ${total} عملاء${
-          r.failed > 0 ? ` — فشل ${r.failed}` : ''
-        }${skipped > 0 ? ` — تخطّي ${skipped}` : ''}`,
-        `📨 القالب: ${tpl}`,
-        `📞 الواتساب: ${wa}`,
-        `🕐 المُجدول: ${snap.scheduler.campaign_dispatcher_enabled ? 'مفعّل' : 'معطّل'}`,
-      ]
-
-      // Audience funnel — render the complete pipeline so the
-      // merchant can see exactly where customers were dropped. We
-      // ALWAYS show this when the campaign has either an audience
-      // > 0 or has materialised any rows; otherwise it's noise.
-      const f = snap.audience_funnel
-      if (f && (f.raw_audience > 0 || f.materialized_rows > 0)) {
-        lines.push('📊 مسار الجمهور:')
-        lines.push(`  • العدد الأولي: ${f.raw_audience}`)
-        lines.push(`  • قابل للوصول: ${f.after_reachable_filter}`)
-        lines.push(`  • صفوف فعليّة: ${f.materialized_rows}`)
-        if (f.queued_for_send > 0) {
-          lines.push(`  • في الطابور: ${f.queued_for_send}`)
-        }
-        if (f.frequency_cap_skipped > 0) {
-          lines.push(`  • تخطّى التكرار: ${f.frequency_cap_skipped}`)
-        }
-      }
-
-      // Pre-send exclusion breakdown — surfaces "🚫 تم استبعاد 4
-      // عملاء: 2 لا يملكون واتساب، 2 أرقام غير صالحة" instead of
-      // the generic "حملة بلا مستلمين".
-      if ((snap.excluded_reasons_summary || []).length > 0) {
-        lines.push(`🚫 تم استبعاد ${snap.excluded_before_send_count} عميل قبل الإرسال:`)
-        for (const ex of snap.excluded_reasons_summary) {
-          lines.push(`  • ${ex.label_ar} (${ex.count})`)
-        }
-      }
-
-      // Delivery summary — split "sent" into the four downstream
-      // stages so the merchant sees the difference between
-      // "Meta accepted" and "the customer actually received it".
-      // Only render when we have any rows to talk about; otherwise
-      // it's noise on a freshly-launched campaign that hasn't
-      // received any webhooks yet.
-      const ds = snap.delivery_summary
-      if (ds && ds.accepted_by_provider > 0) {
-        lines.push('📬 حالة التسليم:')
-        lines.push(`  • قبلتها Meta: ${ds.accepted_by_provider}`)
-        lines.push(`  • وصلت للعميل: ${ds.delivered}`)
-        lines.push(`  • قرأها العميل: ${ds.read}`)
-        if (ds.failed_after_accept > 0) {
-          lines.push(`  ⚠️ فشلت بعد قبول Meta: ${ds.failed_after_accept}`)
-        }
-        if (ds.unknown_delivery > 0) {
-          lines.push(`  • لم تصل بعد (لم نستلم إشعار من Meta): ${ds.unknown_delivery}`)
-        }
-        if (ds.missing_provider_message_id > 0) {
-          lines.push(
-            `  ⛔ ${ds.missing_provider_message_id} صف مُعلَّم "تم الإرسال" بدون provider_message_id ` +
-            `— لا يجوز اعتبارها مُرسلة فعلاً.`,
-          )
-        }
-      }
-
-      // Failure summary — group by canonical Meta key so the merchant
-      // doesn't see 4 raw rows; just "3 عملاء لا يملكون واتساب".
-      if ((snap.failure_summary || []).length > 0) {
-        lines.push('🚨 تفصيل الفشل:')
-        for (const fs of snap.failure_summary) {
-          const sev = fs.severity === 'minor' ? 'ℹ️'
-                    : fs.severity === 'major' ? '⚠️' : '⛔'
-          lines.push(`  ${sev} ${fs.error_label_ar} (${fs.count})`)
-          if (fs.advice_ar) {
-            lines.push(`     ↳ ${fs.advice_ar}`)
-          }
-        }
-      }
-      appendFrequencyCapDiagnostic(lines, snap)
-      const hints = (snap.hints || []).join(' • ')
-      if (hints) lines.push(`💡 ${hints}`)
+      const lines = buildCampaignDiagnosticLines(
+        snap,
+        campaign.audience_count || 0,
+        list,
+        lang,
+      )
       setDiagnostic(lines.join('\n'))
     } catch (err: any) {
-      setDiagnostic(`تعذر تشغيل التشخيص: ${err?.message || err}`)
+      setDiagnostic(dr.diagnoseFailed.replace('{msg}', String(err?.message || err)))
     } finally {
       setDiagnosing(false)
     }
@@ -3306,26 +3190,25 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    * refreshes on focus + manually whenever the parent reloads it.
    */
   const handleDispatchNow = async () => {
-    let msg =
-      `سيتم تشغيل الإرسال للحملة "${campaign.name}" الآن في الخلفية. ` +
-      `لن يُعاد إرسال أي مستلم تم إرساله مسبقاً.`
+    let msg = dr.dispatchConfirm.replace('{name}', campaign.name)
     if (ignoreFreqCapForDispatch) {
-      msg +=
-        '\n\n⚠️ تم تفعيل «تجاهل حد التكرار لهذه الحملة» — ستُرسل هذه الجولة حتى للعملاء الذين تلقّوا رسالة تسويقية ناجحة مؤخراً (استخدام للاختبار).'
+      msg += dr.dispatchConfirmFreqCap
     }
     if (!confirm(msg)) return
     setDispatching(true)
-    setDiagnostic('⏳ بدأ الإرسال في الخلفية — جاري متابعة التقدّم…')
+    setDiagnostic(dr.dispatchStarted)
     try {
       const res = await campaignsApi.dispatchNow(campaign.id, {
         bypassFrequencyCap: ignoreFreqCapForDispatch,
       })
       if (res.skipped) {
-        setDiagnostic(res.message || 'تم تجاوز الإرسال.')
+        setDiagnostic(res.message || dr.dispatchSkipped)
         return
       }
       if (res.ok === false) {
-        setDiagnostic(`❌ تعذر تشغيل الإرسال: ${res.error || res.message || 'unknown'}`)
+        setDiagnostic(
+          dr.dispatchFailed.replace('{msg}', res.error || res.message || 'unknown'),
+        )
         return
       }
       // Surface the pre-dispatch bookkeeping so the merchant sees
@@ -3334,16 +3217,16 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       const preLines: string[] = []
       if ((res.rescheduled_failed ?? 0) > 0) {
         preLines.push(
-          `🔁 تمت إعادة جدولة ${res.rescheduled_failed} صف فاشل ضمن حدّ المحاولات.`,
+          dr.dispatchRescheduled.replace('{n}', String(res.rescheduled_failed)),
         )
       }
       if ((res.revived_zombies ?? 0) > 0) {
         preLines.push(
-          `🧟 تم تحرير ${res.revived_zombies} صف عالق في sending وإعادته إلى queued.`,
+          dr.dispatchRevived.replace('{n}', String(res.revived_zombies)),
         )
       }
       if (preLines.length > 0) {
-        setDiagnostic(preLines.join('\n') + '\n\n⏳ جاري متابعة التقدّم…')
+        setDiagnostic(preLines.join('\n') + '\n\n' + dr.dispatchProgress)
       }
       // Background task is now running. Poll the debug endpoint a
       // few times so the merchant sees counters tick up without
@@ -3361,34 +3244,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           setSampleRows(snap.sample_rows || [])
           setRetryHealth(snap.retry_health || null)
           setProviderBlock(snap.provider_block || null)
-          const r = snap.recipients
-          const total = r.total || campaign.audience_count || 0
-          const lifecycleLabel =
-            LIFECYCLE_META[snap.campaign.lifecycle]?.label
-            || snap.campaign.lifecycle
-          const lines: string[] = [
-            `📤 تم الإرسال إلى ${r.sent} من ${total} عملاء`,
-          ]
-          if (r.queued > 0) lines.push(`⏳ في الطابور: ${r.queued}`)
-          if (r.failed > 0) lines.push(`❌ فشل: ${r.failed}`)
-          if ((snap.failure_summary || []).length > 0) {
-            lines.push('🚨 تفصيل الفشل:')
-            for (const fs of snap.failure_summary) {
-              const sev = fs.severity === 'minor' ? 'ℹ️'
-                        : fs.severity === 'major' ? '⚠️' : '⛔'
-              lines.push(`  ${sev} ${fs.error_label_ar} (${fs.count})`)
-            }
-          }
-          // Surface the funnel during polling too — the merchant
-          // can see "raw=4, after_reachable=0" the moment we know.
-          if ((snap.excluded_reasons_summary || []).length > 0) {
-            lines.push(`🚫 مستبعدون: ${snap.excluded_before_send_count}`)
-            for (const ex of snap.excluded_reasons_summary) {
-              lines.push(`  • ${ex.label_ar} (${ex.count})`)
-            }
-          }
-          appendFrequencyCapDiagnostic(lines, snap)
-          lines.push(`🚦 الحالة: ${lifecycleLabel}`)
+          const lines = buildDispatchPollLines(
+            snap,
+            campaign.audience_count || 0,
+            list,
+            lang,
+          )
           lastSnapshot = lines.join('\n')
           setDiagnostic(lastSnapshot)
           // Refresh the parent list so the lifecycle pill updates.
@@ -3407,13 +3268,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         }
       }
       if (!lastSnapshot) {
-        setDiagnostic(
-          res.message ||
-          '✅ تم تشغيل الإرسال في الخلفية. حدّث الصفحة لرؤية النتيجة.'
-        )
+        setDiagnostic(res.message || dr.dispatchDone)
       }
     } catch (err: any) {
-      setDiagnostic(`❌ تعذر تشغيل الإرسال: ${err?.message || err}`)
+      setDiagnostic(dr.dispatchFailed.replace('{msg}', String(err?.message || err)))
     } finally {
       setDispatching(false)
       setIgnoreFreqCapForDispatch(false)
@@ -3462,24 +3320,24 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               a tiny "نسخ الخطأ التقني" copy icon so support can
               paste the raw Meta payload into a ticket without having
               to ask the merchant to find it. */}
-          {(campaign.last_error_ar || campaign.last_error) && (
+          {(campaign.last_error_ar || campaign.last_error || campaign.last_error_key) && (
             <div className="flex items-center gap-1 mt-1 max-w-[200px]">
               <p
                 className="text-[10px] text-red-500 truncate flex-1"
                 title={campaign.last_error || ''}
               >
-                {campaign.last_error_ar || campaign.last_error}
+                {campaignLastErrorDisplay(campaign, list.runtime, lang) || campaign.last_error}
               </p>
               {campaign.last_error && (
                 <button
                   type="button"
                   onClick={() => {
                     navigator.clipboard.writeText(campaign.last_error || '')
-                      .then(() => setDiagnostic('📋 تم نسخ الخطأ التقني إلى الحافظة'))
-                      .catch(() => setDiagnostic('تعذر النسخ — انسخ يدوياً.'))
+                      .then(() => setDiagnostic(rowLabels.errorCopied))
+                      .catch(() => setDiagnostic(rowLabels.copyFailed))
                   }}
                   className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
-                  title="نسخ الخطأ التقني للدعم"
+                  title={rowLabels.copyTechnicalErrorTitle}
                 >
                   <Copy className="w-3 h-3" />
                 </button>
@@ -3492,7 +3350,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               className="flex items-center gap-0.5 text-[10px] text-red-500 hover:text-red-700 mt-1 cursor-pointer"
             >
               <AlertCircle className="w-3 h-3" />
-              {showErrors ? 'إخفاء التفاصيل' : 'عرض سبب الفشل'}
+              {showErrors ? rowLabels.hideDetails : rowLabels.showFailureReason}
             </button>
           )}
           {campaign.status === 'completed' && failedCount > 0 && (
@@ -3501,7 +3359,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               className="flex items-center gap-0.5 text-[10px] text-amber-500 hover:text-amber-700 mt-1 cursor-pointer"
             >
               <AlertCircle className="w-3 h-3" />
-              {failedCount} فشلت
+              {rowLabels.failedCount.replace('{count}', String(failedCount))}
             </button>
           )}
         </td>
@@ -3510,7 +3368,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
           <span className="text-xs text-slate-700">{fmtCount(campaign.sent_count, lang)}</span>
           {failedCount > 0 && (
             <span className="text-[10px] text-red-500 block mt-0.5">
-              {failedCount} فشلت
+              {rowLabels.failedCount.replace('{count}', String(failedCount))}
             </span>
           )}
         </td>
@@ -3531,7 +3389,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 onClick={() => onStatusChange(campaign.id, 'paused')}
                 className="text-xs text-red-400 hover:text-red-600 transition-colors flex items-center gap-1"
               >
-                <XCircle className="w-3.5 h-3.5" /> إيقاف
+                <XCircle className="w-3.5 h-3.5" /> {rowLabels.pause}
               </button>
             )}
             {campaign.status === 'paused' && (
@@ -3539,7 +3397,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 onClick={() => onStatusChange(campaign.id, 'active')}
                 className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
               >
-                <Send className="w-3.5 h-3.5" /> استئناف
+                <Send className="w-3.5 h-3.5" /> {rowLabels.resume}
               </button>
             )}
             {campaign.status === 'draft' && (
@@ -3547,7 +3405,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 onClick={() => onStatusChange(campaign.id, 'active')}
                 className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
               >
-                <Send className="w-3.5 h-3.5" /> إطلاق
+                <Send className="w-3.5 h-3.5" /> {rowLabels.launch}
               </button>
             )}
             {/* Diagnose + manual dispatch — visible whenever a campaign
@@ -3558,10 +3416,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               onClick={handleDiagnose}
               disabled={diagnosing}
               className="text-xs text-slate-500 hover:text-slate-800 transition-colors flex items-center gap-1 disabled:opacity-50"
-              title="تشخيص حالة الإرسال"
+              title={rowLabels.diagnoseTitle}
             >
               <AlertCircle className="w-3.5 h-3.5" />
-              {diagnosing ? 'جاري…' : 'تشخيص'}
+              {diagnosing ? rowLabels.diagnosing : rowLabels.diagnose}
             </button>
             {/* Hide the dispatch CTA entirely on provider-blocked
                 campaigns — retrying produces the same restriction
@@ -3569,31 +3427,31 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 The merchant gets a "Contact 360dialog" workflow
                 instead, surfaced by ProviderBlockBanner below. */}
             {!providerBlocked && (isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
-              <div className="flex flex-col items-end gap-1">
-                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-600 max-w-[155px] leading-snug text-right">
+              <div className="flex flex-col items-end gap-1" dir={dir}>
+                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-600 max-w-[155px] leading-snug text-start">
                   <input
                     type="checkbox"
                     className="rounded border-slate-300 text-amber-600 shrink-0"
                     checked={ignoreFreqCapForDispatch}
                     onChange={e => setIgnoreFreqCapForDispatch(e.target.checked)}
                   />
-                  <span>تجاهل حد التكرار لهذه الحملة</span>
+                  <span>{rowLabels.ignoreFreqCap}</span>
                 </label>
                 <button
                   onClick={handleDispatchNow}
                   disabled={dispatching}
                   className="text-xs text-amber-600 hover:text-amber-800 transition-colors flex items-center gap-1 disabled:opacity-50"
-                  title="تشغيل الإرسال يدوياً الآن"
+                  title={rowLabels.dispatchTitle}
                 >
                   <Send className="w-3.5 h-3.5" />
-                  {dispatching ? 'جاري…' : 'إرسال الآن'}
+                  {dispatching ? rowLabels.dispatching : rowLabels.dispatchNow}
                 </button>
               </div>
             )}
             <button
               onClick={() => onDelete(campaign.id)}
               className="text-xs text-slate-300 hover:text-red-500 transition-colors p-1 rounded"
-              title="حذف"
+              title={rowLabels.delete}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -3618,7 +3476,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 campaigns; immediate ones get nothing (the panel
                 self-suppresses based on the API response). */}
             <WavesPanel campaignId={campaign.id} />
-            <pre className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
+            <pre dir={dir} className="text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono bg-white border border-slate-200 rounded-lg p-3 leading-relaxed">
               {diagnostic}
             </pre>
             {deliverySummary && (
@@ -3654,10 +3512,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       {showErrors && hasErrors && (
         <tr className="bg-red-50/60">
           <td colSpan={CAMPAIGN_TABLE_COL_COUNT} className="px-6 py-3">
-            <div className="rounded-lg bg-red-100/80 border border-red-200 p-3">
+            <div dir={dir} className="rounded-lg bg-red-100/80 border border-red-200 p-3">
               <p className="text-xs font-semibold text-red-700 mb-1.5 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5" />
-                تفاصيل فشل الإرسال ({failedCount} من {campaign.audience_count})
+                {list.diagnostics.dispatchErrors.title
+                  .replace('{failed}', String(failedCount))
+                  .replace('{total}', String(campaign.audience_count))}
               </p>
               <ul className="space-y-1">
                 {campaign.dispatch_errors.map((err, i) => (
@@ -3694,8 +3554,9 @@ export default function Campaigns() {
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const { t, lang } = useLanguage()
-  const list = t(tr => tr.campaignsMgmt.list)
+  const { tStatic, t, lang, dir } = useLanguage()
+  const list = tStatic(tr => tr.campaignsMgmt.list)
+  void UI_ONLY_GUARD
 
   const tableHeaders = useMemo(
     () => [
@@ -3706,6 +3567,7 @@ export default function Campaigns() {
       list.table.sent,
       list.table.openRate,
       list.table.conversion,
+      list.table.actions,
     ],
     [list],
   )
@@ -3829,7 +3691,7 @@ export default function Campaigns() {
   }, [campaigns])
 
   return (
-    <div className="space-y-6">
+    <div dir={dir} className="space-y-6">
       <PageHeader
         title={t(tr => tr.pages.campaigns.title)}
         subtitle={list.pageSubtitle}
@@ -3840,16 +3702,16 @@ export default function Campaigns() {
                 <button
                   onClick={() => setShowMediaEnv(true)}
                   className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                  title="فحص إعدادات الوسائط على الخادم (OpenAI / تخزين / ffmpeg) — Admin only"
+                  title={list.admin.mediaCheckTitle}
                 >
-                  <AlertCircle className="w-3.5 h-3.5" /> فحص الوسائط
+                  <AlertCircle className="w-3.5 h-3.5" /> {list.admin.mediaCheck}
                 </button>
                 <button
                   onClick={() => setShowAdminSend(true)}
                   className="text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                  title="إرسال قالب واتساب مباشرة عبر المزود — يتجاوز نظام الحملات (Admin only)"
+                  title={list.admin.directSendTitle}
                 >
-                  <Send className="w-3.5 h-3.5" /> إرسال اختبار مباشر
+                  <Send className="w-3.5 h-3.5" /> {list.admin.directSend}
                 </button>
               </>
             )}
@@ -3940,28 +3802,28 @@ export default function Campaigns() {
 
       <div className="card overflow-hidden">
         {selectedIds.size > 0 && (
-          <div className="flex items-center justify-between px-5 py-2.5 bg-brand-50 border-b border-brand-100">
+          <div dir={dir} className="flex items-center justify-between px-5 py-2.5 bg-brand-50 border-b border-brand-100">
             <span className="text-xs font-medium text-brand-700">
-              تم تحديد {selectedIds.size} حملة
+              {list.bulk.selected.replace('{count}', String(selectedIds.size))}
             </span>
             <div className="flex items-center gap-2">
               <button
                 onClick={handleBulkDelete}
                 className="flex items-center gap-1.5 text-xs font-medium text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors"
               >
-                <Trash2 className="w-3.5 h-3.5" /> حذف المحدد
+                <Trash2 className="w-3.5 h-3.5" /> {list.bulk.deleteSelected}
               </button>
               <button
                 onClick={() => setSelectedIds(new Set())}
                 className="text-xs text-slate-500 hover:text-slate-700 px-2 py-1.5"
               >
-                إلغاء
+                {list.bulk.cancel}
               </button>
             </div>
           </div>
         )}
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table dir={dir} className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
               <tr>
                 <th className="px-3 py-3 w-8">

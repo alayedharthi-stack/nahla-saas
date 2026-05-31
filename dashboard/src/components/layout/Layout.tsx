@@ -193,7 +193,7 @@ const PAGE_META: Record<string, MetaSelector> = {
 
 export default function Layout() {
   const { pathname } = useLocation()
-  const { t } = useLanguage()
+  const { t, dir } = useLanguage()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const metaSelector = PAGE_META[pathname] ?? ((_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
@@ -216,7 +216,7 @@ export default function Layout() {
         <ImpersonationBanner />
         <SupportAccessWarningBanner />
         <TrialBanner />
-        <main className="flex-1 p-3 md:p-6 overflow-x-auto">
+        <main dir={dir} className="flex-1 p-3 md:p-6 overflow-x-auto">
           <Outlet />
         </main>
         {/* iOS home-bar safe area */}

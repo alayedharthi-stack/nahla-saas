@@ -30,17 +30,18 @@
  * Each of those needs its own diagnostic surface — collapsing them
  * into the generic Integrations row would hide the actionable bits.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Loader2,
   Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
   Store, MessageCircle, Database, ArrowDown, Bot, Megaphone, ShoppingBag,
-  Download, Clock,
+  Download, Clock, Image as ImageIcon,
 } from 'lucide-react'
 import {
   catalogApi,
   type CatalogDiagnostics,
   type CatalogProductDiagResponse,
+  type CatalogProductDiagRow,
   type CatalogResyncReport,
   type CatalogStatus,
   type CatalogTestSendResult,
@@ -50,6 +51,7 @@ import {
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
 import { useLanguage } from '../i18n/context'
+import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
 
 function localeTag(lang: Lang): string {
@@ -69,6 +71,15 @@ function fmtImportAt(iso: string | null, lang: Lang): string {
   }
 }
 
+function fmtProductPrice(
+  price: string | null,
+  currency: string | null | undefined,
+): string {
+  if (!price) return '—'
+  const c = currency?.trim()
+  return c ? `${price} ${c}` : price
+}
+
 type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
 
 const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
@@ -85,10 +96,11 @@ function sourceStyle(source: ProductSource | DominantSource) {
 }
 
 function SourceBadge({ source, size = 'sm' }: { source: ProductSource | DominantSource; size?: 'sm' | 'md' }) {
-  const { t } = useLanguage()
+  const { tStatic } = useLanguage()
   const style = sourceStyle(source)
   const key = (source in SOURCE_STYLES ? source : 'unknown') as CatalogSourceKey
-  const label = t(tr => tr.catalogMgmt.sources[key])
+  const sources = tStatic(tr => tr.catalogMgmt.sources)
+  const label = sources[key]
   const cls = size === 'md' ? 'text-xs px-2.5 py-1' : 'text-[11px] px-2 py-0.5'
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border font-semibold ${cls} ${style.bg} ${style.text}`}>
@@ -128,8 +140,9 @@ function Card(props: { title: string; icon?: React.ReactNode; children: React.Re
 // ── Page ─────────────────────────────────────────────────────────────
 
 export default function WhatsAppCatalog() {
-  const { t, lang, dir } = useLanguage()
-  const cm = t(tr => tr.catalogMgmt)
+  const { tStatic, lang, dir } = useLanguage()
+  const cm = tStatic(tr => tr.catalogMgmt)
+  void UI_ONLY_GUARD
 
   const [status, setStatus]         = useState<CatalogStatus | null>(null)
   const [loading, setLoading]       = useState(true)
@@ -159,6 +172,10 @@ export default function WhatsAppCatalog() {
   // and on network failure. The page renders WITHOUT the diagnostics
   // card if this is null, so the legacy status surface keeps working.
   const [diagnostics, setDiagnostics] = useState<CatalogDiagnostics | null>(null)
+
+  // Bumps ImportedProductsSection after import / resync / manual add.
+  const [productsRefresh, setProductsRefresh] = useState(0)
+  const bumpProductList = () => setProductsRefresh(v => v + 1)
 
   const loadDiagnostics = async () => {
     try {
@@ -198,6 +215,7 @@ export default function WhatsAppCatalog() {
       await refresh()
       await loadProducts()
       await loadDiagnostics()
+      bumpProductList()
     } catch (e: any) {
       setError(e?.message ?? cm.messages.resyncFailed)
     } finally {
@@ -718,7 +736,7 @@ export default function WhatsAppCatalog() {
                   {products ? products.coverage.total : '—'}
                 </span>
                 {products && products.coverage.total > 0 && (
-                  <span className="text-xs text-slate-500 mr-2">
+                  <span className="text-xs text-slate-500 ms-2">
                     ({Math.round(products.coverage.with_rid / products.coverage.total * 100)}%)
                   </span>
                 )}
@@ -765,6 +783,7 @@ export default function WhatsAppCatalog() {
         onChanged={async () => {
           await loadProducts()
           await loadDiagnostics()
+          bumpProductList()
         }}
       />
 
@@ -777,9 +796,13 @@ export default function WhatsAppCatalog() {
           onChanged={async () => {
             await loadProducts()
             await loadDiagnostics()
+            bumpProductList()
           }}
         />
       )}
+
+      {/* ── Imported products grid (read-only confirmation) ─────── */}
+      <ImportedProductsSection refreshTrigger={productsRefresh} />
 
       {/* ── Test send ────────────────────────────────────────────── */}
       <Card title={cm.testSend.title} icon={<Send className="w-5 h-5 text-emerald-600" />}>
@@ -903,9 +926,10 @@ function HubNode(props: {
   subtitle?: string
   status: NodeStatus
 }) {
-  const { t } = useLanguage()
+  const { tStatic } = useLanguage()
   const s = NODE_STATUS_STYLE[props.status]
-  const label = t(tr => tr.catalogMgmt.hub.nodeStatus[props.status])
+  const nodeStatus = tStatic(tr => tr.catalogMgmt.hub.nodeStatus)
+  const label = nodeStatus[props.status]
   return (
     <div className={`relative rounded-xl border p-3 ${s.pill}`}>
       <div className="flex items-center gap-2">
@@ -917,7 +941,7 @@ function HubNode(props: {
           )}
         </div>
       </div>
-      <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
+      <div className="absolute top-1.5 start-1.5 flex items-center gap-1">
         <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
         <span className="text-[10px] text-slate-600">{label}</span>
       </div>
@@ -926,8 +950,8 @@ function HubNode(props: {
 }
 
 function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
-  const { t, lang } = useLanguage()
-  const hub = t(tr => tr.catalogMgmt.hub)
+  const { tStatic, lang, dir } = useLanguage()
+  const hub = tStatic(tr => tr.catalogMgmt.hub)
   const d = props.diagnostics
   const breakdown = d.products.source_breakdown
 
@@ -953,6 +977,7 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
 
   return (
     <Card title={hub.title} icon={<Database className="w-5 h-5 text-emerald-600" />}>
+      <div dir={dir}>
       <p className="text-xs text-slate-600 leading-relaxed mb-4">
         {hub.intro}
       </p>
@@ -1058,11 +1083,10 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
           />
         </div>
       </div>
+      </div>
     </Card>
   )
 }
-
-
 // ─────────────────────────────────────────────────────────────────────
 // Meta import section (Path 4)
 // ─────────────────────────────────────────────────────────────────────
@@ -1072,9 +1096,9 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
 // would fail preflight anyway, so showing a button would be confusing.
 
 function MetaImportSection(props: { onChanged: () => Promise<void> }) {
-  const { t } = useLanguage()
-  const mi = t(tr => tr.catalogMgmt.metaImport)
-  const msgs = t(tr => tr.catalogMgmt.messages)
+  const { tStatic, dir } = useLanguage()
+  const mi = tStatic(tr => tr.catalogMgmt.metaImport)
+  const msgs = tStatic(tr => tr.catalogMgmt.messages)
 
   const [busy, setBusy]               = useState(false)
   const [error, setError]             = useState<string | null>(null)
@@ -1138,7 +1162,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
   return (
     <div id="meta-import-section">
     <Card title={mi.title} icon={<Download className="w-5 h-5 text-emerald-600" />}>
-      <div className="space-y-3">
+      <div className="space-y-3" dir={dir}>
         <p className="text-xs text-slate-600 leading-relaxed">
           {mi.intro}
         </p>
@@ -1204,6 +1228,136 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
 
 
 // ─────────────────────────────────────────────────────────────────────
+// Imported products grid — read-only confirmation below Meta import
+// ─────────────────────────────────────────────────────────────────────
+
+function ImportedProductsSection(props: { refreshTrigger: number }) {
+  const { tStatic, lang, dir } = useLanguage()
+  const ip = tStatic(tr => tr.catalogMgmt.importedProducts)
+
+  const [rows, setRows]       = useState<CatalogProductDiagRow[]>([])
+  const [total, setTotal]     = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const r = await catalogApi.products(200, 0)
+      setRows(r.rows)
+      setTotal(r.tenant_total ?? r.total)
+    } catch (e: any) {
+      setRows([])
+      setTotal(0)
+      setError(e?.message ?? ip.loadFailed)
+    } finally {
+      setLoading(false)
+    }
+  }, [ip.loadFailed])
+
+  useEffect(() => { void load() }, [load, props.refreshTrigger])
+
+  return (
+    <Card title={ip.title} icon={<Package className="w-5 h-5 text-emerald-600" />}>
+      <div className="space-y-4" dir={dir}>
+        <p className="text-xs text-slate-600 leading-relaxed">{ip.intro}</p>
+
+        {!loading && total > 0 && (
+          <p className="text-xs font-semibold text-slate-500">
+            {ip.count.replace('{count}', fmtCount(total, lang))}
+          </p>
+        )}
+
+        {error && (
+          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
+            <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex flex-col items-center justify-center py-16 text-slate-500">
+            <Loader2 className="w-7 h-7 animate-spin mb-3 text-emerald-500" />
+            <p className="text-sm">{ip.loading}</p>
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="w-16 h-16 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center mb-4">
+              <Package className="w-8 h-8 text-slate-400" />
+            </div>
+            <h4 className="text-base font-bold text-slate-800 mb-1">{ip.emptyTitle}</h4>
+            <p className="text-sm text-slate-500 max-w-md leading-relaxed">{ip.emptyDesc}</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-600 uppercase tracking-wide">
+                <tr>
+                  <th className="text-start py-3 px-3 font-semibold w-16"></th>
+                  <th className="text-start py-3 px-3 font-semibold">{ip.colProduct}</th>
+                  <th className="text-start py-3 px-3 font-semibold">{ip.colPrice}</th>
+                  <th className="text-start py-3 px-3 font-semibold">{ip.colRetailerId}</th>
+                  <th className="text-start py-3 px-3 font-semibold">{ip.colSource}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(row => {
+                  const retailerId = row.meta_retailer_id || row.effective_retailer_id || '—'
+                  return (
+                    <tr key={row.id} className="border-t border-slate-100 hover:bg-slate-50/60">
+                      <td className="py-3 px-3">
+                        <div
+                          className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0"
+                          title={row.image_url ? undefined : ip.noImage}
+                        >
+                          {row.image_url ? (
+                            <img
+                              src={row.image_url}
+                              alt=""
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <ImageIcon className="w-5 h-5 text-slate-300" />
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-slate-900 leading-snug">{row.title}</div>
+                        <div className="text-[11px] text-slate-400 font-mono mt-0.5" dir="ltr">
+                          #{row.id}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-slate-700 font-medium whitespace-nowrap">
+                        {fmtProductPrice(row.price, row.currency)}
+                      </td>
+                      <td className="py-3 px-3">
+                        <code
+                          dir="ltr"
+                          className="text-[11px] font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 break-all"
+                        >
+                          {retailerId}
+                        </code>
+                      </td>
+                      <td className="py-3 px-3">
+                        <SourceBadge source={row.source} />
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
 // Manual products section (Path 3)
 // ─────────────────────────────────────────────────────────────────────
 //
@@ -1225,9 +1379,9 @@ function ManualProductsSection(props: {
   currentSource: DominantSource
   onChanged: () => Promise<void>
 }) {
-  const { t } = useLanguage()
-  const manual = t(tr => tr.catalogMgmt.manual)
-  const msgs = t(tr => tr.catalogMgmt.messages)
+  const { tStatic, dir } = useLanguage()
+  const manual = tStatic(tr => tr.catalogMgmt.manual)
+  const msgs = tStatic(tr => tr.catalogMgmt.messages)
 
   const [open, setOpen]       = useState(false)
   const [busy, setBusy]       = useState(false)
@@ -1285,7 +1439,7 @@ function ManualProductsSection(props: {
   return (
     <div id="manual-product-section">
     <Card title={manual.title} icon={<Store className="w-5 h-5 text-emerald-600" />}>
-      <div className="space-y-4">
+      <div className="space-y-4" dir={dir}>
         <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3 leading-relaxed">
           {explainer}
         </div>

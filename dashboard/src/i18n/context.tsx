@@ -9,6 +9,7 @@
  *
  *   // Type-safe translation access — full autocomplete in IDEs:
  *   t(tr => tr.nav.items.overview)          // → 'نظرة عامة' | 'Overview'
+ *   tStatic(tr => tr.nav.items.overview)    // same — explicit static-only API
  *   t(tr => tr.actions.newCoupon)           // → 'كوبون جديد' | 'New Coupon'
  */
 
@@ -22,6 +23,7 @@ import {
 import type { Lang, Translations } from './types'
 import ar from './ar'
 import en from './en'
+import { createTStatic, type StaticLabelSelector } from './tStatic'
 
 // ── Translation map ───────────────────────────────────────────────────────────
 
@@ -39,6 +41,11 @@ interface LangContextValue {
   setLang: (lang: Lang) => void
   /** Type-safe accessor — accepts a selector function over the translation tree. */
   t: <T>(selector: (tr: Translations) => T) => T
+  /**
+   * Static UI labels ONLY. Same as `t` but named to signal that runtime
+   * merchant/customer/API values must never be passed here.
+   */
+  tStatic: <T>(selector: StaticLabelSelector<T>) => T
 }
 
 const LangContext = createContext<LangContextValue | null>(null)
@@ -98,9 +105,10 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   }
 
   const t = <T,>(selector: (tr: Translations) => T) => selector(tr)
+  const tStatic = createTStatic(() => tr)
 
   return (
-    <LangContext.Provider value={{ lang, dir, isRTL, setLang, t }}>
+    <LangContext.Provider value={{ lang, dir, isRTL, setLang, t, tStatic }}>
       {children}
     </LangContext.Provider>
   )
