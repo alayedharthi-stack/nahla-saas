@@ -1,6 +1,7 @@
 import type { Translations } from './types'
 import { customersPageAr } from './customersPageLabels'
 import { campaignsListAr } from './campaignsListPageLabels'
+import { templatesPageExtraAr } from './templatesPageLabels'
 
 /**
  * Arabic translations — primary language for Nahla SaaS.
@@ -1163,6 +1164,11 @@ const ar: Translations = {
         bodyLabel: 'نص الرسالة *',
         footerLabel: 'نص التذييل (اختياري)',
         charCountSuffix: 'حرف',
+        headerPlaceholder: 'عنوان الرسالة…',
+        headerExamplePlaceholder: 'مثال: عرض خاص لك 🎁',
+        bodyPlaceholder: 'نص الرسالة…',
+        bodyExamplePlaceholder: 'مثال:\nمرحباً {{1}}،\nلديك عرض خاص — احصل على خصم {{2}} باستخدام كود: {{3}}',
+        footerPlaceholder: 'مثال: نحلة — مساعد متجرك 🐝',
       },
       step3: {
         intro: 'أضف أزراراً تفاعلية اختيارية (حتى 3 أزرار).',
@@ -1219,6 +1225,9 @@ const ar: Translations = {
       previewLabel: 'معاينة',
       save: 'حفظ التعديلات',
       saving: 'جارٍ الحفظ…',
+      headerPlaceholder: 'عنوان الرسالة…',
+      bodyPlaceholder: 'نص الرسالة…',
+      footerPlaceholder: 'مثال: نحلة — مساعد متجرك 🐝',
       errors: {
         bodyRequired: 'نص الرسالة مطلوب',
         saveFailed: 'حدث خطأ — تأكد من البيانات وحاول مجدداً',
@@ -1366,6 +1375,7 @@ const ar: Translations = {
       description:
         'أنشئ الكوبون داخل سلة بنفسك ثم ضع الكود + رابط المتجر هنا — وترسله نحلة عبر واتساب بزر «اطلب الآن». حل مؤقت قبل اعتماد سلة لـ API الكوبونات.',
     },
+    page: templatesPageExtraAr,
   },
 
   campaignsMgmt: {

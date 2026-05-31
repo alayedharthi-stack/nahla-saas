@@ -249,6 +249,16 @@ function formatStrategyDelay(
   return ss.delayDays.replace('{n}', days)
 }
 
+function templateDisplayName(
+  tpl: { display_name_ar?: string | null; library_label_ar?: string | null; name: string },
+  lang: Lang,
+): string {
+  if (lang === 'ar') {
+    return tpl.display_name_ar || tpl.library_label_ar || tpl.name.replace(/_/g, ' ')
+  }
+  return tpl.name.replace(/_/g, ' ')
+}
+
 function step3EmptyHint(
   recommendation: TemplateRecommendation | null,
   lang: Lang,
@@ -259,7 +269,7 @@ function step3EmptyHint(
   }
   const next = recommendation?.next_best_template
   if (!next) return s3.emptyNoTemplates
-  const name = next.display_name_ar || next.name.replace(/_/g, ' ')
+  const name = templateDisplayName(next, lang)
   switch ((next.status || '').toUpperCase()) {
     case 'PENDING':  return s3.emptyPending.replace('{name}', name)
     case 'REJECTED': return s3.emptyRejected.replace('{name}', name)
@@ -346,9 +356,9 @@ function Step1Goal({
   goals: CampaignGoal[]
   loading: boolean
 }) {
-  const { t, lang } = useLanguage()
-  const s1 = t(tr => tr.campaignsMgmt.step1)
-  const cm = t(tr => tr.campaignsMgmt)
+  const { tStatic, lang } = useLanguage()
+  const s1 = tStatic(tr => tr.campaignsMgmt.step1)
+  const cm = tStatic(tr => tr.campaignsMgmt)
 
   if (loading) {
     return (
@@ -412,9 +422,9 @@ function Step2Segment({
   loading: boolean
   goals: CampaignGoal[]
 }) {
-  const { t, lang } = useLanguage()
-  const s2 = t(tr => tr.campaignsMgmt.step2)
-  const cm = t(tr => tr.campaignsMgmt)
+  const { tStatic, lang } = useLanguage()
+  const s2 = tStatic(tr => tr.campaignsMgmt.step2)
+  const cm = tStatic(tr => tr.campaignsMgmt)
 
   // Reorder so segments "natural" to the chosen goal float to the top —
   // the merchant most often wants those first.
@@ -620,9 +630,9 @@ function TemplateBadge({
 function RecommendedTemplateCard({
   tpl, selected, onClick,
 }: { tpl: RecommendedTemplate; selected: boolean; onClick: () => void }) {
-  const { t, lang } = useLanguage()
-  const s3 = t(tr => tr.campaignsMgmt.step3)
-  const tm = t(tr => tr.templatesMgmt)
+  const { tStatic, lang } = useLanguage()
+  const s3 = tStatic(tr => tr.campaignsMgmt.step3)
+  const tm = tStatic(tr => tr.templatesMgmt)
 
   const header = getTemplateHeader(tpl)
   const body   = getTemplateBody(tpl)
@@ -630,10 +640,7 @@ function RecommendedTemplateCard({
   const manual = isManualTemplate(tpl)
   // Prefer the merchant-set display name, then the library's labelled
   // suggestion, and only fall back to the raw template name as a last resort.
-  const displayName =
-    tpl.display_name_ar ||
-    tpl.library_label_ar ||
-    tpl.name.replace(/_/g, ' ')
+  const displayName = templateDisplayName(tpl, lang)
 
   return (
     <button
@@ -708,9 +715,9 @@ function Step3Template({
   recommendation: TemplateRecommendation | null
   loading: boolean
 }) {
-  const { t, lang } = useLanguage()
-  const s3 = t(tr => tr.campaignsMgmt.step3)
-  const tm = t(tr => tr.templatesMgmt)
+  const { tStatic, lang } = useLanguage()
+  const s3 = tStatic(tr => tr.campaignsMgmt.step3)
+  const tm = tStatic(tr => tr.templatesMgmt)
 
   if (loading) {
     return (
@@ -732,7 +739,9 @@ function Step3Template({
               {s3.closestTemplate}
             </p>
             <p className="text-sm text-amber-900 truncate">
-              {next.display_name_ar || next.name}
+              {next.display_name_ar && lang === 'ar'
+                ? next.display_name_ar
+                : templateDisplayName(next, lang)}
             </p>
             <p className="text-[11px] text-amber-700 mt-1">
               {s3.closestMeta
@@ -878,8 +887,8 @@ function allVarsAutoResolved(
 }
 
 function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispatch<React.SetStateAction<WizardState>> }) {
-  const { t } = useLanguage()
-  const s4 = t(tr => tr.campaignsMgmt.step4)
+  const { tStatic } = useLanguage()
+  const s4 = tStatic(tr => tr.campaignsMgmt.step4)
 
   const autoVarInfo = (v: string) => s4.autoVars[v as keyof typeof s4.autoVars]
   const manualVarHint = (v: string) =>
@@ -983,14 +992,14 @@ function Step4Variables({ wiz, setWiz }: { wiz: WizardState; setWiz: React.Dispa
 // ── Step 5: Preview ───────────────────────────────────────────────────────────
 
 function Step5Preview({ wiz }: { wiz: WizardState }) {
-  const { t } = useLanguage()
-  const s5 = t(tr => tr.campaignsMgmt.step5)
-  const tm = t(tr => tr.templatesMgmt)
+  const { tStatic, lang } = useLanguage()
+  const s5 = tStatic(tr => tr.campaignsMgmt.step5)
+  const tm = tStatic(tr => tr.templatesMgmt)
 
   const body   = renderTemplate(getTemplateBody(wiz.template!),   wiz.variables)
   const header = renderTemplate(getTemplateHeader(wiz.template!), wiz.variables)
   const footer = getTemplateFooter(wiz.template!)
-  const tplName = wiz.template!.display_name_ar || wiz.template!.name.replace(/_/g, ' ')
+  const tplName = templateDisplayName(wiz.template!, lang)
   return (
     <div className="space-y-4">
       <p className="text-xs text-slate-500">{s5.intro}</p>
@@ -1030,8 +1039,8 @@ function Step6TestSend({
   onTestSend: () => void
   testLoading: boolean
 }) {
-  const { t } = useLanguage()
-  const s6 = t(tr => tr.campaignsMgmt.step6)
+  const { tStatic } = useLanguage()
+  const s6 = tStatic(tr => tr.campaignsMgmt.step6)
 
   return (
     <div className="space-y-5">
@@ -1465,16 +1474,16 @@ function Step7Review({
   segmentMeta: CustomerSegmentMeta | undefined
   goalMeta: CampaignGoal | undefined
 }) {
-  const { t, lang, dir } = useLanguage()
-  const s7 = t(tr => tr.campaignsMgmt.step7)
-  const tm = t(tr => tr.templatesMgmt)
+  const { tStatic, lang, dir } = useLanguage()
+  const s7 = tStatic(tr => tr.campaignsMgmt.step7)
+  const tm = tStatic(tr => tr.templatesMgmt)
 
   const segmentSummary = segmentMeta
     ? s7.segmentCount
         .replace('{label}', segDisplayLabel(segmentMeta, lang))
         .replace('{count}', fmtCount(segmentMeta.customer_count, lang))
     : '—'
-  const tplName = wiz.template?.display_name_ar || wiz.template?.name.replace(/_/g, ' ') || '—'
+  const tplName = wiz.template ? templateDisplayName(wiz.template, lang) : '—'
 
   const formatDelayOption = (minutes: number): string =>
     minutes < 60
@@ -1646,12 +1655,12 @@ function Step8Launch({
   onLaunch: () => void
   error: string
 }) {
-  const { t, lang } = useLanguage()
-  const s8 = t(tr => tr.campaignsMgmt.step8)
+  const { tStatic, lang } = useLanguage()
+  const s8 = tStatic(tr => tr.campaignsMgmt.step8)
 
   const segmentLabel = segmentMeta ? segDisplayLabel(segmentMeta, lang) : '—'
   const countLabel = segmentMeta ? fmtCount(segmentMeta.customer_count, lang) : '—'
-  const tplName = wiz.template?.display_name_ar || wiz.template?.name || '—'
+  const tplName = wiz.template ? templateDisplayName(wiz.template, lang) : '—'
 
   const scheduleLabel =
     wiz.scheduleType === 'immediate' ? s8.scheduleImmediate
@@ -1769,9 +1778,9 @@ function Step8Launch({
 function CampaignWizard({
   onClose, onCreated,
 }: { onClose: () => void; onCreated: (c: CampaignRecord) => void }) {
-  const { t, lang, dir, isRTL } = useLanguage()
-  const wz = t(tr => tr.campaignsMgmt.wizard)
-  const cm = t(tr => tr.campaignsMgmt)
+  const { tStatic, lang, dir, isRTL } = useLanguage()
+  const wz = tStatic(tr => tr.campaignsMgmt.wizard)
+  const cm = tStatic(tr => tr.campaignsMgmt)
   const { Prev: PrevIcon, Next: NextIcon } = paginationChevrons(isRTL)
   const stepLabels = useMemo(() => wizardStepLabels(cm), [cm])
   const wizardLang = lang === 'en' ? 'en' : 'ar'

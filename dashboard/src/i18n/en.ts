@@ -1,6 +1,7 @@
 import type { Translations } from './types'
 import { customersPageEn } from './customersPageLabels'
 import { campaignsListEn } from './campaignsListPageLabels'
+import { templatesPageExtraEn } from './templatesPageLabels'
 
 const en: Translations = {
   meta: { code: 'en', label: 'English', dir: 'ltr' },
@@ -1159,6 +1160,11 @@ const en: Translations = {
         bodyLabel: 'Message body *',
         footerLabel: 'Footer text (optional)',
         charCountSuffix: 'characters',
+        headerPlaceholder: 'Message header…',
+        headerExamplePlaceholder: 'e.g. Special offer for you 🎁',
+        bodyPlaceholder: 'Message body…',
+        bodyExamplePlaceholder: 'Example:\nHello {{1}},\nYou have a special offer — use code {{2}} with {{3}}',
+        footerPlaceholder: 'e.g. Nahla — your store assistant 🐝',
       },
       step3: {
         intro: 'Add optional interactive buttons (up to 3).',
@@ -1215,6 +1221,9 @@ const en: Translations = {
       previewLabel: 'Preview',
       save: 'Save changes',
       saving: 'Saving…',
+      headerPlaceholder: 'Message header…',
+      bodyPlaceholder: 'Message body…',
+      footerPlaceholder: 'e.g. Nahla — your store assistant 🐝',
       errors: {
         bodyRequired: 'Message body is required',
         saveFailed: 'Something went wrong — check your inputs and try again',
@@ -1362,6 +1371,7 @@ const en: Translations = {
       description:
         'Create the coupon in Salla yourself, then enter the code and store link here — Nahla sends it via WhatsApp with an Order Now button. Interim flow until Salla approves the coupon API.',
     },
+    page: templatesPageExtraEn,
   },
 
   campaignsMgmt: {

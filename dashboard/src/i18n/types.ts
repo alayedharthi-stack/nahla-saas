@@ -4,6 +4,7 @@
  */
 import type { CustomersPageLabels } from './customersPageLabels'
 import type { CampaignsListLabels } from './campaignsListPageLabels'
+import type { TemplatesPageExtraLabels } from './templatesPageLabels'
 
 export interface Translations {
   /** Language metadata */
@@ -1130,6 +1131,11 @@ export interface Translations {
         bodyLabel: string
         footerLabel: string
         charCountSuffix: string
+        headerPlaceholder: string
+        headerExamplePlaceholder: string
+        bodyPlaceholder: string
+        bodyExamplePlaceholder: string
+        footerPlaceholder: string
       }
       step3: {
         intro: string
@@ -1186,6 +1192,9 @@ export interface Translations {
       previewLabel: string
       save: string
       saving: string
+      headerPlaceholder: string
+      bodyPlaceholder: string
+      footerPlaceholder: string
       errors: {
         bodyRequired: string
         saveFailed: string
@@ -1324,6 +1333,7 @@ export interface Translations {
       title: string
       description: string
     }
+    page: TemplatesPageExtraLabels
   }
 
   /** Campaigns page — wizard + list (Wave 1C) */

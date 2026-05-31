@@ -9,11 +9,11 @@ import {
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
-
-const fmtDelay = (h: number) =>
-  h >= 24 ? `${Math.round(h / 24)} يوم` : h < 1 ? `${Math.round(h * 60)} دقيقة` : `${h} ساعة`
 import StatCard from '../components/ui/StatCard'
 import { useLanguage } from '../i18n/context'
+import { UI_ONLY_GUARD } from '../i18n/uiOnly'
+import type { TemplatesPageExtraLabels } from '../i18n/templatesPageLabels'
+import { serviceInfoForKey } from '../i18n/templatesPageLabels'
 import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
@@ -26,22 +26,6 @@ import {
 import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
-
-const SERVICE_INFO: Record<string, { name: string; description: string; icon: string; color: string }> = {
-  cart_recovery:        { name: 'استرجاع السلات المتروكة',         description: 'تذكير العملاء الذين أضافوا منتجات لسلتهم دون إكمال الطلب', icon: '🛒', color: 'amber'   },
-  order_confirmation:   { name: 'تأكيد الطلب',                    description: 'إشعار العميل بتأكيد واستلام طلبه مع ملخص التفاصيل',        icon: '📦', color: 'blue'    },
-  cod_confirmation:     { name: 'تأكيد الدفع عند الاستلام',       description: 'التحقق من جدية العميل في طلبات الدفع عند الاستلام',         icon: '💰', color: 'emerald' },
-  shipping_tracking:    { name: 'الشحن وتتبع الطلب',              description: 'إبقاء العميل على اطلاع بحالة شحن طلبه',                   icon: '🚚', color: 'violet'  },
-  post_delivery:        { name: 'ما بعد التسليم',                  description: 'تعزيز تجربة العميل بعد استلام الطلب وطلب تقييمه',           icon: '⭐', color: 'yellow'  },
-  predictive_reorder:   { name: 'إعادة الطلب التنبؤية',            description: 'تذكير العملاء بإعادة شراء منتجات عند توقع نفادها',          icon: '🔄', color: 'teal'    },
-  marketing_campaigns:  { name: 'الحملات التسويقية',               description: 'إرسال عروض ترويجية وأكواد خصم وإعلانات المنتجات الجديدة',  icon: '📢', color: 'pink'    },
-  welcome_onboarding:   { name: 'الترحيب بالعملاء',                description: 'ترحيب بالعملاء الجدد عند أول تواصل أو تسجيل في المتجر',    icon: '👋', color: 'sky'     },
-  customer_support:     { name: 'خدمة العملاء',                    description: 'متابعة العملاء بعد حل مشكلاتهم والتأكد من رضاهم',          icon: '💬', color: 'slate'   },
-  customer_retention:   { name: 'استرجاع العملاء غير النشطين',     description: 'تحفيز العملاء الذين لم يشتروا منذ فترة على العودة',         icon: '💛', color: 'orange'  },
-  payment_reminder:     { name: 'تذكير بالدفع',                    description: 'تذكير العملاء بإكمال دفع الطلبات المعلقة',                 icon: '💳', color: 'rose'    },
-  customer_engagement:  { name: 'تفاعل العملاء',                   description: 'متابعة العملاء المهتمين بمنتجات معينة',                    icon: '💡', color: 'cyan'    },
-  vip_rewards:          { name: 'مكافآت العملاء المميزين',          description: 'عروض حصرية ومكافآت لعملاء VIP',                           icon: '👑', color: 'purple'  },
-}
 
 // Tailwind needs full class names at build time — map color tokens to
 // the exact gradient / border / text classes used in the service badge.
@@ -87,45 +71,20 @@ const TRIGGER_TO_SERVICE: Record<string, string> = {
   support_resolved:         'customer_support',
 }
 
-function resolveServiceForTemplate(tpl: WhatsAppTemplateRecord) {
+function resolveServiceForTemplate(
+  tpl: WhatsAppTemplateRecord,
+  page: TemplatesPageExtraLabels,
+) {
   const objective = tpl.library?.objective
   if (objective) {
     const serviceKey = TRIGGER_TO_SERVICE[objective]
-    if (serviceKey) return SERVICE_INFO[serviceKey]
+    if (serviceKey) return serviceInfoForKey(serviceKey, page)
   }
   return null
 }
 
-// ── Default templates metadata ────────────────────────────────────────────────
-
-const DEFAULT_TEMPLATE_META: Record<string, {
-  purposeLabel: string
-  automationLabel: string
-  automationType: string
-  varLabels: Record<string, string>
-}> = {
-  order_status_update_ar: {
-    purposeLabel: 'إشعار تحديث حالة الطلب',
-    automationLabel: 'إشعارات الطلبات',
-    automationType: 'order_status_update',
-    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'رقم الطلب', '{{3}}': 'حالة الطلب' },
-  },
-  cod_order_confirmation_ar: {
-    purposeLabel: 'تأكيد الطلب النقدي',
-    automationLabel: 'الطلبات بالدفع عند الاستلام',
-    automationType: 'order_status_update',
-    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'اسم المنتج', '{{3}}': 'مبلغ الطلب' },
-  },
-  predictive_reorder_reminder_ar: {
-    purposeLabel: 'تذكير إعادة الطلب التنبؤي',
-    automationLabel: 'predictive_reorder',
-    automationType: 'predictive_reorder',
-    varLabels: { '{{1}}': 'اسم العميل', '{{2}}': 'اسم المنتج', '{{3}}': 'رابط إعادة الطلب' },
-  },
-}
-
-function isDefaultTemplate(name: string) {
-  return name in DEFAULT_TEMPLATE_META
+function isDefaultTemplate(name: string, page: TemplatesPageExtraLabels) {
+  return name in page.defaultTemplates
 }
 
 // ── WhatsApp bubble preview ───────────────────────────────────────────────────
@@ -133,9 +92,10 @@ function isDefaultTemplate(name: string) {
 function WaPreview({
   header, body, footer, buttons,
 }: { header: string; body: string; footer: string; buttons: TemplateButton[] }) {
-  const { t } = useLanguage()
+  const { tStatic, dir } = useLanguage()
+  const mgmt = tStatic(tr => tr.templatesMgmt)
   return (
-    <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28">
+    <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28" dir={dir}>
       <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1" dir="rtl">
         {header && <p className="font-semibold text-slate-900 text-xs border-b border-slate-100 pb-1">{header}</p>}
         {body && (
@@ -152,14 +112,14 @@ function WaPreview({
                 {btn.type === 'QUICK_REPLY' && <span>💬</span>}
                 <span>
                   {btn.type === 'COPY_CODE'
-                    ? (btn.text || t(tr => tr.templatesMgmt.previewCopyCodeFallback))
+                    ? (btn.text || mgmt.previewCopyCodeFallback)
                     : btn.text || '—'}
                 </span>
               </div>
             ))}
           </div>
         )}
-        <p className="text-[10px] text-slate-300 text-end">{t(tr => tr.templatesMgmt.previewReadReceipt)}</p>
+        <p className="text-[10px] text-slate-300 text-end">{mgmt.previewReadReceipt}</p>
       </div>
     </div>
   )
@@ -170,14 +130,16 @@ function WaPreview({
 function TemplateRow({
   tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting,
 }: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean }) {
-  const { t, lang } = useLanguage()
-  const row = t(tr => tr.templatesMgmt.row)
-  const lib = t(tr => tr.templatesMgmt.library)
-  const create = t(tr => tr.templatesMgmt.create)
+  const { tStatic, lang } = useLanguage()
+  const row = tStatic(tr => tr.templatesMgmt.row)
+  const lib = tStatic(tr => tr.templatesMgmt.library)
+  const create = tStatic(tr => tr.templatesMgmt.create)
+  const page = tStatic(tr => tr.templatesMgmt.page)
+  const mgmt = tStatic(tr => tr.templatesMgmt)
   const vars = countVars(tpl)
   const sm = (STATUS_COLORS[tpl.status] ?? 'slate') as 'green' | 'amber' | 'red' | 'slate' | 'purple'
-  const isDefault = isDefaultTemplate(tpl.name)
-  const meta = DEFAULT_TEMPLATE_META[tpl.name]
+  const isDefault = isDefaultTemplate(tpl.name, page)
+  const meta = isDefault ? page.defaultTemplates[tpl.name] : null
   const compatibility = tpl.compatibility
 
   const formatRowDelay = (h: number): string => {
@@ -195,29 +157,33 @@ function TemplateRow({
     }
   }
 
-  const displayName = tpl.display_name_ar || (isDefault && meta ? meta.purposeLabel : null)
-  const serviceInfo = tpl.service_key ? SERVICE_INFO[tpl.service_key] : null
+  const displayName = lang === 'ar'
+    ? (tpl.display_name_ar || (isDefault && meta ? meta.purposeLabel : null))
+    : ((isDefault && meta ? meta.purposeLabel : null) || null)
+  const serviceInfo = tpl.service_key
+    ? serviceInfoForKey(tpl.service_key, page)
+    : null
   const isInactive = tpl.is_active === false
 
   const statusLabel = (() => {
     switch (tpl.status) {
-      case 'DRAFT':          return t(tr => tr.templatesMgmt.statusDraft)
-      case 'APPROVED':       return t(tr => tr.templatesMgmt.statusApproved)
-      case 'PENDING':        return t(tr => tr.templatesMgmt.statusPending)
-      case 'REJECTED':       return t(tr => tr.templatesMgmt.statusRejected)
-      case 'PAUSED':         return t(tr => tr.templatesMgmt.statusPaused)
-      case 'DISABLED':       return t(tr => tr.templatesMgmt.disabled)
-      case 'ARCHIVED':       return t(tr => tr.templatesMgmt.archived)
-      case 'LIMIT_EXCEEDED': return t(tr => tr.templatesMgmt.limitExceeded)
+      case 'DRAFT':          return mgmt.statusDraft
+      case 'APPROVED':       return mgmt.statusApproved
+      case 'PENDING':        return mgmt.statusPending
+      case 'REJECTED':       return mgmt.statusRejected
+      case 'PAUSED':         return mgmt.statusPaused
+      case 'DISABLED':       return mgmt.disabled
+      case 'ARCHIVED':       return mgmt.archived
+      case 'LIMIT_EXCEEDED': return mgmt.limitExceeded
       default:               return tpl.status
     }
   })()
 
   const categoryLabel = (() => {
     switch (tpl.category) {
-      case 'MARKETING':      return t(tr => tr.templatesMgmt.categoryMarketing)
-      case 'UTILITY':        return t(tr => tr.templatesMgmt.categoryUtility)
-      case 'AUTHENTICATION': return t(tr => tr.templatesMgmt.categoryAuth)
+      case 'MARKETING':      return mgmt.categoryMarketing
+      case 'UTILITY':        return mgmt.categoryUtility
+      case 'AUTHENTICATION': return mgmt.categoryAuth
       default:               return tpl.category
     }
   })()
@@ -242,7 +208,7 @@ function TemplateRow({
           {isDefault && (
             <span className="inline-flex items-center gap-1 text-[10px] bg-brand-100 text-brand-700 border border-brand-200 px-1.5 py-0.5 rounded-full font-medium">
               <Star className="w-2.5 h-2.5" />
-              {t(tr => tr.templatesMgmt.defaultBadge)}
+              {mgmt.defaultBadge}
             </span>
           )}
           {tpl.service_key && tpl.is_active && (
@@ -285,7 +251,7 @@ function TemplateRow({
                 (nahla_source_key set) keep the original "مربوط تلقائياً"
                 pill so the merchant sees the link to Nahla's catalogue.  */}
         {(() => {
-          const svcName = tpl.service_name_ar || serviceInfo?.name
+          const svcName = (lang === 'ar' ? tpl.service_name_ar : null) || serviceInfo?.name
           if (!svcName) return null
           const c = svcColors(tpl.service_color || serviceInfo?.color || 'amber')
           const isManual = tpl.library?.mode === 'manual'
@@ -341,7 +307,7 @@ function TemplateRow({
         <div className="flex flex-col items-start gap-1">
           {vars > 0 ? (
             <span className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
-              {vars} {t(tr => tr.templatesMgmt.varCount)}
+              {vars} {mgmt.varCount}
             </span>
           ) : (
             <span className="text-xs text-slate-300">—</span>
@@ -355,10 +321,10 @@ function TemplateRow({
                 : 'bg-slate-100 text-slate-600'
             }`}>
               {compatibility.compatibility === 'compatible'
-                ? t(tr => tr.templatesMgmt.compatible)
+                ? mgmt.compatible
                 : compatibility.compatibility === 'pending_meta'
-                ? t(tr => tr.templatesMgmt.awaitingMeta)
-                : t(tr => tr.templatesMgmt.needsReview)}
+                ? mgmt.awaitingMeta
+                : mgmt.needsReview}
             </span>
           )}
         </div>
@@ -371,7 +337,7 @@ function TemplateRow({
           <button
             onClick={onPreview}
             className="text-slate-400 hover:text-brand-500 transition-colors"
-            title={t(tr => tr.templatesMgmt.tooltipPreview)}
+            title={mgmt.tooltipPreview}
           >
             <Eye className="w-4 h-4" />
           </button>
@@ -379,7 +345,7 @@ function TemplateRow({
             <button
               onClick={onEdit}
               className="text-slate-400 hover:text-amber-500 transition-colors"
-              title={t(tr => tr.templatesMgmt.tooltipEdit)}
+              title={mgmt.tooltipEdit}
             >
               <Pencil className="w-4 h-4" />
             </button>
@@ -393,19 +359,19 @@ function TemplateRow({
                   ? 'text-slate-400 bg-slate-100 cursor-not-allowed'
                   : 'text-brand-500 hover:text-brand-700 bg-brand-50 hover:bg-brand-100'
               }`}
-              title={isSubmitting ? t(tr => tr.templatesMgmt.submittingBtn) : t(tr => tr.templatesMgmt.submitBtn)}
+              title={isSubmitting ? mgmt.submittingBtn : mgmt.submitBtn}
             >
               {isSubmitting
                 ? <RefreshCw className="w-3 h-3 animate-spin" />
                 : <Send className="w-3 h-3" />
               }
-              {isSubmitting ? t(tr => tr.templatesMgmt.submittingBtn) : t(tr => tr.templatesMgmt.submitBtn)}
+              {isSubmitting ? mgmt.submittingBtn : mgmt.submitBtn}
             </button>
           )}
           <button
             onClick={onDelete}
             className="text-slate-300 hover:text-red-500 transition-colors"
-            title={tpl.status === 'APPROVED' ? row.removeFromNahla : t(tr => tr.templatesMgmt.tooltipDelete)}
+            title={tpl.status === 'APPROVED' ? row.removeFromNahla : mgmt.tooltipDelete}
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -418,10 +384,11 @@ function TemplateRow({
 // ── Preview modal ─────────────────────────────────────────────────────────────
 
 function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord; onClose: () => void; onUpdate?: (updated: WhatsAppTemplateRecord) => void }) {
-  const { t, dir } = useLanguage()
-  const p = t(tr => tr.templatesMgmt.preview)
-  const mgmt = t(tr => tr.templatesMgmt)
-  const lib = t(tr => tr.templatesMgmt.library)
+  const { tStatic, t, lang, dir } = useLanguage()
+  const p = tStatic(tr => tr.templatesMgmt.preview)
+  const mgmt = tStatic(tr => tr.templatesMgmt)
+  const lib = tStatic(tr => tr.templatesMgmt.library)
+  const page = tStatic(tr => tr.templatesMgmt.page)
   const actions = t(tr => tr.actions)
 
   const formatPreviewDelay = (h: number): string => {
@@ -470,12 +437,16 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
   const varKeys = extractVars(bodyRaw)
   const footer  = getFooter(tpl)
   const buttons = getButtons(tpl)
-  const isDefault = isDefaultTemplate(tpl.name)
-  const defaultMeta = DEFAULT_TEMPLATE_META[tpl.name]
+  const isDefault = isDefaultTemplate(tpl.name, page)
+  const defaultMeta = isDefault ? page.defaultTemplates[tpl.name] : null
 
-  const displayName = tpl.display_name_ar || (isDefault && defaultMeta ? defaultMeta.purposeLabel : null)
+  const displayName = lang === 'ar'
+    ? (tpl.display_name_ar || (defaultMeta ? defaultMeta.purposeLabel : null))
+    : (defaultMeta?.purposeLabel ?? null)
   const svcKey = tpl.service_key
-  const serviceInfo = svcKey ? SERVICE_INFO[svcKey] : resolveServiceForTemplate(tpl)
+  const serviceInfo = svcKey
+    ? serviceInfoForKey(svcKey, page)
+    : resolveServiceForTemplate(tpl, page)
   const svcColor = tpl.service_color || serviceInfo?.color || 'amber'
 
   const getVarPlaceholder = (varKey: string): string => {
@@ -704,7 +675,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
               </div>
               {!!tpl.compatibility.supported_features?.length && (
                 <p className="text-[11px] text-slate-600">
-                  {p.supportedFeaturesPrefix} {tpl.compatibility.supported_features.join('، ')}
+                  {p.supportedFeaturesPrefix} {tpl.compatibility.supported_features.join(lang === 'ar' ? '، ' : ', ')}
                 </p>
               )}
               {!!tpl.compatibility.issues?.length && (
@@ -784,22 +755,25 @@ interface WizardState {
   buttons: TemplateButton[]
 }
 
-const INIT_WIZARD: WizardState = {
+const INIT_WIZARD_BASE: Omit<WizardState, 'footerText'> = {
   step: 1,
   name: '',
   language: 'ar',
   category: 'MARKETING',
   headerText: '',
   bodyText: '',
-  footerText: '🐝 نحلة — مساعد متجرك',
   buttons: [],
 }
 
 function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (t: WhatsAppTemplateRecord) => void }) {
-  const { t, dir } = useLanguage()
-  const c = t(tr => tr.templatesMgmt.create)
-  const mgmt = t(tr => tr.templatesMgmt)
-  const [wiz, setWiz] = useState<WizardState>(INIT_WIZARD)
+  const { tStatic, dir } = useLanguage()
+  const c = tStatic(tr => tr.templatesMgmt.create)
+  const mgmt = tStatic(tr => tr.templatesMgmt)
+  const page = tStatic(tr => tr.templatesMgmt.page)
+  const [wiz, setWiz] = useState<WizardState>(() => ({
+    ...INIT_WIZARD_BASE,
+    footerText: page.footerDefault,
+  }))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -982,7 +956,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <label className="label">{c.step2.headerLabel}</label>
                 <input
                   className="input text-sm"
-                  placeholder="مثال: عرض خاص لك 🎁"
+                  placeholder={c.step2.headerExamplePlaceholder}
                   value={wiz.headerText}
                   onChange={e => setWiz(w => ({ ...w, headerText: e.target.value }))}
                 />
@@ -1006,7 +980,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <textarea
                   rows={5}
                   className="input text-sm"
-                  placeholder={`مثال:\nمرحباً {{1}}،\nلديك عرض خاص — احصل على خصم {{2}} باستخدام كود: {{3}}`}
+                  placeholder={c.step2.bodyExamplePlaceholder}
                   value={wiz.bodyText}
                   onChange={e => setWiz(w => ({ ...w, bodyText: e.target.value }))}
                 />
@@ -1017,6 +991,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 <label className="label">{c.step2.footerLabel}</label>
                 <input
                   className="input text-sm"
+                  placeholder={c.step2.footerPlaceholder}
                   value={wiz.footerText}
                   onChange={e => setWiz(w => ({ ...w, footerText: e.target.value }))}
                 />
@@ -1272,7 +1247,7 @@ function EditModal({
             <label className="label text-xs">{create.step2.headerLabel}</label>
             <input className="input text-sm" value={headerText}
               onChange={ev => setHeaderText(ev.target.value)}
-              placeholder="عنوان الرسالة..." />
+              placeholder={e.headerPlaceholder} />
           </div>
 
           {/* Body */}
@@ -1290,7 +1265,7 @@ function EditModal({
             </div>
             <textarea rows={6} className="input text-sm" value={bodyText}
               onChange={ev => setBodyText(ev.target.value)}
-              placeholder="نص الرسالة..." />
+              placeholder={e.bodyPlaceholder} />
             <p className="text-xs text-slate-400 mt-1">{bodyText.length}/1024 {create.step2.charCountSuffix}</p>
           </div>
 
@@ -1299,7 +1274,7 @@ function EditModal({
             <label className="label text-xs">{create.step2.footerLabel}</label>
             <input className="input text-sm" value={footerText}
               onChange={ev => setFooterText(ev.target.value)}
-              placeholder="مثال: نحلة — مساعد متجرك 🐝" />
+              placeholder={e.footerPlaceholder} />
           </div>
 
           {/* Buttons */}
@@ -1926,28 +1901,30 @@ export default function Templates() {
   const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
   const [submitError, setSubmitError] = useState<{id: number; msg: string; code?: string} | null>(null)
   const [submitting, setSubmitting] = useState<number | null>(null)
-  const { t, dir } = useLanguage()
-  const submitErr = t(tr => tr.templatesMgmt.submitErrors)
-  const del = t(tr => tr.templatesMgmt.delete)
-  const manualCoupon = t(tr => tr.templatesMgmt.manualCoupon)
+  const { tStatic, t, dir } = useLanguage()
+  void UI_ONLY_GUARD
+  const submitErr = tStatic(tr => tr.templatesMgmt.submitErrors)
+  const del = tStatic(tr => tr.templatesMgmt.delete)
+  const manualCoupon = tStatic(tr => tr.templatesMgmt.manualCoupon)
+  const mgmt = tStatic(tr => tr.templatesMgmt)
 
   const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
-    { key: 'all',      label: t(tr => tr.templatesMgmt.filterAll)      },
-    { key: 'DRAFT',    label: t(tr => tr.templatesMgmt.statDraft)      },
-    { key: 'APPROVED', label: t(tr => tr.templatesMgmt.filterApproved) },
-    { key: 'PENDING',  label: t(tr => tr.templatesMgmt.filterPending)  },
-    { key: 'REJECTED', label: t(tr => tr.templatesMgmt.filterRejected) },
-    { key: 'DISABLED', label: t(tr => tr.templatesMgmt.disabled)       },
-    { key: 'PAUSED',   label: t(tr => tr.templatesMgmt.filterPaused)   },
+    { key: 'all',      label: mgmt.filterAll      },
+    { key: 'DRAFT',    label: mgmt.statDraft      },
+    { key: 'APPROVED', label: mgmt.filterApproved },
+    { key: 'PENDING',  label: mgmt.filterPending  },
+    { key: 'REJECTED', label: mgmt.filterRejected },
+    { key: 'DISABLED', label: mgmt.disabled       },
+    { key: 'PAUSED',   label: mgmt.filterPaused   },
   ]
 
   const TABLE_HEADERS = [
-    t(tr => tr.templatesMgmt.colName),
-    t(tr => tr.templatesMgmt.colLang),
-    t(tr => tr.templatesMgmt.colCategory),
-    t(tr => tr.templatesMgmt.colStatus),
-    t(tr => tr.templatesMgmt.colVariables),
-    t(tr => tr.templatesMgmt.colUpdated),
+    mgmt.colName,
+    mgmt.colLang,
+    mgmt.colCategory,
+    mgmt.colStatus,
+    mgmt.colVariables,
+    mgmt.colUpdated,
     '',
   ]
 
