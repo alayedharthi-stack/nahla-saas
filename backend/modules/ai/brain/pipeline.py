@@ -527,59 +527,75 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001
             _nc_match = None
 
+        from .pre_commerce_gate import (  # noqa: PLC0415
+            load_minimal_ai_settings,
+            load_minimal_commerce_facts,
+            log_pre_commerce_shortcut,
+            should_pre_commerce_shortcut,
+        )
+        _pre_commerce_shortcut = should_pre_commerce_shortcut(intent, _nc_match)
+        if _pre_commerce_shortcut:
+            log_pre_commerce_shortcut(
+                tenant_id=tenant_id,
+                intent=intent,
+                nc_match=_nc_match,
+            )
+
         # ── 2. Load state + facts ─────────────────────────────────────────
         state: MerchantConversationState = state_for_classify
-        facts: CommerceFacts             = self._facts_loader.load(db, tenant_id)
+        if _pre_commerce_shortcut:
+            facts: CommerceFacts = load_minimal_commerce_facts(db, tenant_id)
+            sales_context: SalesContextSnapshot = SalesContextSnapshot()
+            merchant_context: Dict[str, Any] = {}
+            commerce_bundle: Dict[str, Any] = {}
+        else:
+            facts = self._facts_loader.load(db, tenant_id)
+
+            sales_context = self._sales_context_loader.load(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=customer_phone,
+                state=state,
+                history=history,
+                profile=profile,
+                customer_id=customer_id,
+                tenant_context=tenant_ctx,
+            )
+
+            merchant_context = {}
+            try:
+                from core.store_knowledge import build_merchant_context  # noqa: PLC0415
+                merchant_context = build_merchant_context(
+                    db,
+                    tenant_id      = tenant_id,
+                    customer_phone = customer_phone,
+                    product_query  = message or "",
+                    state          = state,
+                    history        = history,
+                    profile        = profile,
+                ) or {}
+            except Exception as exc:
+                logger.warning(
+                    "[BrainPipeline] build_merchant_context failed tenant=%s — "
+                    "falling back to legacy context: %s",
+                    tenant_id, exc,
+                )
+                merchant_context = {}
+
+            commerce_bundle = {}
+            try:
+                from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
+
+                commerce_bundle = load_commerce_bundle_from_db(
+                    db, tenant_id, customer_phone,
+                )
+            except Exception as _cb_exc:  # noqa: BLE001
+                logger.debug(
+                    "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
+                    tenant_id, _cb_exc,
+                )
 
         # ── 3. Assemble context ───────────────────────────────────────────
-        sales_context: SalesContextSnapshot = self._sales_context_loader.load(
-            db,
-            tenant_id=tenant_id,
-            customer_phone=customer_phone,
-            state=state,
-            history=history,
-            profile=profile,
-            customer_id=customer_id,
-            tenant_context=tenant_ctx,
-        )
-
-        # ── 3b. Merchant context (Step 2 wire-up — best-effort) ───────────
-        # Fact-grounded view of catalog + policies + customer + brain profile.
-        # If anything fails (DB hiccup, missing settings row, etc.) we keep
-        # an empty dict and the brain falls back to its previous behaviour.
-        merchant_context: Dict[str, Any] = {}
-        try:
-            from core.store_knowledge import build_merchant_context  # noqa: PLC0415
-            merchant_context = build_merchant_context(
-                db,
-                tenant_id      = tenant_id,
-                customer_phone = customer_phone,
-                product_query  = message or "",
-                state          = state,
-                history        = history,
-                profile        = profile,
-            ) or {}
-        except Exception as exc:
-            logger.warning(
-                "[BrainPipeline] build_merchant_context failed tenant=%s — "
-                "falling back to legacy context: %s",
-                tenant_id, exc,
-            )
-            merchant_context = {}
-
-        commerce_bundle: Dict[str, Any] = {}
-        try:
-            from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
-
-            commerce_bundle = load_commerce_bundle_from_db(
-                db, tenant_id, customer_phone,
-            )
-        except Exception as _cb_exc:  # noqa: BLE001
-            logger.debug(
-                "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
-                tenant_id, _cb_exc,
-            )
-
         ctx = BrainContext(
             tenant_id      = tenant_id,
             customer_phone = customer_phone,
@@ -601,6 +617,7 @@ class MerchantBrain:
                 str(_nc_match.category) if _nc_match else ""
             ),
         )
+        ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         if human_priority:
             logger.info(
                 "[HUMAN_PRIORITY] pipeline=enter tenant=%s phone=%s convo=%s — "
@@ -691,7 +708,7 @@ class MerchantBrain:
                     tenant_id, _rel_exc,
                 )
 
-        if merchant_context:
+        if merchant_context and not _pre_commerce_shortcut:
             logger.info(
                 "[BrainPipeline] merchant_context loaded tenant=%s products=%d "
                 "policies=%d has_customer=%s",
@@ -1070,114 +1087,114 @@ class MerchantBrain:
         # drops it and re-renders from raw settings — that's what lets
         # the High-Priority banner sit *above* the KB block.
         _ai_settings_for_prompt: Dict[str, Any] = {}
-        try:
-            from models import TenantSettings  # noqa: PLC0415
-            from core.tenant import merge_ai_defaults  # noqa: PLC0415
-            _ts = (
-                db.query(TenantSettings)
-                .filter(TenantSettings.tenant_id == tenant_id)
-                .first()
-            )
-            if _ts:
-                _ai_settings_for_prompt = merge_ai_defaults(_ts.ai_settings) or {}
-        except Exception:  # noqa: BLE001 — prompt must never break a turn
-            _ai_settings_for_prompt = {}
-
-        # Smart Store Knowledge Hub (Phase 1+):
-        # Pre-bake the structured facts block when the merchant has rows
-        # in ``merchant_knowledge_sections``. This is computed here
-        # (where ``db`` is in scope) and passed through merchant_context
-        # so the IO-free prompt_builder can swap it in for the legacy
-        # ``manual_knowledge_base`` text. Empty string → prompt_builder
-        # falls back to the legacy overlay path.
-        #
-        # Phase 3 — Product scoping
-        # ─────────────────────────
-        # Collect the catalog product ids the conversation is currently
-        # "about" — the active focus + recently recommended products —
-        # so the overlay can suppress product-scoped sections that
-        # belong to OTHER products. We pass ``None`` (not an empty set)
-        # when we don't have any signal yet so day-1 deployments keep
-        # showing every product extra.
-        _active_pids: Optional[set] = None
-        try:
-            _pid_candidates: set = set()
-            _focus = getattr(new_state, "current_product_focus", None) or {}
-            _focus_id = _focus.get("id") if isinstance(_focus, dict) else None
-            if isinstance(_focus_id, int):
-                _pid_candidates.add(_focus_id)
-            for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
-                _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
-                if isinstance(_rid, int):
-                    _pid_candidates.add(_rid)
-            # Only opt into filtering when we have at least one real
-            # numeric product id — otherwise stay in "show everything"
-            # mode so global sections never disappear.
-            if _pid_candidates:
-                _active_pids = _pid_candidates
-        except Exception:  # noqa: BLE001
-            _active_pids = None
-
         _structured_facts_block: str = ""
         _structured_behavior_block: str = ""
-        try:
-            from modules.ai.prompts.tenant_overlay import (  # noqa: PLC0415
-                build_behavioral_overlay_block,
-                build_structured_facts_block,
-            )
-            _structured_facts_block = build_structured_facts_block(
-                db, tenant_id, active_product_ids=_active_pids,
-            ) or ""
-            _structured_behavior_block = build_behavioral_overlay_block(
-                db, tenant_id,
-            ) or ""
-        except Exception as _kb_exc:  # noqa: BLE001
-            logger.warning(
-                "[BrainPipeline] structured KB build failed tenant=%s: %s",
-                tenant_id, _kb_exc,
-            )
-            _structured_facts_block = ""
-            _structured_behavior_block = ""
-
-        # Phase 3 — Product/Media resolver overlay for the Brain prompt.
-        # The legacy webhook path computes this same overlay just before
-        # the LLM call (see whatsapp_webhook.py:3570-3598). We surface
-        # it through slim_merchant_ctx so the Brain LLM also learns the
-        # ``[PRODUCT:<query>]`` + ``[MEDIA_KEY:<slug>]`` vocabulary and
-        # the concrete list of available keys for this tenant. Without
-        # this, the High-Priority block hints at the markers but the
-        # model never sees the explicit protocol or the keys list.
         _resolver_overlay_text = ""
-        try:
-            from services import media_resolver as _media_res  # noqa: PLC0415
-            from services import media_key_registry as _media_reg  # noqa: PLC0415
-            from core.ai_libraries import (  # noqa: PLC0415
-                format_resolver_overlay_for_prompt as _fmt_resolver,
-            )
-            from models import Product as _Product  # noqa: PLC0415
 
-            _keys_avail = _media_res.available_keys_for_tenant(db, tenant_id)
-            _keys_block = _media_reg.format_keys_for_prompt(_keys_avail)
-            _has_catalog = (
-                db.query(_Product.id)
-                  .filter(_Product.tenant_id == tenant_id)
-                  .limit(1)
-                  .first()
-                is not None
-            )
-            _resolver_overlay_text = _fmt_resolver(
-                available_media_keys_block=_keys_block,
-                catalog_has_products=_has_catalog,
-            ) or ""
-        except Exception as _ovr_exc:  # noqa: BLE001
-            logger.warning(
-                "[BrainPipeline] resolver overlay skipped tenant=%s: %s",
-                tenant_id, _ovr_exc,
-            )
-            _resolver_overlay_text = ""
+        if _pre_commerce_shortcut:
+            _ai_settings_for_prompt = load_minimal_ai_settings(db, tenant_id)
+        else:
+            try:
+                from models import TenantSettings  # noqa: PLC0415
+                from core.tenant import merge_ai_defaults  # noqa: PLC0415
+                _ts = (
+                    db.query(TenantSettings)
+                    .filter(TenantSettings.tenant_id == tenant_id)
+                    .first()
+                )
+                if _ts:
+                    _ai_settings_for_prompt = merge_ai_defaults(_ts.ai_settings) or {}
+            except Exception:  # noqa: BLE001 — prompt must never break a turn
+                _ai_settings_for_prompt = {}
+
+            # Smart Store Knowledge Hub (Phase 1+):
+            # Pre-bake the structured facts block when the merchant has rows
+            # in ``merchant_knowledge_sections``. This is computed here
+            # (where ``db`` is in scope) and passed through merchant_context
+            # so the IO-free prompt_builder can swap it in for the legacy
+            # ``manual_knowledge_base`` text. Empty string → prompt_builder
+            # falls back to the legacy overlay path.
+            #
+            # Phase 3 — Product scoping
+            # ─────────────────────────
+            # Collect the catalog product ids the conversation is currently
+            # "about" — the active focus + recently recommended products —
+            # so the overlay can suppress product-scoped sections that
+            # belong to OTHER products. We pass ``None`` (not an empty set)
+            # when we don't have any signal yet so day-1 deployments keep
+            # showing every product extra.
+            _active_pids: Optional[set] = None
+            try:
+                _pid_candidates: set = set()
+                _focus = getattr(new_state, "current_product_focus", None) or {}
+                _focus_id = _focus.get("id") if isinstance(_focus, dict) else None
+                if isinstance(_focus_id, int):
+                    _pid_candidates.add(_focus_id)
+                for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                    _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                    if isinstance(_rid, int):
+                        _pid_candidates.add(_rid)
+                if _pid_candidates:
+                    _active_pids = _pid_candidates
+            except Exception:  # noqa: BLE001
+                _active_pids = None
+
+            try:
+                from modules.ai.prompts.tenant_overlay import (  # noqa: PLC0415
+                    build_behavioral_overlay_block,
+                    build_structured_facts_block,
+                )
+                _structured_facts_block = build_structured_facts_block(
+                    db, tenant_id, active_product_ids=_active_pids,
+                ) or ""
+                _structured_behavior_block = build_behavioral_overlay_block(
+                    db, tenant_id,
+                ) or ""
+            except Exception as _kb_exc:  # noqa: BLE001
+                logger.warning(
+                    "[BrainPipeline] structured KB build failed tenant=%s: %s",
+                    tenant_id, _kb_exc,
+                )
+                _structured_facts_block = ""
+                _structured_behavior_block = ""
+
+            # Phase 3 — Product/Media resolver overlay for the Brain prompt.
+            try:
+                from services import media_resolver as _media_res  # noqa: PLC0415
+                from services import media_key_registry as _media_reg  # noqa: PLC0415
+                from core.ai_libraries import (  # noqa: PLC0415
+                    format_resolver_overlay_for_prompt as _fmt_resolver,
+                )
+                from models import Product as _Product  # noqa: PLC0415
+
+                _keys_avail = _media_res.available_keys_for_tenant(db, tenant_id)
+                _keys_block = _media_reg.format_keys_for_prompt(_keys_avail)
+                _has_catalog = (
+                    db.query(_Product.id)
+                      .filter(_Product.tenant_id == tenant_id)
+                      .limit(1)
+                      .first()
+                    is not None
+                )
+                _resolver_overlay_text = _fmt_resolver(
+                    available_media_keys_block=_keys_block,
+                    catalog_has_products=_has_catalog,
+                ) or ""
+            except Exception as _ovr_exc:  # noqa: BLE001
+                logger.warning(
+                    "[BrainPipeline] resolver overlay skipped tenant=%s: %s",
+                    tenant_id, _ovr_exc,
+                )
+                _resolver_overlay_text = ""
 
         slim_merchant_ctx: Dict[str, Any] = {}
-        if isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
+        if _pre_commerce_shortcut:
+            slim_merchant_ctx = {
+                "tenant_id": tenant_id,
+                "ai_settings": _ai_settings_for_prompt,
+                "pre_commerce_social": True,
+            }
+        elif isinstance(ctx.merchant_context, dict) and ctx.merchant_context:
             mc = ctx.merchant_context
             try:
                 _faq_approved = list((mc.get("faq") or {}).get("approved") or [])[:5]
@@ -1623,6 +1640,7 @@ class MerchantBrain:
                     "alignment_mismatch": _align_mismatch,
                     "alignment_regen":    _align_regen_fired,
                     "latency_ms":       latency_ms,
+                    "pre_commerce_shortcut": bool(_pre_commerce_shortcut),
                 }, ensure_ascii=False),
             )
         except Exception:

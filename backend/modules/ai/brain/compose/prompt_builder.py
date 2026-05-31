@@ -141,6 +141,11 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
 
     _platform_mode = bool(getattr(state, "platform_kb_mode", False))
     _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
+    _pre_commerce_social = bool(
+        isinstance(_mc, dict) and _mc.get("pre_commerce_social")
+    )
+    if _pre_commerce_social:
+        _non_commerce_mode = True
     if _platform_mode:
         excerpt = str(getattr(state, "platform_kb_excerpt", "") or "").strip()
         _ptopic = str(getattr(state, "platform_topic", "") or "").strip()
