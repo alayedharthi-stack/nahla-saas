@@ -5959,6 +5959,7 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _brain_handoff: bool = False  # set True only by the brain handoff branch
+        _br_action: str = ""  # brain last_action — used by final dispatch guard
         # Tenant 33 #49 (Commit 3): empty string when the relational
         # layer is disabled or no moment was identified — guarantees
         # the safety-net suppression gate stays inert.
@@ -7584,6 +7585,9 @@ async def _handle_merchant_message(
         _positive_commerce = False
         _catalog_card_limit = 2
         _bs_for_nc: dict = {}
+        _intent_for_nc = ""
+        _allow_product_cards = True
+        _dispatch_guard_reason = "ok"
         try:
             from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
                 has_positive_commerce_intent,
@@ -7638,8 +7642,56 @@ async def _handle_merchant_message(
                 tenant_id, _nc_exc,
             )
 
+        # ── Final dispatch guard (May 2026) ─────────────────────────
+        # Authoritative last-chance gate: even when earlier layers
+        # blocked search, stale [PRODUCT:] markers, visual enforcement,
+        # safety nets, and the catalog loop may still attach cards.
+        # Require POSITIVE current-turn commerce permission.
+        _dispatch_decision = None
+        try:
+            from services.final_dispatch_guard import (  # noqa: PLC0415
+                log_final_dispatch_guard as _log_dispatch_guard,
+                should_allow_product_attachment_dispatch as _eval_dispatch_guard,
+            )
+            _intent_conf_nc = (_bs_for_nc or {}).get("last_intent_confidence")
+            _active_order_nc = None
+            _prep_nc = (_bs_for_nc or {}).get("order_prep") or {}
+            if _prep_nc.get("product_id") or _prep_nc.get("product_name"):
+                _active_order_nc = dict(_prep_nc)
+            _dispatch_decision = _eval_dispatch_guard(
+                brain_action=_br_action or "",
+                intent_name=_intent_for_nc or "",
+                intent_confidence=(
+                    float(_intent_conf_nc)
+                    if _intent_conf_nc is not None
+                    else None
+                ),
+                inbound_message=text or "",
+                reply_text=reply or "",
+                brain_handoff=bool(_brain_handoff),
+                commerce_blocked=_commerce_blocked,
+                fulfillment_discovery_blocked=_fulfillment_discovery_blocked,
+                brain_state=_bs_for_nc,
+                active_order_state=_active_order_nc,
+            )
+            _allow_product_cards = bool(_dispatch_decision.allow)
+            _dispatch_guard_reason = str(_dispatch_decision.reason or "ok")
+            _log_dispatch_guard(
+                decision=_dispatch_decision,
+                tenant_id=tenant_id,
+                brain_action=_br_action or "",
+                intent_name=_intent_for_nc or "",
+            )
+        except Exception as _fdg_exc:  # noqa: BLE001
+            logger.debug(
+                "[FINAL_DISPATCH_GUARD] tenant=%s evaluation skipped: %s",
+                tenant_id, _fdg_exc,
+            )
+
         _product_escalation_blocked = (
-            _commerce_blocked or _fulfillment_discovery_blocked
+            _commerce_blocked
+            or _fulfillment_discovery_blocked
+            or not _allow_product_cards
         )
 
         # ── [PRODUCT:<query>] markers ──────────────────────────────
@@ -8816,6 +8868,39 @@ async def _handle_merchant_message(
             except Exception:  # noqa: BLE001
                 _validate_media = None  # type: ignore[assignment]
 
+            # ── Final dispatch guard — last-chance attachment purge ──
+            # Even if an earlier layer queued cards, hard-suppress
+            # before visual enforcement and the catalog send loop.
+            if not _allow_product_cards:
+                try:
+                    from services.final_dispatch_guard import (  # noqa: PLC0415
+                        suppress_product_attachments as _purge_product_atts,
+                    )
+                    if _dispatch_decision is not None:
+                        _product_attachments, reply = _purge_product_atts(
+                            product_attachments=_product_attachments,
+                            reply_text=reply or "",
+                            decision=_dispatch_decision,
+                            tenant_id=tenant_id,
+                            had_stale_candidates=bool(_product_attachments),
+                        )
+                    elif _product_attachments:
+                        logger.info(
+                            "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s "
+                            "reason=%s count=%d ids=%s",
+                            tenant_id,
+                            _dispatch_guard_reason,
+                            len(_product_attachments),
+                            [a.get("id") for a in _product_attachments],
+                        )
+                        _product_attachments = []
+                except Exception as _purge_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[FINAL_DISPATCH_GUARD] purge failed tenant=%s: %s",
+                        tenant_id, _purge_exc,
+                    )
+                    _product_attachments = []
+
             # ── [VISUAL_PRODUCT_ENFORCEMENT] — May 2026 #6 ────────────
             # Production regression: customer says "أبغى أشوف صورة
             # لعسل السمر" / "ورني السمر" / "أرسل رابط السمر" / "أبي
@@ -8864,7 +8949,11 @@ async def _handle_merchant_message(
                     _vp_skip_reason = (
                         "fulfillment_lock"
                         if _fulfillment_discovery_blocked
-                        else "non_commerce_block"
+                        else (
+                            _dispatch_guard_reason
+                            if not _allow_product_cards
+                            else "non_commerce_block"
+                        )
                     )
                     logger.info(
                         "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
@@ -9140,6 +9229,15 @@ async def _handle_merchant_message(
                 # to the legacy path so the customer always gets a
                 # reply. Success → skip the legacy path entirely.
                 if _is_product:
+                    if not _allow_product_cards:
+                        logger.info(
+                            "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s "
+                            "reason=%s product_id=%s stage=dispatch_loop",
+                            tenant_id,
+                            _dispatch_guard_reason,
+                            _att.get("id"),
+                        )
+                        continue
                     try:
                         _catalog_sent = await _try_send_catalog_product(
                             db=db,
@@ -9541,6 +9639,7 @@ async def _handle_merchant_message(
                     _wants
                     and _final_mode == _MODE_TEXT_ONLY
                     and not _delivery_audit.get("first_send_failed")
+                    and _allow_product_cards
                 ):
                     _rescue_url = ""
                     _rescue_title = ""
