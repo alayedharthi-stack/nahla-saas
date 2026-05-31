@@ -208,26 +208,41 @@ class DefaultDecisionEngine:
             "longitude",
         }
 
-        def _product_discovery_blocked() -> bool:
+        def _product_discovery_blocked(source: str = "") -> bool:
             try:
                 from ..order_context_gate import (  # noqa: PLC0415
                     fulfillment_lock_reason,
                     log_fulfillment_lock,
                     log_order_context_block,
-                    should_block_product_discovery,
                 )
-                if should_block_product_discovery(ctx):
-                    _reason = fulfillment_lock_reason(ctx) or "fulfillment_session"
-                    log_fulfillment_lock(
+                from ..product_discovery_gate import (  # noqa: PLC0415
+                    log_product_discovery_blocked,
+                    product_discovery_block_reason,
+                )
+
+                _reason = product_discovery_block_reason(
+                    ctx,
+                    source=source or None,
+                )
+                if _reason:
+                    log_product_discovery_blocked(
                         tenant_id=getattr(ctx, "tenant_id", None),
                         reason=_reason,
                         preview=(ctx.message or "")[:80],
+                        source=source or "-",
                     )
-                    log_order_context_block(
-                        tenant_id=getattr(ctx, "tenant_id", None),
-                        reason=_reason,
-                        preview=(ctx.message or "")[:80],
-                    )
+                    if _reason == "active_fulfillment":
+                        _fr = fulfillment_lock_reason(ctx) or "fulfillment_session"
+                        log_fulfillment_lock(
+                            tenant_id=getattr(ctx, "tenant_id", None),
+                            reason=_fr,
+                            preview=(ctx.message or "")[:80],
+                        )
+                        log_order_context_block(
+                            tenant_id=getattr(ctx, "tenant_id", None),
+                            reason=_fr,
+                            preview=(ctx.message or "")[:80],
+                        )
                     return True
             except Exception:  # noqa: BLE001
                 pass
@@ -1006,10 +1021,14 @@ class DefaultDecisionEngine:
             # can pick by number from a fresh list. Never show a bare
             # "ما المنتج؟" clarification when we can show real options.
             if facts.has_products:
-                if _product_discovery_blocked():
+                if _product_discovery_blocked("top_products_numeric_fallback"):
                     _fb = _fulfillment_locked_fallback()
                     if _fb is not None:
                         return _fb
+                    from ..product_discovery_gate import clarify_instead_of_top_products  # noqa: PLC0415
+                    return clarify_instead_of_top_products(
+                        ctx, reason="weak_or_unknown_intent",
+                    )
                 logger.info(
                     "[ORDER FLOW] numeric_pick_no_candidates → showing_top_products "
                     "tenant=%s intent=%s",
@@ -1290,7 +1309,7 @@ class DefaultDecisionEngine:
             _is_top_seller_req
             and facts.has_products
             and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("top_products")
         ):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
@@ -1309,7 +1328,7 @@ class DefaultDecisionEngine:
             _is_show_more_req
             and facts.has_products
             and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("show_more")
         ):
             logger.info(
                 "[ORDER FLOW] show_more_candidates | offset=%d pool=%d tenant=%s",
@@ -1332,7 +1351,7 @@ class DefaultDecisionEngine:
             _is_repeat_req
             and facts.has_products
             and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("replay")
         ):
             _last_cands = list(state.last_search_candidates or [])
             if _last_cands:
@@ -1352,15 +1371,13 @@ class DefaultDecisionEngine:
                     confidence=0.90,
                 )
             logger.info(
-                "[ORDER FLOW] replaying_last_candidates | count=0 → showing top_products "
+                "[ORDER FLOW] replaying_last_candidates | count=0 → clarify "
                 "tenant=%s",
                 ctx.tenant_id,
             )
-            return Decision(
-                action=ACTION_SEARCH_PRODUCTS,
-                args={"query": "", "source": "top_products_replay_fallback"},
-                reason="text-pattern: replay requested but no candidates — show top products",
-                confidence=0.88,
+            from ..product_discovery_gate import clarify_instead_of_top_products  # noqa: PLC0415
+            return clarify_instead_of_top_products(
+                ctx, reason="weak_or_unknown_intent",
             )
 
         # ── 3.8c handler ─────────────────────────────────────────────────
@@ -1368,7 +1385,7 @@ class DefaultDecisionEngine:
             _extracted_product_query
             and facts.has_products
             and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("order_product_query")
         ):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
@@ -1398,9 +1415,8 @@ class DefaultDecisionEngine:
             and facts.has_products
             and intent.name in (INTENT_GENERAL, INTENT_ASK_PRODUCT, INTENT_ASK_PRICE)
             and _PRICE_REFINE_RE.search(ctx.message or "")
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("price_refine")
         ):
-            # Extract optional price ceiling (e.g. "أقل من 150 ريال")
             _price_max: float | None = None
             _num_match = re.search(r"(\d[\d,\.]{0,7})", ctx.message or "")
             if _num_match:
@@ -1689,10 +1705,14 @@ class DefaultDecisionEngine:
                     or _extracted_product_query
                 )
                 if not query:
-                    if _product_discovery_blocked():
+                    if _product_discovery_blocked("top_products_start_order"):
                         _fb = _fulfillment_locked_fallback()
                         if _fb is not None:
                             return _fb
+                        from ..product_discovery_gate import clarify_instead_of_top_products  # noqa: PLC0415
+                        return clarify_instead_of_top_products(
+                            ctx, reason="weak_or_unknown_intent",
+                        )
                     logger.info(
                         "[ORDER FLOW] intent_rule_matched | rule=top_products "
                         "reason=start_order_no_query tenant=%s",
@@ -1722,6 +1742,11 @@ class DefaultDecisionEngine:
 
         # ── 7. Ask about product or price ─────────────────────────────────
         if intent.name in (INTENT_ASK_PRODUCT, INTENT_ASK_PRICE):
+            from ..product_discovery_gate import (  # noqa: PLC0415
+                clarify_instead_of_top_products,
+                try_price_query_decision,
+                _extract_price_subject,
+            )
             if _is_commerce_blocked(ctx):
                 return Decision(
                     action=ACTION_SOCIAL_REPLY,
@@ -1732,17 +1757,33 @@ class DefaultDecisionEngine:
                     reason="non-commerce block overrides ask_product/price on social OCR",
                     confidence=0.94,
                 )
-            if _product_discovery_blocked():
+            if _product_discovery_blocked("ask_product"):
                 _fb = _fulfillment_locked_fallback()
                 if _fb is not None:
                     return _fb
+            from ..product_discovery_gate import try_price_query_decision  # noqa: PLC0415
+            _price_dec = try_price_query_decision(
+                ctx, extracted_product_query=_extracted_product_query,
+            )
+            if _price_dec is not None:
+                return _price_dec
             if facts.has_products:
                 query = (
                     intent.slots.get("product_query")
                     or intent.slots.get("product_name")
                     or _extracted_product_query
-                    or ctx.message
+                    or _extract_price_subject(ctx.message or "")
                 )
+                if not query:
+                    query = _extract_price_subject(ctx.message or "")
+                if not query:
+                    return clarify_instead_of_top_products(
+                        ctx, reason="weak_or_unknown_intent",
+                    )
+                if _product_discovery_blocked("ask_product"):
+                    _fb = _fulfillment_locked_fallback()
+                    if _fb is not None:
+                        return _fb
                 return Decision(
                     action=ACTION_SEARCH_PRODUCTS,
                     args={"query": query},
@@ -1771,7 +1812,7 @@ class DefaultDecisionEngine:
             and ctx.sales_context
             and ctx.sales_context.recommendations
             and intent.name in (INTENT_START_ORDER, INTENT_PAY_NOW, INTENT_ASK_PRODUCT)
-            and not _product_discovery_blocked()
+            and not _product_discovery_blocked("order_product_query")
         ):
             return Decision(
                 action=ACTION_RECOMMEND_ADDON,

@@ -61,6 +61,7 @@ class ProductSearchHandler:
             next_catalog_browse_batch,
             resolve_product_breadth_from_context,
         )
+        from ..product_discovery_gate import allows_search_top_products_fallback  # noqa: PLC0415
         breadth = resolve_product_breadth_from_context(ctx, decision)
         fetch_limit = breadth.search_fetch_limit
         source = str(decision.args.get("source") or "").strip().lower()
@@ -137,11 +138,17 @@ class ProductSearchHandler:
                 )
                 refreshed_pool = list(runtime_result.payload.get("products") or [])
                 if not refreshed_pool and not q:
-                    runtime_result = await runtime.execute(
-                        "search_products",
-                        {"limit": max(fetch_limit, 12)},
-                    )
-                    refreshed_pool = list(runtime_result.payload.get("products") or [])
+                    if allows_search_top_products_fallback(
+                        ctx,
+                        query="",
+                        source="show_more",
+                        message=ctx.message,
+                    ):
+                        runtime_result = await runtime.execute(
+                            "search_products",
+                            {"limit": max(fetch_limit, 12)},
+                        )
+                        refreshed_pool = list(runtime_result.payload.get("products") or [])
                 refreshed_pool = _apply_affinity_boost(refreshed_pool, ctx)
                 seen = {
                     _product_key(p)
@@ -192,11 +199,23 @@ class ProductSearchHandler:
 
             # If search produced nothing but products exist → fallback to top sellers
             if not products:
-                runtime_result = await runtime.execute(
-                    "search_products",
-                    {"limit": fetch_limit},
-                )
-                products = list(runtime_result.payload.get("products") or [])
+                if allows_search_top_products_fallback(
+                    ctx,
+                    query=str(query or ""),
+                    source=source,
+                    message=ctx.message,
+                ):
+                    runtime_result = await runtime.execute(
+                        "search_products",
+                        {"limit": fetch_limit},
+                    )
+                    products = list(runtime_result.payload.get("products") or [])
+                else:
+                    return ActionResult(
+                        success=False,
+                        error="no_search_hits",
+                        data={"message": "no_search_hits_no_top_fallback"},
+                    )
 
             if not products:
                 return ActionResult(

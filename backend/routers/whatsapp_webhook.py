@@ -7595,6 +7595,9 @@ async def _handle_merchant_message(
             from modules.ai.brain.order_context_gate import (  # noqa: PLC0415
                 should_suppress_product_escalation,
             )
+            from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+                should_suppress_recommendation_escalation,
+            )
             _bs_for_nc = ((convo.extra_metadata or {}).get("brain_state") or {})
             _intent_for_nc = str(_bs_for_nc.get("last_intent") or "")
             _nc_turn = resolve_commerce_block(
@@ -7603,7 +7606,7 @@ async def _handle_merchant_message(
                 intent_name=_intent_for_nc or None,
             )
             _commerce_blocked = _nc_turn is not None
-            _fulfillment_discovery_blocked = should_suppress_product_escalation(
+            _fulfillment_discovery_blocked = should_suppress_recommendation_escalation(
                 message=text or "",
                 brain_state=_bs_for_nc,
                 intent_name=_intent_for_nc or None,
