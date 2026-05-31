@@ -204,7 +204,7 @@ class DefaultComposer:
                     apply_display_slice,
                     resolve_product_breadth_from_context,
                 )
-                breadth = resolve_product_breadth_from_context(ctx, result.decision)
+                breadth = resolve_product_breadth_from_context(ctx, decision)
                 alts, breadth_meta = apply_display_slice(alts, breadth)
                 result.data["pending_candidates"] = alts
                 result.data["product_breadth"] = breadth.to_log_dict()
@@ -251,7 +251,7 @@ class DefaultComposer:
                 log_product_breadth,
                 resolve_product_breadth_from_context,
             )
-            breadth = resolve_product_breadth_from_context(ctx, result.decision)
+            breadth = resolve_product_breadth_from_context(ctx, decision)
             candidates, breadth_meta = apply_display_slice(safe_products, breadth)
             log_product_breadth(
                 tenant_id=getattr(ctx, "tenant_id", None),
@@ -510,7 +510,7 @@ class DefaultComposer:
                 apply_display_slice,
                 resolve_product_breadth_from_context,
             )
-            breadth = resolve_product_breadth_from_context(ctx, result.decision)
+            breadth = resolve_product_breadth_from_context(ctx, decision)
             products, breadth_meta = apply_display_slice(
                 list(data.get("products") or []),
                 breadth,
@@ -539,7 +539,7 @@ class DefaultComposer:
         # customer the team will reply during working hours — no
         # "I'll alert the team now" implication.
         if action == ACTION_HANDOFF:
-            args = result.decision.args or {}
+            args = decision.args or {}
             after_hours = bool(args.get("after_hours"))
             if after_hours:
                 return T.handoff_after_hours()

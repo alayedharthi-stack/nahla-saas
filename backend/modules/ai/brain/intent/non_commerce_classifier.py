@@ -241,6 +241,26 @@ def _is_media_origin(message: str) -> bool:
     return any(m in (message or "") for m in _MEDIA_ORIGIN_MARKERS)
 
 
+def _commerce_keyword_hit(norm: str, kw: str) -> bool:
+    """Boundary-aware commerce keyword match.
+
+    Production regression (May 2026): Eid greeting cards signed
+    ``محبكم`` falsely matched the price-ask token ``بكم`` and blocked
+    the non-commerce classifier on long religious OCR.
+    """
+    if kw == "بكم":
+        return bool(re.search(r"(?<![ء-ي])بكم(?![ء-ي])", norm))
+    if kw in ("منتج", "المنتج", "product"):
+        return bool(re.search(rf"(?<![\w]){re.escape(kw)}", norm))
+    return kw in norm
+
+
+def _has_commercial_signal_bounded(norm: str) -> bool:
+    from .social_classifier import _COMMERCIAL_DISQUALIFIERS  # noqa: PLC0415
+
+    return any(_commerce_keyword_hit(norm, kw) for kw in _COMMERCIAL_DISQUALIFIERS)
+
+
 def _has_strong_commerce(norm: str) -> bool:
     # Vision/OCR often says "no products" / "بدون منتجات" — not buying intent.
     if re.search(
@@ -248,14 +268,11 @@ def _has_strong_commerce(norm: str) -> bool:
         norm,
     ):
         return False
-    if _has_commercial_signal(norm):
+    if _has_commercial_signal_bounded(norm):
         return True
     hits = 0
     for kw in _STRONG_COMMERCE_MARKERS:
-        if kw in ("منتج", "المنتج", "product"):
-            if re.search(rf"(?<![\w]){re.escape(kw)}", norm):
-                hits += 1
-        elif kw in norm:
+        if _commerce_keyword_hit(norm, kw):
             hits += 1
     return hits >= 2
 

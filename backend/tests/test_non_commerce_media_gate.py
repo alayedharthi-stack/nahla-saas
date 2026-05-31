@@ -85,6 +85,19 @@ SOCIAL_FORWARD_OCR = (
     "تهنئة بمناسبة ذي الحجة. اللهم تقبل. frequently forwarded."
 )
 
+# Production regression (May 2026): signed greeting cards use ``محبكم``
+# which falsely matched the price-ask token ``بكم`` and skipped blocking.
+EID_CARD_MUHEBBKUM_OCR = (
+    "[وصف الصورة المرسلة] نوع المحتوى: صورة عامة.\n\n"
+    'النص المرئي: \n'
+    '"وفي خاتمة أعيادنا نقول لأحبابنا\n'
+    "تباركت أعيادكم بقبول أعمالكم، وبارك الله في أعماركم، "
+    "وتقبل الله طاعتكم، وكل عام وأنتم بخير\n"
+    "محبكم: أبو عبدالله محمد الجيلاني\n"
+    'مكة المكرمة _ عيد الأضحى المبارك _ 1447ه"\n\n'
+    "تفاصيل مهمة: تهنئة بعيد الأضحى المبارك."
+)
+
 COMMERCE_MESSAGE = "أبغى عسل سدر بكم؟"
 
 
@@ -165,6 +178,20 @@ class TestNonCommerceClassifier:
         )
         assert m is not None
 
+    def test_muhebbkum_signature_does_not_block_eid_ocr(self):
+        m = classify_non_commerce(
+            EID_CARD_MUHEBBKUM_OCR,
+            media_type="image",
+            intent_name="ask_price",
+            intent_confidence=0.90,
+        )
+        assert m is not None
+        assert m.category == NC_EID_GREETING
+        assert m.block_commerce is True
+
+    def test_real_price_ask_still_commerce(self):
+        assert classify_non_commerce("عسل سدر بكم؟") is None
+
 
 class TestIntentRules:
     @pytest.mark.parametrize("message", [
@@ -212,6 +239,17 @@ class TestDecisionEngine:
             assert decision.args.get("block_commerce_escalation") is True
         else:
             assert decision.action == ACTION_SOCIAL_REPLY
+
+    def test_ask_price_misread_on_eid_card_routes_social(self):
+        engine = DefaultDecisionEngine()
+        ctx = _ctx(
+            EID_CARD_MUHEBBKUM_OCR,
+            intent_name="ask_price",
+            intent_confidence=0.90,
+        )
+        decision = engine.decide(ctx)
+        assert decision.action == ACTION_SOCIAL_REPLY
+        assert decision.action != ACTION_SEARCH_PRODUCTS
 
 
 class TestCatalogOrchestrator:

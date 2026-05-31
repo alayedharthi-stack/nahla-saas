@@ -187,3 +187,51 @@ class TestNarrowTemplates:
         text = T.narrow_choices(products=_products(1), variant=0)
         assert "1. *P1*" in text
         assert "2." not in text
+
+
+class TestComposerBreadthIntegration:
+    def test_search_products_compose_uses_decision_param(self):
+        import asyncio
+        from modules.ai.brain.compose.responder import DefaultComposer
+        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS
+        from modules.ai.brain.types import (
+            ActionResult,
+            BrainContext,
+            CommerceFacts,
+            Decision,
+            Intent,
+            MerchantConversationState,
+        )
+
+        async def _run():
+            composer = DefaultComposer()
+            decision = Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "عسل"},
+            )
+            result = ActionResult(
+                success=True,
+                data={
+                    "products": [
+                        {
+                            "title": "عسل طلح",
+                            "price": 120,
+                            "id": 1,
+                            "external_id": "e1",
+                            "can_checkout": True,
+                        }
+                    ],
+                },
+            )
+            ctx = BrainContext(
+                tenant_id=33,
+                customer_phone="966500000000",
+                message="بكم العسل؟",
+                intent=Intent(name="ask_price", confidence=0.9, raw_message="بكم العسل؟"),
+                state=MerchantConversationState(greeted=True),
+                facts=CommerceFacts(has_products=True, orderable=True),
+            )
+            return await composer.compose(decision, result, ctx)
+
+        reply = asyncio.run(_run())
+        assert "عسل طلح" in reply
