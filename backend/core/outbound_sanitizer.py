@@ -150,6 +150,56 @@ _PLANNER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("planner_word",           re.compile(r"\bplanner\b",                       re.IGNORECASE)),
 ]
 
+# ── Internal sales-policy / prompt-instruction fingerprints (May 2026) ────────
+# LLM occasionally quotes its own system prompt back to the customer —
+# e.g. "حسب قواعد البيع التدريجي Progressive Selling…". These MUST
+# never reach WhatsApp.
+_POLICY_LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("progressive_selling_en", re.compile(r"progressive\s+selling", re.IGNORECASE)),
+    ("progressive_selling_ar", re.compile(r"البيع\s*التدريجي", re.UNICODE)),
+    ("rules_prefix_ar",        re.compile(r"حسب\s*قواعد\s*(?:البيع\s*)?التدريجي", re.UNICODE)),
+    ("rules_generic_ar",       re.compile(r"حسب\s*القواعد\b", re.UNICODE)),
+    ("system_instructions_ar", re.compile(r"تعليمات\s*النظام", re.UNICODE)),
+    ("reply_policy_ar",        re.compile(r"سياسة\s*الرد", re.UNICODE)),
+    ("internal_policy_en",     re.compile(r"\binternal\s+policy\b", re.IGNORECASE)),
+    ("decision_engine_en",     re.compile(r"\bdecision\s+engine\b", re.IGNORECASE)),
+    ("routing_en",             re.compile(r"\brouting\b", re.IGNORECASE)),
+    ("prompt_en",              re.compile(r"\bprompt\b", re.IGNORECASE)),
+    ("classifier_en",          re.compile(r"\bclassifier\b", re.IGNORECASE)),
+    ("high_priority_block",    re.compile(r"\bHIGH\s+PRIORITY\b", re.IGNORECASE)),
+    ("brain_state_json",       re.compile(r"\bBrainStateJSON\b", re.IGNORECASE)),
+    ("response_goal_field",    re.compile(r"\bresponse_goal\s*[:=]", re.IGNORECASE)),
+]
+
+
+def contains_policy_leak_markers(text: str) -> Optional[str]:
+    """Return the first matching internal-policy fingerprint, or ``None``."""
+    from core.outbound_leakage_firewall import contains_outbound_leak  # noqa: PLC0415
+
+    hit = contains_outbound_leak(text)
+    if hit and hit not in {
+        "response_goal", "execute_pending_offer", "resolve_ambiguous_need",
+        "action_token", "goal_constant", "fallback_kind_const",
+        "intent_field", "decision_field", "relational_frame_field",
+        "recommended_next_step", "fallback_kind_field",
+        "internal_word", "debug_word", "planner_word",
+    }:
+        return hit
+    # Legacy direct scan for policy-only patterns
+    if not text or not isinstance(text, str):
+        return None
+    for name, pattern in _POLICY_LEAK_PATTERNS:
+        if pattern.search(text):
+            return name
+    return None
+
+
+def contains_internal_instruction_leak(text: str) -> Optional[str]:
+    """Planner fields OR internal policy / prompt names in customer text."""
+    from core.outbound_leakage_firewall import contains_outbound_leak  # noqa: PLC0415
+
+    return contains_outbound_leak(text)
+
 
 def contains_planner_markers(text: str) -> Optional[str]:
     """Return the name of the first matching planner-field
@@ -161,6 +211,36 @@ def contains_planner_markers(text: str) -> Optional[str]:
         if pattern.search(text):
             return name
     return None
+
+
+def _drop_leaky_sentences(text: str) -> str:
+    """Remove sentences that contain internal instruction/policy leaks."""
+    if not text:
+        return text or ""
+    chunks = re.split(r"(?<=[.!?؟\n])\s+", text.strip())
+    clean = [
+        c.strip()
+        for c in chunks
+        if c.strip() and contains_internal_instruction_leak(c) is None
+    ]
+    return " ".join(clean).strip()
+
+
+def sanitize_outbound_text(
+    text: str,
+    *,
+    tenant_id: Optional[int] = None,
+    recipient: Optional[str] = None,
+) -> Tuple[str, bool]:
+    """Scrub internal planner/policy leakage from a plain-text reply."""
+    from core.outbound_leakage_firewall import firewall_outbound_text  # noqa: PLC0415
+
+    return firewall_outbound_text(
+        text,
+        tenant_id=tenant_id,
+        recipient=recipient,
+        fallback_text=SAFE_FALLBACK_TEXT,
+    )
 
 
 def extract_natural_segment(text: str) -> Optional[str]:
@@ -190,7 +270,7 @@ def extract_natural_segment(text: str) -> Optional[str]:
     clean_paragraphs = [
         p.strip()
         for p in paragraphs
-        if p.strip() and contains_planner_markers(p) is None
+        if p.strip() and contains_internal_instruction_leak(p) is None
     ]
     if clean_paragraphs:
         recovered = "\n\n".join(clean_paragraphs).strip()
@@ -202,7 +282,7 @@ def extract_natural_segment(text: str) -> Optional[str]:
     clean_lines = [
         ln.strip()
         for ln in lines
-        if ln.strip() and contains_planner_markers(ln) is None
+        if ln.strip() and contains_internal_instruction_leak(ln) is None
     ]
     if clean_lines:
         recovered = "\n".join(clean_lines).strip()
@@ -327,41 +407,20 @@ def sanitize_outbound_payload(
         if not body:
             return payload, False
 
-        # ── Internal-planner leak (June 2026) ───────────────────
-        # Try to recover the natural Arabic part of the reply
-        # rather than dropping the whole message. Only fall back
-        # to the generic apology when nothing recoverable remains.
-        planner_match = contains_planner_markers(body)
-        if planner_match:
-            recovered = extract_natural_segment(body)
-            if (
-                recovered
-                and recovered != body
-                and contains_planner_markers(recovered) is None
-            ):
-                new_text = recovered
-                outcome  = "recovered_natural_segment"
-                strip_buttons = False
-            else:
-                new_text = SAFE_FALLBACK_TEXT
-                outcome  = "fallback_no_clean_segment"
-                strip_buttons = True
-            logger.warning(
-                "[INTERNAL_PLANNER_BLOCKED] tenant=%s to=%s marker=%s "
-                "outcome=%s original_len=%d preview=%r",
-                tenant_id,
-                recipient,
-                planner_match,
-                outcome,
-                len(body),
-                body[:140],
-            )
+        # ── Internal planner / policy leak (June 2026) ──────────
+        sanitized_body, was_internal_scrub = sanitize_outbound_text(
+            body,
+            tenant_id=tenant_id,
+            recipient=recipient,
+        )
+        if was_internal_scrub:
+            strip_buttons = sanitized_body == SAFE_FALLBACK_TEXT
             if _replace_body_in_payload(
-                payload, new_text, strip_buttons=strip_buttons
+                payload, sanitized_body, strip_buttons=strip_buttons
             ):
                 return payload, True
             logger.warning(
-                "[INTERNAL_PLANNER_BLOCKED] tenant=%s could not rewrite "
+                "[INTERNAL_POLICY_BLOCKED] tenant=%s could not rewrite "
                 "payload type=%r — blanking body",
                 tenant_id, payload.get("type"),
             )
@@ -827,10 +886,13 @@ __all__ = [
     "ASSET_LOCATION",
     "contains_leakage_markers",
     "contains_planner_markers",
+    "contains_policy_leak_markers",
+    "contains_internal_instruction_leak",
     "contains_handoff_promise",
     "contains_promised_asset",
     "extract_natural_segment",
     "maybe_scrub_handoff_promise",
     "maybe_scrub_unkept_asset_promise",
     "sanitize_outbound_payload",
+    "sanitize_outbound_text",
 ]

@@ -1476,6 +1476,26 @@ class MerchantBrain:
                 _scrub_exc,
             )
 
+        try:
+            from core.outbound_sanitizer import sanitize_outbound_text  # noqa: PLC0415
+            _orig_policy = reply
+            reply, _policy_hit = sanitize_outbound_text(
+                reply or "",
+                tenant_id=tenant_id,
+                recipient=customer_phone,
+            )
+            if _policy_hit:
+                logger.info(
+                    "[BRAIN_SCRUB] internal policy leak scrubbed tenant=%s "
+                    "len_before=%d len_after=%d",
+                    tenant_id, len(_orig_policy or ""), len(reply or ""),
+                )
+        except Exception as _policy_exc:  # noqa: BLE001
+            logger.debug(
+                "[BRAIN_SCRUB] policy scrub skipped tenant=%s: %s",
+                tenant_id, _policy_exc,
+            )
+
         # ── 10a. Single per-turn audit fields (May 2026 #12) ──────────────
         #
         # Compute the answer-alignment outcome BEFORE the structured
@@ -1933,6 +1953,20 @@ def _build_reply_state(
         platform_topic=platform_topic,
         platform_kb_excerpt=platform_kb_excerpt,
         non_commerce_block_mode=non_commerce_block_mode,
+        need_based_advice_mode=str(
+            (decision.args or {}).get("topic") or ""
+        ) in {"need_based_product_advice", "solution_seeking_commerce"}
+        or getattr(ctx.intent, "name", "") in {
+            "need_based_product_advice",
+            "solution_seeking_commerce",
+        },
+        need_category=str(
+            (decision.args or {}).get("solution_axis")
+            or (decision.args or {}).get("need_category")
+            or (getattr(ctx.intent, "slots", None) or {}).get("solution_axis")
+            or (getattr(ctx.intent, "slots", None) or {}).get("need_category")
+            or ""
+        ),
         relational_frame=(
             _stance_result.stance if _stance_result
             and _stance_result.stance != "unknown" else ""

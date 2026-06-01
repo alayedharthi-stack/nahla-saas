@@ -71,6 +71,15 @@ INTENT_SOCIAL           = "social"
 # ai_capabilities, campaigns, dashboard, meta_connection,
 # general_platform}.
 INTENT_PLATFORM_INQUIRY = "platform_inquiry"
+# Advisory need-based product questions — health / use-case oriented
+# ("عسل ما يرفع السكر"، "عطر ثابت"، "جوال بطاريته قوية"). NOT a request
+# to name a SKU; route to solution-seeking commerce advisory.
+#
+# Canonical intent name; legacy string kept for backward compatibility.
+INTENT_SOLUTION_SEEKING_COMMERCE = "solution_seeking_commerce"
+INTENT_NEED_BASED_PRODUCT_ADVICE = INTENT_SOLUTION_SEEKING_COMMERCE
+# Slot: ``need_category`` / ``solution_axis`` ∈ closed axes from
+# ``brain.commerce.solution_seeking`` (health_diet, audience_age, …).
 
 
 @dataclass
@@ -688,6 +697,9 @@ class BrainReplyState:
     # When True, suppress [PRODUCT:...] vocabulary and catalog escalation
     # for social / religious / greeting media (May 2026 non-commerce gate).
     non_commerce_block_mode: bool = False
+    # Advisory need-based product guidance (diabetes-safe, colon, …).
+    need_based_advice_mode: bool = False
+    need_category: str = ""
     # True after the bot has introduced itself ("أنا نحلة" / "أنا
     # مساعدتك الذكية") once in this conversation. The HIGH PRIORITY
     # block reads this field and FORBIDS the LLM from re-introducing

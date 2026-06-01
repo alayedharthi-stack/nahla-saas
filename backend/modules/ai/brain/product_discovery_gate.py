@@ -23,7 +23,7 @@ from .decision.actions import (
     ACTION_SEARCH_PRODUCTS,
 )
 from .intent.rules import INTENT_ASK_PRICE, INTENT_ASK_PRODUCT
-from .types import BrainContext, Decision
+from .types import BrainContext, Decision, INTENT_NEED_BASED_PRODUCT_ADVICE
 
 logger = logging.getLogger("nahla.brain.product_discovery_gate")
 
@@ -179,11 +179,34 @@ def _is_unit_only_price_message(message: str) -> bool:
     return False
 
 
+def is_solution_seeking_commerce(ctx: BrainContext) -> bool:
+    """True when turn is attribute/outcome-based commerce — not unknown SKU."""
+    if str(getattr(ctx.intent, "name", "") or "") in {
+        INTENT_NEED_BASED_PRODUCT_ADVICE,
+        "need_based_product_advice",
+        "solution_seeking_commerce",
+    }:
+        return True
+    try:
+        from ..commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
+
+        return classify_solution_seeking_commerce(ctx.message or "") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def is_need_based_product_advice(ctx: BrainContext) -> bool:
+    """Backward-compat alias for :func:`is_solution_seeking_commerce`."""
+    return is_solution_seeking_commerce(ctx)
+
+
 def is_price_without_product_context(
     ctx: BrainContext,
     *,
     extracted_product_query: str = "",
 ) -> bool:
+    if is_need_based_product_advice(ctx):
+        return False
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return False
@@ -238,6 +261,10 @@ def product_discovery_block_reason(
     msg = message if message is not None else (ctx.message or "")
     src = str(source or "").strip().lower()
     intent_name = str(getattr(ctx.intent, "name", "") or "")
+
+    if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
+        return None
+
     intent_conf = float(getattr(ctx.intent, "confidence", 0.0) or 0.0)
 
     try:
@@ -425,6 +452,8 @@ def try_price_query_decision(
 ) -> Optional[Decision]:
     """Route price asks without product context to clarify / focus — not search."""
     intent_name = str(getattr(ctx.intent, "name", "") or "")
+    if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
+        return None
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return None
 
@@ -475,15 +504,56 @@ def clarify_instead_of_top_products(
         preview=(ctx.message or "")[:80],
         source="top_products",
     )
+    try:
+        from ..commerce.solution_seeking import (  # noqa: PLC0415
+            classify_solution_seeking_commerce,
+            intelligent_need_clarification,
+        )
+        _ss = classify_solution_seeking_commerce(ctx.message or "")
+        if _ss is not None:
+            try:
+                from ..commerce.solution_seeking import log_solution_seeking_commerce  # noqa: PLC0415
+                log_solution_seeking_commerce(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    axis=_ss.axis,
+                    source=_ss.source,
+                    route="clarify_fallback_llm",
+                    preview=ctx.message or "",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "solution_seeking_commerce",
+                    "need_category": _ss.axis,
+                    "solution_axis": _ss.axis,
+                },
+                reason="solution-seeking commerce — advisory LLM, not SKU clarify",
+                confidence=0.88,
+            )
+        _question = intelligent_need_clarification("general_attribute")
+    except Exception:  # noqa: BLE001
+        _question = (
+            "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة "
+            "وأرشّح لك الأنسب — بدون ما تحتاج تكتب اسم منتج."
+        )
+
+    try:
+        from ..commerce.solution_seeking import log_intelligent_need_clarification  # noqa: PLC0415
+        log_intelligent_need_clarification(
+            tenant_id=getattr(ctx, "tenant_id", None),
+            axis="general_attribute",
+            reason=reason,
+            preview=ctx.message or "",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return Decision(
         action=ACTION_CLARIFY,
-        args={
-            "question": (
-                "أي منتج تقصد؟ اكتب اسمه، أو اكتب «وش عندكم؟» "
-                "لو تبغى تشوف الخيارات."
-            ),
-        },
-        reason=f"blocked top_products ({reason}) — ask clarification",
+        args={"question": _question},
+        reason=f"blocked top_products ({reason}) — intelligent need clarification",
         confidence=0.80,
     )
 
@@ -493,6 +563,8 @@ __all__ = [
     "allows_top_products_decision",
     "clarify_instead_of_top_products",
     "has_explicit_broad_browse_request",
+    "is_need_based_product_advice",
+    "is_solution_seeking_commerce",
     "is_price_without_product_context",
     "log_product_discovery_blocked",
     "product_discovery_block_reason",

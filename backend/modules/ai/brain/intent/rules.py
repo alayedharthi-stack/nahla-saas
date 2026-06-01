@@ -28,6 +28,7 @@ from ..types import (
     INTENT_GENERAL,
     INTENT_GREETING,
     INTENT_HESITATION,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
     INTENT_PAY_NOW,
     INTENT_PICK_LIST_ITEM,
     INTENT_PLATFORM_INQUIRY,
@@ -41,6 +42,8 @@ from ..types import (
 from .platform_classifier import classify_platform
 from .social_classifier import classify_social
 from .non_commerce_classifier import classify_non_commerce
+from .need_based_product_classifier import classify_need_based_product_advice
+from ..commerce.solution_seeking import classify_solution_seeking_commerce
 
 
 @dataclass
@@ -542,6 +545,22 @@ def match_top_k(message: str, *, k: int = 3) -> List[Tuple[float, "Intent"]]:
             ),
         ))
 
+    need_based = classify_solution_seeking_commerce(message) or classify_need_based_product_advice(message)
+    if need_based is not None:
+        out.append((
+            need_based.confidence,
+            Intent(
+                name=INTENT_NEED_BASED_PRODUCT_ADVICE,
+                confidence=need_based.confidence,
+                slots={
+                    "need_category": need_based.axis,
+                    "solution_axis": need_based.axis,
+                },
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
+
     for ruleset, compiled in _RULES:
         for pattern in compiled:
             if pattern.search(message):
@@ -639,6 +658,23 @@ def match(message: str) -> Optional[Intent]:
                 name=INTENT_PLATFORM_INQUIRY,
                 confidence=platform.confidence,
                 slots={"platform_topic": platform.topic},
+                raw_message=message,
+                extraction_method="rules",
+            ),
+        ))
+
+    # ── Layer 2b: need-based advisory product questions ───────────────
+    need_based = classify_solution_seeking_commerce(message) or classify_need_based_product_advice(message)
+    if need_based is not None:
+        candidates.append((
+            need_based.confidence,
+            Intent(
+                name=INTENT_NEED_BASED_PRODUCT_ADVICE,
+                confidence=need_based.confidence,
+                slots={
+                    "need_category": need_based.axis,
+                    "solution_axis": need_based.axis,
+                },
                 raw_message=message,
                 extraction_method="rules",
             ),
@@ -759,6 +795,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_ASK_OWNER_CONTACT,
     INTENT_TRACK_ORDER,
     INTENT_PLATFORM_INQUIRY,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
 })
 
 

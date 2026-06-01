@@ -56,6 +56,7 @@ from ..types import (
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
     INTENT_HESITATION,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
     INTENT_PLATFORM_INQUIRY,
     INTENT_SOCIAL,
     INTENT_TALK_HUMAN,
@@ -1679,6 +1680,51 @@ class DefaultDecisionEngine:
                     reason="explicit greeting after greeted=True — short re-greeting",
                     confidence=0.85,
                 )
+
+        # ── 6.5 Need-based advisory product guidance ───────────────────
+        if intent.name in {
+            INTENT_NEED_BASED_PRODUCT_ADVICE,
+            "need_based_product_advice",
+        }:
+            _need_cat = str(
+                (intent.slots or {}).get("solution_axis")
+                or (intent.slots or {}).get("need_category")
+                or ""
+            )
+            if not _need_cat:
+                try:
+                    from ..commerce.solution_seeking import (  # noqa: PLC0415
+                        classify_solution_seeking_commerce,
+                    )
+                    _nb = classify_solution_seeking_commerce(ctx.message or "")
+                    if _nb is not None:
+                        _need_cat = _nb.axis
+                except Exception:  # noqa: BLE001
+                    pass
+            if not _need_cat:
+                _need_cat = "general_attribute"
+            _src = "intent_slot" if (intent.slots or {}).get("solution_axis") else "classifier"
+            try:
+                from ..commerce.solution_seeking import log_solution_seeking_commerce  # noqa: PLC0415
+                log_solution_seeking_commerce(
+                    tenant_id=ctx.tenant_id,
+                    axis=_need_cat,
+                    source=_src,
+                    route="decision_engine",
+                    preview=ctx.message or "",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "solution_seeking_commerce",
+                    "need_category": _need_cat,
+                    "solution_axis": _need_cat,
+                },
+                reason="solution-seeking commerce — advisory LLM, no SKU clarify",
+                confidence=0.93,
+            )
 
         # ── 6. Start order — product in focus ──────────────────────────────
         if intent.name == INTENT_START_ORDER:

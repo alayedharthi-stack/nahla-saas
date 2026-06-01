@@ -8557,6 +8557,28 @@ async def _handle_merchant_message(
                     tenant_id, _scrub_exc,
                 )
 
+        if reply:
+            try:
+                from core.outbound_sanitizer import sanitize_outbound_text as _scrub_policy  # noqa: PLC0415
+                _orig_policy = reply
+                reply, _policy_scrubbed = _scrub_policy(
+                    reply or "",
+                    tenant_id=tenant_id,
+                    recipient=to,
+                )
+                if _policy_scrubbed:
+                    logger.info(
+                        "[INTERNAL_POLICY_BLOCKED] tenant=%s conversation_id=%s "
+                        "scrubbed=true orig_len=%d new_len=%d",
+                        tenant_id, getattr(convo, "id", None),
+                        len(_orig_policy or ""), len(reply or ""),
+                    )
+            except Exception as _policy_exc:  # noqa: BLE001
+                logger.debug(
+                    "[INTERNAL_POLICY_BLOCKED] inline scrub failed tenant=%s: %s",
+                    tenant_id, _policy_exc,
+                )
+
         # ── Asset-promise guard (May 2026 #30) ────────────────────────
         # Detect "I will send you the link/number/barcode/location" in
         # the outbound text and verify the matching asset is actually
