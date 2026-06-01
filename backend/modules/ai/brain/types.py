@@ -781,6 +781,8 @@ class BrainContext:
     # repaired using conversation anchors. Guards still enforce execution.
     semantic_interpretation: Optional[Any] = None
     raw_message: str = ""
+    # State relevance verdict — blocks stale workflow resurrection.
+    state_relevance: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

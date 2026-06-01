@@ -563,6 +563,52 @@ class MerchantBrain:
         if _raw_message and intent.raw_message != _raw_message:
             intent.raw_message = _raw_message
 
+        # ── 1b. State relevance validation ─────────────────────────────
+        _state_relevance = None
+        try:
+            from .state.state_relevance import (  # noqa: PLC0415
+                log_state_relevance,
+                validate_state_relevance,
+            )
+
+            _state_relevance = validate_state_relevance(
+                type("_SRCtx", (), {
+                    "message": _raw_message,
+                    "state": state_for_classify,
+                    "intent": intent,
+                    "semantic_interpretation": _semantic_interpretation,
+                })(),
+                message=_raw_message,
+                state=state_for_classify,
+                semantic_interpretation=_semantic_interpretation,
+            )
+            if _state_relevance.active_workflows:
+                for _wf in _state_relevance.active_workflows:
+                    _rel = True
+                    if _wf in ("awaiting_payment_receipt", "payment_flow"):
+                        _rel = _state_relevance.payment_state_relevant
+                    elif _wf in ("active_fulfillment", "awaiting_location"):
+                        _rel = _state_relevance.fulfillment_state_relevant
+                    elif _wf == "pending_candidates":
+                        _rel = _state_relevance.pending_candidates_relevant
+                    log_state_relevance(
+                        tenant_id=tenant_id,
+                        verdict=_state_relevance,
+                        state_name=_wf,
+                        relevant=_rel,
+                        reason=(
+                            "topic_shift"
+                            if _state_relevance.detected_topic_shift and not _rel
+                            else "current_turn_match"
+                        ),
+                    )
+        except Exception as _sr_exc:  # noqa: BLE001
+            logger.debug(
+                "[STATE_RELEVANCE] skipped tenant=%s err=%s",
+                tenant_id, _sr_exc,
+            )
+            _state_relevance = None
+
         _nc_match = None
         try:
             from .intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
@@ -709,6 +755,7 @@ class MerchantBrain:
             ),
             semantic_interpretation=_semantic_interpretation,
             raw_message=_raw_message,
+            state_relevance=_state_relevance,
         )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         if human_priority:

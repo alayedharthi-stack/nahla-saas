@@ -1414,44 +1414,64 @@ def context_aware_dedup_fallback(
             )
 
         if s.get("awaiting_payment_receipt"):
-            # Post-shipment delivery-confirmation gate (May 2026 #12):
-            # if a tracking notice was already pushed and the customer
-            # is now confirming PACKAGE arrival ("اخذته / استلمته /
-            # وصل اليوم"), the awaiting-receipt re-prompt is wrong —
-            # the order has clearly moved past payment. Fall through
-            # to the default fallback so the brain replies naturally.
+            # State relevance gate — do NOT resurrect payment flow when
+            # the current turn is a commerce/price/size query.
+            _payment_resume = True
             if inbound_text:
                 try:
-                    from core.payment_intent import (  # noqa: PLC0415
-                        is_post_shipment_delivery_confirmation,
+                    from modules.ai.brain.state.state_relevance import (  # noqa: PLC0415
+                        log_state_resurrection_blocked,
+                        validate_state_relevance_from_summary,
                     )
-                    if is_post_shipment_delivery_confirmation(
-                        db,
-                        tenant_id=tenant_id,
-                        phone=phone,
-                        inbound_text=inbound_text,
-                    ):
-                        logger.info(
-                            "[ORDER_FLOW_STATE] suppressing receipt re-prompt "
-                            "— post-shipment delivery confirmation detected "
-                            "tenant=%s phone=*%s",
-                            tenant_id, (phone or "")[-4:],
+                    _verdict = validate_state_relevance_from_summary(
+                        message=inbound_text,
+                        summary=s,
+                    )
+                    if not _verdict.payment_state_relevant and _verdict.detected_topic_shift:
+                        log_state_resurrection_blocked(
+                            tenant_id=tenant_id,
+                            blocked_state="payment_flow",
+                            reason="no_payment_semantics",
+                            preview=inbound_text[:80],
+                            intent_hint=_verdict.current_intent_hint,
                         )
-                    else:
+                        _payment_resume = False
+                except Exception:  # noqa: BLE001
+                    pass
+
+            if _payment_resume:
+                if inbound_text:
+                    try:
+                        from core.payment_intent import (  # noqa: PLC0415
+                            is_post_shipment_delivery_confirmation,
+                        )
+                        if is_post_shipment_delivery_confirmation(
+                            db,
+                            tenant_id=tenant_id,
+                            phone=phone,
+                            inbound_text=inbound_text,
+                        ):
+                            logger.info(
+                                "[ORDER_FLOW_STATE] suppressing receipt re-prompt "
+                                "— post-shipment delivery confirmation detected "
+                                "tenant=%s phone=*%s",
+                                tenant_id, (phone or "")[-4:],
+                            )
+                        else:
+                            return (
+                                "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
+                                "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
+                            )
+                    except Exception:
                         return (
                             "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
                             "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
                         )
-                except Exception:
+                else:
                     return (
                         "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
                         "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
                     )
-            else:
-                return (
-                    "أنا بانتظار إيصال التحويل بإذنك — أرسله هنا "
-                    "(صورة أو PDF) وأكمل لك الطلب فوراً. 🌷"
-                )
 
         if s.get("selected_product") and s.get("price") is not None:
             price_str = _format_price(s["price"], s.get("currency") or "SAR")

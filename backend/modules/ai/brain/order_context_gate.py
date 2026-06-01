@@ -581,6 +581,25 @@ def try_fulfillment_lock_continuation(ctx: BrainContext) -> Optional[Decision]:
     if has_explicit_commerce_topic_change(ctx.message or ""):
         return None
 
+    try:
+        from .state.state_relevance import (  # noqa: PLC0415
+            log_state_resurrection_blocked,
+            should_block_workflow_resume,
+            validate_state_relevance,
+        )
+        _verdict = getattr(ctx, "state_relevance", None) or validate_state_relevance(ctx)
+        if should_block_workflow_resume("active_fulfillment", _verdict):
+            log_state_resurrection_blocked(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                blocked_state="active_fulfillment",
+                reason="semantic_mismatch",
+                preview=(ctx.message or "")[:80],
+                intent_hint=_verdict.current_intent_hint,
+            )
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+
     product = _resolve_product_for_update(ctx)
     if product:
         logger.info(

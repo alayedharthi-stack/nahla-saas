@@ -251,6 +251,21 @@ class DefaultDecisionEngine:
 
         def _fulfillment_locked_fallback() -> Optional[Decision]:
             try:
+                from ..state.state_relevance import (  # noqa: PLC0415
+                    log_state_resurrection_blocked,
+                    should_block_workflow_resume,
+                    validate_state_relevance,
+                )
+                _verdict = getattr(ctx, "state_relevance", None) or validate_state_relevance(ctx)
+                if should_block_workflow_resume("active_fulfillment", _verdict):
+                    log_state_resurrection_blocked(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        blocked_state="active_fulfillment",
+                        reason="semantic_mismatch",
+                        preview=(ctx.message or "")[:80],
+                        intent_hint=_verdict.current_intent_hint,
+                    )
+                    return None
                 from ..order_context_gate import (  # noqa: PLC0415
                     try_fulfillment_lock_continuation,
                     try_order_context_update_decision,
@@ -261,6 +276,34 @@ class DefaultDecisionEngine:
                 return try_fulfillment_lock_continuation(ctx)
             except Exception:  # noqa: BLE001
                 return None
+
+        def _state_relevance():
+            try:
+                from ..state.state_relevance import validate_state_relevance  # noqa: PLC0415
+
+                return getattr(ctx, "state_relevance", None) or validate_state_relevance(ctx)
+            except Exception:  # noqa: BLE001
+                return None
+
+        def _block_stale_resume(workflow: str, *, reason: str = "semantic_mismatch") -> bool:
+            try:
+                from ..state.state_relevance import (  # noqa: PLC0415
+                    log_state_resurrection_blocked,
+                    should_block_workflow_resume,
+                )
+                _verdict = _state_relevance()
+                if _verdict is None or not should_block_workflow_resume(workflow, _verdict):
+                    return False
+                log_state_resurrection_blocked(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    blocked_state=workflow,
+                    reason=reason,
+                    preview=(ctx.message or "")[:80],
+                    intent_hint=_verdict.current_intent_hint,
+                )
+                return True
+            except Exception:  # noqa: BLE001
+                return False
 
         # ── -1. Prediction confirmation (absolute highest priority) ─────────
         # ── Variant choice gate (Phase 3 — migration 0064) ─────────────
@@ -765,7 +808,9 @@ class DefaultDecisionEngine:
             INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
             INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
         ):
-            _matched_product = _match_product_from_message(ctx.message, _candidates)
+            if _block_stale_resume("pending_candidates"):
+                _candidates = []
+            _matched_product = _match_product_from_message(ctx.message, _candidates) if _candidates else None
             if _matched_product:
                 # Use can_checkout as the single source of truth; fall back to
                 # orderable for older state entries that pre-date can_checkout.
@@ -1347,6 +1392,7 @@ class DefaultDecisionEngine:
             and facts.has_products
             and not _is_commerce_blocked(ctx)
             and not _product_discovery_blocked("show_more")
+            and not _block_stale_resume("show_more")
         ):
             logger.info(
                 "[ORDER FLOW] show_more_candidates | offset=%d pool=%d tenant=%s",
@@ -1370,6 +1416,7 @@ class DefaultDecisionEngine:
             and facts.has_products
             and not _is_commerce_blocked(ctx)
             and not _product_discovery_blocked("replay")
+            and not _block_stale_resume("product_replay")
         ):
             _last_cands = list(state.last_search_candidates or [])
             if _last_cands:
@@ -1876,6 +1923,7 @@ class DefaultDecisionEngine:
             and ctx.sales_context.recommendations
             and intent.name in (INTENT_START_ORDER, INTENT_PAY_NOW, INTENT_ASK_PRODUCT)
             and not _product_discovery_blocked("order_product_query")
+            and not _block_stale_resume("addon_recommendation")
         ):
             return Decision(
                 action=ACTION_RECOMMEND_ADDON,
