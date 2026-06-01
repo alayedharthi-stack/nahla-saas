@@ -347,6 +347,9 @@ class MerchantConversationState:
     draft_order_id: Optional[str] = None
     checkout_url: Optional[str] = None
     customer_goal: str = ""
+    # Last turn we returned salam — avoids repetitive salam spam.
+    last_salam_return_turn: int = 0
+    last_salam_return_level: str = ""
     last_question_asked: str = ""
     last_question_answered: bool = True
     recommended_next_step: str = ""
@@ -438,6 +441,8 @@ class MerchantConversationState:
             "draft_order_id": self.draft_order_id,
             "checkout_url": self.checkout_url,
             "customer_goal": self.customer_goal,
+            "last_salam_return_turn": self.last_salam_return_turn,
+            "last_salam_return_level": self.last_salam_return_level,
             "last_question_asked": self.last_question_asked,
             "last_question_answered": self.last_question_answered,
             "recommended_next_step": self.recommended_next_step,
@@ -482,6 +487,8 @@ class MerchantConversationState:
             draft_order_id=d.get("draft_order_id"),
             checkout_url=d.get("checkout_url"),
             customer_goal=d.get("customer_goal", ""),
+            last_salam_return_turn=int(d.get("last_salam_return_turn") or 0),
+            last_salam_return_level=str(d.get("last_salam_return_level", "") or ""),
             last_question_asked=d.get("last_question_asked", ""),
             last_question_answered=bool(d.get("last_question_answered", True)),
             recommended_next_step=d.get("recommended_next_step", ""),

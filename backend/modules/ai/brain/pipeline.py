@@ -2267,50 +2267,27 @@ def _prepend_stance_directive(base_goal: str, stance: Any) -> str:
     return f"{directive} | {base_goal}"
 
 
-# Short Gulf-style salaam acknowledgments rotated by message length so
-# the prefix never feels canned across a small batch of customers. The
-# variants stay under one line each and intentionally do NOT add a
-# follow-up question — the actionable answer below already drives the
-# conversation forward.
+# Short Gulf-style salaam acknowledgments — superseded by
+# ``compose.greeting_etiquette`` for level-matched salam returns.
 _WELCOME_GATE_PREFIXES: List[str] = [
     "وعليكم السلام ورحمة الله 🌹",
-    "وعليكم السلام يا الغالي 🌹",
     "وعليكم السلام 🌷",
-    "أهلاً بك 🌹",
-    "هلا والله 🌷",
 ]
 
 
 def _prepend_first_contact_salaam(reply: str, ctx: Any) -> str:
-    """Return ``reply`` with a brief Gulf-style salaam line prepended.
+    """Return ``reply`` with a level-matched salam return prepended."""
+    from modules.ai.brain.compose.greeting_etiquette import (  # noqa: PLC0415
+        apply_greeting_etiquette,
+        customer_message_for_etiquette,
+    )
 
-    The prefix is chosen deterministically from the message length so a
-    given customer message always produces the same opener (helpful for
-    debugging) while different customers see different lines.
-    """
-    if not isinstance(reply, str) or not reply.strip():
-        return reply
-    message = str(getattr(ctx, "message", "") or "")
-    idx = (len(message) + 7) % len(_WELCOME_GATE_PREFIXES)
-    prefix = _WELCOME_GATE_PREFIXES[idx]
-    # If the composed reply already opens with a salaam/greeting from the
-    # LLM we leave it untouched — double-greeting would feel mechanical.
-    head = reply.lstrip()[:30]
-    head_l = head.lower()
-    if any(
-        marker in head
-        for marker in (
-            "وعليكم السلام",
-            "السلام عليكم",
-            "أهلاً",
-            "أهلا",
-            "هلا",
-            "حياك",
-            "مرحبا",
-        )
-    ) or head_l.startswith(("hi ", "hello", "hey ")):
-        return reply
-    return f"{prefix}\n{reply}"
+    return apply_greeting_etiquette(
+        reply,
+        customer_message_for_etiquette(ctx),
+        getattr(ctx, "state", None),
+        tenant_id=getattr(ctx, "tenant_id", None),
+    )
 
 
 def _history_has_outbound(history: List[Dict[str, Any]]) -> bool:

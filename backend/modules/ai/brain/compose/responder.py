@@ -117,6 +117,11 @@ class DefaultComposer:
 
         # ── Greet ──────────────────────────────────────────────────────────
         if action == ACTION_GREET:
+            from .greeting_etiquette import (  # noqa: PLC0415
+                apply_greeting_etiquette,
+                customer_message_for_etiquette,
+            )
+
             variant = self._variant_idx(ctx)
             persona = getattr(ctx.facts, "assistant_name", "") or ""
             if re_greet_requested:
@@ -131,19 +136,24 @@ class DefaultComposer:
                         assistant_name=persona,
                         variant=(variant + 1) % 3,
                     )
-                return text
-            text = T.greeting(
-                store_name=ctx.facts.store_name,
-                assistant_name=persona,
-                variant=variant,
-            )
-            if self._is_duplicate(text, ctx):
+            else:
                 text = T.greeting(
                     store_name=ctx.facts.store_name,
                     assistant_name=persona,
-                    variant=(variant + 1) % 3,
+                    variant=variant,
                 )
-            return text
+                if self._is_duplicate(text, ctx):
+                    text = T.greeting(
+                        store_name=ctx.facts.store_name,
+                        assistant_name=persona,
+                        variant=(variant + 1) % 3,
+                    )
+            return apply_greeting_etiquette(
+                text,
+                customer_message_for_etiquette(ctx),
+                ctx.state,
+                tenant_id=getattr(ctx, "tenant_id", None),
+            )
 
         # ── FAQ ────────────────────────────────────────────────────────────
         if action == ACTION_FAQ_REPLY:
