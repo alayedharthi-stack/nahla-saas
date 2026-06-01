@@ -98,6 +98,48 @@ def _is_commerce_blocked(ctx: BrainContext) -> bool:
     return False
 
 
+def _goal_based_commerce_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Structured KB regimen — only when pipeline composed a resolved bundle."""
+    _goal_bundle = getattr(ctx, "goal_regimen_bundle", None)
+    if _goal_bundle is None or getattr(_goal_bundle, "resolved_count", 0) <= 0:
+        return None
+    intent = getattr(ctx, "intent", None)
+    if intent is None or intent.name not in {
+        INTENT_NEED_BASED_PRODUCT_ADVICE,
+        "need_based_product_advice",
+        "solution_seeking_commerce",
+    }:
+        return None
+    try:
+        from ..commerce.goal.telemetry import log_goal_commerce  # noqa: PLC0415
+
+        log_goal_commerce(
+            tenant_id=ctx.tenant_id,
+            goal=str(getattr(_goal_bundle, "goal", "") or ""),
+            kb_hits=1,
+            selected_bundle=str(getattr(_goal_bundle, "title", "") or ""),
+            resolved_products=int(_goal_bundle.resolved_count),
+            unresolved_products=len(getattr(_goal_bundle, "unresolved_refs", []) or []),
+            retrieval_source="goal_based_recommendation",
+            fallback_used=False,
+            final_action="goal_based_commerce",
+            preview=ctx.message or "",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "goal_based_commerce",
+            "goal": _goal_bundle.goal,
+            "regimen_bundle": _goal_bundle.to_dict(),
+            "response_goal": "goal_based_commerce",
+        },
+        reason="goal-based KB regimen — structured bundle composed",
+        confidence=0.94,
+    )
+
+
 # ── Direct Answer First (DAF) — first-turn welcome bypass ────────────────────
 #
 # Production regression (May 2026 #20 — "voice note with invoice question"):
@@ -1532,12 +1574,23 @@ class DefaultDecisionEngine:
                 ctx, reason="weak_or_unknown_intent",
             )
 
+        # ── 3.8b½ Goal-based commerce (before order-query text hijack) ───
+        _goal_dec = _goal_based_commerce_decision(ctx)
+        if _goal_dec is not None:
+            return _goal_dec
+
         # ── 3.8c handler ─────────────────────────────────────────────────
         if (
             _extracted_product_query
             and facts.has_products
             and not _is_commerce_blocked(ctx)
             and not _product_discovery_blocked("order_product_query")
+            and intent.name not in {
+                INTENT_NEED_BASED_PRODUCT_ADVICE,
+                "need_based_product_advice",
+                "solution_seeking_commerce",
+            }
+            and getattr(ctx, "goal_regimen_bundle", None) is None
         ):
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
@@ -1837,6 +1890,10 @@ class DefaultDecisionEngine:
             INTENT_NEED_BASED_PRODUCT_ADVICE,
             "need_based_product_advice",
         }:
+            _goal_dec = _goal_based_commerce_decision(ctx)
+            if _goal_dec is not None:
+                return _goal_dec
+
             _need_cat = str(
                 (intent.slots or {}).get("solution_axis")
                 or (intent.slots or {}).get("need_category")

@@ -234,6 +234,13 @@ REGISTRY: List[SectionKind] = [
         "مقارنات سريعة بين المنتجات المتشابهة لمساعدة العميل في الاختيار.",
         is_product_bound=True,
     ),
+    SectionKind(
+        "goal_based_recommendation", 5,
+        "توصية حسب الهدف",
+        "مجموعة منتجات وإرشادات مرتبطة بهدف العميل (خصوبة، طاقة، مناعة…). "
+        "استخدم metadata_json للحقول المنظّمة: goal_tags, products, usage_guidance.",
+        is_product_bound=False,
+    ),
 
     # Cross-cutting fallbacks
     SectionKind(

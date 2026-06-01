@@ -819,6 +819,8 @@ class BrainContext:
     raw_message: str = ""
     # State relevance verdict — blocks stale workflow resurrection.
     state_relevance: Optional[Any] = None
+    # Structured goal-based regimen when KB hit exists (P0 goal commerce).
+    goal_regimen_bundle: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

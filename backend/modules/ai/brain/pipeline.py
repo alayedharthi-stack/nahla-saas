@@ -880,6 +880,37 @@ class MerchantBrain:
 
         stage_before = state.stage
 
+        # ── 3.9 Goal-based commerce (P0 — KB retrieval + composition) ────
+        try:
+            from .types import INTENT_NEED_BASED_PRODUCT_ADVICE  # noqa: PLC0415
+            from .commerce.goal.orchestrator import prepare_goal_regimen_bundle  # noqa: PLC0415
+            from .commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
+
+            _advisory_turn = (
+                intent.name
+                in {
+                    INTENT_NEED_BASED_PRODUCT_ADVICE,
+                    "need_based_product_advice",
+                    "solution_seeking_commerce",
+                }
+                or classify_solution_seeking_commerce(_classify_message or message)
+                is not None
+            )
+            if _advisory_turn and not getattr(ctx, "block_commerce_escalation", False):
+                _bundle, _, _kb_hits = prepare_goal_regimen_bundle(
+                    db,
+                    tenant_id,
+                    message,
+                    canonical_message=_classify_message,
+                )
+                ctx.goal_regimen_bundle = _bundle
+        except Exception as _gc_exc:  # noqa: BLE001
+            logger.debug(
+                "[GOAL_COMMERCE] prepare skipped tenant=%s err=%s",
+                tenant_id,
+                _gc_exc,
+            )
+
         # ── 4. Decision ───────────────────────────────────────────────────
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
@@ -2192,6 +2223,43 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
             "إذا طلب العميل وسيلة دفع/شهادة/باركود استخدم "
             "`[MEDIA_KEY:<slug>]` المناسب من قائمة المفاتيح المتاحة."
         )
+        return " | ".join(lines)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "goal_based_commerce"
+    ):
+        _bundle = (decision.args or {}).get("regimen_bundle") or {}
+        _goal = str(_bundle.get("goal") or (decision.args or {}).get("goal") or "")
+        _items = list(_bundle.get("items") or [])
+        lines = [
+            "goal_based_commerce — العميل يصف هدف/حاجة (ليس SKU). "
+            "استخدم التوصية المنظّمة من KB — ممنوع اختراع منتجات أو تركيبات.",
+            "صِغ الرد بصيغة استشارية ناعمة: «كثير من العملاء يفضلون…» "
+            "«قد يناسب…» «ضمن روتين غذائي…» — ممنوع ادعاءات علاجية أو ضمان نتائج.",
+            "ممنوع: علاج، يشفي، مضمون، نتائج مؤكدة، تشخيص طبي.",
+        ]
+        if _goal:
+            lines.append(f"الهدف المكتشف: {_goal}")
+        for _ug in (_bundle.get("usage_guidance") or [])[:4]:
+            lines.append(f"إرشاد استخدام: {_ug}")
+        for _sc in (_bundle.get("soft_claims") or [])[:3]:
+            lines.append(f"claim ناعم: {_sc}")
+        for _cp in (_bundle.get("compliance") or [])[:3]:
+            lines.append(f"امتثال: {_cp}")
+        _resolved = [i for i in _items if i.get("resolved")]
+        if _resolved:
+            lines.append(
+                "أرسل بطاقة كل منتج محلول باستخدام "
+                + "، ".join(f'`[PRODUCT:{i.get("title")}]`' for i in _resolved[:4])
+                + " — مع شرح مختصر لدور كل منتج."
+            )
+        _followups = list(_bundle.get("followup_questions") or [])[:2]
+        if _followups:
+            lines.append(
+                "سؤال متابعة اختياري (واحد فقط): "
+                + _followups[0]
+            )
         return " | ".join(lines)
 
     if (
