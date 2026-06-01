@@ -16,8 +16,10 @@ import sys
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
-if _backend not in sys.path:
-    sys.path.insert(0, _backend)
+_repo = os.path.dirname(_backend)
+for _p in (_backend, os.path.join(_repo, "database")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 GOAL_KB_KIND = "goal_based_recommendation"
 
@@ -27,9 +29,9 @@ SEED_ENTRIES = [
         "title": "خصوبة وحيوية",
         "goal_tags": ["fertility_vitality"],
         "products": [
-            {"ref": "غذاء ملكات النحل", "role": "primary"},
-            {"ref": "عسل طلح بلدي", "role": "primary"},
-            {"ref": "حبوب لقاح", "role": "complement"},
+            {"product_id": 107, "ref": "غذاء ملكات النحل", "role": "primary"},
+            {"product_id": 109, "ref": "عسل طلح نجد", "role": "primary"},
+            {"product_id": 118, "ref": "حبوب لقاح", "role": "complement"},
         ],
         "usage_guidance": [
             "ملعقة صباحًا ومساءً",
@@ -52,8 +54,8 @@ SEED_ENTRIES = [
         "title": "طاقة يومية",
         "goal_tags": ["energy_daily"],
         "products": [
-            {"ref": "عسل طلح", "role": "primary"},
-            {"ref": "غذاء ملكات", "role": "complement"},
+            {"product_id": 109, "ref": "عسل طلح نجد", "role": "primary"},
+            {"product_id": 107, "ref": "غذاء ملكات النحل", "role": "complement"},
         ],
         "usage_guidance": ["ملعقة صباحًا على الريق"],
         "soft_claims": ["كثير من العملاء يفضلونه للطاقة اليومية"],
@@ -64,9 +66,9 @@ SEED_ENTRIES = [
         "title": "دعم المناعة",
         "goal_tags": ["immunity_support"],
         "products": [
-            {"ref": "عسل سدر", "role": "primary"},
-            {"ref": "بروبوليس", "role": "complement"},
-            {"ref": "حبوب لقاح", "role": "complement"},
+            {"product_id": 116, "ref": "عسل السدر", "role": "primary"},
+            {"product_id": 106, "ref": "بروبوليس", "role": "complement"},
+            {"product_id": 118, "ref": "حبوب لقاح", "role": "complement"},
         ],
         "usage_guidance": ["جرعة يومية منتظمة"],
         "soft_claims": ["قد يناسب ضمن نمط حياة متوازن"],
@@ -77,8 +79,8 @@ SEED_ENTRIES = [
         "title": "عافية يومية",
         "goal_tags": ["daily_wellness"],
         "products": [
-            {"ref": "عسل طلح", "role": "primary"},
-            {"ref": "عسل سمر", "role": "optional"},
+            {"product_id": 109, "ref": "عسل طلح نجد", "role": "primary"},
+            {"product_id": 116, "ref": "عسل السدر", "role": "optional"},
         ],
         "usage_guidance": ["ملعقة يوميًا"],
         "soft_claims": ["خيار خفيف للاستخدام اليومي"],

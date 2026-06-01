@@ -138,7 +138,7 @@ def _resolve_product_ref(
             )
             for r in rows or []
         ]
-        matches = match_products(ref, catalog, limit=2, min_confidence=0.45)
+        matches = match_products(ref, catalog, limit=2, min_confidence=0.40)
         if not matches:
             return None, "no_catalog_match"
         if len(matches) >= 2 and matches[0].confidence - matches[1].confidence < 0.12:
