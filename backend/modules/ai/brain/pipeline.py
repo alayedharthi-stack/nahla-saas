@@ -560,6 +560,26 @@ class MerchantBrain:
                 )
             except Exception:  # noqa: BLE001
                 pass
+        if (
+            _classify_message
+            and (message or "").strip()
+            and _classify_message.strip() != (message or "").strip()
+        ):
+            try:
+                from .commerce.solution_seeking import apply_post_repair_suppression  # noqa: PLC0415
+
+                intent = apply_post_repair_suppression(
+                    intent,
+                    _classify_message,
+                    state=state_for_classify,
+                    history=history,
+                )
+            except Exception as _prs_exc:  # noqa: BLE001
+                logger.debug(
+                    "[POST_REPAIR_SUPPRESSION] skipped tenant=%s err=%s",
+                    tenant_id,
+                    _prs_exc,
+                )
         if _raw_message and intent.raw_message != _raw_message:
             intent.raw_message = _raw_message
 
@@ -1877,6 +1897,12 @@ def _infer_customer_goal(intent: Intent, decision: Decision, previous_goal: str 
         return "complete_purchase"
     if decision.action == "handoff_to_human":
         return "reach_human_support"
+    _args = decision.args or {}
+    if str(_args.get("customer_goal") or _args.get("response_goal") or "") in {
+        "all_variant_prices",
+        "show_all_variants_prices",
+    }:
+        return "all_variant_prices"
     return mapping.get(intent.name, previous_goal or "general_help")
 
 

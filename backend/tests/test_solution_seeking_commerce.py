@@ -117,3 +117,32 @@ class TestIsSolutionSeekingHelper:
     def test_helper_true_for_perfume(self):
         ctx = _ctx("عطر للصيف")
         assert is_solution_seeking_commerce(ctx)
+
+
+class TestSolutionSeekingSuppression:
+    def test_delivery_not_solution_seeking(self):
+        from modules.ai.brain.commerce.solution_seeking import (
+            detect_solution_seeking_suppression,
+        )
+
+        assert detect_solution_seeking_suppression("فيه توصيل؟") == "delivery_intent"
+
+    def test_clarify_routes_delivery_to_shipping_not_advisory(self):
+        from modules.ai.brain.commerce.solution_seeking import (
+            detect_solution_seeking_suppression,
+        )
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+
+        msg = "فيه توصيل اذا طلبت الحين"
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966500000001",
+            message=msg,
+            intent=Intent(name="general", confidence=0.5, raw_message=msg),
+            state=MerchantConversationState(),
+            facts=CommerceFacts(has_products=True),
+        )
+        assert detect_solution_seeking_suppression(msg) == "delivery_intent"
+        d = clarify_instead_of_top_products(ctx, reason="test")
+        assert d.action == ACTION_LLM_REPLY
+        assert (d.args or {}).get("topic") == "ask_shipping"

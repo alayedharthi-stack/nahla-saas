@@ -491,6 +491,10 @@ class DefaultStateStore:
             visual_focus_turn=int(getattr(state, "visual_focus_turn", 0) or 0),
             last_inbound_canonical=str(getattr(state, "last_inbound_canonical", "") or ""),
             last_inbound_canonical_turn=int(getattr(state, "last_inbound_canonical_turn", 0) or 0),
+            recent_topic=str(getattr(state, "recent_topic", "") or ""),
+            recent_topic_turn=int(getattr(state, "recent_topic_turn", 0) or 0),
+            last_fallback_fingerprint=str(getattr(state, "last_fallback_fingerprint", "") or ""),
+            last_fallback_turn=int(getattr(state, "last_fallback_turn", 0) or 0),
             # Increment general_streak when intent is GENERAL, reset otherwise.
             general_streak=(
                 (getattr(state, "general_streak", 0) or 0) + 1

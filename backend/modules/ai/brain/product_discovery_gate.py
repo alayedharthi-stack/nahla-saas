@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from .decision.actions import (
     ACTION_CLARIFY,
+    ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_SEARCH_PRODUCTS,
 )
@@ -188,7 +189,7 @@ def is_solution_seeking_commerce(ctx: BrainContext) -> bool:
     }:
         return True
     try:
-        from ..commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
+        from .commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
 
         return classify_solution_seeking_commerce(ctx.message or "") is not None
     except Exception:  # noqa: BLE001
@@ -506,21 +507,150 @@ def clarify_instead_of_top_products(
         preview=(ctx.message or "")[:80],
         source="top_products",
     )
+    msg = ctx.message or ""
+    tenant_id = getattr(ctx, "tenant_id", None)
+    state = ctx.state
+    history = list(getattr(ctx, "history", None) or [])
+
     try:
-        from ..commerce.solution_seeking import (  # noqa: PLC0415
-            classify_solution_seeking_commerce,
-            intelligent_need_clarification,
+        from .commerce.fallback_guard import (  # noqa: PLC0415
+            detect_semantic_dead_end,
+            log_fallback_repeat_blocked,
+            record_fallback_sent,
+            resolve_active_topic,
+            should_block_fallback_repeat,
+            stamp_recent_topic,
         )
-        _ss = classify_solution_seeking_commerce(ctx.message or "")
+        from .commerce.solution_seeking import (  # noqa: PLC0415
+            classify_solution_seeking_commerce,
+            contextual_non_product_clarification,
+            detect_solution_seeking_suppression,
+            intelligent_need_clarification,
+            log_intelligent_need_clarification,
+            log_intelligent_need_clarification_suppressed,
+            log_solution_seeking_suppressed,
+            should_suppress_repeat_need_clarification,
+        )
+
+        _canonical = ""
+        _interp = getattr(ctx, "semantic_interpretation", None)
+        if _interp is not None:
+            _canonical = str(getattr(_interp, "canonical_text", "") or "").strip()
+
+        _dead_end_goal = detect_semantic_dead_end(
+            msg,
+            history=history,
+            state=state,
+            previous_goal=str(getattr(state, "customer_goal", "") or ""),
+        )
+        if _dead_end_goal:
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "show_all_variants_prices",
+                    "customer_goal": _dead_end_goal,
+                    "response_goal": "show_all_variants_prices",
+                },
+                reason="semantic dead-end — inferred all_variant_prices goal",
+                confidence=0.88,
+            )
+
+        _suppressed = resolve_active_topic(msg, state, history)
+        if not _suppressed:
+            _suppressed = detect_solution_seeking_suppression(
+                msg, skip_recent_topic=True,
+            )
+        if _canonical and _canonical != msg.strip():
+            _post = detect_solution_seeking_suppression(
+                _canonical, skip_recent_topic=True,
+            )
+            if _post:
+                _suppressed = _post
+        if _suppressed:
+            stamp_recent_topic(state, _suppressed)
+            log_solution_seeking_suppressed(
+                tenant_id=tenant_id,
+                reason=_suppressed,
+                preview=msg,
+            )
+            if _suppressed == "delivery_intent":
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "ask_shipping", "topic_hint": "shipping"},
+                    reason="delivery question — LLM shipping reply, not product advisory",
+                    confidence=0.90,
+                )
+            if _suppressed in {"order_intent"}:
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "track_order", "topic_hint": "order_status"},
+                    reason="order/tracking question — not product advisory",
+                    confidence=0.90,
+                )
+            if _suppressed == "location_intent":
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "fulfillment_location", "topic_hint": "location"},
+                    reason="location/fulfillment message — not product advisory",
+                    confidence=0.88,
+                )
+            if _suppressed == "support_intent":
+                _support_q = contextual_non_product_clarification(msg)
+                if _support_q:
+                    return Decision(
+                        action=ACTION_CLARIFY,
+                        args={"question": _support_q},
+                        reason="support clarify — short, not product advisory",
+                        confidence=0.86,
+                    )
+                return Decision(
+                    action=ACTION_HANDOFF,
+                    args={"reason": "support_intent"},
+                    reason="support question — handoff, not product advisory",
+                    confidence=0.88,
+                )
+            if _suppressed == "payment_intent":
+                _pay_q = contextual_non_product_clarification(msg)
+                if _pay_q:
+                    if should_block_fallback_repeat(state, _pay_q):
+                        log_fallback_repeat_blocked(
+                            tenant_id=tenant_id,
+                            reason="payment_clarify_repeat",
+                            preview=msg,
+                        )
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={"topic": "ask_payment_info", "topic_hint": "payment"},
+                            reason="payment repeat blocked — direct payment topic",
+                            confidence=0.88,
+                        )
+                    record_fallback_sent(state, _pay_q)
+                    return Decision(
+                        action=ACTION_CLARIFY,
+                        args={"question": _pay_q},
+                        reason="payment clarify — short, not product advisory",
+                        confidence=0.86,
+                    )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "ask_payment_info", "topic_hint": "payment"},
+                    reason="payment question — not product advisory",
+                    confidence=0.88,
+                )
+
+        _ss = classify_solution_seeking_commerce(msg)
+        if _ss is None and _canonical:
+            _ss = classify_solution_seeking_commerce(_canonical)
         if _ss is not None:
             try:
-                from ..commerce.solution_seeking import log_solution_seeking_commerce  # noqa: PLC0415
+                from .commerce.solution_seeking import log_solution_seeking_commerce  # noqa: PLC0415
+
                 log_solution_seeking_commerce(
-                    tenant_id=getattr(ctx, "tenant_id", None),
+                    tenant_id=tenant_id,
                     axis=_ss.axis,
                     source=_ss.source,
                     route="clarify_fallback_llm",
-                    preview=ctx.message or "",
+                    preview=msg,
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -534,7 +664,34 @@ def clarify_instead_of_top_products(
                 reason="solution-seeking commerce — advisory LLM, not SKU clarify",
                 confidence=0.88,
             )
+
         _question = intelligent_need_clarification("general_attribute")
+        if should_suppress_repeat_need_clarification(state, "general_attribute", _question):
+            log_intelligent_need_clarification_suppressed(
+                tenant_id=tenant_id,
+                axis="general_attribute",
+                reason="repeat_blocked",
+                preview=msg,
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={"topic": "solution_seeking_commerce", "solution_axis": "general_attribute"},
+                reason="repeat need clarification blocked — advisory LLM",
+                confidence=0.82,
+            )
+        if should_block_fallback_repeat(state, _question):
+            log_fallback_repeat_blocked(
+                tenant_id=tenant_id,
+                reason="need_clarify_repeat",
+                preview=msg,
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={"topic": "solution_seeking_commerce", "solution_axis": "general_attribute"},
+                reason="fallback repeat blocked — advisory LLM",
+                confidence=0.82,
+            )
+        record_fallback_sent(state, _question)
     except Exception:  # noqa: BLE001
         _question = (
             "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة "
@@ -542,12 +699,13 @@ def clarify_instead_of_top_products(
         )
 
     try:
-        from ..commerce.solution_seeking import log_intelligent_need_clarification  # noqa: PLC0415
+        from .commerce.solution_seeking import log_intelligent_need_clarification  # noqa: PLC0415
+
         log_intelligent_need_clarification(
-            tenant_id=getattr(ctx, "tenant_id", None),
+            tenant_id=tenant_id,
             axis="general_attribute",
             reason=reason,
-            preview=ctx.message or "",
+            preview=msg,
         )
     except Exception:  # noqa: BLE001
         pass

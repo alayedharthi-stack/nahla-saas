@@ -126,6 +126,42 @@ _STRUCTURE_PATTERNS: List[str] = [
     r"\S.{2,30}\s+(?:بدون|مناسب\s*ل|ل(?:ل)?(?:دايت|رسم|صيف|اطف|معد|نوم|سكر))",
 ]
 
+# Negative gate — do NOT treat as solution-seeking when the turn is clearly
+# delivery / payment / support / order / location (tenant-agnostic).
+_NEGATIVE_GATE_RULES: List[Tuple[str, List[str]]] = [
+    ("delivery_intent", [
+        r"توصيل", r"شحن", r"مندوب", r"مناديب", r"استلام",
+        r"يوصل", r"توصل", r"تشحن", r"تشحنون", r"توصلون",
+        r"delivery", r"shipping", r"ship to",
+        r"البيع(?:ه|ة)",
+    ]),
+    ("payment_intent", [
+        r"دفع", r"الدفع", r"تحويل", r"حوال", r"فلوس", r"باركود",
+        r"مدى", r"visa", r"apple pay", r"تابي", r"تمارا",
+        r"payment", r"transfer", r"bank",
+    ]),
+    ("order_intent", [
+        r"طلب(?:ي|ات)?", r"تتبع", r"tracking", r"وين\s*طلب",
+        r"status", r"حالة\s*الطلب", r"وصل\s*الطلب",
+    ]),
+    ("location_intent", [
+        r"موقع(?:ي|ك|نا)?", r"الموقع", r"فرع", r"فروع", r"عنوان(?:ي|ك)?",
+        r"خريط", r"maps", r"location", r"branch",
+    ]),
+    ("support_intent", [
+        r"شكوى", r"مشكله", r"مشكلة", r"تأخير", r"ما\s*وصل",
+        r"مو\s*وصل", r"complaint", r"support", r"خدمة\s*العملاء",
+    ]),
+]
+
+_RECOMMENDATION_ASK_RE = re.compile(
+    r"(?:"
+    r"تنصحن|ترشح|تنصح|ترشد|وش\s+تنصح|ايش\s+تنصح|"
+    r"افضل|أفضل|best|recommend|اقترح|اقتراح"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 @dataclass(frozen=True)
 class SolutionSeekingMatch:
@@ -198,6 +234,174 @@ def classify_solution_seeking_commerce(message: str) -> Optional[SolutionSeeking
         return SolutionSeekingMatch(axis=AXIS_GENERAL, source="structure")
 
     return None
+
+
+def detect_solution_seeking_suppression(
+    message: str,
+    *,
+    skip_recent_topic: bool = False,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+) -> Optional[str]:
+    """
+    Return suppression topic when message is clearly non-advisory commerce.
+
+    Topics: ``delivery_intent``, ``payment_intent``, ``order_intent``,
+    ``location_intent``, ``support_intent`` — or ``None``.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return None
+    norm = _norm_ar(raw)
+    if not norm:
+        return None
+
+    for topic, patterns in _NEGATIVE_GATE_RULES:
+        for pat in patterns:
+            if re.search(pat, norm, re.IGNORECASE | re.UNICODE):
+                return topic
+
+    return None
+
+
+def contextual_non_product_clarification(message: str) -> Optional[str]:
+    """Short non-product clarify for payment/support — avoid long handoffs."""
+    norm = _norm_ar(message or "")
+    if not norm:
+        return None
+    if re.search(r"فلوس|دفع|تحويل|باركود|مدى|visa|payment|transfer", norm):
+        return "تقصد طريقة الدفع أو إثبات التحويل؟ أرسل لك التفاصيل."
+    if re.search(r"شكو|مشكل|تأخير|ما\s*وصل|complaint|support", norm):
+        return "تقصد متابعة طلب أو مشكلة في التوصيل؟ وضّح لي رقم الطلب أو المشكلة."
+    if re.search(r"موقع|فرع|خريط|location|branch", norm):
+        return "تقصد موقع الفرع أو عنوان التوصيل؟"
+    return None
+
+
+def customer_explicit_recommendation_request(message: str) -> bool:
+    """True when customer explicitly asks for a recommendation."""
+    return bool(_RECOMMENDATION_ASK_RE.search(_norm_ar(message or "")))
+
+
+def should_suppress_repeat_need_clarification(
+    state: Any,
+    axis: str,
+    question: str,
+) -> bool:
+    """Avoid repeating the same need-clarification within a short window."""
+    try:
+        from .fallback_guard import should_block_fallback_repeat  # noqa: PLC0415
+
+        return should_block_fallback_repeat(state, question or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def log_solution_seeking_suppressed(
+    *,
+    tenant_id: Any = None,
+    reason: str = "",
+    preview: str = "",
+) -> None:
+    try:
+        logger.info(
+            "[SOLUTION_SEEKING_SUPPRESSED] tenant=%s reason=%s preview=%r",
+            tenant_id,
+            reason or "-",
+            (preview or "")[:80],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def log_intelligent_need_clarification_suppressed(
+    *,
+    tenant_id: Any = None,
+    axis: str = "",
+    reason: str = "",
+    preview: str = "",
+) -> None:
+    try:
+        logger.info(
+            "[INTELLIGENT_NEED_CLARIFICATION_SUPPRESSED] tenant=%s axis=%s "
+            "reason=%s preview=%r",
+            tenant_id,
+            axis or "-",
+            reason or "-",
+            (preview or "")[:80],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def apply_post_repair_suppression(
+    intent: Any,
+    message: str,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+) -> Any:
+    """
+    Re-run negative gates on semantically repaired text.
+
+    Demotes advisory commerce intent when repair reveals delivery/payment/etc.
+    """
+    from ..types import (  # noqa: PLC0415
+        INTENT_ASK_LOCATION,
+        INTENT_ASK_PAYMENT_INFO,
+        INTENT_ASK_SHIPPING,
+        INTENT_NEED_BASED_PRODUCT_ADVICE,
+        INTENT_TALK_HUMAN,
+        INTENT_TRACK_ORDER,
+        Intent,
+    )
+
+    topic = detect_solution_seeking_suppression(
+        message or "",
+        skip_recent_topic=True,
+    )
+    if not topic:
+        try:
+            from .fallback_guard import resolve_active_topic, stamp_recent_topic  # noqa: PLC0415
+
+            topic = resolve_active_topic(message or "", state, history)
+            if topic and state is not None:
+                stamp_recent_topic(state, topic)
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not topic:
+        return intent
+
+    if intent.name not in {
+        INTENT_NEED_BASED_PRODUCT_ADVICE,
+        "need_based_product_advice",
+        "solution_seeking_commerce",
+        "general",
+    }:
+        return intent
+
+    _map = {
+        "delivery_intent": INTENT_ASK_SHIPPING,
+        "payment_intent": INTENT_ASK_PAYMENT_INFO,
+        "order_intent": INTENT_TRACK_ORDER,
+        "location_intent": INTENT_ASK_LOCATION,
+        "support_intent": INTENT_TALK_HUMAN,
+    }
+    mapped = _map.get(topic)
+    if not mapped:
+        return intent
+
+    log_solution_seeking_suppressed(
+        reason=f"post_repair_{topic}",
+        preview=message or "",
+    )
+    return Intent(
+        name=mapped,
+        confidence=max(float(getattr(intent, "confidence", 0.5) or 0.5), 0.92),
+        raw_message=getattr(intent, "raw_message", "") or message,
+        slots=dict(getattr(intent, "slots", None) or {}),
+    )
 
 
 def intelligent_need_clarification(axis: str) -> str:
@@ -292,8 +496,15 @@ __all__ = [
     "AXIS_SIZE_FIT",
     "SOLUTION_SEEKING_CONFIDENCE",
     "SolutionSeekingMatch",
+    "apply_post_repair_suppression",
     "classify_solution_seeking_commerce",
+    "contextual_non_product_clarification",
+    "customer_explicit_recommendation_request",
+    "detect_solution_seeking_suppression",
     "intelligent_need_clarification",
     "log_intelligent_need_clarification",
+    "log_intelligent_need_clarification_suppressed",
     "log_solution_seeking_commerce",
+    "log_solution_seeking_suppressed",
+    "should_suppress_repeat_need_clarification",
 ]

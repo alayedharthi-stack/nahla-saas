@@ -348,6 +348,11 @@ class MerchantConversationState:
     draft_order_id: Optional[str] = None
     checkout_url: Optional[str] = None
     customer_goal: str = ""
+    # Multi-turn topic memory for suppression (delivery/payment/support/…).
+    recent_topic: str = ""
+    recent_topic_turn: int = 0
+    last_fallback_fingerprint: str = ""
+    last_fallback_turn: int = 0
     # Last turn we returned salam — avoids repetitive salam spam.
     last_salam_return_turn: int = 0
     last_salam_return_level: str = ""
@@ -449,6 +454,10 @@ class MerchantConversationState:
             "draft_order_id": self.draft_order_id,
             "checkout_url": self.checkout_url,
             "customer_goal": self.customer_goal,
+            "recent_topic": self.recent_topic,
+            "recent_topic_turn": self.recent_topic_turn,
+            "last_fallback_fingerprint": self.last_fallback_fingerprint,
+            "last_fallback_turn": self.last_fallback_turn,
             "last_salam_return_turn": self.last_salam_return_turn,
             "last_salam_return_level": self.last_salam_return_level,
             "product_focus_turn": self.product_focus_turn,
@@ -499,6 +508,10 @@ class MerchantConversationState:
             draft_order_id=d.get("draft_order_id"),
             checkout_url=d.get("checkout_url"),
             customer_goal=d.get("customer_goal", ""),
+            recent_topic=str(d.get("recent_topic", "") or ""),
+            recent_topic_turn=int(d.get("recent_topic_turn") or 0),
+            last_fallback_fingerprint=str(d.get("last_fallback_fingerprint", "") or ""),
+            last_fallback_turn=int(d.get("last_fallback_turn") or 0),
             last_salam_return_turn=int(d.get("last_salam_return_turn") or 0),
             last_salam_return_level=str(d.get("last_salam_return_level", "") or ""),
             product_focus_turn=int(d.get("product_focus_turn") or 0),
