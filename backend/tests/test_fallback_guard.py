@@ -48,6 +48,12 @@ def test_location_after_delivery_ack():
     assert topic in {"delivery_intent", "location_intent"}
 
 
+def test_semantic_dead_end_two_turn_price_then_all_sizes():
+    history = [{"direction": "in", "body": "كم السعر"}]
+    goal = detect_semantic_dead_end("كل الحجام", history=history, state=None)
+    assert goal == "all_variant_prices"
+
+
 def test_semantic_dead_end_all_variants():
     history = [
         {"direction": "in", "body": "كم السعر"},

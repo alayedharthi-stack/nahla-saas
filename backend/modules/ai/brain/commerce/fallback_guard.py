@@ -31,7 +31,9 @@ _PRICE_SIZE_LOOP_RE = re.compile(
 
 _ALL_VARIANTS_RE = re.compile(
     r"(?:"
-    r"كل\s*ال(?:حج|أح|اح)جام|كل\s*الاحجام|كل\s*ال(?:مقاس|مقاسات|الوان|ألوان)|"
+    r"كل\s*ال(?:حج|أح|اح)?(?:ج)?(?:ام|ام|ام)|"
+    r"كل\s*ال(?:حج|أح|اح)جام|كل\s*الاحجام|"
+    r"كل\s*ال(?:مقاس|مقاسات|الوان|ألوان)|"
     r"سعر\s*كل|اسعار\s*كل|أسعار\s*كل|all\s*(?:sizes|variants|prices)"
     r")",
     re.IGNORECASE | re.UNICODE,
@@ -241,6 +243,15 @@ def detect_semantic_dead_end(
             customer_msgs.append(body)
     if (message or "").strip():
         customer_msgs.append(message.strip())
+
+    norm_current = _norm(message or "")
+    if _ALL_VARIANTS_RE.search(norm_current):
+        if any(
+            _PRICE_SIZE_LOOP_RE.search(_norm(m))
+            for m in customer_msgs[:-1]
+        ):
+            log_workflow_exhausted(workflow="clarify_all_variants_after_price")
+            return "all_variant_prices"
 
     price_size_hits = sum(
         1 for m in customer_msgs[-5:]

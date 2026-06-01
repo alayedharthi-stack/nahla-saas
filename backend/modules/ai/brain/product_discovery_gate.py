@@ -511,6 +511,14 @@ def clarify_instead_of_top_products(
     tenant_id = getattr(ctx, "tenant_id", None)
     state = ctx.state
     history = list(getattr(ctx, "history", None) or [])
+    if not history and state is not None:
+        for turn in list(getattr(state, "recent_messages", None) or [])[-8:]:
+            role = str(turn.get("role") or turn.get("direction") or "").lower()
+            if role not in {"user", "customer", "in", "inbound"}:
+                continue
+            body = str(turn.get("content") or turn.get("text") or turn.get("body") or "").strip()
+            if body:
+                history.append({"direction": "in", "body": body})
 
     try:
         from .commerce.fallback_guard import (  # noqa: PLC0415
