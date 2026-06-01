@@ -63,6 +63,7 @@ _NON_COMMERCE_TAGS = (
 POSITIVE_COMMERCE_INTENTS = frozenset({
     "ask_product",
     "ask_price",
+    "product_visual_request",
     "start_order",
     "pick_list_item",
     "pay_now",

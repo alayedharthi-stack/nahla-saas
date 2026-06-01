@@ -252,6 +252,7 @@ def apply_product_safety_net(
     existing_product_attachments: List[Dict[str, Any]],
     detected_markers: int,
     customer_id: Optional[Any] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
 ) -> ProductSafetyNetResult:
     """Try to attach a product card when Claude forgot to emit
     ``[PRODUCT:...]`` but the customer clearly asked for one.
@@ -297,6 +298,26 @@ def apply_product_safety_net(
         result.skipped_reason = "no_intent_or_class"
         return result
 
+    lookup_query = customer_msg or ""
+    try:
+        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+            attachment_matches_turn_request,
+            extract_visual_product_query,
+            is_deictic_visual_request,
+        )
+        explicit = extract_visual_product_query(customer_msg or "")
+        if explicit:
+            lookup_query = explicit
+        elif is_deictic_visual_request(customer_msg or ""):
+            focus = (brain_state or {}).get("current_product_focus") or {}
+            focus_title = str(focus.get("title") or "").strip()
+            if not focus_title:
+                result.skipped_reason = "deictic_no_focus"
+                return result
+            lookup_query = focus_title
+    except Exception:  # noqa: BLE001
+        pass
+
     # Delegate the actual lookup to the resolver. It already returns
     # ``None`` for too-short queries / no-match — we don't need to
     # second-guess it.
@@ -312,7 +333,7 @@ def apply_product_safety_net(
 
     try:
         resolution = _resolve(
-            db, tenant_id, customer_msg or "",
+            db, tenant_id, lookup_query or "",
             customer_id=customer_id, limit=5,
         )
     except Exception as exc:  # pragma: no cover
@@ -326,6 +347,21 @@ def apply_product_safety_net(
     if not resolution:
         result.skipped_reason = "no_match"
         return result
+
+    try:
+        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+            attachment_matches_turn_request,
+        )
+        _ok, _why = attachment_matches_turn_request(
+            inbound_message=customer_msg or "",
+            attachment_title=str(resolution.title or ""),
+            brain_state=brain_state,
+        )
+        if not _ok:
+            result.skipped_reason = f"turn_mismatch:{_why}"
+            return result
+    except Exception:  # noqa: BLE001
+        pass
 
     # Build the SAME attachment shape the existing product-marker
     # pipeline produces so the downstream sender code is one branch.
@@ -341,7 +377,8 @@ def apply_product_safety_net(
         "in_stock":     resolution.in_stock,
         "external_id":  resolution.external_id,
         "confidence":   resolution.confidence,
-        "safety_net":   True,  # surfaces in logs + downstream metrics
+        "safety_net":   True,
+        "dispatch_source": "safety_net",
     }
 
     result.fired = True

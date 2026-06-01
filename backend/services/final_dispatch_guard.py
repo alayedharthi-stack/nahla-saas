@@ -47,6 +47,11 @@ from modules.ai.brain.types import (
     Intent,
     MerchantConversationState,
 )
+from modules.ai.brain.commerce.product_visual import (
+    attachment_matches_turn_request,
+    is_product_visual_request,
+    prepare_inbound_for_commerce,
+)
 from modules.observability.delivery_mode import customer_wants_product_or_image
 
 logger = logging.getLogger("nahla.final_dispatch_guard")
@@ -161,13 +166,18 @@ def should_allow_product_attachment_dispatch(
     action = (brain_action or "").strip()
     intent = (intent_name or "").strip()
 
+    inbound_effective = prepare_inbound_for_commerce(
+        inbound_message or "",
+        brain_state,
+    )
+
     product_discovery_blocked = False
     try:
         state = MerchantConversationState.from_dict(dict(brain_state or {}))
         ctx = BrainContext(
             tenant_id=0,
             customer_phone="",
-            message=inbound_message or "",
+            message=inbound_effective or inbound_message or "",
             intent=Intent(
                 name=intent or "general",
                 confidence=float(intent_confidence or 0.5),
@@ -268,11 +278,17 @@ def should_allow_product_attachment_dispatch(
         )
 
     if customer_wants_product_or_image(
-        inbound_text=inbound_message or "",
+        inbound_text=inbound_effective or inbound_message or "",
         brain_action=action,
     ):
         return ProductAttachmentDispatchDecision(
             allow=True, reason="visual_product_intent",
+            product_discovery_blocked=False,
+        )
+
+    if is_product_visual_request(inbound_effective):
+        return ProductAttachmentDispatchDecision(
+            allow=True, reason="product_visual_request",
             product_discovery_blocked=False,
         )
 
@@ -365,10 +381,79 @@ def log_final_dispatch_guard(
         pass
 
 
+def validate_product_attachment_for_send(
+    *,
+    inbound_message: str,
+    attachment: dict,
+    brain_state: Optional[dict] = None,
+    intent_name: str = "",
+    brain_action: str = "",
+    dispatch_allowed: bool = True,
+) -> tuple[bool, str]:
+    """Per-card send boundary — title must match current-turn context."""
+    if not dispatch_allowed:
+        return False, "dispatch_blocked"
+
+    title = str((attachment or {}).get("title") or "").strip()
+    allow, reason = attachment_matches_turn_request(
+        inbound_message=inbound_message or "",
+        attachment_title=title,
+        brain_state=brain_state,
+        intent_name=intent_name,
+        brain_action=brain_action,
+    )
+    return allow, reason
+
+
+def log_final_product_send_attempt(
+    *,
+    tenant_id: Optional[int] = None,
+    product: str = "",
+    allow: bool = False,
+    reason: str = "",
+    source: str = "",
+    candidate_origin: str = "",
+    focus_title: str = "",
+    focus_id: str = "",
+    inbound_preview: str = "",
+) -> None:
+    """Emit ``[FINAL_PRODUCT_SEND_ATTEMPT]`` at the wire boundary."""
+    try:
+        logger.info(
+            "[FINAL_PRODUCT_SEND_ATTEMPT] tenant=%s product=%r focus=%r "
+            "focus_id=%s source=%s candidate_origin=%s allow=%s reason=%s "
+            "inbound=%r",
+            tenant_id,
+            (product or "")[:80],
+            (focus_title or "")[:80],
+            (focus_id or "-"),
+            source or "unknown",
+            candidate_origin or "-",
+            str(allow).lower(),
+            reason or "-",
+            (inbound_preview or "")[:80],
+        )
+        if not allow:
+            logger.info(
+                "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s reason=%s "
+                "source=%s candidate_origin=%s product=%r focus=%r",
+                tenant_id,
+                reason or "blocked",
+                source or "unknown",
+                candidate_origin or "-",
+                (product or "")[:80],
+                (focus_title or "")[:80],
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 __all__ = [
     "ProductAttachmentDispatchDecision",
     "log_final_dispatch_guard",
+    "log_final_product_send_attempt",
     "should_allow_product_attachment_dispatch",
     "strip_product_markers_from_reply",
     "suppress_product_attachments",
+    "validate_product_attachment_for_send",
 ]

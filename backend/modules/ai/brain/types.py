@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # avoid runtime import cycles
 INTENT_GREETING      = "greeting"
 INTENT_WHO_ARE_YOU   = "who_are_you"
 INTENT_ASK_PRODUCT   = "ask_product"
+INTENT_PRODUCT_VISUAL_REQUEST = "product_visual_request"
 INTENT_ASK_PRICE     = "ask_price"
 INTENT_START_ORDER   = "start_order"
 INTENT_PAY_NOW       = "pay_now"
@@ -350,6 +351,13 @@ class MerchantConversationState:
     # Last turn we returned salam — avoids repetitive salam spam.
     last_salam_return_turn: int = 0
     last_salam_return_level: str = ""
+    # Turn when ``current_product_focus`` was last set or reinforced.
+    product_focus_turn: int = 0
+    # Turn when a product card/image was last sent — decays faster than text focus.
+    visual_focus_turn: int = 0
+    # Semantically repaired inbound used for intent classification this turn.
+    last_inbound_canonical: str = ""
+    last_inbound_canonical_turn: int = 0
     last_question_asked: str = ""
     last_question_answered: bool = True
     recommended_next_step: str = ""
@@ -443,6 +451,10 @@ class MerchantConversationState:
             "customer_goal": self.customer_goal,
             "last_salam_return_turn": self.last_salam_return_turn,
             "last_salam_return_level": self.last_salam_return_level,
+            "product_focus_turn": self.product_focus_turn,
+            "visual_focus_turn": self.visual_focus_turn,
+            "last_inbound_canonical": self.last_inbound_canonical,
+            "last_inbound_canonical_turn": self.last_inbound_canonical_turn,
             "last_question_asked": self.last_question_asked,
             "last_question_answered": self.last_question_answered,
             "recommended_next_step": self.recommended_next_step,
@@ -489,6 +501,10 @@ class MerchantConversationState:
             customer_goal=d.get("customer_goal", ""),
             last_salam_return_turn=int(d.get("last_salam_return_turn") or 0),
             last_salam_return_level=str(d.get("last_salam_return_level", "") or ""),
+            product_focus_turn=int(d.get("product_focus_turn") or 0),
+            visual_focus_turn=int(d.get("visual_focus_turn") or 0),
+            last_inbound_canonical=str(d.get("last_inbound_canonical", "") or ""),
+            last_inbound_canonical_turn=int(d.get("last_inbound_canonical_turn") or 0),
             last_question_asked=d.get("last_question_asked", ""),
             last_question_answered=bool(d.get("last_question_answered", True)),
             recommended_next_step=d.get("recommended_next_step", ""),

@@ -7058,8 +7058,15 @@ async def _handle_merchant_message(
                 _overlap >= _DEDUP_OVERLAP_THRESHOLD and not _is_hard
             )
             _carries_signal = _reply_carries_new_signal(reply)
+            try:
+                from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+                    is_product_visual_request as _is_visual_inbound,
+                )
+                _visual_inbound = _is_visual_inbound(text or "")
+            except Exception:  # noqa: BLE001
+                _visual_inbound = False
 
-            if _is_hard and not _carries_signal:
+            if _is_hard and not _carries_signal and not _visual_inbound:
                 # ── Wave 3 (May 2026): Relational/seasonal-aware
                 # dedup suppression gate. Eid-season audit on
                 # Tenant 33 found this branch was substituting
@@ -7586,8 +7593,8 @@ async def _handle_merchant_message(
         _catalog_card_limit = 2
         _bs_for_nc: dict = {}
         _intent_for_nc = ""
-        _allow_product_cards = True
-        _dispatch_guard_reason = "ok"
+        _allow_product_cards = False
+        _dispatch_guard_reason = "pending"
         try:
             from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
                 has_positive_commerce_intent,
@@ -7683,8 +7690,10 @@ async def _handle_merchant_message(
                 intent_name=_intent_for_nc or "",
             )
         except Exception as _fdg_exc:  # noqa: BLE001
-            logger.debug(
-                "[FINAL_DISPATCH_GUARD] tenant=%s evaluation skipped: %s",
+            _allow_product_cards = False
+            _dispatch_guard_reason = "guard_eval_failed"
+            logger.warning(
+                "[FINAL_DISPATCH_GUARD] tenant=%s evaluation failed (fail-closed): %s",
                 tenant_id, _fdg_exc,
             )
 
@@ -7762,6 +7771,7 @@ async def _handle_merchant_message(
                         "variants":             list(getattr(_res, "variants", []) or []),
                         "has_variants":         getattr(_res, "has_variants", False),
                         "default_variant_retailer_id": getattr(_res, "default_variant_retailer_id", None),
+                        "dispatch_source": "llm_marker",
                     })
                 if _resolutions:
                     logger.info(
@@ -7883,6 +7893,7 @@ async def _handle_merchant_message(
                         existing_product_attachments=_product_attachments,
                         detected_markers=_marker_detected["product"],
                         customer_id=_cust_id_sn,
+                        brain_state=_bs_for_nc,
                     )
                     if (
                         _pn.fired
@@ -9051,6 +9062,8 @@ async def _handle_merchant_message(
                                     "external_id":  _vp_res.external_id,
                                     "confidence":   _vp_res.confidence,
                                     "_enforced":    True,
+                                    "dispatch_source": "visual",
+                                    "candidate_origin": _candidate_source,
                                 })
                                 _enforcement_applied = True
                                 logger.info(
@@ -9083,6 +9096,8 @@ async def _handle_merchant_message(
                                     "external_id":  _vp_res.external_id,
                                     "confidence":   _vp_res.confidence,
                                     "_enforced":    True,
+                                    "dispatch_source": "visual",
+                                    "candidate_origin": _candidate_source,
                                 })
                                 _enforcement_applied = True
                                 logger.info(
@@ -9251,14 +9266,57 @@ async def _handle_merchant_message(
                 # to the legacy path so the customer always gets a
                 # reply. Success → skip the legacy path entirely.
                 if _is_product:
-                    if not _allow_product_cards:
-                        logger.info(
-                            "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s "
-                            "reason=%s product_id=%s stage=dispatch_loop",
-                            tenant_id,
-                            _dispatch_guard_reason,
-                            _att.get("id"),
+                    _att_source = str(
+                        _att.get("dispatch_source")
+                        or ("safety_net" if _att.get("safety_net") else "queue")
+                    )
+                    try:
+                        from services.final_dispatch_guard import (  # noqa: PLC0415
+                            log_final_product_send_attempt as _log_product_send,
+                            validate_product_attachment_for_send as _validate_product_send,
                         )
+                        _send_ok, _send_reason = _validate_product_send(
+                            inbound_message=text or "",
+                            attachment=_att,
+                            brain_state=_bs_for_nc,
+                            intent_name=_intent_for_nc or "",
+                            brain_action=_br_action or "",
+                            dispatch_allowed=_allow_product_cards,
+                        )
+                        _focus_bs = (_bs_for_nc or {}).get("current_product_focus") or {}
+                        _log_product_send(
+                            tenant_id=tenant_id,
+                            product=str(_att.get("title") or ""),
+                            allow=_send_ok,
+                            reason=_send_reason,
+                            source=_att_source,
+                            candidate_origin=str(
+                                _att.get("candidate_origin") or _att_source
+                            ),
+                            focus_title=str(_focus_bs.get("title") or ""),
+                            focus_id=str(_focus_bs.get("id") or ""),
+                            inbound_preview=(text or "")[:80],
+                        )
+                    except Exception as _vps_exc:  # noqa: BLE001
+                        _send_ok = _allow_product_cards
+                        _send_reason = f"validate_error:{_vps_exc}"
+                        logger.debug(
+                            "[FINAL_PRODUCT_SEND_ATTEMPT] tenant=%s validate skipped: %s",
+                            tenant_id, _vps_exc,
+                        )
+                    if not _allow_product_cards or not _send_ok:
+                        if _allow_product_cards and not _send_ok:
+                            pass  # logged above via _log_product_send
+                        else:
+                            logger.info(
+                                "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s "
+                                "reason=%s product_id=%s stage=dispatch_loop "
+                                "source=%s",
+                                tenant_id,
+                                _send_reason if not _send_ok else _dispatch_guard_reason,
+                                _att.get("id"),
+                                _att_source,
+                            )
                         continue
                     try:
                         _catalog_sent = await _try_send_catalog_product(

@@ -51,6 +51,7 @@ from ..types import (
     INTENT_GREETING,
     INTENT_ASK_PRODUCT,
     INTENT_ASK_PRICE,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
     INTENT_START_ORDER,
@@ -1366,6 +1367,92 @@ class DefaultDecisionEngine:
                 from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
                 if not is_order_fulfillment_product_query(_extracted):
                     _extracted_product_query = _extracted
+
+        # ── 3.8d Product visual / image request (before order-query hijack) ─
+        if intent.name == INTENT_PRODUCT_VISUAL_REQUEST:
+            from ..commerce.product_visual import (  # noqa: PLC0415
+                extract_visual_product_query,
+                is_deictic_visual_request,
+            )
+
+            if _is_commerce_blocked(ctx):
+                return Decision(
+                    action=ACTION_SOCIAL_REPLY,
+                    args={
+                        "social_category": "religious_media",
+                        "block_commerce_escalation": True,
+                    },
+                    reason="non-commerce block overrides product_visual on social OCR",
+                    confidence=0.94,
+                )
+            focus = state.current_product_focus or {}
+            focus_title = str(focus.get("title") or "").strip()
+            query = (
+                extract_visual_product_query(ctx.message or "")
+                or str(intent.slots.get("product_query") or "").strip()
+                or str(intent.slots.get("product_name") or "").strip()
+            )
+            if is_deictic_visual_request(ctx.message or ""):
+                from ..commerce.product_visual import (  # noqa: PLC0415
+                    resolve_trusted_focus_for_deictic,
+                )
+                trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
+                if trusted.title:
+                    focus_title = trusted.title
+            if focus_title:
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "product_visual",
+                        "focus_product": focus_title,
+                        "product_query": focus_title,
+                        "response_goal": "send_product_visual",
+                    },
+                    reason="customer wants product image — focused SKU",
+                    confidence=0.92,
+                )
+            if query:
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={"query": query, "after_search": "product_visual"},
+                    reason=f"customer wants image of {query!r}",
+                    confidence=0.90,
+                )
+            if is_deictic_visual_request(ctx.message or ""):
+                from ..commerce.product_visual import (  # noqa: PLC0415
+                    resolve_trusted_focus_for_deictic,
+                )
+                trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
+                if not trusted.title:
+                    return Decision(
+                        action=ACTION_CLARIFY,
+                        args={
+                            "topic": "product_visual",
+                            "clarify_question": "أي منتج تقصد صورته؟ 🌷",
+                        },
+                        reason=trusted.reason or "deictic visual ask without trusted focus",
+                        confidence=0.88,
+                    )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "product_visual",
+                        "focus_product": trusted.title,
+                        "product_query": trusted.title,
+                        "response_goal": "send_product_visual",
+                    },
+                    reason=f"deictic visual → trusted focus ({trusted.reason})",
+                    confidence=0.90,
+                )
+            return Decision(
+                action=ACTION_CLARIFY,
+                args={
+                    "topic": "product_visual",
+                    "clarify_question": "أي منتج تبغى صورته؟ 🌷",
+                },
+                reason="product visual ask without resolved SKU",
+                confidence=0.85,
+            )
 
         # ── 3.8a handler ─────────────────────────────────────────────────
         if (

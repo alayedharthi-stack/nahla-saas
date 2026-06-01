@@ -955,6 +955,16 @@ class MerchantBrain:
             or not new_state.current_product_focus
         ):
             new_state.current_product_focus = result.data["product"]
+            try:
+                from .commerce.product_visual import (  # noqa: PLC0415
+                    stamp_product_focus_metadata,
+                    stamp_visual_focus_metadata,
+                )
+                stamp_product_focus_metadata(new_state, result.data["product"])
+                if intent.name == "product_visual_request":
+                    stamp_visual_focus_metadata(new_state, result.data["product"])
+            except Exception:  # noqa: BLE001
+                pass
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
             # Sync option-selection state to top-level MerchantConversationState
@@ -1163,6 +1173,11 @@ class MerchantBrain:
                 )
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
+        try:
+            new_state.last_inbound_canonical = str(_classify_message or message or "")
+            new_state.last_inbound_canonical_turn = int(state.turn or 0)
+        except Exception:  # noqa: BLE001
+            pass
         ctx.state = new_state
         suggestion = self._suggestion_engine.suggest(ctx, decision, result)
         new_state.recent_messages = list((history or [])[-20:])
@@ -1385,6 +1400,12 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        try:
+            from .commerce.product_visual import stamp_visual_focus_from_outbound_reply  # noqa: PLC0415
+            stamp_visual_focus_from_outbound_reply(new_state, reply)
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── 7a. Human-Priority reassurance suffix ─────────────────────────
         # When the turn is being handled under Human-Priority Mode (the
@@ -2144,6 +2165,27 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         lines.append(
             "إذا طلب العميل وسيلة دفع/شهادة/باركود استخدم "
             "`[MEDIA_KEY:<slug>]` المناسب من قائمة المفاتيح المتاحة."
+        )
+        return " | ".join(lines)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "product_visual"
+    ):
+        _focus = str((decision.args or {}).get("focus_product") or "").strip()
+        _query = str((decision.args or {}).get("product_query") or _focus).strip()
+        lines = [
+            "product_visual — العميل يطلب صورة/بطاقة المنتج (ليس توصيات عامة). "
+            "أرسل بطاقة المنتج الفعلية مع الصورة والسعر والرابط — "
+            "ممنوع الرد النصي فقط أو «أبشري» بدون بطاقة."
+        ]
+        if _query:
+            lines.append(
+                f"المنتج المطلوب: «{_query}» — استخدم "
+                f"`[PRODUCT:{_query}]` في ردك."
+            )
+        lines.append(
+            "ممنوع اقتراح منتجات أخرى (مثل سم النحل) إذا لم يطلبها العميل."
         )
         return " | ".join(lines)
 

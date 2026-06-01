@@ -151,6 +151,8 @@ def test_candidate_picker_prefers_current_product_focus() -> None:
     same turn / a few turns ago — wins."""
     bs = {
         "current_product_focus": {"id": 1, "title": "عسل السمر", "price": 280},
+        "product_focus_turn": 5,
+        "turn": 6,
         "last_search_candidates": [{"id": 2, "title": "عسل سدر"}],
         "last_recommended_products": [{"id": 3, "title": "عسل طلح"}],
     }
@@ -192,7 +194,7 @@ def test_candidate_picker_uses_inbound_text_as_last_resort() -> None:
     title, source = pick_best_candidate_title(
         {}, "أبغى أشوف صورة لعسل السمر",
     )
-    assert title == "أبغى أشوف صورة لعسل السمر"
+    assert title == "عسل السمر"
     assert source == SOURCE_INBOUND_TEXT
 
 
@@ -223,9 +225,9 @@ def test_candidate_picker_tolerates_malformed_state() -> None:
     # current_product_focus is a non-dict
     bs = {"current_product_focus": "not a dict"}
     title, source = pick_best_candidate_title(bs, "أبي صورة")
-    # Falls through to inbound text fallback without raising.
-    assert title == "أبي صورة"
-    assert source == SOURCE_INBOUND_TEXT
+    # Deictic without trusted focus → no candidate (clarify path).
+    assert title == ""
+    assert source == SOURCE_NONE
 
 
 # ─────────────────────────────────────────────────────────────────────────────

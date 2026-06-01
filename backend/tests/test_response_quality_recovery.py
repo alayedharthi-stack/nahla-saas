@@ -99,6 +99,7 @@ from modules.ai.brain.types import (
     Decision,
     Intent,
     INTENT_ASK_PRODUCT,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_GENERAL,
     INTENT_GREETING,
     MerchantConversationState,
@@ -273,20 +274,17 @@ def test_case2_response_goal_tells_llm_to_execute() -> None:
 # Case 3 — "أبغى أشوف صورة لعسل السمر"
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_case3_image_request_classifies_as_ask_product() -> None:
-    """rules.match must catch the 'أبغى ...' verb so the engine routes
-    to ACTION_SEARCH_PRODUCTS instead of a context-free LLM_REPLY."""
+def test_case3_image_request_classifies_as_product_visual() -> None:
+    """Visual image requests route to product_visual_request intent."""
     result = intent_rules.match("أبغى أشوف صورة لعسل السمر")
     assert result is not None
-    assert result.name == INTENT_ASK_PRODUCT, (
-        f"expected ASK_PRODUCT to catch 'أبغى أشوف صورة...', got "
-        f"{result.name!r}"
+    assert result.name == INTENT_PRODUCT_VISUAL_REQUEST, (
+        f"expected PRODUCT_VISUAL_REQUEST for image ask, got {result.name!r}"
     )
 
 
 def test_case3_image_request_decides_search_products() -> None:
-    """End-to-end (rules→engine): the image-request flows to
-    ACTION_SEARCH_PRODUCTS so the responder attaches a product card."""
+    """End-to-end (rules→engine): named image request searches catalog."""
     message = "أبغى أشوف صورة لعسل السمر"
     classified = intent_rules.match(message)
     assert classified is not None
@@ -299,6 +297,7 @@ def test_case3_image_request_decides_search_products() -> None:
         f"expected SEARCH_PRODUCTS, got {decision.action!r} "
         f"(reason={decision.reason!r})"
     )
+    assert "عسل" in str((decision.args or {}).get("query") or "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

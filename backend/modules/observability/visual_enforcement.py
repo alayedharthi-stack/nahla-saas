@@ -37,6 +37,26 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+try:
+    from modules.ai.brain.commerce.product_visual import (
+        extract_visual_product_query,
+        is_deictic_visual_request,
+        prepare_inbound_for_commerce,
+        resolve_trusted_focus_for_deictic,
+    )
+except Exception:  # pragma: no cover
+    def is_deictic_visual_request(_message: str) -> bool:  # type: ignore[misc]
+        return False
+
+    def extract_visual_product_query(_message: str) -> str:  # type: ignore[misc]
+        return ""
+
+    def prepare_inbound_for_commerce(raw, *_a, **_k):  # type: ignore[misc]
+        return raw or ""
+
+    def resolve_trusted_focus_for_deictic(*_a, **_k):  # type: ignore[misc]
+        return type("R", (), {"title": "", "origin": "", "reason": ""})()
+
 
 # Source labels (closed enum) — kept short so they fit cleanly in the
 # [VISUAL_PRODUCT_ENFORCEMENT] log lines without truncation.
@@ -89,12 +109,27 @@ def pick_best_candidate_title(
     which the webhook short-circuits earlier anyway).
     """
     bs = brain_state or {}
+    inbound = prepare_inbound_for_commerce(inbound_text or "", bs)
+    deictic = is_deictic_visual_request(inbound)
+
+    if deictic:
+        trusted = resolve_trusted_focus_for_deictic(bs, inbound)
+        if trusted.title:
+            return trusted.title, trusted.origin or SOURCE_FOCUS
+        return "", SOURCE_NONE
 
     focus = bs.get("current_product_focus")
     if isinstance(focus, dict):
         title = str(focus.get("title") or "").strip()
         if title:
             return title, SOURCE_FOCUS
+
+    explicit = extract_visual_product_query(inbound)
+    if explicit:
+        return explicit, SOURCE_INBOUND_TEXT
+
+    if deictic:
+        return "", SOURCE_NONE
 
     title = _first_nonempty_title(bs.get("last_search_candidates"))
     if title:
@@ -104,9 +139,8 @@ def pick_best_candidate_title(
     if title:
         return title, SOURCE_LAST_RECOMMENDED
 
-    fallback = (inbound_text or "").strip()
-    if fallback:
-        return fallback, SOURCE_INBOUND_TEXT
+    if inbound:
+        return inbound, SOURCE_INBOUND_TEXT
 
     return "", SOURCE_NONE
 

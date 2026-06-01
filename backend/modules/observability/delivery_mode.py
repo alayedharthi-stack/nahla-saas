@@ -228,6 +228,16 @@ _PRODUCT_INBOUND_KEYWORDS = (
     "أبي صورة",
     "أبغى صورة",
     "ودي صورة",
+    # Deictic / follow-up visual asks (May 2026).
+    "الصورة وينها",
+    "الصورة فين",
+    "صور العسل",
+    "صورة الطلح",
+    "صور الطلح",
+    "ابي اشوف المنتج",
+    "أبي أشوف المنتج",
+    "ابي اشوف صور",
+    "أبي أشوف صور",
     # ── May 2026 #6 — visual-product enforcement keyword pack ────────
     # Production gap: customers say "عندك صورة للضهيان؟" / "ورني
     # السمر" / "أرسل رابط السمر" / "أبي الكتالوج" and the previous
@@ -356,16 +366,19 @@ def customer_wants_product_or_image(
     raw = inbound_text or ""
     if not raw:
         return False
-    # Normalise whitespace + lowercase (the latter is a no-op for
-    # Arabic but cheap insurance for any Latin tail like product
-    # SKUs).
     norm = " ".join(raw.split()).lower()
 
-    # Cheap negative gate FIRST: if the customer named a non-product
-    # noun explicitly we want the legacy text/CTA path to handle the
-    # turn without the enforcer adding a card.
     if any(neg in norm for neg in _NEGATIVE_NON_PRODUCT_PHRASES):
         return False
+
+    try:
+        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+            is_product_visual_request,
+        )
+        if is_product_visual_request(raw):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
 
     return any(kw in norm for kw in _PRODUCT_INBOUND_KEYWORDS)
 

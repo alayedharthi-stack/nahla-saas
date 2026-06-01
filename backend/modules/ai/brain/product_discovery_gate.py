@@ -261,6 +261,8 @@ def product_discovery_block_reason(
     msg = message if message is not None else (ctx.message or "")
     src = str(source or "").strip().lower()
     intent_name = str(getattr(ctx.intent, "name", "") or "")
+    if intent_name == "product_visual_request":
+        return None
 
     if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
         return None

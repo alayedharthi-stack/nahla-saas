@@ -487,6 +487,10 @@ class DefaultStateStore:
             pending_google_maps_url=getattr(state, "pending_google_maps_url", "") or "",
             pending_city=getattr(state, "pending_city", "") or "",
             last_action=getattr(state, "last_action", "") or "",
+            product_focus_turn=int(getattr(state, "product_focus_turn", 0) or 0),
+            visual_focus_turn=int(getattr(state, "visual_focus_turn", 0) or 0),
+            last_inbound_canonical=str(getattr(state, "last_inbound_canonical", "") or ""),
+            last_inbound_canonical_turn=int(getattr(state, "last_inbound_canonical_turn", 0) or 0),
             # Increment general_streak when intent is GENERAL, reset otherwise.
             general_streak=(
                 (getattr(state, "general_streak", 0) or 0) + 1

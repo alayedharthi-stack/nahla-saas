@@ -22,6 +22,7 @@ from ..types import (
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
@@ -83,6 +84,24 @@ _register(RuleSet(
         r"^(أهلين|يا هلا|هلأ|هلأً|أهلا وسهلا)",
     ],
     confidence=0.95,
+))
+
+# ── Product visual / image request ────────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_PRODUCT_VISUAL_REQUEST,
+    patterns=[
+        r"(?:ال)?صور(?:ة)?\s*(?:وين|فين|وينها|فينها|مو\s*موجود|م[\s]?و)",
+        r"(?:وين|فين)\s*(?:ال)?صور(?:ة)?",
+        r"(?:اب(?:ي|غ(?:ى|ا)?)|أ(?:بي|ب(?:غ(?:ى|a)?)?)|ودي|"
+        r"ار(?:سل|سل)|أ(?:رسل|رس(?:ل)?)|ابعث|أبعث|ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a))"
+        r"\s*(?:ال)?(?:صور(?:ة)?|صور|شكل(?:ه|ها)?|المنتج|منتج)",
+        r"(?:اب(?:ي|غ(?:ى|a)?)|أ(?:بي|ب(?:غ(?:ى|a)?)?))\s*أ?شوف\s*(?:ال)?(?:صور(?:ة)?|صور|المنتج|منتج)",
+        r"صور(?:ة)?\s*(?:ل|لـ|ال)\s+\S.{1,40}",
+        r"\S.{1,30}\s+صور(?:ة)?",
+        r"صور\s+(?:ال)?(?:عسل|منتج|طلح|سدر|سمر|ضهيان|سمر)",
+        r"(?:show|send)\s+(?:me\s+)?(?:the\s+)?(?:product\s+)?(?:image|photo|picture)",
+    ],
+    confidence=0.93,
 ))
 
 # ── Ask for a product ─────────────────────────────────────────────────────────
@@ -230,6 +249,9 @@ _register(RuleSet(
         # group produced "للجدة" / "للالرياض" double prefixes.
         r"((الشحن|التوصيل|تشحنون|توصلون).{0,8}(للرياض|للجدة|لجدة|لجده|للجده|للطائف|للمدينة|للدمام|لمكة|للمكة|للقصيم|للأحساء|الرياض|جدة|جده|الدمام|الطائف|مكة|الأحساء))",
         # English fallbacks
+        r"((?:فيه|في|هل\s+(?:فيه|في|عندكم))\s*.{0,12}(?:توصيل|شحن|مندوب|يوصل|تشحن|توصلون|تشحنون))",
+        r"((?:توصيل|شحن|يوصل|تشحن).{0,30}(?:اذا|لو|لما|الحين|الان|الآن|الآن))",
+        r"((?:موقعي|الموقع|موقع).{0,35}(?:توصيل|يوصل|تشحن|تجي|تيجي|توصل))",
         r"(shipping (cost|fee|price|policy|methods?|areas?)|how (do|long|many days)|free shipping|delivery (cost|fee|time|method))",
         r"(do you (ship|deliver)|where (do|can) you (ship|deliver))",
     ],
@@ -309,6 +331,10 @@ _register(RuleSet(
         r"تحويل|الراجحي|راجحي|بنك\s+\S*|الأهلي|أهلي))",
         # English fallbacks — covers customers who use mixed messaging.
         r"(bank (account|details|transfer)|payment (barcode|qr)|iban (number)?)",
+        # Vague payment/finance mentions — "لك فلوس معاي", "عندي مبلغ".
+        r"((?:لك|ليك|عندي|معاي|معي|معاك)\s*(?:فلوس|مبلغ|حوال(?:ه|ة)|تحويل))",
+        r"((?:فلوس|مبلغ|حوال(?:ه|ة))\s*(?:معاي|معي|عندي|لك|ليك|معاك))",
+        r"^\s*(?:فلوس|مبلغ|تحويل|حوال(?:ه|ة))\s*[\?؟]?\s*$",
     ],
     confidence=0.95,
 ))
@@ -386,6 +412,7 @@ _register(RuleSet(
         # Standalone customer-service mention (e.g. "خدمة العملاء من
         # فضلك", "خدمة العملاء لو سمحت") — the phrase is specific
         # enough to escalate on its own without an انتي/أبي prefix.
+        r"^\s*(?:خدمة\s*(?:ال)?عملاء|خدمه\s*(?:ال)?عملاء|الدعم\s*ال?فني|دعم\s*ال?عملاء)\s*[\?؟]?\s*$",
         r"(خدمة العملاء|خدمه العملاء|الدعم الفني|دعم العملاء)",
         # Direct asks for a staff member (موظف / مختص / مسؤول / مشرف /
         # خدمة العملاء / شخص). The "أبي / أبغى / أريد / أحتاج / لو سمحت
@@ -702,6 +729,7 @@ def match(message: str) -> Optional[Intent]:
     # Default: highest-confidence wins.
     candidates.sort(key=lambda x: x[0], reverse=True)
     best_conf, best_intent = candidates[0]
+    best_intent = _apply_need_based_priority(candidates, best_intent)
 
     # ── First-contact welcome gate ───────────────────────────────────────
     # When the customer sends "السلام عليكم أبي سعر العسل" the bare
@@ -785,6 +813,7 @@ def match(message: str) -> Optional[Intent]:
 #     either redundant or wrong fit for an embedded-greeting case.
 _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_ASK_PRODUCT,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_ASK_PRICE,
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
@@ -797,6 +826,30 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_PLATFORM_INQUIRY,
     INTENT_NEED_BASED_PRODUCT_ADVICE,
 })
+
+# Solution-seeking loses to delivery / payment / support / order intents.
+_PRIORITY_OVER_NEED_BASED: frozenset[str] = frozenset({
+    INTENT_ASK_SHIPPING,
+    INTENT_ASK_PAYMENT_INFO,
+    INTENT_PAY_NOW,
+    INTENT_TRACK_ORDER,
+    INTENT_TALK_HUMAN,
+    INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_LOCATION,
+})
+
+
+def _apply_need_based_priority(
+    candidates: List[Tuple[float, Intent]],
+    best: Intent,
+) -> Intent:
+    """Demote advisory product intent when a higher-priority intent matched."""
+    if best.name != INTENT_NEED_BASED_PRODUCT_ADVICE:
+        return best
+    for conf, intent in candidates:
+        if intent.name in _PRIORITY_OVER_NEED_BASED and conf >= 0.82:
+            return intent
+    return best
 
 
 def _pick_embedded_actionable(
