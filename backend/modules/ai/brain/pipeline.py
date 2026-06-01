@@ -513,7 +513,55 @@ class MerchantBrain:
             state=state_for_classify,
         )
 
-        intent: Intent = await self._classifier.classify(message, history, state_for_classify)
+        # ── 1a. Semantic turn interpreter (Phase 1) ─────────────────────
+        # Context-aware repair for short/ambiguous replies BEFORE rigid
+        # rule routing. Does not bypass guards — only improves meaning.
+        _raw_message = message
+        _semantic_interpretation = None
+        _classify_message = message
+        try:
+            from .interpret.semantic_turn_interpreter import (  # noqa: PLC0415
+                interpret_semantic_turn,
+                log_semantic_turn_interpretation,
+            )
+            from .interpret.semantic_routing import apply_semantic_intent_override  # noqa: PLC0415
+
+            _semantic_interpretation = interpret_semantic_turn(
+                raw_text=message,
+                state=state_for_classify,
+                history=history,
+            )
+            if _semantic_interpretation is not None:
+                log_semantic_turn_interpretation(
+                    tenant_id=tenant_id,
+                    interpretation=_semantic_interpretation,
+                )
+                if _semantic_interpretation.canonical_text:
+                    _classify_message = _semantic_interpretation.canonical_text
+        except Exception as _sem_exc:  # noqa: BLE001
+            logger.debug(
+                "[SEMANTIC_TURN_INTERPRETER] skipped tenant=%s err=%s",
+                tenant_id, _sem_exc,
+            )
+            _semantic_interpretation = None
+            _classify_message = message
+
+        intent: Intent = await self._classifier.classify(
+            _classify_message, history, state_for_classify,
+        )
+        if _semantic_interpretation is not None:
+            try:
+                from .interpret.semantic_routing import apply_semantic_intent_override  # noqa: PLC0415
+
+                intent = apply_semantic_intent_override(
+                    intent,
+                    _semantic_interpretation,
+                    state=state_for_classify,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if _raw_message and intent.raw_message != _raw_message:
+            intent.raw_message = _raw_message
 
         _nc_match = None
         try:
@@ -659,6 +707,8 @@ class MerchantBrain:
             non_commerce_category=(
                 str(_nc_match.category) if _nc_match else ""
             ),
+            semantic_interpretation=_semantic_interpretation,
+            raw_message=_raw_message,
         )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         if human_priority:
@@ -2100,6 +2150,20 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         else:
             lines.append("tracking_available=false — no tracking URL to send yet.")
         return " | ".join(lines)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "show_all_variants_prices"
+    ):
+        _product = (decision.args or {}).get("product") or {}
+        _title = str(_product.get("title") or "المنتج").strip()
+        return (
+            f"show_all_variants_prices — العميل يريد كل الأحجام/الخيارات "
+            f"والأسعار لـ «{_title}». "
+            "اعرض قائمة bullet واضحة بكل الأحجام المتاحة مع سعر كل واحد. "
+            "ممنوع «أي منتج تقصد؟». ممنوع dump كatalog cards متعددة. "
+            "اختم بسؤال قصير: أي حجم يفضّل؟"
+        )
 
     parts: List[str] = []
     # ── Relational preference prefix (May 2026 — Tenant 33 #49, Commit 2)

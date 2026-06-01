@@ -419,6 +419,23 @@ class DefaultDecisionEngine:
                 confidence=0.85,
             )
 
+        # ── 0. Semantic turn interpretation (Phase 1) ───────────────────
+        # Context-aware repair for short/ambiguous replies. Runs BEFORE
+        # social/courtesy routing so "كل الحجام" after a size question
+        # does not fall through to generic/social paths.
+        try:
+            from ..interpret.semantic_routing import (  # noqa: PLC0415
+                try_semantic_interpretation_decision,
+            )
+            _sem_dec = try_semantic_interpretation_decision(ctx)
+            if _sem_dec is not None:
+                return _sem_dec
+        except Exception as _sem_route_exc:  # noqa: BLE001
+            logger.debug(
+                "[SEMANTIC_TURN_INTERPRETER] routing skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _sem_route_exc,
+            )
+
         # ── 0a. Social / courtesy / religious (May 2026 #4) ─────────────────
         # The intent classifier set INTENT_SOCIAL when the customer's
         # message is a deterministic social ACK — thanks, blessing,

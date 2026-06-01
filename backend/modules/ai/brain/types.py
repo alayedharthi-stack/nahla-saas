@@ -776,6 +776,11 @@ class BrainContext:
     # Commit 1 attaches the verdict but no consumer reads it yet —
     # zero behaviour change.
     relational_state: Optional[Any] = None
+    # Phase 1 semantic turn interpreter — contextual repair before routing.
+    # Populated in ``Pipeline.process`` when a short/ambiguous turn is
+    # repaired using conversation anchors. Guards still enforce execution.
+    semantic_interpretation: Optional[Any] = None
+    raw_message: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
