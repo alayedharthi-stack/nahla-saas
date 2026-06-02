@@ -2336,6 +2336,21 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "category_discovery"
+    ):
+        _hint = str((decision.args or {}).get("category_hint") or "").strip()
+        _label = f"«{_hint}»" if _hint else "الفئة المطلوبة"
+        return (
+            f"category_discovery — العميل يستفسر عن {_label} في وضع اكتشاف "
+            "(Disclosure Ladder — خطوة 1). "
+            "اذكر أسماء/أنواع متوفرة فقط (حتى 5) **بدون أسعار** في هذه الرسالة، "
+            "ثم سؤال توجيه واحد (تفضيل/استخدام/جنس/حجم) — "
+            "ممنوع قائمة مرقمة بأسعار أو بطاقات منتجات متعددة. "
+            "ممنوع اقتراح منتجات لا علاقة لها بالفئة المطلوبة."
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "show_all_variants_prices"
     ):
         _product = (decision.args or {}).get("product") or {}

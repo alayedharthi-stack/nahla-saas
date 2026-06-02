@@ -133,6 +133,9 @@ def test_extract_inquiry_product_query():
     assert extract_inquiry_product_query(
         "\u0623\u0628\u063a\u0649 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0639\u0646 \u0627\u0644\u0639\u0633\u0644",
     ) in {"\u0627\u0644\u0639\u0633\u0644", "\u0639\u0633\u0644"}
+    assert extract_inquiry_product_query(
+        "\u0623\u0631\u064a\u062f \u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u062a\u0645\u0631",
+    ) in {"\u0627\u0644\u062a\u0645\u0631", "\u062a\u0645\u0631"}
 
 
 def test_has_explicit_product_inquiry():

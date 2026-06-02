@@ -154,3 +154,93 @@ class TestProductDiscoveryGate:
         assert product_discovery_block_reason(ctx, source="show_more") == (
             "weak_or_unknown_intent"
         )
+
+
+class TestInquiryRoutingSplit:
+    """Broad category inquiry must not immediately ACTION_SEARCH_PRODUCTS."""
+
+    def _ctx(self, message: str, *, intent_name: str = "ask_product") -> BrainContext:
+        return BrainContext(
+            tenant_id=99,
+            customer_phone="966500000001",
+            message=message,
+            intent=Intent(name=intent_name, confidence=0.82, raw_message=message),
+            state=MerchantConversationState(greeted=True, stage="discovery"),
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+
+    def test_broad_inquiry_honey_routes_llm(self):
+        msg = "أبغى الاستفسار عن العسل"
+        decision = DefaultDecisionEngine().decide(self._ctx(msg))
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "category_discovery"
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+
+    def test_broad_inquiry_perfume_types_routes_llm(self):
+        msg = "أبغى أعرف أنواع العطور"
+        decision = DefaultDecisionEngine().decide(self._ctx(msg))
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "category_discovery"
+
+    def test_broad_inquiry_cross_vertical(self):
+        for msg in (
+            "أبغى الاستفسار عن الجوالات",
+            "أبغى الاستفسار عن الملابس",
+            "أريد معرفة التمر",
+            "أبغى الاستفسار عن القهوة",
+        ):
+            decision = DefaultDecisionEngine().decide(self._ctx(msg))
+            assert decision.action == ACTION_LLM_REPLY, msg
+            assert decision.args.get("topic") == "category_discovery", msg
+
+    def test_specific_product_name_still_searches(self):
+        msg = "عسل سدر طيب"
+        ctx = BrainContext(
+            tenant_id=99,
+            customer_phone="966500000001",
+            message=msg,
+            intent=Intent(
+                name="ask_product",
+                confidence=0.82,
+                raw_message=msg,
+                slots={"product_query": msg},
+            ),
+            state=MerchantConversationState(greeted=True, stage="discovery"),
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_narrowing_after_candidates_still_searches(self):
+        msg = "سدر"
+        ctx = BrainContext(
+            tenant_id=99,
+            customer_phone="966500000001",
+            message=msg,
+            intent=Intent(
+                name="ask_product",
+                confidence=0.82,
+                raw_message=msg,
+                slots={"product_query": msg},
+            ),
+            state=MerchantConversationState(
+                greeted=True,
+                stage="discovery",
+                last_search_candidates=[dict(_PRODUCT)],
+            ),
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_classify_broad_category_inquiry(self):
+        from modules.ai.brain.product_discovery_gate import (
+            INQUIRY_CLASS_BROAD,
+            classify_product_inquiry_route,
+        )
+
+        inquiry_class, route = classify_product_inquiry_route(
+            self._ctx("أبغى الاستفسار عن العسل"), query="العسل",
+        )
+        assert inquiry_class == INQUIRY_CLASS_BROAD
+        assert route == "category_discovery"

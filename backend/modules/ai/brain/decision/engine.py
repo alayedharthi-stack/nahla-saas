@@ -79,8 +79,14 @@ def _is_commerce_blocked(ctx: BrainContext) -> bool:
             return True
         from ..intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
         intent = getattr(ctx, "intent", None)
+        _profile = getattr(ctx, "profile", None) or {}
+        _in_meta = (
+            _profile.get("inbound_metadata")
+            if isinstance(_profile, dict) else None
+        )
         nc = resolve_commerce_block(
             ctx.message or "",
+            inbound_metadata=_in_meta if isinstance(_in_meta, dict) else None,
             intent_name=getattr(intent, "name", None),
             intent_confidence=getattr(intent, "confidence", None),
         )
@@ -589,6 +595,22 @@ class DefaultDecisionEngine:
                 },
                 reason=f"non-commerce safety gate ({nc_category})",
                 confidence=max(float(intent.confidence or 0.0), 0.94),
+            )
+
+        # ── 0a.55 Short transactional continuation (product focus) ─────────
+        try:
+            from ..commerce.conversational_priority import (  # noqa: PLC0415
+                try_short_continuation_decision,
+            )
+            _short_dec = try_short_continuation_decision(
+                ctx, route="decision_engine",
+            )
+            if _short_dec is not None:
+                return _short_dec
+        except Exception as _short_exc:  # noqa: BLE001
+            logger.debug(
+                "[SHORT_CONTINUATION] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _short_exc,
             )
 
         # ── 0a.6 Active-order fulfillment / location update (May 2026) ─────
@@ -1357,6 +1379,19 @@ class DefaultDecisionEngine:
                 confidence=0.88,
             )
 
+        # ── 3.7y Conversational priority before text-pattern fallbacks ─────
+        try:
+            from ..commerce.conversational_priority import (  # noqa: PLC0415
+                try_priority_before_suppression,
+            )
+            _prio_dec = try_priority_before_suppression(
+                ctx, history=list(ctx.history or []), route="pre_text_patterns",
+            )
+            if _prio_dec is not None:
+                return _prio_dec
+        except Exception:  # noqa: BLE001
+            pass
+
         # ── 3.8 Text-pattern rules (message-level, intent-agnostic) ─────────
         # These fire regardless of intent classification because the NLU
         # sometimes misses Arabic commerce patterns. They run after the
@@ -1407,7 +1442,11 @@ class DefaultDecisionEngine:
             _norm_extracted = _normalize_ar(_extracted)
             if _norm_extracted and _norm_extracted not in _STOP and len(_norm_extracted) >= 2:
                 from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
-                if not is_order_fulfillment_product_query(_extracted):
+                from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
+                if (
+                    not is_order_fulfillment_product_query(_extracted)
+                    and not has_inquiry_phrasing(ctx.message or "")
+                ):
                     _extracted_product_query = _extracted
 
         # ── 3.8d Product visual / image request (before order-query hijack) ─
@@ -2035,6 +2074,29 @@ class DefaultDecisionEngine:
                     return clarify_instead_of_top_products(
                         ctx, reason="weak_or_unknown_intent",
                     )
+                from ..product_discovery_gate import (  # noqa: PLC0415
+                    classify_product_inquiry_route,
+                    log_inquiry_class,
+                    try_broad_category_inquiry_decision,
+                )
+                _inquiry_class, _inquiry_route = classify_product_inquiry_route(
+                    ctx, query=query,
+                )
+                log_inquiry_class(
+                    tenant_id=ctx.tenant_id,
+                    inquiry_class=_inquiry_class,
+                    route=_inquiry_route,
+                    query=query,
+                    preview=(ctx.message or "")[:80],
+                )
+                _broad_dec = try_broad_category_inquiry_decision(
+                    ctx,
+                    query=query,
+                    inquiry_class=_inquiry_class,
+                    route=_inquiry_route,
+                )
+                if _broad_dec is not None:
+                    return _broad_dec
                 if _product_discovery_blocked("ask_product"):
                     _fb = _fulfillment_locked_fallback()
                     if _fb is not None:

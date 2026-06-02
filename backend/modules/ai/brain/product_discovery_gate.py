@@ -124,10 +124,41 @@ def has_explicit_broad_browse_request(message: str) -> bool:
 _INQUIRY_PRODUCT_QUERY_RE = re.compile(
     r"(?:"
     r"استفسار\s*عن|استفسر\s*عن|"
+    r"اريد\s+معرف(?:ة|ه)|أريد\s+معرف(?:ة|ه)|"
     r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,24}(?:اعرف|أعرف|استفسر|استفسار)(?:\s*عن)?"
     r")\s+(.{2,40})",
     re.UNICODE | re.IGNORECASE,
 )
+
+_INQUIRY_PHRASING_RE = re.compile(
+    r"(?:"
+    r"استفسار\s*عن|استفسر\s*عن|"
+    r"اريد\s+معرف(?:ة|ه)|أريد\s+معرف(?:ة|ه)|"
+    r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,24}(?:اعرف|أعرف|استفسر|استفسار)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_TYPES_OVERVIEW_RE = re.compile(
+    r"(?:^|\s)(?:انواع|أنواع|types?)\s+(?:ال|about|the\s+)?(.{2,40})",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SKU_SPECIFICITY_RE = re.compile(
+    r"(?:"
+    r"\d|"
+    r"كilo|كيلo|كيلو|كيلوغرام|kg|gram|جرام|كجم|"
+    r"لتر|\bml\b|"
+    r"سدر|طلح|ضهيان|"
+    r"رجالي|رجال|نسائي|نساء|"
+    r"\bsmall\b|\bmedium\b|\blarge\b|\bxl\b|\bxxl\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+INQUIRY_CLASS_BROAD = "broad_category_inquiry"
+INQUIRY_CLASS_BROWSE = "category_browse"
+INQUIRY_CLASS_SPECIFIC = "specific_product_search"
 
 
 def extract_inquiry_product_query(message: str) -> str:
@@ -141,6 +172,156 @@ def extract_inquiry_product_query(message: str) -> str:
     candidate = (m.group(1) or "").strip(" ؟?!.")
     candidate = re.sub(r"^(?:ال|about|the)\s+", "", candidate, flags=re.UNICODE | re.IGNORECASE)
     return candidate.strip(" ؟?!.")
+
+
+def has_inquiry_phrasing(message: str) -> bool:
+    """True when the customer uses discovery inquiry wording (not SKU lookup)."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if _INQUIRY_PHRASING_RE.search(raw):
+        return True
+    norm = _normalize_ar(raw)
+    return any(
+        _normalize_ar(p) in norm
+        for p in (
+            "استفسار عن",
+            "استفسر عن",
+            "ابغى اعرف عن",
+            "أبغى أعرف عن",
+            "ابي اعرف عن",
+            "أبي أعرف عن",
+            "اريد معرفه",
+            "أريد معرفة",
+        )
+    )
+
+
+def _strip_category_noun(query: str) -> str:
+    q = (query or "").strip(" ؟?!.")
+    q = re.sub(r"^(?:ال|about|the)\s+", "", q, flags=re.UNICODE | re.IGNORECASE)
+    q = re.sub(r"^(?:انواع|أنواع|types?)\s+", "", q, flags=re.UNICODE | re.IGNORECASE)
+    return q.strip(" ؟?!.")
+
+
+def is_generic_category_noun(query: str) -> bool:
+    """True for a single category noun or «أنواع X» — not a named SKU."""
+    core = _strip_category_noun(query)
+    if not core or len(core) < 2:
+        return False
+    if _SKU_SPECIFICITY_RE.search(core):
+        return False
+    tokens = [t for t in core.split() if t]
+    return len(tokens) <= 1
+
+
+def has_types_overview_ask(message: str, query: str = "") -> bool:
+    """True when the customer asks for types/overview of a category."""
+    raw = (message or "").strip()
+    q = (query or "").strip()
+    norm_msg = _normalize_ar(raw)
+    norm_q = _normalize_ar(q)
+    if norm_q.startswith("انواع ") or norm_q.startswith("أنواع "):
+        return True
+    if "انواع " in norm_msg or "أنواع " in norm_msg:
+        return True
+    return bool(_TYPES_OVERVIEW_RE.search(raw))
+
+
+def log_inquiry_class(
+    *,
+    tenant_id: Any,
+    inquiry_class: str,
+    route: str,
+    query: str = "",
+    preview: str = "",
+) -> None:
+    try:
+        logger.info(
+            "[INQUIRY_CLASS] tenant=%s class=%s route=%s query=%r preview=%r",
+            tenant_id,
+            inquiry_class,
+            route,
+            (query or "")[:60],
+            (preview or "")[:80],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def classify_product_inquiry_route(
+    ctx: BrainContext,
+    *,
+    query: str,
+) -> tuple[str, str]:
+    """Classify discovery turn and recommend route (telemetry + routing).
+
+    Returns ``(inquiry_class, route)`` where *route* is one of:
+    ``category_discovery``, ``clarify``, ``search``.
+    """
+    msg = ctx.message or ""
+    q = (query or "").strip()
+    slots = getattr(ctx.intent, "slots", None) or {}
+    slot_q = str(slots.get("product_query") or slots.get("product_name") or "").strip()
+
+    if _has_prior_browse_context(ctx):
+        return INQUIRY_CLASS_SPECIFIC, "search"
+
+    try:
+        from .commerce.product_breadth_policy import explicit_soft_browse_requested  # noqa: PLC0415
+
+        soft_browse = explicit_soft_browse_requested(msg)
+    except Exception:  # noqa: BLE001
+        soft_browse = False
+
+    if not q:
+        if soft_browse or has_explicit_broad_browse_request(msg):
+            return INQUIRY_CLASS_BROWSE, "clarify"
+        return INQUIRY_CLASS_BROWSE, "clarify"
+
+    price_subject = _extract_price_subject(msg)
+    if price_subject and price_subject.strip() == q and not is_generic_category_noun(q):
+        return INQUIRY_CLASS_SPECIFIC, "search"
+
+    inquiry_turn = has_inquiry_phrasing(msg) or has_types_overview_ask(msg, q)
+    generic = is_generic_category_noun(q)
+
+    if inquiry_turn and generic and not _SKU_SPECIFICITY_RE.search(msg):
+        return INQUIRY_CLASS_BROAD, "category_discovery"
+
+    if soft_browse and generic:
+        return INQUIRY_CLASS_BROWSE, "clarify"
+
+    if slot_q and slot_q == q and not inquiry_turn and not generic:
+        return INQUIRY_CLASS_SPECIFIC, "search"
+
+    return INQUIRY_CLASS_SPECIFIC, "search"
+
+
+def try_broad_category_inquiry_decision(
+    ctx: BrainContext,
+    *,
+    query: str,
+    inquiry_class: str = "",
+    route: str = "",
+) -> Optional[Decision]:
+    """Route broad category inquiry to discovery LLM — not catalog search."""
+    if not inquiry_class:
+        inquiry_class, route = classify_product_inquiry_route(ctx, query=query)
+    if inquiry_class != INQUIRY_CLASS_BROAD or route != "category_discovery":
+        return None
+
+    category_hint = _strip_category_noun(query)
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "category_discovery",
+            "category_hint": category_hint,
+            "response_goal": "category_discovery",
+        },
+        reason="broad category inquiry — discovery LLM, not catalog search",
+        confidence=0.88,
+    )
 
 
 def has_explicit_product_inquiry(message: str) -> bool:
@@ -338,8 +519,14 @@ def product_discovery_block_reason(
         from .intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
 
         intent = ctx.intent
+        _profile = getattr(ctx, "profile", None) or {}
+        _in_meta = (
+            _profile.get("inbound_metadata")
+            if isinstance(_profile, dict) else None
+        )
         if resolve_commerce_block(
             msg,
+            inbound_metadata=_in_meta if isinstance(_in_meta, dict) else None,
             intent_name=getattr(intent, "name", None),
             intent_confidence=getattr(intent, "confidence", None),
         ):
@@ -577,6 +764,28 @@ def clarify_instead_of_top_products(
                 history.append({"direction": "in", "body": body})
 
     try:
+        from .commerce.conversational_priority import (  # noqa: PLC0415
+            is_single_offer_short_acceptance,
+            try_priority_before_suppression,
+            try_short_continuation_decision,
+        )
+
+        if is_single_offer_short_acceptance(ctx):
+            _single_dec = try_short_continuation_decision(
+                ctx, route="single_offer_guard",
+            )
+            if _single_dec is not None:
+                return _single_dec
+
+        _priority_dec = try_priority_before_suppression(
+            ctx, history=history, route="clarify_fallback",
+        )
+        if _priority_dec is not None:
+            return _priority_dec
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
         from .commerce.fallback_guard import (  # noqa: PLC0415
             detect_hard_topic_shift,
             detect_semantic_dead_end,
@@ -804,16 +1013,25 @@ def clarify_instead_of_top_products(
 __all__ = [
     "allows_search_top_products_fallback",
     "allows_top_products_decision",
+    "classify_product_inquiry_route",
     "clarify_instead_of_top_products",
     "extract_inquiry_product_query",
     "has_explicit_broad_browse_request",
     "has_explicit_product_inquiry",
+    "has_inquiry_phrasing",
+    "has_types_overview_ask",
+    "INQUIRY_CLASS_BROAD",
+    "INQUIRY_CLASS_BROWSE",
+    "INQUIRY_CLASS_SPECIFIC",
+    "is_generic_category_noun",
     "is_need_based_product_advice",
     "is_solution_seeking_commerce",
     "is_price_without_product_context",
+    "log_inquiry_class",
     "log_product_discovery_blocked",
     "product_discovery_block_reason",
     "should_block_generic_product_discovery",
     "should_suppress_recommendation_escalation",
+    "try_broad_category_inquiry_decision",
     "try_price_query_decision",
 ]
