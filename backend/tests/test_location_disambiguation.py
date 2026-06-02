@@ -65,8 +65,8 @@ def test_ecommerce_explicit_triggers_store_link_not_maps(message: str) -> None:
     assert not looks_like_physical_location_request(message)
 
 
-def test_mawqe_almatjar_routes_to_faq_location_not_store() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+def test_mawqe_almatjar_routes_to_location_delivery_llm_not_store() -> None:
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.types import (
         BrainContext,
@@ -100,8 +100,8 @@ def test_mawqe_almatjar_routes_to_faq_location_not_store() -> None:
         facts=facts,
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
-    assert decision.args.get("topic") == "location"
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == "location_delivery"
 
 
 def test_store_link_safety_net_suppressed_for_mawqe_almatjar(
@@ -156,3 +156,52 @@ def test_faq_location_template_prefers_maps_over_store_url() -> None:
     assert _STORE_URL not in loc
     assert _STORE_URL in store
     assert _MAPS_URL not in store
+
+
+def test_location_faq_skips_order_resume_hint() -> None:
+    from modules.ai.brain.compose.responder import DefaultComposer
+    from modules.ai.brain.execution.faq import TOPIC_LOCATION
+    from modules.ai.brain.types import (
+        BrainContext,
+        CommerceFacts,
+        Intent,
+        MerchantConversationState,
+        OrderPreparationState,
+    )
+
+    prep = OrderPreparationState(product_id="p1")
+    state = MerchantConversationState(
+        greeted=True,
+        current_product_focus={"id": "p1", "title": "عسل سدر"},
+        order_prep=prep,
+    )
+    ctx = BrainContext(
+        tenant_id=1,
+        customer_phone="+966500000000",
+        message="وين موقعكم؟",
+        intent=Intent(name="ask_location", confidence=0.9, raw_message="وين موقعكم؟"),
+        state=state,
+        facts=CommerceFacts(has_products=True),
+    )
+    composer = DefaultComposer()
+    out = composer._with_follow_up("موقعنا 📍", ctx, topic=TOPIC_LOCATION)
+    assert "نكمل" not in out
+    assert out == "موقعنا 📍"
+
+
+def test_location_delivery_response_goal() -> None:
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+    from modules.ai.brain.pipeline import _compose_base_response_goal
+    from modules.ai.brain.types import Decision, SuggestionSnapshot
+
+    goal = _compose_base_response_goal(
+        Decision(
+            action=ACTION_LLM_REPLY,
+            args={"topic": "location_delivery", "topic_hint": "location"},
+            reason="location ask",
+        ),
+        SuggestionSnapshot(),
+    )
+    assert goal.startswith("location_delivery")
+    assert "نكمل إنشاء طلب" in goal
+    assert "maps" in goal.lower() or "CTA" in goal

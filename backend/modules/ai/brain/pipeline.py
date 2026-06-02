@@ -2336,6 +2336,23 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "location_delivery"
+    ):
+        return (
+            "location_delivery — Generate a short natural Saudi Arabic "
+            "WhatsApp reply. The customer asked for the store location, "
+            "branches, or directions. Answer warmly in 1–2 lines using "
+            "KB branch/location context when available. "
+            "Do NOT push order completion or say «نكمل إنشاء طلب». "
+            "Do NOT substitute the e-commerce store URL for a physical "
+            "maps pin — the wire layer injects the Google Maps URL / "
+            "CTA button after compose. "
+            "If reaching the branch might be difficult, briefly offer "
+            "to connect them with the right staff member."
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "category_discovery"
     ):
         _hint = str((decision.args or {}).get("category_hint") or "").strip()

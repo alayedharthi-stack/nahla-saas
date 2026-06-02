@@ -16,7 +16,7 @@ from modules.ai.brain.commerce.contact_escalation import (
     log_location_branch_failure,
     parse_staff_contacts_sent,
 )
-from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_SEARCH_PRODUCTS
+from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
 from modules.ai.brain.intent.rules import match
 from modules.ai.brain.types import (
@@ -159,8 +159,8 @@ class TestBranchRouting:
             facts=CommerceFacts(has_products=True),
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == "location"
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "location_delivery"
         assert decision.action != ACTION_SEARCH_PRODUCTS
 
     def test_branch_location_order_tail(self):

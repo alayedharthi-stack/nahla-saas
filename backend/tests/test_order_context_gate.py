@@ -16,6 +16,7 @@ for _p in [_backend, os.path.join(_backend, "..")]:
 
 from modules.ai.brain.decision.actions import (
     ACTION_FAQ_REPLY,
+    ACTION_LLM_REPLY,
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
@@ -165,8 +166,8 @@ class TestOrderContextDecisionEngine:
             ),
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == "location"
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "location_delivery"
 
     def test_completed_order_product_ask_still_allowed(self):
         msg = "عسل سدر بكم؟"

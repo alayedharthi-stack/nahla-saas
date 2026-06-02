@@ -193,6 +193,7 @@ class DefaultComposer:
                         maps_url=payload.get("maps_url", ""),
                     ),
                     ctx,
+                    topic=TOPIC_LOCATION,
                 )
             if topic == TOPIC_OWNER_CONTACT:
                 return self._with_follow_up(
@@ -710,15 +711,24 @@ class DefaultComposer:
             return True
         return False
 
-    def _with_follow_up(self, text: str, ctx: BrainContext) -> str:
+    def _with_follow_up(
+        self,
+        text: str,
+        ctx: BrainContext,
+        *,
+        topic: str = "",
+    ) -> str:
         # Order-flow resume hint takes priority over generic suggestion
         # follow-ups: when the customer asks a side question ("كم
         # التوصيل؟") mid-order, we answer the FAQ AND remind them where
         # we left off so the conversation doesn't lose momentum.
-        resume = self._order_resume_hint(ctx)
-        if resume and resume not in text:
-            text = f"{text}\n\n{resume}"
-            return text
+        # Location/branch turns must never carry an order nudge — the
+        # maps CTA is the only asset on those replies.
+        if topic != TOPIC_LOCATION:
+            resume = self._order_resume_hint(ctx)
+            if resume and resume not in text:
+                text = f"{text}\n\n{resume}"
+                return text
 
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:

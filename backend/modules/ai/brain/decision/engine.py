@@ -1791,16 +1791,24 @@ class DefaultDecisionEngine:
                         return _loc_update
             except Exception:  # noqa: BLE001
                 pass
-            # Physical-shop / Google-Maps questions get their own
-            # FAQ topic so the deterministic template + maps resolver
-            # chain can deliver the maps URL. Routing this to
-            # ``store_info`` (the previous behaviour) would silently
-            # return the e-commerce storefront link instead — the
-            # exact bug May 2026 #36 set out to fix.
+            # Physical-shop / branch questions defer to the brain for
+            # natural prose. The post-compose ``apply_location_safety_net``
+            # still injects the maps URL + CTA button — same contract as
+            # shipping (template disabled, wire layer owns the asset).
+            logger.info(
+                "[LOCATION_INTENT] defer to brain (location_delivery) | tenant=%s",
+                ctx.tenant_id,
+            )
             return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "location"},
-                reason="customer asked for the physical shop / Google Maps location",
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "location_delivery",
+                    "topic_hint": "location",
+                },
+                reason=(
+                    "customer asked for the physical shop / Google Maps "
+                    "location — defer to brain (location_delivery)"
+                ),
             )
 
         if intent.name == INTENT_ASK_PAYMENT_INFO:
