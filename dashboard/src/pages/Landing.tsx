@@ -6,6 +6,7 @@ import WhatsAppDemo from '../components/landing/WhatsAppDemo'
 import InboxDemo from '../components/landing/InboxDemo'
 import '../components/landing/landing.css'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
+import { landingPricingAr } from '../i18n/landingPricingLabels'
 import {
   MessageCircle,
   ShoppingBag,
@@ -147,19 +148,28 @@ type PlanSlug = keyof typeof PLAN_THEME
 interface PlanProps {
   slug: PlanSlug
   name: string
-  nameAr: string
+  nameDisplay: string
   price: number
   launchPrice: number
   tagline: string
   idealFor: string
   features: string[]
   popular?: boolean
+  popularBadge?: string
   ctaLabel?: string
+  perMonth?: string
+  currency?: string
+  securePayment?: string
+  defaultCta?: string
 }
 
 function PlanCard({
-  slug, name, nameAr, price, launchPrice, tagline, idealFor,
-  features, popular, ctaLabel,
+  slug, name, nameDisplay, price, launchPrice, tagline, idealFor,
+  features, popular, popularBadge, ctaLabel,
+  perMonth = 'ريال / شهرياً',
+  currency = 'ريال',
+  securePayment = 'دفع آمن — لا تُطلب بطاقة للتجربة',
+  defaultCta = 'ابدأ مجاناً 14 يوم',
 }: PlanProps) {
   const theme    = PLAN_THEME[slug]
   const Icon     = theme.icon
@@ -175,11 +185,11 @@ function PlanCard({
           : 'ring-1 ring-white/10 hover:ring-white/20',
       ].join(' ')}
     >
-      {/* Popular badge */}
-      {popular && (
+      {/* Popular badge — Growth only */}
+      {popular && popularBadge && (
         <div className="absolute -top-px inset-x-0 flex justify-center">
-          <span className={`bg-gradient-to-r ${theme.gradient} text-white text-[11px] font-black px-4 py-1 rounded-b-xl shadow-md`}>
-            ⭐ الأكثر اختياراً
+          <span className="bg-amber-500/15 border border-amber-400/30 text-amber-200 text-[10px] font-bold px-3 py-0.5 rounded-b-lg backdrop-blur-sm">
+            {popularBadge}
           </span>
         </div>
       )}
@@ -192,7 +202,7 @@ function PlanCard({
           </div>
           <div>
             <p className="text-white/70 text-[10px] font-bold uppercase tracking-widest">{name}</p>
-            <h3 className="text-xl font-black leading-tight">{nameAr}</h3>
+            <h3 className="text-xl font-black leading-tight">{nameDisplay}</h3>
           </div>
           {discount > 0 && (
             <span className={`ms-auto text-[11px] font-bold px-2 py-0.5 rounded-full ${theme.saveBg}`}>
@@ -209,17 +219,17 @@ function PlanCard({
           </span>
           <div className="pb-1">
             <div className="text-white/50 text-xs line-through">
-              {price.toLocaleString('ar-SA')} ريال
+              {price.toLocaleString('ar-SA')} {currency}
             </div>
-            <div className="text-white/70 text-xs font-medium">ريال / شهرياً</div>
+            <div className="text-white/70 text-xs font-medium">{perMonth}</div>
           </div>
         </div>
         <p className="text-white/60 text-[11px]">{tagline}</p>
       </div>
 
-      {/* Features body */}
+      {/* Features body — min-height keeps cards visually balanced */}
       <div className="bg-slate-800/80 flex-1 p-5 backdrop-blur-sm">
-        <ul className="flex flex-col gap-2.5">
+        <ul className="flex flex-col gap-2.5 min-h-[280px]">
           {features.map((f, i) => (
             <li key={i} className="flex items-start gap-2.5">
               <Check size={14} className={`mt-0.5 shrink-0 ${theme.checkColor}`} />
@@ -235,10 +245,10 @@ function PlanCard({
           to="/register"
           className={`block text-center py-3 rounded-xl font-black text-sm text-white transition-all duration-200 hover:scale-[1.02] active:scale-100 bg-gradient-to-br ${theme.gradient} shadow-md hover:brightness-110`}
         >
-          {ctaLabel ?? 'ابدأ مجاناً 14 يوم'}
+          {ctaLabel ?? defaultCta}
         </Link>
         <p className="flex items-center justify-center gap-1 text-[10px] text-slate-500 mt-2">
-          <Shield size={10} /> دفع آمن — لا تُطلب بطاقة للتجربة
+          <Shield size={10} /> {securePayment}
         </p>
       </div>
     </div>
@@ -962,61 +972,29 @@ export default function Landing() {
 
           {/* Cards — no scale transform (breaks mobile) */}
           <div className="grid md:grid-cols-3 gap-5 lg:gap-6 items-stretch">
-            <PlanCard
-              slug="starter"
-              name="STARTER"
-              nameAr="المبتدئ"
-              price={899}
-              launchPrice={449}
-              tagline="سعر الإطلاق — وفّر 450 ريال شهرياً"
-              idealFor="مثالي للمتاجر الناشئة التي تريد البدء بشكل احترافي"
-              features={[
-                'حتى 1,000 محادثة في الشهر',
-                'ردود ذكاء اصطناعي باللغة العربية',
-                '3 أتمتات مفعّلة في آنٍ واحد',
-                'حملتان تسويقيتان شهرياً',
-                'تقارير أساسية للمبيعات',
-                'دعم عبر البريد الإلكتروني',
-              ]}
-              ctaLabel="ابدأ مجاناً 14 يوم"
-            />
-            <PlanCard
-              slug="growth"
-              name="GROWTH"
-              nameAr="النمو"
-              price={1699}
-              launchPrice={849}
-              tagline="سعر الإطلاق — وفّر 850 ريال شهرياً"
-              idealFor="للمتاجر النشطة التي تريد تحقيق أقصى مبيعات عبر واتساب"
-              popular
-              features={[
-                'حتى 5,000 محادثة في الشهر',
-                'ردود ذكاء اصطناعي متقدمة',
-                'أتمتات غير محدودة',
-                '10 حملات تسويقية شهرياً',
-                'تقارير مبيعات متقدمة',
-                'أولوية في الدعم الفني',
-              ]}
-              ctaLabel="جرّب الخطة الأكثر شيوعاً"
-            />
-            <PlanCard
-              slug="scale"
-              name="SCALE"
-              nameAr="التوسع"
-              price={2999}
-              launchPrice={1499}
-              tagline="سعر الإطلاق — وفّر 1,500 ريال شهرياً"
-              idealFor="للعلامات التجارية والمتاجر الكبيرة بحجم مبيعات عالٍ"
-              features={[
-                'محادثات غير محدودة',
-                'أتمتات وحملات غير محدودة',
-                'تقارير مخصصة ولوحات تحكم',
-                'مدير حساب مخصص',
-                'دعم فني 24/7 على الواتساب',
-                'وصول كامل لـ API',
-              ]}
-              ctaLabel="تحدث مع فريق المبيعات"
-            />
+            {(['starter', 'growth', 'scale'] as const).map((slug) => {
+              const plan = landingPricingAr.plans[slug]
+              return (
+                <PlanCard
+                  key={slug}
+                  slug={slug}
+                  name={plan.name}
+                  nameDisplay={plan.nameDisplay}
+                  price={plan.price}
+                  launchPrice={plan.launchPrice}
+                  tagline={plan.tagline}
+                  idealFor={plan.idealFor}
+                  features={plan.features}
+                  ctaLabel={plan.ctaLabel}
+                  popular={slug === 'growth'}
+                  popularBadge={slug === 'growth' ? landingPricingAr.popularBadge : undefined}
+                  perMonth={landingPricingAr.perMonth}
+                  currency={landingPricingAr.currency}
+                  securePayment={landingPricingAr.securePayment}
+                  defaultCta={landingPricingAr.defaultCta}
+                />
+              )
+            })}
           </div>
 
           {/* Guarantees row */}

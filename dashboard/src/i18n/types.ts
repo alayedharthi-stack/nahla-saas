@@ -3,6 +3,7 @@
  * Every key here must be present in both ar.ts and en.ts.
  */
 import type { CustomersPageLabels } from './customersPageLabels'
+import type { LandingPricingLabels } from './landingPricingLabels'
 import type { CampaignsListLabels } from './campaignsListPageLabels'
 import type { TemplatesPageExtraLabels } from './templatesPageLabels'
 
@@ -640,6 +641,7 @@ export interface Translations {
 
   /** Customers page — static UI only; dynamic customer data stays as API values */
   customersPage: CustomersPageLabels
+  landingPricing: LandingPricingLabels
 
   /** Analytics page */
   analyticsPage: {

@@ -2,6 +2,7 @@ import type { Translations } from './types'
 import { customersPageAr } from './customersPageLabels'
 import { campaignsListAr } from './campaignsListPageLabels'
 import { templatesPageExtraAr } from './templatesPageLabels'
+import { landingPricingAr } from './landingPricingLabels'
 
 /**
  * Arabic translations — primary language for Nahla SaaS.
@@ -2067,6 +2068,8 @@ const ar: Translations = {
     successEnabled:    'تم تفعيل التحقق بخطوتين بنجاح.',
     successDisabled:   'تم تعطيل التحقق بخطوتين.',
   },
+
+  landingPricing: landingPricingAr,
 }
 
 export default ar

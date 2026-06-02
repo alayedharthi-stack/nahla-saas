@@ -2,6 +2,7 @@ import type { Translations } from './types'
 import { customersPageEn } from './customersPageLabels'
 import { campaignsListEn } from './campaignsListPageLabels'
 import { templatesPageExtraEn } from './templatesPageLabels'
+import { landingPricingEn } from './landingPricingLabels'
 
 const en: Translations = {
   meta: { code: 'en', label: 'English', dir: 'ltr' },
@@ -2063,6 +2064,8 @@ const en: Translations = {
     successEnabled:    'Two-factor authentication is now enabled.',
     successDisabled:   'Two-factor authentication has been disabled.',
   },
+
+  landingPricing: landingPricingEn,
 }
 
 export default en
