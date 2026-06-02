@@ -29,8 +29,9 @@ Public API
 ──────────
 * ``check_rate_limit_or_429(bucket, key, max_count, window_s)`` — raises
   ``HTTPException(429)`` when the limit is exceeded. Always returns
-  cleanly when allowed. Audits the violation under
-  ``rate_limit_exceeded`` so SOC dashboards can chart denials.
+  cleanly when allowed. Login buckets (``login_ip`` / ``login_email``)
+  audit under ``login_rate_limited``; all other buckets use
+  ``rate_limit_exceeded``.
 * ``hash_email(email)`` — opaque, stable identifier for per-email keys
   that does NOT leak the address into Redis (audit-friendly).
 """
@@ -56,6 +57,10 @@ logger = logging.getLogger("nahla.rate_limit")
 # of the rate-limit namespace. JWT_SECRET is reused as the salt so we
 # don't introduce a new secret to manage.
 _HASH_SALT_ENV = "JWT_SECRET"
+
+# Buckets that represent the /auth/login* surface — Phase 1A spec asks
+# for a dedicated ``login_rate_limited`` audit event (IP + email hash).
+_LOGIN_RATE_BUCKETS = frozenset({"login_ip", "login_email"})
 
 
 # ── In-process fallback (sliding window) ───────────────────────────────────────
@@ -147,7 +152,8 @@ def check_rate_limit_or_429(
         "retry_after": retry_after,
     })
     try:
-        audit("rate_limit_exceeded", **metadata)
+        event = "login_rate_limited" if bucket in _LOGIN_RATE_BUCKETS else "rate_limit_exceeded"
+        audit(event, **metadata)
     except Exception:  # noqa: silent-ok — audit emission is best-effort; the 429 below is the user-visible signal
         pass
 
