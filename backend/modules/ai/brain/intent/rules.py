@@ -36,6 +36,7 @@ from ..types import (
     INTENT_SOCIAL,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
+    INTENT_EMPLOYEE_NOT_RESPONDING,
     INTENT_TRACK_ORDER,
     INTENT_WHO_ARE_YOU,
     Intent,
@@ -45,6 +46,7 @@ from .social_classifier import classify_social
 from .non_commerce_classifier import classify_non_commerce
 from .need_based_product_classifier import classify_need_based_product_advice
 from ..commerce.solution_seeking import classify_solution_seeking_commerce
+from ..commerce.contact_escalation import classify_employee_not_responding
 
 
 @dataclass
@@ -292,7 +294,9 @@ _register(RuleSet(
         r"(موقع المتجر|موقع المعرض|موقع المحل|وين أنتم|وين انتم)",
         r"(لوكيشن|لوكيشن المحل|لوكيشن المتجر|لوكيشن المعرض|لوكيشن الفرع|عنوان المحل|عنوان الفرع|عنوانكم)",
         r"((?:ارسل|أرسل|ارسلي|أرسلي|ابعث|أبعث|ابعثلي|أبعثلي|ابي|أبي|ابغى|أبغى)\s*(?:لي\s+)?(?:ال)?لوكيشن)",
-        r"(الفرع|فروعكم|عندكم فرع|وين فرعكم|أبي أزوركم|أبي أجي للمحل|نزور المحل|نزوركم)",
+        r"(الفرع|فروعكم|(?:^|\s)(?:ال)?فروع(?:\s|[؟?!.]|$)|(?:ابغ|ابي|أبغ|أبي|اريد|أريد)\s*(?:لي\s+)?(?:ال)?فروع|"
+        r"عندكم فرع|وين فرعكم|أبي أزوركم|أبي أجي للمحل|نزور المحل|نزوركم)",
+        r"\bbranches\b",
         r"(خرايط|الخرائط|خريطة|على الخريطة|رابط الموقع|رابط الخريطة|رابط الخرايط|رابط اللوكيشن)",
         # English / mixed
         r"(google maps|google\s*map|location|address|where is your shop|where is your branch|"
@@ -704,6 +708,24 @@ def match(message: str) -> Optional[Intent]:
                 },
                 raw_message=message,
                 extraction_method="rules",
+            ),
+        ))
+
+    # ── Layer 2c: staff-not-responding follow-up ──────────────────────
+    # Runs before the regex chain so track_order (0.96) still wins
+    # when order/shipment nouns are present; this layer only fires
+    # when :func:`classify_employee_not_responding` passes exclusion
+    # guards (no competing track/delivery/complaint/fresh-handoff).
+    enr = classify_employee_not_responding(message)
+    if enr is not None:
+        candidates.append((
+            enr.confidence,
+            Intent(
+                name=INTENT_EMPLOYEE_NOT_RESPONDING,
+                confidence=enr.confidence,
+                slots={"trigger_pattern": enr.pattern},
+                raw_message=message,
+                extraction_method="rules+employee_not_responding",
             ),
         ))
 

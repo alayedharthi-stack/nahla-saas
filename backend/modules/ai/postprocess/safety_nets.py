@@ -1473,17 +1473,44 @@ def apply_staff_contact_safety_net(
     try:
         from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
             classify_employee_not_responding,
+            classify_location_branch_failure,
             contact_already_sent,
             log_contact_escalation,
+            log_location_branch_failure,
             parse_staff_contacts_sent,
         )
         _employee_not_responding = classify_employee_not_responding(
             customer_msg or "",
         )
+        _location_branch_failure = classify_location_branch_failure(
+            customer_msg or "",
+            history=history if isinstance(history, list) else None,
+        )
         _contacts_sent = parse_staff_contacts_sent(staff_contacts_sent)
     except Exception:  # noqa: BLE001
         _employee_not_responding = None
+        _location_branch_failure = None
         _contacts_sent = []
+
+    if _location_branch_failure is not None:
+        log_location_branch_failure(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            trigger=_location_branch_failure.trigger,
+            context=_location_branch_failure.context,
+            matched=_location_branch_failure.pattern,
+            preview=(customer_msg or "")[:80],
+        )
+        log_contact_escalation(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            trigger=_location_branch_failure.trigger,
+            context=_location_branch_failure.context,
+            name_source="-",
+            already_sent=False,
+            selected_contact="",
+            contacts_sent_count=len(_contacts_sent),
+        )
 
     # Trigger gating: a turn fires the resolver when EITHER side of
     # the conversation surfaces staff-contact intent.
@@ -1509,6 +1536,7 @@ def apply_staff_contact_safety_net(
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                     trigger="employee_not_responding",
+                    context="-",
                     name_source="-",
                     already_sent=False,
                     selected_contact="",
@@ -1565,6 +1593,7 @@ def apply_staff_contact_safety_net(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 trigger="employee_not_responding",
+                context="-",
                 name_source=name_source or "-",
                 already_sent=False,
                 selected_contact="",
@@ -1690,6 +1719,7 @@ def apply_staff_contact_safety_net(
         tenant_id=tenant_id,
         conversation_id=conversation_id,
         trigger=_escalation_trigger,
+        context="-",
         name_source=name_source or "-",
         already_sent=_already_sent,
         selected_contact=display_name,
@@ -2234,6 +2264,13 @@ _LOCATION_LINK_TRIGGERS_PHRASE: set = {
     "فروعكم",
     "وين فروعكم",
     "أين فروعكم",
+    "الفروع",
+    "ابغى الفروع",
+    "أبغى الفروع",
+    "ابي الفروع",
+    "أبي الفروع",
+    "branches",
+    "فروع",
     "أبي أزوركم",
     "أبي أزوركم",
     "أبي أجي للمحل",

@@ -49,6 +49,10 @@ INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
 INTENT_ASK_PAYMENT_INFO = "ask_payment_info"
 INTENT_HESITATION       = "hesitation"
 INTENT_TALK_HUMAN       = "talk_to_human"
+# Follow-up when a previously suggested staff contact did not respond
+# ("ما رد" / "اتصلت عليه وما رد"). Distinct from fresh handoff
+# (``INTENT_TALK_HUMAN``). Phase 1: detection + memory + telemetry only.
+INTENT_EMPLOYEE_NOT_RESPONDING = "employee_not_responding"
 INTENT_TRACK_ORDER      = "track_order"
 INTENT_GENERAL          = "general"
 INTENT_PICK_LIST_ITEM   = "pick_list_item"   # customer picks numbered option
@@ -443,6 +447,10 @@ class MerchantConversationState:
     # fresh signal reinforces it; see detector.py for the cascade.
     customer_gender_hint: str = ""
     customer_gender_confidence: float = 0.0
+    # Staff contact cards already dispatched this conversation.
+    # Each entry: {"name", "phone", "turn"}. Generic across merchants;
+    # escalation-chain logic (Phase 2) derives ordering from KB/config.
+    staff_contacts_sent: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -495,6 +503,7 @@ class MerchantConversationState:
             "last_link_sent_turn": self.last_link_sent_turn,
             "customer_gender_hint": self.customer_gender_hint,
             "customer_gender_confidence": self.customer_gender_confidence,
+            "staff_contacts_sent": list(self.staff_contacts_sent or []),
         }
 
     @staticmethod
@@ -553,6 +562,7 @@ class MerchantConversationState:
             customer_gender_confidence=float(
                 d.get("customer_gender_confidence") or 0.0
             ),
+            staff_contacts_sent=list(d.get("staff_contacts_sent") or []),
         )
 
 
