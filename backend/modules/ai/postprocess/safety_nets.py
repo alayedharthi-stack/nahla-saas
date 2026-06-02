@@ -426,6 +426,9 @@ def apply_media_key_safety_net(
     customer_msg: str,
     existing_media_attachments: List[Dict[str, Any]],
     detected_media_key_markers: int,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    normalized_type: Optional[str] = None,
+    conversation_id: Optional[int] = None,
 ) -> MediaKeySafetyNetResult:
     """Try to attach an asset (image / PDF / video) when Claude
     forgot to emit ``[MEDIA_KEY:...]`` but the customer clearly
@@ -446,6 +449,23 @@ def apply_media_key_safety_net(
     """
     result = MediaKeySafetyNetResult()
 
+    try:
+        from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+            customer_origin_has_payment_request,
+            emit_payment_intent_telemetry,
+            is_payment_media_key,
+            split_inbound_text,
+        )
+        _split = split_inbound_text(
+            customer_msg or "",
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+        )
+        _origin = _split.customer_origin
+    except Exception:  # noqa: BLE001
+        _split = None
+        _origin = (customer_msg or "").strip()
+
     if not media_key_net_enabled():
         result.skipped_reason = "flag_disabled"
         return result
@@ -461,7 +481,7 @@ def apply_media_key_safety_net(
             result.skipped_reason = "already_has_media_key"
             return result
 
-    if not (customer_msg or "").strip():
+    if not (customer_msg or "").strip() and not (_origin or "").strip():
         result.skipped_reason = "empty_msg"
         return result
 
@@ -474,8 +494,28 @@ def apply_media_key_safety_net(
         result.skipped_reason = "import_failure"
         return result
 
+    # Payment media keys require customer-origin intent — never OCR alone.
+    _probe_resolution, _probe_key = _resolve_media(db, tenant_id, customer_msg or "")
+    if _probe_key and is_payment_media_key(_probe_key):
+        if not customer_origin_has_payment_request(
+            _origin,
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+        ):
+            if _split is not None:
+                emit_payment_intent_telemetry(
+                    tenant_id=tenant_id,
+                    route="media_key_safety_net",
+                    split=_split,
+                    allow_outbound=False,
+                    reason="no_customer_origin_payment_intent",
+                    conversation_id=conversation_id,
+                )
+            result.skipped_reason = "no_customer_origin_payment_intent"
+            return result
+
     try:
-        resolution, inferred = _resolve_media(db, tenant_id, customer_msg or "")
+        resolution, inferred = _resolve_media(db, tenant_id, _origin or "")
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "safety_nets.media_key | resolve_for_query failed tenant=%s err=%s",
@@ -1372,6 +1412,9 @@ def apply_staff_contact_safety_net(
     db: Any = None,
     tenant_id: int = 0,
     history: Optional[List[Any]] = None,
+    staff_contacts_sent: Optional[List[Dict[str, Any]]] = None,
+    conversation_turn: int = 0,
+    conversation_id: Optional[int] = None,
 ) -> StaffContactSafetyNetResult:
     """Build a contact-card ``CallTarget`` when the customer asked
     to reach a staff member by name.
@@ -1427,6 +1470,21 @@ def apply_staff_contact_safety_net(
     # bounded to 40 rows; the same shape we run for the resolver.
     _emit_staff_contact_graph_trace(db, int(tenant_id or 0))
 
+    try:
+        from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+            classify_employee_not_responding,
+            contact_already_sent,
+            log_contact_escalation,
+            parse_staff_contacts_sent,
+        )
+        _employee_not_responding = classify_employee_not_responding(
+            customer_msg or "",
+        )
+        _contacts_sent = parse_staff_contacts_sent(staff_contacts_sent)
+    except Exception:  # noqa: BLE001
+        _employee_not_responding = None
+        _contacts_sent = []
+
     # Trigger gating: a turn fires the resolver when EITHER side of
     # the conversation surfaces staff-contact intent.
     #   * Customer-side: explicit ask ("ابي رقم أمين", "كم رقمه").
@@ -1438,12 +1496,24 @@ def apply_staff_contact_safety_net(
     #                    rewrites the reply to the cold "الرقم غير
     #                    مضاف" copy even though the KB has the
     #                    contact.
-    customer_intent = _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
-    reply_offer_verb, reply_offer_name = "", ""
+    customer_intent = (
+        _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
+        or _employee_not_responding is not None
+    )
+    reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(reply_text or "")
+    reply_has_digits = bool(_extract_phones(reply_text or ""))
     if not customer_intent:
-        reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(reply_text or "")
-        reply_has_digits = bool(_extract_phones(reply_text or ""))
         if not (reply_offer_verb and reply_offer_name) or reply_has_digits:
+            if _employee_not_responding is not None:
+                log_contact_escalation(
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    trigger="employee_not_responding",
+                    name_source="-",
+                    already_sent=False,
+                    selected_contact="",
+                    contacts_sent_count=len(_contacts_sent),
+                )
             logger.info(
                 "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
                 "customer_intent=False reply_offer_verb=%r "
@@ -1490,6 +1560,16 @@ def apply_staff_contact_safety_net(
             history_bot_norm, history_customer_norm,
         )
     if not name:
+        if _employee_not_responding is not None:
+            log_contact_escalation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger="employee_not_responding",
+                name_source=name_source or "-",
+                already_sent=False,
+                selected_contact="",
+                contacts_sent_count=len(_contacts_sent),
+            )
         logger.info(
             "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=False "
             "msg_chars=%d reply_chars=%d history_bot_chars=%d "
@@ -1595,6 +1675,26 @@ def apply_staff_contact_safety_net(
     else:
         # ``kb:<kind>``
         result.reason = f"intent_plus_name_plus_phone_in_{source}"
+
+    _escalation_trigger = (
+        "employee_not_responding"
+        if _employee_not_responding is not None
+        else ("reply_offer" if reply_offer_name else "customer_staff_intent")
+    )
+    _already_sent = contact_already_sent(
+        _contacts_sent,
+        name=display_name,
+        phone=wa_id,
+    )
+    log_contact_escalation(
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        trigger=_escalation_trigger,
+        name_source=name_source or "-",
+        already_sent=_already_sent,
+        selected_contact=display_name,
+        contacts_sent_count=len(_contacts_sent),
+    )
     return result
 
 
@@ -4046,6 +4146,11 @@ def _classify_expected_artifact(
     norm_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", norm_compact)
     norm_compact = re.sub(r"\s+", " ", norm_compact).strip()
 
+    # 1. Maps-link intent (location / google maps / lookup)
+    for phrase in _LOCATION_LINK_TRIGGERS_PHRASE:
+        if phrase in norm_compact:
+            return "maps_link"
+
     try:
         from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
             should_suppress_store_link_intent,
@@ -4058,11 +4163,6 @@ def _classify_expected_artifact(
             return "none"
     except Exception:  # noqa: BLE001
         pass
-
-    # 1. Maps-link intent (location / google maps / lookup)
-    for phrase in _LOCATION_LINK_TRIGGERS_PHRASE:
-        if phrase in norm_compact:
-            return "maps_link"
 
     # 2. Store-link intent (online shop URL)
     for phrase in _STORE_LINK_TRIGGERS_PHRASE:
@@ -4244,6 +4344,9 @@ def apply_outbound_artifact_guard(
     media_attachments: Optional[List[Any]] = None,
     call_targets: Optional[List[Any]] = None,
     history: Optional[List[Dict[str, Any]]] = None,
+    inbound_metadata: Optional[dict] = None,
+    normalized_type: Optional[str] = None,
+    conversation_id: Any = None,
 ) -> OutboundArtifactGuardResult:
     """Final hollow-affirmation guard.
 
@@ -4262,8 +4365,21 @@ def apply_outbound_artifact_guard(
     """
     result = OutboundArtifactGuardResult()
 
+    origin_msg = (customer_msg or "").strip()
+    try:
+        from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+            extract_customer_origin_text,
+        )
+        origin_msg, _ = extract_customer_origin_text(
+            customer_msg or "",
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     expected = _classify_expected_artifact(
-        customer_msg or "",
+        origin_msg or "",
         history=history,
     )
 
@@ -4302,6 +4418,35 @@ def apply_outbound_artifact_guard(
                 customer_msg = prior_msg
 
     result.expected_artifact = expected
+
+    if expected == "payment_barcode":
+        try:
+            from core.payment_relevance_gate import (  # noqa: PLC0415
+                PaymentRelevanceLogContext,
+                validate_payment_outbound_artifact,
+            )
+            _prv = validate_payment_outbound_artifact(
+                message=customer_msg or "",
+                inbound_metadata=inbound_metadata,
+                normalized_type=normalized_type,
+                history=history,
+                tenant_id=tenant_id,
+                route="artifact_guard_barcode",
+                log_context=PaymentRelevanceLogContext(
+                    tenant_id=tenant_id,
+                    message=customer_msg or "",
+                    inbound_metadata=inbound_metadata,
+                    normalized_type=normalized_type,
+                    fallback_source="artifact_guard_barcode",
+                    artifact=True,
+                    final_action="dispatch_barcode",
+                ),
+            )
+            if not _prv.allowed:
+                result.skipped_reason = f"payment_relevance_gate:{_prv.reason}"
+                return result
+        except Exception:  # noqa: BLE001
+            pass
 
     if expected == "none":
         result.skipped_reason = "no_artifact_intent"

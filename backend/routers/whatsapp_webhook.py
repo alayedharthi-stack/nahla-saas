@@ -5765,16 +5765,46 @@ async def _handle_merchant_message(
                 is_payment_barcode_image_request as _is_barcode_image_request,
                 payment_barcode_intro_text as _barcode_intro_text,
             )
+            from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
+                has_payment_outbound_consent as _has_payment_consent,
+            )
+            from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+                split_inbound_text,
+            )
             from services.media_resolver import resolve_for_query as _resolve_for_query  # noqa: PLC0415
 
-            _early_barcode_image = _is_barcode_image_request(text or "")
-            _early_payment_intent = _is_payment_query(text or "") or _early_barcode_image
+            _in_meta_early = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+            _norm_type_early = str(
+                _in_meta_early.get("normalized_type")
+                or _in_meta_early.get("source_type")
+                or ""
+            )
+            _split_early = split_inbound_text(
+                text or "",
+                inbound_metadata=_in_meta_early,
+                normalized_type=_norm_type_early or None,
+            )
+            _origin_early = _split_early.customer_origin
+            _payment_consent = _has_payment_consent(
+                text or "",
+                inbound_metadata=_in_meta_early,
+                normalized_type=_norm_type_early or None,
+                tenant_id=tenant_id,
+                route="early_payment_bypass",
+                conversation_id=getattr(convo, "id", None),
+            )
+            _early_barcode_image = (
+                _payment_consent and _is_barcode_image_request(_origin_early)
+            )
+            _early_payment_intent = _payment_consent and (
+                _is_payment_query(_origin_early) or _early_barcode_image
+            )
             _early_payment_asset = None
             _early_payment_key = ""
             if _early_barcode_image:
                 try:
                     _early_resolution, _early_payment_key = _resolve_for_query(
-                        db, tenant_id, text or "",
+                        db, tenant_id, _origin_early or "",
                     )
                     if _early_resolution:
                         _early_payment_asset = _early_resolution.to_attachment()
@@ -5785,7 +5815,9 @@ async def _handle_merchant_message(
                         tenant_id, _early_resolve_exc,
                     )
             elif _early_payment_intent:
-                _early_payment_asset = _find_payment_asset(db, tenant_id, text or "")
+                _early_payment_asset = _find_payment_asset(
+                    db, tenant_id, _origin_early or "",
+                )
             logger.info(
                 "[PAYMENT_INFO] early-gate tenant=%s convo=%s to=%s "
                 "intent_detected=%s barcode_image=%s asset_found=%s asset_id=%s "
@@ -7157,6 +7189,16 @@ async def _handle_merchant_message(
                                 history=history,
                                 default_fallback=_default_short,
                                 inbound_text=text,
+                                inbound_metadata=(
+                                    dict(inbound_metadata or {})
+                                    if isinstance(inbound_metadata, dict)
+                                    else None
+                                ),
+                                normalized_type=str(
+                                    (inbound_metadata or {}).get("source_type")
+                                    or (inbound_metadata or {}).get("normalized_type")
+                                    or ""
+                                ) or None,
                             )
                         except Exception as _ctx_exc:  # noqa: BLE001
                             logger.debug(
@@ -7521,6 +7563,50 @@ async def _handle_merchant_message(
                         len(_media_attachments),
                         [a.get("id") for a in _media_attachments],
                     )
+                    try:
+                        from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+                            customer_origin_has_payment_request,
+                            filter_payment_media_attachments,
+                            split_inbound_text,
+                        )
+                        _in_meta_legacy = {}
+                        if isinstance(inbound_metadata, dict):
+                            _in_meta_legacy = dict(inbound_metadata)
+                        try:
+                            _in_meta_legacy.update(dict(_live_in_meta or {}))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        _split_legacy = split_inbound_text(
+                            text or "",
+                            inbound_metadata=_in_meta_legacy,
+                            normalized_type=str(
+                                _in_meta_legacy.get("normalized_type")
+                                or _in_meta_legacy.get("source_type")
+                                or ""
+                            ) or None,
+                        )
+                        _allow_payment_legacy = customer_origin_has_payment_request(
+                            _split_legacy.customer_origin,
+                            inbound_metadata=_in_meta_legacy,
+                            normalized_type=_split_legacy.normalized_type or None,
+                        )
+                        _before_legacy = len(_media_attachments)
+                        _media_attachments = filter_payment_media_attachments(
+                            _media_attachments,
+                            allow_payment=_allow_payment_legacy,
+                        )
+                        if _before_legacy != len(_media_attachments):
+                            logger.info(
+                                "[CUSTOMER_ORIGIN_INTENT] tenant=%s "
+                                "conversation_id=%s route=legacy_media_id "
+                                "filtered_payment_attachments=%d allow=%s",
+                                tenant_id,
+                                getattr(convo, "id", None),
+                                _before_legacy - len(_media_attachments),
+                                "true" if _allow_payment_legacy else "false",
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
                     reply = _cleaned_reply
                 elif "[MEDIA:" in reply.upper():
                     # Marker present but didn't resolve — strip it so the
@@ -7556,6 +7642,62 @@ async def _handle_merchant_message(
                         db, tenant_id, reply, max_attachments=2,
                     )
                 )
+                try:
+                    from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+                        customer_origin_has_payment_request,
+                        emit_payment_intent_telemetry,
+                        filter_payment_media_attachments,
+                        is_payment_media_key,
+                        split_inbound_text,
+                    )
+                    _in_meta_mk = {}
+                    if isinstance(inbound_metadata, dict):
+                        _in_meta_mk = dict(inbound_metadata)
+                    try:
+                        _in_meta_mk.update(dict(_live_in_meta or {}))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _split_mk = split_inbound_text(
+                        text or "",
+                        inbound_metadata=_in_meta_mk,
+                        normalized_type=str(
+                            _in_meta_mk.get("normalized_type")
+                            or _in_meta_mk.get("source_type")
+                            or ""
+                        ) or None,
+                    )
+                    _allow_payment_keys = customer_origin_has_payment_request(
+                        _split_mk.customer_origin,
+                        inbound_metadata=_in_meta_mk,
+                        normalized_type=_split_mk.normalized_type or None,
+                    )
+                    _keys_before = len(_key_attachments)
+                    _key_attachments = filter_payment_media_attachments(
+                        _key_attachments,
+                        allow_payment=_allow_payment_keys,
+                    )
+                    if not _allow_payment_keys:
+                        _missing_media_keys = [
+                            k for k in (_missing_media_keys or [])
+                            if not is_payment_media_key(k)
+                        ]
+                    if _keys_before != len(_key_attachments):
+                        emit_payment_intent_telemetry(
+                            tenant_id=tenant_id,
+                            route="media_key_marker_extract",
+                            split=_split_mk,
+                            allow_outbound=_allow_payment_keys,
+                            reason=(
+                                "ok" if _allow_payment_keys
+                                else "no_customer_origin_payment_intent"
+                            ),
+                            conversation_id=getattr(convo, "id", None),
+                        )
+                except Exception as _mk_gate_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[CUSTOMER_ORIGIN_INTENT] media_key gate failed tenant=%s err=%s",
+                        tenant_id, _mk_gate_exc,
+                    )
                 if _key_attachments:
                     _media_attachments.extend(_key_attachments)
                     logger.info(
@@ -7961,6 +8103,17 @@ async def _handle_merchant_message(
                     customer_msg=text or "",
                     existing_media_attachments=_media_attachments,
                     detected_media_key_markers=_marker_detected["media_key"],
+                    inbound_metadata=(
+                        dict(inbound_metadata or {})
+                        if isinstance(inbound_metadata, dict)
+                        else {}
+                    ),
+                    normalized_type=str(
+                        (inbound_metadata or {}).get("normalized_type")
+                        or (inbound_metadata or {}).get("source_type")
+                        or ""
+                    ) or None,
+                    conversation_id=getattr(convo, "id", None),
                 )
                 if _mn.fired and _mn.extra_attachment:
                     _media_attachments.append(_mn.extra_attachment)
@@ -8005,6 +8158,11 @@ async def _handle_merchant_message(
                         # the staff name from the prior bot turn
                         # that the customer is following up on.
                         history=history if isinstance(history, list) else None,
+                        staff_contacts_sent=list(
+                            _bs_for_nc.get("staff_contacts_sent") or []
+                        ),
+                        conversation_turn=int(_bs_for_nc.get("turn") or 0),
+                        conversation_id=getattr(convo, "id", None),
                     )
                     if _cn.fired and _cn.extra_call_target is not None:
                         _call_targets.append(_cn.extra_call_target)
@@ -8249,6 +8407,13 @@ async def _handle_merchant_message(
                     apply_payment_barcode_image_route as _apply_barcode_route,
                     payment_barcode_intro_text as _barcode_intro_text,
                 )
+                _pbr_meta = {}
+                if isinstance(inbound_metadata, dict):
+                    _pbr_meta = dict(inbound_metadata)
+                try:
+                    _pbr_meta.update(dict(_live_in_meta or {}))
+                except Exception:  # noqa: BLE001
+                    pass
                 _pbr = _apply_barcode_route(
                     db,
                     tenant_id=tenant_id,
@@ -8256,6 +8421,12 @@ async def _handle_merchant_message(
                     media_attachments=_media_attachments,
                     reply_text=reply or "",
                     conversation_id=getattr(convo, "id", None),
+                    inbound_metadata=_pbr_meta,
+                    normalized_type=str(
+                        _pbr_meta.get("normalized_type")
+                        or _pbr_meta.get("source_type")
+                        or ""
+                    ) or None,
                 )
                 if _pbr.rewrote_reply:
                     reply = _barcode_intro_text(_pbr.media_key)
@@ -8278,6 +8449,13 @@ async def _handle_merchant_message(
             # clear-intent fallback so artifact-specific copy
             # wins over the generic "I didn't understand" copy.
             try:
+                _in_meta_ag = {}
+                if isinstance(inbound_metadata, dict):
+                    _in_meta_ag = dict(inbound_metadata)
+                try:
+                    _in_meta_ag.update(dict(_live_in_meta or {}))
+                except Exception:  # noqa: BLE001
+                    pass
                 _ag = _sn_artifact_guard(
                     db,
                     tenant_id=tenant_id,
@@ -8292,6 +8470,13 @@ async def _handle_merchant_message(
                     # ask. Falls back to ``None`` gracefully when
                     # history isn't in scope at this call site.
                     history=history if isinstance(history, list) else None,
+                    inbound_metadata=_in_meta_ag,
+                    normalized_type=str(
+                        _in_meta_ag.get("normalized_type")
+                        or _in_meta_ag.get("source_type")
+                        or ""
+                    ) or None,
+                    conversation_id=getattr(convo, "id", None),
                 )
                 if _ag.fired and _ag.rewrote_reply and _ag.new_reply:
                     reply = _ag.new_reply
@@ -8445,10 +8630,41 @@ async def _handle_merchant_message(
                 find_best_payment_asset as _find_payment_asset,
                 is_payment_query as _is_payment_query,
             )
-            _payment_intent = _is_payment_query(text or "")
+            from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
+                has_payment_outbound_consent as _has_payment_consent_hard,
+            )
+            _in_meta_hard = {}
+            try:
+                _in_meta_hard = dict(_live_in_meta or {})
+            except Exception:  # noqa: BLE001
+                _in_meta_hard = {}
+            if isinstance(inbound_metadata, dict):
+                _in_meta_hard.update(inbound_metadata)
+            _payment_intent = _has_payment_consent_hard(
+                text or "",
+                inbound_metadata=_in_meta_hard,
+                tenant_id=tenant_id,
+                route="payment_hard_override",
+                conversation_id=getattr(convo, "id", None),
+            )
             if _payment_intent:
+                from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+                    split_inbound_text,
+                )
+                _split_hard = split_inbound_text(
+                    text or "",
+                    inbound_metadata=_in_meta_hard,
+                    normalized_type=str(
+                        _in_meta_hard.get("normalized_type")
+                        or _in_meta_hard.get("source_type")
+                        or ""
+                    ) or None,
+                )
+                _origin_hard = _split_hard.customer_origin
                 _already_attached_ids = {a.get("id") for a in _media_attachments}
-                _payment_asset = _find_payment_asset(db, tenant_id, text or "")
+                _payment_asset = _find_payment_asset(
+                    db, tenant_id, _origin_hard or "",
+                )
                 if _payment_asset and _payment_asset.get("id") not in _already_attached_ids:
                     _media_attachments.append(_payment_asset)
                     logger.info(
@@ -9608,6 +9824,38 @@ async def _handle_merchant_message(
                     )
                     if _contacts_ok and isinstance(_delivery_audit, dict):
                         _delivery_audit["contacts_sent"] = True
+                    if _contacts_ok:
+                        try:
+                            from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                                persist_staff_contacts_sent_batch,
+                            )
+                            _persist_turn = int(
+                                ((_bs_for_nc or {}).get("turn") or 0)
+                            )
+                            _contact_entries = [
+                                {
+                                    "name": getattr(_ct, "name", "") or "",
+                                    "phone": (
+                                        getattr(_ct, "phone_display", "")
+                                        or getattr(_ct, "wa_id", "")
+                                        or ""
+                                    ),
+                                    "turn": _persist_turn,
+                                }
+                                for _ct in _call_targets
+                            ]
+                            persist_staff_contacts_sent_batch(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                entries=_contact_entries,
+                            )
+                        except Exception as _ces_exc:  # noqa: BLE001
+                            logger.debug(
+                                "[CONTACT_ESCALATION] persist after send "
+                                "failed tenant=%s err=%s",
+                                tenant_id, _ces_exc,
+                            )
                     try:
                         import json as _json_call  # noqa: PLC0415
                         _call_log_payload = {

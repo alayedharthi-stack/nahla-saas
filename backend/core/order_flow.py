@@ -1061,6 +1061,43 @@ def maybe_handle_payment_evidence_inbound(
     if not reply_text:
         return None
 
+    try:
+        from core.payment_relevance_gate import (  # noqa: PLC0415
+            PaymentRelevanceLogContext,
+            validate_payment_evidence_prompt,
+        )
+        _prv = validate_payment_evidence_prompt(
+            message=str(md.get("caption") or md.get("vision_text") or ""),
+            inbound_metadata=md,
+            normalized_type=inbound_normalized_type,
+            state_summary=summary,
+            history=None,
+            tenant_id=tenant_id,
+            route="payment_evidence_inbound",
+            log_context=PaymentRelevanceLogContext(
+                tenant_id=tenant_id,
+                phone_tail=(phone[-4:] if phone else ""),
+                message=str(md.get("caption") or md.get("vision_text") or ""),
+                inbound_metadata=md,
+                normalized_type=inbound_normalized_type,
+                fallback_source="payment_evidence_inbound",
+                artifact=False,
+                final_action="evidence_soft_prompt",
+            ),
+        )
+        if not _prv.allowed:
+            logger.info(
+                "[PAYMENT_EVIDENCE] evidence prompt blocked by relevance gate "
+                "tenant=%s phone=*%s reason=%s",
+                tenant_id, (phone[-4:] if phone else ""), _prv.reason,
+            )
+            return None
+    except Exception as _prg_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_EVIDENCE] relevance gate skipped tenant=%s err=%s",
+            tenant_id, _prg_exc,
+        )
+
     logger.info(
         "[PAYMENT_EVIDENCE] short_circuit=payment_evidence_soft "
         "tenant=%s phone=*%s payment_evidence_status=%s "
@@ -1383,6 +1420,8 @@ def context_aware_dedup_fallback(
     history: List[Any],
     default_fallback: str,
     inbound_text: Optional[str] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    normalized_type: Optional[str] = None,
 ) -> str:
     """Return a context-relevant fallback when the brain's reply
     tripped the near-duplicate guard. Without this, the merchant
@@ -1414,30 +1453,57 @@ def context_aware_dedup_fallback(
             )
 
         if s.get("awaiting_payment_receipt"):
-            # State relevance gate — do NOT resurrect payment flow when
-            # the current turn is a commerce/price/size query.
             _payment_resume = True
-            if inbound_text:
-                try:
-                    from modules.ai.brain.state.state_relevance import (  # noqa: PLC0415
-                        log_state_resurrection_blocked,
-                        validate_state_relevance_from_summary,
-                    )
-                    _verdict = validate_state_relevance_from_summary(
-                        message=inbound_text,
-                        summary=s,
-                    )
-                    if not _verdict.payment_state_relevant and _verdict.detected_topic_shift:
-                        log_state_resurrection_blocked(
-                            tenant_id=tenant_id,
-                            blocked_state="payment_flow",
-                            reason="no_payment_semantics",
-                            preview=inbound_text[:80],
-                            intent_hint=_verdict.current_intent_hint,
+            try:
+                from core.payment_relevance_gate import (  # noqa: PLC0415
+                    PaymentRelevanceLogContext,
+                    validate_payment_workflow_resume,
+                )
+                _prv = validate_payment_workflow_resume(
+                    message=inbound_text or "",
+                    inbound_metadata=inbound_metadata,
+                    normalized_type=normalized_type,
+                    state_summary=s,
+                    history=history,
+                    tenant_id=tenant_id,
+                    route="dedup_fallback",
+                    log_context=PaymentRelevanceLogContext(
+                        tenant_id=tenant_id,
+                        phone_tail=(phone[-4:] if phone else ""),
+                        message=inbound_text or "",
+                        inbound_metadata=inbound_metadata,
+                        normalized_type=normalized_type,
+                        dedup=True,
+                        fallback_source="dedup_fallback",
+                        artifact=False,
+                        final_action="dedup_payment_resume_check",
+                    ),
+                )
+                if not _prv.allowed:
+                    _payment_resume = False
+            except Exception:  # noqa: BLE001
+                if inbound_text:
+                    try:
+                        from modules.ai.brain.state.state_relevance import (  # noqa: PLC0415
+                            log_state_resurrection_blocked,
+                            should_block_workflow_resume,
+                            validate_state_relevance_from_summary,
                         )
-                        _payment_resume = False
-                except Exception:  # noqa: BLE001
-                    pass
+                        _verdict = validate_state_relevance_from_summary(
+                            message=inbound_text,
+                            summary=s,
+                        )
+                        if should_block_workflow_resume("payment_flow", _verdict):
+                            log_state_resurrection_blocked(
+                                tenant_id=tenant_id,
+                                blocked_state="payment_flow",
+                                reason="no_payment_semantics",
+                                preview=inbound_text[:80],
+                                intent_hint=_verdict.current_intent_hint,
+                            )
+                            _payment_resume = False
+                    except Exception:  # noqa: BLE001
+                        pass
 
             if _payment_resume:
                 if inbound_text:

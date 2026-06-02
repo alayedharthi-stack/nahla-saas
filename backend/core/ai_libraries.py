@@ -805,6 +805,7 @@ def extract_media_markers(
                 "id": int(r.id),
                 "tenant_id": int(r.tenant_id),
                 "title": r.title,
+                "media_key": getattr(r, "media_key", None),
                 "media_type": r.media_type,
                 "file_url": r.file_url,
                 "mime_type": r.mime_type,
@@ -859,6 +860,7 @@ _PAYMENT_QUERY_RE = re.compile(
     # Banks / accounts
     r"الراجحي|راجحي|الأهلي|اهلي|الرياض|"
     r"حساب\s*(الـ?بنك|بنكي?|الراجحي|الأهلي)|رقم\s*الحساب|"
+    r"ارسل(?:وا)?\s*(?:لي\s+)?(?:ال)?حساب|"
     # IBAN
     r"آيبان|الآيبان|ايبان|الايبان|iban|"
     # Transfer / deposit
@@ -877,7 +879,7 @@ _PAYMENT_QUERY_RE = re.compile(
     r"[أا]?بي\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
     r"ودي\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
     r"حابب\s+[أا]?[ح]ول\s+(?:ل|إل)كم|"
-    r"كيف\s+[أا]?دفع\s+(?:ل|إل)كم|"
+    r"كيف\s+[أا]?دفع(?:\s+(?:ل|إل)كم)?|"
     r"كيف\s+الدفع|كيف\s+التحويل|"
     r"طريقة\s+(?:الدفع|التحويل|السداد)|"
     r"وش\s+طريقة\s+(?:الدفع|التحويل|السداد)|"
@@ -910,7 +912,10 @@ def is_payment_query(message: str) -> bool:
     not, since the whole point is to recover when GPT misses the asset."""
     if not message:
         return False
-    return bool(_PAYMENT_QUERY_RE.search(str(message)))
+    raw = str(message)
+    if _PAYMENT_QUERY_RE.search(raw):
+        return True
+    return bool(_PAYMENT_QUERY_RE.search(_normalize_for_match(raw)))
 
 
 def find_best_payment_asset(

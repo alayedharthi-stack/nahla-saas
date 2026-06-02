@@ -803,6 +803,19 @@ def rewrite_generic_reply_for_payment_context(
     )
     if not has_active_context:
         return None
+    try:
+        from core.payment_relevance_gate import (  # noqa: PLC0415
+            validate_payment_workflow_resume,
+        )
+        _prv = validate_payment_workflow_resume(
+            message=inbound_text,
+            state_summary=s,
+            route="payment_context_rewrite",
+        )
+        if not _prv.allowed:
+            return None
+    except Exception:  # noqa: BLE001
+        pass
     return compose_payment_claim_ack(
         selected_product=selected_product,
         awaiting_receipt=awaiting_receipt,

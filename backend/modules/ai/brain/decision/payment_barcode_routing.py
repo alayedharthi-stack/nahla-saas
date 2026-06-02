@@ -116,6 +116,8 @@ def apply_payment_barcode_image_route(
     media_attachments: List[Dict[str, Any]],
     reply_text: str,
     conversation_id: Optional[int] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    normalized_type: Optional[str] = None,
 ) -> PaymentBarcodeRouteResult:
     """Queue outbound barcode media before text-only payment fallbacks.
 
@@ -124,7 +126,63 @@ def apply_payment_barcode_image_route(
     cannot preempt the image send.
     """
     result = PaymentBarcodeRouteResult()
-    if not is_payment_barcode_image_request(customer_msg):
+    try:
+        from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+            split_inbound_text,
+        )
+        _split = split_inbound_text(
+            customer_msg or "",
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+        )
+        _origin = _split.customer_origin
+    except Exception:  # noqa: BLE001
+        _split = None
+        _origin = (customer_msg or "").strip()
+
+    try:
+        from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
+            has_payment_outbound_consent,
+            inbound_type_label,
+            log_payment_outbound_suppressed,
+            log_priority_correlation,
+        )
+        if not has_payment_outbound_consent(
+            customer_msg,
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+            tenant_id=tenant_id,
+            route="post_compose_barcode",
+            conversation_id=conversation_id,
+        ):
+            result.skipped_reason = "no_outbound_consent"
+            log_payment_outbound_suppressed(
+                tenant_id=tenant_id,
+                reason=result.skipped_reason,
+                inbound_type=inbound_type_label(
+                    inbound_metadata=inbound_metadata,
+                    normalized_type=normalized_type,
+                    message=customer_msg,
+                ),
+                route="post_compose_barcode",
+            )
+            log_priority_correlation(
+                tenant_id=tenant_id,
+                inbound_type=inbound_type_label(
+                    inbound_metadata=inbound_metadata,
+                    normalized_type=normalized_type,
+                    message=customer_msg,
+                ),
+                suppression="payment_consent",
+                final_action="skipped_barcode",
+                media_sent=False,
+                route="post_compose_barcode",
+            )
+            return result
+    except Exception:  # noqa: BLE001
+        pass
+
+    if not is_payment_barcode_image_request(_origin):
         result.skipped_reason = "not_barcode_image_request"
         return result
 
@@ -140,7 +198,7 @@ def apply_payment_barcode_image_route(
         return result
 
     try:
-        resolution, inferred_key = resolve_for_query(db, tenant_id, customer_msg or "")
+        resolution, inferred_key = resolve_for_query(db, tenant_id, _origin or "")
     except Exception as exc:  # noqa: BLE001
         result.skipped_reason = f"resolve_failed:{exc}"
         result.fallback_used = True
