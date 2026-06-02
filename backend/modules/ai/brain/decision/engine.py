@@ -2029,7 +2029,8 @@ class DefaultDecisionEngine:
                     or _extract_price_subject(ctx.message or "")
                 )
                 if not query:
-                    query = _extract_price_subject(ctx.message or "")
+                    from ..product_discovery_gate import extract_inquiry_product_query  # noqa: PLC0415
+                    query = extract_inquiry_product_query(ctx.message or "")
                 if not query:
                     return clarify_instead_of_top_products(
                         ctx, reason="weak_or_unknown_intent",

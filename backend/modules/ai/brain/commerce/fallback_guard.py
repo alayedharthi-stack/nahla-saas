@@ -12,7 +12,8 @@ import hashlib
 import logging
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.brain.fallback_guard")
 
@@ -48,6 +49,199 @@ _ACK_ONLY_RE = re.compile(
     re.UNICODE,
 )
 
+# Hard topic-shift — invalidates replay / exhaustion / stale clarify memory.
+# Patterns use _norm-compatible spellings (ى→ي, ة→ه, …).
+_AVAILABILITY_ASK_RE = re.compile(
+    r"(?:"
+    r"متي\s*(?:يتوفر|يوفر|راح\s*يوفر|تتوفر)|"
+    r"هل\s*(?:متوفر|مو\s*جود|موجود)|"
+    r"متي\s*(?:راح|بيكون)|"
+    r"when\s*(?:available|in\s*stock)|"
+    r"out\s*of\s*stock"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PRODUCT_ENTITY_RE = re.compile(
+    r"(?:"
+    r"عسل(?:\s*(?:سدر|طلح|سمر|ضهيان|السدر|الطلح|السمر))?|"
+    r"غذاء\s*ملكات|حبوب\s*لقاح|برو(?:ب|)وليس|سم\s*النحل|"
+    r"منتج|sku|"
+    r"honey|royal\s*jelly|propolis"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_INQUIRY_ABOUT_PRODUCT_RE = re.compile(
+    r"(?:"
+    r"استفسار\s*عن|استفسر\s*عن|"
+    r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,20}(?:اعرف|أعرف|استفسر|استفسار)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_ORDER_INTENT_RE = re.compile(
+    r"(?:"
+    r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد|بغيت).{0,12}(?:اطلب|أطلب|اشتري|أشتري)|"
+    r"(?:اطلب|أطلب|اشتري|أشتري)\s+(?!شي(?:ء)?\s+(?:ل|لل))"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CLARIFY_LOOP_GOALS = frozenset({
+    "all_variant_prices",
+    "show_all_variants_prices",
+    "general_attribute",
+})
+
+_PRICE_SIZE_CONTINUATION_RE = re.compile(
+    r"(?:"
+    r"^كم\s*السعر|^بكم|^سعر|^الحجم|^حجم|^احجام|^أحجام|^الاحجام|"
+    r"^كل\s*ال(?:حج|أح|اح)?(?:ج)?(?:ام|ام|ام)|^كل\s*ال(?:حج|أح|اح)جام|"
+    r"^طيب\s*و|^وال|^اي\s*حجم|^أي\s*حجم|"
+    r"كilo|كيلو|جرام|حجام|مقاس"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class HardTopicShiftVerdict:
+    detected: bool
+    reason: str = ""
+    new_topic: str = ""
+
+
+def _semantic_product_entity(text: str) -> str:
+    """
+    Canonical product-family key — ignores cosmetic lexical differences
+    (``عسل طبيعي`` vs ``العسل الطبيعي`` → same ``honey_generic``).
+    """
+    norm = _norm(text or "")
+    if not norm:
+        return ""
+    if re.search(r"عسل\s*سدر|السدر", norm):
+        return "honey_sdr"
+    if re.search(r"عسل\s*طلح|الطلح", norm):
+        return "honey_tlh"
+    if re.search(r"عسل\s*سمر|السمر", norm):
+        return "honey_smr"
+    if re.search(r"عسل\s*ضهيان|الضهيان|الضهيان", norm):
+        return "honey_dhyan"
+    if re.search(r"غذاء\s*ملكات|ملكات", norm):
+        return "royal_jelly"
+    if re.search(r"حبوب\s*لقاح|لقاح", norm):
+        return "pollen"
+    if re.search(r"برو(?:ب|)وليس|عكبر", norm):
+        return "propolis"
+    if re.search(r"سم\s*النحل", norm):
+        return "bee_venom"
+    if "عسل" in norm.split() or norm.endswith("عسل") or norm.startswith("عسل"):
+        return "honey_generic"
+    if re.search(r"\bعسل\b|honey", norm):
+        return "honey_generic"
+    return ""
+
+
+def _previous_was_product_context(prev: str, state: Any) -> bool:
+    if _semantic_product_entity(prev):
+        return True
+    if _INQUIRY_ABOUT_PRODUCT_RE.search(prev or "") and _PRODUCT_ENTITY_RE.search(prev or ""):
+        return True
+    return get_recent_topic(state) in {
+        "general_attribute",
+        "product_inquiry",
+        "product_availability",
+    }
+
+
+def _infer_new_topic(message: str, reason: str) -> str:
+    if reason.startswith("non_product_intent:"):
+        return reason.split(":", 1)[-1]
+    if reason == "availability_ask":
+        return "product_availability"
+    if reason == "product_inquiry":
+        return "product_inquiry"
+    if reason == "order_intent":
+        return "order_intent"
+    if reason == "product_visual":
+        return "product_visual"
+    if reason == "commerce_topic_change":
+        return "product_browse"
+    if reason.startswith("semantic_entity_change:"):
+        return reason.split(":", 1)[-1]
+    try:
+        from .solution_seeking import detect_solution_seeking_suppression  # noqa: PLC0415
+
+        hit = detect_solution_seeking_suppression(message or "", skip_recent_topic=True)
+        if hit:
+            return hit
+    except Exception:  # noqa: BLE001
+        pass
+    entity = _semantic_product_entity(message or "")
+    return entity or "commerce_turn"
+
+
+def _customer_messages(
+    history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    exclude_current: str = "",
+) -> List[str]:
+    exclude_norm = _norm(exclude_current)
+    out: List[str] = []
+    for turn in reversed(history or []):
+        if str(turn.get("direction") or "") not in {"in", "inbound"}:
+            continue
+        body = str(turn.get("body") or turn.get("text") or "").strip()
+        if not body:
+            continue
+        if exclude_norm and _norm(body) == exclude_norm:
+            continue
+        out.append(body)
+    return list(reversed(out))
+
+
+def _is_price_size_continuation(
+    message: str,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Price / size / variant / deictic follow-ups stay in the same thread."""
+    norm = _norm(message or "")
+    if not norm:
+        return False
+    prev_msgs = _customer_messages(history, exclude_current=message or "")
+    if not prev_msgs:
+        return False
+    prev_had_price_size = any(
+        _PRICE_SIZE_LOOP_RE.search(_norm(m)) or _ALL_VARIANTS_RE.search(_norm(m))
+        for m in prev_msgs
+    )
+    if not prev_had_price_size:
+        return False
+    if _PRICE_SIZE_LOOP_RE.search(norm) or _ALL_VARIANTS_RE.search(norm):
+        return True
+    if _PRICE_SIZE_CONTINUATION_RE.search(norm):
+        return True
+    return False
+
+
+def _previous_topic_label(state: Any) -> str:
+    topic = get_recent_topic(state)
+    if topic:
+        return topic
+    goal = str(getattr(state, "customer_goal", "") or "").strip()
+    return goal or "-"
+
+
+def _had_suppression_memory(state: Any) -> bool:
+    if state is None:
+        return False
+    return bool(
+        get_recent_topic(state)
+        or str(getattr(state, "last_fallback_fingerprint", "") or "").strip()
+        or str(getattr(state, "customer_goal", "") or "").strip() in _CLARIFY_LOOP_GOALS
+    )
+
 
 def _norm(text: str) -> str:
     t = unicodedata.normalize("NFKC", (text or "").strip().lower())
@@ -78,6 +272,30 @@ def log_fallback_repeat_blocked(
             tenant_id,
             fingerprint or "-",
             reason or "-",
+            (preview or "")[:80],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def log_hard_topic_shift(
+    *,
+    tenant_id: Any = None,
+    reason: str = "",
+    preview: str = "",
+    previous_topic: str = "",
+    new_topic: str = "",
+    suppression_invalidated: bool = False,
+) -> None:
+    try:
+        logger.info(
+            "[HARD_TOPIC_SHIFT] tenant=%s previous_topic=%s new_topic=%s "
+            "reason=%s suppression_invalidated=%s preview=%r",
+            tenant_id,
+            previous_topic or "-",
+            new_topic or "-",
+            reason or "-",
+            str(bool(suppression_invalidated)).lower(),
             (preview or "")[:80],
         )
     except Exception:  # noqa: BLE001
@@ -123,6 +341,174 @@ def stamp_recent_topic(state: Any, topic: str, *, turn: Optional[int] = None) ->
     )
 
 
+def _last_customer_message(
+    history: Optional[List[Dict[str, Any]]] = None,
+    *,
+    exclude_current: str = "",
+) -> str:
+    msgs = _customer_messages(history, exclude_current=exclude_current)
+    return msgs[-1] if msgs else ""
+
+
+def evaluate_hard_topic_shift(
+    message: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    state: Any = None,
+) -> HardTopicShiftVerdict:
+    """
+    True when the current turn introduces a fresh commerce entity or intent.
+
+    Suppression / replay memory must NOT carry over across these turns.
+    """
+    msg = (message or "").strip()
+    norm = _norm(msg)
+    if not norm:
+        return HardTopicShiftVerdict(False)
+
+    if _is_price_size_continuation(msg, history):
+        return HardTopicShiftVerdict(False)
+
+    if _AVAILABILITY_ASK_RE.search(norm):
+        return HardTopicShiftVerdict(
+            True,
+            reason="availability_ask",
+            new_topic="product_availability",
+        )
+
+    if _INQUIRY_ABOUT_PRODUCT_RE.search(msg) and _PRODUCT_ENTITY_RE.search(msg):
+        return HardTopicShiftVerdict(
+            True,
+            reason="product_inquiry",
+            new_topic="product_inquiry",
+        )
+
+    if _ORDER_INTENT_RE.search(msg):
+        return HardTopicShiftVerdict(
+            True,
+            reason="order_intent",
+            new_topic="order_intent",
+        )
+
+    try:
+        from ..commerce.product_visual import is_product_visual_request  # noqa: PLC0415
+
+        if is_product_visual_request(msg):
+            return HardTopicShiftVerdict(
+                True,
+                reason="product_visual",
+                new_topic="product_visual",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from ..order_context_gate import has_explicit_commerce_topic_change  # noqa: PLC0415
+
+        if has_explicit_commerce_topic_change(msg):
+            return HardTopicShiftVerdict(
+                True,
+                reason="commerce_topic_change",
+                new_topic="product_browse",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from .solution_seeking import detect_solution_seeking_suppression  # noqa: PLC0415
+
+        current_non_product = detect_solution_seeking_suppression(
+            msg, skip_recent_topic=True,
+        )
+        if current_non_product and not is_ack_only_message(msg):
+            prev = _last_customer_message(history, exclude_current=msg)
+            if _previous_was_product_context(prev, state):
+                return HardTopicShiftVerdict(
+                    True,
+                    reason=f"non_product_intent:{current_non_product}",
+                    new_topic=current_non_product,
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    current_entity = _semantic_product_entity(msg)
+    if current_entity:
+        prev = _last_customer_message(history, exclude_current=msg)
+        if prev:
+            prev_entity = _semantic_product_entity(prev)
+            if (
+                prev_entity
+                and current_entity
+                and prev_entity != current_entity
+                and not (
+                    prev_entity == "honey_generic"
+                    and current_entity == "honey_generic"
+                )
+            ):
+                return HardTopicShiftVerdict(
+                    True,
+                    reason=f"semantic_entity_change:{prev_entity}->{current_entity}",
+                    new_topic=current_entity,
+                )
+
+    return HardTopicShiftVerdict(False)
+
+
+def detect_hard_topic_shift(
+    message: str,
+    *,
+    history: Optional[List[Dict[str, Any]]] = None,
+    state: Any = None,
+) -> bool:
+    return evaluate_hard_topic_shift(
+        message, history=history, state=state,
+    ).detected
+
+
+def _product_entity_signature(text: str) -> frozenset[str]:
+    """Backward-compatible alias — prefer ``_semantic_product_entity``."""
+    key = _semantic_product_entity(text)
+    return frozenset({key}) if key else frozenset()
+
+
+def invalidate_suppression_memory(
+    state: Any,
+    *,
+    reason: str = "",
+    tenant_id: Any = None,
+    preview: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
+    verdict: Optional[HardTopicShiftVerdict] = None,
+) -> None:
+    """Clear replay / topic / clarify-loop memory after a hard topic shift."""
+    if state is None:
+        return
+    previous_topic = _previous_topic_label(state)
+    had_memory = _had_suppression_memory(state)
+    _verdict = verdict or evaluate_hard_topic_shift(
+        preview or "", history=history, state=state,
+    )
+    new_topic = _verdict.new_topic or _infer_new_topic(preview or "", _verdict.reason or reason)
+    shift_reason = reason or _verdict.reason or "invalidate"
+
+    state.recent_topic = ""
+    state.recent_topic_turn = 0
+    state.last_fallback_fingerprint = ""
+    state.last_fallback_turn = 0
+    goal = str(getattr(state, "customer_goal", "") or "")
+    if goal in _CLARIFY_LOOP_GOALS:
+        state.customer_goal = ""
+
+    log_hard_topic_shift(
+        tenant_id=tenant_id,
+        reason=shift_reason,
+        preview=preview,
+        previous_topic=previous_topic,
+        new_topic=new_topic,
+        suppression_invalidated=had_memory,
+    )
+
+
 def infer_topic_from_messages(
     message: str,
     history: Optional[List[Dict[str, Any]]] = None,
@@ -165,6 +551,11 @@ def resolve_active_topic(
     except Exception:  # noqa: BLE001
         return None
 
+    if evaluate_hard_topic_shift(message, history=history, state=state).detected:
+        return detect_solution_seeking_suppression(
+            message or "", skip_recent_topic=True,
+        )
+
     direct = detect_solution_seeking_suppression(
         message or "", skip_recent_topic=True,
     )
@@ -181,9 +572,13 @@ def should_block_fallback_repeat(
     *,
     explicit_reask: bool = False,
     current_turn: Optional[int] = None,
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """Do not replay the same fallback within a short conversational window."""
     if explicit_reask:
+        return False
+    if detect_hard_topic_shift(message or "", history=history, state=state):
         return False
     fp = fallback_fingerprint(text)
     if not fp:
@@ -229,6 +624,9 @@ def detect_semantic_dead_end(
 
     Returns goal token e.g. ``all_variant_prices`` or ``None``.
     """
+    if detect_hard_topic_shift(message, history=history, state=state):
+        return None
+
     if is_ack_only_message(message):
         if is_recent_topic_active(state):
             return None
@@ -273,13 +671,18 @@ def detect_semantic_dead_end(
 
 
 __all__ = [
+    "HardTopicShiftVerdict",
+    "detect_hard_topic_shift",
     "detect_semantic_dead_end",
+    "evaluate_hard_topic_shift",
     "fallback_fingerprint",
     "get_recent_topic",
     "infer_topic_from_messages",
+    "invalidate_suppression_memory",
     "is_ack_only_message",
     "is_recent_topic_active",
     "log_fallback_repeat_blocked",
+    "log_hard_topic_shift",
     "log_workflow_exhausted",
     "record_fallback_sent",
     "resolve_active_topic",

@@ -231,6 +231,26 @@ class DefaultComposer:
                 )
 
             if not result.success or data.get("message") == "no_products_in_catalog":
+                query = str((decision.args or {}).get("query") or "").strip()
+                inquiry_query = ""
+                _inquiry = False
+                try:
+                    from ..product_discovery_gate import (  # noqa: PLC0415
+                        extract_inquiry_product_query,
+                        has_explicit_product_inquiry,
+                    )
+                    inquiry_query = extract_inquiry_product_query(ctx.message or "")
+                    _inquiry = has_explicit_product_inquiry(ctx.message or "")
+                except Exception:  # noqa: BLE001
+                    pass
+                subject = query or inquiry_query
+                if _inquiry or subject:
+                    return (
+                        "حاضر 🌷 "
+                        f"بخصوص *{subject or 'المنتج'}* — "
+                        "أي نوع أو صفة تهمك بالضبط؟ "
+                        "مثلاً سدر، طلح، أو حجم معيّن — وأرشّح لك الأنسب."
+                    )
                 variant = self._variant_idx(ctx)
                 text = T.no_products(variant=variant)
                 if self._is_duplicate(text, ctx):

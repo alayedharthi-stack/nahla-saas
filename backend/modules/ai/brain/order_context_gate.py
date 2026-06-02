@@ -124,6 +124,8 @@ _ORDER_PHRASE_PRODUCT_DISQUALIFIERS: tuple[str, ...] = (
     "استلام",
     "توصيل",
     "delivery",
+    "استفسار",
+    "استفسر",
 )
 
 # Strong explicit topic-change — unlocks discovery during fulfillment lock.

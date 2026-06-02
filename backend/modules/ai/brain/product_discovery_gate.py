@@ -121,6 +121,59 @@ def has_explicit_broad_browse_request(message: str) -> bool:
     return any(_normalize_ar(p) in norm for p in _EXTRA_BROWSE)
 
 
+_INQUIRY_PRODUCT_QUERY_RE = re.compile(
+    r"(?:"
+    r"استفسار\s*عن|استفسر\s*عن|"
+    r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,24}(?:اعرف|أعرف|استفسر|استفسار)(?:\s*عن)?"
+    r")\s+(.{2,40})",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def extract_inquiry_product_query(message: str) -> str:
+    """Extract product/category from inquiry phrasing, e.g. 'استفسار عن العسل'."""
+    raw = (message or "").strip()
+    if not raw:
+        return ""
+    m = _INQUIRY_PRODUCT_QUERY_RE.search(raw)
+    if not m:
+        return ""
+    candidate = (m.group(1) or "").strip(" ؟?!.")
+    candidate = re.sub(r"^(?:ال|about|the)\s+", "", candidate, flags=re.UNICODE | re.IGNORECASE)
+    return candidate.strip(" ؟?!.")
+
+
+def has_explicit_product_inquiry(message: str) -> bool:
+    """True when the customer is explicitly asking about a product/category."""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if extract_inquiry_product_query(msg):
+        return True
+    norm = _normalize_ar(msg)
+    if not norm:
+        return False
+    _INQUIRY_MARKERS = (
+        "استفسار عن",
+        "استفسر عن",
+        "ابغى اعرف عن",
+        "أبغى أعرف عن",
+        "ابي اعرف عن",
+        "أبي أعرف عن",
+        "عندكم عسل",
+        "عندك عسل",
+        "عندكم منتج",
+    )
+    if any(_normalize_ar(p) in norm for p in _INQUIRY_MARKERS):
+        return True
+    try:
+        from .commerce.fallback_guard import detect_hard_topic_shift  # noqa: PLC0415
+
+        return detect_hard_topic_shift(msg)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 _PRICE_SUFFIX_RE = re.compile(
     r"^(.{2,60}?)\s+(?:بكم|كم\s*سعر|سعر)\s*$",
     re.UNICODE | re.IGNORECASE,
@@ -296,6 +349,9 @@ def product_discovery_block_reason(
 
     if is_price_without_product_context(ctx):
         return "price_without_product_context"
+
+    if has_explicit_product_inquiry(msg):
+        return None
 
     if src in _TOP_PRODUCTS_SOURCES and not has_explicit_broad_browse_request(msg):
         return "weak_or_unknown_intent"
@@ -522,7 +578,9 @@ def clarify_instead_of_top_products(
 
     try:
         from .commerce.fallback_guard import (  # noqa: PLC0415
+            detect_hard_topic_shift,
             detect_semantic_dead_end,
+            invalidate_suppression_memory,
             log_fallback_repeat_blocked,
             record_fallback_sent,
             resolve_active_topic,
@@ -544,6 +602,19 @@ def clarify_instead_of_top_products(
         _interp = getattr(ctx, "semantic_interpretation", None)
         if _interp is not None:
             _canonical = str(getattr(_interp, "canonical_text", "") or "").strip()
+
+        if detect_hard_topic_shift(
+            msg,
+            history=history,
+            state=state,
+        ):
+            invalidate_suppression_memory(
+                state,
+                reason="hard_topic_shift",
+                tenant_id=tenant_id,
+                preview=msg,
+                history=history,
+            )
 
         _dead_end_goal = detect_semantic_dead_end(
             msg,
@@ -620,7 +691,9 @@ def clarify_instead_of_top_products(
             if _suppressed == "payment_intent":
                 _pay_q = contextual_non_product_clarification(msg)
                 if _pay_q:
-                    if should_block_fallback_repeat(state, _pay_q):
+                    if should_block_fallback_repeat(
+                        state, _pay_q, message=msg, history=history,
+                    ):
                         log_fallback_repeat_blocked(
                             tenant_id=tenant_id,
                             reason="payment_clarify_repeat",
@@ -687,7 +760,9 @@ def clarify_instead_of_top_products(
                 reason="repeat need clarification blocked — advisory LLM",
                 confidence=0.82,
             )
-        if should_block_fallback_repeat(state, _question):
+        if should_block_fallback_repeat(
+            state, _question, message=msg, history=history,
+        ):
             log_fallback_repeat_blocked(
                 tenant_id=tenant_id,
                 reason="need_clarify_repeat",
@@ -730,7 +805,9 @@ __all__ = [
     "allows_search_top_products_fallback",
     "allows_top_products_decision",
     "clarify_instead_of_top_products",
+    "extract_inquiry_product_query",
     "has_explicit_broad_browse_request",
+    "has_explicit_product_inquiry",
     "is_need_based_product_advice",
     "is_solution_seeking_commerce",
     "is_price_without_product_context",
