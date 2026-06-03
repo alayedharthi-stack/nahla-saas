@@ -996,6 +996,8 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
     # logged with the full traceback and returned as a structured body
     # the frontend can act on.)
     import traceback as _tb  # noqa: PLC0415
+    from core.auth import require_authenticated  # noqa: PLC0415
+
     requested_store = str(request.query_params.get("store_id") or "").strip()
     tenant_id = 0
     integration_id: Optional[int] = None
