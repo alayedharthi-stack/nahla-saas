@@ -618,43 +618,37 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             Integration.provider == "salla",
         ).first()
         if check_integ:
+            from store_integration.salla_login_flags import (  # noqa: PLC0415
+                derive_salla_login_integration_flags,
+            )
+
             cfg = check_integ.config or {}
-            has_refresh   = bool(cfg.get("refresh_token"))
-            api_key_src   = (cfg.get("api_key_source") or "").lower()
-            app_type      = (cfg.get("app_type")       or "").lower()
-            is_easy_mode  = (
+            has_refresh = bool(cfg.get("refresh_token"))
+            api_key_src = (cfg.get("api_key_source") or "").lower()
+            app_type = (cfg.get("app_type") or "").lower()
+            is_easy_mode = (
                 app_type == "easy"
                 or api_key_src == "easy_mode_webhook"
             )
-            api_sync_done = (
-                bool(cfg.get("api_sync_enabled"))
-                and has_refresh
-                and bool(check_integ.enabled)
+
+            needs_oauth, needs_api_sync = derive_salla_login_integration_flags(
+                cfg,
+                enabled=bool(check_integ.enabled),
             )
 
-            # api_sync only counts the dedicated Sync OAuth row — Easy Mode
-            # tokens via webhook also qualify as "full Admin API access" so
-            # we don't nag those merchants either.
-            if api_sync_done or is_easy_mode:
-                needs_api_sync = False
-
             if is_easy_mode:
-                # Easy Mode: never OAuth.  If refresh_token is somehow
-                # missing here, the app.store.authorize webhook will land
-                # within seconds (or the merchant must reinstall from
-                # s.salla.sa/apps).  Either way the embedded session is
-                # valid for the dashboard and the orders poller will pick
-                # up tokens once they arrive.
                 logger.info(
                     "[SallaLogin] easy_mode tenant=%s — needs_oauth=false "
                     "(has_refresh=%s api_key_source=%s app_type=%s)",
                     tenant_id, has_refresh, api_key_src or "?", app_type or "?",
                 )
-            elif not has_refresh or api_key_src == "embedded_token":
-                # Legacy Custom OAuth path — only here do we still flip
-                # needs_oauth.  Easy Mode merchants will not reach this
-                # branch.
-                needs_oauth = True
+            elif api_key_src == "embedded_token":
+                logger.info(
+                    "[SallaLogin] embedded_token tenant=%s — needs_oauth=false "
+                    "needs_api_sync=%s (Sync OAuth CTA in /app/entry)",
+                    tenant_id, needs_api_sync,
+                )
+            elif needs_oauth:
                 if SALLA_CLIENT_ID and SALLA_REDIRECT_URI:
                     normalized_redirect = SALLA_REDIRECT_URI.strip().rstrip("/")
                     state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}"
@@ -682,9 +676,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     except Exception as _e:
         logger.warning("[SallaLogin] needs_oauth check failed: %s", _e)
 
-    # ── Trigger initial Salla sync (fire-and-forget) ONLY if OAuth tokens present ─
-    # Without OAuth tokens, sync will fail (embedded token can't call /admin/v2/*).
-    if is_new and tenant_id and not needs_oauth:
+    # ── Trigger initial Salla sync (fire-and-forget) ONLY if Admin API tokens present ─
+    if is_new and tenant_id and not needs_api_sync:
         try:
             import asyncio as _asyncio  # noqa: PLC0415
 
