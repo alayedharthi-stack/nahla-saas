@@ -20,6 +20,13 @@ import {
   readStoredEmbedLang,
   resolveEmbeddedLang,
 } from '../i18n/embeddedLocale'
+import {
+  EMBED_THEME_STORAGE_KEY,
+  readStoredEmbedTheme,
+  readStoredUserResolvedTheme,
+  readSystemTheme,
+  resolveEmbeddedTheme,
+} from '../i18n/embeddedTheme'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 type Lang      = 'ar' | 'en'
@@ -94,7 +101,7 @@ function applyLang(lang: Lang): void {
 export function bootstrapPreferences(): {
   theme: 'light' | 'dark'
   lang:  Lang
-  source: { theme: 'url' | 'stored' | 'system'; lang: 'url' | 'stored' | 'default' | 'embed' }
+  source: { theme: 'url' | 'stored' | 'system' | 'embed'; lang: 'url' | 'stored' | 'default' | 'embed' }
 } {
   // ── URL ──
   let urlTheme: 'light' | 'dark' | null = null
@@ -121,13 +128,27 @@ export function bootstrapPreferences(): {
   } catch { /* URL parsing failed */ }
 
   // ── Theme resolution ──
-  let themeSource: 'url' | 'stored' | 'system'
+  let themeSource: 'url' | 'stored' | 'system' | 'embed'
   let resolvedTheme: 'light' | 'dark'
+  const inEmbed = isSallaEmbeddedIframe()
+
   if (urlTheme) {
-    // URL wins, also persist so the next reload still matches.
-    themeSource    = 'url'
-    resolvedTheme  = urlTheme
+    themeSource   = 'url'
+    resolvedTheme = urlTheme
     try { localStorage.setItem(THEME_KEY, urlTheme) } catch { /* ignore */ }
+    try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, urlTheme) } catch { /* ignore */ }
+  } else if (inEmbed) {
+    const { theme, source } = resolveEmbeddedTheme({
+      urlTheme:         null,
+      embedStored:      readStoredEmbedTheme(),
+      userResolved:     readStoredUserResolvedTheme(),
+      systemTheme:      readSystemTheme(),
+      inSallaEmbedded:  true,
+    })
+    resolvedTheme = theme
+    themeSource   = source === 'stored' ? 'stored' : 'embed'
+    try { localStorage.setItem(THEME_KEY, theme) } catch { /* ignore */ }
+    try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, theme) } catch { /* ignore */ }
   } else {
     const storedMode = readStoredTheme()
     resolvedTheme    = resolveTheme(storedMode)
@@ -138,8 +159,6 @@ export function bootstrapPreferences(): {
   // ── Lang resolution ──
   let langSource: 'url' | 'stored' | 'default' | 'embed'
   let resolvedLang: Lang
-  const inEmbed = isSallaEmbeddedIframe()
-
   if (urlLang) {
     langSource   = 'url'
     resolvedLang = urlLang

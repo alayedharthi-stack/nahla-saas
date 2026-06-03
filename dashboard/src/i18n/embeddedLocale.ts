@@ -201,29 +201,3 @@ export function persistEmbeddedLang(lang: EmbeddedLang): void {
   } catch { /* ignore */ }
 }
 
-/** Build /app/entry query string fragment including resolved lang (and optional theme). */
-export function buildEmbeddedEntryQuery(
-  searchParams?: URLSearchParams,
-  themeParams?: { theme?: string | null },
-): string {
-  const sp = searchParams ?? new URLSearchParams(window.location.search)
-  const { lang } = resolveEmbeddedLang({
-    urlLang:       readUrlEmbeddedLang(sp.toString() ? `?${sp}` : undefined),
-    embedStored:   readStoredEmbedLang(),
-    userPref:      readStoredUserLang(),
-    referrerLang:  readSallaReferrerLang(),
-    navigatorLang: readNavigatorLang(),
-    documentLang:  readDocumentLang(),
-    documentRtl:   isDocumentRtl(),
-    inSallaEmbedded: isSallaEmbeddedIframe(),
-  })
-  const out = new URLSearchParams()
-  out.set('lang', lang)
-  const theme = themeParams?.theme
-    ?? sp.get('theme')
-    ?? sp.get('color_scheme')
-    ?? sp.get('mode')
-  if (theme) out.set('theme', theme)
-  const qs = out.toString()
-  return qs ? `?${qs}` : ''
-}

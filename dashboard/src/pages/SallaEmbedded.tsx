@@ -22,7 +22,8 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
-import { buildEmbeddedEntryQuery } from '../i18n/embeddedLocale'
+import { buildEmbeddedEntryQuery } from '../i18n/embeddedTheme'
+import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -173,6 +174,7 @@ function persistSession(data: LoginResponse | SessionResponse) {
 export default function SallaEmbedded() {
   const navigate = useNavigate()
   const { isRTL, t } = useEmbeddedLocale()
+  const { isDark } = useEmbeddedTheme()
 
   const [phase, setPhase]               = useState<Phase>('init')
   const [statusText, setStatusText]     = useState(t.loader.initializing)
@@ -467,14 +469,38 @@ export default function SallaEmbedded() {
 
   const isLoading = phase === 'init' || phase === 'checking' || phase === 'login'
 
+  const shell = isDark
+    ? {
+        bg: '#0f172a',
+        bgGradient: 'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.08) 0%, transparent 70%)',
+        title: '#f1f5f9',
+        cardBg: 'rgba(255,255,255,0.03)',
+        cardBorder: 'rgba(245,158,11,0.2)',
+        muted: '#94a3b8',
+        skeletonLine: 'rgba(255,255,255,0.06)',
+        skeletonLine2: 'rgba(255,255,255,0.04)',
+        tagline: '#334155',
+      }
+    : {
+        bg: '#f9fafb',
+        bgGradient: 'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.12) 0%, transparent 70%)',
+        title: '#0f172a',
+        cardBg: '#ffffff',
+        cardBorder: '#e2e8f0',
+        muted: '#64748b',
+        skeletonLine: '#e2e8f0',
+        skeletonLine2: '#f1f5f9',
+        tagline: '#94a3b8',
+      }
+
   return (
     <div
       dir={isRTL ? 'rtl' : 'ltr'}
       className="min-h-dvh flex flex-col items-center justify-center px-4 py-6"
       style={{
         fontFamily:      "'Cairo', system-ui, sans-serif",
-        background:      '#0f172a',
-        backgroundImage: 'radial-gradient(ellipse 80% 60% at 50% -10%, rgba(245,158,11,0.08) 0%, transparent 70%)',
+        background:      shell.bg,
+        backgroundImage: shell.bgGradient,
       }}
     >
       {/* Logo */}
@@ -499,7 +525,7 @@ export default function SallaEmbedded() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <h1 className="text-2xl font-black text-slate-100 tracking-tight">{t.app.brand}</h1>
+          <h1 className="text-2xl font-black tracking-tight" style={{ color: shell.title }}>{t.app.brand}</h1>
           <span
             className="text-xs font-black px-2 py-0.5 rounded-md"
             style={{
@@ -519,17 +545,18 @@ export default function SallaEmbedded() {
       <div
         className="w-full max-w-sm rounded-2xl p-7"
         style={{
-          background:     'rgba(255,255,255,0.03)',
-          border:         '1px solid rgba(245,158,11,0.2)',
-          backdropFilter: 'blur(16px)',
+          background:     shell.cardBg,
+          border:         `1px solid ${shell.cardBorder}`,
+          backdropFilter: isDark ? 'blur(16px)' : undefined,
+          boxShadow:      isDark ? undefined : '0 1px 3px rgba(15,23,42,0.06)',
         }}
       >
         {/* ── Error ─────────────────────────────────────────────────────── */}
         {phase === 'error' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">⚠️</div>
-            <p className="text-white font-semibold text-base">{t.errors.title}</p>
-            <p className="text-slate-400 text-sm leading-relaxed whitespace-pre-line">{errorDetail}</p>
+            <p className="font-semibold text-base" style={{ color: shell.title }}>{t.errors.title}</p>
+            <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: shell.muted }}>{errorDetail}</p>
             <div className="flex flex-col gap-3 pt-2">
               <button
                 onClick={handleRetry}
@@ -552,10 +579,10 @@ export default function SallaEmbedded() {
         {phase === 'ready' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">🎉</div>
-            <p className="text-white font-bold text-lg leading-snug">
+            <p className="font-bold text-lg leading-snug" style={{ color: shell.title }}>
               {t.welcome.title}
             </p>
-            <p className="text-slate-300 text-sm">
+            <p className="text-sm" style={{ color: shell.muted }}>
               {t.welcome.openingNahla}
             </p>
             <button
@@ -571,8 +598,8 @@ export default function SallaEmbedded() {
         {phase === 'success' && (
           <div className="text-center space-y-4">
             <div className="text-5xl">✅</div>
-            <p className="text-white font-semibold text-base">{statusText}</p>
-            <p className="text-slate-400 text-sm">{t.loader.redirecting}</p>
+            <p className="font-semibold text-base" style={{ color: shell.title }}>{statusText}</p>
+            <p className="text-sm" style={{ color: shell.muted }}>{t.loader.redirecting}</p>
           </div>
         )}
 
@@ -586,20 +613,20 @@ export default function SallaEmbedded() {
                 style={{ background: 'rgba(245,158,11,0.12)' }}
               />
               <div className="flex-1 space-y-2">
-                <div className="h-3 rounded animate-pulse" style={{ background: 'rgba(255,255,255,0.06)', width: '55%' }} />
-                <div className="h-2.5 rounded animate-pulse" style={{ background: 'rgba(255,255,255,0.04)', width: '35%' }} />
+                <div className="h-3 rounded animate-pulse" style={{ background: shell.skeletonLine, width: '55%' }} />
+                <div className="h-2.5 rounded animate-pulse" style={{ background: shell.skeletonLine2, width: '35%' }} />
               </div>
             </div>
             <div className="h-10 rounded-xl animate-pulse" style={{ background: 'rgba(245,158,11,0.07)' }} />
-            <div className="h-10 rounded-xl animate-pulse" style={{ background: 'rgba(255,255,255,0.04)' }} />
+            <div className="h-10 rounded-xl animate-pulse" style={{ background: shell.skeletonLine2 }} />
 
             {/* Live status text */}
-            <p className="text-center text-slate-500 text-xs pt-1">{statusText}</p>
+            <p className="text-center text-xs pt-1" style={{ color: shell.muted }}>{statusText}</p>
           </div>
         )}
       </div>
 
-      <p className="mt-5 text-xs" style={{ color: '#334155' }}>
+      <p className="mt-5 text-xs" style={{ color: shell.tagline }}>
         {t.app.tagline}
       </p>
     </div>
