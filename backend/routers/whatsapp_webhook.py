@@ -7362,6 +7362,41 @@ async def _handle_merchant_message(
                     tenant_id, _stg_exc,
                 )
 
+        if reply:
+            try:
+                from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
+                    apply_staff_escalation_truth_guard,
+                )
+                _setg_meta = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                _setg_path = str(
+                    _setg_meta.get("deterministic_path") or _br_action or ""
+                )
+                _setg_result = apply_staff_escalation_truth_guard(
+                    reply=reply,
+                    inbound_metadata=_setg_meta,
+                    conversation_flags={
+                        "needs_human": bool(getattr(convo, "needs_human", False)),
+                        "handoff_active": bool(getattr(convo, "handoff_active", False)),
+                        "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
+                        "status": str(getattr(convo, "status", "") or ""),
+                    },
+                    chosen_path=_setg_path,
+                    brain_handoff=bool(_brain_handoff),
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                )
+                if _setg_result.replaced:
+                    reply = _setg_result.reply
+            except Exception as _setg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[STAFF_ESCALATION_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _setg_exc,
+                )
+
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
         #   continue → send `reply` as-is
@@ -7485,40 +7520,6 @@ async def _handle_merchant_message(
                     )
             except Exception as _loop_exc:
                 logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
-
-        # ── Handoff-promise scrub (May 2026 P1, Tenant 33) ─────────────────
-        # Wire-layer safety net: if the reply ABOUT to be sent promises a
-        # human handoff but no handoff state is active on the conversation,
-        # rewrite the reply to a neutral acknowledgement instead of
-        # making a false promise. Two upstream fixes (loop-guard branch
-        # now flips every flag + persona prompt no longer encourages this
-        # language) already cover the known sources — this is the wire
-        # net that catches any future leak.
-        if reply and not _brain_handoff:
-            try:
-                from core.outbound_sanitizer import (  # noqa: PLC0415
-                    maybe_scrub_handoff_promise as _scrub_handoff,
-                )
-                _handoff_state_active = bool(
-                    getattr(convo, "is_human_handoff", False)
-                    or getattr(convo, "needs_human", False)
-                    or getattr(convo, "handoff_active", False)
-                    or (str(getattr(convo, "status", "") or "").lower() == "human")
-                )
-                _new_reply, _scrubbed = _scrub_handoff(
-                    reply,
-                    handoff_state_active=_handoff_state_active,
-                    tenant_id=tenant_id,
-                    recipient=to,
-                )
-                if _scrubbed:
-                    reply = _new_reply
-            except Exception as _scrub_exc:  # noqa: BLE001
-                # The scrub MUST NOT take the send path down.
-                logger.debug(
-                    "[handoff_promise_scrub] evaluate failed (open): %s",
-                    _scrub_exc,
-                )
 
         # Save outbound reply after generation.
         StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)

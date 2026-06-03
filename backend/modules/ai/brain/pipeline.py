@@ -1878,6 +1878,31 @@ class MerchantBrain:
                 tenant_id, _stg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
+                apply_staff_escalation_truth_guard,
+            )
+            _escalation_path = _chosen_path or str(getattr(decision, "action", "") or "")
+            _setg = apply_staff_escalation_truth_guard(
+                reply=reply or "",
+                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                chosen_path=_escalation_path,
+                brain_handoff=(str(getattr(decision, "action", "") or "") == ACTION_HANDOFF),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _setg.replaced:
+                reply = _setg.reply
+            if _setg.staff_escalation_claim_blocked:
+                result.data["staff_escalation_claim_blocked"] = True
+                if _setg.reason:
+                    result.data["staff_escalation_guard_reason"] = _setg.reason
+        except Exception as _setg_exc:  # noqa: BLE001
+            logger.warning(
+                "[STAFF_ESCALATION_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _setg_exc,
+            )
+
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
         #
         # Single per-turn record — every field the merchant's audit
