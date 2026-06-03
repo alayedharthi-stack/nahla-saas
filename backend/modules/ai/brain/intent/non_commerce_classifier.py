@@ -109,7 +109,11 @@ _DUA_PATTERNS = [
     re.compile(r"ادعيه|أدعية|ادعية|دعاء"),
     re.compile(r"رب\s*اغفر"),
     re.compile(r"رب\s*ارحم"),
-    re.compile(r"آ?مين"),
+    # Word-boundary only — bare ``امين`` is a substring of playful
+    # identity probes like ``تنامين؟`` (Phase 1 persona_identity fix).
+    # ``[اآ]?`` covers post-normalization alef variants.
+    re.compile(r"(?:^|[\s،.!?؟])[اآ]?مين(?:[\s،.!?؟]|$)"),
+    re.compile(r"^[اآ]?مين\s*[\?؟]?\s*$"),
     re.compile(r"تقبل\s*الله"),
 ]
 
@@ -208,8 +212,24 @@ def _strip_media_framing(message: str) -> str:
     return "\n".join(lines)
 
 
+# Short tokens that false-positive as substrings inside unrelated words.
+_BOUNDARY_KEYWORDS = frozenset({"امين", "آمين"})
+
+
+def _keyword_hit(norm: str, kw: str) -> bool:
+    if kw in _BOUNDARY_KEYWORDS:
+        return bool(
+            re.search(
+                rf"(?:^|[\s،.!?؟])[اآ]?{re.escape(kw.lstrip('آ'))}(?:[\s،.!?؟]|$)",
+                norm,
+            )
+            or re.match(rf"^[اآ]?{re.escape(kw.lstrip('آ'))}\s*[\?؟]?\s*$", norm)
+        )
+    return kw in norm
+
+
 def _count_keyword_hits(norm: str, keywords: Sequence[str]) -> int:
-    return sum(1 for kw in keywords if kw in norm)
+    return sum(1 for kw in keywords if _keyword_hit(norm, kw))
 
 
 def _score_categories(norm: str) -> List[tuple[str, int]]:

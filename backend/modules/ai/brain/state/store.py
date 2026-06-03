@@ -447,6 +447,7 @@ class DefaultStateStore:
         from ..decision.actions import (
             ACTION_GREET,
             ACTION_FAQ_REPLY,
+            ACTION_LLM_REPLY,
             ACTION_SEARCH_PRODUCTS,
             ACTION_PROPOSE_DRAFT_ORDER,
             ACTION_SEND_PAYMENT_LINK,
@@ -541,6 +542,11 @@ class DefaultStateStore:
             # through explicitly (e.g. an LLM-routed identity reply).
             topic = str((decision.args or {}).get("topic") or "")
             if topic == "identity" or intent.name == "who_are_you":
+                s.assistant_identity_introduced = True
+
+        elif action == ACTION_LLM_REPLY:
+            topic = str((decision.args or {}).get("topic") or "")
+            if topic == "persona_identity" or intent.name == "who_are_you":
                 s.assistant_identity_introduced = True
 
         elif action == ACTION_SEARCH_PRODUCTS:

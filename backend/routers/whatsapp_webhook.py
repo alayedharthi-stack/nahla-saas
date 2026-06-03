@@ -6033,11 +6033,13 @@ async def _handle_merchant_message(
             return
 
         # ── Identity / greeting fast path ────────────────────────────────────
-        # When the customer asked "who are you?" / "السلام عليكم", answer
-        # deterministically with the merchant's configured assistant name
-        # so we never fall through to AI fallbacks that might leak
-        # automation boilerplate.
-        if mode_decision.mode == MODE_IDENTITY_REPLY:
+        # Pure short greetings still get the deterministic card. Identity
+        # probes ("من أنت؟" / "هل أنت AI؟") fall through to the Brain so
+        # thin persona compose (persona_identity) can answer naturally.
+        if (
+            mode_decision.mode == MODE_IDENTITY_REPLY
+            and mode_decision.identity_topic == "greeting"
+        ):
             reply = render_identity_reply(
                 db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
             )
@@ -6054,6 +6056,16 @@ async def _handle_merchant_message(
                 tenant_id, mode_decision.identity_topic,
             )
             return
+
+        if (
+            mode_decision.mode == MODE_IDENTITY_REPLY
+            and mode_decision.identity_topic == "identity"
+        ):
+            logger.info(
+                "[PERSONA_IDENTITY] route=persona_identity intent=who_are_you "
+                "webhook=bypass_disabled tenant=%s",
+                tenant_id,
+            )
 
         # ── Human handoff / support escalation ───────────────────────────────
         # If the dashboard conversation is flagged for human handoff, do NOT

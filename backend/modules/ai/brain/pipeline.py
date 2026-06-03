@@ -961,8 +961,29 @@ class MerchantBrain:
             (ctx.state.current_product_focus or {}).get("title"),
         )
 
+        if (
+            decision.action == ACTION_LLM_REPLY
+            and (decision.args or {}).get("topic") == "persona_identity"
+        ):
+            logger.info(
+                "[PERSONA_IDENTITY] route=persona_identity intent=%s tenant=%s "
+                "pre_commerce_shortcut=%s non_commerce_block=%s",
+                ctx.intent.name if ctx.intent else "(none)",
+                ctx.tenant_id,
+                bool(_pre_commerce_shortcut),
+                bool((decision.args or {}).get("block_commerce_escalation")),
+            )
+
         # ── 5. Execute ────────────────────────────────────────────────────
         result: ActionResult = await self._executor.execute(decision, ctx)
+
+        if (
+            decision.action == ACTION_LLM_REPLY
+            and (decision.args or {}).get("topic") == "persona_identity"
+        ):
+            result.data["persona_identity_route"] = True
+            result.data["pre_commerce_shortcut"] = bool(_pre_commerce_shortcut)
+            result.data["non_commerce_block_mode"] = True
 
         # ── 6. Project next state + suggestion snapshot ───────────────────
         new_state = self._state_store.transition(state, intent, decision)
@@ -2337,6 +2358,27 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
             "«دوم إحساسك» / «دمت بود» / «يسعد مساك على شعورك» / "
             "«الله يبحث عنك بحسن ظنك» / «والله الثناء منك وسام» unless "
             "the customer themselves wrote in that highly literary style."
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "persona_identity"
+    ):
+        return (
+            "persona_identity — Generate a short natural Saudi Arabic WhatsApp "
+            "reply. The customer is asking who you are, whether you are Nahla, "
+            "a bot, AI, or human, or is playfully probing (e.g. «تنامين؟»). "
+            "Answer in Nahla's warm playful persona: 1–3 short lines, "
+            "conversational Saudi tone, emotionally natural — not support "
+            "boilerplate. "
+            "Do NOT use onboarding bullet lists or enumerate product/price/"
+            "shipping/order capabilities. "
+            "Do NOT pitch products, prices, checkout, or catalog items. "
+            "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole "
+            "reply or «نظام ذكاء اصطناعي» boilerplate. "
+            "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
+            "If they ask whether you sleep, answer playfully that you are a "
+            "digital Nahla assistant always available to help."
         )
 
     if (

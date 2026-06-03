@@ -578,7 +578,7 @@ class DefaultDecisionEngine:
         # (or intent slots) marks the turn, block ALL commerce branches
         # below — including text-pattern top_products / replay fallbacks
         # and LLM catalog drift — and respond socially instead.
-        if _is_commerce_blocked(ctx):
+        if _is_commerce_blocked(ctx) and intent.name != INTENT_WHO_ARE_YOU:
             nc_category = str(
                 (intent.slots or {}).get("social_category") or "religious_media"
             )
@@ -1731,10 +1731,20 @@ class DefaultDecisionEngine:
 
         # ── 4. Simple FAQ / identity / shipping / contact ──────────────────
         if intent.name == INTENT_WHO_ARE_YOU:
+            logger.info(
+                "[PERSONA_IDENTITY] route=persona_identity intent=%s tenant=%s preview=%r",
+                intent.name,
+                getattr(ctx, "tenant_id", None),
+                (ctx.message or "")[:60],
+            )
             return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "identity"},
-                reason="customer asked who the assistant is",
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "persona_identity",
+                    "block_commerce_escalation": True,
+                },
+                reason="identity probe — thin persona compose",
+                confidence=intent.confidence,
             )
 
         if intent.name == INTENT_ASK_SHIPPING:
