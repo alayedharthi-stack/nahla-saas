@@ -1,7 +1,7 @@
 /**
  * useEmbeddedTheme — Salla-aware theme for embedded surfaces.
  *
- * Inside Salla iframe: URL → postMessage → nahla-embedded-theme → **light** default.
+ * Inside Salla iframe: URL → trusted Salla postMessage → **light** default (stale storage ignored).
  * Stale `nahla-theme=dark` / OS dark mode do not apply in iframe.
  *
  * Outside iframe: URL → embed storage → user → system → light.
@@ -17,6 +17,7 @@ import {
   readStoredUserResolvedTheme,
   readSystemTheme,
   extractThemeFromPostMessage,
+  isTrustedSallaThemeMessage,
   persistEmbeddedTheme,
   applyEmbeddedThemeToDocument,
   EMBED_THEME_STORAGE_KEY,
@@ -36,12 +37,14 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
   const resolve = useCallback((): { theme: EmbeddedTheme; source: EmbeddedThemeSource } => {
     const { theme, source } = resolveEmbeddedTheme({
       urlTheme:          readUrlEmbeddedTheme(),
-      embedStored:       readStoredEmbedTheme(),
+      embedStored:       embedded ? null : readStoredEmbedTheme(),
       userResolved:      readStoredUserResolvedTheme(),
       systemTheme:       readSystemTheme(),
       inSallaEmbedded:   embedded,
     })
-    if (embedded || source === 'url' || source === 'stored' || source === 'salla') {
+    if (embedded) {
+      persistEmbeddedTheme(theme)
+    } else if (source === 'url' || source === 'stored' || source === 'salla') {
       persistEmbeddedTheme(theme)
     }
     return { theme, source }
@@ -54,13 +57,8 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const d = e?.data
-      if (!d || typeof d !== 'object') return
-      const rec  = d as Record<string, unknown>
-      const type = String(rec.event || rec.type || '').toLowerCase()
+      if (!isTrustedSallaThemeMessage(d)) return
       const next = extractThemeFromPostMessage(d)
-      if (!next && !type.includes('theme') && !type.includes('color') && !type.includes('appearance')) {
-        return
-      }
       if (!next) return
       persistEmbeddedTheme(next)
       setState({ theme: next, source: 'salla' })

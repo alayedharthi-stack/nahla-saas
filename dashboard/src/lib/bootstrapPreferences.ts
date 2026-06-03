@@ -139,10 +139,10 @@ export function bootstrapPreferences(): {
     try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, urlTheme) } catch { /* ignore */ }
   } else if (inEmbed) {
     const { theme, source } = resolveEmbeddedTheme({
-      urlTheme:         null,
-      embedStored:      readStoredEmbedTheme(),
-      userResolved:     readStoredUserResolvedTheme(),
-      systemTheme:      readSystemTheme(),
+      urlTheme:         urlTheme,
+      embedStored:      null,
+      userResolved:     null,
+      systemTheme:      null,
       inSallaEmbedded:  true,
     })
     resolvedTheme = theme

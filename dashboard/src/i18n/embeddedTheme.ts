@@ -88,6 +88,20 @@ export function extractThemeFromPostMessage(data: unknown): EmbeddedTheme | null
   return normalizeEmbeddedTheme(raw)
 }
 
+/** Ignore noisy host frames — only Salla/embedded theme events are trusted. */
+export function isTrustedSallaThemeMessage(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false
+  const rec  = data as Record<string, unknown>
+  const type = String(rec.event || rec.type || '').toLowerCase()
+  if (type.includes('theme') || type.includes('color') || type.includes('appearance')) {
+    return extractThemeFromPostMessage(data) !== null
+  }
+  if (type.includes('embedded') || type.includes('salla')) {
+    return extractThemeFromPostMessage(data) !== null
+  }
+  return false
+}
+
 export interface ResolveEmbeddedThemeInput {
   urlTheme?:           EmbeddedTheme | null
   embedStored?:        EmbeddedTheme | null
@@ -99,8 +113,8 @@ export interface ResolveEmbeddedThemeInput {
 
 /**
  * Inside Salla iframe: default **light** (matches Salla dashboard).
- * Stale `nahla-theme=dark` or OS dark mode must not override unless URL /
- * postMessage / embed storage explicitly say dark.
+ * Stale `nahla-embedded-theme=dark` is ignored — only explicit `?theme=`
+ * or a trusted Salla postMessage may select dark.
  */
 export function resolveEmbeddedTheme(input: ResolveEmbeddedThemeInput = {}): {
   theme: EmbeddedTheme
@@ -114,7 +128,8 @@ export function resolveEmbeddedTheme(input: ResolveEmbeddedThemeInput = {}): {
   if (input.sallaMessageTheme) {
     return { theme: input.sallaMessageTheme, source: 'salla' }
   }
-  if (input.embedStored) {
+  // Legacy localStorage dark must not override Salla's light chrome.
+  if (!embedded && input.embedStored) {
     return { theme: input.embedStored, source: 'stored' }
   }
 
@@ -163,12 +178,13 @@ export function buildEmbeddedEntryQuery(searchParams?: URLSearchParams): string 
     documentRtl:       isDocumentRtl(),
     inSallaEmbedded:   isSallaEmbeddedIframe(),
   })
+  const inEmbed = isSallaEmbeddedIframe()
   const { theme } = resolveEmbeddedTheme({
     urlTheme:          readUrlEmbeddedTheme(search),
-    embedStored:       readStoredEmbedTheme(),
-    userResolved:      readStoredUserResolvedTheme(),
-    systemTheme:       readSystemTheme(),
-    inSallaEmbedded:   isSallaEmbeddedIframe(),
+    embedStored:       inEmbed ? null : readStoredEmbedTheme(),
+    userResolved:      inEmbed ? null : readStoredUserResolvedTheme(),
+    systemTheme:       inEmbed ? null : readSystemTheme(),
+    inSallaEmbedded:   inEmbed,
   })
   const out = new URLSearchParams()
   out.set('lang', lang)

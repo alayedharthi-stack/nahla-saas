@@ -24,6 +24,14 @@ import { API_BASE } from '../api/client'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 import { buildEmbeddedEntryQuery } from '../i18n/embeddedTheme'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
+import {
+  describeLoginFailure,
+  EMBEDDED_LOGIN_MAX_ATTEMPTS,
+  EMBEDDED_LOGIN_TIMEOUT_MS,
+  EMBEDDED_SESSION_TIMEOUT_MS,
+  EMBEDDED_WATCHDOG_TIMEOUT_MS,
+  shouldRetryEmbeddedLogin,
+} from '../lib/embeddedLogin'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -35,10 +43,7 @@ import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const SDK_URL          = 'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
-const SESSION_TIMEOUT  = 5_000   // ms — check existing session
-const LOGIN_TIMEOUT    = 10_000  // ms — token-login (Salla introspect can be slow)
-const WATCHDOG_TIMEOUT = 13_000  // ms — global stuck-skeleton guard
+const SDK_URL = 'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -181,6 +186,7 @@ export default function SallaEmbedded() {
   const [errorDetail, setErrorDetail]   = useState('')
   const bootedRef                       = useRef(false)
   const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loginFlightRef                  = useRef<AbortController | null>(null)
 
   // Read URL params once
   const paramsRef  = useRef(new URLSearchParams(window.location.search))
@@ -202,6 +208,14 @@ export default function SallaEmbedded() {
       clearTimeout(watchdogRef.current)
       watchdogRef.current = null
     }
+  }, [])
+
+  const cancelActiveLogin = useCallback((reason: string) => {
+    const ctrl = loginFlightRef.current
+    if (!ctrl) return
+    console.info('[SallaEmbedded] cancel in-flight login | reason=%s', reason)
+    ctrl.abort()
+    loginFlightRef.current = null
   }, [])
 
   const showError = useCallback((msg: string) => {
@@ -271,10 +285,18 @@ export default function SallaEmbedded() {
     setPhase('checking')
     setStatusText(t.loader.checking)
 
-    try {
-      const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), SESSION_TIMEOUT)
+    const startedAt = performance.now()
+    const ctrl      = new AbortController()
+    const tid       = setTimeout(() => {
+      console.warn(
+        '[SallaEmbedded] session-check abort | reason=client_timeout | limit_ms=%s | elapsed_ms=%s',
+        EMBEDDED_SESSION_TIMEOUT_MS,
+        Math.round(performance.now() - startedAt),
+      )
+      ctrl.abort()
+    }, EMBEDDED_SESSION_TIMEOUT_MS)
 
+    try {
       const sessionUrl = storeId
         ? `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(storeId)}`
         : `${API_BASE}/api/salla/session`
@@ -284,7 +306,11 @@ export default function SallaEmbedded() {
       })
       clearTimeout(tid)
 
-      console.info('[SallaEmbedded] session check status:', res.status)
+      console.info(
+        '[SallaEmbedded] session-check response | status=%s | elapsed_ms=%s',
+        res.status,
+        Math.round(performance.now() - startedAt),
+      )
 
       if (res.ok) {
         const data: SessionResponse = await res.json()
@@ -303,102 +329,140 @@ export default function SallaEmbedded() {
   // ── Step 2: token exchange with Salla ─────────────────────────────────────
 
   const doLogin = useCallback(async () => {
-    console.info('[SallaEmbedded] token-login start | token present:', !!sallaToken)
-
     if (!sallaToken) {
       showError(t.errors.noAuthToken)
       return
     }
 
+    cancelActiveLogin('new_login_attempt')
     setPhase('login')
     setStatusText(t.loader.verifying)
 
-    try {
-      const ctrl = new AbortController()
-      const tid  = setTimeout(() => ctrl.abort(), LOGIN_TIMEOUT)
+    for (let attempt = 1; attempt <= EMBEDDED_LOGIN_MAX_ATTEMPTS; attempt++) {
+      const startedAt = performance.now()
+      const ctrl      = new AbortController()
+      loginFlightRef.current = ctrl
+      const tid = setTimeout(() => {
+        console.warn(
+          '[SallaEmbedded] token-login abort | reason=client_timeout | attempt=%s/%s | limit_ms=%s | elapsed_ms=%s',
+          attempt,
+          EMBEDDED_LOGIN_MAX_ATTEMPTS,
+          EMBEDDED_LOGIN_TIMEOUT_MS,
+          Math.round(performance.now() - startedAt),
+        )
+        ctrl.abort()
+      }, EMBEDDED_LOGIN_TIMEOUT_MS)
 
-      console.info('[SallaEmbedded] → POST /salla/token-login')
-      const res = await fetch(`${API_BASE}/salla/token-login`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ token: sallaToken, app_id: appId || undefined }),
-        signal:  ctrl.signal,
-      })
-      clearTimeout(tid)
+      console.info(
+        '[SallaEmbedded] token-login start | ts=%s | attempt=%s/%s | token_present=%s',
+        new Date().toISOString(),
+        attempt,
+        EMBEDDED_LOGIN_MAX_ATTEMPTS,
+        true,
+      )
 
-      console.info('[SallaEmbedded] token-login status:', res.status)
-
-      let data: LoginResponse
       try {
-        data = await res.json()
-      } catch {
-        showError(t.errors.invalidResponse)
-        return
-      }
+        console.info('[SallaEmbedded] → POST /salla/token-login')
+        const res = await fetch(`${API_BASE}/salla/token-login`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ token: sallaToken, app_id: appId || undefined }),
+          signal:  ctrl.signal,
+        })
+        clearTimeout(tid)
+        if (loginFlightRef.current === ctrl) loginFlightRef.current = null
 
-      if (!res.ok || !data.access_token) {
-        const detail = data?.detail || `HTTP ${res.status}`
-        console.error('[SallaEmbedded] token-login failed:', detail, data)
-        showError(data?.detail || t.errors.verifyFailed)
-        return
-      }
+        const elapsed = Math.round(performance.now() - startedAt)
+        console.info(
+          '[SallaEmbedded] token-login response | status=%s | elapsed_ms=%s | attempt=%s',
+          res.status,
+          elapsed,
+          attempt,
+        )
 
-      console.info('[SallaEmbedded] ✓ token-login OK | tenant:', data.tenant_id, 'store_id:', data.store_id, 'is_new:', data.is_new, 'needs_oauth:', data.needs_oauth)
-      console.info('[SallaEmbedded] needs_oauth=' + String(!!data.needs_oauth))
-      persistSession(data)
-
-      // ── Auto-trigger OAuth ONLY for legacy Custom OAuth integrations ──
-      //
-      // For Easy Mode merchants the backend now always returns
-      // needs_oauth=false because Easy Mode apps have no registered
-      // redirect_uri and accounts.salla.sa would 404 with
-      // 'redirect_uri does not match'.  As a defence-in-depth against
-      // an older backend deployment that still returns true, we also
-      // refuse to redirect to any URL whose path is /oauth2/auth — the
-      // merchant should NEVER see Salla's OAuth screen from inside the
-      // embedded iframe.  Instead we just enter the dashboard and let
-      // the app.store.authorize webhook (which already arrived for
-      // Easy Mode) hydrate tokens server-side.
-      if (data.needs_oauth && data.oauth_url) {
-        const oauthIsExternalAuthorize =
-          /accounts\.salla\.sa\/oauth2\/auth/i.test(data.oauth_url)
-        if (oauthIsExternalAuthorize) {
-          console.warn(
-            '[SallaEmbedded] backend asked for external OAuth authorize ' +
-            '(needs_oauth=true) — refusing because Easy Mode apps have no ' +
-            'redirect_uri registered. Entering dashboard directly.',
-          )
-          // Fall through to markReady — the embedded session is enough
-          // for the dashboard, and the orders poller / webhook handler
-          // will populate refresh_token when Salla delivers it.
-        } else {
-          console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
-          setStatusText(t.loader.completingLink)
-          if (window.top) {
-            window.top.location.href = data.oauth_url
-          } else {
-            window.location.href = data.oauth_url
-          }
+        let data: LoginResponse
+        try {
+          data = await res.json()
+        } catch {
+          showError(t.errors.invalidResponse)
           return
         }
-      }
 
-      markReady()
-    } catch (e) {
-      const isAbort = e instanceof DOMException && e.name === 'AbortError'
-      console.error('[SallaEmbedded] token-login exception:', e)
-      showError(isAbort ? t.errors.timeout : t.errors.network)
+        if (!res.ok || !data.access_token) {
+          const detail = data?.detail || `HTTP ${res.status}`
+          console.error('[SallaEmbedded] token-login failed:', detail, data)
+          showError(data?.detail || t.errors.verifyFailed)
+          return
+        }
+
+        console.info(
+          '[SallaEmbedded] ✓ token-login OK | tenant=%s | store_id=%s | elapsed_ms=%s',
+          data.tenant_id,
+          data.store_id,
+          elapsed,
+        )
+        persistSession(data)
+
+        if (data.needs_oauth && data.oauth_url) {
+          const oauthIsExternalAuthorize =
+            /accounts\.salla\.sa\/oauth2\/auth/i.test(data.oauth_url)
+          if (oauthIsExternalAuthorize) {
+            console.warn(
+              '[SallaEmbedded] needs_oauth external authorize refused — entering dashboard',
+            )
+          } else {
+            console.info('[SallaEmbedded] needs_oauth=true → redirecting to Salla OAuth')
+            clearWatchdog()
+            setStatusText(t.loader.completingLink)
+            if (window.top) {
+              window.top.location.href = data.oauth_url
+            } else {
+              window.location.href = data.oauth_url
+            }
+            return
+          }
+        }
+
+        markReady()
+        return
+      } catch (e) {
+        clearTimeout(tid)
+        if (loginFlightRef.current === ctrl) loginFlightRef.current = null
+        const elapsed = Math.round(performance.now() - startedAt)
+        const reason  = describeLoginFailure(e)
+        console.error(
+          '[SallaEmbedded] token-login exception | reason=%s | elapsed_ms=%s | attempt=%s | error=%o',
+          reason,
+          elapsed,
+          attempt,
+          e,
+        )
+
+        if (shouldRetryEmbeddedLogin(e, attempt)) {
+          console.info('[SallaEmbedded] token-login retrying after client timeout (no error UI yet)')
+          setStatusText(t.loader.retrying)
+          continue
+        }
+
+        const isAbort = e instanceof DOMException && e.name === 'AbortError'
+        showError(isAbort ? t.errors.timeout : t.errors.network)
+        return
+      }
     }
-  }, [sallaToken, appId, storeId, showError, markReady, t])
+  }, [sallaToken, appId, cancelActiveLogin, showError, markReady, clearWatchdog, t])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
 
   const bootstrap = useCallback(async () => {
     // Global watchdog: if still loading after WATCHDOG_TIMEOUT → show error
     watchdogRef.current = setTimeout(() => {
-      console.error('[SallaEmbedded] ⏱ watchdog triggered — still loading after', WATCHDOG_TIMEOUT, 'ms')
+      console.error(
+        '[SallaEmbedded] ⏱ watchdog triggered — still loading after %s ms',
+        EMBEDDED_WATCHDOG_TIMEOUT_MS,
+      )
+      cancelActiveLogin('watchdog')
       showError(t.errors.watchdog)
-    }, WATCHDOG_TIMEOUT)
+    }, EMBEDDED_WATCHDOG_TIMEOUT_MS)
 
     // Load SDK in background — do NOT await before checking session/token
     loadSdk().then(initSdkHandshake)
@@ -420,7 +484,7 @@ export default function SallaEmbedded() {
     // Last resort: try doLogin() in case Salla token is missing (might still
     // work if Salla SDK fills it in via postMessage), otherwise show error.
     await doLogin()
-  }, [sallaToken, checkSession, doLogin, showError, t])
+  }, [sallaToken, checkSession, doLogin, showError, cancelActiveLogin, t])
 
   // ── Mount effect ──────────────────────────────────────────────────────────
   // IMPORTANT: signalReady is called synchronously on mount, before any async.
@@ -447,6 +511,7 @@ export default function SallaEmbedded() {
       clearTimeout(t1)
       clearTimeout(t2)
       clearWatchdog()
+      cancelActiveLogin('unmount')
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -455,15 +520,14 @@ export default function SallaEmbedded() {
 
   const handleRetry = useCallback(() => {
     console.info('[SallaEmbedded] retry triggered')
-    bootedRef.current = false
+    clearWatchdog()
+    cancelActiveLogin('user_retry')
     setPhase('init')
     setStatusText(t.loader.retrying)
     setErrorDetail('')
-    bootedRef.current = true
-    // Re-signal and retry login
     signalReady()
-    doLogin()
-  }, [doLogin, t])
+    void doLogin()
+  }, [doLogin, t, clearWatchdog, cancelActiveLogin])
 
   // ── Render ────────────────────────────────────────────────────────────────
 

@@ -1,10 +1,14 @@
 /**
- * Smoke test for embedded locale/theme resolution.
+ * Smoke test for embedded locale/theme resolution + login retry helper.
  *
  * Run:  npm run check:resolvers   (from dashboard/)
  */
 import { resolveEmbeddedLang } from '../src/i18n/embeddedLocale.ts'
 import { resolveEmbeddedTheme } from '../src/i18n/embeddedTheme.ts'
+import {
+  shouldRetryEmbeddedLogin,
+  EMBEDDED_LOGIN_MAX_ATTEMPTS,
+} from '../src/lib/embeddedLogin.ts'
 
 type Lang  = 'ar' | 'en'
 type Theme = 'light' | 'dark'
@@ -35,8 +39,8 @@ const embedLangCases: Case<Lang>[] = [
 
 const embedThemeCases: Case<Theme>[] = [
   {
-    name: 'embedded: nahla-theme=dark → light default (Salla light UI)',
-    input: { inSallaEmbedded: true, userResolved: 'dark', systemTheme: 'dark' },
+    name: 'embedded: stale nahla-embedded-theme=dark → light default',
+    input: { inSallaEmbedded: true, embedStored: 'dark', userResolved: 'dark' },
     want: 'light',
   },
   {
@@ -46,12 +50,7 @@ const embedThemeCases: Case<Theme>[] = [
   },
   {
     name: 'embedded: URL ?theme=dark wins',
-    input: { inSallaEmbedded: true, urlTheme: 'dark', userResolved: 'light' },
-    want: 'dark',
-  },
-  {
-    name: 'embedded: sticky nahla-embedded-theme=dark preserved',
-    input: { inSallaEmbedded: true, embedStored: 'dark' },
+    input: { inSallaEmbedded: true, urlTheme: 'dark' },
     want: 'dark',
   },
   {
@@ -60,8 +59,8 @@ const embedThemeCases: Case<Theme>[] = [
     want: 'dark',
   },
   {
-    name: 'standalone: user dark pref still works',
-    input: { inSallaEmbedded: false, userResolved: 'dark' },
+    name: 'standalone: stored dark preserved outside iframe',
+    input: { inSallaEmbedded: false, embedStored: 'dark' },
     want: 'dark',
   },
 ]
@@ -82,8 +81,29 @@ for (const c of embedThemeCases) {
   else      console.log(`OK   [embed-theme] ${c.name} → ${got}`)
 }
 
+// Login retry helper
+const abortErr = new DOMException('Aborted', 'AbortError')
+if (!shouldRetryEmbeddedLogin(abortErr, 1)) {
+  failed++
+  console.error('FAIL [login] should retry on AbortError attempt 1')
+} else {
+  console.log('OK   [login] AbortError attempt 1 → retry')
+}
+if (shouldRetryEmbeddedLogin(abortErr, EMBEDDED_LOGIN_MAX_ATTEMPTS)) {
+  failed++
+  console.error('FAIL [login] should not retry after max attempts')
+} else {
+  console.log('OK   [login] max attempts → no retry')
+}
+if (shouldRetryEmbeddedLogin(new Error('network'), 1)) {
+  failed++
+  console.error('FAIL [login] should not retry on generic Error')
+} else {
+  console.log('OK   [login] generic Error → no retry')
+}
+
 if (failed > 0) {
   console.error(`\n${failed} case(s) failed`)
   process.exit(1)
 }
-console.log(`\nAll ${embedLangCases.length + embedThemeCases.length} resolver cases passed.`)
+console.log(`\nAll ${embedLangCases.length + embedThemeCases.length + 3} cases passed.`)
