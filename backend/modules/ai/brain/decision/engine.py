@@ -43,6 +43,7 @@ from .actions import (
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
+    ACTION_PAYMENT_TRANSFER_PROMISE,
 )
 from ..types import (
     INTENT_ASK_LOCATION,
@@ -757,6 +758,38 @@ class DefaultDecisionEngine:
                 args={"during_active_order": _has_active_order} if _has_active_order else {},
                 reason="customer requested human agent",
             )
+
+        # ── 1.5 Future transfer promise (awaiting receipt) ───────────────
+        # Customer promised to transfer soon while we already asked for
+        # receipt proof. Route deterministically — do NOT fall through to
+        # intent=general → ACTION_LLM_REPLY.
+        _op_pay = getattr(state, "order_prep", None)
+        if _op_pay is not None and getattr(_op_pay, "awaiting_payment_receipt", False):
+            try:
+                from core.payment_intent import (  # noqa: PLC0415
+                    detect_future_transfer_promise_text,
+                )
+                if detect_future_transfer_promise_text(ctx.message or ""):
+                    logger.info(
+                        "[PAYMENT_TRANSFER_PROMISE] deterministic ack | "
+                        "tenant=%s preview=%r",
+                        ctx.tenant_id,
+                        (ctx.message or "")[:60],
+                    )
+                    return Decision(
+                        action=ACTION_PAYMENT_TRANSFER_PROMISE,
+                        args={},
+                        reason=(
+                            "awaiting_payment_receipt + future transfer "
+                            "promise — deterministic ack"
+                        ),
+                        confidence=0.96,
+                    )
+            except Exception as _ftp_exc:  # noqa: BLE001
+                logger.debug(
+                    "[PAYMENT_TRANSFER_PROMISE] check skipped tenant=%s err=%s",
+                    ctx.tenant_id, _ftp_exc,
+                )
 
         # ── 1.8 Post-order tracking-link guard (May 2026) ───────────────
         # After an order is confirmed, bare "الرابط" / "ارسل الرابط"

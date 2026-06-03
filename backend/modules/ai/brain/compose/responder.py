@@ -62,6 +62,7 @@ from ..decision.actions import (
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
+    ACTION_PAYMENT_TRANSFER_PROMISE,
     ACTION_VARIANT_PRICING,
 )
 from ..execution.faq import (
@@ -544,6 +545,16 @@ class DefaultComposer:
                 result.data["chosen_path"] = "variant_pricing"
                 return reply
             return T.clarify(question="أي خيار/حجم تقصد؟")
+
+        # ── Future transfer promise (awaiting receipt) ─────────────────────
+        if action == ACTION_PAYMENT_TRANSFER_PROMISE:
+            reply = str(data.get("reply_text") or "").strip()
+            if reply:
+                result.data["chosen_path"] = "payment_transfer_promise"
+                return reply
+            from core.payment_intent import PAYMENT_TRANSFER_PROMISE_REPLY_AR  # noqa: PLC0415
+            result.data["chosen_path"] = "payment_transfer_promise"
+            return PAYMENT_TRANSFER_PROMISE_REPLY_AR
 
         # ── Narrow choices ─────────────────────────────────────────────────
         if action == ACTION_NARROW:

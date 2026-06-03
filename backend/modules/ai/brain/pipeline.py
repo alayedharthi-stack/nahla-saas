@@ -1992,6 +1992,8 @@ def _resolve_chosen_path(decision: Decision, result: ActionResult) -> str:
         return "llm"
     if decision.action in {"greet", "faq_reply", "clarify", "narrow_choices"}:
         return "rule"
+    if decision.action == "payment_transfer_promise":
+        return "payment_transfer_promise"
     return "action"
 
 

@@ -24,6 +24,7 @@ from ..decision.actions import (
     ACTION_NARROW,
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_OUT_OF_SCOPE,
+    ACTION_PAYMENT_TRANSFER_PROMISE,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_RECOMMEND_ADDON,
@@ -209,6 +210,20 @@ class _VariantPricingHandler:
         )
 
 
+class _PaymentTransferPromiseHandler:
+    """Deterministic ack when customer promises a future transfer."""
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from core.payment_intent import PAYMENT_TRANSFER_PROMISE_REPLY_AR  # noqa: PLC0415
+
+        return ActionResult(
+            success=True,
+            data={
+                "type": "payment_transfer_promise",
+                "reply_text": PAYMENT_TRANSFER_PROMISE_REPLY_AR,
+            },
+        )
+
+
 class _NarrowHandler:
     """Present a short list of product choices to help the customer decide."""
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
@@ -374,6 +389,7 @@ class DefaultActionExecutor:
             ACTION_PLATFORM_REPLY:      _PlatformReplyHandler(),
             ACTION_ORDER_CONTEXT_UPDATE: _OrderContextUpdateHandler(),
             ACTION_VARIANT_PRICING:       _VariantPricingHandler(),
+            ACTION_PAYMENT_TRANSFER_PROMISE: _PaymentTransferPromiseHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

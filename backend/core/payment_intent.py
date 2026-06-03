@@ -1038,10 +1038,73 @@ def _maybe_promote_prior_evidence(
     }
 
 
+# ── Future transfer promise (awaiting receipt) ───────────────────────
+# Customer has NOT paid yet — they are promising to transfer soon.
+# Distinct from ``detect_payment_confirmation_text`` (past/completed claims).
+
+PAYMENT_TRANSFER_PROMISE_REPLY_AR = (
+    "تمام، بعد التحويل أرسل الإيصال هنا عشان نراجعه ونكمل الطلب 🌷"
+)
+
+_FUTURE_TRANSFER_PHRASES: Tuple[str, ...] = (
+    "احول لك الان",
+    "انا احول لك",
+    "انا احول الان",
+    "بحول لك",
+    "بحول الان",
+    "احول وارسل",
+    "احول والارسل",
+    "راح احول",
+    "ساحول",
+    "انا بدفع الحين",
+    "بدفع الحين",
+    "بسرع وقت ارسل",
+    "في اسرع وقت ارسل",
+    "بعد شوي احول",
+    "بعد شوي بحول",
+    "بعد قليل احول",
+)
+
+_FUTURE_TRANSFER_PAST_MARKERS: Tuple[str, ...] = (
+    "تم التحويل",
+    "تم الدفع",
+    "حولت لك",
+    "حولت المبلغ",
+    "دفعت",
+    "سددت",
+)
+
+
+def detect_future_transfer_promise_text(text: Optional[str]) -> bool:
+    """Return True when inbound is a future transfer promise, not a completed claim."""
+    if not text or not isinstance(text, str):
+        return False
+    if detect_payment_confirmation_text(text):
+        return False
+    norm = _normalise_arabic(text.strip())
+    if not norm:
+        return False
+    if any(p in norm for p in _FUTURE_TRANSFER_PAST_MARKERS):
+        return False
+    for phrase in _FUTURE_TRANSFER_PHRASES:
+        if phrase in norm:
+            return True
+    if "بعد" in norm and ("شوي" in norm or "قليل" in norm):
+        if "احول" in norm or "بحول" in norm or "حول" in norm:
+            return True
+    if ("احول" in norm or "بحول" in norm) and (
+        "الان" in norm or "الحين" in norm or "ارسل" in norm or "لك" in norm
+    ):
+        return True
+    return False
+
+
 __all__ = [
     "detect_payment_confirmation_text",
+    "detect_future_transfer_promise_text",
     "looks_like_generic_fallback_reply",
     "compose_payment_claim_ack",
     "maybe_handle_payment_claim",
     "rewrite_generic_reply_for_payment_context",
+    "PAYMENT_TRANSFER_PROMISE_REPLY_AR",
 ]

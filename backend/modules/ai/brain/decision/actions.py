@@ -82,6 +82,9 @@ ACTION_ORDER_CONTEXT_UPDATE = "order_context_update"
 # Deterministic variant-bound price / budget-quantity reply (generic catalog).
 ACTION_VARIANT_PRICING = "variant_pricing"
 
+# Customer promised a future bank transfer while awaiting receipt proof.
+ACTION_PAYMENT_TRANSFER_PROMISE = "payment_transfer_promise"
+
 ALL_ACTIONS = [
     ACTION_GREET,
     ACTION_FAQ_REPLY,
@@ -102,4 +105,5 @@ ALL_ACTIONS = [
     ACTION_PLATFORM_REPLY,
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_VARIANT_PRICING,
+    ACTION_PAYMENT_TRANSFER_PROMISE,
 ]
