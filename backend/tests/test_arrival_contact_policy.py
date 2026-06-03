@@ -179,6 +179,7 @@ def test_log_arrival_contact_policy_emits_line(caplog: pytest.LogCaptureFixture)
         r.message for r in caplog.records if "[ARRIVAL_CONTACT_POLICY]" in r.message
     )
     assert "tenant=99" in line
+    assert "source=heuristic" in line
     assert "allow=true" in line
     assert "text:escalation_rules" in line
     assert "section_id=149" in line

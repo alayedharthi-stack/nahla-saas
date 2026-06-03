@@ -81,6 +81,11 @@ class ArrivalContactPolicyVerdict:
     reason: str = ""
     source_kind: str = ""
     section_id: Optional[int] = None
+    policy_source: str = "heuristic"
+    contact_ref: str = ""
+    contact_lookup_name: str = ""
+    contact_section_id: Optional[int] = None
+    source_sections: tuple[int, ...] = ()
 
 
 def _norm(text: str) -> str:
@@ -284,6 +289,26 @@ def resolve_arrival_contact_policy(
                 "arrival_contact_policy | settings load failed tenant=%s err=%s",
                 tenant_id, exc,
             )
+    try:
+        from modules.ai.brain.commerce.arrival_contact_compile_v0 import (  # noqa: PLC0415
+            compile_arrival_contact_policy_v0,
+            log_operational_policy_compile,
+            verdict_from_compiled_artifact,
+        )
+
+        artifact = compile_arrival_contact_policy_v0(
+            sections, settings=settings,
+        )
+        log_operational_policy_compile(tenant_id=tenant_id, artifact=artifact)
+        verdict = verdict_from_compiled_artifact(artifact)
+        log_arrival_contact_policy(tenant_id=tenant_id, verdict=verdict)
+        return verdict
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "arrival_contact_policy | compile_v0 failed tenant=%s err=%s",
+            tenant_id, exc,
+        )
+
     verdict = merchant_allows_arrival_staff_contact(sections, settings=settings)
     log_arrival_contact_policy(tenant_id=tenant_id, verdict=verdict)
     return verdict
@@ -297,6 +322,8 @@ def log_arrival_contact_policy(
     reason: str = "",
     source_kind: str = "",
     section_id: Optional[int] = None,
+    policy_source: str = "",
+    source_sections: Optional[Sequence[int]] = None,
 ) -> None:
     """Emit one grep-friendly ``[ARRIVAL_CONTACT_POLICY]`` line."""
     if verdict is not None:
@@ -304,15 +331,22 @@ def log_arrival_contact_policy(
         reason = verdict.reason or ""
         source_kind = verdict.source_kind or ""
         section_id = verdict.section_id
+        policy_source = verdict.policy_source or policy_source
+        source_sections = verdict.source_sections or source_sections
+    sections_str = "-"
+    if source_sections:
+        sections_str = ",".join(str(s) for s in source_sections)
     try:
         logger.info(
-            "[ARRIVAL_CONTACT_POLICY] tenant=%s allow=%s reason=%r "
-            "source_kind=%s section_id=%s",
+            "[ARRIVAL_CONTACT_POLICY] tenant=%s source=%s allow=%s reason=%r "
+            "source_kind=%s section_id=%s source_sections=%s",
             tenant_id if tenant_id is not None else "-",
+            policy_source or "heuristic",
             "true" if allowed else "false",
             (reason or "")[:96],
             source_kind or "-",
             section_id if section_id is not None else "-",
+            sections_str,
         )
     except Exception:  # noqa: BLE001
         pass

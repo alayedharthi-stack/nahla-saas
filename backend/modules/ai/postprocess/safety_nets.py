@@ -1655,6 +1655,25 @@ def apply_staff_contact_safety_net(
             msg_norm, reply_norm,
             history_bot_norm, history_customer_norm,
         )
+    if (
+        not name
+        and _arrival_gated_intent
+        and _arrival_policy is not None
+        and getattr(_arrival_policy, "policy_source", "") == "compiled_v0"
+        and _arrival_policy.allowed
+    ):
+        _compiled_lookup = str(
+            getattr(_arrival_policy, "contact_lookup_name", "") or ""
+        ).strip()
+        if _compiled_lookup:
+            name = _compiled_lookup
+            name_source = "compiled_v0_contact_hint"
+            logger.info(
+                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=True "
+                "source=compiled_v0_contact_hint name_chars=%d",
+                int(tenant_id or 0),
+                len(name),
+            )
     if not name:
         if _employee_not_responding is not None:
             log_contact_escalation(

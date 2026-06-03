@@ -323,3 +323,102 @@ def test_telemetry_policy_and_escalation(
         "policy_allowed=true" in ln and "selected_contact=" in ln
         for ln in esc_lines
     )
+
+
+def test_compiled_v0_contact_hint_fires_vcard_without_staff_name_in_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cross-section KB + arrival turn with no staff name in msg/reply."""
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    caplog.set_level(logging.INFO)
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=10,
+                kind="escalation_rules",
+                body="عند الوصول للمعرض يُنسّق مع البائع.",
+            ),
+            _StubKBSection(
+                section_id=20,
+                kind="custom",
+                body="تواصل مع بائع المعرض\n0541690226",
+            ),
+        ],
+    )
+    history = [{"direction": "in", "body": "وين موقعكم؟"}]
+    result = apply_staff_contact_safety_net(
+        customer_msg="أنا في الطريق",
+        reply_text="أهلاً، نورتنا 🌷",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db,
+        tenant_id=42,
+        history=history,
+    )
+    assert result.fired is True
+    assert result.wa_id == "966541690226"
+    assert result.skipped_reason != "no_staff_name"
+
+    logs = "\n".join(r.message for r in caplog.records)
+    assert "[OPERATIONAL_POLICY_COMPILE]" in logs
+    assert "enabled=true" in logs
+    assert "[ARRIVAL_CONTACT_POLICY]" in logs
+    assert "source=compiled_v0" in logs
+    assert "allow=true" in logs
+    assert "compiled_v0_contact_hint" in logs
+
+
+def test_owner_only_contact_no_vcard_on_arrival(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[
+            _StubKBSection(
+                section_id=40,
+                kind="escalation_rules",
+                body="عند الوصول للمعرض تواصل مع صاحب المتجر.",
+            ),
+            _StubKBSection(
+                section_id=41,
+                kind="owner_identity",
+                body="صاحب المتجر: 0555906901",
+            ),
+        ],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="أنا في الطريق",
+        reply_text="أهلاً بك",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db,
+        tenant_id=42,
+    )
+    assert result.fired is False
+    assert result.skipped_reason in {"arrival_policy_denied", "no_staff_name", "no_phone_in_reply"}
+
+
+def test_explicit_staff_ask_unchanged_without_arrival_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    db = _install_stubs(
+        monkeypatch,
+        sections=[_staff_section()],
+    )
+    result = apply_staff_contact_safety_net(
+        customer_msg="ابي رقم أمين",
+        reply_text="تفضل",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db,
+        tenant_id=42,
+    )
+    assert result.fired is True
+    assert result.wa_id == "966541690226"
