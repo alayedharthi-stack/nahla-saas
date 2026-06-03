@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time as _time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -1059,6 +1060,10 @@ class DecideRequest(BaseModel):
     op_ids: Optional[List[str]] = None
 
 
+def _elapsed_ms(started: float) -> int:
+    return int((_time.monotonic() - started) * 1000)
+
+
 def _serialize_draft(draft: MerchantKnowledgeDraft) -> Dict[str, Any]:
     return {
         "id": int(draft.id),
@@ -1503,6 +1508,7 @@ async def approve_draft(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    started = _time.monotonic()
     tenant_id = resolve_tenant_id(request)
     draft = (
         db.query(MerchantKnowledgeDraft)
@@ -1610,6 +1616,7 @@ async def approve_draft(
         if (op.get("op") or "").lower() in link_op_kinds
     ]
 
+    apply_started = _time.monotonic()
     applied_ids: List[str] = []
     op_id_to_section: Dict[str, int] = {}
     for op in primary_ops:
@@ -1642,9 +1649,19 @@ async def approve_draft(
     draft.applied_op_ids = applied_ids
     db.commit()
     db.refresh(draft)
+    db_apply_ms = _elapsed_ms(apply_started)
+    proposal_source = str(proposal.get("source") or "").strip() or "-"
+    suggestion_id = str(proposal.get("suggestion_id") or "-")
     _logger.info(
-        "[KB.draft.approve] tenant=%s draft=%s applied=%d",
-        tenant_id, draft.id, len(applied_ids),
+        "[KB.draft.approve] tenant=%s draft=%s applied=%d duration_ms=%d "
+        "db_apply_ms=%d llm_ms=0 reanalysis_ms=0 source=%s suggestion_id=%s",
+        tenant_id,
+        draft.id,
+        len(applied_ids),
+        _elapsed_ms(started),
+        db_apply_ms,
+        proposal_source,
+        suggestion_id,
     )
     return _serialize_draft(draft)
 
@@ -2034,7 +2051,7 @@ async def improvement_suggestions(
     request: Request,
     db: Session = Depends(get_db),
     polish: bool = Query(
-        True,
+        False,
         description=(
             "Apply the optional GPT Arabic polisher on top of the "
             "deterministic auditor. Has no effect when OPENAI_API_KEY "
@@ -2042,6 +2059,13 @@ async def improvement_suggestions(
         ),
     ),
     max_suggestions: int = Query(5, ge=1, le=10),
+    include_conversation_signals: bool = Query(
+        False,
+        description=(
+            "Scan recent inbound messages for gap signals. Off by default "
+            "to keep analysis fast; enable for richer suggestions."
+        ),
+    ),
 ):
     """KB-Improve V1 — read-only proactive improvement suggestions.
 
@@ -2064,51 +2088,57 @@ async def improvement_suggestions(
     ``MerchantKnowledgeDraft`` row — then the existing per-op approve
     pipeline takes over. NEVER auto-applies.
     """
-    import time as _time
     started = _time.monotonic()
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    _logger.info(
+        "[KB.improve.analyze.start] tenant=%s polish=%s include_signals=%s "
+        "max_suggestions=%d",
+        tenant_id,
+        "true" if polish else "false",
+        "true" if include_conversation_signals else "false",
+        max_suggestions,
+    )
 
+    phase = _time.monotonic()
     rows = (
         db.query(MerchantKnowledgeSection)
         .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
         .order_by(MerchantKnowledgeSection.id.asc())
         .all()
     )
+    sections_load_ms = _elapsed_ms(phase)
 
+    phase = _time.monotonic()
     signal = _platform_signal_for_tenant(db, tenant_id)
     catalog = _catalog_slice_for_audit(db, tenant_id)
+    catalog_load_ms = _elapsed_ms(phase)
 
     # Scanner is best-effort: failure or empty traffic must never block
     # the deterministic KB improvement suggestions the merchant already had.
     conversation_signals: Optional[ConversationSignalSummary] = None
-    try:
-        conversation_signals = scan_tenant_conversation_signals(db, tenant_id)
-    except Exception as exc:  # noqa: BLE001 — guard rail for the endpoint
-        _logger.warning(
-            "[KB.improve] conversation signal scan skipped tenant=%s err=%s",
-            tenant_id,
-            exc,
-        )
+    signals_scan_ms = 0
+    if include_conversation_signals:
+        phase = _time.monotonic()
+        try:
+            conversation_signals = scan_tenant_conversation_signals(db, tenant_id)
+        except Exception as exc:  # noqa: BLE001 — guard rail for the endpoint
+            _logger.warning(
+                "[KB.improve] conversation signal scan skipped tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
+        signals_scan_ms = _elapsed_ms(phase)
 
     # ── Suppression (KB-Improve V1.1) ───────────────────────────────────
-    # Two streams of suppression feed the auditor:
-    #   1. Dismissed fingerprints — recorded by the
-    #      ``POST /knowledge/improvement-suggestions/dismiss`` endpoint
-    #      into ``TenantSettings.ai_settings.kb_improvement_state``,
-    #      with a 7-day TTL (expired entries skipped here, pruned on
-    #      next write).
-    #   2. Approved fingerprints — every promote-to-draft call stamps
-    #      the suggestion's fingerprint onto the resulting
-    #      ``MerchantKnowledgeDraft.proposal_json``. We treat ANY draft
-    #      from this source (pending, approved, rejected) as
-    #      suppressed so the merchant doesn't see the same idea twice
-    #      while a previous proposal is still in their inbox.
+    phase = _time.monotonic()
     settings = get_or_create_settings(db, tenant_id)
     dismissed = active_dismissed_fingerprints(settings.ai_settings or {})
     applied_fps = _approved_improvement_fingerprints(db, tenant_id)
     suppressed_fps = dismissed | applied_fps
+    suppression_load_ms = _elapsed_ms(phase)
 
+    phase = _time.monotonic()
     findings = improvement_audit(
         rows,
         platform_connected=signal.connected,
@@ -2117,11 +2147,15 @@ async def improvement_suggestions(
         suppressed_fingerprints=suppressed_fps,
         conversation_signals=conversation_signals,
     )
+    audit_ms = _elapsed_ms(phase)
 
     polished = findings
     fallback_used = False
+    polish_ms = 0
     if polish:
+        phase = _time.monotonic()
         polished = polish_with_gpt(findings, tenant_id=tenant_id)
+        polish_ms = _elapsed_ms(phase)
         # ``polish_with_gpt`` returns the originals on any failure — we
         # can't tell here whether GPT actually ran, but the structured
         # log line in the advisor module records the skip with the
@@ -2134,6 +2168,25 @@ async def improvement_suggestions(
         started=started,
         model=_POLISHER_MODEL if polish else "deterministic_only",
         fallback=fallback_used,
+    )
+
+    duration_ms = _elapsed_ms(started)
+    _logger.info(
+        "[KB.improve.analyze.end] tenant=%s duration_ms=%d sections_load_ms=%d "
+        "catalog_load_ms=%d signals_scan_ms=%d suppression_load_ms=%d "
+        "audit_ms=%d polish_ms=%d llm_ms=%d suggestions_count=%d "
+        "scanned_sections=%d",
+        tenant_id,
+        duration_ms,
+        sections_load_ms,
+        catalog_load_ms,
+        signals_scan_ms,
+        suppression_load_ms,
+        audit_ms,
+        polish_ms,
+        polish_ms,
+        len(polished),
+        len(rows),
     )
 
     return {
@@ -2169,9 +2222,18 @@ async def promote_improvement_suggestion(
     target a different ``kind``. Bundling them would force the
     merchant into "approve all or reject all" semantics, which the
     per-op approval drawer already escapes.
+
+    This path is DB-only — it never re-runs the LLM or the auditor.
     """
+    started = _time.monotonic()
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    _logger.info(
+        "[KB.improve.promote.start] tenant=%s suggestion_id=%s type=%s",
+        tenant_id,
+        payload.suggestion_id,
+        payload.type,
+    )
 
     # Re-validate the target kind against the canonical registry — the
     # advisor only emits valid kinds, but a stale client could send
@@ -2238,14 +2300,23 @@ async def promote_improvement_suggestion(
         conflicts_json=[],
     )
     db.add(draft)
+    db_write_started = _time.monotonic()
     db.commit()
     db.refresh(draft)
+    db_write_ms = _elapsed_ms(db_write_started)
 
     _logger.info(
-        "[KB.improve.promote] tenant=%s draft=%s suggestion=%s type=%s "
-        "target_kind=%s fp=%s",
-        tenant_id, draft.id, payload.suggestion_id, payload.type, target_kind,
+        "[KB.improve.promote.end] tenant=%s draft=%s suggestion_id=%s type=%s "
+        "target_kind=%s fp=%s duration_ms=%d db_write_ms=%d llm_ms=0 "
+        "reanalysis_ms=0",
+        tenant_id,
+        draft.id,
+        payload.suggestion_id,
+        payload.type,
+        target_kind,
         fingerprint,
+        _elapsed_ms(started),
+        db_write_ms,
     )
 
     return _serialize_draft(draft)

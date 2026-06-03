@@ -1026,6 +1026,7 @@ function DraftPreviewDrawer({
   const isFallback = !!draft.proposal.fallback_used
 
   const handleApprove = async () => {
+    if (busy !== null) return
     setBusy('approve')
     setError(null)
     try {
@@ -1038,6 +1039,7 @@ function DraftPreviewDrawer({
   }
 
   const handleReject = async () => {
+    if (busy !== null) return
     setBusy('reject')
     setError(null)
     try {
@@ -1077,7 +1079,11 @@ function DraftPreviewDrawer({
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+          <button
+            onClick={onClose}
+            disabled={busy !== null}
+            className="text-slate-400 hover:text-slate-700 disabled:opacity-40"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -2222,10 +2228,37 @@ export default function KnowledgeBase() {
 
   const handleApproveDraft = useCallback(
     async (draftId: number, opIds: string[]) => {
-      const updated = await knowledgeApi.approveDraft(draftId, opIds)
-      setActiveDraft(null)
-      await refreshSections()
-      setToast(`تم تطبيق ${updated.applied_op_ids.length} اقتراحاً من الذكاء`)
+      const isTimeoutMessage = (msg: string) =>
+        /انتهت مهلة الطلب|signal timed out|aborted|timed out/i.test(msg)
+
+      try {
+        const updated = await knowledgeApi.approveDraft(draftId, opIds)
+        setActiveDraft(null)
+        setToast(`تم تطبيق ${updated.applied_op_ids.length} اقتراحاً من الذكاء`)
+        void refreshSections().catch(() => {})
+      } catch (err) {
+        const msg = (err as Error).message || 'فشل التطبيق'
+        if (isTimeoutMessage(msg)) {
+          try {
+            const drafts = await knowledgeApi.listDrafts()
+            const maybeApplied = drafts.items.find(d => d.id === draftId)
+            if (maybeApplied?.status === 'approved') {
+              setActiveDraft(null)
+              setToast(
+                'تم التطبيق — انتهت مهلة الانتظار لكن الخادم أكّد حفظ التغيير.',
+              )
+              void refreshSections().catch(() => {})
+              return
+            }
+          } catch {
+            // fall through to ambiguous timeout message
+          }
+          throw new Error(
+            `${msg} لم يتأكد التطبيق — أعد تحميل الصفحة للتحقق من الأقسام.`,
+          )
+        }
+        throw err
+      }
     },
     [refreshSections],
   )

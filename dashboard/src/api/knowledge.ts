@@ -310,12 +310,14 @@ export const knowledgeApi = {
     return apiCall<KnowledgeDraft>(`/knowledge/drafts/${id}/approve`, {
       method: 'POST',
       body: JSON.stringify({ op_ids: opIds && opIds.length ? opIds : null }),
+      timeoutMs: 15_000,
     })
   },
 
   rejectDraft(id: number) {
     return apiCall<KnowledgeDraft>(`/knowledge/drafts/${id}/reject`, {
       method: 'POST',
+      timeoutMs: 15_000,
     })
   },
 
@@ -359,13 +361,19 @@ export const knowledgeApi = {
   // ``promoteImprovementSuggestion`` which creates a
   // ``MerchantKnowledgeDraft`` row — the existing draft preview drawer
   // handles per-op approve / reject after that.
-  getImprovementSuggestions(opts?: { polish?: boolean; max?: number }) {
+  getImprovementSuggestions(opts?: {
+    polish?: boolean
+    max?: number
+    includeSignals?: boolean
+  }) {
     const qs = new URLSearchParams()
-    if (opts?.polish === false) qs.set('polish', 'false')
+    if (opts?.polish) qs.set('polish', 'true')
+    if (opts?.includeSignals) qs.set('include_conversation_signals', 'true')
     if (opts?.max) qs.set('max_suggestions', String(opts.max))
     const suffix = qs.toString() ? `?${qs}` : ''
     return apiCall<ImprovementSuggestionsResponse>(
       `/knowledge/improvement-suggestions${suffix}`,
+      { timeoutMs: opts?.polish ? 60_000 : 30_000 },
     )
   },
 
@@ -374,6 +382,7 @@ export const knowledgeApi = {
       '/knowledge/improvement-suggestions/promote',
       {
         method: 'POST',
+        timeoutMs: 15_000,
         body: JSON.stringify({
           suggestion_id: suggestion.id,
           type: suggestion.type,
