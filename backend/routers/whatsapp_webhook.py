@@ -7276,6 +7276,40 @@ async def _handle_merchant_message(
                     _pi_exc,
                 )
 
+        if reply and not _brain_handoff:
+            try:
+                from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
+                    apply_payment_reply_guard,
+                )
+                from core.order_flow import (  # noqa: PLC0415
+                    _focus_summary as _prg_focus,
+                    _load_brain_state as _prg_load,
+                )
+                _prg_conv, _prg_bs = _prg_load(db, tenant_id=tenant_id, phone=to)
+                _prg_summary = _prg_focus(_prg_bs)
+                _prg_meta = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                _prg_result = apply_payment_reply_guard(
+                    reply=reply,
+                    inbound_text=text or "",
+                    inbound_metadata=_prg_meta,
+                    payment_receipt_received=bool(
+                        _prg_summary.get("payment_receipt_received")
+                    ),
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                )
+                if _prg_result.replaced:
+                    reply = _prg_result.reply
+            except Exception as _prg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[PAYMENT_REPLY_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _prg_exc,
+                )
+
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
         #   continue → send `reply` as-is

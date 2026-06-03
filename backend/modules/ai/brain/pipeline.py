@@ -1794,13 +1794,6 @@ class MerchantBrain:
                 _align_exc,
             )
 
-        # Derive observability hints used by the audit log:
-        # * ``social_category`` — set by classify_social via intent.slots.
-        # * ``fallback_used``   — chosen_path begins with "llm_fallback"
-        #   / "fallback" / template-only paths the composer flags.
-        # * ``model_used``      — composer / classifier may stash this
-        #   on result.data; absent → "" (still logged so dashboards
-        #   can detect the gap).
         _chosen_path = str(result.data.get("chosen_path") or "")
         _fallback_used = bool(
             "fallback" in _chosen_path
@@ -1818,6 +1811,29 @@ class MerchantBrain:
             or result.data.get("llm_model")
             or ""
         )
+
+        try:
+            from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
+                apply_payment_reply_guard,
+            )
+            _prg = apply_payment_reply_guard(
+                reply=reply or "",
+                inbound_text=message or "",
+                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                payment_receipt_received=bool(
+                    getattr(new_state.order_prep, "payment_receipt_received", False)
+                ),
+                chosen_path=_chosen_path,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _prg.replaced:
+                reply = _prg.reply
+        except Exception as _prg_exc:  # noqa: BLE001
+            logger.warning(
+                "[PAYMENT_REPLY_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _prg_exc,
+            )
 
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
         #
