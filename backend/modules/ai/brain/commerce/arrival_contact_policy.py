@@ -231,6 +231,64 @@ def merchant_allows_arrival_staff_contact(
     )
 
 
+def resolve_arrival_contact_policy(
+    db: Any,
+    tenant_id: int,
+) -> ArrivalContactPolicyVerdict:
+    """Load KB + legacy settings, evaluate policy, emit telemetry."""
+    sections: Sequence[Any] = ()
+    settings: Optional[Mapping[str, Any]] = None
+    if db is not None and tenant_id:
+        try:
+            from models import MerchantKnowledgeSection  # noqa: PLC0415
+
+            sections = (
+                db.query(MerchantKnowledgeSection)
+                .filter(
+                    MerchantKnowledgeSection.tenant_id == tenant_id,
+                    MerchantKnowledgeSection.is_active.is_(True),
+                )
+                .order_by(
+                    MerchantKnowledgeSection.priority.asc(),
+                    MerchantKnowledgeSection.updated_at.desc(),
+                )
+                .limit(120)
+                .all()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "arrival_contact_policy | sections load failed tenant=%s err=%s",
+                tenant_id, exc,
+            )
+        try:
+            from models import TenantSettings  # noqa: PLC0415
+
+            ts = (
+                db.query(TenantSettings)
+                .filter(TenantSettings.tenant_id == tenant_id)
+                .first()
+            )
+            if ts is not None:
+                ai = dict(getattr(ts, "ai_settings", None) or {})
+                meta = dict(getattr(ts, "extra_metadata", None) or {})
+                settings = {
+                    "escalation_rules": (
+                        ai.get("escalation_rules")
+                        or meta.get("escalation_rules")
+                        or ""
+                    ),
+                    "ai_settings": ai,
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "arrival_contact_policy | settings load failed tenant=%s err=%s",
+                tenant_id, exc,
+            )
+    verdict = merchant_allows_arrival_staff_contact(sections, settings=settings)
+    log_arrival_contact_policy(tenant_id=tenant_id, verdict=verdict)
+    return verdict
+
+
 def log_arrival_contact_policy(
     *,
     tenant_id: Any = None,
@@ -264,4 +322,5 @@ __all__ = [
     "ArrivalContactPolicyVerdict",
     "log_arrival_contact_policy",
     "merchant_allows_arrival_staff_contact",
+    "resolve_arrival_contact_policy",
 ]

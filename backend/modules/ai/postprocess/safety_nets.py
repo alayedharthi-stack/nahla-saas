@@ -1471,26 +1471,46 @@ def apply_staff_contact_safety_net(
     _emit_staff_contact_graph_trace(db, int(tenant_id or 0))
 
     try:
+        from modules.ai.brain.commerce.arrival_contact_policy import (  # noqa: PLC0415
+            resolve_arrival_contact_policy,
+        )
         from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
             classify_employee_not_responding,
             classify_location_branch_failure,
+            classify_store_arrival,
             contact_already_sent,
             log_contact_escalation,
             log_location_branch_failure,
             parse_staff_contacts_sent,
+        )
+        _history_list = history if isinstance(history, list) else None
+        _arrival_policy = resolve_arrival_contact_policy(
+            db, int(tenant_id or 0),
+        )
+        _store_arrival = classify_store_arrival(
+            customer_msg or "",
+            history=_history_list,
         )
         _employee_not_responding = classify_employee_not_responding(
             customer_msg or "",
         )
         _location_branch_failure = classify_location_branch_failure(
             customer_msg or "",
-            history=history if isinstance(history, list) else None,
+            history=_history_list,
         )
         _contacts_sent = parse_staff_contacts_sent(staff_contacts_sent)
     except Exception:  # noqa: BLE001
+        _arrival_policy = None
+        _store_arrival = None
         _employee_not_responding = None
         _location_branch_failure = None
         _contacts_sent = []
+
+    _policy_allowed = bool(
+        _arrival_policy is not None and _arrival_policy.allowed
+    )
+    _arrival_signal = _store_arrival is not None
+    _arrival_gated_intent = _arrival_signal and _policy_allowed
 
     if _location_branch_failure is not None:
         log_location_branch_failure(
@@ -1501,32 +1521,35 @@ def apply_staff_contact_safety_net(
             matched=_location_branch_failure.pattern,
             preview=(customer_msg or "")[:80],
         )
-        log_contact_escalation(
-            tenant_id=tenant_id,
-            conversation_id=conversation_id,
-            trigger=_location_branch_failure.trigger,
-            context=_location_branch_failure.context,
-            name_source="-",
-            already_sent=False,
-            selected_contact="",
-            contacts_sent_count=len(_contacts_sent),
-        )
+        if _arrival_signal and not _policy_allowed:
+            log_contact_escalation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger=_store_arrival.trigger if _store_arrival else "store_arrival",
+                context=_store_arrival.context if _store_arrival else "-",
+                name_source="-",
+                already_sent=False,
+                selected_contact="",
+                contacts_sent_count=len(_contacts_sent),
+                policy_allowed=False,
+            )
 
     # Trigger gating: a turn fires the resolver when EITHER side of
     # the conversation surfaces staff-contact intent.
     #   * Customer-side: explicit ask ("ابي رقم أمين", "كم رقمه").
+    #   * Customer-side (KB-gated): arrival / on-the-way / branch
+    #     access ONLY when merchant KB opted in via
+    #     ``merchant_allows_arrival_staff_contact``.
     #   * Reply-side:    bot proactively offers a contact
     #                    ("تواصل مع أمين عند الوصول") with no digits
-    #                    in the reply yet — the arrival-flow case
-    #                    that triggered Tenant 33 #38c. Without this
-    #                    branch the asset-promise sanitiser downstream
-    #                    rewrites the reply to the cold "الرقم غير
-    #                    مضاف" copy even though the KB has the
-    #                    contact.
-    customer_intent = (
+    #                    in the reply yet — also KB-gated; without
+    #                    opt-in the LLM text stands alone (no vCard).
+    explicit_customer_intent = (
         _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
         or _employee_not_responding is not None
     )
+    customer_intent = explicit_customer_intent or _arrival_gated_intent
+
     reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(reply_text or "")
     reply_has_digits = bool(_extract_phones(reply_text or ""))
     if not customer_intent:
@@ -1542,26 +1565,71 @@ def apply_staff_contact_safety_net(
                     selected_contact="",
                     contacts_sent_count=len(_contacts_sent),
                 )
+            if _arrival_signal and not _policy_allowed:
+                log_contact_escalation(
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    trigger=_store_arrival.trigger if _store_arrival else "store_arrival",
+                    context=_store_arrival.context if _store_arrival else "-",
+                    name_source="-",
+                    already_sent=False,
+                    selected_contact="",
+                    contacts_sent_count=len(_contacts_sent),
+                    policy_allowed=False,
+                )
             logger.info(
                 "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
                 "customer_intent=False reply_offer_verb=%r "
-                "reply_has_digits=%s",
+                "reply_has_digits=%s arrival_signal=%s policy_allowed=%s",
                 int(tenant_id or 0),
                 reply_offer_verb or "", reply_has_digits,
+                _arrival_signal, _policy_allowed,
             )
-            result.skipped_reason = "no_staff_intent"
+            result.skipped_reason = (
+                "arrival_policy_denied"
+                if _arrival_signal and not _policy_allowed and not reply_has_digits
+                else "no_staff_intent"
+            )
+            return result
+        if not (_policy_allowed and _arrival_signal):
+            log_contact_escalation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger="reply_offer",
+                context=_store_arrival.context if _store_arrival else "-",
+                name_source="-",
+                already_sent=False,
+                selected_contact="",
+                contacts_sent_count=len(_contacts_sent),
+                policy_allowed=_policy_allowed if _arrival_signal else False,
+            )
+            logger.info(
+                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
+                "source=reply_offer arrival_signal=%s policy_allowed=%s",
+                int(tenant_id or 0),
+                _arrival_signal,
+                _policy_allowed,
+            )
+            result.skipped_reason = (
+                "arrival_policy_denied"
+                if _arrival_signal and not _policy_allowed
+                else "no_staff_intent"
+            )
             return result
         logger.info(
             "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-            "source=reply_offer verb_chars=%d name_chars=%d",
+            "source=reply_offer verb_chars=%d name_chars=%d policy_allowed=true",
             int(tenant_id or 0),
             len(reply_offer_verb), len(reply_offer_name),
         )
     else:
         logger.info(
             "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-            "source=customer_msg",
+            "source=%s arrival_signal=%s policy_allowed=%s",
             int(tenant_id or 0),
+            "arrival_gated" if _arrival_gated_intent else "customer_msg",
+            _arrival_signal,
+            _policy_allowed if _arrival_signal else "-",
         )
 
     # Layer 0: scan the customer message → the LLM reply →
@@ -1708,7 +1776,11 @@ def apply_staff_contact_safety_net(
     _escalation_trigger = (
         "employee_not_responding"
         if _employee_not_responding is not None
-        else ("reply_offer" if reply_offer_name else "customer_staff_intent")
+        else (
+            (_store_arrival.trigger if _store_arrival else "store_arrival")
+            if _arrival_gated_intent
+            else ("reply_offer" if reply_offer_name else "customer_staff_intent")
+        )
     )
     _already_sent = contact_already_sent(
         _contacts_sent,
@@ -1719,11 +1791,12 @@ def apply_staff_contact_safety_net(
         tenant_id=tenant_id,
         conversation_id=conversation_id,
         trigger=_escalation_trigger,
-        context="-",
+        context=_store_arrival.context if _store_arrival else "-",
         name_source=name_source or "-",
         already_sent=_already_sent,
         selected_contact=display_name,
         contacts_sent_count=len(_contacts_sent),
+        policy_allowed=_policy_allowed if _arrival_signal else None,
     )
     return result
 

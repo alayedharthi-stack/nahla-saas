@@ -58,12 +58,16 @@ class _StubKBSection:
         section_id: int,
         kind: str,
         body: str,
+        title: str = "",
+        metadata: Optional[dict] = None,
         is_active: bool = True,
         priority: int = 100,
     ) -> None:
         self.id = section_id
         self.kind = kind
         self.body = body
+        self.title = title
+        self.metadata = metadata or {}
         self.is_active = is_active
         self.priority = priority
         self.updated_at = section_id  # monotonic stand-in
@@ -803,12 +807,17 @@ def test_reply_driven_trigger_arrival_flow(
     """Customer says 'وصلت' — no customer-side trigger. The bot
     reply offers 'تواصل مع أمين عند الوصول' without digits. The
     safety net must treat that as an implicit staff_phone intent
-    and ship the contact card from the KB."""
+    and ship the contact card from the KB when arrival policy
+    is opted in."""
     from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
 
     db = _install_stubs(
         monkeypatch,
         sections=[
+            _StubKBSection(
+                section_id=149, kind="escalation_rules",
+                body="عند الوصول للمعرض تواصل مع بائع المعرض على الرقم المسجل.",
+            ),
             _StubKBSection(
                 section_id=5, kind="branches",
                 body="أمين بائع المعرض: 0541690226",
@@ -882,7 +891,7 @@ def test_reply_driven_trigger_no_misfire_on_unrelated_reply(
         ],
     )
     result = apply_staff_contact_safety_net(
-        customer_msg="وصلت",
+        customer_msg="تمام",
         reply_text="أبشر 🌷 وصول سعيد!",
         existing_call_targets=[],
         detected_call_markers=0,
@@ -946,6 +955,10 @@ def test_reply_driven_trigger_emits_telemetry(
         monkeypatch,
         sections=[
             _StubKBSection(
+                section_id=149, kind="escalation_rules",
+                body="عند الوصول للمعرض تواصل مع بائع المعرض.",
+            ),
+            _StubKBSection(
                 section_id=1, kind="branches",
                 body="أمين بائع المعرض: 0541690226",
             ),
@@ -964,9 +977,12 @@ def test_reply_driven_trigger_emits_telemetry(
         "[STAFF_CONTACT_TRACE]" in ln
         and "stage=trigger" in ln
         and "hit=True" in ln
-        and "source=reply_offer" in ln
+        and (
+            "source=reply_offer" in ln
+            or "source=arrival_gated" in ln
+        )
         for ln in log_lines
-    ), f"expected a reply_offer trigger trace; got: {log_lines!r}"
+    ), f"expected an arrival-gated trigger trace; got: {log_lines!r}"
 
 
 # ── Dashboard-suggestion filter + reply hallucination guard (May 2026 #38d) ─

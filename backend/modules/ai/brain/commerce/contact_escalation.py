@@ -205,6 +205,87 @@ def _resolve_location_failure_context(
     return "none"
 
 
+@dataclass(frozen=True)
+class StoreArrivalVerdict:
+    """Customer is arriving, on the way, at the door, or branch access failed."""
+
+    trigger: str  # store_arrival | branch_closed | location_failed
+    context: str  # standalone | post_location | post_branch_ask
+    pattern: str = ""
+    confidence: float = 0.91
+
+
+# On-the-way / at-door / arrived (physical visit — not shipment).
+_STORE_ARRIVAL_RE = re.compile(
+    r"(?:"
+    r"(?:^|\s)(?:انا|أنا)\s*(?:جاي|جا(?:ي|يك)(?:كم|ك|ين)?|في\s*الطريق)"
+    r"|(?:^|\s)وصل(?:ت|نا|وا)?(?:\s|[،,.]|$)"
+    r"|(?:^|\s)عند\s*الب(?:و)?اب(?:ة)?"
+    r"|(?:^|\s)عند\s*الباب"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Shipment / order delivery — NOT in-store arrival.
+_SHIPPING_STATUS_ARRIVAL_RE = re.compile(
+    r"(?:"
+    r"(?:^|\s)(?:ال)?(?:شحن(?:ة|ه)?|طلب(?:ي|يتي)?|الطلب(?:ية)?|order|shipment|delivery|parcel|package)"
+    r"|"
+    r"وصل(?:ت|نا)?\s*(?:ال)?(?:شحن(?:ة|ه)?|طلب(?:ي|يتي)?|الطلب(?:ية)?)"
+    r"|"
+    r"(?:ال)?(?:شحن(?:ة|ه)?|طلب(?:ي|يتي)?|الطلب(?:ية)?)\s*وصل(?:ت|نا)?"
+    r"|"
+    r"هل\s*وصل(?:ت)?\s*(?:ال)?(?:شحن(?:ة|ه)?|طلب)"
+    r"|"
+    r"ما\s*وصل(?:ت)?\s*(?:ال)?(?:شحن(?:ة|ه)?|طلب(?:ي|يتي)?|الطلب(?:ية)?)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def classify_store_arrival(
+    message: str,
+    *,
+    history: Optional[Sequence[Any]] = None,
+) -> Optional[StoreArrivalVerdict]:
+    """Detect in-person arrival / on-the-way / branch-access signals.
+
+    Excludes shipment-status phrasing such as «وصلت الشحنة».
+    Branch-closed / location-failed follow-ups reuse
+    :func:`classify_location_branch_failure` context rules.
+    """
+    norm = _norm(message)
+    if not norm:
+        return None
+    if _SHIPPING_STATUS_ARRIVAL_RE.search(norm):
+        return None
+    if _COMPETING_INTENT_RE.search(norm):
+        return None
+
+    branch = classify_location_branch_failure(message, history=history)
+    if branch is not None:
+        return StoreArrivalVerdict(
+            trigger=branch.trigger,
+            context=branch.context,
+            pattern=branch.pattern,
+            confidence=branch.confidence,
+        )
+
+    m = _STORE_ARRIVAL_RE.search(norm)
+    if not m:
+        return None
+
+    context = _resolve_location_failure_context(message, history=history)
+    if context == "none":
+        context = "standalone"
+
+    return StoreArrivalVerdict(
+        trigger="store_arrival",
+        context=context,
+        pattern=(m.group(0) or "")[:48],
+    )
+
+
 def classify_location_branch_failure(
     message: str,
     *,
@@ -355,13 +436,19 @@ def log_contact_escalation(
     selected_contact: str = "",
     contacts_sent_count: int = 0,
     conversation_id: Any = None,
+    policy_allowed: Optional[bool] = None,
 ) -> None:
     """Emit one grep-friendly ``[CONTACT_ESCALATION]`` line."""
     try:
+        policy_suffix = ""
+        if policy_allowed is not None:
+            policy_suffix = (
+                f" policy_allowed={'true' if policy_allowed else 'false'}"
+            )
         logger.info(
             "[CONTACT_ESCALATION] tenant=%s conversation_id=%s "
             "trigger=%s context=%s name_source=%s already_sent=%s "
-            "selected_contact=%r contacts_sent_count=%d",
+            "selected_contact=%r contacts_sent_count=%d%s",
             tenant_id if tenant_id is not None else "-",
             conversation_id if conversation_id is not None else "-",
             trigger or "-",
@@ -370,6 +457,7 @@ def log_contact_escalation(
             "true" if already_sent else "false",
             selected_contact or "",
             int(contacts_sent_count or 0),
+            policy_suffix,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -446,6 +534,7 @@ __all__ = [
     "append_staff_contact_sent",
     "classify_employee_not_responding",
     "classify_location_branch_failure",
+    "classify_store_arrival",
     "contact_already_sent",
     "is_branch_list_request",
     "is_branch_location_order_tail",
@@ -454,4 +543,5 @@ __all__ = [
     "parse_staff_contacts_sent",
     "persist_staff_contact_sent",
     "persist_staff_contacts_sent_batch",
+    "StoreArrivalVerdict",
 ]
