@@ -4,14 +4,16 @@ Staff contact fallback v0 — next contact in merchant KB escalation chain.
 When a customer reports the last suggested staff member is unavailable
 («مايرد», «البائع مايرد», «مقفل» after a prior vCard), advance to the
 next showroom staff entry in KB document order. Owner contacts are
-excluded unless the customer explicitly asks for the owner.
+excluded unless the customer explicitly asks using a KB-defined alias
+for ``role=owner``.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("nahla.brain.staff_contact_fallback_v0")
@@ -30,6 +32,10 @@ _CHAIN_SCAN_KINDS: frozenset[str] = frozenset({
 })
 
 _OWNER_IDENTITY_KINDS: frozenset[str] = frozenset({"owner_identity"})
+
+_ROLE_ALIAS_SCAN_KINDS: frozenset[str] = frozenset(
+    _CHAIN_SCAN_KINDS | _OWNER_IDENTITY_KINDS
+)
 
 _PHONE_REGEXES: Tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\+?\s*9665\d{8}\b"),
@@ -51,27 +57,18 @@ _SHOWROOM_ROLE_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
-_OWNER_LABEL_RE = re.compile(
-    r"(?:"
-    r"(?:^|\s)(?:المالك|مالك\s*المتجر|صاحب\s*الم(?:حل|تجر)|owner)"
-    r"|(?:^|\s)أبو\s*هشام"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
-
-_EXPLICIT_OWNER_ASK_RE = re.compile(
-    r"(?:"
-    r"(?:^|\s)(?:ابي|ابغ|اريد|أبي|أبغ|أريد|ابغى|أبغى)\s*(?:رقم\s*)?"
-    r"(?:المالك|مالك|صاحب\s*الم(?:حل|تجر)|owner|أبو\s*هشام)"
-    r"|(?:^|\s)(?:المالك|مالك\s*المتجر|صاحب\s*الم(?:حل|تجر))"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
-
 _LABEL_PHONE_LINE_RE = re.compile(
     r"^(.{2,48}?)\s*[:：\-–—]\s*(\+?\s*966?\s*5\d{8}|05\d{8}|5\d{8})\s*$",
     re.MULTILINE | re.UNICODE,
 )
+
+_ROLE_BODY_BLOCK_RE = re.compile(
+    r"(?ms)^\s*role\s*:\s*([a-zA-Z_][\w-]*)\s*\n\s*aliases\s*:\s*\n((?:\s*-\s*.+\n?)+)",
+)
+_ROLE_BODY_INLINE_RE = re.compile(
+    r"(?ms)^\s*role\s*:\s*([a-zA-Z_][\w-]*)\s*\n\s*aliases\s*:\s*(.+?)\s*$",
+)
+_BODY_ALIAS_BULLET_RE = re.compile(r"^\s*-\s*(.+?)\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -82,6 +79,18 @@ class StaffChainEntry:
     kind: str
     is_owner: bool
     chain_index: int
+    role: str = ""
+
+
+@dataclass(frozen=True)
+class StaffRoleAliasGraph:
+    """KB-defined contact-role aliases (e.g. owner → customer phrases)."""
+
+    roles: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+
+    def aliases_for(self, role: str) -> Tuple[str, ...]:
+        key = (role or "").strip().lower()
+        return self.roles.get(key, ())
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,7 @@ class StaffContactFallbackVerdict:
     section_id: Optional[int] = None
     chain_len: int = 0
     last_sent_index: int = -1
+    explicit_role: str = ""
 
 
 def _norm(text: str) -> str:
@@ -127,25 +137,180 @@ def _normalize_name_key(name: str) -> str:
     return _norm(_norm_alif(name or ""))
 
 
-def classify_explicit_owner_request(message: str) -> bool:
-    norm = _norm(_norm_alif(message or ""))
-    if not norm:
+def _metadata_dict(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _section_fields(section: Any) -> tuple[str, str, str, Dict[str, Any], Optional[int]]:
+    if isinstance(section, dict):
+        kind = str(section.get("kind") or "").strip().lower()
+        title = str(section.get("title") or "").strip()
+        body = str(section.get("body") or "").strip()
+        meta = _metadata_dict(section.get("metadata"))
+        if not meta:
+            meta = _metadata_dict(section.get("metadata_json"))
+        sid = section.get("id")
+    else:
+        kind = str(getattr(section, "kind", "") or "").strip().lower()
+        title = str(getattr(section, "title", "") or "").strip()
+        body = str(getattr(section, "body", "") or "").strip()
+        meta = _metadata_dict(getattr(section, "metadata", None))
+        if not meta:
+            meta = _metadata_dict(getattr(section, "metadata_json", None))
+        sid = getattr(section, "id", None)
+    try:
+        section_id = int(sid) if sid is not None else None
+    except (TypeError, ValueError):
+        section_id = None
+    combined = f"{title}\n{body}".strip() if title else body
+    return kind, combined, body, meta, section_id
+
+
+def _split_alias_tokens(raw: str) -> List[str]:
+    parts = re.split(r"[,،\n|]+", raw or "")
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _role_aliases_from_metadata(meta: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
+    if not meta:
+        return []
+    found: List[Tuple[str, List[str]]] = []
+
+    role = str(meta.get("role") or meta.get("contact_role") or "").strip().lower()
+    aliases_raw = meta.get("aliases")
+    if role and isinstance(aliases_raw, (list, tuple)):
+        found.append((
+            role,
+            [str(a).strip() for a in aliases_raw if str(a).strip()],
+        ))
+    elif role and isinstance(aliases_raw, str) and aliases_raw.strip():
+        found.append((role, _split_alias_tokens(aliases_raw)))
+
+    for key in ("staff_contact_roles", "contact_roles"):
+        block = meta.get(key)
+        if not isinstance(block, list):
+            continue
+        for item in block:
+            if not isinstance(item, dict):
+                continue
+            item_role = str(item.get("role") or "").strip().lower()
+            item_aliases = item.get("aliases")
+            if not item_role:
+                continue
+            if isinstance(item_aliases, (list, tuple)):
+                found.append((
+                    item_role,
+                    [str(a).strip() for a in item_aliases if str(a).strip()],
+                ))
+            elif isinstance(item_aliases, str) and item_aliases.strip():
+                found.append((item_role, _split_alias_tokens(item_aliases)))
+    return found
+
+
+def _role_aliases_from_body(body: str) -> List[Tuple[str, List[str]]]:
+    if not body:
+        return []
+    found: List[Tuple[str, List[str]]] = []
+    for m in _ROLE_BODY_BLOCK_RE.finditer(body):
+        role = m.group(1).strip().lower()
+        aliases = [
+            a.strip()
+            for a in _BODY_ALIAS_BULLET_RE.findall(m.group(2))
+            if a.strip()
+        ]
+        if role and aliases:
+            found.append((role, aliases))
+    for m in _ROLE_BODY_INLINE_RE.finditer(body):
+        role = m.group(1).strip().lower()
+        aliases = _split_alias_tokens(m.group(2))
+        if role and aliases:
+            found.append((role, aliases))
+    return found
+
+
+def extract_staff_role_aliases_from_sections(
+    sections: Sequence[Any],
+) -> StaffRoleAliasGraph:
+    """Compile role → alias mappings declared in merchant KB sections."""
+    merged: Dict[str, List[str]] = {}
+    for section in sections or ():
+        kind, combined, body, meta, _sid = _section_fields(section)
+        if kind and kind not in _ROLE_ALIAS_SCAN_KINDS:
+            continue
+        for role, aliases in (
+            *_role_aliases_from_metadata(meta),
+            *_role_aliases_from_body(body),
+            *_role_aliases_from_body(combined),
+        ):
+            bucket = merged.setdefault(role, [])
+            for alias in aliases:
+                if alias not in bucket:
+                    bucket.append(alias)
+    return StaffRoleAliasGraph(
+        roles={role: tuple(aliases) for role, aliases in merged.items()},
+    )
+
+
+def classify_explicit_role_request(
+    message: str,
+    aliases: Sequence[str],
+) -> bool:
+    """True when the customer message matches a KB-defined role alias."""
+    norm_msg = _norm(_norm_alif(message or ""))
+    if not norm_msg or not aliases:
         return False
-    return bool(_EXPLICIT_OWNER_ASK_RE.search(norm))
+    for alias in aliases:
+        norm_alias = _norm(_norm_alif(alias))
+        if not norm_alias or len(norm_alias) < 2:
+            continue
+        if norm_alias in norm_msg:
+            return True
+    return False
 
 
-def _is_owner_label(label: str, kind: str) -> bool:
+def _label_matches_role_alias(label: str, aliases: Sequence[str]) -> bool:
+    norm_label = _normalize_name_key(label)
+    if not norm_label:
+        return False
+    for alias in aliases:
+        norm_alias = _normalize_name_key(alias)
+        if not norm_alias:
+            continue
+        if (
+            norm_alias == norm_label
+            or norm_alias in norm_label
+            or norm_label in norm_alias
+        ):
+            return True
+    return False
+
+
+def _section_role(meta: Dict[str, Any]) -> str:
+    return str(meta.get("role") or meta.get("contact_role") or "").strip().lower()
+
+
+def _is_owner_entry(
+    *,
+    kind: str,
+    label: str,
+    section_meta: Dict[str, Any],
+    owner_aliases: Sequence[str],
+) -> bool:
     k = (kind or "").strip().lower()
     if k in _OWNER_IDENTITY_KINDS:
         return True
-    norm = _norm(_norm_alif(label or ""))
-    if not norm:
-        return False
-    if _OWNER_LABEL_RE.search(norm):
+    if _section_role(section_meta) == "owner":
         return True
-    if "مالك" in norm and not _SHOWROOM_ROLE_RE.search(norm):
-        return True
-    return False
+    return _label_matches_role_alias(label, owner_aliases)
 
 
 def _extract_label_near_phone(body: str, phone_start: int) -> str:
@@ -170,35 +335,20 @@ def _extract_label_near_phone(body: str, phone_start: int) -> str:
     return ""
 
 
-def _section_fields(section: Any) -> tuple[str, str, str, Optional[int]]:
-    if isinstance(section, dict):
-        kind = str(section.get("kind") or "").strip().lower()
-        title = str(section.get("title") or "").strip()
-        body = str(section.get("body") or "").strip()
-        sid = section.get("id")
-    else:
-        kind = str(getattr(section, "kind", "") or "").strip().lower()
-        title = str(getattr(section, "title", "") or "").strip()
-        body = str(getattr(section, "body", "") or "").strip()
-        sid = getattr(section, "id", None)
-    try:
-        section_id = int(sid) if sid is not None else None
-    except (TypeError, ValueError):
-        section_id = None
-    combined = f"{title}\n{body}".strip() if title else body
-    return kind, combined, body, section_id
-
-
 def extract_staff_chain_from_sections(
     sections: Sequence[Any],
+    *,
+    role_graph: Optional[StaffRoleAliasGraph] = None,
 ) -> List[StaffChainEntry]:
-    """Build ordered showroom staff chain from KB sections (document order)."""
+    """Build ordered staff chain from KB sections (document order)."""
+    graph = role_graph or extract_staff_role_aliases_from_sections(sections)
+    owner_aliases = graph.aliases_for("owner")
     chain: List[StaffChainEntry] = []
     seen_phones: set[str] = set()
     idx = 0
 
     for section in sections or ():
-        kind, combined, _body, section_id = _section_fields(section)
+        kind, combined, _body, meta, section_id = _section_fields(section)
         if kind and kind not in _CHAIN_SCAN_KINDS and kind not in _OWNER_IDENTITY_KINDS:
             continue
         if not combined or section_id is None:
@@ -213,7 +363,12 @@ def extract_staff_chain_from_sections(
                 label = _extract_label_near_phone(combined, m.start())
                 if not label:
                     continue
-                is_owner = _is_owner_label(label, kind)
+                is_owner = _is_owner_entry(
+                    kind=kind,
+                    label=label,
+                    section_meta=meta,
+                    owner_aliases=owner_aliases,
+                )
                 seen_phones.add(phone_key)
                 chain.append(
                     StaffChainEntry(
@@ -223,6 +378,7 @@ def extract_staff_chain_from_sections(
                         kind=kind or "",
                         is_owner=is_owner,
                         chain_index=idx,
+                        role="owner" if is_owner else "",
                     )
                 )
                 idx += 1
@@ -276,8 +432,13 @@ def resolve_staff_contact_fallback_v0(
             reason="no_prior_sent",
         )
 
-    owner_explicit = classify_explicit_owner_request(customer_msg)
-    chain = extract_staff_chain_from_sections(sections or ())
+    role_graph = extract_staff_role_aliases_from_sections(sections or ())
+    owner_aliases = role_graph.aliases_for("owner")
+    explicit_owner = classify_explicit_role_request(customer_msg, owner_aliases)
+    chain = extract_staff_chain_from_sections(
+        sections or (),
+        role_graph=role_graph,
+    )
     showroom_chain = [e for e in chain if not e.is_owner]
 
     log_staff_contact_fallback_policy(
@@ -286,10 +447,11 @@ def resolve_staff_contact_fallback_v0(
         chain_len=len(chain),
         showroom_chain_len=len(showroom_chain),
         contacts_sent_count=len(contacts_sent),
-        owner_explicit=owner_explicit,
+        owner_explicit=explicit_owner,
+        owner_alias_count=len(owner_aliases),
     )
 
-    if owner_explicit:
+    if explicit_owner:
         for entry in chain:
             if not entry.is_owner:
                 continue
@@ -301,19 +463,21 @@ def resolve_staff_contact_fallback_v0(
                 selected=entry.lookup_name,
                 phone=entry.phone,
                 section_id=entry.section_id,
-                reason="explicit_owner_request",
+                reason="explicit_role_request",
                 chain_index=entry.chain_index,
                 last_sent_index=_last_sent_chain_index(chain, contacts_sent),
+                explicit_role="owner",
             )
             return StaffContactFallbackVerdict(
                 enabled=True,
                 trigger=trigger,
-                reason="explicit_owner_request",
+                reason="explicit_role_request",
                 next_lookup_name=entry.lookup_name,
                 next_phone=entry.phone,
                 section_id=entry.section_id,
                 chain_len=len(chain),
                 last_sent_index=_last_sent_chain_index(chain, contacts_sent),
+                explicit_role="owner",
             )
         log_staff_contact_fallback_resolve(
             tenant_id=tenant_id,
@@ -321,16 +485,18 @@ def resolve_staff_contact_fallback_v0(
             selected="",
             phone="",
             section_id=None,
-            reason="owner_unavailable",
+            reason="role_unavailable",
             chain_index=-1,
             last_sent_index=_last_sent_chain_index(chain, contacts_sent),
+            explicit_role="owner",
         )
         return StaffContactFallbackVerdict(
             enabled=False,
             trigger=trigger,
-            reason="owner_unavailable",
+            reason="role_unavailable",
             chain_len=len(chain),
             last_sent_index=_last_sent_chain_index(chain, contacts_sent),
+            explicit_role="owner",
         )
 
     if not showroom_chain:
@@ -420,12 +586,13 @@ def log_staff_contact_fallback_policy(
     showroom_chain_len: int = 0,
     contacts_sent_count: int = 0,
     owner_explicit: bool = False,
+    owner_alias_count: int = 0,
 ) -> None:
     try:
         logger.info(
             "[STAFF_CONTACT_FALLBACK_POLICY] tenant=%s trigger=%s "
             "enabled=%s chain_len=%d showroom_chain_len=%d "
-            "contacts_sent_count=%d owner_explicit=%s",
+            "contacts_sent_count=%d owner_explicit=%s owner_alias_count=%d",
             tenant_id if tenant_id is not None else "-",
             trigger or "-",
             "true" if contacts_sent_count > 0 and chain_len > 0 else "false",
@@ -433,6 +600,7 @@ def log_staff_contact_fallback_policy(
             showroom_chain_len,
             contacts_sent_count,
             "true" if owner_explicit else "false",
+            owner_alias_count,
         )
     except Exception:  # noqa: BLE001
         pass
@@ -448,12 +616,13 @@ def log_staff_contact_fallback_resolve(
     reason: str = "",
     chain_index: int = -1,
     last_sent_index: int = -1,
+    explicit_role: str = "",
 ) -> None:
     try:
         logger.info(
             "[STAFF_CONTACT_FALLBACK_RESOLVE] tenant=%s trigger=%s "
             "reason=%r selected=%r phone_len=%d section_id=%s "
-            "chain_index=%d last_sent_index=%d",
+            "chain_index=%d last_sent_index=%d explicit_role=%s",
             tenant_id if tenant_id is not None else "-",
             trigger or "-",
             (reason or "")[:64],
@@ -462,6 +631,7 @@ def log_staff_contact_fallback_resolve(
             section_id if section_id is not None else "-",
             chain_index,
             last_sent_index,
+            explicit_role or "-",
         )
     except Exception:  # noqa: BLE001
         pass
@@ -470,8 +640,10 @@ def log_staff_contact_fallback_resolve(
 __all__ = [
     "StaffChainEntry",
     "StaffContactFallbackVerdict",
-    "classify_explicit_owner_request",
+    "StaffRoleAliasGraph",
+    "classify_explicit_role_request",
     "extract_staff_chain_from_sections",
+    "extract_staff_role_aliases_from_sections",
     "load_staff_chain_sections",
     "log_staff_contact_fallback_policy",
     "log_staff_contact_fallback_resolve",

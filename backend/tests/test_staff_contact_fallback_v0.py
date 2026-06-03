@@ -16,7 +16,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from modules.ai.brain.commerce.staff_contact_fallback_v0 import (
-    classify_explicit_owner_request,
+    classify_explicit_role_request,
+    extract_staff_role_aliases_from_sections,
     extract_staff_chain_from_sections,
     resolve_staff_contact_fallback_v0,
 )
@@ -30,11 +31,21 @@ class _Section:
         kind: str,
         body: str,
         title: str = "",
+        metadata: Optional[dict] = None,
+        metadata_json: Optional[dict] = None,
     ) -> None:
         self.id = id
         self.kind = kind
         self.body = body
         self.title = title
+        self.metadata = metadata
+        self.metadata_json = metadata_json
+
+
+def _owner_aliases_body(*aliases: str) -> str:
+    lines = ["role: owner", "aliases:"]
+    lines.extend(f"- {alias}" for alias in aliases)
+    return "\n".join(lines)
 
 
 def _chain_sections() -> List[_Section]:
@@ -62,6 +73,35 @@ def test_chain_order_from_kb():
     assert "أمين" in chain[0].lookup_name or "بائع" in chain[0].lookup_name
     assert chain[1].lookup_name == "هشام"
     assert chain[2].lookup_name == "هيثم"
+
+
+def test_owner_aliases_read_from_kb_metadata():
+    sections = [
+        _Section(
+            id=1,
+            kind="escalation_rules",
+            body="",
+            metadata_json={
+                "role": "owner",
+                "aliases": ["المالك", "صاحب المحل", "أبو هشام"],
+            },
+        ),
+    ]
+    graph = extract_staff_role_aliases_from_sections(sections)
+    assert graph.aliases_for("owner") == ("المالك", "صاحب المحل", "أبو هشام")
+
+
+def test_owner_aliases_read_from_kb_body_block():
+    sections = [
+        _Section(
+            id=1,
+            kind="custom",
+            body=_owner_aliases_body("صاحب العسل", "النحال"),
+        ),
+    ]
+    graph = extract_staff_role_aliases_from_sections(sections)
+    assert "صاحب العسل" in graph.aliases_for("owner")
+    assert "النحال" in graph.aliases_for("owner")
 
 
 def test_fallback_advances_after_first_sent():
@@ -99,7 +139,11 @@ def test_owner_not_sent_without_explicit_request():
         _Section(
             id=1,
             kind="owner_identity",
-            body="صاحب المتجر: 0555906901",
+            body="contact-one: 0555906901",
+            metadata_json={
+                "role": "owner",
+                "aliases": ["المالك", "صاحب المحل"],
+            },
         ),
         _Section(
             id=2,
@@ -120,20 +164,26 @@ def test_owner_not_sent_without_explicit_request():
     assert "0555906901" not in verdict.next_phone
 
 
-def test_owner_sent_when_explicitly_requested():
+def test_owner_sent_when_kb_alias_matches():
     sections = [
         _Section(
             id=1,
-            kind="owner_identity",
-            body="صاحب المحل: 0555906901",
+            kind="escalation_rules",
+            body=_owner_aliases_body("المالك", "صاحب المحل"),
         ),
         _Section(
             id=2,
+            kind="owner_identity",
+            body="contact-one: 0555906901",
+        ),
+        _Section(
+            id=3,
             kind="custom",
             body="أمين بائع المعرض: 0541690226",
         ),
     ]
-    assert classify_explicit_owner_request("ابي رقم المالك") is True
+    aliases = extract_staff_role_aliases_from_sections(sections).aliases_for("owner")
+    assert classify_explicit_role_request("ابي رقم المالك", aliases) is True
     verdict = resolve_staff_contact_fallback_v0(
         sections,
         contacts_sent=[{"name": "أمين", "phone": "966541690226", "turn": 1}],
@@ -142,7 +192,102 @@ def test_owner_sent_when_explicitly_requested():
         tenant_id=42,
     )
     assert verdict.enabled is True
+    assert verdict.reason == "explicit_role_request"
     assert "0555906901" in verdict.next_phone
+
+
+def test_abu_hasham_sends_owner_only_when_kb_maps_alias():
+    owner_alias = "أبو هشام"
+    sections_with_alias = [
+        _Section(
+            id=1,
+            kind="escalation_rules",
+            body=_owner_aliases_body(owner_alias),
+        ),
+        _Section(
+            id=2,
+            kind="owner_identity",
+            body="contact-one: 0555906901",
+        ),
+        _Section(
+            id=3,
+            kind="custom",
+            body="staff-a: 0541690226\nstaff-b: 0501112233",
+        ),
+    ]
+    with_alias = resolve_staff_contact_fallback_v0(
+        sections_with_alias,
+        contacts_sent=[{"name": "staff-a", "phone": "966541690226", "turn": 1}],
+        customer_msg=f"ابي {owner_alias}",
+        trigger="employee_not_responding",
+        tenant_id=42,
+    )
+    assert with_alias.enabled is True
+    assert "0555906901" in with_alias.next_phone
+
+    sections_without_alias = [
+        _Section(
+            id=2,
+            kind="owner_identity",
+            body="contact-one: 0555906901",
+        ),
+        _Section(
+            id=3,
+            kind="custom",
+            body="staff-a: 0541690226\nstaff-b: 0501112233",
+        ),
+    ]
+    without_alias = resolve_staff_contact_fallback_v0(
+        sections_without_alias,
+        contacts_sent=[{"name": "staff-a", "phone": "966541690226", "turn": 1}],
+        customer_msg=f"ابي {owner_alias}",
+        trigger="employee_not_responding",
+        tenant_id=42,
+    )
+    assert without_alias.enabled is True
+    assert without_alias.next_lookup_name == "staff-b"
+    assert "0555906901" not in without_alias.next_phone
+
+
+def test_sahib_alasal_only_when_defined_in_kb_alias_list():
+    alias = "صاحب العسل"
+    sections = [
+        _Section(
+            id=1,
+            kind="custom",
+            body=_owner_aliases_body(alias),
+        ),
+        _Section(
+            id=2,
+            kind="owner_identity",
+            body="contact-one: 0555906901",
+        ),
+        _Section(
+            id=3,
+            kind="custom",
+            body="staff-a: 0541690226\nstaff-b: 0501112233",
+        ),
+    ]
+    matched = resolve_staff_contact_fallback_v0(
+        sections,
+        contacts_sent=[{"name": "staff-a", "phone": "966541690226", "turn": 1}],
+        customer_msg=f"ابي {alias}",
+        trigger="employee_not_responding",
+        tenant_id=42,
+    )
+    assert matched.enabled is True
+    assert "0555906901" in matched.next_phone
+
+    unmatched = resolve_staff_contact_fallback_v0(
+        _chain_sections(),
+        contacts_sent=[{"name": "أمين", "phone": "966541690226", "turn": 1}],
+        customer_msg=f"ابي {alias}",
+        trigger="employee_not_responding",
+        tenant_id=42,
+    )
+    assert unmatched.enabled is True
+    assert unmatched.next_lookup_name == "هشام"
+    assert "0555906901" not in unmatched.next_phone
 
 
 class _StubKBSection:
@@ -155,6 +300,7 @@ class _StubKBSection:
         title: str = "",
         is_active: bool = True,
         priority: int = 100,
+        metadata_json: Optional[dict] = None,
     ) -> None:
         self.id = section_id
         self.kind = kind
@@ -163,6 +309,7 @@ class _StubKBSection:
         self.is_active = is_active
         self.priority = priority
         self.updated_at = section_id
+        self.metadata_json = metadata_json
 
 
 class _KBQuery:
