@@ -14,10 +14,14 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
 from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: E402
     FUTURE_TRANSFER_REPLY_AR,
     REJECTED_EVIDENCE_REPLY_AR,
+    TEXT_CLAIM_NO_EVIDENCE_REPLY_AR,
     apply_payment_reply_guard,
     detect_future_transfer_intent,
     payment_evidence_allows_receipt_ack,
     reply_contains_receipt_confirmation,
+)
+from modules.ai.brain.postprocess.payment_evidence import (  # noqa: E402
+    evaluate_payment_evidence,
 )
 
 
@@ -132,7 +136,7 @@ class TestStaleStateOverride:
         assert result.replaced is False
         assert result.action == "allowed"
 
-    def test_stale_receipt_flag_alone_still_allows_non_future_followup(self) -> None:
+    def test_stale_receipt_flag_alone_blocks_receipt_wording(self) -> None:
         reply = "تم استلام الإيصال وسيتم تجهيز الطلب"
         result = apply_payment_reply_guard(
             reply=reply,
@@ -140,26 +144,66 @@ class TestStaleStateOverride:
             inbound_text="شكراً لك",
             payment_receipt_received=True,
         )
-        assert result.replaced is False
-        assert result.reply == reply
+        assert result.replaced is True
+        assert result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
+        assert result.reason == "no_structured_payment_evidence"
+
+
+class TestPaymentSlice1TextClaims:
+    def test_blocks_receipt_wording_on_text_only_payment_claim(self) -> None:
+        llm_reply = (
+            "الله يبارك خير 🙏 وصل الإيصال، "
+            "وسيتم متابعة الطلب وتجهيزه بإذن الله."
+        )
+        result = apply_payment_reply_guard(
+            reply=llm_reply,
+            inbound_text="تم الدفع",
+            inbound_metadata={},
+            payment_receipt_received=False,
+            tenant_id=33,
+            conversation_id=9001,
+        )
+        assert result.replaced is True
+        assert result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
+        assert "وصل الإيصال" not in result.reply
+        assert result.reason == "customer_text_claim_without_evidence"
+
+    @pytest.mark.parametrize(
+        "inbound",
+        ["حولت", "دفعت الآن", "ارسلت المبلغ"],
+    )
+    def test_customer_transfer_claims_are_not_evidence(self, inbound: str) -> None:
+        evidence = evaluate_payment_evidence(
+            inbound_metadata={},
+            inbound_text=inbound,
+        )
+        assert evidence.evidence_ok is False
+
+        result = apply_payment_reply_guard(
+            reply="تم تأكيد الدفع",
+            inbound_text=inbound,
+            inbound_metadata={},
+        )
+        assert result.replaced is True
+        assert result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
 
 
 class TestConfirmedFlowUnchanged:
-    def test_payment_receipt_received_allows_wording_without_future_intent(self) -> None:
+    def test_stale_receipt_flag_does_not_allow_wording(self) -> None:
         reply = "تم استلام الإيصال وسيتم تجهيز الطلب"
         assert payment_evidence_allows_receipt_ack(
             {"payment_evidence_status": "not_payment"},
             payment_receipt_received=True,
             inbound_text="شكراً",
-        )
+        ) is False
         result = apply_payment_reply_guard(
             reply=reply,
             inbound_metadata={"payment_evidence_status": "not_payment"},
             inbound_text="شكراً",
             payment_receipt_received=True,
         )
-        assert result.replaced is False
-        assert result.reply == reply
+        assert result.replaced is True
+        assert result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
 
     def test_deterministic_path_skips_guard(self) -> None:
         reply = "وصلنا إيصال التحويل"

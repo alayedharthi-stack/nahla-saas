@@ -1,9 +1,9 @@
 """
 modules/ai/brain/postprocess/payment_reply_guard.py
 ───────────────────────────────────────────────────
-Block false receipt/payment confirmation wording when classifiers
-rejected the inbound evidence or the customer only promised a future
-transfer — not a completed one.
+Block false receipt/payment confirmation wording when structured
+payment evidence is missing, classifiers rejected the inbound, or the
+customer only promised a future transfer — not a completed one.
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+from modules.ai.brain.postprocess.payment_evidence import evaluate_payment_evidence
 
 logger = logging.getLogger("nahla.brain.postprocess.payment_reply_guard")
 
@@ -25,18 +27,23 @@ FUTURE_TRANSFER_REPLY_AR = (
     "تمام، بعد التحويل أرسل الإيصال هنا عشان نراجعه ونكمل الطلب 🌷"
 )
 
+TEXT_CLAIM_NO_EVIDENCE_REPLY_AR = (
+    "إذا أرسلت الإيصال أو صورة التحويل أراجعها لك مباشرة 🌷"
+)
+
 _RECEIPT_CONFIRMATION_REPLY_MARKERS = (
-    "وصل الايصال",
-    "وصلنا ايصال التحويل",
-    "تم استلام الايصال",
+    "وصل الإيصال",
+    "وصلنا إيصال التحويل",
+    "تم استلام الإيصال",
     "تم استلام التحويل",
     "تم تأكيد الدفع",
+    "تم استلام المبلغ",
+    "تم التحقق من الحوالة",
     "سيتم تجهيز الطلب",
     "تم استلام الطلب",
-    "وصلنا ايصال",
-    "استلمنا الايصال",
+    "وصلنا إيصال",
+    "استلمنا الإيصال",
     "تم التحقق من التحويل",
-    "وسيتم متابعه الطلب",
     "وسيتم متابعة الطلب",
     "وتجهيزه",
 )
@@ -99,7 +106,8 @@ def reply_contains_receipt_confirmation(reply: Optional[str]) -> bool:
     norm = _norm(reply)
     if not norm:
         return False
-    return any(marker in norm for marker in _RECEIPT_CONFIRMATION_REPLY_MARKERS)
+    markers = (_norm(marker) for marker in _RECEIPT_CONFIRMATION_REPLY_MARKERS)
+    return any(marker in norm for marker in markers)
 
 
 def detect_future_transfer_intent(text: Optional[str]) -> bool:
@@ -162,32 +170,36 @@ def inbound_metadata_blocks_receipt_confirmation(
     return False, ""
 
 
+def rejected_media_requires_soft_rejection(
+    metadata: Optional[Dict[str, Any]],
+) -> tuple[bool, str]:
+    """Use the rejected-document reply only for current-turn media rejection."""
+    blocked, reason = inbound_metadata_blocks_receipt_confirmation(metadata)
+    if not blocked:
+        return False, ""
+    md = metadata or {}
+    has_media = bool(str(md.get("pdf_kind") or md.get("image_kind") or "").strip())
+    if has_media:
+        return True, reason
+    if str(md.get("payment_evidence_reason") or "").strip() == "semantic_rejected_document":
+        return True, reason
+    return False, ""
+
+
 def payment_evidence_allows_receipt_ack(
     metadata: Optional[Dict[str, Any]],
     *,
     payment_receipt_received: bool = False,
     inbound_text: str = "",
+    chosen_path: str = "",
 ) -> bool:
-    """Allow receipt-confirmation wording only on confirmed current evidence.
-
-    Stale ``payment_receipt_received`` from a prior turn must NOT bypass
-    the guard when the *current* inbound is a future-transfer promise.
-    """
-    if detect_future_transfer_intent(inbound_text):
-        md = metadata or {}
-        pe = str(md.get("payment_evidence_status") or "").strip()
-        if pe == "confirmed":
-            return True
-        kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip()
-        return kind == "payment_receipt" and pe == "confirmed"
-    if payment_receipt_received:
-        return True
-    md = metadata or {}
-    if str(md.get("payment_evidence_status") or "").strip() == "confirmed":
-        return True
-    kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip()
-    pe = str(md.get("payment_evidence_status") or "").strip()
-    return kind == "payment_receipt" and pe == "confirmed"
+    """Allow receipt-confirmation wording only on confirmed structured evidence."""
+    return evaluate_payment_evidence(
+        inbound_metadata=metadata,
+        chosen_path=chosen_path,
+        inbound_text=inbound_text,
+        payment_receipt_received=payment_receipt_received,
+    ).evidence_ok
 
 
 @dataclass(frozen=True)
@@ -207,17 +219,19 @@ def log_payment_reply_guard(
     image_kind: str,
     reason: str,
     action: str,
+    evidence_source: str = "",
 ) -> None:
     try:
         logger.info(
             "[PAYMENT_REPLY_GUARD] tenant_id=%s conversation_id=%s "
             "payment_evidence_status=%s pdf_kind=%s image_kind=%s "
-            "reason=%s action=%s",
+            "evidence_source=%s reason=%s action=%s",
             tenant_id,
             conversation_id,
             payment_evidence_status or "-",
             pdf_kind or "-",
             image_kind or "-",
+            evidence_source or "-",
             reason or "-",
             action,
         )
@@ -241,31 +255,66 @@ def apply_payment_reply_guard(
         pe = str(md.get("payment_evidence_status") or "").strip()
         pdf_kind = str(md.get("pdf_kind") or "").strip()
         image_kind = str(md.get("image_kind") or "").strip()
+        path = str(chosen_path or "").strip()
 
         if not original.strip():
             return PaymentReplyGuardResult(reply=original, action="allowed")
-        if str(chosen_path or "").strip() in _DETERMINISTIC_ALLOW_PATHS:
+        if path in _DETERMINISTIC_ALLOW_PATHS:
             log_payment_reply_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 payment_evidence_status=pe,
                 pdf_kind=pdf_kind,
                 image_kind=image_kind,
+                evidence_source="deterministic_path",
                 reason="deterministic_path",
                 action="allowed",
             )
             return PaymentReplyGuardResult(reply=original, action="allowed")
 
-        future_intent = detect_future_transfer_intent(inbound_text)
         has_receipt_wording = reply_contains_receipt_confirmation(original)
+        future_intent = detect_future_transfer_intent(inbound_text)
+        evidence = evaluate_payment_evidence(
+            inbound_metadata=md,
+            chosen_path=path,
+            inbound_text=inbound_text,
+            payment_receipt_received=payment_receipt_received,
+        )
 
-        if future_intent and has_receipt_wording:
+        if not has_receipt_wording:
             log_payment_reply_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 payment_evidence_status=pe,
                 pdf_kind=pdf_kind,
                 image_kind=image_kind,
+                evidence_source=evidence.evidence_source,
+                reason="no_receipt_wording_in_reply",
+                action="allowed",
+            )
+            return PaymentReplyGuardResult(reply=original, action="allowed")
+
+        if evidence.evidence_ok:
+            log_payment_reply_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                payment_evidence_status=pe,
+                pdf_kind=pdf_kind,
+                image_kind=image_kind,
+                evidence_source=evidence.evidence_source,
+                reason=evidence.reason,
+                action="allowed",
+            )
+            return PaymentReplyGuardResult(reply=original, action="allowed")
+
+        if future_intent:
+            log_payment_reply_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                payment_evidence_status=pe,
+                pdf_kind=pdf_kind,
+                image_kind=image_kind,
+                evidence_source=evidence.evidence_source,
                 reason="future_transfer_intent",
                 action="blocked_receipt_confirmation",
             )
@@ -276,65 +325,40 @@ def apply_payment_reply_guard(
                 reason="future_transfer_intent",
             )
 
-        if payment_evidence_allows_receipt_ack(
-            md,
-            payment_receipt_received=payment_receipt_received,
-            inbound_text=inbound_text,
-        ):
+        rejected, reject_reason = rejected_media_requires_soft_rejection(md)
+        if rejected:
             log_payment_reply_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 payment_evidence_status=pe,
                 pdf_kind=pdf_kind,
                 image_kind=image_kind,
-                reason="confirmed_evidence",
-                action="allowed",
+                evidence_source=evidence.evidence_source,
+                reason=reject_reason,
+                action="blocked_receipt_confirmation",
             )
-            return PaymentReplyGuardResult(reply=original, action="allowed")
-
-        if not has_receipt_wording:
-            log_payment_reply_guard(
-                tenant_id=tenant_id,
-                conversation_id=conversation_id,
-                payment_evidence_status=pe,
-                pdf_kind=pdf_kind,
-                image_kind=image_kind,
-                reason="no_receipt_wording_in_reply",
-                action="allowed",
+            return PaymentReplyGuardResult(
+                reply=REJECTED_EVIDENCE_REPLY_AR,
+                action="blocked_receipt_confirmation",
+                replaced=True,
+                reason=reject_reason,
             )
-            return PaymentReplyGuardResult(reply=original, action="allowed")
 
-        blocked, block_reason = inbound_metadata_blocks_receipt_confirmation(md)
-        if not blocked and not future_intent:
-            log_payment_reply_guard(
-                tenant_id=tenant_id,
-                conversation_id=conversation_id,
-                payment_evidence_status=pe,
-                pdf_kind=pdf_kind,
-                image_kind=image_kind,
-                reason="no_block_signal",
-                action="allowed",
-            )
-            return PaymentReplyGuardResult(reply=original, action="allowed")
-
-        replacement = (
-            REJECTED_EVIDENCE_REPLY_AR if blocked else FUTURE_TRANSFER_REPLY_AR
-        )
-        reason = block_reason if blocked else "future_transfer_intent"
         log_payment_reply_guard(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             payment_evidence_status=pe,
             pdf_kind=pdf_kind,
             image_kind=image_kind,
-            reason=reason,
+            evidence_source=evidence.evidence_source,
+            reason=evidence.reason,
             action="blocked_receipt_confirmation",
         )
         return PaymentReplyGuardResult(
-            reply=replacement,
+            reply=TEXT_CLAIM_NO_EVIDENCE_REPLY_AR,
             action="blocked_receipt_confirmation",
             replaced=True,
-            reason=reason,
+            reason=evidence.reason,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PAYMENT_REPLY_GUARD] guard failed err=%s", exc)
@@ -345,6 +369,7 @@ __all__ = [
     "PaymentReplyGuardResult",
     "REJECTED_EVIDENCE_REPLY_AR",
     "FUTURE_TRANSFER_REPLY_AR",
+    "TEXT_CLAIM_NO_EVIDENCE_REPLY_AR",
     "apply_payment_reply_guard",
     "detect_future_transfer_intent",
     "inbound_metadata_blocks_receipt_confirmation",
