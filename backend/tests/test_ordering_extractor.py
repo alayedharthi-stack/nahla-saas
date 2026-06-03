@@ -68,3 +68,9 @@ def test_merge_message_details_upgrades_empty_to_extracted_name() -> None:
     _merge_message_details(prep, {}, message)
     assert prep.customer_first_name == "جميل"
     assert prep.customer_last_name == "العتيبي"
+
+
+def test_future_transfer_promise_does_not_capture_name() -> None:
+    slots = extract_ordering_slots("بعد شوي احول لك")
+    assert "customer_first_name" not in slots
+    assert "customer_name" not in slots

@@ -134,6 +134,9 @@ _ARABIC_NON_NAME_TOKENS = {
     "جاهز", "جاهزه", "حاضر", "حاضره",
     "بانتظار", "بانتظارك", "منتظر", "منتظره", "منتظرك",
     "اقرب", "قريب", "بعيد",
+    # Temporal / payment-promise tokens — never personal names.
+    "بعد", "شوي", "قليل", "احول", "بحول", "حول", "ارسل", "ارسله",
+    "بدفع", "دفع", "تحويل", "حواله", "حوالة",
 }
 
 _ARABIC_LETTERS_RE = re.compile(r"^[\u0621-\u064A][\u0621-\u064A\s]*$")
@@ -179,16 +182,25 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
 
     slots: Dict[str, Any] = {}
 
+    _skip_name = False
+    try:
+        from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
+            detect_future_transfer_intent,
+        )
+        _skip_name = detect_future_transfer_intent(text)
+    except Exception:  # noqa: BLE001
+        _skip_name = False
+
     # ── Layer 1: Labeled field parsing ────────────────────────────────
-    # Handles: "الاسم تركي الحارثي - المدينة الذهب - العنوان الوطني TAPA7401"
-    labeled_name = _extract_labeled_name(text)
-    if labeled_name:
-        first, last = _split_name(labeled_name)
-        if first:
-            slots["customer_first_name"] = first
-        if last:
-            slots["customer_last_name"] = last
-        slots["customer_name"] = labeled_name
+    if not _skip_name:
+        labeled_name = _extract_labeled_name(text)
+        if labeled_name:
+            first, last = _split_name(labeled_name)
+            if first:
+                slots["customer_first_name"] = first
+            if last:
+                slots["customer_last_name"] = last
+            slots["customer_name"] = labeled_name
 
     labeled_city = _extract_labeled_city(text)
     if labeled_city:
@@ -212,14 +224,16 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
             slots["city"] = city
 
     # ── Layer 4: Heuristic name detection (if not already found) ─────
-    if not slots.get("customer_first_name"):
+    if not _skip_name and not slots.get("customer_first_name"):
         name_first, name_last = _detect_name(text, slots)
         if name_first or name_last:
             if name_first:
                 slots["customer_first_name"] = name_first
             if name_last:
                 slots["customer_last_name"] = name_last
-            slots["customer_name"] = " ".join(p for p in (name_first, name_last) if p).strip()
+            slots["customer_name"] = " ".join(
+                p for p in (name_first, name_last) if p
+            ).strip()
 
     if slots:
         if slots.get("customer_first_name") or slots.get("customer_name"):

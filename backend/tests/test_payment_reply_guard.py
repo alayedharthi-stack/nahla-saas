@@ -79,6 +79,7 @@ class TestFutureTransferIntent:
             "بحول لك الآن",
             "أحول وأرسل لك الإيصال",
             "أنا بدفع الحين",
+            "بعد شوي احول لك",
         ],
     )
     def test_future_phrases_detected_not_past_claim(self, phrase: str) -> None:
@@ -92,16 +93,69 @@ class TestFutureTransferIntent:
         assert result.reply == FUTURE_TRANSFER_REPLY_AR
 
 
+class TestStaleStateOverride:
+    def test_future_intent_blocks_despite_payment_receipt_received(self) -> None:
+        llm_reply = "وصل الإيصال، وسيتم متابعة الطلب وتجهيزه بإذن الله"
+        result = apply_payment_reply_guard(
+            reply=llm_reply,
+            inbound_text="بعد شوي احول لك",
+            inbound_metadata={},
+            payment_receipt_received=True,
+        )
+        assert result.replaced is True
+        assert result.reason == "future_transfer_intent"
+        assert result.reply == FUTURE_TRANSFER_REPLY_AR
+
+    def test_future_intent_blocks_while_awaiting_receipt(self) -> None:
+        llm_reply = "وصلنا إيصال التحويل"
+        result = apply_payment_reply_guard(
+            reply=llm_reply,
+            inbound_text="انا احول لك الان",
+            inbound_metadata={"payment_evidence_status": "not_payment"},
+            payment_receipt_received=False,
+        )
+        assert result.replaced is True
+        assert result.reply == FUTURE_TRANSFER_REPLY_AR
+
+    def test_confirmed_media_still_allowed_with_stale_state(self) -> None:
+        llm_reply = "وصلنا إيصال التحويل، شكراً لك"
+        metadata = {
+            "pdf_kind": "payment_receipt",
+            "payment_evidence_status": "confirmed",
+        }
+        result = apply_payment_reply_guard(
+            reply=llm_reply,
+            inbound_text="[document receipt]",
+            inbound_metadata=metadata,
+            payment_receipt_received=True,
+        )
+        assert result.replaced is False
+        assert result.action == "allowed"
+
+    def test_stale_receipt_flag_alone_still_allows_non_future_followup(self) -> None:
+        reply = "تم استلام الإيصال وسيتم تجهيز الطلب"
+        result = apply_payment_reply_guard(
+            reply=reply,
+            inbound_metadata={"payment_evidence_status": "not_payment"},
+            inbound_text="شكراً لك",
+            payment_receipt_received=True,
+        )
+        assert result.replaced is False
+        assert result.reply == reply
+
+
 class TestConfirmedFlowUnchanged:
-    def test_payment_receipt_received_allows_wording(self) -> None:
+    def test_payment_receipt_received_allows_wording_without_future_intent(self) -> None:
         reply = "تم استلام الإيصال وسيتم تجهيز الطلب"
         assert payment_evidence_allows_receipt_ack(
             {"payment_evidence_status": "not_payment"},
             payment_receipt_received=True,
+            inbound_text="شكراً",
         )
         result = apply_payment_reply_guard(
             reply=reply,
             inbound_metadata={"payment_evidence_status": "not_payment"},
+            inbound_text="شكراً",
             payment_receipt_received=True,
         )
         assert result.replaced is False

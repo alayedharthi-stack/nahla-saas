@@ -104,6 +104,14 @@ class DefaultIntentClassifier:
             if heuristic_slots:
                 slots = {**heuristic_slots, **(slots or {})}
 
+        try:
+            from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
+                strip_customer_name_slots_when_future_transfer,
+            )
+            slots = strip_customer_name_slots_when_future_transfer(message, slots)
+        except Exception:  # noqa: BLE001
+            pass
+
         if not slots:
             # LLM unavailable or empty — fall back to rules or general
             if rule_intent:

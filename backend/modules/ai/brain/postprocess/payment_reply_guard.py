@@ -22,7 +22,7 @@ REJECTED_EVIDENCE_REPLY_AR = (
 )
 
 FUTURE_TRANSFER_REPLY_AR = (
-    "تمام، بعد التحويل أرسل الإيصال هنا عشان نراجعه ونكمل الطلب."
+    "تمام، بعد التحويل أرسل الإيصال هنا عشان نراجعه ونكمل الطلب 🌷"
 )
 
 _RECEIPT_CONFIRMATION_REPLY_MARKERS = (
@@ -55,7 +55,16 @@ _FUTURE_TRANSFER_PHRASES = (
     "بدفع الحين",
     "بسرع وقت ارسل",
     "في اسرع وقت ارسل",
+    "بعد شوي احول",
+    "بعد شوي بحول",
+    "بعد قليل احول",
 )
+
+_NAME_SLOT_KEYS = frozenset({
+    "customer_name",
+    "customer_first_name",
+    "customer_last_name",
+})
 
 _PAST_TRANSFER_MARKERS = (
     "تم التحويل",
@@ -111,11 +120,27 @@ def detect_future_transfer_intent(text: Optional[str]) -> bool:
     for phrase in _FUTURE_TRANSFER_PHRASES:
         if phrase in norm:
             return True
+    if "بعد" in norm and ("شوي" in norm or "قليل" in norm):
+        if "احول" in norm or "بحول" in norm or "حول" in norm:
+            return True
     if ("احول" in norm or "بحول" in norm) and (
-        "الان" in norm or "الحين" in norm or "ارسل" in norm
+        "الان" in norm or "الحين" in norm or "ارسل" in norm or "لك" in norm
     ):
         return True
     return False
+
+
+def strip_customer_name_slots_when_future_transfer(
+    message: str,
+    slots: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Drop name slots when the inbound is a future-transfer promise."""
+    out = dict(slots or {})
+    if not detect_future_transfer_intent(message):
+        return out
+    for key in _NAME_SLOT_KEYS:
+        out.pop(key, None)
+    return out
 
 
 def inbound_metadata_blocks_receipt_confirmation(
@@ -141,7 +166,20 @@ def payment_evidence_allows_receipt_ack(
     metadata: Optional[Dict[str, Any]],
     *,
     payment_receipt_received: bool = False,
+    inbound_text: str = "",
 ) -> bool:
+    """Allow receipt-confirmation wording only on confirmed current evidence.
+
+    Stale ``payment_receipt_received`` from a prior turn must NOT bypass
+    the guard when the *current* inbound is a future-transfer promise.
+    """
+    if detect_future_transfer_intent(inbound_text):
+        md = metadata or {}
+        pe = str(md.get("payment_evidence_status") or "").strip()
+        if pe == "confirmed":
+            return True
+        kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip()
+        return kind == "payment_receipt" and pe == "confirmed"
     if payment_receipt_received:
         return True
     md = metadata or {}
@@ -218,8 +256,30 @@ def apply_payment_reply_guard(
             )
             return PaymentReplyGuardResult(reply=original, action="allowed")
 
+        future_intent = detect_future_transfer_intent(inbound_text)
+        has_receipt_wording = reply_contains_receipt_confirmation(original)
+
+        if future_intent and has_receipt_wording:
+            log_payment_reply_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                payment_evidence_status=pe,
+                pdf_kind=pdf_kind,
+                image_kind=image_kind,
+                reason="future_transfer_intent",
+                action="blocked_receipt_confirmation",
+            )
+            return PaymentReplyGuardResult(
+                reply=FUTURE_TRANSFER_REPLY_AR,
+                action="blocked_receipt_confirmation",
+                replaced=True,
+                reason="future_transfer_intent",
+            )
+
         if payment_evidence_allows_receipt_ack(
-            md, payment_receipt_received=payment_receipt_received,
+            md,
+            payment_receipt_received=payment_receipt_received,
+            inbound_text=inbound_text,
         ):
             log_payment_reply_guard(
                 tenant_id=tenant_id,
@@ -232,7 +292,7 @@ def apply_payment_reply_guard(
             )
             return PaymentReplyGuardResult(reply=original, action="allowed")
 
-        if not reply_contains_receipt_confirmation(original):
+        if not has_receipt_wording:
             log_payment_reply_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
@@ -245,7 +305,6 @@ def apply_payment_reply_guard(
             return PaymentReplyGuardResult(reply=original, action="allowed")
 
         blocked, block_reason = inbound_metadata_blocks_receipt_confirmation(md)
-        future_intent = detect_future_transfer_intent(inbound_text)
         if not blocked and not future_intent:
             log_payment_reply_guard(
                 tenant_id=tenant_id,
@@ -292,4 +351,5 @@ __all__ = [
     "log_payment_reply_guard",
     "payment_evidence_allows_receipt_ack",
     "reply_contains_receipt_confirmation",
+    "strip_customer_name_slots_when_future_transfer",
 ]
