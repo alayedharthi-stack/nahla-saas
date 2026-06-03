@@ -21,11 +21,13 @@ import {
   resolveEmbeddedLang,
 } from '../i18n/embeddedLocale'
 import {
-  EMBED_THEME_STORAGE_KEY,
-  readStoredEmbedTheme,
+  readTrustedStoredEmbedTheme,
+  readSallaReferrerTheme,
   readStoredUserResolvedTheme,
   readSystemTheme,
   resolveEmbeddedTheme,
+  persistEmbeddedThemeWithSource,
+  logEmbeddedThemeResolved,
 } from '../i18n/embeddedTheme'
 
 type ThemeMode = 'light' | 'dark' | 'system'
@@ -135,20 +137,20 @@ export function bootstrapPreferences(): {
   if (urlTheme) {
     themeSource   = 'url'
     resolvedTheme = urlTheme
-    try { localStorage.setItem(THEME_KEY, urlTheme) } catch { /* ignore */ }
-    try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, urlTheme) } catch { /* ignore */ }
+    persistEmbeddedThemeWithSource(urlTheme, 'url')
   } else if (inEmbed) {
     const { theme, source } = resolveEmbeddedTheme({
-      urlTheme:         urlTheme,
-      embedStored:      null,
-      userResolved:     null,
-      systemTheme:      null,
-      inSallaEmbedded:  true,
+      urlTheme:          null,
+      embedStored:       readTrustedStoredEmbedTheme(),
+      referrerTheme:     readSallaReferrerTheme(),
+      userResolved:      null,
+      systemTheme:       null,
+      inSallaEmbedded:   true,
     })
     resolvedTheme = theme
-    themeSource   = source === 'stored' ? 'stored' : 'embed'
-    try { localStorage.setItem(THEME_KEY, theme) } catch { /* ignore */ }
-    try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, theme) } catch { /* ignore */ }
+    themeSource   = source === 'stored' ? 'stored' : source === 'salla' ? 'embed' : 'embed'
+    logEmbeddedThemeResolved(theme, source)
+    persistEmbeddedThemeWithSource(theme, source)
   } else {
     const storedMode = readStoredTheme()
     resolvedTheme    = resolveTheme(storedMode)

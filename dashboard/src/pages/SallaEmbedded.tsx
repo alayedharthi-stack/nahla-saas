@@ -22,7 +22,11 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
-import { buildEmbeddedEntryQuery } from '../i18n/embeddedTheme'
+import {
+  buildEmbeddedEntryQuery,
+  extractThemeFromSdkState,
+  notifySallaHostTheme,
+} from '../i18n/embeddedTheme'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 import {
   describeLoginFailure,
@@ -121,7 +125,15 @@ function initSdkHandshake() {
     return
   }
   sdk.init({ debug: false })
-    .then(() => { sdk.ready(); signalReady() })
+    .then((state: unknown) => {
+      const hostTheme = extractThemeFromSdkState(state)
+      if (hostTheme) {
+        console.info('[SallaEmbedded] SDK init layout theme=%s', hostTheme)
+        notifySallaHostTheme(hostTheme)
+      }
+      sdk.ready()
+      signalReady()
+    })
     .catch((err: unknown) => {
       console.warn('[SallaEmbedded] sdk.init error:', err)
       signalReady()
