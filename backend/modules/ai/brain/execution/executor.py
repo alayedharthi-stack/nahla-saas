@@ -33,6 +33,7 @@ from ..decision.actions import (
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_VARIANT_PRICING,
     ACTION_WEB_SEARCH,
 )
 
@@ -189,6 +190,23 @@ class _ClarifyHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         question = decision.args.get("question", "ما الذي تبحث عنه بالضبط؟")
         return ActionResult(success=True, data={"question": question, "type": "clarify"})
+
+
+class _VariantPricingHandler:
+    """Deterministic reply — variant, unit, and price stay bound."""
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        args = dict(decision.args or {})
+        return ActionResult(
+            success=True,
+            data={
+                "type": "variant_pricing",
+                "reply_text": str(args.get("reply_text") or "").strip(),
+                "variant_binding": args.get("variant_binding") or {},
+                "price_trace": args.get("price_trace") or {},
+                "variant_trace": args.get("variant_trace") or {},
+                "quantity_trace": args.get("quantity_trace") or {},
+            },
+        )
 
 
 class _NarrowHandler:
@@ -355,6 +373,7 @@ class DefaultActionExecutor:
             ACTION_SOCIAL_REPLY:        _SocialReplyHandler(),
             ACTION_PLATFORM_REPLY:      _PlatformReplyHandler(),
             ACTION_ORDER_CONTEXT_UPDATE: _OrderContextUpdateHandler(),
+            ACTION_VARIANT_PRICING:       _VariantPricingHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

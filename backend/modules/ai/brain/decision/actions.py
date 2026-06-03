@@ -79,6 +79,9 @@ ACTION_PLATFORM_REPLY      = "platform_reply"
 # Customer updates delivery location / address while an order is active.
 ACTION_ORDER_CONTEXT_UPDATE = "order_context_update"
 
+# Deterministic variant-bound price / budget-quantity reply (generic catalog).
+ACTION_VARIANT_PRICING = "variant_pricing"
+
 ALL_ACTIONS = [
     ACTION_GREET,
     ACTION_FAQ_REPLY,
@@ -98,4 +101,5 @@ ALL_ACTIONS = [
     ACTION_SOCIAL_REPLY,
     ACTION_PLATFORM_REPLY,
     ACTION_ORDER_CONTEXT_UPDATE,
+    ACTION_VARIANT_PRICING,
 ]

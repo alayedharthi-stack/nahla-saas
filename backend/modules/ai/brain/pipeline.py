@@ -1016,6 +1016,25 @@ class MerchantBrain:
                     stamp_visual_focus_metadata(new_state, result.data["product"])
             except Exception:  # noqa: BLE001
                 pass
+        _variant_binding = result.data.get("variant_binding")
+        if isinstance(_variant_binding, dict) and _variant_binding.get("price") is not None:
+            new_state.selected_variant = _variant_binding
+            _focus = dict(new_state.current_product_focus or {})
+            if _focus:
+                _focus["price"] = _variant_binding.get("price")
+                _focus["variant_id"] = _variant_binding.get("variant_id")
+                _focus["variant_label"] = _variant_binding.get("variant_label")
+                _focus["unit"] = _variant_binding.get("unit")
+                new_state.current_product_focus = _focus
+            logger.info(
+                "[VARIANT_RESOLUTION_TRACE] tenant=%s state_bound variant_id=%s "
+                "variant_label=%r unit=%s price=%s",
+                tenant_id,
+                _variant_binding.get("variant_id"),
+                _variant_binding.get("variant_label"),
+                (_variant_binding.get("unit") or {}).get("display_label"),
+                _variant_binding.get("price"),
+            )
         if result.data.get("order_prep"):
             new_state.order_prep = OrderPreparationState.from_dict(result.data.get("order_prep"))
             # Sync option-selection state to top-level MerchantConversationState

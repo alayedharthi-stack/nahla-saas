@@ -62,6 +62,7 @@ from ..decision.actions import (
     ACTION_TRACK_ORDER,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
+    ACTION_VARIANT_PRICING,
 )
 from ..execution.faq import (
     TOPIC_IDENTITY,
@@ -535,6 +536,14 @@ class DefaultComposer:
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:
             return T.clarify(question=data.get("question", ""))
+
+        # ── Variant-bound pricing (deterministic) ──────────────────────────
+        if action == ACTION_VARIANT_PRICING:
+            reply = str(data.get("reply_text") or "").strip()
+            if reply:
+                result.data["chosen_path"] = "variant_pricing"
+                return reply
+            return T.clarify(question="أي خيار/حجم تقصد؟")
 
         # ── Narrow choices ─────────────────────────────────────────────────
         if action == ACTION_NARROW:

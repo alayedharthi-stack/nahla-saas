@@ -708,6 +708,17 @@ def try_price_query_decision(
     product_query = _resolved_product_query(ctx, extracted_product_query)
 
     if focus and (not product_query or _is_unit_only_price_message(msg)):
+        try:
+            from .commerce.variant_pricing import try_variant_pricing_decision  # noqa: PLC0415
+
+            _variant_dec = try_variant_pricing_decision(ctx)
+            if _variant_dec is not None:
+                return _variant_dec
+        except Exception as _vp_exc:  # noqa: BLE001
+            logger.debug(
+                "[VARIANT_PRICING] decision hook failed tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _vp_exc,
+            )
         return Decision(
             action=ACTION_LLM_REPLY,
             args={"topic": "price", "product": dict(focus)},
