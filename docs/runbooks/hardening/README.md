@@ -12,7 +12,8 @@ a **plan**, not a script. Nothing here has been executed.
 | 05 | [`05_PGBOUNCER_READINESS.md`](./05_PGBOUNCER_READINESS.md) | Decide YES / DEFER for pgBouncer; deploy plan if YES | drafted |
 | 06 | [`06_BACKUP_AUTOMATION.md`](./06_BACKUP_AUTOMATION.md) | Daily encrypted off-Railway backups | drafted |
 | 07 | [`07_DR_DRILL.md`](./07_DR_DRILL.md) | Quarterly DR drill plan | drafted |
-| 08 | [`ANTI_PATTERNS.md`](./ANTI_PATTERNS.md) | Concrete things we've stepped on (build/deploy) — read before any change to git tracking, Dockerfile, or env vars | living doc |
+| 08 | [`08_MERCHANT_PROVISIONING_FILLED_GAP.md`](./08_MERCHANT_PROVISIONING_FILLED_GAP.md) | **`filled_gap` global email collision** — defer until Salla Embedded stable; prevents `users_email_key` on new stores | **deferred** |
+| — | [`ANTI_PATTERNS.md`](./ANTI_PATTERNS.md) | Concrete things we've stepped on (build/deploy) — read before any change to git tracking, Dockerfile, or env vars | living doc |
 
 ## Companion docs (existing, not in this folder)
 
