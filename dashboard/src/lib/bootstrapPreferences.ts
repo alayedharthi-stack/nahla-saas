@@ -6,17 +6,20 @@
  *   • <html dir/lang/class> are correct before the LanguageProvider mounts
  *   • Salla → Nahla preference handoff (?theme=… &lang=…) lands instantly
  *
- * Priority on first load (highest first):
- *   1. URL query params (`?theme=…`, `?lang=…`) — used when the merchant
- *      arrives from /app/salla/launch after the embedded handoff.
- *   2. localStorage (`nahla-theme`, `nahla-lang`) — the merchant's last
- *      explicit choice, set by either Header toggle or earlier propagation.
- *   3. System (`prefers-color-scheme` for theme; AR default for locale).
- *
- * After applying we strip the consumed params from the URL via
- * `history.replaceState` so a manual refresh doesn't keep re-applying them
- * (the values already live in localStorage at that point).
+ * Inside Salla iframe (`embeddedLocale.ts`): Arabic is the safe default;
+ * a stale `nahla-lang=en` from the standalone dashboard must not win.
  */
+
+import {
+  EMBED_LANG_STORAGE_KEY,
+  isSallaEmbeddedIframe,
+  readDocumentLang,
+  isDocumentRtl,
+  readNavigatorLang,
+  readSallaReferrerLang,
+  readStoredEmbedLang,
+  resolveEmbeddedLang,
+} from '../i18n/embeddedLocale'
 
 type ThemeMode = 'light' | 'dark' | 'system'
 type Lang      = 'ar' | 'en'
@@ -91,7 +94,7 @@ function applyLang(lang: Lang): void {
 export function bootstrapPreferences(): {
   theme: 'light' | 'dark'
   lang:  Lang
-  source: { theme: 'url' | 'stored' | 'system'; lang: 'url' | 'stored' | 'default' }
+  source: { theme: 'url' | 'stored' | 'system'; lang: 'url' | 'stored' | 'default' | 'embed' }
 } {
   // ── URL ──
   let urlTheme: 'light' | 'dark' | null = null
@@ -133,19 +136,36 @@ export function bootstrapPreferences(): {
   applyTheme(resolvedTheme)
 
   // ── Lang resolution ──
-  let langSource: 'url' | 'stored' | 'default'
+  let langSource: 'url' | 'stored' | 'default' | 'embed'
   let resolvedLang: Lang
+  const inEmbed = isSallaEmbeddedIframe()
+
   if (urlLang) {
     langSource   = 'url'
     resolvedLang = urlLang
     try { localStorage.setItem(LANG_KEY, urlLang) } catch { /* ignore */ }
+    try { localStorage.setItem(EMBED_LANG_STORAGE_KEY, urlLang) } catch { /* ignore */ }
+  } else if (inEmbed) {
+    const { lang, source } = resolveEmbeddedLang({
+      urlLang:          null,
+      embedStored:      readStoredEmbedLang(),
+      userPref:         readStoredLang(),
+      referrerLang:     readSallaReferrerLang(),
+      navigatorLang:    readNavigatorLang(),
+      documentLang:     readDocumentLang(),
+      documentRtl:      isDocumentRtl(),
+      inSallaEmbedded:  true,
+    })
+    resolvedLang = lang
+    langSource   = source === 'stored' ? 'stored' : 'embed'
+    try { localStorage.setItem(LANG_KEY, lang) } catch { /* ignore */ }
+    try { localStorage.setItem(EMBED_LANG_STORAGE_KEY, lang) } catch { /* ignore */ }
   } else {
     const stored = readStoredLang()
     if (stored) {
       langSource   = 'stored'
       resolvedLang = stored
     } else {
-      // Saudi market default — same as i18n/context.tsx
       langSource   = 'default'
       resolvedLang = 'ar'
     }

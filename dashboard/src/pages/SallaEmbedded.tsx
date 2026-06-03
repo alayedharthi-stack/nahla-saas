@@ -22,6 +22,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
+import { buildEmbeddedEntryQuery } from '../i18n/embeddedLocale'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -185,22 +186,10 @@ export default function SallaEmbedded() {
   const storeId    = paramsRef.current.get('store_id') || ''
   const appId      = paramsRef.current.get('app_id')   || ''
 
-  // Build the /app/entry path while preserving Salla's UI preferences
-  // (?lang and ?theme).  React Router's navigate() strips the query
-  // string by default, which would otherwise lose Salla's host language
-  // on the very first navigation after auth.  useEmbeddedLocale /
-  // useEmbeddedTheme also persist to localStorage as a secondary
-  // safety net — this URL forwarding is the primary path so even
-  // private-mode iframes (where storage is wiped) stay consistent.
+  // Always forward resolved lang (Salla rarely passes ?lang= on /embedded/…/index).
   const entryUrlRef = useRef<string>('')
   if (entryUrlRef.current === '') {
-    const forwarded = new URLSearchParams()
-    const lang  = paramsRef.current.get('lang')  || paramsRef.current.get('locale') || paramsRef.current.get('language')
-    const theme = paramsRef.current.get('theme') || paramsRef.current.get('color_scheme') || paramsRef.current.get('mode')
-    if (lang)  forwarded.set('lang',  lang)
-    if (theme) forwarded.set('theme', theme)
-    const qs = forwarded.toString()
-    entryUrlRef.current = qs ? `/app/entry?${qs}` : '/app/entry'
+    entryUrlRef.current = `/app/entry${buildEmbeddedEntryQuery(paramsRef.current)}`
   }
   const entryUrl = entryUrlRef.current
 
