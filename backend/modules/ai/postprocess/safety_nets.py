@@ -1642,15 +1642,70 @@ def apply_staff_contact_safety_net(
     reply_norm = _normalise_for_match(reply_text or "")
     history_bot_norm, history_customer_norm = _extract_recent_history_norms(history)
 
+    _fallback_trigger = ""
+    if _contacts_sent:
+        if _employee_not_responding is not None:
+            _fallback_trigger = "employee_not_responding"
+        elif (
+            _store_arrival is not None
+            and getattr(_store_arrival, "trigger", "") == "branch_closed"
+        ):
+            _fallback_trigger = "branch_closed"
+
+    name = ""
+    name_source = ""
+    _fallback_prefill_phone = ""
+    _fallback_section_kind = ""
+    _fallback_section_id = ""
+    if _fallback_trigger:
+        try:
+            from modules.ai.brain.commerce.staff_contact_fallback_v0 import (  # noqa: PLC0415
+                load_staff_chain_sections,
+                resolve_staff_contact_fallback_v0,
+            )
+            _fb_sections = load_staff_chain_sections(db, int(tenant_id or 0))
+            _fb = resolve_staff_contact_fallback_v0(
+                _fb_sections,
+                contacts_sent=_contacts_sent,
+                customer_msg=customer_msg or "",
+                trigger=_fallback_trigger,
+                tenant_id=tenant_id,
+            )
+            if _fb.enabled and _fb.next_phone:
+                name = _fb.next_lookup_name
+                name_source = "staff_contact_fallback_v0"
+                _fallback_prefill_phone = _fb.next_phone
+                _fallback_section_id = str(_fb.section_id or "")
+                _fallback_section_kind = "escalation_chain"
+            elif not _fb.enabled:
+                logger.info(
+                    "[STAFF_CONTACT_TRACE] tenant_id=%s stage=fallback hit=False "
+                    "trigger=%s reason=%s",
+                    int(tenant_id or 0),
+                    _fallback_trigger,
+                    _fb.reason or "-",
+                )
+                result.skipped_reason = (
+                    f"fallback_{_fb.reason}"
+                    if _fb.reason
+                    else "fallback_unresolved"
+                )
+                return result
+        except Exception as _fb_exc:  # noqa: BLE001
+            logger.debug(
+                "safety_nets.staff | fallback_v0 failed tenant=%s err=%s",
+                tenant_id, _fb_exc,
+            )
+
     # When the trigger came from a reply-side offer, the offered
     # name IS the resolver target — short-circuit the pool scan so
     # we don't accidentally pick a different candidate that happens
     # to also appear in history (e.g. an older question about
     # "خالد"). When the trigger came from the customer side the
     # canonical pool order applies.
-    if reply_offer_name:
+    if not name and reply_offer_name:
         name, name_source = reply_offer_name, "reply_offer"
-    else:
+    elif not name:
         name, name_source = _find_staff_name_in_pool(
             msg_norm, reply_norm,
             history_bot_norm, history_customer_norm,
@@ -1658,6 +1713,7 @@ def apply_staff_contact_safety_net(
     if (
         not name
         and _arrival_gated_intent
+        and not _fallback_trigger
         and _arrival_policy is not None
         and getattr(_arrival_policy, "policy_source", "") == "compiled_v0"
         and _arrival_policy.allowed
@@ -1704,10 +1760,21 @@ def apply_staff_contact_safety_net(
     )
 
     # ── Layer 1: reply scan (canonical path) ────────────────────
-    raw_phone = ""
+    raw_phone = _fallback_prefill_phone
     source = ""
+    if raw_phone:
+        source = f"kb:{_fallback_section_kind}" if _fallback_section_kind else "fallback_v0"
+        logger.info(
+            "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=%s "
+            "name_len=%d phone_match=%s section_id=%s",
+            int(tenant_id or 0),
+            source,
+            len(name),
+            True,
+            _fallback_section_id or "-",
+        )
     phones = _extract_phones(reply_text or "")
-    if phones:
+    if not raw_phone and phones:
         raw_phone = phones[0]
         source = "reply"
         logger.info(
