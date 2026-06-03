@@ -7322,6 +7322,46 @@ async def _handle_merchant_message(
                     tenant_id, _prg_exc,
                 )
 
+        if reply and not _brain_handoff:
+            try:
+                from core.active_order_context import (  # noqa: PLC0415
+                    load_commerce_bundle as _stg_load_bundle,
+                )
+                from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: PLC0415
+                    apply_shipment_truth_guard,
+                )
+                from core.order_flow import (  # noqa: PLC0415
+                    _focus_summary as _stg_focus,
+                    _load_brain_state as _stg_load,
+                )
+                _stg_conv, _stg_bs = _stg_load(db, tenant_id=tenant_id, phone=to)
+                _stg_summary = _stg_focus(_stg_bs)
+                _stg_meta = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                _stg_bundle = _stg_load_bundle(
+                    dict(getattr(convo, "extra_metadata", None) or {})
+                )
+                _stg_result = apply_shipment_truth_guard(
+                    reply=reply,
+                    commerce_bundle=_stg_bundle,
+                    inbound_metadata=_stg_meta,
+                    payment_receipt_received=bool(
+                        _stg_summary.get("payment_receipt_received")
+                    ),
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                )
+                if _stg_result.replaced:
+                    reply = _stg_result.reply
+            except Exception as _stg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[SHIPMENT_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _stg_exc,
+                )
+
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
         #   continue → send `reply` as-is

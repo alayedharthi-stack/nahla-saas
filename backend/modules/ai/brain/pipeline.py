@@ -1856,6 +1856,28 @@ class MerchantBrain:
                 tenant_id, _prg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: PLC0415
+                apply_shipment_truth_guard,
+            )
+            _stg = apply_shipment_truth_guard(
+                reply=reply or "",
+                commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                payment_receipt_received=bool(
+                    getattr(new_state.order_prep, "payment_receipt_received", False)
+                ),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _stg.replaced:
+                reply = _stg.reply
+        except Exception as _stg_exc:  # noqa: BLE001
+            logger.warning(
+                "[SHIPMENT_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _stg_exc,
+            )
+
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
         #
         # Single per-turn record — every field the merchant's audit
