@@ -165,7 +165,13 @@ JWT_PUBLIC_PREFIXES = (
     "/auth",
     "/oauth",                           # Salla/WhatsApp OAuth callbacks
     "/integrations/salla/",             # Salla success/error landing HTML pages (public)
-    "/salla",                           # /salla/start (new merchant install entry point)
+    # Salla — explicit public routes only (never use bare "/salla"; that exposed
+    # /salla/subscription/status and /salla/app-settings to JWT bypass).
+    "/salla/token-login",               # embedded iframe token exchange (no JWT yet)
+    "/salla/start",                     # Partner Portal app URL → OAuth redirect
+    "/salla/session/launch-dashboard",  # validates JWT from body, not middleware
+    "/salla/session/resolve-launch",    # short-lived launch token exchange
+    "/salla/app-settings/webhook",      # Salla Partner app.settings webhook (HMAC)
     "/api/salla/test/authorize",        # Salla TEST app OAuth start — public redirect
     "/api/salla/diag/",                 # public diagnostic endpoints (no secrets exposed)
     "/api/salla/oauth/start",           # Sync (OAuth) app: 302 → accounts.salla.sa
@@ -189,7 +195,21 @@ JWT_PUBLIC_PREFIXES = (
     # + row existence inside stream_ai_media (see intelligence_libraries).
     "/intelligence/ai-media/file/",
 )
+
+# Exact paths only — do not use startswith (e.g. "/salla/app" would swallow
+# "/salla/app-settings").
+JWT_PUBLIC_EXACT_PATHS = frozenset({
+    "/salla/app",                       # legacy embedded HTML landing (iframe)
+})
+
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
+
+
+def is_jwt_public_path(path: str) -> bool:
+    """True when JWT enforcement middleware should skip this path."""
+    if path in JWT_PUBLIC_EXACT_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in JWT_PUBLIC_PREFIXES)
 
 
 # ── Middleware functions ───────────────────────────────────────────────────────
@@ -557,7 +577,7 @@ async def jwt_enforcement_middleware(request: Request, call_next):
     if _is_bypass_path(path):
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
-    if any(path.startswith(p) for p in JWT_PUBLIC_PREFIXES):
+    if is_jwt_public_path(path):
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     # Public store scripts + store-facing widget APIs — no JWT possible from external stores
