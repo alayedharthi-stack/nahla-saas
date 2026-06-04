@@ -37,11 +37,17 @@ from modules.ai.routing.conversation_mode import (  # noqa: E402
     MODE_SUPPORT_ESCALATION,
     ModeLease,
     RecoverySnapshot,
+    SOURCE_GREETING_DETECTED,
+    SOURCE_IDENTITY_DETECTED,
+    SOURCE_LEASE_HELD,
     detect_identity_topic,
+    is_established_conversation,
     is_free_form_message,
     load_lease,
     resolve_conversation_mode,
     save_lease,
+    should_apply_greeting_identity_card,
+    should_use_greeting_fast_path,
 )
 
 
@@ -116,6 +122,16 @@ def _future(minutes: int) -> str:
 
 def _past(minutes: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def _outbound_history():
+    return [{"direction": "outbound", "body": "أهلاً فيك 🌷"}]
+
+
+def _seed_brain_greeted(convo: FakeConvo) -> None:
+    meta = dict(convo.extra_metadata or {})
+    meta["brain_state"] = {"greeted": True}
+    convo.extra_metadata = meta
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -193,7 +209,204 @@ class TestIdentityOverridesRecovery:
 
         assert decision.mode == MODE_IDENTITY_REPLY
         assert decision.identity_topic == "greeting"
+        assert decision.source == SOURCE_GREETING_DETECTED
         assert decision.lease.mode == MODE_LIVE_CHAT
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Established-conversation guard — pure greetings yield to live_chat / Brain
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGreetingEstablishedGuard:
+    def test_live_chat_active_lease_heLa_stays_live_chat(self):
+        """Established live_chat with active lease must not lose to identity card."""
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(convo, mode=MODE_LIVE_CHAT, locked_until=_future(5))
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=99, convo=convo, customer_phone="+966500000099",
+            text="هلا",
+            history=_outbound_history(),
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.source == SOURCE_LEASE_HELD
+        assert decision.identity_topic == ""
+
+    def test_active_lease_blocks_even_without_history(self):
+        """Migrated rows: active live_chat lease alone blocks the card."""
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(convo, mode=MODE_LIVE_CHAT, locked_until=_future(5))
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="هلا",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.source == SOURCE_LEASE_HELD
+
+    def test_greeted_flag_skips_identity_card(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_brain_greeted(convo)
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="هلا",
+        )
+
+        assert decision.mode != MODE_IDENTITY_REPLY
+
+    def test_outbound_history_skips_identity_card(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="السلام عليكم",
+            history=_outbound_history(),
+        )
+
+        assert decision.mode != MODE_IDENTITY_REPLY
+
+    def test_cold_start_salaam_still_identity_reply(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="السلام عليكم",
+        )
+
+        assert decision.mode == MODE_IDENTITY_REPLY
+        assert decision.identity_topic == "greeting"
+        assert decision.source == SOURCE_GREETING_DETECTED
+
+    def test_cold_start_heLa_still_identity_reply(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="هلا",
+        )
+
+        assert decision.mode == MODE_IDENTITY_REPLY
+        assert decision.source == SOURCE_GREETING_DETECTED
+
+    def test_greeting_during_recovery_with_history_unchanged(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(convo, mode=MODE_AUTOMATION_RECOVERY)
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="السلام عليكم",
+            history=_outbound_history(),
+        )
+
+        assert decision.mode == MODE_IDENTITY_REPLY
+        assert decision.identity_topic == "greeting"
+        assert decision.source == SOURCE_GREETING_DETECTED
+
+    def test_identity_probe_unchanged_during_live_chat(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(convo, mode=MODE_LIVE_CHAT, locked_until=_future(5))
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="من أنت؟",
+            history=_outbound_history(),
+        )
+
+        assert decision.mode == MODE_IDENTITY_REPLY
+        assert decision.identity_topic == "identity"
+        assert decision.source == SOURCE_IDENTITY_DETECTED
+
+    def test_actionable_greeting_not_detected_as_pure_greeting(self):
+        assert detect_identity_topic("هلا، كم سعر العسل؟") == ""
+
+    def test_is_established_conversation_helpers(self):
+        convo = FakeConvo()
+        assert is_established_conversation(convo, []) is False
+        assert is_established_conversation(convo, _outbound_history()) is True
+        _seed_brain_greeted(convo)
+        assert is_established_conversation(convo, []) is True
+
+    def test_should_apply_greeting_identity_card_matrix(self):
+        convo = FakeConvo()
+        lease = ModeLease(mode=MODE_LIVE_CHAT, locked_until=_future(5))
+        assert should_apply_greeting_identity_card(
+            prior_mode=MODE_AUTOMATION_RECOVERY,
+            prior_lease=lease, convo=convo,
+        ) is True
+        assert should_apply_greeting_identity_card(
+            prior_mode=MODE_LIVE_CHAT,
+            prior_lease=lease, convo=convo,
+        ) is False
+        assert should_apply_greeting_identity_card(
+            prior_mode=MODE_LIVE_CHAT,
+            prior_lease=ModeLease(), convo=convo,
+            history=_outbound_history(),
+        ) is False
+
+    def test_webhook_fast_path_blocked_for_established_live_chat(self):
+        from modules.ai.routing.conversation_mode import ModeDecision
+
+        convo = FakeConvo()
+        decision = ModeDecision(
+            mode=MODE_IDENTITY_REPLY,
+            lease=ModeLease(),
+            previous_mode=MODE_LIVE_CHAT,
+            identity_topic="greeting",
+        )
+        assert should_use_greeting_fast_path(
+            mode_decision=decision,
+            convo=convo,
+            history=_outbound_history(),
+        ) is False
+
+    def test_webhook_fast_path_allowed_for_cold_start(self):
+        from modules.ai.routing.conversation_mode import ModeDecision
+
+        decision = ModeDecision(
+            mode=MODE_IDENTITY_REPLY,
+            lease=ModeLease(),
+            previous_mode=MODE_LIVE_CHAT,
+            identity_topic="greeting",
+        )
+        assert should_use_greeting_fast_path(
+            mode_decision=decision,
+            convo=FakeConvo(),
+            history=[],
+        ) is True
+
+    def test_webhook_fast_path_allowed_for_recovery_escape(self):
+        from modules.ai.routing.conversation_mode import ModeDecision
+
+        decision = ModeDecision(
+            mode=MODE_IDENTITY_REPLY,
+            lease=ModeLease(),
+            previous_mode=MODE_AUTOMATION_RECOVERY,
+            identity_topic="greeting",
+        )
+        assert should_use_greeting_fast_path(
+            mode_decision=decision,
+            convo=FakeConvo(),
+            history=_outbound_history(),
+        ) is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -286,22 +499,34 @@ class TestStickyLiveChatLease:
         # Sliding window: lease refreshed on every turn
         assert decision.lease.locked_until
 
-    def test_expired_lease_allows_normal_resolution(self):
+    def test_expired_lease_established_greeting_stays_live_chat(self):
         db = FakeDB()
         convo = FakeConvo()
         _seed_lease(convo, mode=MODE_LIVE_CHAT, locked_until=_past(1))
 
-        # No recovery snapshot, no special signal → defaults to live_chat
-        # but as a fresh resolution (transitioned only if mode actually
-        # changed; here it stays live_chat so transitioned remains False).
         decision = resolve_conversation_mode(
             db,
             tenant_id=1, convo=convo, customer_phone="+966500000000",
-            text="مرحبا",  # greeting — should win
+            text="مرحبا",
+            history=_outbound_history(),
         )
 
-        # Greeting wins → identity reply mode
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_IDENTITY_REPLY
+
+    def test_expired_lease_cold_start_greeting_still_identity_reply(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(convo, mode=MODE_LIVE_CHAT, locked_until=_past(1))
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="مرحبا",
+        )
+
         assert decision.mode == MODE_IDENTITY_REPLY
+        assert decision.source == SOURCE_GREETING_DETECTED
 
 
 # ══════════════════════════════════════════════════════════════════════════════

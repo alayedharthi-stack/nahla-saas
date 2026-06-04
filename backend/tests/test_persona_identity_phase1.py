@@ -126,17 +126,38 @@ def test_pure_greeting_still_detects_greeting() -> None:
     assert detect_identity_topic("السلام عليكم") == "greeting"
 
 
-def _webhook_identity_early_return_allowed(*, mode: str, identity_topic: str) -> bool:
+def _webhook_identity_early_return_allowed(
+    *,
+    mode: str,
+    identity_topic: str,
+    previous_mode: str = "",
+    convo: object | None = None,
+    history: list | None = None,
+) -> bool:
     """Mirror ``whatsapp_webhook.py`` Phase-1 identity/greeting fast-path gate.
 
-    Only ``identity_topic=greeting`` may call ``render_identity_reply`` and
-    return early. ``identity_topic=identity`` must fall through to Brain.
+    Only ``identity_topic=greeting`` on cold start or recovery escape may call
+    ``render_identity_reply`` and return early. ``identity_topic=identity``
+    must fall through to Brain.
     """
-    from modules.ai.routing.conversation_mode import MODE_IDENTITY_REPLY
+    from modules.ai.routing.conversation_mode import (
+        MODE_IDENTITY_REPLY,
+        ModeDecision,
+        ModeLease,
+        should_use_greeting_fast_path,
+    )
 
-    return (
-        mode == MODE_IDENTITY_REPLY
-        and identity_topic == "greeting"
+    if mode != MODE_IDENTITY_REPLY or identity_topic != "greeting":
+        return False
+    return should_use_greeting_fast_path(
+        mode_decision=ModeDecision(
+            mode=mode,
+            lease=ModeLease(),
+            previous_mode=previous_mode,
+            identity_topic=identity_topic,
+        ),
+        convo=convo or object(),
+        history=history,
     )
 
 
@@ -178,9 +199,10 @@ def test_webhook_identity_topic_falls_through_to_brain_persona() -> None:
 
     greeting_block_start = webhook_src.index('identity_topic == "greeting"')
     identity_block_start = webhook_src.index('identity_topic == "identity"')
-    greeting_slice = webhook_src[greeting_block_start:greeting_block_start + 800]
+    greeting_slice = webhook_src[greeting_block_start:greeting_block_start + 1200]
     identity_slice = webhook_src[identity_block_start:identity_block_start + 400]
     assert "render_identity_reply" in greeting_slice
+    assert "should_use_greeting_fast_path" in greeting_slice
     assert "return" in greeting_slice
     assert "render_identity_reply" not in identity_slice
 
@@ -198,3 +220,9 @@ def test_webhook_greeting_topic_still_early_returns_render_identity() -> None:
         mode=MODE_IDENTITY_REPLY,
         identity_topic="greeting",
     ) is True
+    assert _webhook_identity_early_return_allowed(
+        mode=MODE_IDENTITY_REPLY,
+        identity_topic="greeting",
+        previous_mode="live_chat",
+        history=[{"direction": "outbound", "body": "أهلاً"}],
+    ) is False

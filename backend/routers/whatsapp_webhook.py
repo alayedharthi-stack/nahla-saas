@@ -6009,6 +6009,7 @@ async def _handle_merchant_message(
             render_identity_reply,
             resolve_conversation_mode,
             save_lease,
+            should_use_greeting_fast_path,
         )
         from core.ownership_state import (  # noqa: PLC0415
             attempt_implicit_takeover_recovery,
@@ -6066,29 +6067,42 @@ async def _handle_merchant_message(
             return
 
         # ── Identity / greeting fast path ────────────────────────────────────
-        # Pure short greetings still get the deterministic card. Identity
-        # probes ("من أنت؟" / "هل أنت AI؟") fall through to the Brain so
-        # thin persona compose (persona_identity) can answer naturally.
+        # Pure short greetings on cold start (or automation_recovery escape)
+        # get the deterministic card. Established live_chat conversations
+        # and active leases yield to the Brain for non-deterministic
+        # re-greeting (Nahla Constitution — personality is not deterministic).
+        # Identity probes ("من أنت؟" / "هل أنت AI؟") fall through to the
+        # Brain so thin persona compose (persona_identity) can answer naturally.
         if (
             mode_decision.mode == MODE_IDENTITY_REPLY
             and mode_decision.identity_topic == "greeting"
         ):
-            reply = render_identity_reply(
-                db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
-            )
-            StateManager.save_message(
-                db, to, reply, "outbound",
-                conversation_id=convo.id, tenant_id=tenant_id,
-            )
-            await _send_whatsapp_message(
-                phone_id=phone_id, to=to, text=reply,
-                _tenant_id=tenant_id, _db=db,
-            )
+            if should_use_greeting_fast_path(
+                mode_decision=mode_decision,
+                convo=convo,
+                history=history,
+            ):
+                reply = render_identity_reply(
+                    db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
+                )
+                StateManager.save_message(
+                    db, to, reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                )
+                await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                logger.info(
+                    "[Mode] identity_reply tenant=%s topic=%s",
+                    tenant_id, mode_decision.identity_topic,
+                )
+                return
             logger.info(
-                "[Mode] identity_reply tenant=%s topic=%s",
-                tenant_id, mode_decision.identity_topic,
+                "[Mode] greeting_fast_path_skipped tenant=%s to=%s "
+                "previous_mode=%s reason=established_conversation",
+                tenant_id, to, mode_decision.previous_mode,
             )
-            return
 
         if (
             mode_decision.mode == MODE_IDENTITY_REPLY

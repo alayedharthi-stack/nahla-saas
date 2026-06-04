@@ -95,6 +95,7 @@ DEFAULT_LEASE_MINUTES_POST_PURCHASE  = 15
 # Sources used by `reason` / observability. Kept as constants so logs
 # and tests can match exact strings.
 SOURCE_OVERRIDE_FREEFORM   = "override_from_recovery_freeform"
+SOURCE_GREETING_DETECTED   = "greeting_detected"
 SOURCE_IDENTITY_DETECTED   = "identity_question_detected"
 SOURCE_HANDOFF_FLAG        = "human_handoff_flag"
 SOURCE_RECOVERY_ACTIVE     = "recovery_lineage_active"
@@ -184,6 +185,7 @@ class ModeDecision:
             "previous_mode":    self.previous_mode,
             "reason":           self.reason,
             "source":           self.source,
+            "identity_topic":   self.identity_topic,
             "transitioned":     self.transitioned,
             "lease_until":      self.lease.locked_until,
             "free_form_override": self.free_form_override,
@@ -454,6 +456,109 @@ def detect_identity_topic(text: str) -> str:
             return ""
         return "greeting"
     return ""
+
+
+# ── Established-conversation guard (greeting routing only) ──────────────────
+#
+# ``detect_identity_topic`` stays text-only. These helpers gate whether a
+# pure greeting may preempt the Brain with a deterministic intro card.
+#
+# ``is_established_conversation`` — relationship signals (greeted flag,
+# prior outbound). Used for expired-lease and migrated rows where
+# ``brain_state.greeted`` or history may be incomplete.
+#
+# ``_has_active_live_chat_lease`` — operational signal kept SEPARATE from
+# ``is_established_conversation`` because ``prior_mode`` defaults to
+# ``live_chat`` on empty lease metadata; cold-start would false-positive if
+# ``prior_mode`` alone were treated as "established".
+
+
+def is_established_conversation(
+    convo: Any,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """True when the customer relationship already exists.
+
+    Personality turns (re-greetings) must reach the Brain, not the
+    deterministic ``render_identity_reply`` card. Best-effort — never
+    raises."""
+    try:
+        meta = getattr(convo, "extra_metadata", None) or {}
+        brain_state = meta.get("brain_state")
+        if isinstance(brain_state, dict) and brain_state.get("greeted"):
+            return True
+    except Exception:
+        pass
+    for msg in history or []:
+        if not isinstance(msg, dict):
+            continue
+        direction = str(msg.get("direction") or "").lower()
+        if direction in ("outbound", "out"):
+            return True
+    return False
+
+
+def _has_active_live_chat_lease(
+    prior_mode: str,
+    prior_lease: ModeLease,
+    now: Optional[datetime] = None,
+) -> bool:
+    """True when the customer is inside an active ``live_chat`` lease window."""
+    return (
+        prior_mode == MODE_LIVE_CHAT
+        and prior_lease.is_lease_active(now)
+    )
+
+
+def should_apply_greeting_identity_card(
+    *,
+    prior_mode: str,
+    prior_lease: ModeLease,
+    convo: Any,
+    history: Optional[List[Dict[str, Any]]] = None,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Whether a pure greeting should route to the deterministic intro card.
+
+    Retained for ``automation_recovery`` escape (cold intro after scripted
+    automation). Blocked when an active ``live_chat`` lease is held or
+    when relationship signals show the conversation is already established.
+    """
+    if prior_mode == MODE_AUTOMATION_RECOVERY:
+        return True
+    if _has_active_live_chat_lease(prior_mode, prior_lease, now):
+        return False
+    if is_established_conversation(convo, history):
+        return False
+    return True
+
+
+def should_use_greeting_fast_path(
+    *,
+    mode_decision: ModeDecision,
+    convo: Any,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Webhook defense-in-depth mirror of the resolver greeting gate.
+
+    Only applies when the resolver already chose ``identity_reply`` +
+    ``identity_topic=greeting``. Blocks the deterministic send when
+    relationship signals show the conversation is established. Never
+    blocks ``automation_recovery`` escape.
+
+    ``previous_mode == live_chat`` alone is NOT a block signal — empty
+    lease metadata defaults ``prior_mode`` to ``live_chat`` on cold start.
+    """
+    if (
+        mode_decision.mode != MODE_IDENTITY_REPLY
+        or mode_decision.identity_topic != "greeting"
+    ):
+        return False
+    if mode_decision.previous_mode == MODE_AUTOMATION_RECOVERY:
+        return True
+    if is_established_conversation(convo, history):
+        return False
+    return True
 
 
 # ── Order-flow recovery signal ───────────────────────────────────────────────
@@ -739,7 +844,10 @@ def resolve_conversation_mode(
     Order of resolution (first match wins):
 
       1. Human handoff flag on the conversation row.
-      2. Identity / greeting detection in the inbound text.
+      2. Identity / greeting detection in the inbound text. Pure greetings
+         route to ``identity_reply`` only on cold start or when escaping
+         ``automation_recovery``; established conversations and active
+         ``live_chat`` leases fall through to step 3+.
       3. Sticky LIVE_CHAT lease that has not expired yet.
       4. Free-form override of an existing automation_recovery owner.
       5. Active recovery lineage (and no overriding signal).
@@ -779,29 +887,52 @@ def resolve_conversation_mode(
     # 2) Identity / greeting detection ──────────────────────────────────
     identity_topic = detect_identity_topic(text_clean)
     if identity_topic:
-        # Identity replies are deterministic single-turn answers. We
-        # acquire a LIVE_CHAT lease right after so the conversation
-        # stays in live mode for the next turn instead of falling back
-        # into automation behavior.
-        lease = _build_lease(
-            mode=MODE_LIVE_CHAT,
-            previous_mode=prior_mode,
-            reason=f"customer asked: {identity_topic}",
-            source=SOURCE_IDENTITY_DETECTED,
-            minutes=DEFAULT_LEASE_MINUTES_LIVE_CHAT,
-            now=now,
-        )
-        return ModeDecision(
-            mode=MODE_IDENTITY_REPLY,
-            lease=lease,
-            previous_mode=prior_mode,
-            reason=lease.reason,
-            source=lease.source,
-            transitioned=(prior_mode != MODE_LIVE_CHAT),
-            recovery=snapshot,
-            identity_topic=identity_topic,
-            free_form_override=(prior_mode == MODE_AUTOMATION_RECOVERY),
-        )
+        if (
+            identity_topic == "greeting"
+            and not should_apply_greeting_identity_card(
+                prior_mode=prior_mode,
+                prior_lease=prior_lease,
+                convo=convo,
+                history=history_safe,
+                now=now,
+            )
+        ):
+            logger.info(
+                "[mode] greeting_identity_card_skipped prior_mode=%s "
+                "lease_active=%s established=%s",
+                prior_mode,
+                prior_lease.is_lease_active(now),
+                is_established_conversation(convo, history_safe),
+            )
+        else:
+            # Identity replies are deterministic single-turn answers. We
+            # acquire a LIVE_CHAT lease right after so the conversation
+            # stays in live mode for the next turn instead of falling back
+            # into automation behavior.
+            source = (
+                SOURCE_GREETING_DETECTED
+                if identity_topic == "greeting"
+                else SOURCE_IDENTITY_DETECTED
+            )
+            lease = _build_lease(
+                mode=MODE_LIVE_CHAT,
+                previous_mode=prior_mode,
+                reason=f"customer asked: {identity_topic}",
+                source=source,
+                minutes=DEFAULT_LEASE_MINUTES_LIVE_CHAT,
+                now=now,
+            )
+            return ModeDecision(
+                mode=MODE_IDENTITY_REPLY,
+                lease=lease,
+                previous_mode=prior_mode,
+                reason=lease.reason,
+                source=lease.source,
+                transitioned=(prior_mode != MODE_LIVE_CHAT),
+                recovery=snapshot,
+                identity_topic=identity_topic,
+                free_form_override=(prior_mode == MODE_AUTOMATION_RECOVERY),
+            )
 
     # 3) Sticky LIVE_CHAT lease still active ────────────────────────────
     # Once we have switched into live chat, we DO NOT bounce back to
