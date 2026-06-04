@@ -6251,6 +6251,119 @@ async def _handle_merchant_message(
                 )
                 return
 
+        # ── Staff contact recovery (P1 Slice 2) ─────────────────────────────
+        # «ما يرد» after a staff vCard was sent must advance the KB chain
+        # deterministically — never fall through to LLM generic greeting reset.
+        _scr_decision = None
+        try:
+            from modules.ai.brain.commerce.staff_contact_recovery import (  # noqa: PLC0415
+                maybe_staff_contact_recovery as _maybe_staff_contact_recovery,
+            )
+            _scr_decision = _maybe_staff_contact_recovery(
+                db,
+                tenant_id=tenant_id,
+                phone=to,
+                message=text or "",
+                conversation_id=getattr(convo, "id", None),
+            )
+        except Exception as _scr_exc:  # noqa: BLE001
+            logger.warning(
+                "[STAFF_CONTACT_RECOVERY] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _scr_exc,
+            )
+            _scr_decision = None
+
+        if _scr_decision is not None:
+            _scr_reply = _scr_decision.reply_text
+            try:
+                _scr_text_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=_scr_reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                StateManager.save_message(
+                    db, to, _scr_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        "is_ai": True,
+                        "deterministic_path": "staff_contact_recovery",
+                        "staff_contact_recovery_trigger": _scr_decision.trigger,
+                        "staff_contact_recovery_reason": _scr_decision.reason,
+                    },
+                )
+            except Exception as _scr_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[STAFF_CONTACT_RECOVERY] text send failed tenant=%s err=%s",
+                    tenant_id, _scr_send_exc,
+                )
+                _scr_text_ok = False
+
+            _scr_contacts_ok = False
+            if _scr_decision.call_target is not None and _staff_call_marker_enabled():
+                try:
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _scr_build_contacts,
+                    )
+                    _scr_payload = _scr_build_contacts(
+                        [_scr_decision.call_target], to=to,
+                    )
+                    _scr_contacts_ok = await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_scr_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    if _scr_contacts_ok:
+                        try:
+                            from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                                persist_staff_contacts_sent_batch,
+                            )
+                            persist_staff_contacts_sent_batch(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                entries=[{
+                                    "name": _scr_decision.next_contact_name,
+                                    "phone": (
+                                        getattr(
+                                            _scr_decision.call_target,
+                                            "phone_display",
+                                            "",
+                                        )
+                                        or getattr(
+                                            _scr_decision.call_target,
+                                            "wa_id",
+                                            "",
+                                        )
+                                        or _scr_decision.next_contact_phone
+                                    ),
+                                    "turn": int(_scr_decision.conversation_turn or 0),
+                                }],
+                            )
+                        except Exception as _scr_persist_exc:  # noqa: BLE001
+                            logger.debug(
+                                "[STAFF_CONTACT_RECOVERY] persist failed tenant=%s err=%s",
+                                tenant_id, _scr_persist_exc,
+                            )
+                except Exception as _scr_card_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[STAFF_CONTACT_RECOVERY] vCard send failed tenant=%s err=%s",
+                        tenant_id, _scr_card_exc,
+                    )
+
+            logger.info(
+                "[STAFF_CONTACT_RECOVERY] short_circuit tenant=%s to=%s "
+                "text_ok=%s contacts_ok=%s selected=%r skip_brain=true",
+                tenant_id, to, _scr_text_ok, _scr_contacts_ok,
+                (_scr_decision.next_contact_name or "")[:48],
+            )
+            try:
+                _trace.fallback_source = "staff_contact_recovery"
+                _trace.response_goal = "staff_contact_fallback"
+                _trace.intent = "employee_not_responding"
+                _trace.emit()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
         _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)
