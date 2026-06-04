@@ -967,6 +967,206 @@ def try_short_continuation_decision(ctx: Any, *, route: str = "") -> Optional[An
     )
 
 
+def _pending_offer_context(state: Any) -> bool:
+    if state is None:
+        return False
+    return bool(
+        str(getattr(state, "last_question_asked", "") or "").strip()
+        or str(getattr(state, "pending_action", "") or "").strip()
+        or getattr(state, "current_product_focus", None)
+    )
+
+
+def positive_commerce_signal(
+    message: str,
+    *,
+    intent_name: Optional[str] = None,
+    intent_confidence: Optional[float] = None,
+    state: Any = None,
+    inbound_metadata: Optional[dict] = None,
+) -> bool:
+    """True when existing detectors justify sales / commerce framing."""
+    try:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            POSITIVE_COMMERCE_INTENTS,
+            has_positive_commerce_intent,
+        )
+        if has_positive_commerce_intent(intent_name, intent_confidence):
+            return True
+        from modules.ai.brain.intent import rules as intent_rules  # noqa: PLC0415
+
+        rule_hit = intent_rules.match(message)
+        if rule_hit is not None and rule_hit.name in POSITIVE_COMMERCE_INTENTS:
+            conf = float(getattr(rule_hit, "confidence", 0) or 0)
+            if conf >= 0.70:
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    strength = commerce_signal_strength(
+        message, state=state, intent_name=intent_name,
+    )
+    if strength >= SOCIAL_COMMERCE_BLOCK_THRESHOLD:
+        return True
+
+    if detect_short_transactional_continuation(message, state=state).matched:
+        return True
+
+    mode = infer_continuation_mode(state)
+    if mode in {
+        CONTINUATION_PAYMENT_FLOW,
+        CONTINUATION_CHECKOUT,
+        CONTINUATION_DELIVERY,
+        CONTINUATION_VARIANT_SELECTION,
+    }:
+        return True
+
+    if _pending_offer_context(state):
+        return True
+
+    pay = detect_payment_intent_strength(
+        message,
+        state=state,
+        inbound_metadata=inbound_metadata,
+    )
+    if (
+        pay.strength >= PAYMENT_CONSENT_STRENGTH_THRESHOLD
+        and pay.source != "blocked"
+    ):
+        return True
+
+    try:
+        from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
+            classify_solution_seeking_commerce,
+        )
+        if classify_solution_seeking_commerce(message):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    return False
+
+
+def absence_of_positive_commerce_signal(
+    message: str,
+    *,
+    intent_name: Optional[str] = None,
+    intent_confidence: Optional[float] = None,
+    state: Any = None,
+    inbound_metadata: Optional[dict] = None,
+    nc_match: Any = None,
+) -> bool:
+    """True when no authoritative source justifies activating sales framing."""
+    name = str(intent_name or "").strip().lower()
+    if not str(message or "").strip():
+        return False
+
+    if nc_match is not None:
+        return False
+
+    if name in {
+        "social",
+        "persona_interaction",
+        "who_are_you",
+        "platform_inquiry",
+    }:
+        return False
+
+    if name not in {"general", "hesitation"}:
+        return False
+
+    if state is not None and not bool(getattr(state, "greeted", False)):
+        return False
+
+    return not positive_commerce_signal(
+        message,
+        intent_name=intent_name,
+        intent_confidence=intent_confidence,
+        state=state,
+        inbound_metadata=inbound_metadata,
+    )
+
+
+def log_absence_commerce_gate(
+    *,
+    tenant_id: Optional[int],
+    preview: str,
+    route: str = "",
+    commerce_strength: float = 0.0,
+) -> None:
+    logger.info(
+        "[ABSENCE_COMMERCE_GATE] tenant=%s route=%s strength=%.2f preview=%r",
+        tenant_id if tenant_id is not None else "-",
+        route or "-",
+        float(commerce_strength),
+        (preview or "")[:80],
+    )
+
+
+def try_absence_non_sales_decision(ctx: Any, *, route: str = "") -> Optional[Any]:
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: PLC0415
+    from modules.ai.brain.persona_expression import (  # noqa: PLC0415
+        PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+    )
+    from modules.ai.brain.types import Decision  # noqa: PLC0415
+
+    msg = ctx.message or ""
+    intent = getattr(ctx, "intent", None)
+    intent_name = getattr(intent, "name", None)
+    state = getattr(ctx, "state", None)
+    meta = _ctx_inbound_metadata(ctx)
+
+    nc = None
+    try:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            resolve_commerce_block,
+        )
+        nc = resolve_commerce_block(
+            msg,
+            inbound_metadata=meta,
+            intent_name=intent_name,
+            intent_confidence=getattr(intent, "confidence", None),
+        )
+    except Exception:  # noqa: BLE001
+        nc = None
+
+    if not absence_of_positive_commerce_signal(
+        msg,
+        intent_name=intent_name,
+        intent_confidence=getattr(intent, "confidence", None),
+        state=state,
+        inbound_metadata=meta,
+        nc_match=nc,
+    ):
+        return None
+
+    strength = commerce_signal_strength(
+        msg, state=state, intent_name=intent_name,
+    )
+    tenant_id = getattr(ctx, "tenant_id", None)
+    log_absence_commerce_gate(
+        tenant_id=tenant_id,
+        preview=msg,
+        route=route,
+        commerce_strength=strength,
+    )
+    _correlation_from_ctx(
+        ctx,
+        route=route,
+        final_action="non_sales_ambiguous_llm",
+        topic=PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+    )
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+            "block_commerce_escalation": True,
+        },
+        reason="absence of positive commerce signal — non-sales generative frame",
+        confidence=0.88,
+    )
+
+
 def try_priority_before_suppression(
     ctx: Any,
     *,
@@ -989,6 +1189,7 @@ __all__ = [
     "CONTINUATION_VARIANT_SELECTION",
     "PaymentIntentVerdict",
     "ShortContinuationVerdict",
+    "absence_of_positive_commerce_signal",
     "commerce_signal_strength",
     "detect_payment_intent_strength",
     "detect_short_transactional_continuation",
@@ -997,6 +1198,7 @@ __all__ = [
     "inbound_type_label",
     "is_receipt_inbound",
     "is_single_offer_short_acceptance",
+    "log_absence_commerce_gate",
     "log_payment_consent_detected",
     "log_payment_outbound_attempt",
     "log_payment_outbound_suppressed",
@@ -1004,6 +1206,8 @@ __all__ = [
     "log_short_continuation_detected",
     "log_social_non_commerce_routed",
     "log_social_route_bypass",
+    "positive_commerce_signal",
+    "try_absence_non_sales_decision",
     "try_priority_before_suppression",
     "try_short_continuation_decision",
     "try_social_non_commerce_decision",

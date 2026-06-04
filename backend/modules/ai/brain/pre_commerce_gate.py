@@ -45,6 +45,8 @@ def should_pre_commerce_shortcut(
     nc_match: Optional[NonCommerceMatch],
     *,
     min_confidence: Optional[float] = None,
+    message: str = "",
+    state: Any = None,
 ) -> bool:
     """True when this turn must bypass commerce preload entirely."""
     threshold = (
@@ -70,6 +72,25 @@ def should_pre_commerce_shortcut(
 
     if intent.name == INTENT_PERSONA_INTERACTION and conf >= threshold:
         return True
+
+    if message and state is not None:
+        try:
+            from .commerce.conversational_priority import (  # noqa: PLC0415
+                absence_of_positive_commerce_signal,
+            )
+            from .types import INTENT_GENERAL, INTENT_HESITATION  # noqa: PLC0415
+
+            if intent.name in {INTENT_GENERAL, INTENT_HESITATION}:
+                if absence_of_positive_commerce_signal(
+                    message,
+                    intent_name=intent.name,
+                    intent_confidence=conf,
+                    state=state,
+                    nc_match=nc_match,
+                ):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
 
     return False
 

@@ -10,8 +10,13 @@ from typing import Any, Dict, Optional
 
 PERSONA_TOPIC_IDENTITY = "persona_identity"
 PERSONA_TOPIC_SOCIAL = "persona_social"
+PERSONA_TOPIC_NON_SALES_AMBIGUOUS = "non_sales_ambiguous"
 
-PERSONA_TOPICS = frozenset({PERSONA_TOPIC_IDENTITY, PERSONA_TOPIC_SOCIAL})
+PERSONA_TOPICS = frozenset({
+    PERSONA_TOPIC_IDENTITY,
+    PERSONA_TOPIC_SOCIAL,
+    PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+})
 
 # Shared negative guidance — behavioral only, not reply text.
 _NO_SERVICE_CLOSER = (
@@ -58,8 +63,24 @@ _PERSONA_OMIT_STATE_JSON_KEYS = (
 )
 
 
+def compose_non_sales_ambiguous_goal() -> str:
+    return (
+        "non_sales_ambiguous — Generate a short natural Saudi Arabic WhatsApp "
+        "reply to a conversational or phatic turn that carries no product, "
+        "order, price, payment, shipping, or catalog request. "
+        "Match the customer's energy warmly in 1–3 short lines — "
+        "conversational, not merchant FAQ, not a sales assistant. "
+        "Do NOT pitch products, prices, checkout, or catalog items. "
+        "Do NOT ask disambiguation-menu questions about which product or "
+        "specification they want when they have not asked to buy. "
+        "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply. "
+        "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
+        f"{_NO_SERVICE_CLOSER}"
+    )
+
+
 def persona_topic_from_decision_args(args: Optional[dict]) -> str:
-    """Return ``persona_identity`` / ``persona_social`` or ``""``."""
+    """Return a persona compose topic token or ``""``."""
     topic = str((args or {}).get("topic") or "").strip()
     if topic in PERSONA_TOPICS:
         return topic
@@ -163,8 +184,10 @@ __all__ = [
     "PERSONA_TOPICS",
     "build_persona_json_footer",
     "build_persona_residual_rules",
+    "compose_non_sales_ambiguous_goal",
     "compose_persona_identity_goal",
     "compose_persona_social_goal",
+    "PERSONA_TOPIC_NON_SALES_AMBIGUOUS",
     "is_persona_expression_topic",
     "persona_kind_guidance",
     "persona_topic_from_decision_args",

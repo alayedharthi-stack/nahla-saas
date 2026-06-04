@@ -676,6 +676,27 @@ class DefaultDecisionEngine:
                 _oc_exc,
             )
 
+        # ── 0a.57 Absence of positive commerce signal (Jun 2026) ─────────
+        # When classifiers miss and no commerce/fulfillment signal is
+        # present, route to generative non-sales compose — not the default
+        # MerchantBrain sales frame. Runs after short-continuation and
+        # order-context gates so checkout acks are never swallowed.
+        try:
+            from ..commerce.conversational_priority import (  # noqa: PLC0415
+                try_absence_non_sales_decision,
+            )
+            _absence_dec = try_absence_non_sales_decision(
+                ctx, route="decision_engine",
+            )
+            if _absence_dec is not None:
+                return _absence_dec
+        except Exception as _abs_exc:  # noqa: BLE001
+            logger.debug(
+                "[ABSENCE_COMMERCE_GATE] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _abs_exc,
+            )
+
         # ── 0b. Platform / SaaS inquiry (May 2026 #4) ───────────────────────
         # Customer is asking about Nahla (the platform) itself —
         # subscription, API, dashboard, Meta linking, campaigns.

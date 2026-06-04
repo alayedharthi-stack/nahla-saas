@@ -680,7 +680,12 @@ class MerchantBrain:
             _order_fulfillment_skip = False
 
         _pre_commerce_shortcut = (
-            should_pre_commerce_shortcut(intent, _nc_match)
+            should_pre_commerce_shortcut(
+                intent,
+                _nc_match,
+                message=message or "",
+                state=state_for_classify,
+            )
             or _order_fulfillment_skip
         )
         if _pre_commerce_shortcut and not _order_fulfillment_skip:
@@ -2453,6 +2458,14 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
         _pk = str((decision.args or {}).get("persona_kind") or "social").strip()
         return compose_persona_social_goal(_pk)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "non_sales_ambiguous"
+    ):
+        from .persona_expression import compose_non_sales_ambiguous_goal  # noqa: PLC0415
+
+        return compose_non_sales_ambiguous_goal()
 
     if (
         decision.action == ACTION_LLM_REPLY
