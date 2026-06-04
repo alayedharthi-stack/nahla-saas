@@ -115,10 +115,14 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     merchant_behavior_extra = (
         structured_behavior_block or overlay_buckets.get("behavior", "")
     )
+    _persona_expression_mode = bool(
+        getattr(state, "persona_expression_mode", False)
+    )
     high_priority_block = build_high_priority_block(
         settings_for_overlay,
         store_name=store_name,
         merchant_behavior_extra=merchant_behavior_extra,
+        omit_sales_behavior=_persona_expression_mode,
     )
 
     # Assistant identity (name + role) sits with the persona, not with
@@ -470,6 +474,11 @@ def _emit_prompt_log(
             "has_libraries":             bool(libraries),
             "has_resolver_overlay":      bool(resolver_overlay),
             "has_structured_behavior":   bool(mc.get("structured_behavior_block")),
+            "persona_expression_mode":   bool(
+                getattr(state, "persona_expression_mode", False)
+            ),
+            "persona_topic":             getattr(state, "persona_topic", "") or None,
+            "has_sales_behavior_a1":     "SALESPERSON BEHAVIOR" in high_priority,
         }
         _log.info("[PROMPT_LAYERS] " + json.dumps(payload, ensure_ascii=False))
     except Exception:  # noqa: BLE001 — logging must never break a turn

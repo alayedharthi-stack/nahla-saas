@@ -2193,6 +2193,19 @@ def _build_reply_state(
 
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
+    from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
+
+    _persona_topic = persona_topic_from_decision_args(decision.args)
+    _persona_kind = str((decision.args or {}).get("persona_kind") or "").strip()
+    if _persona_topic:
+        logger.info(
+            "[PERSONA_EXPRESSION] tenant=%s topic=%s kind=%s "
+            "a1=suppressed stance=bypass",
+            getattr(ctx, "tenant_id", None),
+            _persona_topic,
+            _persona_kind or "-",
+        )
+
     return BrainReplyState(
         store_name=ctx.facts.store_name,
         tone=effective_tone,
@@ -2247,13 +2260,26 @@ def _build_reply_state(
             or (getattr(ctx.intent, "slots", None) or {}).get("need_category")
             or ""
         ),
+        persona_expression_mode=bool(_persona_topic),
+        persona_topic=_persona_topic,
+        persona_kind=_persona_kind,
         relational_frame=(
-            _stance_result.stance if _stance_result
-            and _stance_result.stance != "unknown" else ""
+            _persona_topic
+            if _persona_topic
+            else (
+                _stance_result.stance
+                if _stance_result and _stance_result.stance != "unknown"
+                else ""
+            )
         ),
         relational_evidence=(
-            _stance_result.evidence if _stance_result
-            and _stance_result.stance != "unknown" else ""
+            ""
+            if _persona_topic
+            else (
+                _stance_result.evidence
+                if _stance_result and _stance_result.stance != "unknown"
+                else ""
+            )
         ),
     )
 
@@ -2278,6 +2304,10 @@ def _compose_response_goal(
     primary goal; it widens the lens.
     """
     base_goal = _compose_base_response_goal(decision, suggestion)
+    from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
+
+    if persona_topic_from_decision_args(decision.args):
+        return base_goal
     return _prepend_stance_directive(base_goal, stance)
 
 
@@ -2411,38 +2441,18 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "persona_identity"
     ):
-        return (
-            "persona_identity — Generate a short natural Saudi Arabic WhatsApp "
-            "reply. The customer is asking who you are, whether you are Nahla, "
-            "a bot, AI, or human, or is playfully probing (e.g. «تنامين؟»). "
-            "Answer in Nahla's warm playful persona: 1–3 short lines, "
-            "conversational Saudi tone, emotionally natural — not support "
-            "boilerplate. "
-            "Do NOT use onboarding bullet lists or enumerate product/price/"
-            "shipping/order capabilities. "
-            "Do NOT pitch products, prices, checkout, or catalog items. "
-            "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole "
-            "reply or «نظام ذكاء اصطناعي» boilerplate. "
-            "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
-            "If they ask whether you sleep, answer playfully that you are a "
-            "digital Nahla assistant always available to help."
-        )
+        from .persona_expression import compose_persona_identity_goal  # noqa: PLC0415
+
+        return compose_persona_identity_goal()
 
     if (
         decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "persona_social"
     ):
+        from .persona_expression import compose_persona_social_goal  # noqa: PLC0415
+
         _pk = str((decision.args or {}).get("persona_kind") or "social").strip()
-        return (
-            f"persona_social — Generate a short natural Saudi Arabic WhatsApp "
-            f"reply to a social/personality message (persona_kind={_pk}). "
-            "Respond warmly and conversationally in 1–3 short lines — not "
-            "support boilerplate, not a sales pitch. "
-            "Do NOT pitch products, prices, checkout, or catalog items. "
-            "Do NOT use onboarding bullet lists or enumerate store capabilities. "
-            "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
-            "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply."
-        )
+        return compose_persona_social_goal(_pk)
 
     if (
         decision.action == ACTION_LLM_REPLY

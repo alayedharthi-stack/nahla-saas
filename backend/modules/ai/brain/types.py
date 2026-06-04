@@ -767,6 +767,11 @@ class BrainReplyState:
     # observability — operators grep for ``relational_frame=`` in logs.
     relational_frame: str = ""
     relational_evidence: str = ""
+    # Persona expression profile (Phase 3A) — suppresses commerce prompt
+    # layers on persona_identity / persona_social compose turns.
+    persona_expression_mode: bool = False
+    persona_topic: str = ""
+    persona_kind: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

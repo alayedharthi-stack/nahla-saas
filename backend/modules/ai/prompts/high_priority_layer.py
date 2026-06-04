@@ -388,6 +388,7 @@ def build_high_priority_block(
     *,
     store_name: str = "",
     merchant_behavior_extra: str = "",
+    omit_sales_behavior: bool = False,
 ) -> str:
     """
     Render the High-Priority Style + Policy block.
@@ -441,35 +442,33 @@ def build_high_priority_block(
             lines.append(f"• الطول: {style_overrides['length']}")
 
     # ── A1) SALESPERSON BEHAVIOR — البيع التدريجي ─────────────────────────
-    # Inserted between STYLE and POLICY so it inherits the same "above the
-    # knowledge base" precedence as STYLE while still leaving POLICY in
-    # charge of *what* the assistant is allowed to say. This layer governs
-    # *how much* it says per turn — the answer to "بائع واتساب حقيقي،
-    # ليس كتالوج جامد".
-    lines.append("")
-    lines.append("[A1] SALESPERSON BEHAVIOR — البيع التدريجي (Progressive Selling)")
-    lines.append(
-        "أنت بائع واتساب محترف، لست كتالوج. هذا الأسلوب يسبق كل قواعد المعرفة "
-        "والسياق — حتى لو سأل العميل صراحةً عن «الأنواع وأسعارها»، التزم "
-        "بالقواعد أدناه ولا تُفرّغ البيانات دفعةً واحدة."
-    )
-    for r in BASELINE_SALES_BEHAVIOR_RULES:
-        lines.append(f"• {r}")
-
-    # In-context examples — the model learns the shape from concrete cases.
-    if SALES_BEHAVIOR_EXAMPLES:
+    # Omitted on persona_identity / persona_social turns (Phase 3A) so
+    # social/personality compose is not pulled toward progressive selling.
+    if not omit_sales_behavior:
         lines.append("")
-        lines.append("أمثلة تعليمية (تعلّم الشكل من المرفوض ← المقبول):")
-        for idx, (msg, bad, good, lesson) in enumerate(SALES_BEHAVIOR_EXAMPLES, start=1):
+        lines.append("[A1] SALESPERSON BEHAVIOR — البيع التدريجي (Progressive Selling)")
+        lines.append(
+            "أنت بائع واتساب محترف، لست كتالوج. هذا الأسلوب يسبق كل قواعد المعرفة "
+            "والسياق — حتى لو سأل العميل صراحةً عن «الأنواع وأسعارها»، التزم "
+            "بالقواعد أدناه ولا تُفرّغ البيانات دفعةً واحدة."
+        )
+        for r in BASELINE_SALES_BEHAVIOR_RULES:
+            lines.append(f"• {r}")
+
+        # In-context examples — the model learns the shape from concrete cases.
+        if SALES_BEHAVIOR_EXAMPLES:
             lines.append("")
-            lines.append(f"[{idx}] عميل: «{msg}»")
-            lines.append("    ❌ مرفوض (data dump):")
-            for ln in bad.splitlines():
-                lines.append(f"       {ln}")
-            lines.append("    ✅ مقبول (progressive disclosure):")
-            for ln in good.splitlines():
-                lines.append(f"       {ln}")
-            lines.append(f"    الدرس: {lesson}")
+            lines.append("أمثلة تعليمية (تعلّم الشكل من المرفوض ← المقبول):")
+            for idx, (msg, bad, good, lesson) in enumerate(SALES_BEHAVIOR_EXAMPLES, start=1):
+                lines.append("")
+                lines.append(f"[{idx}] عميل: «{msg}»")
+                lines.append("    ❌ مرفوض (data dump):")
+                for ln in bad.splitlines():
+                    lines.append(f"       {ln}")
+                lines.append("    ✅ مقبول (progressive disclosure):")
+                for ln in good.splitlines():
+                    lines.append(f"       {ln}")
+                lines.append(f"    الدرس: {lesson}")
 
     # ── B) POLICY ─────────────────────────────────────────────────────────
     lines.append("")
