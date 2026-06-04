@@ -1,40 +1,61 @@
 """
-Persona expression helpers — Phase 3A compose profile (routing unchanged).
+Persona expression helpers — Phase 3A/3B compose profile (routing unchanged).
 
 Subtracts commerce-oriented prompt layers on ``persona_identity`` /
 ``persona_social`` turns. Behavioral guidance only — no canned Arabic.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 PERSONA_TOPIC_IDENTITY = "persona_identity"
 PERSONA_TOPIC_SOCIAL = "persona_social"
 
 PERSONA_TOPICS = frozenset({PERSONA_TOPIC_IDENTITY, PERSONA_TOPIC_SOCIAL})
 
+# Shared negative guidance — behavioral only, not reply text.
+_NO_SERVICE_CLOSER = (
+    "Do NOT end with customer-service or help-desk closers — no "
+    "«كيف أقدر أخدمك», «كيف أساعدك», «أنا هنا للمساعدة», "
+    "«إذا احتجت أي مساعدة», «خبرني كيف أساعدك», or «تحت أمرك» as a "
+    "closing line. End on the social beat; do not pivot to assistance."
+)
+
 _KIND_GUIDANCE: dict[str, str] = {
     "affection": (
         "Energy: warm reciprocal — acknowledge the feeling modestly in Saudi "
-        "tone; no romantic escalation, no sales pivot, no support boilerplate."
+        "tone; no romantic escalation, no sales pivot, no support boilerplate. "
+        "No help-offer ending."
     ),
     "appearance": (
         "Energy: modest friendly acknowledgment — light deflection or "
-        "kindness mirror; no over-flattery, no poetic Gulf-generic lines."
+        "kindness mirror; no over-flattery, no poetic Gulf-generic lines. "
+        "No service framing or assistance offer at the end."
     ),
     "tease": (
         "Energy: light playful pushback — match tease with tease, not apology "
-        "or customer-service tone; humor and mild comeback are welcome."
+        "plus support tone; humor and mild comeback are welcome. "
+        "No customer-service recovery pattern."
     ),
     "upset": (
         "Energy: gentle light repair — acknowledge without groveling; no "
-        "support-ticket tone, staff escalation promise, or discount offer."
+        "support-ticket tone, staff escalation promise, or discount offer. "
+        "No escalation or handoff language."
     ),
     "social": (
         "Energy: warm conversational Saudi personality — natural and human, "
         "not merchant FAQ or sales assistant."
     ),
 }
+
+_PERSONA_OMIT_STATE_JSON_KEYS = (
+    "recommended_next_step",
+    "coupon_policy",
+    "last_recommended_products",
+    "selected_product",
+    "explicit_pending_action",
+    "policy_reason",
+)
 
 
 def persona_topic_from_decision_args(args: Optional[dict]) -> str:
@@ -70,7 +91,8 @@ def compose_persona_identity_goal() -> str:
         "Do NOT pitch products, prices, checkout, or catalog items. "
         "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole "
         "reply or «نظام ذكاء اصطناعي» boilerplate. "
-        "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]."
+        "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
+        f"{_NO_SERVICE_CLOSER}"
     )
 
 
@@ -86,8 +108,52 @@ def compose_persona_social_goal(persona_kind: str) -> str:
         "Do NOT pitch products, prices, checkout, or catalog items. "
         "Do NOT use onboarding bullet lists or enumerate store capabilities. "
         "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
-        "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply."
+        "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply. "
+        f"{_NO_SERVICE_CLOSER}"
     )
+
+
+def build_persona_residual_rules(*, tone: str) -> str:
+    """Platform-wide residual rules for persona compose turns (Phase 3B)."""
+    tone_label = tone or "neutral"
+    return (
+        "## قواعد تشغيل Brain — جولة شخصية/اجتماعية (persona)\n"
+        f"- النبرة: {tone_label} — سعودية طبيعية، دافئة، مختصرة.\n"
+        "- اتبعي **response_goal** أعلاه — يتجاوز stage وأي إشارة JSON "
+        "تجارية أو خطوة بيعية.\n"
+        "- هذه جولة **شخصية/اجتماعية** — لا منتجات، لا أسعار، لا checkout، "
+        "لا كوبونات، لا طلب عنوان، لا تصعيد موظف.\n"
+        "- **ممنوع** إغلاق الرد بعبارات خدمة عملاء أو مكتب مساعدة: "
+        "«كيف أقدر أخدمك»، «كيف أساعدك»، «أنا هنا للمساعدة»، "
+        "«إذا احتجت أي مساعدة»، «خبرني كيف أساعدك»، «تحت أمرك» كختام.\n"
+        "- انهي الرد على نغمة المحادثة — لا سؤال متابعة بيعي ولا CTA مساعدة.\n"
+        "- لا تخترعي حقائق. لا [PRODUCT:…] / [MEDIA_KEY:…].\n"
+        "- اجعلي الرد 1–3 أسطر (راجع HIGH PRIORITY)."
+    )
+
+
+def build_persona_json_footer(*, brain_state_json: str) -> str:
+    return (
+        f"BrainStateJSON:\n{brain_state_json}\n\n"
+        "جولة شخصية/اجتماعية: استخدمي JSON لفهم **استمرارية المحادثة** فقط "
+        "(recent_turns، conversation_summary، customer_memory، greeted، "
+        "identity_already_introduced). "
+        "**ممنوع** اقتراح خطوة تجارية أو checkout أو pitch بيعي بناءً على JSON."
+    )
+
+
+def slim_brain_state_dict_for_persona(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop commerce progression keys from JSON surfaced to Claude on persona turns."""
+    out = dict(state_dict)
+    for key in _PERSONA_OMIT_STATE_JSON_KEYS:
+        out.pop(key, None)
+    mc = out.get("merchant_context")
+    if isinstance(mc, dict):
+        slim_mc = dict(mc)
+        slim_mc.pop("resolver_overlay", None)
+        slim_mc.pop("structured_facts_block", None)
+        out["merchant_context"] = slim_mc
+    return out
 
 
 __all__ = [
@@ -95,11 +161,14 @@ __all__ = [
     "PERSONA_TOPIC_IDENTITY",
     "PERSONA_TOPIC_SOCIAL",
     "PERSONA_TOPICS",
+    "build_persona_json_footer",
+    "build_persona_residual_rules",
     "compose_persona_identity_goal",
     "compose_persona_social_goal",
     "is_persona_expression_topic",
     "persona_kind_guidance",
     "persona_topic_from_decision_args",
+    "slim_brain_state_dict_for_persona",
 ]
 
 # Exported for tests that assert keys exist.

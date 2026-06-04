@@ -145,10 +145,46 @@ NAHLA_PERSONA: str = (
 )
 
 
+# Persona-aware Nahla block — social/personality compose (Phase 3B).
+# Platform-wide; no merchant-specific logic. Claude still authors replies.
+NAHLA_PERSONA_SOCIAL_EXPRESSION: str = (
+    "أنتِ «نحلة 🐝» — شخصية ودودة على واتساب، تتكلمين بشكل طبيعي مع العميل.\n"
+    "هذه جولة **شخصية/اجتماعية** — ليست خدمة عملاء ولا مبيعات.\n\n"
+
+    "## أسلوب الحديث\n"
+    "- تحدّثي بأسلوب سعودي طبيعي — دافئ، مختصر، عفوي، كأنك شخص حقيقي "
+    "وليس موظفة استقبال أو مكتب مساعدة.\n"
+    "- اجعلي الردود قصيرة (1–3 أسطر). لا فصحى ثقيلة ولا لهجة غير سعودية.\n"
+    "- إيموجي اختياري (0–1) عند الحاجة — ليس إلزامياً في كل رد.\n"
+    "- تجنّبي الردود الرسمية أو «المسرحية» أو نبرة الدعم الفني.\n"
+    "- لا تستخدمي مصطلحات تقنية مثل «نظام» أو «ذكاء اصطناعي» إلا إذا "
+    "سأل العميل مباشرة عن كونك بوت.\n\n"
+
+    "## اللهجة السعودية\n"
+    "- فضّلي عبارات سعودية طبيعية بحسب السياق: حياك الله، يا هلا، أبشر، "
+    "الله يسعدك، تسلم، كفو — بدون تكديس.\n"
+    "- **ممنوع** إغلاق الرد بعبارات مكتب المساعدة: «كيف أقدر أخدمك»، "
+    "«كيف أساعدك»، «أنا هنا للمساعدة»، «تحت أمرك» كختام، «خبرني كيف أساعدك».\n"
+    "- انهي الرد على نغمة المحادثة الاجتماعية — لا تفتحي باب الطلبات أو "
+    "المنتجات.\n\n"
+
+    "## الشخصية\n"
+    "- أنتِ لطيفة، ذكية، ومرحة عند الحاجة.\n"
+    "- لا تضغطي على العميل ولا تذكري الطلبات أو المنتجات في هذه الجولة.\n\n"
+
+    "## قواعد المحادثة\n"
+    "1. ركّزي على آخر رسالة من العميل.\n"
+    "2. لا تكرّري نفس الرد.\n"
+    "3. لا تذكري أنك برنامج إلا إذا سُئلتِ صراحة.\n"
+    "4. عند ذكر اسم المتجر استخدمي الاسم التجاري فقط.\n"
+)
+
+
 def nahla_persona_system_prompt(
     *,
     store_name: Optional[str] = None,
     store_context_text: Optional[str] = None,
+    persona_expression_mode: bool = False,
 ) -> str:
     """Return the full system prompt: Nahla persona + (optional) merchant
     store context. Designed to be the BASE of the system prompt; tenant
@@ -164,15 +200,23 @@ def nahla_persona_system_prompt(
         `build_ai_context(...)`. Appended as a clearly-fenced block so
         the model treats it as ground-truth — never something to invent.
     """
-    intro = NAHLA_PERSONA
+    intro = NAHLA_PERSONA_SOCIAL_EXPRESSION if persona_expression_mode else NAHLA_PERSONA
     if store_name:
         disp = clean_store_name(store_name.strip())
         if disp:
-            intro = intro.replace(
-                "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر.",
-                f"أنتِ «نحلة 🐝»، المساعدة الذكية لمتجر «{disp}».",
-                1,
-            )
+            if persona_expression_mode:
+                intro = intro.replace(
+                    "أنتِ «نحلة 🐝» — شخصية ودودة على واتساب، تتكلمين بشكل طبيعي مع العميل.",
+                    f"أنتِ «نحلة 🐝» من متجر «{disp}» — شخصية ودودة على واتساب، "
+                    "تتكلمين بشكل طبيعي مع العميل.",
+                    1,
+                )
+            else:
+                intro = intro.replace(
+                    "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر.",
+                    f"أنتِ «نحلة 🐝»، المساعدة الذكية لمتجر «{disp}».",
+                    1,
+                )
 
     sections = [intro]
 

@@ -350,6 +350,56 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     "ممنوع pitch بيعي أو اقتراح منتج في نفس الرد.",
 )
 
+# Policy rules omitted on persona compose (Phase 3B) — commerce ops only.
+_PERSONA_OMIT_POLICY_MARKERS: tuple[str, ...] = (
+    "وش أقدر أخدمك",
+    "[PRODUCT:",
+    "store_url",
+    "MEDIA_KEY",
+    "كود خصم",
+    "رابط التتبع",
+    "طلب نشط",
+    "رقم موظف",
+    "للتصعيد للموظف",
+    "للوسائط (باركودات",
+)
+
+BASELINE_PERSONA_POLICY_RULES: tuple[str, ...] = (
+    "جولة persona — تعريف النفس: إذا identity_already_introduced=true "
+    "ممنوع تكرار «أنا نحلة / مساعدة / ذكاء اصطناعي». ردود قصيرة طبيعية "
+    "(«ياهلا» / «حياك الله») **بدون** «تحت أمرك» أو «كيف أقدر أخدمك» كختام.",
+    "إذا سأل صراحة «هل أنت بوت؟ / مين أنت؟» — جملة واحدة طبيعية بدون "
+    "قائمة قدرات وبدون ختام خدمة عملاء.",
+    "جولة persona — **ممنوع** إغلاق الرد الاجتماعي بعبارات مكتب المساعدة: "
+    "«كيف أقدر أخدمك»، «كيف أساعدك»، «أنا هنا للمساعدة»، «إذا احتجت أي "
+    "مساعدة»، «خبرني كيف أساعدك»، «تحت أمرك» كسطر ختام.",
+)
+
+_PERSONA_OMIT_STYLE_PREFIX = "اقرئي `relational_frame`"
+
+
+def _style_rules_for_mode(*, persona_expression_mode: bool) -> tuple[str, ...]:
+    if not persona_expression_mode:
+        return BASELINE_STYLE_RULES
+    return tuple(
+        r for r in BASELINE_STYLE_RULES
+        if not r.startswith(_PERSONA_OMIT_STYLE_PREFIX)
+    )
+
+
+def _policy_rules_for_mode(*, persona_expression_mode: bool) -> tuple[str, ...]:
+    if not persona_expression_mode:
+        return BASELINE_POLICY_RULES
+    filtered = [
+        r
+        for r in BASELINE_POLICY_RULES
+        if not any(marker in r for marker in _PERSONA_OMIT_POLICY_MARKERS)
+        and "«تحت أمرك»" not in r
+        and "خدمة العملاء والطلبات" not in r
+    ]
+    return tuple(filtered) + BASELINE_PERSONA_POLICY_RULES
+
+
 BASELINE_FORBIDDEN_RULES: tuple[str, ...] = (
     # ── Source-of-truth precedence (Phase 4 — Smart Store KB) ─────────────
     # The Smart Store Knowledge Hub introduces a structured facts surface
@@ -389,6 +439,7 @@ def build_high_priority_block(
     store_name: str = "",
     merchant_behavior_extra: str = "",
     omit_sales_behavior: bool = False,
+    persona_expression_mode: bool = False,
 ) -> str:
     """
     Render the High-Priority Style + Policy block.
@@ -429,7 +480,7 @@ def build_high_priority_block(
 
     # ── A) STYLE ──────────────────────────────────────────────────────────
     lines.append("[A] STYLE — كيف تكتب")
-    for r in BASELINE_STYLE_RULES:
+    for r in _style_rules_for_mode(persona_expression_mode=persona_expression_mode):
         lines.append(f"• {r}")
     if style_overrides:
         lines.append("")
@@ -473,7 +524,7 @@ def build_high_priority_block(
     # ── B) POLICY ─────────────────────────────────────────────────────────
     lines.append("")
     lines.append("[B] POLICY — متى تفعل ماذا")
-    for r in BASELINE_POLICY_RULES:
+    for r in _policy_rules_for_mode(persona_expression_mode=persona_expression_mode):
         lines.append(f"• {r}")
     if policy_overrides:
         lines.append("")

@@ -92,10 +92,20 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # Drop the legacy concatenated overlay — it would duplicate the
     # split buckets below.
     state_dict.pop("tenant_overlay", None)
+    _persona_expression_mode = bool(
+        getattr(state, "persona_expression_mode", False)
+    )
+    if _persona_expression_mode:
+        from ..persona_expression import slim_brain_state_dict_for_persona  # noqa: PLC0415
+
+        state_dict = slim_brain_state_dict_for_persona(state_dict)
     brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
 
     # ── BLOCK 1: Persona ──────────────────────────────────────────────────
-    persona_block = nahla_persona_system_prompt(store_name=store_name)
+    persona_block = nahla_persona_system_prompt(
+        store_name=store_name,
+        persona_expression_mode=_persona_expression_mode,
+    )
 
     # ── BLOCK 2: HIGH PRIORITY (Style + Policy + Forbidden) ───────────────
     # KB-2 (May 2026 #23): pass the merchant's behavioral overlay (group-7
@@ -115,14 +125,12 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     merchant_behavior_extra = (
         structured_behavior_block or overlay_buckets.get("behavior", "")
     )
-    _persona_expression_mode = bool(
-        getattr(state, "persona_expression_mode", False)
-    )
     high_priority_block = build_high_priority_block(
         settings_for_overlay,
         store_name=store_name,
         merchant_behavior_extra=merchant_behavior_extra,
         omit_sales_behavior=_persona_expression_mode,
+        persona_expression_mode=_persona_expression_mode,
     )
 
     # Assistant identity (name + role) sits with the persona, not with
@@ -142,6 +150,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     if isinstance(_mc, dict):
         _structured_kb = str(_mc.get("structured_facts_block") or "").strip()
     kb_block = _structured_kb or overlay_buckets.get("facts", "")
+    if _persona_expression_mode:
+        kb_block = ""
 
     _platform_mode = bool(getattr(state, "platform_kb_mode", False))
     _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
@@ -312,6 +322,10 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "- إذا كان BrainStateJSON يظهر منتجاً محدداً فتجاهلي ذلك لأغراض "
             "الرد — العميل يسأل عن إعدادات/خدمة نحلة.\n"
         )
+    elif _persona_expression_mode:
+        from ..persona_expression import build_persona_residual_rules  # noqa: PLC0415
+
+        brain_residual_rules = build_persona_residual_rules(tone=tone)
     else:
         autopilot_on = bool(
             (state.merchant_context or {})
@@ -375,6 +389,10 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "في وضع استفسار المنصّة: استخدمي الحقول لفهم المراسلة فقط — "
             "**ممنوع** اقتراح خطوة تجارية أو طلب منتج بناءً على JSON."
         )
+    elif _persona_expression_mode:
+        from ..persona_expression import build_persona_json_footer  # noqa: PLC0415
+
+        brain_json_tail = build_persona_json_footer(brain_state_json=brain_state_json)
     else:
         brain_json_tail = (
             f"BrainStateJSON:\n{brain_state_json}\n\n"
