@@ -37,6 +37,7 @@ from ..types import (
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_EMPLOYEE_NOT_RESPONDING,
+    INTENT_PERSONA_INTERACTION,
     INTENT_TRACK_ORDER,
     INTENT_WHO_ARE_YOU,
     Intent,
@@ -47,6 +48,7 @@ from .non_commerce_classifier import classify_non_commerce
 from .need_based_product_classifier import classify_need_based_product_advice
 from ..commerce.solution_seeking import classify_solution_seeking_commerce
 from ..commerce.contact_escalation import classify_employee_not_responding
+from .persona_interaction_classifier import classify_persona_interaction
 
 
 @dataclass
@@ -77,7 +79,7 @@ _register(RuleSet(
         # Playful / persona probes — must beat non-commerce mis-tags (e.g. "تنامين؟").
         r"(?:هل\s*)?(?:انت|أنت|انتي|أنتِ)\s*(?:نحله|نحلة|بوت|روبوت|bot|chatbot|إنسان|انسان|بشر|موجود(?:ه|ة)?|ذكاء\s*اصطناعي|ذكاء|برنامج|ai)",
         r"(?:نحله|نحلة)\s*(?:انت|أنت|انتي|أنتِ|هذا|هذي|هي)",
-        r"^(?:تنامين|تنام|ما\s*تنام|تنام\s*ولا|تنام\s*ولا\s*لا)\s*[\?؟]?$",
+        r"^(?:هل\s*)?(?:تنامين|تنام|ما\s*تنام|تنام\s*ولا|تنام\s*ولا\s*لا)\s*[\?؟]?$",
         r"(?:مو\s*انسان|مو\s*إنسان|مو\s*بشر|هل\s*انت\s*بشر)",
     ],
     confidence=0.98,
@@ -731,6 +733,27 @@ def match(message: str) -> Optional[Intent]:
                 slots={"trigger_pattern": enr.pattern},
                 raw_message=message,
                 extraction_method="rules+employee_not_responding",
+            ),
+        ))
+
+    # ── Layer 2d: persona social / emotional probes (Phase 2) ─────────
+    # Playful, affectionate, appearance, tease, mild upset — must beat
+    # generic commerce fallback. Excludes operational/complaint context
+    # (see persona_interaction_classifier).
+    _persona = classify_persona_interaction(message)
+    if _persona is not None:
+        candidates.append((
+            _persona.confidence,
+            Intent(
+                name=INTENT_PERSONA_INTERACTION,
+                confidence=_persona.confidence,
+                slots={
+                    "persona_topic": _persona.persona_topic,
+                    "persona_kind": _persona.persona_kind,
+                    "block_commerce_escalation": True,
+                },
+                raw_message=message,
+                extraction_method="rules+persona_interaction",
             ),
         ))
 

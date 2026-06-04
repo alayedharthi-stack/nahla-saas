@@ -2430,6 +2430,22 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "persona_social"
+    ):
+        _pk = str((decision.args or {}).get("persona_kind") or "social").strip()
+        return (
+            f"persona_social — Generate a short natural Saudi Arabic WhatsApp "
+            f"reply to a social/personality message (persona_kind={_pk}). "
+            "Respond warmly and conversationally in 1–3 short lines — not "
+            "support boilerplate, not a sales pitch. "
+            "Do NOT pitch products, prices, checkout, or catalog items. "
+            "Do NOT use onboarding bullet lists or enumerate store capabilities. "
+            "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
+            "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply."
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "tracking_link_follow_up"
     ):
         _args = decision.args or {}

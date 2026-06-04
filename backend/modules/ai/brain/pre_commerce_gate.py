@@ -24,7 +24,7 @@ import os
 from typing import Any, Optional
 
 from .intent.non_commerce_classifier import NonCommerceMatch
-from .types import CommerceFacts, INTENT_SOCIAL, INTENT_WHO_ARE_YOU, Intent
+from .types import CommerceFacts, INTENT_PERSONA_INTERACTION, INTENT_SOCIAL, INTENT_WHO_ARE_YOU, Intent
 
 logger = logging.getLogger("nahla.brain.pre_commerce_gate")
 
@@ -66,6 +66,9 @@ def should_pre_commerce_shortcut(
         return True
 
     if intent.name == INTENT_WHO_ARE_YOU and conf >= threshold:
+        return True
+
+    if intent.name == INTENT_PERSONA_INTERACTION and conf >= threshold:
         return True
 
     return False

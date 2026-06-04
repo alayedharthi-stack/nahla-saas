@@ -66,6 +66,7 @@ from ..types import (
     INTENT_GENERAL,
     INTENT_WHO_ARE_YOU,
     INTENT_PICK_LIST_ITEM,
+    INTENT_PERSONA_INTERACTION,
 )
 from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 
@@ -572,13 +573,51 @@ class DefaultDecisionEngine:
                 confidence=intent.confidence,
             )
 
+        # ── 0a.42 Persona social / emotional (Phase 2 routing) ─────────────
+        if intent.name == INTENT_PERSONA_INTERACTION:
+            _p_topic = str(
+                (intent.slots or {}).get("persona_topic") or "persona_social"
+            ).strip()
+            _p_kind = str((intent.slots or {}).get("persona_kind") or "").strip()
+            try:
+                from ..intent.persona_interaction_classifier import (  # noqa: PLC0415
+                    log_persona_route,
+                )
+                log_persona_route(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    persona_topic=_p_topic,
+                    persona_kind=_p_kind,
+                    preview=(ctx.message or "")[:64],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            logger.info(
+                "[PERSONA_ROUTE] route=persona_social kind=%s tenant=%s preview=%r",
+                _p_kind or "-",
+                getattr(ctx, "tenant_id", None),
+                (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": _p_topic,
+                    "persona_kind": _p_kind,
+                    "block_commerce_escalation": True,
+                },
+                reason=f"persona interaction — {_p_topic}/{_p_kind or 'social'}",
+                confidence=intent.confidence,
+            )
+
         # ── 0a.5 Non-commerce media / greeting OCR (May 2026) ───────────────
         # Long Eid dua / greeting images bypass ``classify_social`` length
         # limits but still carry zero buying intent. When the classifier
         # (or intent slots) marks the turn, block ALL commerce branches
         # below — including text-pattern top_products / replay fallbacks
         # and LLM catalog drift — and respond socially instead.
-        if _is_commerce_blocked(ctx) and intent.name != INTENT_WHO_ARE_YOU:
+        if _is_commerce_blocked(ctx) and intent.name not in (
+            INTENT_WHO_ARE_YOU,
+            INTENT_PERSONA_INTERACTION,
+        ):
             nc_category = str(
                 (intent.slots or {}).get("social_category") or "religious_media"
             )

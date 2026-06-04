@@ -53,6 +53,10 @@ INTENT_TALK_HUMAN       = "talk_to_human"
 # ("ما رد" / "اتصلت عليه وما رد"). Distinct from fresh handoff
 # (``INTENT_TALK_HUMAN``). Phase 1: detection + memory + telemetry only.
 INTENT_EMPLOYEE_NOT_RESPONDING = "employee_not_responding"
+# Playful / emotional / social persona probes — affection, appearance
+# compliment, tease, mild upset. Routed to persona_social LLM compose;
+# NOT deterministic templates.
+INTENT_PERSONA_INTERACTION = "persona_interaction"
 INTENT_TRACK_ORDER      = "track_order"
 INTENT_GENERAL          = "general"
 INTENT_PICK_LIST_ITEM   = "pick_list_item"   # customer picks numbered option
