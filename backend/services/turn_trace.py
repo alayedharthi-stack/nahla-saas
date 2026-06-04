@@ -175,6 +175,11 @@ class TurnTrace:
     outbound_sent:    bool = False
     outbound_error:   str  = ""
 
+    # ── Real Handoff Slice 1 — derived ownership (not persisted) ────
+    ownership_state:          str = ""
+    ownership_takeover_class: str = ""
+    ownership_release_reason: str = ""
+
     # ── Side info (lists kept short) ─────────────────────────────
     missing_fields:   list[str] = field(default_factory=list)
     options_pending:  list[str] = field(default_factory=list)
@@ -278,7 +283,8 @@ class TurnTrace:
                 "response_goal=%s delivery=%s fallback_source=%s "
                 "clarification_triggered=%s clarification_reason=%s "
                 "reply_source=%s reply_len=%d buttons=%d "
-                "handoff=%s outbound_sent=%s outbound_err=%s "
+                "handoff=%s ownership=%s ownership_class=%s ownership_release=%s "
+                "outbound_sent=%s outbound_err=%s "
                 "missing=%s opts=%s elapsed_ms=%d inbound=%r%s",
                 self.tenant_id, (self.phone or "")[-4:], self.message_id or "-",
                 self.mode or "-", self.intent or "-", float(self.intent_confidence or 0.0), self.stance or "-",
@@ -289,7 +295,11 @@ class TurnTrace:
                 self.response_goal or "-", self.delivery_mode or "-", self.fallback_source or "-",
                 self.clarification_triggered, self.clarification_reason or "-",
                 src, self.reply_len, self.buttons_count,
-                self.handoff_triggered, self.outbound_sent, self.outbound_error or "-",
+                self.handoff_triggered,
+                self.ownership_state or "-",
+                self.ownership_takeover_class or "-",
+                self.ownership_release_reason or "-",
+                self.outbound_sent, self.outbound_error or "-",
                 self.missing_fields, self.options_pending, elapsed, inbound, invalid_src_hint,
             )
         except Exception as _emit_exc:  # noqa: BLE001

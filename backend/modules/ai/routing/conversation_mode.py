@@ -697,40 +697,25 @@ def _build_lease(
     )
 
 
-def _conversation_handoff_flag(convo: Any) -> bool:
-    """True when staff has ACTIVELY taken the conversation over.
+def _conversation_handoff_flag(convo: Any, db: Any = None, *, now: Any = None) -> bool:
+    """True when staff genuinely owns the keyboard (Real Handoff Slice 1).
 
-    May 2026 #46 (Tenant 33) policy shift
-    ────────────────────────────────────
-    Pre-#46 this returned True for the mere presence of
-    ``is_human_handoff`` — including the auto-flipped value the
-    pre-brain escalation guard sets when a customer types
-    "أبي أتواصل مع المالك". That auto-flip then trapped the
-    conversation in MODE_SUPPORT_ESCALATION on every subsequent
-    turn — the customer would ask perfectly normal product /
-    pricing / shipping questions and the AI stayed silent.
+    Uses ``core.ownership_state.conversation_handoff_active`` when a DB
+    session is available — implicit takeover expires after staff-idle TTL
+    once the customer messages again. Advisory queue flags alone never
+    fire this gate (May 2026 #46).
 
-    Merchant rule:
-        "الإيقاف الكامل للذكاء يجب أن يكون يدويًا فقط من الموظف
-         داخل لوحة نحلة."
-
-    So we narrow this gate to the two signals that prove a real
-    human is engaged on the keyboard:
-
-      1. ``paused_by_human`` — set by the conversations router on
-         every manual reply / explicit takeover (line 1871 of
-         routers/conversations.py).
-      2. ``taken_over_at`` — stamped the first time staff sends a
-         manual reply or hits the "استلام" button.
-
-    The advisory tags (``is_human_handoff`` / ``needs_human`` /
-    ``handoff_active``) remain useful for the dashboard's
-    "طلب موظف" filter and for analytics, but they no longer
-    silence the brain on their own. A dashboard pause via
-    ``pause_ai`` flips ``Conversation.ai_paused`` separately and is
-    caught by ``should_skip_ai`` long before this resolver runs —
-    so the explicit manual-pause path is preserved end-to-end.
+    Without ``db`` (unit tests): falls back to raw takeover booleans.
     """
+    if db is not None:
+        try:
+            from core.ownership_state import conversation_handoff_active  # noqa: PLC0415
+
+            return conversation_handoff_active(
+                db, convo, now=now, assume_current_inbound=True,
+            )
+        except Exception:
+            pass
     return bool(
         getattr(convo, "paused_by_human", False)
         or getattr(convo, "taken_over_at", None) is not None
@@ -772,7 +757,7 @@ def resolve_conversation_mode(
     prior_mode = prior_lease.mode or MODE_LIVE_CHAT
 
     # 1) Human handoff trumps everything ────────────────────────────────
-    if _conversation_handoff_flag(convo):
+    if _conversation_handoff_flag(convo, db, now=now):
         lease = _build_lease(
             mode=MODE_SUPPORT_ESCALATION,
             previous_mode=prior_mode,

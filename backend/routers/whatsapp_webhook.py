@@ -6010,6 +6010,39 @@ async def _handle_merchant_message(
             resolve_conversation_mode,
             save_lease,
         )
+        from core.ownership_state import (  # noqa: PLC0415
+            attempt_implicit_takeover_recovery,
+            resolve_ownership_state,
+        )
+        _ownership_before = resolve_ownership_state(
+            db, convo, assume_current_inbound=True,
+        )
+        _ownership_recovery = attempt_implicit_takeover_recovery(
+            db, convo, assume_current_inbound=True,
+        )
+        if _ownership_recovery.released:
+            try:
+                db.add(convo)
+                db.flush()
+            except Exception as _own_exc:
+                logger.warning("[OWNERSHIP_IDLE_RELEASE] flush failed: %s", _own_exc)
+        _ownership_after = resolve_ownership_state(
+            db, convo, assume_current_inbound=True,
+        )
+        if _trace is not None:
+            _trace.ownership_state = _ownership_after.state
+            _trace.ownership_takeover_class = _ownership_after.takeover_class
+            if _ownership_recovery.released:
+                _trace.ownership_release_reason = _ownership_recovery.reason or ""
+        logger.info(
+            "[OWNERSHIP] tenant=%s to=%s before=%s after=%s released=%s class=%s",
+            tenant_id,
+            to,
+            _ownership_before.state,
+            _ownership_after.state,
+            _ownership_recovery.released,
+            _ownership_after.takeover_class,
+        )
         mode_decision = resolve_conversation_mode(
             db,
             tenant_id=tenant_id,
