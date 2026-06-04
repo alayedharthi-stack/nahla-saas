@@ -811,6 +811,68 @@ class CustomerIntelligenceService:
         self.ensure_profile(customer, seen_at=seen_at)
         return customer
 
+    def persist_order_flow_contact_phone(
+        self,
+        *,
+        channel_phone: str,
+        contact_phone_raw: str,
+    ) -> bool:
+        """
+        Store an alternate contact/shipping phone on the Customer row without
+        rewriting WhatsApp channel identity (``normalized_phone``).
+
+        ``channel_phone`` is the WA sender id used for lookup; ``contact_phone_raw``
+        is the number the customer volunteered during checkout (may differ).
+        """
+        from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
+
+        channel_raw = str(channel_phone or "").strip()
+        contact_raw = str(contact_phone_raw or "").strip()
+        if not channel_raw or not contact_raw:
+            return False
+
+        channel_e164 = normalize_to_e164(channel_raw) or channel_raw
+        contact_e164 = normalize_to_e164(contact_raw)
+        if not contact_e164:
+            return False
+
+        customer = self.find_customer_by_phone(channel_e164)
+        if customer is None and channel_raw != channel_e164:
+            customer = self.find_customer_by_phone(channel_raw)
+        if customer is None:
+            logger.debug(
+                "[CIS] contact_phone skip (no customer) tenant=%s channel=%s",
+                self.tenant_id,
+                channel_raw[:20],
+            )
+            return False
+
+        existing_norm = (customer.normalized_phone or "").strip()
+        if contact_e164 == existing_norm or contact_e164 == channel_e164:
+            return False
+
+        metadata = dict(customer.extra_metadata or {})
+        if (
+            metadata.get("contact_phone") == contact_e164
+            and metadata.get("shipping_phone") == contact_e164
+        ):
+            return False
+
+        metadata["contact_phone"] = contact_e164
+        metadata["shipping_phone"] = contact_e164
+        metadata["contact_phone_source"] = "ai_order_flow"
+        metadata["contact_phone_updated_at"] = utcnow().isoformat()
+        customer.extra_metadata = metadata
+        logger.info(
+            "[CUSTOMER_PROFILE_UPDATED] field=contact_phone tenant=%s "
+            "customer_id=%s channel=%s contact=%s",
+            self.tenant_id,
+            customer.id,
+            channel_e164,
+            contact_e164,
+        )
+        return True
+
     def upsert_lead_customer(
         self,
         *,

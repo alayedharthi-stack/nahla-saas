@@ -916,6 +916,24 @@ class MerchantBrain:
                 _gc_exc,
             )
 
+        # ── 3.95 Customer identity bridge (B-WIRE-01) ─────────────────────
+        # Extract name / contact phone / address hints into order_prep and
+        # CRM before the decision engine so replies reflect stored data.
+        try:
+            from modules.ai.brain.commerce.customer_identity import (  # noqa: PLC0415
+                apply_customer_identity_during_order_flow as _apply_customer_identity,
+                customer_identity_bridge_enabled as _identity_bridge_on,
+            )
+
+            if _identity_bridge_on():
+                _apply_customer_identity(ctx, db=db)
+        except Exception as _cid_exc:  # noqa: BLE001
+            logger.warning(
+                "[CUSTOMER_IDENTITY] apply failed tenant=%s err=%s",
+                tenant_id,
+                _cid_exc,
+            )
+
         # ── 4. Decision ───────────────────────────────────────────────────
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason

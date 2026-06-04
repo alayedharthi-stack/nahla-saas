@@ -148,7 +148,7 @@ class TestCustomerIdentityExtraction:
         ctx = _active_order_ctx("اسمي سعيد")
         apply_customer_identity_during_order_flow(ctx, db=MagicMock())
         mock_persist.assert_called_once()
-        call_kw = mock_persist.call_args.kwargs
+        _, call_kw = mock_persist.call_args
         assert call_kw["name"] == "سعيد"
 
     def test_register_bname_pattern_recipient(self):
@@ -193,3 +193,22 @@ class TestCustomerIdentitySafeguards:
         ctx.raw_message = "اسمي فهد"
         apply_customer_identity_during_order_flow(ctx, db=None)
         assert ctx.state.order_prep.customer_first_name == "فهد"
+
+    @patch(
+        "modules.ai.brain.commerce.customer_identity._persist_customer_contact_phone"
+    )
+    def test_high_confidence_phone_persists_contact_metadata(self, mock_contact):
+        ctx = _active_order_ctx("0512345678")
+        apply_customer_identity_during_order_flow(ctx, db=MagicMock())
+        assert ctx.state.order_prep.customer_phone == "0512345678"
+        mock_contact.assert_called_once()
+        assert mock_contact.call_args.kwargs["channel_phone"] == "966500000001"
+
+    def test_bridge_enabled_by_default(self):
+        from modules.ai.brain.commerce.customer_identity import (  # noqa: PLC0415
+            customer_identity_bridge_enabled,
+        )
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUSTOMER_IDENTITY_BRIDGE_ENABLED", None)
+            assert customer_identity_bridge_enabled() is True

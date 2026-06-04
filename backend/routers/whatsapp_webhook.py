@@ -3160,15 +3160,18 @@ async def _dispatch_message(
         contact_name = _extract_contact_name(value, sender)
         _inbound_customer_id: int | None = None
         try:
+            _lead_meta: dict = {
+                "channel": "whatsapp",
+                "phone_number_id": phone_number_id,
+                "provider": wa_provider(wa_conn),
+            }
+            if contact_name:
+                _lead_meta["wa_profile_name"] = contact_name
             _lead = CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
                 phone=normalized_sender,
                 name=contact_name or normalized_sender,
                 source="whatsapp_inbound",
-                extra_metadata={
-                    "channel": "whatsapp",
-                    "phone_number_id": phone_number_id,
-                    "provider": wa_provider(wa_conn),
-                },
+                extra_metadata=_lead_meta,
                 commit=True,
             )
             if _lead:
