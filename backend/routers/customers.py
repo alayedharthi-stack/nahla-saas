@@ -75,6 +75,38 @@ def _normalize_phone(raw: str) -> str:
     return normalize_phone(raw)
 
 
+def _customer_search_clauses(search: str):
+    """OR filter for ``list_customers`` search.
+
+    Matches display name and raw phone (legacy). Also matches
+    ``normalized_phone`` (E.164) so merchants can paste numbers with
+    or without ``+``, and local Saudi ``05…`` forms still resolve when
+    libphonenumber can normalize them.
+    """
+    from sqlalchemy import or_  # noqa: PLC0415
+    from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
+
+    stripped = search.strip()
+    if not stripped:
+        return None
+
+    term = f"%{stripped}%"
+    clauses = [
+        Customer.name.ilike(term),
+        Customer.phone.ilike(term),
+        Customer.normalized_phone.ilike(term),
+    ]
+
+    e164 = normalize_to_e164(stripped)
+    if e164:
+        clauses.append(Customer.normalized_phone == e164)
+        bare = e164.lstrip("+")
+        if bare:
+            clauses.append(Customer.phone.ilike(f"%{bare}%"))
+
+    return or_(*clauses)
+
+
 class CustomerCreateIn(BaseModel):
     name: str
     phone: str
@@ -601,11 +633,9 @@ async def list_customers(
         ).in_(["true", "1"])
         q = q.filter(is_test) if test_recipient else q.filter(~is_test)
 
-    if search.strip():
-        term = f"%{search.strip()}%"
-        q = q.filter(
-            (Customer.name.ilike(term)) | (Customer.phone.ilike(term))
-        )
+    search_clause = _customer_search_clauses(search)
+    if search_clause is not None:
+        q = q.filter(search_clause)
 
     total = q.count()
     rows = (
