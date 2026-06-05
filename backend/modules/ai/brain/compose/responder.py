@@ -244,7 +244,7 @@ class DefaultComposer:
                     )
                     inquiry_query = extract_inquiry_product_query(ctx.message or "")
                     _inquiry = has_explicit_product_inquiry(ctx.message or "")
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — product_discovery_gate optional; generic clarify if unavailable
                     pass
                 subject = query or inquiry_query
                 if _inquiry or subject:
@@ -435,7 +435,7 @@ class DefaultComposer:
                     state=ctx.state,
                 ):
                     return await self._llm_compose(ctx, result)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up gate best-effort; fall through to template
                 pass
             if not result.success or data.get("message") == "no_orders_found":
                 return T.no_orders()
