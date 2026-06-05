@@ -1987,9 +1987,9 @@ class MerchantBrain:
             result.data["persona_ownership"] = _persona_ownership_dict
         except Exception as _po_exc:  # noqa: BLE001
             _persona_ownership_dict = {}
-            logger.debug(
-                "[PERSONA_OWNERSHIP] brain snapshot failed tenant=%s err=%s",
-                tenant_id, _po_exc,
+            logger.exception(
+                "[PERSONA_OWNERSHIP] brain snapshot failed tenant=%s",
+                tenant_id,
             )
 
         # ── 10. Structured turn trace (searchable in Railway logs) ────────

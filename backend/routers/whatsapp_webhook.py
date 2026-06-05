@@ -5263,10 +5263,7 @@ async def _handle_merchant_message(
     _persona_ownership = _PORecord()
 
     def _sync_persona_observability() -> None:
-        try:
-            _sync_po_trace(_trace, _persona_ownership)
-        except Exception:  # noqa: BLE001
-            pass
+        _sync_po_trace(_trace, _persona_ownership)
 
     # ── PRE-BRAIN HANDOFF GUARD (May 2026 critical hotfix) ─────────
     # Production regression: a customer typing "أبي أتكلم مع أحد"
@@ -7691,20 +7688,17 @@ async def _handle_merchant_message(
                     tenant_id, _pavg_exc,
                 )
 
-        try:
-            if (
-                reply
-                and "_po_reply_before_guards" in locals()
-                and (reply or "").strip() != (_po_reply_before_guards or "").strip()
-            ):
-                _persona_ownership.on_text_replaced(
-                    layer="webhook_truth_guards",
-                    reason=_POReason.TRUTH_GUARD_REWRITE,
-                    before=_po_reply_before_guards,
-                    after=reply or "",
-                )
-        except Exception:  # noqa: BLE001
-            pass
+        if (
+            reply
+            and "_po_reply_before_guards" in locals()
+            and (reply or "").strip() != (_po_reply_before_guards or "").strip()
+        ):
+            _persona_ownership.on_text_replaced(
+                layer="webhook_truth_guards",
+                reason=_POReason.TRUTH_GUARD_REWRITE,
+                before=_po_reply_before_guards,
+                after=reply or "",
+            )
 
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
@@ -8960,16 +8954,13 @@ async def _handle_merchant_message(
                 tenant_id, _sn_exc,
             )
 
-        try:
-            if (reply or "").strip() != (_po_reply_before_safety_nets or "").strip():
-                _persona_ownership.on_text_replaced(
-                    layer="safety_nets",
-                    reason=_POReason.SAFETY_NET_REWRITE,
-                    before=_po_reply_before_safety_nets,
-                    after=reply or "",
-                )
-        except Exception:  # noqa: BLE001
-            pass
+        if (reply or "").strip() != (_po_reply_before_safety_nets or "").strip():
+            _persona_ownership.on_text_replaced(
+                layer="safety_nets",
+                reason=_POReason.SAFETY_NET_REWRITE,
+                before=_po_reply_before_safety_nets,
+                after=reply or "",
+            )
 
         # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
         # Drops lines that contain leaked reasoning prose (e.g. "بناءً
@@ -10810,10 +10801,7 @@ async def _handle_merchant_message(
         # function exited. ``emit()`` is wrapped in its own try/except
         # internally — observability MUST NOT take down the response
         # path under any circumstance.
-        try:
-            _sync_persona_observability()
-        except Exception:  # noqa: BLE001
-            pass
+        _sync_persona_observability()
         try:
             _trace.emit()
         except Exception:  # noqa: BLE001
