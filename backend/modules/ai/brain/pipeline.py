@@ -1856,6 +1856,8 @@ class MerchantBrain:
             or ""
         )
 
+        _guard_replaced: dict[str, bool] = {}
+
         try:
             from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
                 apply_payment_reply_guard,
@@ -1873,6 +1875,7 @@ class MerchantBrain:
             )
             if _prg.replaced:
                 reply = _prg.reply
+                _guard_replaced["payment_reply_guard"] = True
         except Exception as _prg_exc:  # noqa: BLE001
             logger.warning(
                 "[PAYMENT_REPLY_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -1895,6 +1898,7 @@ class MerchantBrain:
             )
             if _stg.replaced:
                 reply = _stg.reply
+                _guard_replaced["shipment_truth_guard"] = True
         except Exception as _stg_exc:  # noqa: BLE001
             logger.warning(
                 "[SHIPMENT_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -1916,6 +1920,7 @@ class MerchantBrain:
             )
             if _setg.replaced:
                 reply = _setg.reply
+                _guard_replaced["staff_escalation_truth_guard"] = True
             if _setg.staff_escalation_claim_blocked:
                 result.data["staff_escalation_claim_blocked"] = True
                 if _setg.reason:
@@ -1956,6 +1961,7 @@ class MerchantBrain:
                 )
                 if _pavg.replaced:
                     reply = _pavg.reply
+                    _guard_replaced["product_availability_truth_guard"] = True
                 if _pavg.availability_claim_blocked:
                     result.data["availability_claim_blocked"] = True
                     if _pavg.reason:
@@ -1964,6 +1970,26 @@ class MerchantBrain:
             logger.warning(
                 "[PRODUCT_AVAILABILITY_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _pavg_exc,
+            )
+
+        # ── Persona ownership snapshot (measurement-only) ───────────────
+        try:
+            from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
+
+            _persona_ownership = build_brain_persona_ownership(
+                decision_action=str(getattr(decision, "action", "") or ""),
+                decision_args=dict(getattr(decision, "args", None) or {}),
+                reply_state=getattr(ctx, "reply_state", None),
+                chosen_path=_chosen_path,
+                guard_replaced=_guard_replaced,
+            )
+            _persona_ownership_dict = _persona_ownership.to_dict()
+            result.data["persona_ownership"] = _persona_ownership_dict
+        except Exception as _po_exc:  # noqa: BLE001
+            _persona_ownership_dict = {}
+            logger.exception(
+                "[PERSONA_OWNERSHIP] brain snapshot failed tenant=%s",
+                tenant_id,
             )
 
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
@@ -2036,6 +2062,13 @@ class MerchantBrain:
                     "fallback_used":    _fallback_used,
                     "model_used":       _model_used,
                     "reply_len":        len(reply or ""),
+                    # Persona ownership (measurement-only)
+                    "persona_stamped":  _persona_ownership_dict.get("persona_stamped"),
+                    "persona_topic":    _persona_ownership_dict.get("persona_topic"),
+                    "persona_kind":     _persona_ownership_dict.get("persona_kind"),
+                    "bypass_reason":    _persona_ownership_dict.get("bypass_reason"),
+                    "expression_owner": _persona_ownership_dict.get("expression_owner"),
+                    "compose_pass_count": _persona_ownership_dict.get("compose_pass_count"),
                     # Final answer-alignment outcome.
                     "alignment_passed":   _align_passed,
                     "alignment_mismatch": _align_mismatch,
@@ -2069,6 +2102,7 @@ class MerchantBrain:
             "buttons": pending_buttons,
             "handoff": decision.action == ACTION_HANDOFF,
             "relational_moment": _relational_moment_token,
+            "persona_ownership": _persona_ownership_dict,
         }
 
 
