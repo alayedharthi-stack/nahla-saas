@@ -95,14 +95,9 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _persona_expression_mode = bool(
         getattr(state, "persona_expression_mode", False)
     )
-    if _persona_expression_mode:
-        from ..persona_expression import slim_brain_state_dict_for_persona  # noqa: PLC0415
+    from .brain_state_slim import prepare_brain_state_dict_with_telemetry  # noqa: PLC0415
 
-        state_dict = slim_brain_state_dict_for_persona(state_dict)
-    else:
-        from .brain_state_slim import maybe_slim_brain_state_dict  # noqa: PLC0415
-
-        state_dict = maybe_slim_brain_state_dict(state, state_dict)
+    state_dict = prepare_brain_state_dict_with_telemetry(state, state_dict)
     brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
 
     # ── BLOCK 1: Persona ──────────────────────────────────────────────────
