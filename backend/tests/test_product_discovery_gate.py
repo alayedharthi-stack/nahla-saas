@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
 for _p in [_backend, os.path.join(_backend, "..")]:
@@ -23,6 +25,9 @@ from modules.ai.brain.decision.actions import (
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
 from modules.ai.brain.order_context_gate import should_block_product_discovery
 from modules.ai.brain.product_discovery_gate import (
+    _extract_price_subject,
+    _is_unit_only_price_message,
+    _resolved_product_query,
     allows_top_products_decision,
     has_explicit_broad_browse_request,
     is_price_without_product_context,
@@ -154,6 +159,109 @@ class TestProductDiscoveryGate:
         assert product_discovery_block_reason(ctx, source="show_more") == (
             "weak_or_unknown_intent"
         )
+
+
+class TestPriceAskProductExtraction:
+    """P0-A: product + price-ask + unit must resolve to catalog search."""
+
+    def _price_ctx(self, message: str) -> BrainContext:
+        from modules.ai.brain.intent import rules
+
+        intent = rules.match(message)
+        assert intent is not None
+        assert intent.name == "ask_price"
+        return BrainContext(
+            tenant_id=42,
+            customer_phone="966500000099",
+            message=message,
+            intent=intent,
+            state=MerchantConversationState(greeted=True, stage="discovery"),
+            facts=CommerceFacts(has_products=True, orderable=True, product_count=5),
+        )
+
+    def test_extract_product_before_bkm_unit(self):
+        assert _extract_price_subject("عسل الطلح بكم الكيلو") == "عسل الطلح"
+
+    def test_extract_product_cross_vertical(self):
+        assert _extract_price_subject("قميص قطن بكم") == "قميص قطن"
+        assert _extract_price_subject("coffee beans how much per kg") == "coffee beans"
+
+    def test_bare_kilo_price_still_unit_only(self):
+        assert _extract_price_subject("كم سعر الكيلو؟") == ""
+        assert _is_unit_only_price_message("كم سعر الكيلو؟")
+
+    def test_product_bkm_unit_not_without_context(self):
+        ctx = self._price_ctx("عسل الطلح بكم الكيلو")
+        assert _resolved_product_query(ctx) == "عسل الطلح"
+        assert not is_price_without_product_context(ctx)
+        assert try_price_query_decision(ctx) is None
+
+    def test_product_bkm_unit_routes_search_products(self):
+        ctx = self._price_ctx("قميص رجالي بكم الكيلو")
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == "قميص رجالي"
+        assert decision.action != ACTION_CLARIFY
+        assert decision.action != ACTION_LLM_REPLY
+
+    def test_confirmed_regression_case_routes_search(self):
+        ctx = self._price_ctx("عسل الطلح بكم الكيلو")
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == "عسل الطلح"
+
+
+class TestPriceAskReplayValidation:
+    """P0-A replay matrix — product+price shapes vs bare unit-only asks."""
+
+    _SEARCH_CASES = (
+        ("عسل الطلح بكم", "عسل الطلح"),
+        ("عسل الطلح كم سعره", "عسل الطلح"),
+        ("سمر 1447 بكم", "سمر 1447"),
+        ("بكم كيلو الطلح", "كيلو الطلح"),
+        ("كم سعر عسل الطلح", "عسل الطلح"),
+        ("عسل الطلح بكم الكيلو", "عسل الطلح"),
+        ("قميص رجالي بكم الكيلو", "قميص رجالي"),
+    )
+
+    _CLARIFY_CASES = (
+        "كم سعر الكيلو",
+        "بكم",
+        "السعر كم",
+    )
+
+    def _ctx(self, message: str) -> BrainContext:
+        from modules.ai.brain.intent import rules
+
+        intent = rules.match(message)
+        if intent is None:
+            intent = Intent(name="general", confidence=0.5, raw_message=message)
+        return BrainContext(
+            tenant_id=42,
+            customer_phone="966500000099",
+            message=message,
+            intent=intent,
+            state=MerchantConversationState(greeted=True, stage="discovery"),
+            facts=CommerceFacts(has_products=True, orderable=True, product_count=5),
+        )
+
+    @pytest.mark.parametrize("message,expected_query", _SEARCH_CASES)
+    def test_product_plus_price_routes_search(self, message, expected_query):
+        assert _extract_price_subject(message) == expected_query
+        decision = DefaultDecisionEngine().decide(self._ctx(message))
+        assert decision.action == ACTION_SEARCH_PRODUCTS, (
+            f"{message!r} -> {decision.action} ({decision.reason})"
+        )
+        assert decision.args.get("query") == expected_query
+
+    @pytest.mark.parametrize("message", _CLARIFY_CASES)
+    def test_bare_price_ask_still_clarifies(self, message):
+        assert _extract_price_subject(message) == ""
+        decision = DefaultDecisionEngine().decide(self._ctx(message))
+        assert decision.action == ACTION_CLARIFY, (
+            f"{message!r} -> {decision.action} ({decision.reason})"
+        )
+        assert decision.action != ACTION_SEARCH_PRODUCTS
 
 
 class TestInquiryRoutingSplit:

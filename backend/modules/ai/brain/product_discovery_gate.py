@@ -355,14 +355,49 @@ def has_explicit_product_inquiry(message: str) -> bool:
         return False
 
 
+# Optional sellable-unit token after a trailing price ask (كيلو، لتر، …).
+_PRICE_UNIT_SUFFIX = (
+    r"(?:ال)?(?:كilo|كيلo|كيلو|كيلوغرام|كيلограм|kg|gram|جرام|كجم|g|"
+    r"لتر|ml|piece|pack|حبه|حبة)"
+)
+
+# Trailing price-ask tokens (بكم، كم سعره، …) — not category-specific.
+_PRICE_ASK_SUFFIX = (
+    r"(?:بكم|كم\s*سعر|سعر|قد\s*ايش|how\s*much|"
+    r"كم\s*سعره|كم\s*سعرها|كم\s*ثمنه|كم\s*ثمنها|"
+    r"كم\s*تمنه|كم\s*تمنها)"
+)
+
 _PRICE_SUFFIX_RE = re.compile(
-    r"^(.{2,60}?)\s+(?:بكم|كم\s*سعر|سعر)\s*$",
+    r"^(.{2,80}?)\s+"
+    rf"{_PRICE_ASK_SUFFIX}\s*"
+    rf"(?:per\s+)?(?:{_PRICE_UNIT_SUFFIX})?"
+    r"\s*$",
     re.UNICODE | re.IGNORECASE,
 )
 
 
+def _subject_has_product_substance(candidate: str) -> bool:
+    """True when ``candidate`` is more than bare price/unit tokens."""
+    norm = _normalize_ar(candidate or "")
+    norm = re.sub(r"^ال", "", norm)
+    if not norm:
+        return False
+    tokens = [t for t in norm.split() if t]
+    if not tokens:
+        return False
+    non_unit = [t for t in tokens if t not in _UNIT_ONLY_TOKENS]
+    return any(len(t) >= 2 for t in non_unit)
+
+
 def _extract_price_subject(message: str) -> str:
-    """Recover a product name from price-style messages."""
+    """Recover a product name from price-style messages.
+
+    Supported shapes (platform-wide, any catalog wording):
+      * ``<product> بكم`` / ``<product> كم سعره``
+      * ``<product> بكم <unit>``  (e.g. per-kilo / per-litre asks)
+      * ``بكم <product>`` / ``كم سعر <product>``
+    """
     raw = (message or "").strip()
     if not raw:
         return ""
@@ -371,13 +406,13 @@ def _extract_price_subject(message: str) -> str:
         pn = _normalize_ar(prefix)
         if norm.startswith(pn):
             rest = raw[len(prefix):].strip(" ؟?!.")
-            if rest and not _is_unit_only_price_message(rest):
+            if rest and _subject_has_product_substance(rest):
                 return rest
             return ""
     m = _PRICE_SUFFIX_RE.match(raw.strip(" ؟?!."))
     if m:
         candidate = (m.group(1) or "").strip(" ؟?!.")
-        if candidate and not _is_unit_only_price_message(candidate):
+        if candidate and _subject_has_product_substance(candidate):
             return candidate
     return ""
 
@@ -394,6 +429,9 @@ def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
 
 
 def _is_unit_only_price_message(message: str) -> bool:
+    """True when the message is a bare price/unit ask with no product subject."""
+    if _extract_price_subject(message or ""):
+        return False
     norm = _normalize_ar(message or "")
     norm = re.sub(r"^ال", "", norm)
     if not norm:
@@ -403,14 +441,6 @@ def _is_unit_only_price_message(message: str) -> bool:
     tokens = set(norm.split())
     if tokens and tokens <= _UNIT_ONLY_TOKENS:
         return True
-    if "كيلo" in norm or "كيلو" in norm:
-        productish = re.search(
-            r"عسل|سدر|سمر|طلح|شمع|منتج|product|honey",
-            norm,
-            re.I,
-        )
-        if not productish and re.search(r"كم|سعر|بكم", norm):
-            return True
     return False
 
 
@@ -452,6 +482,8 @@ def is_price_without_product_context(
     msg = ctx.message or ""
     if _is_unit_only_price_message(msg):
         return True
+    if _extract_price_subject(msg):
+        return False
     norm = _normalize_ar(msg)
     return bool(_PRICE_ONLY_RE.search(norm))
 
