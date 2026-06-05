@@ -175,6 +175,14 @@ class TurnTrace:
     outbound_sent:    bool = False
     outbound_error:   str  = ""
 
+    # ── Persona ownership (measurement-only — May 2026) ───────────
+    persona_stamped:      Optional[bool] = None
+    persona_topic:        str  = ""
+    persona_kind:         str  = ""
+    bypass_reason:        str  = ""
+    expression_owner:     str  = ""
+    compose_pass_count:   int  = 0
+
     # ── Real Handoff Slice 1 — derived ownership (not persisted) ────
     ownership_state:          str = ""
     ownership_takeover_class: str = ""
@@ -273,6 +281,11 @@ class TurnTrace:
                 )
             ) + "]"
 
+            _persona_stamped = (
+                "true" if self.persona_stamped is True
+                else "false" if self.persona_stamped is False
+                else "-"
+            )
             logger.info(
                 "[TURN] tenant=%s phone=*%s wamid=%s "
                 "mode=%s intent=%s intent_conf=%.2f stance=%s "
@@ -284,6 +297,8 @@ class TurnTrace:
                 "clarification_triggered=%s clarification_reason=%s "
                 "reply_source=%s reply_len=%d buttons=%d "
                 "handoff=%s ownership=%s ownership_class=%s ownership_release=%s "
+                "persona_stamped=%s persona_topic=%s persona_kind=%s "
+                "bypass_reason=%s expression_owner=%s compose_pass_count=%d "
                 "outbound_sent=%s outbound_err=%s "
                 "missing=%s opts=%s elapsed_ms=%d inbound=%r%s",
                 self.tenant_id, (self.phone or "")[-4:], self.message_id or "-",
@@ -299,6 +314,12 @@ class TurnTrace:
                 self.ownership_state or "-",
                 self.ownership_takeover_class or "-",
                 self.ownership_release_reason or "-",
+                _persona_stamped,
+                self.persona_topic or "-",
+                self.persona_kind or "-",
+                self.bypass_reason or "-",
+                self.expression_owner or "-",
+                int(self.compose_pass_count or 0),
                 self.outbound_sent, self.outbound_error or "-",
                 self.missing_fields, self.options_pending, elapsed, inbound, invalid_src_hint,
             )

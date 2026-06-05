@@ -5255,6 +5255,18 @@ async def _handle_merchant_message(
         message_id   = wa_msg_id or "",
         inbound_text = text or "",
     )
+    from modules.ai.brain.persona_ownership import (  # noqa: PLC0415
+        PersonaBypassReason as _POReason,
+        PersonaOwnershipRecord as _PORecord,
+        sync_persona_to_turn_trace as _sync_po_trace,
+    )
+    _persona_ownership = _PORecord()
+
+    def _sync_persona_observability() -> None:
+        try:
+            _sync_po_trace(_trace, _persona_ownership)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── PRE-BRAIN HANDOFF GUARD (May 2026 critical hotfix) ─────────
     # Production regression: a customer typing "أبي أتكلم مع أحد"
@@ -5521,6 +5533,7 @@ async def _handle_merchant_message(
                     "ai_paused":          bool(_do_pause_ai),
                     "owner_contact":      bool(_is_owner_contact),
                     "owner_tier":         _ho_tier,
+                    **(_persona_ownership.to_metadata()),
                 },
             )
         except Exception as _ho_rec_exc:  # noqa: BLE001
@@ -5529,9 +5542,14 @@ async def _handle_merchant_message(
                 _ho_rec_exc,
             )
         try:
+            _persona_ownership.mark_bypass(
+                _POReason.PRE_BRAIN_HANDOFF,
+                owner=f"pre_brain_handoff:{_ho_tier}",
+            )
             _trace.fallback_source = f"pre_brain_handoff:{_ho_tier}"
             _trace.response_goal   = "handoff"
             _trace.intent          = "talk_to_human"
+            _sync_persona_observability()
             _trace.emit()
         except Exception:  # noqa: BLE001
             pass
@@ -6065,8 +6083,15 @@ async def _handle_merchant_message(
         from core.billing import has_billing_access as _has_billing  # noqa: PLC0415
         if not _has_billing(db, tenant_id):
             reply = "شكراً لتواصلك! هذا الحساب في وضع التجربة المنتهية. يُرجى التواصل مع صاحب المتجر."
-            StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
+            _persona_ownership.mark_bypass(_POReason.BILLING_DENIED, owner="billing_guard")
+            StateManager.save_message(
+                db, to, reply, "outbound",
+                conversation_id=convo.id, tenant_id=tenant_id,
+                extra_metadata=_persona_ownership.to_metadata(),
+            )
             await _send_whatsapp_message(phone_id=phone_id, to=to, text=reply, _tenant_id=tenant_id, _db=db)
+            _trace.mark_outbound_sent(source=_TS.SOURCE_BILLING_DENIED, length=len(reply))
+            _sync_persona_observability()
             return
 
         # ── Identity / greeting fast path ────────────────────────────────────
@@ -6088,14 +6113,24 @@ async def _handle_merchant_message(
                 reply = render_identity_reply(
                     db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
                 )
+                _persona_ownership.mark_bypass(
+                    _POReason.PRE_BRAIN_FAST_PATH,
+                    owner="render_identity_reply",
+                )
                 StateManager.save_message(
                     db, to, reply, "outbound",
                     conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata=_persona_ownership.to_metadata(),
                 )
                 await _send_whatsapp_message(
                     phone_id=phone_id, to=to, text=reply,
                     _tenant_id=tenant_id, _db=db,
                 )
+                _trace.mark_outbound_sent(
+                    source=_TS.SOURCE_WELCOME_GATE,
+                    length=len(reply or ""),
+                )
+                _sync_persona_observability()
                 logger.info(
                     "[Mode] identity_reply tenant=%s topic=%s",
                     tenant_id, mode_decision.identity_topic,
@@ -6264,9 +6299,14 @@ async def _handle_merchant_message(
                     "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
                     "وسيرد عليك أحد الموظفين في أقرب وقت."
                 )
+                _persona_ownership.mark_bypass(
+                    _POReason.WEBHOOK_ESCALATION,
+                    owner="support_escalation",
+                )
                 StateManager.save_message(
                     db, to, reply, "outbound",
                     conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata=_persona_ownership.to_metadata(),
                 )
                 _send_ok = await _send_whatsapp_message(
                     phone_id=phone_id, to=to, text=reply,
@@ -6299,6 +6339,12 @@ async def _handle_merchant_message(
                     "reply_len=%d",
                     tenant_id, to, len(reply),
                 )
+                if _send_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_SUPPORT_ESCALATION,
+                        length=len(reply or ""),
+                    )
+                _sync_persona_observability()
                 return
 
         # ── Staff contact recovery (P1 Slice 2) ─────────────────────────────
@@ -6324,6 +6370,10 @@ async def _handle_merchant_message(
             _scr_decision = None
 
         if _scr_decision is not None:
+            _persona_ownership.mark_bypass(
+                _POReason.STAFF_CONTACT_RECOVERY,
+                owner="staff_contact_recovery",
+            )
             _scr_reply = _scr_decision.reply_text
             try:
                 _scr_text_ok = await _send_whatsapp_message(
@@ -6334,7 +6384,7 @@ async def _handle_merchant_message(
                     db, to, _scr_reply, "outbound",
                     conversation_id=convo.id, tenant_id=tenant_id,
                     extra_metadata={
-                        "is_ai": True,
+                        **_persona_ownership.to_metadata(),
                         "deterministic_path": "staff_contact_recovery",
                         "staff_contact_recovery_trigger": _scr_decision.trigger,
                         "staff_contact_recovery_reason": _scr_decision.reason,
@@ -6409,6 +6459,12 @@ async def _handle_merchant_message(
                 _trace.fallback_source = "staff_contact_recovery"
                 _trace.response_goal = "staff_contact_fallback"
                 _trace.intent = "employee_not_responding"
+                if _scr_text_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN,
+                        length=len(_scr_reply or ""),
+                    )
+                _sync_persona_observability()
                 _trace.emit()
             except Exception:  # noqa: BLE001
                 pass
@@ -6514,6 +6570,9 @@ async def _handle_merchant_message(
                         _relational_moment = str(
                             brain_result.get("relational_moment") or ""
                         ).strip()
+                        _persona_ownership.merge_from_dict(
+                            brain_result.get("persona_ownership")
+                        )
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []
@@ -6626,6 +6685,10 @@ async def _handle_merchant_message(
                     # gets a reply within the 24h window even when the
                     # brain produced nothing. Deliberately non-committal
                     # so we don't promise a product/price/policy fact.
+                    _persona_ownership.mark_bypass(
+                        _POReason.BRAIN_SILENT_ACK,
+                        owner="brain_silent_ack",
+                    )
                     reply = (
                         "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
                     )
@@ -6709,11 +6772,18 @@ async def _handle_merchant_message(
                     # welcome-gate would produce. We deliberately don't
                     # invent a price; we ask which type of honey so the
                     # next turn can answer with the catalogue.
+                    _wg_before = reply
                     reply = (
                         "وعليكم السلام ورحمة الله 🌷\n"
                         "أكيد، عندنا عدة أنواع من العسل. "
                         "تحب أعطيك الأسعار حسب النوع (سدر / طلح / "
                         "ضهيان)؟"
+                    )
+                    _persona_ownership.on_text_replaced(
+                        layer="welcome_gate_substitute",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_wg_before or "",
+                        after=reply,
                     )
 
                 # ── BRAIN_RESULT trace ───────────────────────────────────────
@@ -7051,9 +7121,14 @@ async def _handle_merchant_message(
                         )
                         return
                     _safe_reply = _decision.text
+                    _persona_ownership.mark_bypass(
+                        _POReason.FALLBACK_REPLY,
+                        owner=f"brain_exception:{_decision.kind}",
+                    )
                     StateManager.save_message(
                         db, to, _safe_reply, "outbound",
                         conversation_id=convo.id, tenant_id=tenant_id,
+                        extra_metadata=_persona_ownership.to_metadata(),
                     )
                     try:
                         await _send_whatsapp_message(
@@ -7101,6 +7176,10 @@ async def _handle_merchant_message(
             return
 
         if not _brain_active or MERCHANT_BRAIN_ENABLED_FALLBACK:
+            _persona_ownership.mark_bypass(
+                _POReason.LEGACY_ROUTE,
+                owner="legacy_generate_ai_reply",
+            )
             messages: list = []
             for turn in history[-15:]:
                 role = "user" if turn.get("direction") == "inbound" else "assistant"
@@ -7259,6 +7338,7 @@ async def _handle_merchant_message(
         # for the handoff path (_brain_handoff replies are
         # intentionally distinct).
         if reply and not _brain_handoff:
+            _po_reply_before_dedup = reply
             _overlap = _max_outbound_overlap(reply, history)
             _is_hard = _overlap >= _DEDUP_HARD_OVERLAP_THRESHOLD
             _is_soft = (
@@ -7381,6 +7461,12 @@ async def _handle_merchant_message(
                                 _ctx_exc,
                             )
                             reply = _default_short
+                        _persona_ownership.on_text_replaced(
+                            layer="dedup_substitution",
+                            reason=_POReason.DEDUP_REPLY,
+                            before=_po_reply_before_dedup,
+                            after=reply,
+                        )
                         logger.info(
                             "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
                             "replaced near-duplicate outbound "
@@ -7423,6 +7509,7 @@ async def _handle_merchant_message(
         # matches a known generic fallback marker — so legitimate
         # replies never get touched.
         if reply and not _brain_handoff:
+            _po_reply_before_guards = reply
             try:
                 from core.payment_intent import (  # noqa: PLC0415
                     rewrite_generic_reply_for_payment_context,
@@ -7604,6 +7691,21 @@ async def _handle_merchant_message(
                     tenant_id, _pavg_exc,
                 )
 
+        try:
+            if (
+                reply
+                and "_po_reply_before_guards" in locals()
+                and (reply or "").strip() != (_po_reply_before_guards or "").strip()
+            ):
+                _persona_ownership.on_text_replaced(
+                    layer="webhook_truth_guards",
+                    reason=_POReason.TRUTH_GUARD_REWRITE,
+                    before=_po_reply_before_guards,
+                    after=reply or "",
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
         #   continue → send `reply` as-is
@@ -7717,7 +7819,14 @@ async def _handle_merchant_message(
                     )
                     return
                 if _decision.action == "recovery" and _decision.recovery_text:
+                    _po_before_loop = reply
                     reply = _decision.recovery_text
+                    _persona_ownership.on_text_replaced(
+                        layer="loop_guard_recovery",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_before_loop or "",
+                        after=reply,
+                    )
                     _loop_replaced_with_recovery = True
                     _note_recovery(int(tenant_id), int(convo.id), recovery_text=reply)
                     logger.info(
@@ -7729,7 +7838,11 @@ async def _handle_merchant_message(
                 logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
 
         # Save outbound reply after generation.
-        StateManager.save_message(db, to, reply, "outbound", conversation_id=convo.id, tenant_id=tenant_id)
+        StateManager.save_message(
+            db, to, reply, "outbound",
+            conversation_id=convo.id, tenant_id=tenant_id,
+            extra_metadata=_persona_ownership.to_metadata(),
+        )
 
         latency_ms = 0
         try:
@@ -8309,6 +8422,7 @@ async def _handle_merchant_message(
         # Each net runs independently (own feature flag, own log),
         # and increments ``_marker_resolved`` so the
         # ``[MARKER_RESOLUTION]`` line below reflects post-net state.
+        _po_reply_before_safety_nets = reply or ""
         try:
             from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
                 apply_product_safety_net as _sn_product,
@@ -8845,6 +8959,17 @@ async def _handle_merchant_message(
                 "[SAFETY_NET] module import failed tenant=%s err=%s",
                 tenant_id, _sn_exc,
             )
+
+        try:
+            if (reply or "").strip() != (_po_reply_before_safety_nets or "").strip():
+                _persona_ownership.on_text_replaced(
+                    layer="safety_nets",
+                    reason=_POReason.SAFETY_NET_REWRITE,
+                    before=_po_reply_before_safety_nets,
+                    after=reply or "",
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
         # Drops lines that contain leaked reasoning prose (e.g. "بناءً
@@ -10685,6 +10810,10 @@ async def _handle_merchant_message(
         # function exited. ``emit()`` is wrapped in its own try/except
         # internally — observability MUST NOT take down the response
         # path under any circumstance.
+        try:
+            _sync_persona_observability()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             _trace.emit()
         except Exception:  # noqa: BLE001

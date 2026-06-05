@@ -1,0 +1,263 @@
+"""
+persona_ownership.py
+────────────────────
+Measurement-only ownership record for outbound AI replies.
+
+Tracks whether the customer-facing text passed through Nahla Persona
+Composer (``persona_expression_mode``) or bypassed via templates,
+webhook shortcuts, guards, dedup, or fallbacks.
+
+No reply text is produced here — observability only.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+
+class PersonaBypassReason(str, Enum):
+    PRE_BRAIN_FAST_PATH = "PRE_BRAIN_FAST_PATH"
+    PRE_BRAIN_HANDOFF = "PRE_BRAIN_HANDOFF"
+    WEBHOOK_ESCALATION = "WEBHOOK_ESCALATION"
+    SOCIAL_TEMPLATE = "SOCIAL_TEMPLATE"
+    TEMPLATE_PATH = "TEMPLATE_PATH"
+    COMMERCE_LLM = "COMMERCE_LLM"
+    CLARIFY_DETERMINISTIC = "CLARIFY_DETERMINISTIC"
+    TRUTH_GUARD_REWRITE = "TRUTH_GUARD_REWRITE"
+    SAFETY_NET_REWRITE = "SAFETY_NET_REWRITE"
+    DEDUP_REPLY = "DEDUP_REPLY"
+    FALLBACK_REPLY = "FALLBACK_REPLY"
+    LEGACY_ROUTE = "LEGACY_ROUTE"
+    BRAIN_SILENT_ACK = "BRAIN_SILENT_ACK"
+    LLM_TIMEOUT_STUB = "LLM_TIMEOUT_STUB"
+    ETIQUETTE_PREPEND = "ETIQUETTE_PREPEND"
+    AUTOMATION_RECOVERY = "AUTOMATION_RECOVERY"
+    BILLING_DENIED = "BILLING_DENIED"
+    STAFF_CONTACT_RECOVERY = "STAFF_CONTACT_RECOVERY"
+    UNKNOWN = "UNKNOWN"
+
+
+# Brain ``Decision.action`` values that always emit template Arabic.
+_TEMPLATE_ACTIONS = frozenset({
+    "greet",
+    "faq_reply",
+    "search_products",
+    "propose_draft_order",
+    "send_payment_link",
+    "track_order",
+    "suggest_coupon",
+    "recommend_addon",
+    "web_search",
+    "clarify",
+    "narrow_choices",
+    "handoff_to_human",
+    "social_reply",
+    "platform_reply",
+    "out_of_scope_reply",
+    "order_context_update",
+    "stash_address_pre_product",
+    "variant_pricing",
+    "payment_transfer_promise",
+})
+
+
+@dataclass
+class PersonaOwnershipRecord:
+    """Single outbound message ownership snapshot."""
+
+    persona_stamped: Optional[bool] = None
+    persona_topic: Optional[str] = None
+    persona_kind: Optional[str] = None
+    expression_owner: str = ""
+    bypass_reason: Optional[str] = None
+    compose_pass_count: int = 0
+    pre_stamp_layers: List[str] = field(default_factory=list)
+    finalized: bool = False
+
+    def stamp_persona(
+        self,
+        *,
+        topic: str,
+        kind: str = "",
+        owner: str = "persona_composer",
+    ) -> None:
+        self.persona_stamped = True
+        self.persona_topic = str(topic or "").strip() or None
+        self.persona_kind = str(kind or "").strip() or None
+        self.expression_owner = owner
+        self.bypass_reason = None
+        if self.compose_pass_count <= 0:
+            self.compose_pass_count = 1
+
+    def mark_bypass(self, reason: PersonaBypassReason | str, *, owner: str) -> None:
+        reason_str = (
+            reason.value if isinstance(reason, PersonaBypassReason) else str(reason)
+        )
+        self.persona_stamped = False
+        self.bypass_reason = reason_str
+        self.expression_owner = str(owner or "").strip() or reason_str
+        if self.compose_pass_count <= 0:
+            self.compose_pass_count = 0
+
+    def note_layer(self, layer: str) -> None:
+        layer = str(layer or "").strip()
+        if layer and layer not in self.pre_stamp_layers:
+            self.pre_stamp_layers.append(layer)
+
+    def invalidate_stamp(
+        self,
+        reason: PersonaBypassReason | str,
+        layer: str,
+    ) -> None:
+        """Post-compose substitution removed persona ownership."""
+        self.note_layer(layer)
+        if self.persona_stamped:
+            self.mark_bypass(reason, owner=layer)
+        elif self.bypass_reason is None:
+            self.mark_bypass(reason, owner=layer)
+
+    def on_text_replaced(
+        self,
+        *,
+        layer: str,
+        reason: PersonaBypassReason | str,
+        before: str,
+        after: str,
+    ) -> None:
+        if (before or "").strip() == (after or "").strip():
+            return
+        self.invalidate_stamp(reason, layer)
+
+    def merge_from_dict(self, raw: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(raw, dict):
+            return
+        if raw.get("persona_stamped") is not None:
+            self.persona_stamped = bool(raw.get("persona_stamped"))
+        pt = raw.get("persona_topic")
+        if pt is not None:
+            self.persona_topic = str(pt).strip() or None
+        pk = raw.get("persona_kind")
+        if pk is not None:
+            self.persona_kind = str(pk).strip() or None
+        eo = raw.get("expression_owner")
+        if eo:
+            self.expression_owner = str(eo)
+        br = raw.get("bypass_reason")
+        if br:
+            self.bypass_reason = str(br)
+        try:
+            self.compose_pass_count = int(raw.get("compose_pass_count") or 0)
+        except (TypeError, ValueError):
+            pass
+        layers = raw.get("pre_stamp_layers")
+        if isinstance(layers, list):
+            for item in layers:
+                self.note_layer(str(item))
+
+    def finalize(self) -> PersonaOwnershipRecord:
+        if self.persona_stamped is None:
+            if self.bypass_reason:
+                self.persona_stamped = False
+            else:
+                self.persona_stamped = False
+                self.bypass_reason = PersonaBypassReason.UNKNOWN.value
+                self.expression_owner = self.expression_owner or "unknown"
+        self.finalized = True
+        return self
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "persona_stamped": self.persona_stamped,
+            "persona_topic": self.persona_topic,
+            "persona_kind": self.persona_kind,
+            "expression_owner": self.expression_owner or None,
+            "bypass_reason": self.bypass_reason,
+            "compose_pass_count": int(self.compose_pass_count or 0),
+            "pre_stamp_layers": list(self.pre_stamp_layers),
+            "finalized": bool(self.finalized),
+        }
+
+    def to_metadata(self) -> Dict[str, Any]:
+        """Persist under ``MessageEvent.extra_metadata['persona_ownership']``."""
+        final = self.finalize()
+        return {
+            "persona_ownership": final.to_dict(),
+            "is_ai": True,
+        }
+
+
+def build_brain_persona_ownership(
+    *,
+    decision_action: str,
+    decision_args: Optional[Dict[str, Any]],
+    reply_state: Any,
+    chosen_path: str,
+    guard_replaced: Optional[Dict[str, bool]] = None,
+) -> PersonaOwnershipRecord:
+    """
+    Classify ownership at the Brain pipeline boundary (post-compose, post-guards).
+    """
+    rec = PersonaOwnershipRecord()
+    action = str(decision_action or "").strip()
+    args = dict(decision_args or {})
+    path = str(chosen_path or "").strip()
+
+    persona_mode = bool(getattr(reply_state, "persona_expression_mode", False))
+    persona_topic = str(getattr(reply_state, "persona_topic", "") or "").strip()
+    persona_kind = str(args.get("persona_kind") or "").strip()
+
+    if persona_mode and persona_topic:
+        rec.stamp_persona(topic=persona_topic, kind=persona_kind)
+    elif action == "social_reply":
+        rec.mark_bypass(PersonaBypassReason.SOCIAL_TEMPLATE, owner="social_template")
+    elif action == "llm_reply":
+        if "timeout" in path:
+            rec.mark_bypass(PersonaBypassReason.LLM_TIMEOUT_STUB, owner=path or "llm_timeout")
+        elif "fallback" in path:
+            rec.mark_bypass(PersonaBypassReason.FALLBACK_REPLY, owner=path)
+        else:
+            rec.mark_bypass(PersonaBypassReason.COMMERCE_LLM, owner="llm_compose")
+    elif action == "clarify":
+        rec.mark_bypass(
+            PersonaBypassReason.CLARIFY_DETERMINISTIC,
+            owner="clarify_template",
+        )
+    elif action in _TEMPLATE_ACTIONS or path in {"rule", "action"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TEMPLATE_PATH,
+            owner=f"template:{action or path}",
+        )
+    else:
+        rec.mark_bypass(
+            PersonaBypassReason.TEMPLATE_PATH,
+            owner=action or path or "brain_compose",
+        )
+
+    for layer, replaced in (guard_replaced or {}).items():
+        if replaced:
+            rec.invalidate_stamp(PersonaBypassReason.TRUTH_GUARD_REWRITE, str(layer))
+
+    return rec
+
+
+def sync_persona_to_turn_trace(trace: Any, record: PersonaOwnershipRecord) -> None:
+    """Copy finalized ownership onto ``TurnTrace`` for ``[TURN]`` emission."""
+    final = record.finalize()
+    trace.persona_stamped = final.persona_stamped
+    trace.persona_topic = final.persona_topic or ""
+    trace.persona_kind = final.persona_kind or ""
+    trace.bypass_reason = final.bypass_reason or ""
+    trace.expression_owner = final.expression_owner or ""
+    trace.compose_pass_count = int(final.compose_pass_count or 0)
+    if not isinstance(getattr(trace, "extra", None), dict):
+        trace.extra = {}
+    trace.extra["persona_ownership"] = final.to_dict()
+
+
+__all__ = [
+    "PersonaBypassReason",
+    "PersonaOwnershipRecord",
+    "build_brain_persona_ownership",
+    "sync_persona_to_turn_trace",
+]
