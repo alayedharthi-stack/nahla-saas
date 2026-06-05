@@ -603,7 +603,8 @@ class DefaultComposer:
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
-            return await self._llm_compose(ctx, result)
+            text = await self._llm_compose(ctx, result)
+            return self._apply_established_greeting_etiquette(text, ctx, decision)
 
         variant = self._variant_idx(ctx)
         return T.generic_fallback(variant=variant)
@@ -819,6 +820,39 @@ class DefaultComposer:
             return f"نكمل إنشاء طلب *{product_title}* الآن؟"
         except Exception:
             return ""
+
+    @staticmethod
+    def _apply_established_greeting_etiquette(
+        text: str,
+        ctx: BrainContext,
+        decision: Decision,
+    ) -> str:
+        """Prepend level-matched salam return on established persona greetings.
+
+        Ritual reciprocity stays deterministic; the LLM body is personality.
+        """
+        args = decision.args or {}
+        from ..persona_expression import (  # noqa: PLC0415
+            PERSONA_KIND_GREETING,
+            PERSONA_TOPIC_SOCIAL,
+        )
+
+        if (
+            str(args.get("topic") or "") != PERSONA_TOPIC_SOCIAL
+            or str(args.get("persona_kind") or "") != PERSONA_KIND_GREETING
+        ):
+            return text
+        from .greeting_etiquette import (  # noqa: PLC0415
+            apply_greeting_etiquette,
+            customer_message_for_etiquette,
+        )
+
+        return apply_greeting_etiquette(
+            text,
+            customer_message_for_etiquette(ctx),
+            ctx.state,
+            tenant_id=getattr(ctx, "tenant_id", None),
+        )
 
     # ── LLM delegation ───────────────────────────────────────────────────────
 

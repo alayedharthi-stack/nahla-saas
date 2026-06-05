@@ -6,11 +6,16 @@ Subtracts commerce-oriented prompt layers on ``persona_identity`` /
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 PERSONA_TOPIC_IDENTITY = "persona_identity"
 PERSONA_TOPIC_SOCIAL = "persona_social"
 PERSONA_TOPIC_NON_SALES_AMBIGUOUS = "non_sales_ambiguous"
+
+PERSONA_KIND_GREETING = "greeting"
+
+_ESTABLISHED_GREET_PERSONA_FLAG = "ESTABLISHED_GREET_PERSONA_COMPOSE_ENABLED"
 
 PERSONA_TOPICS = frozenset({
     PERSONA_TOPIC_IDENTITY,
@@ -47,11 +52,34 @@ _KIND_GUIDANCE: dict[str, str] = {
         "support-ticket tone, staff escalation promise, or discount offer. "
         "No escalation or handoff language."
     ),
+    "greeting": (
+        "Energy: warm phatic reciprocity — the customer sent a short hello "
+        "or re-greeting in an established conversation. Match their greeting "
+        "energy naturally in 1–3 short lines. If identity_already_introduced "
+        "is true in BrainStateJSON, do NOT re-introduce (no «أنا نحلة», no "
+        "assistant role, no capability bullets, no onboarding lists). This is "
+        "not an identity FAQ and not a sales opening — do not pivot to "
+        "catalog, checkout, or «how can I help» framing."
+    ),
     "social": (
         "Energy: warm conversational Saudi personality — natural and human, "
         "not merchant FAQ or sales assistant."
     ),
 }
+
+
+def is_established_greet_persona_compose_enabled() -> bool:
+    """Kill switch for established-greeting persona compose (default ON).
+
+    When OFF, the decision engine falls back to legacy ``ACTION_GREET`` +
+    ``re_greet`` templates for rollback only — not the primary personality path.
+    """
+    raw = str(os.getenv(_ESTABLISHED_GREET_PERSONA_FLAG, "true")).strip().lower()
+    if raw in ("", "1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
 
 _PERSONA_OMIT_STATE_JSON_KEYS = (
     "recommended_next_step",
@@ -178,10 +206,12 @@ def slim_brain_state_dict_for_persona(state_dict: Dict[str, Any]) -> Dict[str, A
 
 
 __all__ = [
+    "PERSONA_KIND_GREETING",
     "PERSONA_KIND_GUIDANCE",
     "PERSONA_TOPIC_IDENTITY",
     "PERSONA_TOPIC_SOCIAL",
     "PERSONA_TOPICS",
+    "is_established_greet_persona_compose_enabled",
     "build_persona_json_footer",
     "build_persona_residual_rules",
     "compose_non_sales_ambiguous_goal",

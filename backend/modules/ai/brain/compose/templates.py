@@ -151,8 +151,14 @@ def re_greeting(
     variant: int = 0,
     **_: Any,
 ) -> str:
-    """Short, warm re-greeting for explicit "السلام عليكم" / "هلا" /
-    "مرحبا" arriving AFTER the customer has already been greeted.
+    """Legacy fallback re-greeting (deterministic).
+
+    Happy path (``ESTABLISHED_GREET_PERSONA_COMPOSE_ENABLED`` default ON):
+    established pure greetings use ``persona_social`` + ``persona_kind=greeting``
+    LLM compose — not this template.
+
+    This function remains for rollback when the env flag is OFF or for
+    emergency paths that still emit ``ACTION_GREET`` + ``re_greet=True``.
 
     Three rules baked in:
       1. NEVER mention the assistant's name (e.g. "نحلة") — that's a

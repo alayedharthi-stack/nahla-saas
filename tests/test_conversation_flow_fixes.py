@@ -317,14 +317,26 @@ def _facts():
     )
 
 
-def _ctx(state, intent_name: str, slots: dict | None = None):
+def _ctx(
+    state,
+    intent_name: str,
+    slots: dict | None = None,
+    *,
+    message: str | None = None,
+):
     from modules.ai.brain.types import BrainContext, Intent
-    intent = Intent(name=intent_name, confidence=0.9, slots=slots or {})
+    msg = message if message is not None else "test"
+    intent = Intent(
+        name=intent_name,
+        confidence=0.9,
+        slots=slots or {},
+        raw_message=msg,
+    )
     return BrainContext(
         tenant_id=7,
         customer_phone="+966555555555",
         customer_id=42,
-        message=intent.raw_message or "test",
+        message=msg,
         history=[],
         profile={},
         intent=intent,
@@ -368,11 +380,18 @@ def test_decision_engine_greets_on_first_turn_in_discovery():
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.decision.actions import ACTION_GREET
     from modules.ai.brain.state.stages import STAGE_DISCOVERY
-    from modules.ai.brain.types import INTENT_GREETING
+    from modules.ai.brain.types import INTENT_GREETING, Intent
 
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_DISCOVERY, greeted=False, product=None)
-    decision = engine.decide(_ctx(state, INTENT_GREETING))
+    decision = engine.decide(
+        _ctx(
+            state,
+            INTENT_GREETING,
+            slots={},
+            message="مرحبا",
+        )
+    )
     assert decision.action == ACTION_GREET
 
 
@@ -981,10 +1000,14 @@ def test_transition_sets_identity_introduced_on_first_greet():
 
 
 def test_transition_re_greet_does_not_flip_identity_flag_if_already_false():
-    """A re-greeting (short "ياهلا 🌷") is NOT a self-introduction, so it
+    """Established greeting persona compose is NOT a self-introduction, so it
     must not flip the identity flag — that flag should only land when a
     full greeting or the identity FAQ ran."""
-    from modules.ai.brain.decision.actions import ACTION_GREET
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+    from modules.ai.brain.persona_expression import (
+        PERSONA_KIND_GREETING,
+        PERSONA_TOPIC_SOCIAL,
+    )
     from modules.ai.brain.state.store import DefaultStateStore
     from modules.ai.brain.state.stages import STAGE_DISCOVERY
     from modules.ai.brain.types import Decision, INTENT_GREETING, Intent
@@ -997,14 +1020,16 @@ def test_transition_re_greet_does_not_flip_identity_flag_if_already_false():
         state=state,
         intent=Intent(name=INTENT_GREETING, confidence=0.9),
         decision=Decision(
-            action=ACTION_GREET,
-            args={"re_greet": True},
-            reason="re-greeting after greeted=True",
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": PERSONA_TOPIC_SOCIAL,
+                "persona_kind": PERSONA_KIND_GREETING,
+                "block_commerce_escalation": True,
+            },
+            reason="established greeting — persona_social compose",
         ),
     )
 
-    # greeted stays True (idempotent), but the identity flag MUST NOT flip
-    # because re_greeting doesn't say "أنا نحلة".
     assert new_state.greeted is True
     assert new_state.assistant_identity_introduced is False
 

@@ -176,6 +176,17 @@ class DefaultSuggestionEngine:
             return suggestion
 
         if decision.action == ACTION_LLM_REPLY:
+            _args = decision.args or {}
+            if (
+                str(_args.get("topic") or "") == "persona_social"
+                and str(_args.get("persona_kind") or "") == "greeting"
+            ):
+                suggestion.suggested_next_step = "social_reciprocity"
+                suggestion.needs_follow_up_question = False
+                suggestion.coupon_logic_considered = False
+                suggestion.discount_ok_now = False
+                return suggestion
+
             suggestion.suggested_next_step = "resolve_ambiguous_need"
             suggestion.coupon_logic_considered = self._should_consider_coupon(ctx)
             suggestion.discount_ok_now = (
