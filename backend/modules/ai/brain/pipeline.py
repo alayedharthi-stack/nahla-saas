@@ -2220,6 +2220,14 @@ def _build_reply_state(
 
     _persona_topic = persona_topic_from_decision_args(decision.args)
     _persona_kind = str((decision.args or {}).get("persona_kind") or "").strip()
+    _contextual_clarify = (
+        decision.action == ACTION_LLM_REPLY
+        and str((decision.args or {}).get("topic") or "") == "contextual_clarify"
+    )
+    _ambiguity_class = str((decision.args or {}).get("ambiguity_class") or "").strip()
+    _clarification_evidence = dict(
+        (decision.args or {}).get("clarification_evidence") or {}
+    )
     if _persona_topic:
         logger.info(
             "[PERSONA_EXPRESSION] tenant=%s topic=%s kind=%s "
@@ -2286,6 +2294,9 @@ def _build_reply_state(
         persona_expression_mode=bool(_persona_topic),
         persona_topic=_persona_topic,
         persona_kind=_persona_kind,
+        contextual_clarify_mode=_contextual_clarify,
+        ambiguity_class=_ambiguity_class,
+        clarification_evidence=_clarification_evidence,
         relational_frame=(
             _persona_topic
             if _persona_topic
@@ -2533,6 +2544,15 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
             "If reaching the branch might be difficult, briefly offer "
             "to connect them with the right staff member."
         )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "contextual_clarify"
+    ):
+        from .clarification.compose_goal import compose_contextual_clarify_goal  # noqa: PLC0415
+
+        _cls = str((decision.args or {}).get("ambiguity_class") or "").strip()
+        return compose_contextual_clarify_goal(ambiguity_class=_cls)
 
     if (
         decision.action == ACTION_LLM_REPLY

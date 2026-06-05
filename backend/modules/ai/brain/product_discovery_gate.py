@@ -735,6 +735,19 @@ def try_price_query_decision(
             reason="price_without_product_context",
             preview=msg[:80],
         )
+        try:
+            from ..clarification.router import (  # noqa: PLC0415
+                try_contextual_price_clarification,
+            )
+
+            _ctx_price = try_contextual_price_clarification(
+                ctx, trigger="price_without_product_context",
+            )
+            if _ctx_price is not None:
+                return _ctx_price
+        except Exception:  # noqa: BLE001
+            pass
+
         return Decision(
             action=ACTION_CLARIFY,
             args={
@@ -965,6 +978,21 @@ def clarify_instead_of_top_products(
                 reason="solution-seeking commerce — advisory LLM, not SKU clarify",
                 confidence=0.88,
             )
+
+        try:
+            from ..clarification.router import (  # noqa: PLC0415
+                try_contextual_clarification_fallback,
+            )
+
+            _ctx_clar = try_contextual_clarification_fallback(
+                ctx,
+                trigger=str(reason or "discovery_blocked"),
+                reason_prefix=f"blocked top_products ({reason})",
+            )
+            if _ctx_clar is not None:
+                return _ctx_clar
+        except Exception:  # noqa: BLE001
+            pass
 
         _question = intelligent_need_clarification("general_attribute")
         if should_suppress_repeat_need_clarification(state, "general_attribute", _question):

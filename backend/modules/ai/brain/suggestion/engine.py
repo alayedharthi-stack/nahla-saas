@@ -177,6 +177,12 @@ class DefaultSuggestionEngine:
 
         if decision.action == ACTION_LLM_REPLY:
             _args = decision.args or {}
+            if str(_args.get("topic") or "") == "contextual_clarify":
+                suggestion.suggested_next_step = "await_clarification_answer"
+                suggestion.needs_follow_up_question = False
+                suggestion.coupon_logic_considered = False
+                suggestion.discount_ok_now = False
+                return suggestion
             if (
                 str(_args.get("topic") or "") == "persona_social"
                 and str(_args.get("persona_kind") or "") == "greeting"
