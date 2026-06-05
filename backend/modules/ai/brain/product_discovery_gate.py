@@ -531,6 +531,14 @@ def product_discovery_block_reason(
     if intent_name == "product_visual_request":
         return None
 
+    try:
+        from .intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415
+
+        if is_pure_greeting_without_commerce(msg):
+            return "pure_greeting"
+    except Exception:  # noqa: BLE001
+        pass
+
     if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
         return None
 
@@ -807,6 +815,36 @@ def clarify_instead_of_top_products(
         source="top_products",
     )
     msg = ctx.message or ""
+    try:
+        from .intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415
+
+        if is_pure_greeting_without_commerce(msg):
+            from .persona_expression import (  # noqa: PLC0415
+                PERSONA_KIND_GREETING,
+                PERSONA_TOPIC_SOCIAL,
+            )
+
+            log_product_discovery_blocked(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                reason="pure_greeting",
+                preview=msg[:80],
+                source="top_products",
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": PERSONA_TOPIC_SOCIAL,
+                    "persona_kind": PERSONA_KIND_GREETING,
+                    "block_commerce_escalation": True,
+                },
+                reason=(
+                    "pure greeting — persona_social (product discovery "
+                    "clarify suppressed)"
+                ),
+                confidence=0.85,
+            )
+    except Exception:  # noqa: BLE001
+        pass
     tenant_id = getattr(ctx, "tenant_id", None)
     state = ctx.state
     history = list(getattr(ctx, "history", None) or [])

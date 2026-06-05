@@ -1,23 +1,9 @@
 """
-Production-shaped routing audit — bare «هلا» vs persona greeting compose.
+Production-shaped routing — bare salaam vs persona greeting compose.
 
-This module documents a **pre-existing rules-layer collision**, not a gap in the
-established-greeting persona compose change:
-
-  * ``INTENT_GREETING`` regex also matches «هلا» (confidence 0.95).
-  * ``INTENT_START_ORDER`` has ``^\\s*(...|هلا|...)\\s*$`` (confidence 0.88).
-  * Welcome-gate demotes ``INTENT_GREETING`` → strongest actionable sibling
-    ``start_order`` with ``embedded_greeting=True`` when both fire.
-
-Therefore bare inbound «هلا» often **never reaches** the decision-engine branch:
-
-  ``INTENT_GREETING + greeted=True → persona_social + persona_kind=greeting``
-
-``live_chat`` affects webhook identity-card gating only; the Brain path below
-uses the same ``rules.match`` → ``DefaultDecisionEngine`` chain.
-
-**Do not fix here** (constitutional): no keyword patches, no greeting-regex edits.
-Track separately: bare-hala / start_order collision audit.
+Pure salaam (no commerce residue) must classify as ``INTENT_GREETING`` and
+reach ``persona_social + persona_kind=greeting`` on established turns.
+Mixed salaam+commerce turns still demote via the welcome gate.
 """
 from __future__ import annotations
 
@@ -46,9 +32,6 @@ from modules.ai.brain.types import (  # noqa: E402
     INTENT_START_ORDER,
     MerchantConversationState,
 )
-
-# Documented collision — see module docstring.
-KNOWN_BARE_HALA_COLLISION = True
 
 
 def _production_facts() -> CommerceFacts:
@@ -82,20 +65,7 @@ def _established_ctx(msg: str) -> BrainContext:
     )
 
 
-@pytest.mark.xfail(
-    KNOWN_BARE_HALA_COLLISION,
-    reason=(
-        "Known rules collision: bare «هلا» → start_order+embedded_greeting; "
-        "persona greeting branch requires separate audit (no regex patch here)"
-    ),
-    strict=True,
-)
 def test_production_bare_hala_reaches_persona_social_greeting() -> None:
-    """Desired end state after a future bare-hala / start_order audit.
-
-    Today this xfail documents that production-shaped «هلا» does NOT reliably
-    hit persona_social+greeting until the classifier collision is resolved.
-    """
     assert is_established_greet_persona_compose_enabled()
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
@@ -107,31 +77,25 @@ def test_production_bare_hala_reaches_persona_social_greeting() -> None:
     assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
 
 
-def test_production_bare_hala_rules_classify_start_order_embedded() -> None:
-    """Current production classifier output for bare «هلا»."""
+def test_production_bare_hala_rules_classify_greeting() -> None:
     intent = rules.match("هلا")
     assert intent is not None
-    assert intent.name == INTENT_START_ORDER
-    assert intent.slots.get("embedded_greeting") is True
-    assert intent.extraction_method == "rules+welcome_gate"
+    assert intent.name == INTENT_GREETING
+    assert not (intent.slots or {}).get("embedded_greeting")
+    assert intent.extraction_method == "rules"
 
 
-def test_production_bare_hala_decision_not_persona_greeting_branch() -> None:
-    """Established + greeted + inbound «هلا» — actual decision today."""
+def test_production_bare_hala_decision_is_persona_greeting_branch() -> None:
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
 
-    assert ctx.intent.name != INTENT_GREETING or bool(
-        (ctx.intent.slots or {}).get("embedded_greeting")
-    )
-    assert decision.args.get("topic") != PERSONA_TOPIC_SOCIAL or (
-        decision.args.get("persona_kind") != PERSONA_KIND_GREETING
-    )
+    assert ctx.intent.name == INTENT_GREETING
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
 
 
 @pytest.mark.parametrize("msg", ["مرحبا", "السلام عليكم"])
 def test_production_common_greetings_reach_persona_social(msg: str) -> None:
-    """Positive control — these do not collide with start_order bare pattern."""
     ctx = _established_ctx(msg)
     assert ctx.intent.name == INTENT_GREETING
     assert not (ctx.intent.slots or {}).get("embedded_greeting")
@@ -140,3 +104,10 @@ def test_production_common_greetings_reach_persona_social(msg: str) -> None:
     assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
     assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+
+
+def test_mixed_hala_order_request_still_commerce() -> None:
+    intent = rules.match("هلا أبي أطلب")
+    assert intent is not None
+    assert intent.name == INTENT_START_ORDER
+    assert (intent.slots or {}).get("embedded_greeting") is True

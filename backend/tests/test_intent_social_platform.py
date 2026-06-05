@@ -565,9 +565,11 @@ def test_welcome_gate_routes_to_actionable(message: str, expected_intent: str) -
 @pytest.mark.parametrize("message", [
     "السلام عليكم",
     "مرحبا",
+    "هلا",
     "صباح الخير",
     "هلا والله",
     "أهلاً وسهلاً",
+    "حياك الله",
 ])
 def test_welcome_gate_keeps_pure_greeting(message: str) -> None:
     """Plain greetings (no embedded ask) must NOT be demoted."""

@@ -59,12 +59,7 @@ def _facts() -> CommerceFacts:
 
 
 def _pure_greeting_intent(msg: str, *, slots: dict | None = None) -> Intent:
-    """``INTENT_GREETING`` for decision-engine tests.
-
-    Bare «هلا» can also match ``start_order`` in the rules layer (welcome-gate
-    sibling); these tests target the greeting *decision branch*, not classifier
-    ranking alone.
-    """
+    """``INTENT_GREETING`` for decision-engine tests."""
     return Intent(
         name=INTENT_GREETING,
         confidence=0.95,
@@ -207,8 +202,9 @@ def test_marhaba_classifies_as_greeting_not_persona_interaction() -> None:
 
 
 def test_pure_hala_intent_routes_persona_social_when_greeted() -> None:
-    """Classifier may attach ``start_order`` to bare «هلا»; greeting intent still
-    routes to persona compose when ``greeted=True``."""
-    decision = DefaultDecisionEngine().decide(_ctx("هلا", greeted=True))
+    """Bare «هلا» classifies as GREETING and routes to persona compose."""
+    ctx = _ctx("هلا", greeted=True)
+    assert ctx.intent.name == INTENT_GREETING
+    decision = DefaultDecisionEngine().decide(ctx)
     assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING

@@ -90,7 +90,7 @@ _register(RuleSet(
     intent=INTENT_GREETING,
     patterns=[
         r"^(السلام عليكم|وعليكم السلام|مرحبا?ً?|أهلاً?|هلا|صباح الخير|مساء الخير|كيف حالك|هاي|هلو|hello|hi\b|hey\b)",
-        r"^(أهلين|يا هلا|هلأ|هلأً|أهلا وسهلا)",
+        r"^(أهلين|يا هلا|هلأ|هلأً|أهلا وسهلا|حياك الله|حياك)",
     ],
     confidence=0.95,
 ))
@@ -154,8 +154,11 @@ _register(RuleSet(
         # Post-hesitation confirmations — "خلاص أبيه" / "تمام خذه" / standalone "أبيه"
         r"(خلاص|تمام|يلا|موافق|ماشي|حسناً|اوكي|ok|okay).{0,15}(أبيه|أبي|خذه|آخذه|اشتريه|طلبه|جهزه|حجزه)",
         r"^\s*(أبيه|آخذه|اشتريه|خذه|طلبه|جهزه|حجزه|اجهزه)\s*$",
-        # Urgent continuations — "الآن" / "الحين" / "الان" after product selection
-        r"^\s*(الآن|الان|الحين|هلا|هلق|حالاً|فوراً|فورا|حالا)\s*$",
+        # Urgent continuations — "الآن" / "الحين" / "الان" after product selection.
+        # ``هلا`` is intentionally excluded — it is a pure salaam matched by
+        # ``INTENT_GREETING``; commerce demotion requires residue (see
+        # ``_has_commerce_residue`` in the welcome gate).
+        r"^\s*(الآن|الان|الحين|هلق|حالاً|فوراً|فورا|حالا)\s*$",
         # "اطلبه" / "خذه" / "جهزه" alone
         r"^\s*(اطلبه|اطلبها|اطلبهم|اطلب|جهزه|جهزها|احجزه|احجزها)\s*$",
     ],
@@ -801,7 +804,9 @@ def match(message: str) -> Optional[Intent]:
 
     if best_intent.name == INTENT_GREETING:
         actionable = _pick_embedded_actionable(candidates)
-        if actionable is not None:
+        # Pure salaam must stay GREETING — demote only when commerce residue
+        # survives the greeting strip (e.g. "السلام عليكم أبي سعر العسل").
+        if actionable is not None and _has_commerce_residue(message):
             embedded_slots = dict(actionable.slots or {})
             embedded_slots["embedded_greeting"] = True
             return Intent(
@@ -831,7 +836,11 @@ def match(message: str) -> Optional[Intent]:
             )
         return best_intent
 
-    if has_greeting and best_intent.name in _FIRST_CONTACT_ACTIONABLE_INTENTS:
+    if (
+        has_greeting
+        and best_intent.name in _FIRST_CONTACT_ACTIONABLE_INTENTS
+        and not is_pure_greeting_without_commerce(message)
+    ):
         embedded_slots = dict(best_intent.slots or {})
         embedded_slots["embedded_greeting"] = True
         return Intent(
@@ -974,7 +983,8 @@ _GREETING_RESIDUE_LEAD_TOKENS = (
     "صباح الخير", "صباح النور", "صباح الفل", "صباح الورد",
     "مساء الخير", "مساء النور", "مساء الفل", "مساء الورد",
     # ── Casual ──
-    "أهلاً وسهلاً", "أهلا وسهلا", "اهلا وسهلا", "أهلين", "اهلين",
+    "أهلاً وسهلاً", "أهلا وسهلا", "اهلا وسهلا",     "أهلين", "اهلين",
+    "حياك الله", "حياك",
     "أهلاً", "أهلا", "اهلاً", "اهلا",
     "مرحباً", "مرحبا", "مرحبًا",
     "هلا والله", "هلا وغلا", "يا هلا", "يا مية هلا",
@@ -1138,3 +1148,62 @@ def _has_substantive_residue(message: str) -> bool:
         return False
     n = len(_GREETING_RESIDUE_WORD_CHARS_RE.findall(residue))
     return n >= _GREETING_RESIDUE_MIN_CHARS
+
+
+# Commerce residue — trailing content that justifies welcome-gate demotion
+# from GREETING to an actionable commerce intent. Platform-wide structural
+# test (not keyword→reply); mirrors common commerce ask stems already used
+# across INTENT_ASK_* / INTENT_START_ORDER patterns.
+_COMMERCE_RESIDUE_RE = re.compile(
+    r"(?:"
+    r"سعر|تكلف|ثمن|بكم|كم\s+سعر|كم\s+ثمن|how\s+much|\bprice\b|\bcost\b|"
+    r"طلب|اطلب|"
+    r"اشتري|شراء|\border\b|\bbuy\b|\bpurchase\b|"
+    r"اب(?:ي|غ(?:ى|y|a)?)\s+اطلب|بغ(?:يت|ى)\s+اطلب|"
+    r"اب(?:ي|غ(?:ى|y|a)?)|اريد|اود|ودي|بغيت|بدي|"
+    r"خذ\s+لي|حجز|"
+    r"منتج|بضاع|سلع|صنف|\bproduct\b|"
+    r"عند(?:كم|ك)|لديك(?:م|)?|do\s+you\s+have|"
+    r"شحن|توصيل|\bshipping\b|\bdeliver\b|"
+    r"حساب|تحويل|"
+    r"رابط|"
+    r"مقاس|وزن|كم(?:ية)?|"
+    r"show\s+me|looking\s+for|add\s+to\s+cart"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _normalize_residue_text(text: str) -> str:
+    norm = re.sub(r"[\u064B-\u0652\u0670\u0640]", "", text)
+    return (
+        norm.replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ة", "ه")
+        .replace("ؤ", "و")
+        .replace("ئ", "ي")
+        .replace("ى", "ي")
+        .lower()
+    )
+
+
+def _has_commerce_residue(message: str) -> bool:
+    """True when residue after greeting strip carries commerce intent."""
+    if not message:
+        return False
+    residue = _strip_greeting_residue(message)
+    if not residue:
+        return False
+    return _COMMERCE_RESIDUE_RE.search(_normalize_residue_text(residue)) is not None
+
+
+def is_pure_greeting_without_commerce(message: str) -> bool:
+    """Pure salaam — no commerce residue and no open-ended ask residue."""
+    if not message or not str(message).strip():
+        return False
+    if _has_commerce_residue(message):
+        return False
+    if _has_substantive_residue(message):
+        return False
+    return True

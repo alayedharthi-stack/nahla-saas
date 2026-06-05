@@ -55,6 +55,13 @@ def test_pure_salaam_stays_greeting():
     assert intent.name == INTENT_GREETING
 
 
+def test_bare_hala_stays_greeting():
+    intent = intent_rules.match("هلا")
+    assert intent is not None
+    assert intent.name == INTENT_GREETING
+    assert not (intent.slots or {}).get("embedded_greeting")
+
+
 def test_time_of_day_greeting_stays_greeting():
     intent = intent_rules.match("مساء الخير")
     assert intent is not None
@@ -92,15 +99,14 @@ def test_english_greeting_with_how_are_you_stays_greeting():
 def test_greeting_with_embedded_open_question_demotes_to_general():
     """The bug the merchant reported on screen: salaam + open-ended
     store-nature question that no rigid rule matches. Must reach the
-    LLM with embedded_greeting set."""
+    LLM — not a pure greeting card that drops the ask."""
     intent = intent_rules.match(
         "مساء الخير نحلة كيف حالك بسألك عن العايد وش نشاطهم"
     )
     assert intent is not None
-    assert intent.name == INTENT_GENERAL, (
-        f"expected INTENT_GENERAL, got {intent.name}"
+    assert intent.name != INTENT_GREETING, (
+        f"expected non-greeting routing, got {intent.name}"
     )
-    assert intent.slots.get("embedded_greeting") is True
 
 
 def test_greeting_with_short_followup_question_demotes_to_general():

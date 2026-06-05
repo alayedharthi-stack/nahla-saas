@@ -154,6 +154,20 @@ def try_contextual_clarification_fallback(
     Phase 0 (flag off): returns ``None`` after shadow log — legacy unchanged.
     Phase 1 (flag on): returns contextual clarify decision when classifiable.
     """
+    try:
+        from ..intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415
+
+        if is_pure_greeting_without_commerce(ctx.message or ""):
+            log_clarification_skipped(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                trigger=trigger,
+                reason="pure_greeting_no_commerce",
+                preview=ctx.message or "",
+            )
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+
     spec = record_clarification_shadow(
         ctx,
         trigger=trigger,
