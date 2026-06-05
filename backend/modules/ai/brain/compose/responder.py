@@ -897,6 +897,43 @@ class DefaultComposer:
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(ctx.history, ctx.message)
 
+            try:
+                from modules.ai.brain.truth_surface import (  # noqa: PLC0415
+                    run_truth_surface_shadow_audit,
+                    run_uts_v1_shadow,
+                )
+                from modules.ai.brain.truth_surface.flags import (  # noqa: PLC0415
+                    is_truth_surface_shadow_enabled,
+                    is_uts_v1_enforce_enabled,
+                    is_uts_v1_shadow_enabled,
+                )
+
+                if (
+                    is_truth_surface_shadow_enabled()
+                    or is_uts_v1_shadow_enabled()
+                    or is_uts_v1_enforce_enabled()
+                ):
+                    run_truth_surface_shadow_audit(
+                        reply_state,
+                        tenant_id=ctx.tenant_id,
+                        history_messages=history_messages,
+                        goal_regimen_bundle=getattr(ctx, "goal_regimen_bundle", None),
+                        sales_context=ctx.sales_context,
+                        full_merchant_context=(
+                            ctx.merchant_context
+                            if isinstance(getattr(ctx, "merchant_context", None), dict)
+                            else None
+                        ),
+                    )
+                    run_uts_v1_shadow(
+                        reply_state,
+                        tenant_id=ctx.tenant_id,
+                        goal_regimen_bundle=getattr(ctx, "goal_regimen_bundle", None),
+                        history_messages=history_messages,
+                    )
+            except Exception:  # noqa: BLE001 — shadow must never break compose
+                pass
+
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     generate_ai_reply,
