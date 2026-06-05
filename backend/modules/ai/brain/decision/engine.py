@@ -2027,17 +2027,54 @@ class DefaultDecisionEngine:
                             action=ACTION_GREET,
                             reason="first-turn general help",
                         )
-            if intent.name == INTENT_GREETING and state.greeted:
-                # Composer reads `re_greet=True` and renders the short
-                # `re_greeting` template instead of the full onboarding
-                # message. Confidence kept slightly under the first-turn
-                # path so any higher-priority rule (e.g. a still-active
-                # checkout flow that somehow slipped past the lock above)
-                # would still win.
+            if (
+                intent.name == INTENT_GREETING
+                and state.greeted
+                and not bool(_intent_slots.get("embedded_greeting"))
+            ):
+                # Established pure greeting → persona_social compose (non-
+                # deterministic personality). Legacy template re-greet only
+                # when ``ESTABLISHED_GREET_PERSONA_COMPOSE_ENABLED=false``.
+                # Mixed turns (``embedded_greeting=True``) fall through so the
+                # actionable half reaches a specific or general LLM route.
+                from ..persona_expression import (  # noqa: PLC0415
+                    PERSONA_KIND_GREETING,
+                    PERSONA_TOPIC_SOCIAL,
+                    is_established_greet_persona_compose_enabled,
+                )
+
+                if is_established_greet_persona_compose_enabled():
+                    logger.info(
+                        "[PERSONA_SOCIAL] kind=greeting route=established_greeting "
+                        "tenant=%s preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        (ctx.message or "")[:60],
+                    )
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={
+                            "topic": PERSONA_TOPIC_SOCIAL,
+                            "persona_kind": PERSONA_KIND_GREETING,
+                            "block_commerce_escalation": True,
+                        },
+                        reason=(
+                            "established pure greeting — persona_social "
+                            "compose (persona_kind=greeting)"
+                        ),
+                        confidence=0.85,
+                    )
+                logger.info(
+                    "[PERSONA_SOCIAL] kind=greeting route=legacy_re_greet_template "
+                    "tenant=%s flag_off=1",
+                    getattr(ctx, "tenant_id", None),
+                )
                 return Decision(
                     action=ACTION_GREET,
                     args={"re_greet": True},
-                    reason="explicit greeting after greeted=True — short re-greeting",
+                    reason=(
+                        "explicit greeting after greeted=True — legacy "
+                        "re-greeting template (persona compose disabled)"
+                    ),
                     confidence=0.85,
                 )
 

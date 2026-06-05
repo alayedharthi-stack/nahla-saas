@@ -50,6 +50,7 @@ def _persona_state(
         ("persona_identity", ""),
         ("persona_social", "affection"),
         ("persona_social", "tease"),
+        ("persona_social", "greeting"),
     ],
 )
 def test_persona_prompt_excludes_commerce_leakage_markers(

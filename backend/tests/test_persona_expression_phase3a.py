@@ -78,6 +78,7 @@ def test_high_priority_keeps_a1_on_commerce() -> None:
     [
         ("persona_identity", ""),
         ("persona_social", "affection"),
+        ("persona_social", "greeting"),
     ],
 )
 def test_prompt_builder_suppresses_a1_for_persona_state(
