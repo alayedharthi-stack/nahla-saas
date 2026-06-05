@@ -4,7 +4,8 @@ brain/clarification
 Missing-information classification and contextual clarification routing.
 
 Phase 0: shadow telemetry (``CLARIFICATION_SHADOW_ENABLED``, default on).
-Phase 1: generative contextual clarify (``CONTEXTUAL_CLARIFY_ENABLED``, default off).
+Phase A/1: generative contextual clarify (``CONTEXTUAL_CLARIFY_ENABLED`` — enable on
+staging via env; default off until rollout gate passes).
 """
 from .classifier import classify_missing_information, would_action_for_spec
 from .flags import is_clarification_shadow_enabled, is_contextual_clarify_enabled

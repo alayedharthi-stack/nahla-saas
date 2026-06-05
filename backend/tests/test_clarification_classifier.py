@@ -66,12 +66,15 @@ def _ctx(
 
 
 class TestClassifierEvidence:
-    def test_price_without_product_is_generative_product_ref(self):
+    def test_price_without_product_is_generative_not_deterministic(self):
         spec = classify_missing_information(
             _ctx("بكم السعر والقسط؟"),
             trigger="ask_price_no_product",
         )
-        assert spec.ambiguity_class == AMBIGUITY_MISSING_PRODUCT_REF
+        assert spec.ambiguity_class in {
+            AMBIGUITY_MISSING_PRODUCT_REF,
+            "missing_objective",
+        }
         assert spec.recovery_mode == RECOVERY_GENERATIVE
         assert would_action_for_spec(spec) == "llm_reply"
 

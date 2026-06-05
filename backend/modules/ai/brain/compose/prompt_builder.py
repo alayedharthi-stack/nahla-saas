@@ -125,11 +125,14 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     merchant_behavior_extra = (
         structured_behavior_block or overlay_buckets.get("behavior", "")
     )
+    _contextual_clarify_mode = bool(
+        getattr(state, "contextual_clarify_mode", False)
+    )
     high_priority_block = build_high_priority_block(
         settings_for_overlay,
         store_name=store_name,
         merchant_behavior_extra=merchant_behavior_extra,
-        omit_sales_behavior=_persona_expression_mode,
+        omit_sales_behavior=_persona_expression_mode or _contextual_clarify_mode,
         persona_expression_mode=_persona_expression_mode,
     )
 
@@ -157,7 +160,6 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
     _need_advice_mode = bool(getattr(state, "need_based_advice_mode", False))
     _need_category = str(getattr(state, "need_category", "") or "").strip()
-    _contextual_clarify_mode = bool(getattr(state, "contextual_clarify_mode", False))
     _ambiguity_class = str(getattr(state, "ambiguity_class", "") or "").strip()
     _clarification_evidence = dict(
         getattr(state, "clarification_evidence", None) or {}

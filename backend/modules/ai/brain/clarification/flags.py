@@ -12,7 +12,11 @@ _SHADOW_FLAG = "CLARIFICATION_SHADOW_ENABLED"
 
 
 def is_contextual_clarify_enabled() -> bool:
-    """Phase 1 — when True, generative contextual clarify replaces legacy template fallback."""
+    """Phase A/1 — when True, generative contextual clarify replaces legacy template fallback.
+
+    Rollout: set ``CONTEXTUAL_CLARIFY_ENABLED=true`` on staging first; production
+    stays ``false`` until Phase A validation completes.
+    """
     return os.getenv(_FLAG, "false").strip().lower() in {
         "1", "true", "yes", "on",
     }

@@ -36,6 +36,7 @@ from typing import Any
 
 from ..types import BrainContext, Decision, INTENT_GENERAL
 from .actions import (
+    ACTION_CLARIFY,
     ACTION_LLM_REPLY,
     ACTION_HANDOFF,
     ACTION_SUGGEST_COUPON,
@@ -214,6 +215,7 @@ class RealPolicyGate:
     # ── Rule 0b: non-commerce media clamp (May 2026) ───────────────────────
 
     _NON_COMMERCE_BLOCKED_ACTIONS = frozenset({
+        ACTION_CLARIFY,
         ACTION_SEARCH_PRODUCTS,
         ACTION_NARROW,
         ACTION_RECOMMEND_ADDON,

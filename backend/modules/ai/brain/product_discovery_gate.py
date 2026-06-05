@@ -736,7 +736,7 @@ def try_price_query_decision(
             preview=msg[:80],
         )
         try:
-            from ..clarification.router import (  # noqa: PLC0415
+            from .clarification.router import (  # noqa: PLC0415
                 try_contextual_price_clarification,
             )
 
@@ -980,7 +980,7 @@ def clarify_instead_of_top_products(
             )
 
         try:
-            from ..clarification.router import (  # noqa: PLC0415
+            from .clarification.router import (  # noqa: PLC0415
                 try_contextual_clarification_fallback,
             )
 
