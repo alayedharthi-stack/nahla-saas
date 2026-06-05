@@ -772,6 +772,10 @@ class BrainReplyState:
     persona_expression_mode: bool = False
     persona_topic: str = ""
     persona_kind: str = ""
+    # Contextual clarify compose (Phase 1 — not persona_expression layer).
+    contextual_clarify_mode: bool = False
+    ambiguity_class: str = ""
+    clarification_evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

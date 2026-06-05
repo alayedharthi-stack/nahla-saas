@@ -157,6 +157,11 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
     _need_advice_mode = bool(getattr(state, "need_based_advice_mode", False))
     _need_category = str(getattr(state, "need_category", "") or "").strip()
+    _contextual_clarify_mode = bool(getattr(state, "contextual_clarify_mode", False))
+    _ambiguity_class = str(getattr(state, "ambiguity_class", "") or "").strip()
+    _clarification_evidence = dict(
+        getattr(state, "clarification_evidence", None) or {}
+    )
     _pre_commerce_social = bool(
         isinstance(_mc, dict) and _mc.get("pre_commerce_social")
     )
@@ -187,6 +192,28 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 "- لا تخترعي روابط أو أسعار اشتراك أو خطوات تقنية غير مذكورة في سياق المحادثة.\n"
                 "- **ممنوع** عروض كتالوج أو ‎[PRODUCT:...]‎.\n"
             )
+
+    if _contextual_clarify_mode:
+        import json as _json_clar  # noqa: PLC0415
+
+        _evidence_json = _json_clar.dumps(
+            _clarification_evidence,
+            ensure_ascii=False,
+            indent=2,
+        )
+        kb_block = (
+            (kb_block + "\n\n") if kb_block else ""
+        ) + (
+            "### contextual_clarify — structured evidence (operational facts only)\n"
+            f"ambiguity_class: `{_ambiguity_class or 'unknown'}`\n\n"
+            f"{_evidence_json}\n\n"
+            "### قواعد إلزامية لهذه الجولة\n"
+            "- اكتبي **سؤال استيضاح واحد** قصيراً وطبيعياً مستمداً من السياق "
+            "والحقائق أعلاه — ليس قائمة مواصفات عامة.\n"
+            "- حافظي على شخصية نحلة الدافئة؛ ممنوع صوت نظام/Workflow/مكتب مساعدة.\n"
+            "- ممنوع اقتراح منتجات أو ‎[PRODUCT:...]‎ في سؤال الاستيضاح.\n"
+            "- ممنوع ختام خدمة عملاء («كيف أقدر أساعدك»، «تحت أمرك» كختام).\n"
+        )
 
     if _need_advice_mode:
         _axis_labels = {
@@ -247,6 +274,12 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "## أدوات المنتجات\n"
             "وضع استشارة — **ممنوع** إرسال ‎[PRODUCT:...]‎ إلا إذا كان المنتج "
             "واضحاً جداً من المعرفة. لا تطلبي من العميل تسمية منتج أولاً."
+        )
+    elif _contextual_clarify_mode:
+        tools_parts.append(
+            "## أدوات المنتجات\n"
+            "وضع استيضاح سياقي — **ممنوع** ‎[PRODUCT:...]‎ أو ‎[MEDIA_KEY:...]‎ "
+            "في سؤال الاستيضاح. لا بطاقات ولا عروض بيعية."
         )
     elif not _platform_mode and not _non_commerce_mode:
         if libraries_text:
