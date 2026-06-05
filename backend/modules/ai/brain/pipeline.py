@@ -1926,6 +1926,46 @@ class MerchantBrain:
                 tenant_id, _setg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
+                apply_product_availability_truth_guard,
+                product_availability_guard_mode,
+            )
+            if product_availability_guard_mode() != "off":
+                from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+                    build_availability_context,
+                )
+                _pavg_rec_ids: list = []
+                for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                    _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                    if isinstance(_rid, int):
+                        _pavg_rec_ids.append(_rid)
+                _pavg_ctx = build_availability_context(
+                    db,
+                    tenant_id,
+                    focus_product=getattr(new_state, "current_product_focus", None),
+                    recommended_product_ids=_pavg_rec_ids,
+                )
+                _pavg = apply_product_availability_truth_guard(
+                    reply=reply or "",
+                    availability_context=_pavg_ctx,
+                    inbound_text=message or "",
+                    chosen_path=_chosen_path,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                if _pavg.replaced:
+                    reply = _pavg.reply
+                if _pavg.availability_claim_blocked:
+                    result.data["availability_claim_blocked"] = True
+                    if _pavg.reason:
+                        result.data["availability_guard_reason"] = _pavg.reason
+        except Exception as _pavg_exc:  # noqa: BLE001
+            logger.warning(
+                "[PRODUCT_AVAILABILITY_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _pavg_exc,
+            )
+
         # ── 10. Structured turn trace (searchable in Railway logs) ────────
         #
         # Single per-turn record — every field the merchant's audit

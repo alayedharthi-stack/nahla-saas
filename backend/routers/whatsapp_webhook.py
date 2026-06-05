@@ -7560,6 +7560,50 @@ async def _handle_merchant_message(
                     tenant_id, _setg_exc,
                 )
 
+        if reply and not _brain_handoff:
+            try:
+                from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
+                    apply_product_availability_truth_guard,
+                    product_availability_guard_mode,
+                )
+                if product_availability_guard_mode() != "off":
+                    from core.order_flow import (  # noqa: PLC0415
+                        _load_brain_state as _pavg_load,
+                    )
+                    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+                        build_availability_context,
+                    )
+                    _, _pavg_bs = _pavg_load(db, tenant_id=tenant_id, phone=to)
+                    _pavg_rec_ids: list = []
+                    for _rec in (_pavg_bs.get("last_recommended_products") or [])[:5]:
+                        _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                        if isinstance(_rid, int):
+                            _pavg_rec_ids.append(_rid)
+                    _pavg_ctx = build_availability_context(
+                        db,
+                        tenant_id,
+                        focus_product=_pavg_bs.get("current_product_focus"),
+                        recommended_product_ids=_pavg_rec_ids,
+                    )
+                    _pavg_path = str(
+                        (inbound_metadata or {}).get("deterministic_path") or _br_action or ""
+                    )
+                    _pavg_result = apply_product_availability_truth_guard(
+                        reply=reply,
+                        availability_context=_pavg_ctx,
+                        inbound_text=text or "",
+                        chosen_path=_pavg_path,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                    )
+                    if _pavg_result.replaced:
+                        reply = _pavg_result.reply
+            except Exception as _pavg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[PRODUCT_AVAILABILITY_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _pavg_exc,
+                )
+
         # ── Loop guard (similarity / repetition based) ────────────────────
         # Decides whether to:
         #   continue → send `reply` as-is
