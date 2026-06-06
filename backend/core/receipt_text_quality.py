@@ -174,16 +174,22 @@ def is_receipt_measurement_telemetry_enabled() -> bool:
         )
         if is_receipt_extraction_telemetry_enabled():
             return True
-    except Exception:  # noqa: silent-ok — optional flag probe; failure means flag off
-        pass
+    except Exception:  # noqa: silent-ok - telemetry must not affect runtime
+        logger.debug(
+            "[RECEIPT_TEXT_QUALITY] extraction telemetry flag probe failed",
+            exc_info=True,
+        )
     try:
         from core.receipt_verdict import (  # noqa: PLC0415
             is_receipt_verdict_telemetry_enabled,
         )
         if is_receipt_verdict_telemetry_enabled():
             return True
-    except Exception:  # noqa: silent-ok — optional flag probe; failure means flag off
-        pass
+    except Exception:  # noqa: silent-ok - telemetry must not affect runtime
+        logger.debug(
+            "[RECEIPT_TEXT_QUALITY] verdict telemetry flag probe failed",
+            exc_info=True,
+        )
     return False
 
 
