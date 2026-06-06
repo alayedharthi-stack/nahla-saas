@@ -81,10 +81,29 @@ _GREETING_PATTERNS: Tuple[Tuple[re.Pattern[str], str, float], ...] = (
     (re.compile(r"^هلا(?:\s|$)"), ELEMENT_GREETING, 0.91),
     (re.compile(r"^صباح\s*الخير"), ELEMENT_GREETING, 0.93),
     (re.compile(r"^مساء\s*الخير"), ELEMENT_GREETING, 0.93),
+    (re.compile(r"^حياكم(?:\s*الله)?"), ELEMENT_GREETING, 0.92),
+    (re.compile(r"^حيا\s*الله"), ELEMENT_GREETING, 0.92),
 )
 
+# ``بكم`` inside welcome phrases («مرحبا بكم») is NOT a price ask.
+_WELCOME_BKM_PHRASE_RE: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"^مرحب\S*\s+بكم(?:\s|$)"),
+    re.compile(r"^اهل\S*\s+بكم(?:\s|$)"),
+    re.compile(r"^هلا\s+بكم(?:\s|$)"),
+    re.compile(r"^نورت\S*\s+بكم(?:\s|$)"),
+)
+
+_WELCOME_BEFORE_BKM_TOKENS = frozenset({
+    "مرحبا", "مرحب", "مرحبتين", "اهلا", "أهلا", "هلا", "اهلين",
+    "نورتونا", "نورتكم", "نورتنا",
+})
+
+_BKM_PRICE_AFTER_DEMONSTRATIVE = frozenset({
+    "هذا", "هذي", "هذه", "هال", "كذا",
+})
+
 _COMMERCIAL_PATTERNS: Tuple[Tuple[re.Pattern[str], str, float], ...] = (
-    (re.compile(r"(?:كم\s*)?(?:ال)?سعر|بكم|كم\s*ثمن|قد\s*ايش|how\s*much"), ELEMENT_PRICE_INQUIRY, 0.94),
+    (re.compile(r"(?:كم\s*)?(?:ال)?سعر|كم\s*ثمن|قد\s*ايش|how\s*much"), ELEMENT_PRICE_INQUIRY, 0.94),
     (re.compile(r"كم\s*(?:ال)?(?:كيلو|كيلوغرام|kg|جرام|حجم|مقاس|لتر)"), ELEMENT_QUANTITY_UNIT, 0.93),
     (re.compile(r"(?:كيلو|كيلوغرام|kg|جرام|نصف\s*كيلو|ربع\s*كيلو)"), ELEMENT_QUANTITY_UNIT, 0.88),
     (re.compile(r"(?:عندكم|عندك|لديكم|متوفر|موجود)\s+\S"), ELEMENT_PRODUCT_AVAILABILITY, 0.95),
@@ -144,6 +163,45 @@ def _has_product_focus(state: Optional[MerchantConversationState]) -> bool:
     return bool(str(focus.get("title") or focus.get("id") or "").strip())
 
 
+def _tokenize(norm: str) -> List[str]:
+    return [t for t in _WS.split(norm or "") if t]
+
+
+def _is_welcome_bkm_phrase(norm: str) -> bool:
+    """True when ``بكم`` is part of a welcome idiom, not a price question."""
+    if not norm:
+        return False
+    return any(p.search(norm) for p in _WELCOME_BKM_PHRASE_RE)
+
+
+def _detect_bkm_price_inquiry(norm: str) -> Optional[DetectedElement]:
+    """
+    Detect ``بكم`` only as a standalone price token — never inside welcome openers.
+    """
+    if not norm or _is_welcome_bkm_phrase(norm):
+        return None
+
+    tokens = _tokenize(norm)
+    for i, tok in enumerate(tokens):
+        if tok != "بكم":
+            continue
+        if i > 0 and tokens[i - 1] in _WELCOME_BEFORE_BKM_TOKENS:
+            continue
+        if i > 0 and tokens[i - 1] in _BKM_PRICE_AFTER_DEMONSTRATIVE:
+            return DetectedElement(
+                element_type=ELEMENT_PRICE_INQUIRY,
+                confidence=0.94,
+                span_hint="بكم",
+            )
+        if i == 0 or i + 1 < len(tokens):
+            return DetectedElement(
+                element_type=ELEMENT_PRICE_INQUIRY,
+                confidence=0.94,
+                span_hint="بكم",
+            )
+    return None
+
+
 def _resolved_product_query(intent: Intent) -> str:
     slots = dict(getattr(intent, "slots", None) or {})
     return str(
@@ -167,6 +225,14 @@ def _detect_elements(norm: str, raw: str) -> List[DetectedElement]:
         m = pattern.search(norm)
         if m:
             _add(etype, conf, (m.group(0) or "")[:40])
+
+    _bkm_price = _detect_bkm_price_inquiry(norm)
+    if _bkm_price is not None:
+        _add(
+            _bkm_price.element_type,
+            _bkm_price.confidence,
+            _bkm_price.span_hint,
+        )
 
     for pattern, etype, conf in _COURTESY_PATTERNS:
         m = pattern.search(norm)
@@ -225,6 +291,8 @@ def _goal_from_intent(intent: Intent) -> Optional[str]:
 def _resolve_primary_goal(
     elements: List[DetectedElement],
     intent: Intent,
+    *,
+    norm: str = "",
 ) -> str:
     commercial = [
         e for e in elements
@@ -239,6 +307,14 @@ def _resolve_primary_goal(
             ),
         )
         return _GOAL_FROM_ELEMENT.get(best.element_type, GOAL_GENERAL)
+
+    element_types = {e.element_type for e in elements}
+
+    # Welcome «بكم» must not inherit a stale rules-layer ask_price intent.
+    if _is_welcome_bkm_phrase(norm):
+        if ELEMENT_GREETING in element_types:
+            return GOAL_GREETING_ONLY
+        return GOAL_SOCIAL_ONLY
 
     intent_goal = _goal_from_intent(intent)
     if intent_goal and intent_goal not in {GOAL_GENERAL, GOAL_SOCIAL_ONLY, GOAL_GREETING_ONLY}:
@@ -394,7 +470,7 @@ def compute_customer_intent_priority(
         )
 
     ranking = _rank_elements(elements)
-    primary = _resolve_primary_goal(elements, intent)
+    primary = _resolve_primary_goal(elements, intent, norm=norm)
 
     secondary = [
         e.element_type

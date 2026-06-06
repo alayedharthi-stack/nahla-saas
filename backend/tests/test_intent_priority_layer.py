@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
 for _p in [_backend, os.path.join(_backend, "..")]:
@@ -30,6 +32,11 @@ from modules.ai.brain.intent_priority.types import (  # noqa: E402
     ELEMENT_QUANTITY_UNIT,
     ELEMENT_SHIPPING_INQUIRY,
     ELEMENT_STAFF_CONTACT,
+)
+from modules.ai.brain.intent import rules  # noqa: E402
+from modules.ai.brain.intent_priority.types import (  # noqa: E402
+    GOAL_GREETING_ONLY,
+    GOAL_SOCIAL_ONLY,
 )
 from modules.ai.brain.types import (  # noqa: E402
     INTENT_ASK_PRICE,
@@ -175,3 +182,51 @@ def test_priority_ranking_commercial_beats_courtesy():
         assert ranking.index(ELEMENT_PRICE_INQUIRY) < ranking.index(ELEMENT_COURTESY)
     if ELEMENT_COURTESY in ranking and ELEMENT_QUANTITY_UNIT in ranking:
         assert ranking.index(ELEMENT_QUANTITY_UNIT) < ranking.index(ELEMENT_COURTESY)
+
+
+# ── P1 fix: welcome «بكم» must not trigger price_inquiry ─────────────────────
+def _analyze_with_rules(msg: str) -> object:
+    intent = rules.match(msg) or Intent(name="general", confidence=0.4, slots={})
+    return compute_customer_intent_priority(
+        message=msg,
+        intent=intent,
+        state=MerchantConversationState(),
+        profile={},
+    )
+
+
+@pytest.mark.parametrize(
+    "message,acceptable_goals",
+    [
+        ("مرحبا بكم", {GOAL_GREETING_ONLY, GOAL_SOCIAL_ONLY, "greeting_only"}),
+        ("أهلا بكم", {GOAL_GREETING_ONLY, GOAL_SOCIAL_ONLY, "greeting_only"}),
+        ("حياكم الله", {GOAL_GREETING_ONLY, GOAL_SOCIAL_ONLY, "greeting_only"}),
+    ],
+)
+def test_welcome_bkm_not_price_inquiry(message, acceptable_goals):
+    verdict = _analyze_with_rules(message)
+    assert verdict.primary_customer_goal != GOAL_PRICE_INQUIRY
+    assert verdict.primary_customer_goal in acceptable_goals
+    assert ELEMENT_PRICE_INQUIRY not in _element_types(verdict)
+
+
+def test_marhaba_bikum_with_product_is_availability_not_price():
+    verdict = _analyze_with_rules("مرحبا بكم عندكم طلح؟")
+    assert verdict.primary_customer_goal == GOAL_PRODUCT_AVAILABILITY
+    assert verdict.primary_customer_goal != GOAL_PRICE_INQUIRY
+    assert ELEMENT_PRICE_INQUIRY not in _element_types(verdict)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "بكم الكيلو؟",
+        "بكم السمر؟",
+        "هذا بكم؟",
+        "بكم سعره؟",
+    ],
+)
+def test_valid_bkm_remains_price_inquiry(message):
+    verdict = _analyze(message, intent_name=INTENT_ASK_PRICE, intent_confidence=0.9)
+    assert verdict.primary_customer_goal == GOAL_PRICE_INQUIRY
+    assert ELEMENT_PRICE_INQUIRY in _element_types(verdict)
