@@ -2539,7 +2539,11 @@ async def _process_document(
                 pypdf_status=pypdf_extraction_status,
             )
         except Exception:
-            pass
+            logger.exception(
+                "[RECEIPT_TEXT_QUALITY] measurement metadata stamp failed "
+                "tenant=%s media_id=%s",
+                tenant_id, media_id,
+            )
         if extracted_text:
             base_meta["pdf_text_preview"] = (
                 extracted_text[:280].replace("\n", " ")
@@ -2710,7 +2714,11 @@ async def _process_document(
                 pypdf_text=pypdf_extracted_text,
             )
         except Exception:
-            pass
+            logger.exception(
+                "[RECEIPT_TEXT_QUALITY] document measurement emit failed "
+                "tenant=%s media_id=%s",
+                tenant_id, media_id,
+            )
 
     # ── Compose brain-facing text ────────────────────────────────
     label_ar = {

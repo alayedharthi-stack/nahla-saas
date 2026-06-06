@@ -174,7 +174,7 @@ def is_receipt_measurement_telemetry_enabled() -> bool:
         )
         if is_receipt_extraction_telemetry_enabled():
             return True
-    except Exception:
+    except Exception:  # noqa: silent-ok — optional flag probe; failure means flag off
         pass
     try:
         from core.receipt_verdict import (  # noqa: PLC0415
@@ -182,7 +182,7 @@ def is_receipt_measurement_telemetry_enabled() -> bool:
         )
         if is_receipt_verdict_telemetry_enabled():
             return True
-    except Exception:
+    except Exception:  # noqa: silent-ok — optional flag probe; failure means flag off
         pass
     return False
 
@@ -349,7 +349,9 @@ def _compute_ocr_escalation_shadow_unsafe(
             iban_conf = fields.iban_confidence.value
             beneficiary_conf = fields.beneficiary_confidence.value
         except Exception:
-            pass
+            logger.exception(
+                "[RECEIPT_TEXT_QUALITY] receipt field confidence probe failed"
+            )
 
     if not is_payment_candidate:
         return OcrEscalationShadow(
@@ -465,6 +467,7 @@ def log_text_quality(
             tenant_id, media_id, source, pdf_text_status or "-", body,
         )
     except Exception:
+        logger.exception("[RECEIPT_TEXT_QUALITY] text quality log emit failed")
         return
 
 
@@ -491,6 +494,9 @@ def log_ocr_escalation_shadow(
             pdf_kind or "-", pdf_text_status or "-", body,
         )
     except Exception:
+        logger.exception(
+            "[RECEIPT_TEXT_QUALITY] OCR escalation shadow log emit failed"
+        )
         return
 
 
@@ -512,6 +518,9 @@ def stamp_measurement_metadata(
         base_meta["receipt_text_garble_reasons"] = list(quality.garble_reasons)
         base_meta["pdf_pypdf_text_status"] = pypdf_status or None
     except Exception:
+        logger.exception(
+            "[RECEIPT_TEXT_QUALITY] measurement metadata stamp failed"
+        )
         return
 
 
@@ -574,6 +583,9 @@ def emit_document_receipt_measurement(
                 fields=fields,
             )
     except Exception:
+        logger.exception(
+            "[RECEIPT_TEXT_QUALITY] document measurement emit failed"
+        )
         return
 
 
