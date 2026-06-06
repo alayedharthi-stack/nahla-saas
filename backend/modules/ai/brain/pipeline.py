@@ -583,6 +583,36 @@ class MerchantBrain:
         if _raw_message and intent.raw_message != _raw_message:
             intent.raw_message = _raw_message
 
+        # ── 1a.55 Customer Intent Priority Layer (AI-ARCH-007) ─────────
+        _intent_priority = None
+        try:
+            from .intent_priority import (  # noqa: PLC0415
+                compute_customer_intent_priority,
+                enrich_intent_with_priority,
+                log_intent_priority_verdict,
+            )
+
+            _intent_priority = compute_customer_intent_priority(
+                message=_raw_message or message,
+                intent=intent,
+                state=state_for_classify,
+                profile=profile or {},
+            )
+            intent = enrich_intent_with_priority(intent, _intent_priority)
+            log_intent_priority_verdict(
+                tenant_id=tenant_id,
+                verdict=_intent_priority,
+                preview=_raw_message or message,
+                intent_name=intent.name,
+            )
+        except Exception as _ip_exc:  # noqa: BLE001
+            logger.debug(
+                "[INTENT_PRIORITY] skipped tenant=%s err=%s",
+                tenant_id,
+                _ip_exc,
+            )
+            _intent_priority = None
+
         # ── 1b. State relevance validation ─────────────────────────────
         _state_relevance = None
         try:
@@ -781,6 +811,7 @@ class MerchantBrain:
             semantic_interpretation=_semantic_interpretation,
             raw_message=_raw_message,
             state_relevance=_state_relevance,
+            intent_priority=_intent_priority,
         )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         if human_priority:
@@ -2075,6 +2106,11 @@ class MerchantBrain:
                     "alignment_regen":    _align_regen_fired,
                     "latency_ms":       latency_ms,
                     "pre_commerce_shortcut": bool(_pre_commerce_shortcut),
+                    "intent_priority": (
+                        _intent_priority.to_trace_dict()
+                        if _intent_priority is not None
+                        else None
+                    ),
                 }, ensure_ascii=False),
             )
         except Exception:
@@ -2302,6 +2338,16 @@ def _build_reply_state(
     _clarification_evidence = dict(
         (decision.args or {}).get("clarification_evidence") or {}
     )
+    _intent_priority = getattr(ctx, "intent_priority", None)
+    _priority_focus = ""
+    _primary_goal = ""
+    if _intent_priority is not None:
+        _priority_focus = str(
+            getattr(_intent_priority, "recommended_focus", "") or ""
+        ).strip()
+        _primary_goal = str(
+            getattr(_intent_priority, "primary_customer_goal", "") or ""
+        ).strip()
     if _persona_topic:
         logger.info(
             "[PERSONA_EXPRESSION] tenant=%s topic=%s kind=%s "
@@ -2344,7 +2390,10 @@ def _build_reply_state(
         explicit_pending_action=current_state.pending_action,
         intent_name=getattr(ctx.intent, "name", "") or "",
         response_goal=_compose_response_goal(
-            decision, suggestion, stance=_stance_result,
+            decision,
+            suggestion,
+            stance=_stance_result,
+            intent_priority=_intent_priority,
         ),
         merchant_context=dict(merchant_context or {}),
         platform_kb_mode=platform_kb_mode,
@@ -2371,6 +2420,8 @@ def _build_reply_state(
         contextual_clarify_mode=_contextual_clarify,
         ambiguity_class=_ambiguity_class,
         clarification_evidence=_clarification_evidence,
+        intent_priority_focus=_priority_focus,
+        primary_customer_goal=_primary_goal,
         relational_frame=(
             _persona_topic
             if _persona_topic
@@ -2397,6 +2448,7 @@ def _compose_response_goal(
     suggestion: SuggestionSnapshot,
     *,
     stance: Any = None,
+    intent_priority: Any = None,
 ) -> str:
     """Single-line summary of WHY this turn is being composed.
 
@@ -2411,15 +2463,40 @@ def _compose_response_goal(
     stance can prevent a tone-deaf pitch. The stance NEVER replaces the
     primary goal; it widens the lens.
     """
-    base_goal = _compose_base_response_goal(decision, suggestion)
+    base_goal = _compose_base_response_goal(
+        decision,
+        suggestion,
+        intent_priority=intent_priority,
+    )
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
 
     if persona_topic_from_decision_args(decision.args):
+        return _prepend_intent_priority_directive(base_goal, intent_priority)
+    goal_with_stance = _prepend_stance_directive(base_goal, stance)
+    return _prepend_intent_priority_directive(goal_with_stance, intent_priority)
+
+
+def _prepend_intent_priority_directive(base_goal: str, intent_priority: Any) -> str:
+    """Prepend goal-bound priority directive when a verdict exists."""
+    if intent_priority is None:
         return base_goal
-    return _prepend_stance_directive(base_goal, stance)
+    try:
+        from .intent_priority.compose_hints import intent_priority_compose_directive  # noqa: PLC0415
+
+        directive = intent_priority_compose_directive(intent_priority)
+    except Exception:  # noqa: BLE001
+        directive = ""
+    if not directive:
+        return base_goal
+    return f"{directive} | {base_goal}"
 
 
-def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapshot) -> str:
+def _compose_base_response_goal(
+    decision: Decision,
+    suggestion: SuggestionSnapshot,
+    *,
+    intent_priority: Any = None,
+) -> str:
     """Decision-action-specific goal text (no stance, no relational frame).
 
     Pulled into its own function so the stance enrichment can wrap it
@@ -2626,7 +2703,10 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
         from .clarification.compose_goal import compose_contextual_clarify_goal  # noqa: PLC0415
 
         _cls = str((decision.args or {}).get("ambiguity_class") or "").strip()
-        return compose_contextual_clarify_goal(ambiguity_class=_cls)
+        return compose_contextual_clarify_goal(
+            ambiguity_class=_cls,
+            intent_priority=intent_priority,
+        )
 
     if (
         decision.action == ACTION_LLM_REPLY

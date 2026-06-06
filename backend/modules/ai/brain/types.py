@@ -776,6 +776,9 @@ class BrainReplyState:
     contextual_clarify_mode: bool = False
     ambiguity_class: str = ""
     clarification_evidence: Dict[str, Any] = field(default_factory=dict)
+    # Intent priority overlay for compose (primary goal, no-echo rule).
+    intent_priority_focus: str = ""
+    primary_customer_goal: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -844,6 +847,9 @@ class BrainContext:
     state_relevance: Optional[Any] = None
     # Structured goal-based regimen when KB hit exists (P0 goal commerce).
     goal_regimen_bundle: Optional[Any] = None
+    # Customer Intent Priority verdict (AI-ARCH-007). Computed after
+    # intent classification; consumed by clarification, discovery, compose.
+    intent_priority: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
