@@ -2513,6 +2513,8 @@ async def _process_document(
     # For non-PDF documents we skip extraction; the legacy keyword
     # heuristic still classifies by filename + caption.
     extracted_text = ""
+    pypdf_extracted_text = ""
+    pypdf_extraction_status = ""
     is_pdf_mime = "pdf" in (actual_mime or "").lower() \
         or (filename or "").lower().endswith(".pdf")
     if is_pdf_mime:
@@ -2521,10 +2523,23 @@ async def _process_document(
             tenant_id=tenant_id,
             media_id=media_id,
         )
-        base_meta["pdf_text_status"] = ex.get("extraction_status") or "unknown"
+        pypdf_extraction_status = str(ex.get("extraction_status") or "unknown")
+        base_meta["pdf_text_status"] = pypdf_extraction_status
         base_meta["pdf_page_count"]  = int(ex.get("page_count") or 0)
         extracted_text               = str(ex.get("text") or "")
+        pypdf_extracted_text         = extracted_text
         base_meta["pdf_text_length"] = len(extracted_text)
+        try:
+            from core.receipt_text_quality import (  # noqa: PLC0415
+                stamp_measurement_metadata,
+            )
+            stamp_measurement_metadata(
+                base_meta,
+                pypdf_text=pypdf_extracted_text,
+                pypdf_status=pypdf_extraction_status,
+            )
+        except Exception:
+            pass
         if extracted_text:
             base_meta["pdf_text_preview"] = (
                 extracted_text[:280].replace("\n", " ")
@@ -2679,6 +2694,23 @@ async def _process_document(
             "tenant=%s media_id=%s err=%s",
             tenant_id, media_id, _pe_exc,
         )
+
+    # ── P0 measurement telemetry (observation only) ──────────────
+    # Quality scoring + shadow OCR escalation. NEVER changes OCR
+    # behaviour, payment gates, or brain wording in this phase.
+    if is_pdf_mime:
+        try:
+            from core.receipt_text_quality import (  # noqa: PLC0415
+                emit_document_receipt_measurement,
+            )
+            emit_document_receipt_measurement(
+                tenant_id=tenant_id,
+                media_id=media_id,
+                base_meta=base_meta,
+                pypdf_text=pypdf_extracted_text,
+            )
+        except Exception:
+            pass
 
     # ── Compose brain-facing text ────────────────────────────────
     label_ar = {
