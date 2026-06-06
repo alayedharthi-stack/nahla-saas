@@ -194,6 +194,13 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 "- **ممنوع** عروض كتالوج أو ‎[PRODUCT:...]‎.\n"
             )
 
+    _primary_customer_goal = str(
+        getattr(state, "primary_customer_goal", "") or ""
+    ).strip()
+    _intent_priority_focus = str(
+        getattr(state, "intent_priority_focus", "") or ""
+    ).strip()
+
     if _contextual_clarify_mode:
         import json as _json_clar  # noqa: PLC0415
 
@@ -202,15 +209,24 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             ensure_ascii=False,
             indent=2,
         )
+        _priority_block = ""
+        if _primary_customer_goal or _intent_priority_focus:
+            _priority_block = (
+                f"primary_customer_goal: `{_primary_customer_goal or 'unknown'}`\n"
+                f"recommended_focus: {_intent_priority_focus or '—'}\n\n"
+            )
         kb_block = (
             (kb_block + "\n\n") if kb_block else ""
         ) + (
             "### contextual_clarify — structured evidence (operational facts only)\n"
-            f"ambiguity_class: `{_ambiguity_class or 'unknown'}`\n\n"
+            f"ambiguity_class: `{_ambiguity_class or 'unknown'}`\n"
+            f"{_priority_block}"
             f"{_evidence_json}\n\n"
             "### قواعد إلزامية لهذه الجولة\n"
             "- اكتبي **سؤال استيضاح واحد** قصيراً وطبيعياً مستمداً من السياق "
             "والحقائق أعلاه — ليس قائمة مواصفات عامة.\n"
+            "- السؤال مربوط بـ primary_customer_goal — ليس «أي نوع أو صفة تهمك؟».\n"
+            "- ممنوع جعل عبارة المجاملة/التحية موضوع السؤال أو إعادة صياغتها.\n"
             "- حافظي على شخصية نحلة الدافئة؛ ممنوع صوت نظام/Workflow/مكتب مساعدة.\n"
             "- ممنوع اقتراح منتجات أو ‎[PRODUCT:...]‎ في سؤال الاستيضاح.\n"
             "- ممنوع ختام خدمة عملاء («كيف أقدر أساعدك»، «تحت أمرك» كختام).\n"
