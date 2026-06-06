@@ -34,7 +34,7 @@ def log_intent_priority_verdict(
             json.dumps(payload, ensure_ascii=False),
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[INTENT_PRIORITY] telemetry emit failed")
 
 
 __all__ = ["log_intent_priority_verdict"]
