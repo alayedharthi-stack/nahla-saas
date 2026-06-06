@@ -1,3 +1,14 @@
+"""
+Incident investigation helper.
+
+Read-only diagnostic script for conversation 9063 and tenant 33.
+
+This script is NOT production logic.
+This script is NOT used by runtime code paths.
+This script exists only for historical debugging and audit purposes.
+
+Do not use as architectural reference.
+"""
 import json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
