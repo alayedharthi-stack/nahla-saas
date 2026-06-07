@@ -193,8 +193,11 @@ def _seed_for(automation_type: str) -> Dict[str, Any]:
 
 def test_cart_abandoned_seed_uses_library_template() -> None:
     seed = _seed_for("abandoned_cart")
-    assert seed["config"]["template_name"] == "abandoned_cart_recovery_ar"
-    assert seed["config"]["template_name_en"] == "abandoned_cart_recovery_en"
+    steps = seed["config"]["steps"]
+    assert len(steps) == 3
+    assert [s["step_number"] for s in steps] == [1, 2, 3]
+    assert all(s.get("service_key") == "cart_recovery" for s in steps)
+    assert all(s.get("delivery_mode") == "template" for s in steps)
 
 
 def test_cart_abandoned_final_step_has_auto_coupon() -> None:
@@ -295,9 +298,9 @@ def test_build_vars_falls_back_to_positional_for_unknown_template() -> None:
         config={},
         template_name="some_merchant_template_v3",
     )
-    # Falls back to {{1}}=customer_name, {{2}}=checkout_url
+    # Rich 6-slot fallback: {{1}}=customer_name, {{5}}=checkout_url chain
     assert vars_map["{{1}}"] == "Omar"
-    assert vars_map["{{2}}"] == "https://x"
+    assert vars_map["{{5}}"] == "https://x"
 
 
 # ── 4. Placeholder integrity (variable lock) ──────────────────────────────────

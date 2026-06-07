@@ -154,6 +154,7 @@ def _seed_wa_conn(db, tenant_id) -> WhatsAppConnection:
 def _seed_automation(
     db, tenant_id, template_id,
     *,
+    automation_type: str = "order_notifications",
     trigger_event="order_created",
     enabled=True,
     delay_minutes=0,
@@ -161,7 +162,7 @@ def _seed_automation(
 ) -> SmartAutomation:
     a = SmartAutomation(
         tenant_id=tenant_id,
-        automation_type="new_product_alert",
+        automation_type=automation_type,
         name="Test Automation",
         enabled=enabled,
         trigger_event=trigger_event,

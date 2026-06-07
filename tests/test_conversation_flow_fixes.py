@@ -769,9 +769,12 @@ def test_pick_list_item_with_candidates_proposes_draft_order():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 11, "title": "فستان أزرق", "price": 149},
-        {"id": 12, "title": "فستان أحمر", "price": 189},
-        {"id": 13, "title": "فستان أسود", "price": 229},
+        {"id": 11, "title": "فستان أزرق", "price": 149,
+         "external_id": "ext-11", "can_checkout": True},
+        {"id": 12, "title": "فستان أحمر", "price": 189,
+         "external_id": "ext-12", "can_checkout": True},
+        {"id": 13, "title": "فستان أسود", "price": 229,
+         "external_id": "ext-13", "can_checkout": True},
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
@@ -838,8 +841,8 @@ def test_pick_list_item_clamps_index_within_bounds():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 1, "title": "A"},
-        {"id": 2, "title": "B"},
+        {"id": 1, "title": "A", "external_id": "ext-1", "can_checkout": True},
+        {"id": 2, "title": "B", "external_id": "ext-2", "can_checkout": True},
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 99}))
@@ -872,17 +875,19 @@ def test_after_pick_name_message_continues_order_flow():
 def test_after_pick_maps_url_continues_order_flow():
     """Same chain, but the slot is the Google Maps URL collected from the customer."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import ACTION_ORDER_CONTEXT_UPDATE
     from modules.ai.brain.state.stages import STAGE_ORDERING
     from modules.ai.brain.types import INTENT_GENERAL
 
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
+    maps_url = "https://maps.app.goo.gl/abc123"
 
     decision = engine.decide(
-        _ctx(state, INTENT_GENERAL, {"google_maps_url": "https://maps.app.goo.gl/abc123"})
+        _ctx(state, INTENT_GENERAL, {"google_maps_url": maps_url})
     )
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.action == ACTION_ORDER_CONTEXT_UPDATE
+    assert decision.args.get("google_maps_url") == maps_url
 
 
 # ── Fix I.b: pipeline persists candidates from search executor results ───────

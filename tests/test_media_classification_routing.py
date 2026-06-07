@@ -69,12 +69,13 @@ class TestShippingIntentBoundaries:
         from modules.ai.brain.intent import rules as _rules
 
         result = _rules.match(self.GREETING_OCR)
-        # The exact assertion: greeting card produces NO rule hit.
-        # Brain LLM extractor takes over and replies naturally.
-        assert result is None, (
-            f"Greeting card MUST NOT match any rule, got "
-            f"name={getattr(result, 'name', None)!r}"
-        )
+        # Hajj/Eid greeting OCR must route to social (non-commerce guard),
+        # never to the shipping FAQ false-positive path.
+        assert result is not None
+        assert result.name == "social"
+        assert result.slots.get("social_category") == "eid_greeting"
+        assert result.slots.get("block_commerce_escalation") is True
+        assert result.name != "ask_shipping"
 
     def test_kam_yom_inside_word_does_not_fire_shipping(self) -> None:
         """Lock-in: the standalone substring 'كم يوم' inside any

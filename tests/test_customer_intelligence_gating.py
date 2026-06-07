@@ -401,7 +401,8 @@ def test_reply_allows_freeform_inside_service_window():
         with patch.dict(sys.modules, {"routers.whatsapp_webhook": fake_module}):
             result = asyncio.run(conv_router.reply_to_conversation(body, request, db))
 
-        assert result == {"sent": True}
+        assert result["sent"] is True
+        assert result.get("message_event_id") is not None
         fake_module._send_whatsapp_message.assert_awaited_once()
         # Customer profile was created automatically
         assert db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant.id).count() == 1
@@ -433,8 +434,15 @@ def test_create_campaign_rejects_unapproved_template():
             audience_count=10,
         )
 
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.get_entitlements", return_value={}
+        ), patch(
+            "core.plan_entitlements.require_feature"
+        ), patch(
+            "core.plan_entitlements.require_limit_not_exceeded"
+        ):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(camp_router.create_campaign(body, request, db))
 
         assert exc.value.status_code == 422
         assert "قالب معتمد" in exc.value.detail
@@ -469,7 +477,14 @@ def test_create_campaign_uses_database_template_metadata():
             audience_count=12,
         )
 
-        result = asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.get_entitlements", return_value={}
+        ), patch(
+            "core.plan_entitlements.require_feature"
+        ), patch(
+            "core.plan_entitlements.require_limit_not_exceeded"
+        ):
+            result = asyncio.run(camp_router.create_campaign(body, request, db))
         campaign = db.query(Campaign).filter(Campaign.tenant_id == tenant.id).first()
 
         assert result["template_name"] == "approved_offer"
