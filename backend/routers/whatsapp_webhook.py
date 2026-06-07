@@ -7703,10 +7703,10 @@ async def _handle_merchant_message(
                     )
                     if _clg_result.replaced:
                         reply = _clg_result.reply
-            except Exception as _clg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[CONTEXT_LEAKAGE_GUARD] webhook hook failed tenant=%s err=%s",
-                    tenant_id, _clg_exc,
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[CONTEXT_LEAKAGE_GUARD] webhook hook failed tenant=%s",
+                    tenant_id,
                 )
 
         if (
