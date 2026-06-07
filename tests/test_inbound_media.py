@@ -108,7 +108,7 @@ class TestInboundMediaStorage:
         with pytest.raises(ValueError, match="kind"):
             save_inbound_media(
                 tenant_id=1, file_bytes=b"x",
-                mime_type="application/pdf", kind="document",
+                mime_type="application/pdf", kind="sticker",
             )
 
     def test_rejects_empty_payload(self, isolated_storage):
