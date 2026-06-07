@@ -101,7 +101,9 @@ class TestIntentRules:
 
     def test_store_info_question(self):
         from modules.ai.brain.intent.rules import match
-        result = match("وين موقعكم")
+        # Physical-location phrasings ("وين موقعكم") route to ask_location;
+        # online-store link questions stay on ask_store_info.
+        result = match("رابط المتجر")
         assert result is not None
         assert result.name == INTENT_ASK_STORE_INFO
 
