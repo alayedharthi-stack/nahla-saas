@@ -40,7 +40,8 @@ from services.address_resolution import (  # noqa: E402
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run async helpers from sync tests (project convention: asyncio.run)."""
+    return asyncio.run(coro)
 
 
 # ── 1. _MAPS_URL_RE — URL recognition ─────────────────────────────────────────
