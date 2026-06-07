@@ -304,10 +304,12 @@ def test_step_recorded_as_skipped_when_failed_status_carries_metrics_skip_reason
     o = _order(db, tid, recovery_event_id=ev.id)
 
     tl = timeline_for_order(db, tid, o)
-    assert len(tl["steps"]) == 1
+    assert len(tl["steps"]) == 3
     step = tl["steps"][0]
     assert step["status"] == "skipped"
     assert step["skip_reason"] == "customer_purchased"
+    assert tl["steps"][1]["status"] == "upcoming"
+    assert tl["steps"][2]["status"] == "upcoming"
 
 
 # ── 8. timeline_for_order returns chronological steps with full context ─────
