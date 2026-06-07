@@ -180,18 +180,7 @@ def classify_media_semantic(
             reason="invoice_kind",
         )
 
-    if (
-        payment_evidence_status == "confirmed"
-        or image_kind == "payment_receipt"
-        or pdf_kind == "payment_receipt"
-    ):
-        return MediaSemanticResult(
-            category=MEDIA_PAYMENT_RECEIPT,
-            ack_mode=ACK_PAYMENT,
-            confidence="high",
-            reason="payment_evidence_confirmed",
-        )
-
+    # B1b — social / religious signals before confirmed semantic promotion.
     if any(h in blob for h in _SOCIAL_HINTS):
         return MediaSemanticResult(
             category=MEDIA_SOCIAL_IMAGE,
@@ -208,20 +197,33 @@ def classify_media_semantic(
             reason="product_hint_in_text",
         )
 
-    if normalized_type in {"document", "pdf"} and blob:
-        return MediaSemanticResult(
-            category=MEDIA_DOCUMENT,
-            ack_mode=ACK_NEUTRAL,
-            confidence="low",
-            reason="generic_document",
-        )
-
+    # B2 — weak payment truth before generic_document capture.
     if payment_evidence_status in {"needs_confirmation", "pre_transfer_review"}:
         return MediaSemanticResult(
             category=MEDIA_UNRELATED,
             ack_mode=ACK_NEUTRAL,
             confidence="medium",
             reason="weak_payment_evidence_downgraded",
+        )
+
+    if (
+        payment_evidence_status == "confirmed"
+        or image_kind == "payment_receipt"
+        or pdf_kind == "payment_receipt"
+    ):
+        return MediaSemanticResult(
+            category=MEDIA_PAYMENT_RECEIPT,
+            ack_mode=ACK_PAYMENT,
+            confidence="high",
+            reason="payment_evidence_confirmed",
+        )
+
+    if normalized_type in {"document", "pdf"} and blob:
+        return MediaSemanticResult(
+            category=MEDIA_DOCUMENT,
+            ack_mode=ACK_NEUTRAL,
+            confidence="low",
+            reason="generic_document",
         )
 
     if blob:
@@ -240,6 +242,14 @@ def classify_media_semantic(
     )
 
 
+_STRONG_SEMANTIC_ACK_BLOCKERS = frozenset({
+    MEDIA_SOCIAL_IMAGE,
+    MEDIA_RELIGIOUS_SOCIAL,
+    MEDIA_PRODUCT_IMAGE,
+    MEDIA_MAP_LOCATION,
+})
+
+
 def allows_payment_media_ack(
     *,
     semantic_category: str,
@@ -247,40 +257,62 @@ def allows_payment_media_ack(
     awaiting_payment_receipt: bool = False,
     has_active_order: bool = False,
 ) -> bool:
-    """True only when semantic + payment context justify payment ack copy."""
+    """True when payment context justifies ack — semantic blocks only on strong contradiction."""
     cat = str(semantic_category or "").strip()
     pe = str(payment_evidence_status or "").strip()
+
+    if cat in _STRONG_SEMANTIC_ACK_BLOCKERS:
+        return False
+
+    if pe == "confirmed":
+        if not cat:
+            return has_active_order or awaiting_payment_receipt
+        if cat in _PAYMENT_SEMANTIC:
+            return True
+        return bool(has_active_order and awaiting_payment_receipt)
+
+    if pe in {"needs_confirmation", "pre_transfer_review"}:
+        return True
 
     if cat in _NON_PAYMENT_SEMANTIC:
         return False
 
     if not cat:
-        if pe == "confirmed":
-            return has_active_order or awaiting_payment_receipt
-        if pe in {"needs_confirmation", "pre_transfer_review"}:
-            return bool(awaiting_payment_receipt and has_active_order)
         return False
 
-    if cat not in _PAYMENT_SEMANTIC and pe != "confirmed":
-        return False
-    if pe == "confirmed":
-        return cat in _PAYMENT_SEMANTIC or (has_active_order and awaiting_payment_receipt)
-    if pe in {"needs_confirmation", "pre_transfer_review"}:
-        return bool(
-            awaiting_payment_receipt
-            and has_active_order
-            and cat in _PAYMENT_SEMANTIC.union({MEDIA_SCREENSHOT, MEDIA_UNKNOWN})
-        )
+    if cat in _PAYMENT_SEMANTIC:
+        return bool(awaiting_payment_receipt and has_active_order)
     return False
 
 
 def apply_semantic_payment_override(metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """Downgrade payment-evidence slots when semantic says non-payment."""
+    """Downgrade payment-evidence slots when semantic strongly contradicts truth."""
     md = dict(metadata or {})
     sem_cat = str(md.get("media_semantic_category") or "")
     pe = str(md.get("payment_evidence_status") or "")
 
-    if sem_cat in _NON_PAYMENT_SEMANTIC and pe in {
+    pdf_kind = str(md.get("pdf_kind") or "")
+    image_kind = str(md.get("image_kind") or "")
+    weak_kind = pdf_kind in {
+        "payment_pre_review",
+        "payment_pending_evidence",
+    } or image_kind in {
+        "payment_pre_review",
+        "payment_pending_evidence",
+    }
+
+    # B1 — never clear weak payment truth when kind slots prove payment context.
+    if pe in {"needs_confirmation", "pre_transfer_review"} and weak_kind:
+        return md
+
+    _strong_contradiction = sem_cat in {
+        MEDIA_SOCIAL_IMAGE,
+        MEDIA_RELIGIOUS_SOCIAL,
+        MEDIA_PRODUCT_IMAGE,
+        MEDIA_MAP_LOCATION,
+    }
+
+    if _strong_contradiction and pe in {
         "needs_confirmation",
         "pre_transfer_review",
         "confirmed",

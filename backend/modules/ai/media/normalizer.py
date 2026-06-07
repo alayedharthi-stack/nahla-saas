@@ -1856,6 +1856,10 @@ def _apply_semantic_media_classification(
         base_meta.update(sem.to_metadata())
         overridden = apply_semantic_payment_override(base_meta)
         base_meta.update(overridden)
+        # B3 — honor keys removed by override (update() cannot delete stale slots).
+        for key in ("image_kind", "pdf_kind"):
+            if key not in overridden and key in base_meta:
+                base_meta.pop(key, None)
         log_media_classification(
             tenant_id=tenant_id,
             category=str(base_meta.get("media_semantic_category") or sem.category),

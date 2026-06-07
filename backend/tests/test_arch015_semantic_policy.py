@@ -54,7 +54,7 @@ class TestArch015WeakEvidencePreservation:
         )
         assert md["payment_evidence_status"] == "pre_transfer_review"
         assert md["pdf_kind"] == "payment_pre_review"
-        assert md.get("media_semantic_category") == "document"
+        assert md.get("media_semantic_category") == "unrelated_media"
         assert_truth_consistent(md)
 
     def test_n13_weak_pe_not_overridden_by_semantic_unrelated(self):

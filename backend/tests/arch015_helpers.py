@@ -57,9 +57,12 @@ def merge_metadata_production_semantics(
     base_meta: Dict[str, Any],
     overridden: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Mirror current normalizer merge (base_meta.update(overridden))."""
+    """Mirror normalizer merge including B3 stale-key removal."""
     out = deepcopy(base_meta)
     out.update(overridden)
+    for key in ("image_kind", "pdf_kind"):
+        if key not in overridden and key in out:
+            out.pop(key, None)
     return out
 
 
