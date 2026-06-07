@@ -172,7 +172,13 @@ def log_context_leakage_guard(
             terms,
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[CONTEXT_LEAKAGE_GUARD] telemetry emit failed "
+            "tenant_id=%s conversation_id=%s action=%s",
+            tenant_id,
+            conversation_id,
+            action,
+        )
 
 
 def log_cvi_leak(
@@ -196,7 +202,13 @@ def log_cvi_leak(
             terms,
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[CVI_LEAK] telemetry emit failed tenant_id=%s "
+            "conversation_id=%s action=%s",
+            tenant_id,
+            conversation_id,
+            action,
+        )
 
 
 def apply_context_leakage_guard(
