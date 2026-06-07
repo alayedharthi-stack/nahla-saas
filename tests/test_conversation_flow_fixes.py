@@ -769,9 +769,12 @@ def test_pick_list_item_with_candidates_proposes_draft_order():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 11, "title": "فستان أزرق", "price": 149},
-        {"id": 12, "title": "فستان أحمر", "price": 189},
-        {"id": 13, "title": "فستان أسود", "price": 229},
+        {"id": 11, "title": "فستان أزرق", "price": 149,
+         "external_id": "ext-11", "can_checkout": True},
+        {"id": 12, "title": "فستان أحمر", "price": 189,
+         "external_id": "ext-12", "can_checkout": True},
+        {"id": 13, "title": "فستان أسود", "price": 229,
+         "external_id": "ext-13", "can_checkout": True},
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
@@ -838,8 +841,8 @@ def test_pick_list_item_clamps_index_within_bounds():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 1, "title": "A"},
-        {"id": 2, "title": "B"},
+        {"id": 1, "title": "A", "external_id": "ext-1", "can_checkout": True},
+        {"id": 2, "title": "B", "external_id": "ext-2", "can_checkout": True},
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 99}))
