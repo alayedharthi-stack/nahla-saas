@@ -7688,6 +7688,27 @@ async def _handle_merchant_message(
                     tenant_id, _pavg_exc,
                 )
 
+        if reply and not _brain_handoff:
+            try:
+                from modules.ai.brain.postprocess.context_leakage_guard import (  # noqa: PLC0415
+                    apply_context_leakage_guard,
+                    context_leakage_guard_mode,
+                )
+                if context_leakage_guard_mode() != "off":
+                    _clg_result = apply_context_leakage_guard(
+                        reply=reply,
+                        db=db,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                    )
+                    if _clg_result.replaced:
+                        reply = _clg_result.reply
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[CONTEXT_LEAKAGE_GUARD] webhook hook failed tenant=%s",
+                    tenant_id,
+                )
+
         if (
             reply
             and "_po_reply_before_guards" in locals()
