@@ -401,7 +401,8 @@ def test_reply_allows_freeform_inside_service_window():
         with patch.dict(sys.modules, {"routers.whatsapp_webhook": fake_module}):
             result = asyncio.run(conv_router.reply_to_conversation(body, request, db))
 
-        assert result == {"sent": True}
+        assert result["sent"] is True
+        assert result.get("message_event_id") is not None
         fake_module._send_whatsapp_message.assert_awaited_once()
         # Customer profile was created automatically
         assert db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant.id).count() == 1
