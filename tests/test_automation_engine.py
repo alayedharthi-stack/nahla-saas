@@ -161,7 +161,7 @@ def _seed_automation(
 ) -> SmartAutomation:
     a = SmartAutomation(
         tenant_id=tenant_id,
-        automation_type="new_product_alert",
+        automation_type="order_notifications",
         name="Test Automation",
         enabled=enabled,
         trigger_event=trigger_event,
