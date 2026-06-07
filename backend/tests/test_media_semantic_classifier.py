@@ -55,13 +55,15 @@ class TestMediaSemanticClassifier:
         )
 
     def test_unrelated_pdf_during_active_order_no_payment_ack(self):
+        """ARCH-015 M-01: ACK blocked via policy — weak evidence truth preserved."""
         md = {
             "payment_evidence_status": "needs_confirmation",
             "pdf_kind": "payment_pending_evidence",
             "media_semantic_category": MEDIA_PRODUCT_IMAGE,
         }
         out = apply_semantic_payment_override(md)
-        assert out["payment_evidence_status"] == "not_payment"
+        assert out["payment_evidence_status"] == "needs_confirmation"
+        assert out.get("pdf_kind") == "payment_pending_evidence"
         assert not allows_payment_media_ack(
             semantic_category=MEDIA_PRODUCT_IMAGE,
             payment_evidence_status=out["payment_evidence_status"],

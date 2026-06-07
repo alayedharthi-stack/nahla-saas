@@ -813,27 +813,36 @@ class TestOrderFlowReceiptGate:
         )
         assert decision is None
 
-    def test_evidence_soft_reply_fires_for_pre_review(self, monkeypatch):
-        """The soft reply fires when the conversation does NOT have
-        an active order awaiting a receipt — i.e. the customer sent
-        a bank screenshot without an open order context. The
-        active-order + awaiting_receipt path is now promoted to
-        confirmed (see ``test_evidence_promotes_for_pre_review_when_active_order``).
-        """
+    def test_evidence_soft_reply_fires_for_pre_review(
+        self, isolated_storage, monkeypatch,
+    ):
+        """ARCH-015 M-02: production-shaped metadata after normalizer layers."""
         from core.order_flow import maybe_handle_payment_evidence_inbound
-        # Remove the active-order trigger: no awaiting_receipt flag.
+        _bt = BACKEND_DIR / "tests"
+        if str(_bt) not in sys.path:
+            sys.path.insert(0, str(_bt))
+        from arch015_helpers import normalize_pdf
+
         self._patch_state(
             monkeypatch,
             self._bs(order_prep={"awaiting_payment_receipt": False}),
         )
+        md = normalize_pdf(
+            monkeypatch,
+            pdf_text=(
+                "مراجعة بيانات التحويل\n"
+                "اسم المستفيد: محمد علي\n"
+                "الآيبان: SA0380000000608010167519\n"
+                "المبلغ: 358 ر.س\n"
+                "تأكد من البيانات واضغط تحويل"
+            ),
+            filename="Transfer-Receipt.pdf",
+            isolated_storage=isolated_storage,
+        )
         decision = maybe_handle_payment_evidence_inbound(
             db=MagicMock(), tenant_id=11, phone="+966500000001",
             inbound_normalized_type="document",
-            inbound_metadata={
-                "pdf_kind": "payment_pre_review",
-                "payment_evidence_status": "pre_transfer_review",
-                "payment_evidence_reason": "pre_transfer_review_phrase",
-            },
+            inbound_metadata=md,
         )
         assert decision is not None
         assert decision["state_patch"] == {}, "must NOT mutate order state"
@@ -842,41 +851,59 @@ class TestOrderFlowReceiptGate:
         assert "أمين" not in decision["reply_text"]
 
     def test_evidence_soft_reply_fires_for_needs_confirmation(self, monkeypatch):
+        """ARCH-015 M-03: image weak evidence with full semantic layers."""
         from core.order_flow import maybe_handle_payment_evidence_inbound
-        # Remove the active-order trigger: no awaiting_receipt flag.
+        _bt = BACKEND_DIR / "tests"
+        if str(_bt) not in sys.path:
+            sys.path.insert(0, str(_bt))
+        from arch015_helpers import build_metadata_after_payment_gate
+
         self._patch_state(
             monkeypatch,
             self._bs(order_prep={"awaiting_payment_receipt": False}),
         )
+        md = build_metadata_after_payment_gate(
+            "البنك الراجحي\n"
+            "اسم المستفيد: أحمد\n"
+            "الآيبان: SA0380000000608010167519\n"
+            "المبلغ: 358 ر.س",
+            normalized_type="image",
+        )
         decision = maybe_handle_payment_evidence_inbound(
             db=MagicMock(), tenant_id=11, phone="+966500000001",
             inbound_normalized_type="image",
-            inbound_metadata={
-                "image_kind": "payment_pending_evidence",
-                "payment_evidence_status": "needs_confirmation",
-                "payment_evidence_reason": "payment_context_no_success_marker",
-            },
+            inbound_metadata=md,
         )
         assert decision is not None
         assert decision["state_patch"] == {}
 
-    def test_evidence_promotes_for_pre_review_when_active_order(self, monkeypatch):
-        """Hotfix coverage (May 2026): when a customer with an
-        ACTIVE order + ``awaiting_payment_receipt=True`` sends a
-        payment-context PDF that the classifier marked as
-        ``pre_transfer_review`` (e.g. a real receipt that the bank
-        printed with a "تأكيد التحويل" header), the helper must
-        promote to confirmed instead of re-asking for the receipt."""
+    def test_evidence_promotes_for_pre_review_when_active_order(
+        self, isolated_storage, monkeypatch,
+    ):
+        """ARCH-015 M-04: promotion with production PDF metadata."""
         from core.order_flow import maybe_handle_payment_evidence_inbound
-        self._patch_state(monkeypatch, self._bs())  # has awaiting + product
+        _bt = BACKEND_DIR / "tests"
+        if str(_bt) not in sys.path:
+            sys.path.insert(0, str(_bt))
+        from arch015_helpers import normalize_pdf
+
+        self._patch_state(monkeypatch, self._bs())
+        md = normalize_pdf(
+            monkeypatch,
+            pdf_text=(
+                "مراجعة بيانات التحويل\n"
+                "اسم المستفيد: محمد علي\n"
+                "الآيبان: SA0380000000608010167519\n"
+                "المبلغ: 358 ر.س\n"
+                "تأكد من البيانات واضغط تحويل"
+            ),
+            filename="Transfer-Receipt.pdf",
+            isolated_storage=isolated_storage,
+        )
         decision = maybe_handle_payment_evidence_inbound(
             db=MagicMock(), tenant_id=11, phone="+966500000001",
             inbound_normalized_type="document",
-            inbound_metadata={
-                "pdf_kind": "payment_pre_review",
-                "payment_evidence_status": "pre_transfer_review",
-                "payment_evidence_reason": "pre_transfer_review_phrase",
-            },
+            inbound_metadata=md,
         )
         assert decision is not None
         sp = decision["state_patch"]
