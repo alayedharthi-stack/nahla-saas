@@ -151,6 +151,10 @@ class TestDecisionEngine:
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
+        # Thin first-turn greeting — must not use the generic "test" stub
+        # (DAF treats it as actionable substance and skips ACTION_GREET).
+        ctx.message = "مرحبا"
+        ctx.intent.raw_message = "مرحبا"
         d = eng.decide(ctx)
         assert d.action == ACTION_GREET
 
