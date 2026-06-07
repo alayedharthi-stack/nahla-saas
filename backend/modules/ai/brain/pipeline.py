@@ -1972,6 +1972,27 @@ class MerchantBrain:
                 tenant_id, _pavg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.context_leakage_guard import (  # noqa: PLC0415
+                apply_context_leakage_guard,
+                context_leakage_guard_mode,
+            )
+            if context_leakage_guard_mode() != "off":
+                _clg = apply_context_leakage_guard(
+                    reply=reply or "",
+                    db=db,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                if _clg.replaced:
+                    reply = _clg.reply
+                    _guard_replaced["context_leakage_guard"] = True
+        except Exception as _clg_exc:  # noqa: BLE001
+            logger.warning(
+                "[CONTEXT_LEAKAGE_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _clg_exc,
+            )
+
         # ── Persona ownership snapshot (measurement-only) ───────────────
         try:
             from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
