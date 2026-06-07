@@ -193,8 +193,11 @@ def _seed_for(automation_type: str) -> Dict[str, Any]:
 
 def test_cart_abandoned_seed_uses_library_template() -> None:
     seed = _seed_for("abandoned_cart")
-    assert seed["config"]["template_name"] == "abandoned_cart_recovery_ar"
-    assert seed["config"]["template_name_en"] == "abandoned_cart_recovery_en"
+    steps = seed["config"]["steps"]
+    assert len(steps) == 3
+    assert [s["step_number"] for s in steps] == [1, 2, 3]
+    assert all(s.get("service_key") == "cart_recovery" for s in steps)
+    assert all(s.get("delivery_mode") == "template" for s in steps)
 
 
 def test_cart_abandoned_final_step_has_auto_coupon() -> None:
