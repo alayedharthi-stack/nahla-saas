@@ -875,17 +875,19 @@ def test_after_pick_name_message_continues_order_flow():
 def test_after_pick_maps_url_continues_order_flow():
     """Same chain, but the slot is the Google Maps URL collected from the customer."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import ACTION_ORDER_CONTEXT_UPDATE
     from modules.ai.brain.state.stages import STAGE_ORDERING
     from modules.ai.brain.types import INTENT_GENERAL
 
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
+    maps_url = "https://maps.app.goo.gl/abc123"
 
     decision = engine.decide(
-        _ctx(state, INTENT_GENERAL, {"google_maps_url": "https://maps.app.goo.gl/abc123"})
+        _ctx(state, INTENT_GENERAL, {"google_maps_url": maps_url})
     )
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.action == ACTION_ORDER_CONTEXT_UPDATE
+    assert decision.args.get("google_maps_url") == maps_url
 
 
 # ── Fix I.b: pipeline persists candidates from search executor results ───────
