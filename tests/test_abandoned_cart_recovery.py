@@ -1,21 +1,17 @@
 """
 tests/test_abandoned_cart_recovery.py
 ──────────────────────────────────────
-Coverage for the four-stage abandoned cart recovery workflow.
+Coverage for the three-stage template-only abandoned cart recovery workflow.
 
-Architectural contract under test:
+Architectural contract under test (seed since 7f08d9b0):
 
-    Stage 1 — 30 minutes,    template,           NO coupon, URL→cart button
-    Stage 2 — 6  hours,      interactive,        NO coupon, 3 dynamic buttons
-    Stage 3 — 8  hours,      AI recovery,        OPTIONAL — disabled by default
-    Stage 4 — 23h50m,        coupon CTA-URL,     auto-coupon ON, fires before
-                                                 the 24-hour service window
-                                                 closes so we don't open a
-                                                 fresh paid marketing thread
-                                                 to deliver a discount.
+    Stage 1 — 30 minutes,    template,  NO coupon, service_key cart_recovery step 1
+    Stage 2 — 6  hours,      template,  NO coupon, service_key cart_recovery step 2
+    Stage 3 — 23h45m,        template,  auto-coupon ON, service_key cart_recovery step 3
+                               (fires before the 24-hour window closes)
 
 Stage 1 is emitted by the storefront snippet at abandonment time and
-processed by the engine after its 30-minute delay. Stages 2-4 are
+processed by the engine after its 30-minute delay. Stages 2-3 are
 re-emitted by `scan_abandoned_cart_followups`, which writes a fresh
 `cart_abandoned` AutomationEvent carrying `payload.step_idx` so the
 engine picks the right step + delivery mode + coupon decision.
@@ -143,7 +139,7 @@ def _emit_stage_one_event(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 1. Seed shape — pins the user-facing 4-stage contract
+# 1. Seed shape — pins the user-facing 3-stage template-only contract
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _cart_seed():
@@ -152,21 +148,18 @@ def _cart_seed():
     )
 
 
-def test_seed_has_four_stages_with_correct_delays() -> None:
+def test_seed_has_three_stages_with_correct_delays() -> None:
     steps = _cart_seed()["config"]["steps"]
-    assert len(steps) == 4
+    assert len(steps) == 3
     assert steps[0]["delay_minutes"] == 30
-    assert steps[1]["delay_minutes"] == 360    # 6 hours
-    assert steps[2]["delay_minutes"] == 480    # 8 hours (AI recovery)
-    assert steps[3]["delay_minutes"] == 1430   # 23h 50m — inside 24h window
+    assert steps[1]["delay_minutes"] == 360     # 6 hours
+    assert steps[2]["delay_minutes"] == 1425    # 23h 45m — inside 24h window
 
 
-def test_stage_four_fires_before_meta_24h_window_closes() -> None:
-    """The whole point of stage 4 is to deliver the coupon push as a
-    free in-window interactive instead of as a paid new marketing
-    conversation. Anything ≥1440 would tip past the boundary."""
+def test_stage_three_coupon_fires_before_meta_24h_window_closes() -> None:
+    """Final coupon stage must stay inside the 24-hour service window."""
     steps = _cart_seed()["config"]["steps"]
-    assert steps[3]["delay_minutes"] < 1440
+    assert steps[2]["delay_minutes"] < 1440
 
 
 def test_stage_one_uses_template_delivery_with_no_coupon() -> None:
@@ -174,36 +167,27 @@ def test_stage_one_uses_template_delivery_with_no_coupon() -> None:
     assert step["delivery_mode"] == "template"
     assert step.get("auto_coupon") is not True
     assert step.get("message_type") != "coupon"
-    assert step["template_name"] == "abandoned_cart_recovery_ar"
+    assert step["service_key"] == "cart_recovery"
+    assert step["step_number"] == 1
 
 
-def test_stage_two_uses_interactive_delivery_with_no_coupon() -> None:
+def test_stage_two_uses_template_delivery_with_no_coupon() -> None:
     step = _cart_seed()["config"]["steps"][1]
-    assert step["delivery_mode"] == "interactive"
+    assert step["delivery_mode"] == "template"
     assert step.get("auto_coupon") is not True
     assert step.get("message_type") != "coupon"
-    # Stage 2 always has a body so the in-window send has something
-    # to render even when the merchant hasn't authored Arabic copy.
-    assert step.get("body_text_ar")
+    assert step["service_key"] == "cart_recovery"
+    assert step["step_number"] == 2
 
 
-def test_stage_three_is_optional_ai_recovery_disabled_by_default() -> None:
-    """We never burn AI tokens unless the merchant explicitly opts in."""
+def test_stage_three_is_coupon_template_inside_window() -> None:
     step = _cart_seed()["config"]["steps"][2]
-    assert step["delivery_mode"] == "ai_recovery"
-    assert step.get("enabled") is False
-    assert step.get("ai_recovery_enabled") is False
-
-
-def test_stage_four_is_coupon_cta_inside_window() -> None:
-    step = _cart_seed()["config"]["steps"][3]
-    assert step["delivery_mode"] == "interactive"
+    assert step["delivery_mode"] == "template"
+    assert step.get("enabled") is True
     assert step.get("auto_coupon") is True
     assert step.get("message_type") == "coupon"
-    assert step["template_name"] == "abandoned_cart_final_offer_ar"
-    # The "use the discount" button MUST be the primary CTA — that's
-    # the visual the customer is meant to tap.
-    assert "apply_coupon" in (step.get("buttons") or [])
+    assert step["service_key"] == "cart_recovery"
+    assert step["step_number"] == 3
 
 
 def test_stage_four_template_carries_a_discount_slot() -> None:
@@ -260,23 +244,22 @@ def test_resolve_delay_keeps_legacy_behaviour_for_stage_one() -> None:
 
 
 def test_active_step_picks_coupon_stage_by_explicit_idx() -> None:
-    """When the sweeper says `step_idx=3`, the engine must trust it
-    even though the event is brand new (age 0). Otherwise stage 4
-    would render the stage-1 template and lose the coupon contract."""
+    """When the sweeper says `step_idx=2`, the engine must trust it
+    even though the event is brand new (age 0)."""
     cfg = _cart_seed()["config"]
-    ev = _StubEvent({"step_idx": 3}, age=timedelta(0))
+    ev = _StubEvent({"step_idx": 2}, age=timedelta(0))
     step = _active_step_for_event(ev, cfg)
-    assert step["template_name"] == "abandoned_cart_final_offer_ar"
     assert step.get("auto_coupon") is True
-    assert step["delivery_mode"] == "interactive"
+    assert step["delivery_mode"] == "template"
+    assert step["step_number"] == 3
 
 
-def test_active_step_picks_interactive_stage_two_by_explicit_idx() -> None:
+def test_active_step_picks_template_stage_two_by_explicit_idx() -> None:
     cfg = _cart_seed()["config"]
     ev = _StubEvent({"step_idx": 1}, age=timedelta(0))
     step = _active_step_for_event(ev, cfg)
-    assert step["delivery_mode"] == "interactive"
-    assert step["template_name"] == "abandoned_cart_followup_ar"
+    assert step["delivery_mode"] == "template"
+    assert step["step_number"] == 2
 
 
 def test_active_step_falls_back_to_age_when_payload_has_no_idx() -> None:
@@ -284,7 +267,8 @@ def test_active_step_falls_back_to_age_when_payload_has_no_idx() -> None:
     cfg = _cart_seed()["config"]
     ev = _StubEvent({}, age=timedelta(minutes=45))
     step = _active_step_for_event(ev, cfg)
-    assert step["template_name"] == "abandoned_cart_recovery_ar"
+    assert step["step_number"] == 1
+    assert step["delivery_mode"] == "template"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -344,10 +328,9 @@ def test_stage_two_emitted_after_six_hours() -> None:
         db.close(); engine.dispose()
 
 
-def test_stage_two_and_four_emitted_after_24_hours_skipping_disabled_ai() -> None:
-    """A cart abandoned ~24 h ago should emit stage 2 + stage 4 on the
-    same sweep, while stage 3 stays silent because `enabled=False`
-    in the seed (no AI tokens, no noisy AutomationExecution row)."""
+def test_stage_two_and_three_emitted_after_24_hours() -> None:
+    """A cart abandoned ~24 h ago should emit stage 2 + stage 3 on the
+    same sweep (both delays elapsed)."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
@@ -361,7 +344,6 @@ def test_stage_two_and_four_emitted_after_24_hours_skipping_disabled_ai() -> Non
         emitted = automation_emitters.scan_abandoned_cart_followups(
             db, tenant.id,
         )
-        # stage 2 + stage 4 (stage 3 is disabled by default and skipped)
         assert emitted == 2
 
         followups = (
@@ -370,26 +352,18 @@ def test_stage_two_and_four_emitted_after_24_hours_skipping_disabled_ai() -> Non
             .all()
         )
         step_ids = sorted((f.payload or {}).get("step_idx") for f in followups)
-        assert step_ids == [1, 3]
+        assert step_ids == [1, 2]
     finally:
         db.close(); engine.dispose()
 
 
-def test_stage_three_emitted_when_ai_recovery_explicitly_enabled() -> None:
-    """If the merchant flips the AI step on in the editor, the sweeper
-    must include it in the next sweep."""
+def test_stage_three_not_emitted_before_coupon_delay() -> None:
+    """At 9 h only stage 2 (6 h) is due — coupon stage waits until 23h45m."""
     db, engine = _make_db()
     try:
         tenant = _seed_tenant(db)
         customer = _seed_customer(db, tenant.id)
-
-        seed_cfg = _cart_seed()["config"]
-        cfg = {**seed_cfg, "steps": [dict(s) for s in seed_cfg["steps"]]}
-        cfg["steps"][2]["enabled"] = True
-        cfg["steps"][2]["ai_recovery_enabled"] = True
-        cfg["ai_recovery_enabled"] = True
-
-        _seed_cart_automation(db, tenant.id, config_override=cfg)
+        _seed_cart_automation(db, tenant.id)
         _emit_stage_one_event(
             db, tenant_id=tenant.id, customer_id=customer.id,
             age=timedelta(hours=9),
@@ -398,15 +372,14 @@ def test_stage_three_emitted_when_ai_recovery_explicitly_enabled() -> None:
         emitted = automation_emitters.scan_abandoned_cart_followups(
             db, tenant.id,
         )
-        # stage 2 (6h) + stage 3 (8h) — both due, stage 4 not yet
-        assert emitted == 2
+        assert emitted == 1
         followups = (
             db.query(AutomationEvent)
             .filter(AutomationEvent.processed.is_(False))
             .all()
         )
         step_ids = sorted((f.payload or {}).get("step_idx") for f in followups)
-        assert step_ids == [1, 2]
+        assert step_ids == [1]
     finally:
         db.close(); engine.dispose()
 
@@ -529,7 +502,7 @@ def test_followup_sweeper_ignores_events_older_than_48_hours() -> None:
 
 
 def test_per_step_disabled_does_not_block_subsequent_stages() -> None:
-    """When stage 2 is disabled in the editor, stage 4 must still
+    """When stage 2 is disabled in the editor, stage 3 must still
     fire when its delay elapses — disable means "skip me", not
     "stop the workflow"."""
     db, engine = _make_db()
@@ -550,7 +523,7 @@ def test_per_step_disabled_does_not_block_subsequent_stages() -> None:
         emitted = automation_emitters.scan_abandoned_cart_followups(
             db, tenant.id,
         )
-        # Only stage 4 is emitted; stage 2 is recorded as skipped
+        # Only stage 3 is emitted; stage 2 is recorded as skipped
         # in `recovery_followups` but no event is created for it.
         assert emitted == 1
         followups = (
@@ -559,7 +532,7 @@ def test_per_step_disabled_does_not_block_subsequent_stages() -> None:
             .all()
         )
         step_ids = sorted((f.payload or {}).get("step_idx") for f in followups)
-        assert step_ids == [3]
+        assert step_ids == [2]
     finally:
         db.close(); engine.dispose()
 
