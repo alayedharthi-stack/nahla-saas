@@ -298,9 +298,9 @@ def test_build_vars_falls_back_to_positional_for_unknown_template() -> None:
         config={},
         template_name="some_merchant_template_v3",
     )
-    # Falls back to {{1}}=customer_name, {{2}}=checkout_url
+    # Rich 6-slot fallback: {{1}}=customer_name, {{5}}=checkout_url chain
     assert vars_map["{{1}}"] == "Omar"
-    assert vars_map["{{2}}"] == "https://x"
+    assert vars_map["{{5}}"] == "https://x"
 
 
 # ── 4. Placeholder integrity (variable lock) ──────────────────────────────────
