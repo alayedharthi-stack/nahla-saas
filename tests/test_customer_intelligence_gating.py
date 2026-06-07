@@ -434,8 +434,15 @@ def test_create_campaign_rejects_unapproved_template():
             audience_count=10,
         )
 
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.get_entitlements", return_value={}
+        ), patch(
+            "core.plan_entitlements.require_feature"
+        ), patch(
+            "core.plan_entitlements.require_limit_not_exceeded"
+        ):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(camp_router.create_campaign(body, request, db))
 
         assert exc.value.status_code == 422
         assert "قالب معتمد" in exc.value.detail
@@ -470,7 +477,14 @@ def test_create_campaign_uses_database_template_metadata():
             audience_count=12,
         )
 
-        result = asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.get_entitlements", return_value={}
+        ), patch(
+            "core.plan_entitlements.require_feature"
+        ), patch(
+            "core.plan_entitlements.require_limit_not_exceeded"
+        ):
+            result = asyncio.run(camp_router.create_campaign(body, request, db))
         campaign = db.query(Campaign).filter(Campaign.tenant_id == tenant.id).first()
 
         assert result["template_name"] == "approved_offer"
