@@ -742,6 +742,17 @@ def test_state_manager_save_preserves_brain_state(monkeypatch):
     assert conv.extra_metadata.get("customer_phone") == "+966555906901"
 
 
+def _orderable_search_candidate(**fields):
+    """Minimal search-list row satisfying pick validation (can_checkout + external_id)."""
+    row = {
+        "can_checkout": True,
+        "orderable": True,
+        "external_id": f"prod-{fields.get('id', 'x')}",
+    }
+    row.update(fields)
+    return row
+
+
 # ── Fix I: pick_list_item must bridge into the order flow ────────────────────
 # Production logs showed:
 #   intent=pick_list_item, slots={"list_index":2}, stage_before=exploring
@@ -769,9 +780,9 @@ def test_pick_list_item_with_candidates_proposes_draft_order():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 11, "title": "فستان أزرق", "price": 149},
-        {"id": 12, "title": "فستان أحمر", "price": 189},
-        {"id": 13, "title": "فستان أسود", "price": 229},
+        _orderable_search_candidate(id=11, title="فستان أزرق", price=149),
+        _orderable_search_candidate(id=12, title="فستان أحمر", price=189),
+        _orderable_search_candidate(id=13, title="فستان أسود", price=229),
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
@@ -838,8 +849,8 @@ def test_pick_list_item_clamps_index_within_bounds():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_EXPLORING, product=None)
     state.last_search_candidates = [
-        {"id": 1, "title": "A"},
-        {"id": 2, "title": "B"},
+        _orderable_search_candidate(id=1, title="A"),
+        _orderable_search_candidate(id=2, title="B"),
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 99}))
@@ -870,9 +881,10 @@ def test_after_pick_name_message_continues_order_flow():
 
 
 def test_after_pick_maps_url_continues_order_flow():
-    """Same chain, but the slot is the Google Maps URL collected from the customer."""
+    """Maps URL during ordering routes to order_context_update (fulfillment
+    slot capture), not llm_reply/handoff."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import ACTION_ORDER_CONTEXT_UPDATE
     from modules.ai.brain.state.stages import STAGE_ORDERING
     from modules.ai.brain.types import INTENT_GENERAL
 
@@ -882,7 +894,8 @@ def test_after_pick_maps_url_continues_order_flow():
     decision = engine.decide(
         _ctx(state, INTENT_GENERAL, {"google_maps_url": "https://maps.app.goo.gl/abc123"})
     )
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.action == ACTION_ORDER_CONTEXT_UPDATE
+    assert decision.args.get("google_maps_url") == "https://maps.app.goo.gl/abc123"
 
 
 # ── Fix I.b: pipeline persists candidates from search executor results ───────
