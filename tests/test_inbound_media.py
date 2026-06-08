@@ -103,12 +103,13 @@ class TestInboundMediaStorage:
         assert jpg.sha256 != png.sha256
 
     def test_rejects_invalid_kind(self, isolated_storage):
+        """``document`` and ``video`` are valid since e8a5c161 / cf19bc0b."""
         from services.inbound_media_storage import save_inbound_media
 
         with pytest.raises(ValueError, match="kind"):
             save_inbound_media(
                 tenant_id=1, file_bytes=b"x",
-                mime_type="application/pdf", kind="document",
+                mime_type="application/octet-stream", kind="sticker",
             )
 
     def test_rejects_empty_payload(self, isolated_storage):
