@@ -48,8 +48,11 @@ Invariants under test
 4. Missing shipment outbound history → gate inert (no false-positive).
 5. ``maybe_handle_payment_claim`` skips gracefully on the gate hit.
 6. ``context_aware_dedup_fallback`` falls through to the default
-   fallback when the gate fires AND ``awaiting_payment_receipt`` is
-   set; still re-prompts for receipt when the gate is inert.
+   fallback when the delivery-confirmation gate fires AND
+   ``awaiting_payment_receipt`` is set.  Non-payment inbound text is
+   blocked by the payment workflow resume gate (``dc18f473``) — no
+   receipt re-prompt.  Re-prompt fires only when that gate allows
+   workflow resume (e.g. explicit transfer language).
 """
 from __future__ import annotations
 
@@ -409,8 +412,10 @@ class TestContextAwareDedupFallbackHonoursGate:
         assert out == "تأمر بشيء أكمّل لك فيه؟"
 
     def test_awaiting_receipt_reprompt_still_fires_without_gate(self, monkeypatch):
-        """Inbound that does NOT look like delivery confirmation
-        keeps the original behaviour — re-ask for the receipt."""
+        """Delivery-confirmation gate inert, but payment workflow resume
+        gate (``dc18f473``) denies non-payment commerce text — dedup
+        must fall through to ``default_fallback``, not resurrect a
+        receipt reminder."""
         from core.order_flow import context_aware_dedup_fallback
 
         self._patch_brain_state(monkeypatch, {
@@ -429,13 +434,17 @@ class TestContextAwareDedupFallbackHonoursGate:
             default_fallback="تأمر بشيء أكمّل لك فيه؟",
             inbound_text="بكم سعر التوصيل؟",
         )
-        assert "بانتظار إيصال التحويل" in out, (
-            "non-delivery inbound must still get the receipt re-prompt"
+        assert "بانتظار إيصال التحويل" not in out, (
+            "payment workflow resume gate must block receipt re-prompt "
+            "for non-payment shipping-price query"
         )
+        assert out == "تأمر بشيء أكمّل لك فيه؟"
 
     def test_awaiting_receipt_reprompt_when_inbound_text_omitted(self, monkeypatch):
-        """Backwards-compat: callers that don't pass ``inbound_text``
-        keep the legacy behaviour (re-prompt for the receipt)."""
+        """When ``inbound_text`` is omitted the workflow-resume gate
+        evaluates an empty message as non-payment — no receipt
+        re-prompt (``dc18f473`` contract).  Production webhook always
+        passes ``inbound_text``; this locks legacy caller behaviour."""
         from core.order_flow import context_aware_dedup_fallback
 
         self._patch_brain_state(monkeypatch, {
@@ -452,4 +461,5 @@ class TestContextAwareDedupFallbackHonoursGate:
             default_fallback="تأمر بشيء أكمّل لك فيه؟",
             # inbound_text intentionally omitted
         )
-        assert "بانتظار إيصال التحويل" in out
+        assert "بانتظار إيصال التحويل" not in out
+        assert out == "تأمر بشيء أكمّل لك فيه؟"

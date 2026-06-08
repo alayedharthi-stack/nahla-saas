@@ -1437,7 +1437,8 @@ def context_aware_dedup_fallback(
     Priority:
         1. Receipt already received → "طلبك تحت المراجعة الآن".
         2. Active order with product + price → contextual nudge.
-        3. Awaiting receipt → re-prompt for the receipt nicely.
+        3. Awaiting receipt → re-prompt only when payment workflow
+           resume gate allows the payment flow to continue.
         4. Empty / discovery state → the original ``default_fallback``.
 
     Never raises. Always returns a non-empty string.
