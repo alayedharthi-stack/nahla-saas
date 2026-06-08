@@ -27,6 +27,7 @@ from modules.ai.media.semantic_classifier import (
     apply_semantic_payment_override,
     classify_media_semantic,
     compose_neutral_attachment_ack,
+    metadata_qualifies_for_payment_evidence_soft_reply,
 )
 
 
@@ -55,9 +56,9 @@ class TestMediaSemanticClassifier:
         )
 
     def test_unrelated_pdf_during_active_order_no_payment_ack(self):
+        """Product semantic without payment kind slots may still clear PE."""
         md = {
             "payment_evidence_status": "needs_confirmation",
-            "pdf_kind": "payment_pending_evidence",
             "media_semantic_category": MEDIA_PRODUCT_IMAGE,
         }
         out = apply_semantic_payment_override(md)
@@ -105,3 +106,48 @@ class TestMediaSemanticClassifier:
             normalized_type="image",
         )
         assert sem.ack_mode == ACK_NEUTRAL
+
+    def test_pre_review_pdf_not_generic_document(self):
+        """Hybrid A: deterministic PE must survive semantic pass."""
+        text = (
+            "مراجعة بيانات التحويل\n"
+            "اسم المستفيد: محمد علي\n"
+            "تأكد من البيانات واضغط تحويل"
+        )
+        sem = classify_media_semantic(
+            text_blob=text,
+            filename="Transfer-Receipt.pdf",
+            normalized_type="document",
+            payment_evidence_status="pre_transfer_review",
+            pdf_kind="payment_pre_review",
+        )
+        assert sem.reason != "generic_document"
+        assert sem.category == MEDIA_UNRELATED
+
+    def test_soft_reply_pair_qualifies_without_semantic_ack(self):
+        md = {
+            "payment_evidence_status": "pre_transfer_review",
+            "pdf_kind": "payment_pre_review",
+        }
+        assert metadata_qualifies_for_payment_evidence_soft_reply(md)
+        assert not allows_payment_media_ack(
+            semantic_category=MEDIA_UNRELATED,
+            payment_evidence_status="pre_transfer_review",
+            awaiting_payment_receipt=False,
+            has_active_order=True,
+        )
+
+    def test_payment_evidence_slots_not_erased_by_semantic_override(self):
+        """Hybrid B: semantic may gate acks but not erase PE verdicts."""
+        md = {
+            "payment_evidence_status": "pre_transfer_review",
+            "payment_evidence_reason": "pre_transfer_imperative_with_receipt_filename",
+            "pdf_kind": "payment_pre_review",
+            "media_semantic_category": MEDIA_UNRELATED,
+        }
+        out = apply_semantic_payment_override(md)
+        assert out["payment_evidence_status"] == "pre_transfer_review"
+        assert out["pdf_kind"] == "payment_pre_review"
+        assert out["payment_evidence_reason"] == (
+            "pre_transfer_imperative_with_receipt_filename"
+        )
