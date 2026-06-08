@@ -193,13 +193,18 @@ class TestDecisionEngine:
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
 
-    def test_identity_goes_to_faq(self):
+    def test_identity_goes_to_persona_compose(self):
+        """Identity probes use persona compose since 6635e858 — not FAQ templates."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
+        msg = "من أنت"
         ctx = self._ctx(INTENT_WHO_ARE_YOU, _make_state(greeted=False), _make_facts())
+        ctx.message = msg
+        ctx.intent.raw_message = msg
         d = eng.decide(ctx)
-        assert d.action == ACTION_FAQ_REPLY
-        assert d.args["topic"] == "identity"
+        assert d.action == ACTION_LLM_REPLY
+        assert d.args["topic"] == "persona_identity"
+        assert d.args.get("block_commerce_escalation") is True
 
     def test_shipping_goes_to_brain_with_topic_hint(self):
         """``faq_shipping()`` template was disabled (June 2026) — the
