@@ -394,14 +394,20 @@ def test_reply_allows_freeform_inside_service_window():
         db.commit()
 
         fake_module = ModuleType("routers.whatsapp_webhook")
-        fake_module._send_whatsapp_message = AsyncMock()
+        fake_module._send_whatsapp_message = AsyncMock(return_value=True)
         body = conv_router.ReplyIn(customer_phone="0555000003", message="رد يدوي")
         request = _make_request(tenant.id, "/conversations/reply")
 
-        with patch.dict(sys.modules, {"routers.whatsapp_webhook": fake_module}):
+        with patch.dict(sys.modules, {"routers.whatsapp_webhook": fake_module}), patch(
+            "core.billing.require_outbound_access",
+        ):
             result = asyncio.run(conv_router.reply_to_conversation(body, request, db))
 
-        assert result == {"sent": True}
+        # Service-window gate passed (no 409) and send was attempted.
+        # Reply responses now include outbound observability fields
+        # (message_event_id, send_status, wamid, error) since 8288f95b.
+        assert result["sent"] is True
+        assert result.get("message_event_id")
         fake_module._send_whatsapp_message.assert_awaited_once()
         # Customer profile was created automatically
         assert db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant.id).count() == 1
@@ -433,8 +439,11 @@ def test_create_campaign_rejects_unapproved_template():
             audience_count=10,
         )
 
-        with pytest.raises(HTTPException) as exc:
-            asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.require_feature",
+        ), patch("core.plan_entitlements.require_limit_not_exceeded"):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(camp_router.create_campaign(body, request, db))
 
         assert exc.value.status_code == 422
         assert "قالب معتمد" in exc.value.detail
@@ -469,7 +478,10 @@ def test_create_campaign_uses_database_template_metadata():
             audience_count=12,
         )
 
-        result = asyncio.run(camp_router.create_campaign(body, request, db))
+        with patch("core.billing.require_outbound_access"), patch(
+            "core.plan_entitlements.require_feature",
+        ), patch("core.plan_entitlements.require_limit_not_exceeded"):
+            result = asyncio.run(camp_router.create_campaign(body, request, db))
         campaign = db.query(Campaign).filter(Campaign.tenant_id == tenant.id).first()
 
         assert result["template_name"] == "approved_offer"
