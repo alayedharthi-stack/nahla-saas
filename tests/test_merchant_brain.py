@@ -39,7 +39,7 @@ from modules.ai.brain.types import (
 )
 from modules.ai.brain.decision.actions import (
     ACTION_FAQ_REPLY, ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
-    ACTION_LLM_REPLY,
+    ACTION_ORDER_CONTEXT_UPDATE, ACTION_LLM_REPLY,
 )
 
 
@@ -234,7 +234,8 @@ class TestDecisionEngine:
         d = eng.decide(ctx)
         assert d.action == ACTION_PROPOSE_DRAFT_ORDER
 
-    def test_continue_order_preparation_with_checkout_slots(self):
+    def test_active_order_captures_checkout_fulfillment_slots(self):
+        """City + short code during ordering → order_context_update since 0526ae17."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         state = _make_state(
@@ -257,7 +258,10 @@ class TestDecisionEngine:
             facts=_make_facts(),
         )
         d = eng.decide(ctx)
-        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert d.action == ACTION_ORDER_CONTEXT_UPDATE
+        assert d.args.get("city") == "الرياض"
+        assert d.args.get("short_address_code") == "ABCD1234"
+        assert d.args.get("fulfillment_kind") == "location_update"
 
     def test_ask_product_no_catalog(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
