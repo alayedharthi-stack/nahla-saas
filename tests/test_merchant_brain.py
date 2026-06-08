@@ -31,15 +31,15 @@ for p in [str(REPO_ROOT), str(BACKEND_DIR)]:
 
 # ── Import brain modules ───────────────────────────────────────────────────────
 from modules.ai.brain.types import (
-    INTENT_GREETING, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PRODUCT,
-    INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO, INTENT_START_ORDER,
-    INTENT_GENERAL, INTENT_WHO_ARE_YOU,
+    INTENT_GREETING, INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PRODUCT, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
+    INTENT_START_ORDER, INTENT_GENERAL, INTENT_WHO_ARE_YOU,
     BrainContext, CommerceFacts, Decision, ActionResult, Intent,
     MerchantConversationState, OrderPreparationState, SalesContextSnapshot,
 )
 from modules.ai.brain.decision.actions import (
     ACTION_FAQ_REPLY, ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
-    ACTION_LLM_REPLY,
+    ACTION_ORDER_CONTEXT_UPDATE, ACTION_LLM_REPLY,
 )
 
 
@@ -99,9 +99,17 @@ class TestIntentRules:
         assert result is not None
         assert result.name == INTENT_WHO_ARE_YOU
 
-    def test_store_info_question(self):
+    def test_physical_location_question(self):
+        """Physical shop / maps phrasing → ask_location since af6186c3."""
         from modules.ai.brain.intent.rules import match
         result = match("وين موقعكم")
+        assert result is not None
+        assert result.name == INTENT_ASK_LOCATION
+
+    def test_online_store_link_question(self):
+        """Online storefront phrasing stays on ask_store_info."""
+        from modules.ai.brain.intent.rules import match
+        result = match("رابط المتجر")
         assert result is not None
         assert result.name == INTENT_ASK_STORE_INFO
 
@@ -149,30 +157,54 @@ class TestDecisionEngine:
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
+        # Thin pure greeting — DAF (09fd5319) bypasses only actionable substance.
+        ctx.message = "مرحبا"
+        ctx.intent.raw_message = "مرحبا"
         d = eng.decide(ctx)
         assert d.action == ACTION_GREET
+
+    def _product_inquiry_ctx(
+        self, state: MerchantConversationState,
+    ) -> BrainContext:
+        """Real SKU inquiry — required since 30b997da product discovery gate.
+
+        Availability phrasing alone does not yield a catalog query; the
+        classifier/slot layer supplies ``product_query`` (here: the noun
+        from the customer's ask) before the decision engine searches.
+        """
+        msg = "عندكم شاشة كمبيوتر؟"
+        ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts())
+        ctx.message = msg
+        ctx.intent.raw_message = msg
+        ctx.intent.slots = {"product_query": "شاشة كمبيوتر"}
+        return ctx
 
     def test_first_turn_product_question_does_not_force_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
-        ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=False), _make_facts())
+        ctx = self._product_inquiry_ctx(_make_state(greeted=False))
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
 
     def test_ask_product_after_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
-        ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=True), _make_facts())
+        ctx = self._product_inquiry_ctx(_make_state(greeted=True))
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
 
-    def test_identity_goes_to_faq(self):
+    def test_identity_goes_to_persona_compose(self):
+        """Identity probes use persona compose since 6635e858 — not FAQ templates."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
+        msg = "من أنت"
         ctx = self._ctx(INTENT_WHO_ARE_YOU, _make_state(greeted=False), _make_facts())
+        ctx.message = msg
+        ctx.intent.raw_message = msg
         d = eng.decide(ctx)
-        assert d.action == ACTION_FAQ_REPLY
-        assert d.args["topic"] == "identity"
+        assert d.action == ACTION_LLM_REPLY
+        assert d.args["topic"] == "persona_identity"
+        assert d.args.get("block_commerce_escalation") is True
 
     def test_shipping_goes_to_brain_with_topic_hint(self):
         """``faq_shipping()`` template was disabled (June 2026) — the
@@ -202,7 +234,8 @@ class TestDecisionEngine:
         d = eng.decide(ctx)
         assert d.action == ACTION_PROPOSE_DRAFT_ORDER
 
-    def test_continue_order_preparation_with_checkout_slots(self):
+    def test_active_order_captures_checkout_fulfillment_slots(self):
+        """City + short code during ordering → order_context_update since 0526ae17."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         state = _make_state(
@@ -225,7 +258,10 @@ class TestDecisionEngine:
             facts=_make_facts(),
         )
         d = eng.decide(ctx)
-        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert d.action == ACTION_ORDER_CONTEXT_UPDATE
+        assert d.args.get("city") == "الرياض"
+        assert d.args.get("short_address_code") == "ABCD1234"
+        assert d.args.get("fulfillment_kind") == "location_update"
 
     def test_ask_product_no_catalog(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
@@ -709,13 +745,14 @@ class TestStateDrivenSimplification:
             facts=facts,
         )
 
-    # --- DecisionEngine: continuation no longer captures product questions ---
+    # --- DecisionEngine: mid-order checkout lock (87e028ea) + fulfillment slots (0526ae17) ---
 
-    def test_ask_product_mid_order_routes_to_search_not_continuation(self):
-        """The screenshot bug: customer mid-order asks 'تعرض لي المنتجات بالصور'
-        and the bot replies with 'سجلت اهتمامك بـ فستان'. After the
-        simplification pass, ASK_PRODUCT mid-order must fall through to
-        SEARCH_PRODUCTS, not coerce into propose_draft_order.
+    def test_ask_product_mid_order_with_order_prep_continues_checkout(self):
+        """Mid-order ASK_PRODUCT with default order_prep → rule_based_checkout since 87e028ea.
+
+        Section 3.7 no longer treats ASK_PRODUCT as continuation, but the earlier
+        deterministic checkout block still fires while order_prep is active unless
+        has_explicit_commerce_topic_change bypasses it.
         """
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
@@ -727,14 +764,11 @@ class TestStateDrivenSimplification:
         ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts(),
                         message="تعرض لي المنتجات بالصور؟")
         d = eng.decide(ctx)
-        assert d.action == ACTION_SEARCH_PRODUCTS, (
-            f"ASK_PRODUCT mid-order must go to SEARCH_PRODUCTS, got {d.action}"
-        )
+        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert "rule_based_checkout" in (d.reason or "")
 
-    def test_address_message_mid_order_still_continues_via_slots(self):
-        """The legitimate 'الرياض ABCD1234' case: classified as something
-        else but carries checkout slot data → must still route to
-        propose_draft_order via the slots clause, not get demoted."""
+    def test_address_message_mid_order_captures_fulfillment_slots(self):
+        """City + short code mid-order → order_context_update since 0526ae17."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         state = _make_state(
@@ -748,7 +782,10 @@ class TestStateDrivenSimplification:
             slots={"city": "الرياض", "short_address_code": "ABCD1234"},
         )
         d = eng.decide(ctx)
-        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert d.action == ACTION_ORDER_CONTEXT_UPDATE
+        assert d.args.get("city") == "الرياض"
+        assert d.args.get("short_address_code") == "ABCD1234"
+        assert d.args.get("fulfillment_kind") == "location_update"
 
     # --- Conversation Commerce State Tracking (merchant feedback round 2) ---
     #

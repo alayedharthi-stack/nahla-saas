@@ -192,9 +192,21 @@ def _seed_for(automation_type: str) -> Dict[str, Any]:
 
 
 def test_cart_abandoned_seed_uses_library_template() -> None:
+    """Cart recovery binds Nahla library templates per stage via service_key.
+
+    Since the 3-stage template-only overhaul (7f08d9b0) the seed no longer
+    carries root-level ``template_name``; ``resolve_template_for_send`` maps
+    ``(service_key=cart_recovery, step_number=N)`` to the approved library
+    slot for every merchant.
+    """
     seed = _seed_for("abandoned_cart")
-    assert seed["config"]["template_name"] == "abandoned_cart_recovery_ar"
-    assert seed["config"]["template_name_en"] == "abandoned_cart_recovery_en"
+    steps = seed["config"]["steps"]
+    assert len(steps) == 3
+    for step in steps:
+        assert step["delivery_mode"] == "template"
+        assert step["service_key"] == "cart_recovery"
+    assert [step["step_number"] for step in steps] == [1, 2, 3]
+    assert steps[-1].get("auto_coupon") is True
 
 
 def test_cart_abandoned_final_step_has_auto_coupon() -> None:
@@ -288,16 +300,25 @@ def test_build_vars_injects_coupon_extras_into_discount_code_slot() -> None:
 
 
 def test_build_vars_falls_back_to_positional_for_unknown_template() -> None:
-    """Merchant-authored templates with no library entry still render."""
+    """Merchant-authored templates with no library entry still render.
+
+    Since e54b7e41 the positional fallback fills up to 6 body slots in the
+    order Nahla payment/reminder templates use (customer → order → store →
+    total → URL/coupon → coupon). ``checkout_url`` lands in ``{{5}}``, not
+    ``{{2}}``, so 3+ body templates avoid template_param_mismatch.
+    """
     vars_map = _build_template_vars(
         event=_StubEvent({"checkout_url": "https://x"}),
         customer=_StubCustomer("Omar"),
         config={},
         template_name="some_merchant_template_v3",
     )
-    # Falls back to {{1}}=customer_name, {{2}}=checkout_url
     assert vars_map["{{1}}"] == "Omar"
-    assert vars_map["{{2}}"] == "https://x"
+    assert vars_map["{{2}}"] == ""          # no order id in payload
+    assert vars_map["{{3}}"] == "متجرنا"   # default store label
+    assert vars_map["{{4}}"] == ""          # no total in payload
+    assert vars_map["{{5}}"] == "https://x"
+    assert vars_map["{{6}}"] == ""
 
 
 # ── 4. Placeholder integrity (variable lock) ──────────────────────────────────
