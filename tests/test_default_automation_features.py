@@ -300,16 +300,25 @@ def test_build_vars_injects_coupon_extras_into_discount_code_slot() -> None:
 
 
 def test_build_vars_falls_back_to_positional_for_unknown_template() -> None:
-    """Merchant-authored templates with no library entry still render."""
+    """Merchant-authored templates with no library entry still render.
+
+    Since e54b7e41 the positional fallback fills up to 6 body slots in the
+    order Nahla payment/reminder templates use (customer → order → store →
+    total → URL/coupon → coupon). ``checkout_url`` lands in ``{{5}}``, not
+    ``{{2}}``, so 3+ body templates avoid template_param_mismatch.
+    """
     vars_map = _build_template_vars(
         event=_StubEvent({"checkout_url": "https://x"}),
         customer=_StubCustomer("Omar"),
         config={},
         template_name="some_merchant_template_v3",
     )
-    # Falls back to {{1}}=customer_name, {{2}}=checkout_url
     assert vars_map["{{1}}"] == "Omar"
-    assert vars_map["{{2}}"] == "https://x"
+    assert vars_map["{{2}}"] == ""          # no order id in payload
+    assert vars_map["{{3}}"] == "متجرنا"   # default store label
+    assert vars_map["{{4}}"] == ""          # no total in payload
+    assert vars_map["{{5}}"] == "https://x"
+    assert vars_map["{{6}}"] == ""
 
 
 # ── 4. Placeholder integrity (variable lock) ──────────────────────────────────
