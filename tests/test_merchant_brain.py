@@ -163,17 +163,33 @@ class TestDecisionEngine:
         d = eng.decide(ctx)
         assert d.action == ACTION_GREET
 
+    def _product_inquiry_ctx(
+        self, state: MerchantConversationState,
+    ) -> BrainContext:
+        """Real SKU inquiry — required since 30b997da product discovery gate.
+
+        Availability phrasing alone does not yield a catalog query; the
+        classifier/slot layer supplies ``product_query`` (here: the noun
+        from the customer's ask) before the decision engine searches.
+        """
+        msg = "عندكم شاشة كمبيوتر؟"
+        ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts())
+        ctx.message = msg
+        ctx.intent.raw_message = msg
+        ctx.intent.slots = {"product_query": "شاشة كمبيوتر"}
+        return ctx
+
     def test_first_turn_product_question_does_not_force_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
-        ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=False), _make_facts())
+        ctx = self._product_inquiry_ctx(_make_state(greeted=False))
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
 
     def test_ask_product_after_greeting(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
-        ctx = self._ctx(INTENT_ASK_PRODUCT, _make_state(greeted=True), _make_facts())
+        ctx = self._product_inquiry_ctx(_make_state(greeted=True))
         d = eng.decide(ctx)
         assert d.action == ACTION_SEARCH_PRODUCTS
 
