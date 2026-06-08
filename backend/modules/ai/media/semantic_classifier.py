@@ -52,6 +52,44 @@ _SOCIAL_HINTS = (
     "congrat", "celebration", "poster", "flyer", "invitation",
 )
 
+# Slots produced by ``core.payment_evidence`` + normalizer Stage 2.
+# Semantic may gate acks but must not erase these deterministic verdicts.
+_PAYMENT_EVIDENCE_KINDS = frozenset({
+    "payment_pre_review",
+    "payment_pending_evidence",
+    "payment_receipt",
+})
+_PAYMENT_EVIDENCE_STATUSES = frozenset({
+    "confirmed",
+    "pre_transfer_review",
+    "needs_confirmation",
+})
+
+
+def _has_payment_evidence_kind_slots(
+    *,
+    pdf_kind: Optional[str] = None,
+    image_kind: Optional[str] = None,
+) -> bool:
+    pk = str(pdf_kind or "").strip()
+    ik = str(image_kind or "").strip()
+    return pk in _PAYMENT_EVIDENCE_KINDS or ik in _PAYMENT_EVIDENCE_KINDS
+
+
+def _has_deterministic_payment_evidence(
+    *,
+    payment_evidence_status: Optional[str] = None,
+    pdf_kind: Optional[str] = None,
+    image_kind: Optional[str] = None,
+) -> bool:
+    pe = str(payment_evidence_status or "").strip()
+    if pe in _PAYMENT_EVIDENCE_STATUSES:
+        return True
+    return _has_payment_evidence_kind_slots(
+        pdf_kind=pdf_kind,
+        image_kind=image_kind,
+    )
+
 
 @dataclass(frozen=True)
 class MediaSemanticResult:
@@ -209,12 +247,17 @@ def classify_media_semantic(
         )
 
     if normalized_type in {"document", "pdf"} and blob:
-        return MediaSemanticResult(
-            category=MEDIA_DOCUMENT,
-            ack_mode=ACK_NEUTRAL,
-            confidence="low",
-            reason="generic_document",
-        )
+        if not _has_deterministic_payment_evidence(
+            payment_evidence_status=payment_evidence_status,
+            pdf_kind=pdf_kind,
+            image_kind=image_kind,
+        ):
+            return MediaSemanticResult(
+                category=MEDIA_DOCUMENT,
+                ack_mode=ACK_NEUTRAL,
+                confidence="low",
+                reason="generic_document",
+            )
 
     if payment_evidence_status in {"needs_confirmation", "pre_transfer_review"}:
         return MediaSemanticResult(
@@ -274,17 +317,47 @@ def allows_payment_media_ack(
     return False
 
 
+def metadata_has_payment_evidence_kind_slots(metadata: Dict[str, Any]) -> bool:
+    """True when normalizer already stamped a payment-evidence kind slot."""
+    return _has_payment_evidence_kind_slots(
+        pdf_kind=(metadata or {}).get("pdf_kind"),
+        image_kind=(metadata or {}).get("image_kind"),
+    )
+
+
+_SOFT_REPLY_STATUS_KIND: Dict[str, str] = {
+    "pre_transfer_review": "payment_pre_review",
+    "needs_confirmation": "payment_pending_evidence",
+}
+
+
+def metadata_qualifies_for_payment_evidence_soft_reply(
+    metadata: Dict[str, Any],
+) -> bool:
+    """True when ``core.payment_evidence`` + normalizer stamped a matched
+    non-confirmed verdict/kind pair that warrants
+    ``compose_payment_evidence_reply`` — not a completed-payment ACK."""
+    md = metadata or {}
+    pe = str(md.get("payment_evidence_status") or "").strip()
+    expected_kind = _SOFT_REPLY_STATUS_KIND.get(pe)
+    if not expected_kind:
+        return False
+    kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip()
+    return kind == expected_kind
+
+
 def apply_semantic_payment_override(metadata: Dict[str, Any]) -> Dict[str, Any]:
     """Downgrade payment-evidence slots when semantic says non-payment."""
     md = dict(metadata or {})
     sem_cat = str(md.get("media_semantic_category") or "")
     pe = str(md.get("payment_evidence_status") or "")
 
-    if sem_cat in _NON_PAYMENT_SEMANTIC and pe in {
-        "needs_confirmation",
-        "pre_transfer_review",
-        "confirmed",
-    }:
+    if sem_cat in _NON_PAYMENT_SEMANTIC and pe in _PAYMENT_EVIDENCE_STATUSES:
+        if _has_payment_evidence_kind_slots(
+            pdf_kind=md.get("pdf_kind"),
+            image_kind=md.get("image_kind"),
+        ):
+            return md
         md["payment_evidence_status"] = "not_payment"
         md["payment_evidence_reason"] = f"semantic_rejected_{sem_cat}"
         for key in ("image_kind", "pdf_kind"):
@@ -320,4 +393,6 @@ __all__ = [
     "log_media_classification",
     "log_payment_media_confirmed",
     "log_payment_media_rejected",
+    "metadata_has_payment_evidence_kind_slots",
+    "metadata_qualifies_for_payment_evidence_soft_reply",
 ]

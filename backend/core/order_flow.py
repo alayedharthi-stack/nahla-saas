@@ -853,20 +853,26 @@ def maybe_handle_payment_evidence_inbound(
         from modules.ai.media.semantic_classifier import (  # noqa: PLC0415
             allows_payment_media_ack,
             log_payment_media_rejected,
+            metadata_qualifies_for_payment_evidence_soft_reply,
         )
 
-        if not allows_payment_media_ack(
-            semantic_category=str(md.get("media_semantic_category") or ""),
-            payment_evidence_status=pe_status,
-            awaiting_payment_receipt=awaiting,
-            has_active_order=has_active_order,
-        ):
-            log_payment_media_rejected(
-                tenant_id=tenant_id,
-                reason="semantic_not_payment",
-                category=str(md.get("media_semantic_category") or ""),
-            )
-            return None
+        # Payment-ACK semantic gate applies to attachment ack copy only.
+        # Deterministic ``pre_transfer_review`` / ``needs_confirmation``
+        # pairs from ``core.payment_evidence`` use the operational soft
+        # reply path — they do not claim completed payment.
+        if not metadata_qualifies_for_payment_evidence_soft_reply(md):
+            if not allows_payment_media_ack(
+                semantic_category=str(md.get("media_semantic_category") or ""),
+                payment_evidence_status=pe_status,
+                awaiting_payment_receipt=awaiting,
+                has_active_order=has_active_order,
+            ):
+                log_payment_media_rejected(
+                    tenant_id=tenant_id,
+                    reason="semantic_not_payment",
+                    category=str(md.get("media_semantic_category") or ""),
+                )
+                return None
     except Exception as _sem_exc:  # noqa: BLE001
         logger.debug(
             "[PAYMENT_MEDIA_REJECTED] semantic gate skipped tenant=%s err=%s",
