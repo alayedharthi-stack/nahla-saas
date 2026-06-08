@@ -864,12 +864,14 @@ class TestPaymentReminderDraft:
         assert "نشمي" in text
 
     def test_dash_customer_name_falls_back_to_polite_address(self):
+        """Em-dash placeholder → DEFAULT_FALLBACK_NAME since 29f5e151."""
         text = _build_payment_reminder_text(
             customer_name="—",
             order_number="#1",
             payment_url="https://x",
         )
-        assert "عميلنا الكريم" in text
+        assert "عميلنا الغالي" in text
+        assert "عميلنا الكريم" not in text
 
 
 class TestBuildTimeline:
