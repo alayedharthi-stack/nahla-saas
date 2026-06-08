@@ -322,6 +322,13 @@ def is_visual_batch_context(
     stripped = strip_media_framing(message)
     sem = _media_semantic_category(meta)
     pe = str(meta.get("payment_evidence_status") or "").strip().lower()
+    kind = str(meta.get("pdf_kind") or meta.get("image_kind") or "")
+
+    if pe in {"needs_confirmation", "pre_transfer_review"} and kind in {
+        "payment_pre_review",
+        "payment_pending_evidence",
+    }:
+        return False
 
     if sem in _NON_PAYMENT_MEDIA_SEMANTIC:
         if pe not in {"confirmed", "needs_confirmation", "pre_transfer_review"}:
@@ -545,7 +552,11 @@ def evaluate_payment_relevance(
         "confirmed", "needs_confirmation", "pre_transfer_review",
     }:
         media_relevant = False
-    if visual_batch:
+    if visual_batch and pe not in {
+        "confirmed",
+        "needs_confirmation",
+        "pre_transfer_review",
+    }:
         media_relevant = False
 
     def _emit_log(verdict: PaymentRelevanceVerdict) -> None:
@@ -616,7 +627,15 @@ def evaluate_payment_relevance(
             return _deny("no_current_turn_payment_semantics")
 
     elif dispatch_kind == DISPATCH_EVIDENCE_PROMPT:
-        if visual_batch and sem in _NON_PAYMENT_MEDIA_SEMANTIC:
+        if (
+            visual_batch
+            and sem in _NON_PAYMENT_MEDIA_SEMANTIC
+            and pe not in {
+                "confirmed",
+                "needs_confirmation",
+                "pre_transfer_review",
+            }
+        ):
             return _deny("unrelated_multimodal_evidence")
         if not media_relevant and not payment_sem:
             return _deny("media_not_payment_relevant")
