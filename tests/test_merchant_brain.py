@@ -31,9 +31,9 @@ for p in [str(REPO_ROOT), str(BACKEND_DIR)]:
 
 # ── Import brain modules ───────────────────────────────────────────────────────
 from modules.ai.brain.types import (
-    INTENT_GREETING, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PRODUCT,
-    INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO, INTENT_START_ORDER,
-    INTENT_GENERAL, INTENT_WHO_ARE_YOU,
+    INTENT_GREETING, INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PRODUCT, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
+    INTENT_START_ORDER, INTENT_GENERAL, INTENT_WHO_ARE_YOU,
     BrainContext, CommerceFacts, Decision, ActionResult, Intent,
     MerchantConversationState, OrderPreparationState, SalesContextSnapshot,
 )
@@ -99,9 +99,17 @@ class TestIntentRules:
         assert result is not None
         assert result.name == INTENT_WHO_ARE_YOU
 
-    def test_store_info_question(self):
+    def test_physical_location_question(self):
+        """Physical shop / maps phrasing → ask_location since af6186c3."""
         from modules.ai.brain.intent.rules import match
         result = match("وين موقعكم")
+        assert result is not None
+        assert result.name == INTENT_ASK_LOCATION
+
+    def test_online_store_link_question(self):
+        """Online storefront phrasing stays on ask_store_info."""
+        from modules.ai.brain.intent.rules import match
+        result = match("رابط المتجر")
         assert result is not None
         assert result.name == INTENT_ASK_STORE_INFO
 
