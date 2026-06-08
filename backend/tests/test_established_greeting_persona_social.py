@@ -114,10 +114,14 @@ def test_established_pure_greeting_routes_persona_social(msg: str) -> None:
     assert "persona_social" in (decision.reason or "")
 
 
-def test_first_turn_greeting_still_action_greet() -> None:
+def test_first_turn_greeting_routes_persona_social_not_action_greet() -> None:
+    """Contract (greeting persona unification): cold first turn → persona_social."""
     decision = DefaultDecisionEngine().decide(_ctx("هلا", greeted=False))
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("topic") != PERSONA_TOPIC_SOCIAL
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.args.get("block_commerce_escalation") is True
+    assert decision.action != ACTION_GREET
 
 
 def test_greeting_locked_during_ordering() -> None:

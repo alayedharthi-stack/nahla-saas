@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
@@ -192,23 +193,16 @@ def test_webhook_identity_topic_falls_through_to_brain_persona() -> None:
     webhook_src = (
         Path(_BACKEND) / "routers" / "whatsapp_webhook.py"
     ).read_text(encoding="utf-8")
-    assert 'identity_topic == "greeting"' in webhook_src
-    assert "render_identity_reply" in webhook_src
     assert "[PERSONA_IDENTITY]" in webhook_src
     assert 'identity_topic == "identity"' in webhook_src
 
-    greeting_block_start = webhook_src.index('identity_topic == "greeting"')
     identity_block_start = webhook_src.index('identity_topic == "identity"')
-    greeting_slice = webhook_src[greeting_block_start:greeting_block_start + 1200]
     identity_slice = webhook_src[identity_block_start:identity_block_start + 400]
-    assert "render_identity_reply" in greeting_slice
-    assert "should_use_greeting_fast_path" in greeting_slice
-    assert "return" in greeting_slice
     assert "render_identity_reply" not in identity_slice
 
 
-def test_webhook_greeting_topic_still_early_returns_render_identity() -> None:
-    """Pure greeting keeps deterministic ``render_identity_reply`` at webhook."""
+def test_webhook_cold_greeting_must_not_early_return_render_identity() -> None:
+    """Contract: pure greeting must reach Brain — no PRE_BRAIN_FAST_PATH."""
     from modules.ai.routing.conversation_mode import (
         MODE_IDENTITY_REPLY,
         detect_identity_topic,
@@ -216,10 +210,20 @@ def test_webhook_greeting_topic_still_early_returns_render_identity() -> None:
 
     text = "السلام عليكم"
     assert detect_identity_topic(text) == "greeting"
-    assert _webhook_identity_early_return_allowed(
-        mode=MODE_IDENTITY_REPLY,
-        identity_topic="greeting",
-    ) is True
+
+    webhook_src = (
+        Path(_BACKEND) / "routers" / "whatsapp_webhook.py"
+    ).read_text(encoding="utf-8")
+    marker = 'identity_topic == "greeting"'
+    greeting_slice = webhook_src[
+        webhook_src.index(marker) : webhook_src.index(marker) + 1600
+    ]
+    assert "render_identity_reply" not in greeting_slice, (
+        "greeting fast path must be removed so cold greetings reach Brain"
+    )
+    assert "PRE_BRAIN_FAST_PATH" not in greeting_slice
+
+    # Established conversations already skip fast path and reach Brain.
     assert _webhook_identity_early_return_allowed(
         mode=MODE_IDENTITY_REPLY,
         identity_topic="greeting",

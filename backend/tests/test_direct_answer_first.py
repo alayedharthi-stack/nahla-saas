@@ -246,16 +246,23 @@ def test_first_turn_thin_general_still_greets() -> None:
     assert "first-turn general" in decision.reason
 
 
-def test_first_turn_pure_greeting_still_greets() -> None:
-    """Pure salaam keeps the welcome card untouched."""
+def test_first_turn_pure_greeting_routes_persona_social_not_welcome_card() -> None:
+    """Pure salaam on first turn → persona_social compose (not ACTION_GREET)."""
+    from modules.ai.brain.persona_expression import (
+        PERSONA_KIND_GREETING,
+        PERSONA_TOPIC_SOCIAL,
+    )
+
     ctx = _first_turn_ctx(
         message="السلام عليكم", intent_name=INTENT_GREETING,
     )
 
     decision = DefaultDecisionEngine().decide(ctx)
 
-    assert decision.action == ACTION_GREET
-    assert "explicit greeting" in decision.reason
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action != ACTION_GREET
 
 
 def test_first_turn_greeting_with_substance_bypasses_belt_and_suspenders(

@@ -6024,10 +6024,8 @@ async def _handle_merchant_message(
         from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
             MODE_IDENTITY_REPLY,
             mode_prompt_overlay,
-            render_identity_reply,
             resolve_conversation_mode,
             save_lease,
-            should_use_greeting_fast_path,
         )
         from core.ownership_state import (  # noqa: PLC0415
             attempt_implicit_takeover_recovery,
@@ -6091,52 +6089,15 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
-        # ── Identity / greeting fast path ────────────────────────────────────
-        # Pure short greetings on cold start (or automation_recovery escape)
-        # get the deterministic card. Established live_chat conversations
-        # and active leases yield to the Brain for non-deterministic
-        # re-greeting (Nahla Constitution — personality is not deterministic).
-        # Identity probes ("من أنت؟" / "هل أنت AI؟") fall through to the
-        # Brain so thin persona compose (persona_identity) can answer naturally.
+        # Pure greetings (cold or established) route through Brain persona_social
+        # compose — no PRE_BRAIN_FAST_PATH / render_identity_reply shortcut.
         if (
             mode_decision.mode == MODE_IDENTITY_REPLY
             and mode_decision.identity_topic == "greeting"
         ):
-            if should_use_greeting_fast_path(
-                mode_decision=mode_decision,
-                convo=convo,
-                history=history,
-            ):
-                reply = render_identity_reply(
-                    db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
-                )
-                _persona_ownership.mark_bypass(
-                    _POReason.PRE_BRAIN_FAST_PATH,
-                    owner="render_identity_reply",
-                )
-                StateManager.save_message(
-                    db, to, reply, "outbound",
-                    conversation_id=convo.id, tenant_id=tenant_id,
-                    extra_metadata=_persona_ownership.to_metadata(),
-                )
-                await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=reply,
-                    _tenant_id=tenant_id, _db=db,
-                )
-                _trace.mark_outbound_sent(
-                    source=_TS.SOURCE_WELCOME_GATE,
-                    length=len(reply or ""),
-                )
-                _sync_persona_observability()
-                logger.info(
-                    "[Mode] identity_reply tenant=%s topic=%s",
-                    tenant_id, mode_decision.identity_topic,
-                )
-                return
             logger.info(
-                "[Mode] greeting_fast_path_skipped tenant=%s to=%s "
-                "previous_mode=%s reason=established_conversation",
-                tenant_id, to, mode_decision.previous_mode,
+                "[PERSONA_SOCIAL] route=brain persona_social greeting tenant=%s",
+                tenant_id,
             )
 
         if (

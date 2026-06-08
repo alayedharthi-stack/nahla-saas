@@ -2009,6 +2009,32 @@ class DefaultDecisionEngine:
                             (ctx.message or "")[:80],
                         )
                     else:
+                        from ..persona_expression import (  # noqa: PLC0415
+                            PERSONA_KIND_GREETING,
+                            PERSONA_TOPIC_SOCIAL,
+                            is_established_greet_persona_compose_enabled,
+                        )
+
+                        if is_established_greet_persona_compose_enabled():
+                            logger.info(
+                                "[PERSONA_SOCIAL] kind=greeting route=first_turn_greeting "
+                                "tenant=%s preview=%r",
+                                getattr(ctx, "tenant_id", None),
+                                (ctx.message or "")[:60],
+                            )
+                            return Decision(
+                                action=ACTION_LLM_REPLY,
+                                args={
+                                    "topic": PERSONA_TOPIC_SOCIAL,
+                                    "persona_kind": PERSONA_KIND_GREETING,
+                                    "block_commerce_escalation": True,
+                                },
+                                reason=(
+                                    "first-turn pure greeting — persona_social "
+                                    "compose (persona_kind=greeting)"
+                                ),
+                                confidence=0.85,
+                            )
                         return Decision(
                             action=ACTION_GREET,
                             reason="explicit greeting on first turn",

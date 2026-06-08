@@ -546,8 +546,11 @@ class DefaultStateStore:
 
         elif action == ACTION_LLM_REPLY:
             topic = str((decision.args or {}).get("topic") or "")
+            persona_kind = str((decision.args or {}).get("persona_kind") or "")
             if topic == "persona_identity" or intent.name == "who_are_you":
                 s.assistant_identity_introduced = True
+            if topic == "persona_social" and persona_kind == "greeting":
+                s.greeted = True
 
         elif action == ACTION_SEARCH_PRODUCTS:
             if intent.name == INTENT_ASK_PRODUCT:
