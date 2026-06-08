@@ -192,9 +192,21 @@ def _seed_for(automation_type: str) -> Dict[str, Any]:
 
 
 def test_cart_abandoned_seed_uses_library_template() -> None:
+    """Cart recovery binds Nahla library templates per stage via service_key.
+
+    Since the 3-stage template-only overhaul (7f08d9b0) the seed no longer
+    carries root-level ``template_name``; ``resolve_template_for_send`` maps
+    ``(service_key=cart_recovery, step_number=N)`` to the approved library
+    slot for every merchant.
+    """
     seed = _seed_for("abandoned_cart")
-    assert seed["config"]["template_name"] == "abandoned_cart_recovery_ar"
-    assert seed["config"]["template_name_en"] == "abandoned_cart_recovery_en"
+    steps = seed["config"]["steps"]
+    assert len(steps) == 3
+    for step in steps:
+        assert step["delivery_mode"] == "template"
+        assert step["service_key"] == "cart_recovery"
+    assert [step["step_number"] for step in steps] == [1, 2, 3]
+    assert steps[-1].get("auto_coupon") is True
 
 
 def test_cart_abandoned_final_step_has_auto_coupon() -> None:
