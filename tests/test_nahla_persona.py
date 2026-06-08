@@ -9,7 +9,7 @@ fallback. These tests pin down the public signals that downstream
 prompt layers depend on:
 
   - bee 🐝 + flower 🌷 emoji hooks are present
-  - explicit emoji-rule mapping is included
+  - flexible visual-marketing guidance (not a fixed emoji map) since 7f3213ef
   - store name is interpolated when supplied
   - merchant store context is appended as a clearly-fenced block
   - no stale references to «نظام» / «روبوت» language
@@ -26,10 +26,12 @@ class TestPersonaConstants:
         assert "🐝" in NAHLA_PERSONA
         assert "🌷" in NAHLA_PERSONA
 
-    def test_persona_lists_contextual_emoji_map(self):
-        # The five context-bound emojis the user requested.
-        for emoji in ("🌷", "👍", "🛍️", "🎁", "🚚"):
-            assert emoji in NAHLA_PERSONA, f"missing {emoji} in persona"
+    def test_persona_uses_flexible_visual_guidance(self):
+        """Contextual emoji taste since 7f3213ef — examples, not a fixed map."""
+        assert "## الذوق البصري والتسويقي" in NAHLA_PERSONA
+        assert "العروض والكوبونات" in NAHLA_PERSONA
+        for emoji in ("🌷", "👍", "🛍️", "🚚"):
+            assert emoji in NAHLA_PERSONA, f"missing example emoji {emoji}"
 
     def test_persona_caps_emoji_usage(self):
         assert "1–2" in NAHLA_PERSONA or "1-2" in NAHLA_PERSONA or "واحد" in NAHLA_PERSONA
