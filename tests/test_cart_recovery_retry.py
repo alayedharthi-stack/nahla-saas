@@ -12,8 +12,9 @@ failure pipeline burns in. It must:
 
   * Be **invisible** when the env flag is off (403, not 404 — the
     dashboard distinguishes "feature disabled" from "wrong route").
-  * Refuse to retry when the cart is already converted, has no recovery
-    event linked, or has no failed step.
+  * Refuse to retry when the cart is already converted or has no recovery
+    event linked.
+  * Otherwise restart the full sequence from Stage 1 (``step_idx=0``).
   * Be idempotent against double-clicks (same step within 60s collapses
     to the existing pending event).
   * NOT bypass the engine — the new event lands in the same queue as
@@ -260,7 +261,7 @@ def test_retry_returns_403_when_flag_explicitly_false():
 def test_retry_enqueues_new_event_for_failed_cart():
     """Happy path: feature on + cart has a failed execution → the
     endpoint creates a brand-new unprocessed AutomationEvent linked to
-    the original root, with manual_retry=True and the same step_idx."""
+    the original root, with manual_retry=True and step_idx=0 (Stage 1)."""
     client, Session = _build_client(retry_flag="true")
     order_id, root_id = _seed_failed_cart(Session)
 
@@ -269,7 +270,7 @@ def test_retry_enqueues_new_event_for_failed_cart():
     body = resp.json()
     assert body["ok"] is True
     assert body["deduplicated"] is False
-    assert body["step_idx"] == 1
+    assert body["step_idx"] == 0
     assert body["retry_event_id"] != root_id
 
     # Verify the new event row exists and carries the manual-retry markers.
@@ -282,8 +283,8 @@ def test_retry_enqueues_new_event_for_failed_cart():
     payload = new_event.payload or {}
     assert payload.get("manual_retry") is True
     assert int(payload.get("parent_event_id")) == root_id
-    assert int(payload.get("step_idx")) == 1
-    assert payload.get("retry_of") == root_id
+    assert int(payload.get("step_idx")) == 0
+    assert payload.get("restart_from_stage1") is True
     db.close()
 
 
@@ -314,15 +315,31 @@ def test_retry_refuses_converted_cart():
     assert detail.get("error") == "already_converted"
 
 
-def test_retry_refuses_when_no_failed_step():
-    """Cart with only a 'sent' execution is a happy path — no retry."""
+def test_retry_restarts_from_stage1_when_only_sent_execution():
+    """After 21ad9202 retry restarts the full sequence from Stage 1 —
+    even when the latest execution was ``sent``, not ``failed``."""
     client, Session = _build_client(retry_flag="true")
-    order_id, _ = _seed_failed_cart(Session, status="sent")
+    order_id, root_id = _seed_failed_cart(Session, status="sent")
 
     resp = client.post(f"/autopilot/abandoned-carts/{order_id}/retry")
-    assert resp.status_code == 409
-    detail = resp.json().get("detail") or {}
-    assert detail.get("error") == "no_failed_step"
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["deduplicated"] is False
+    assert body["step_idx"] == 0
+    assert body["retry_event_id"] != root_id
+
+    db = Session()
+    new_event = db.query(AutomationEvent).filter(
+        AutomationEvent.id == body["retry_event_id"],
+    ).first()
+    assert new_event is not None
+    assert new_event.processed is False
+    payload = new_event.payload or {}
+    assert payload.get("manual_retry") is True
+    assert int(payload.get("step_idx")) == 0
+    assert payload.get("restart_from_stage1") is True
+    db.close()
 
 
 def test_retry_returns_404_for_other_tenants_orders():
