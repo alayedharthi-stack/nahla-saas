@@ -634,6 +634,12 @@ class TestBrainPipeline:
         return db
 
     def test_greeting_scenario(self):
+        """Cold greeting runs persona_social compose and returns a non-empty reply."""
+        from modules.ai.brain.persona_expression import (
+            PERSONA_KIND_GREETING,
+            PERSONA_TOPIC_SOCIAL,
+        )
+
         intent = Intent(name=INTENT_GREETING, confidence=0.95, raw_message="مرحبا")
         state  = _make_state(greeted=False)
         facts  = _make_facts()
@@ -641,11 +647,14 @@ class TestBrainPipeline:
         classifier = self._mock_classifier(intent)
         state_store = self._mock_state_store(state)
         facts_loader = self._mock_facts_loader(facts)
+        captured: Dict[str, Any] = {}
 
-        brain = MagicMock()
-        brain.classifier = classifier
-        brain.state_store = state_store
-        brain.facts_loader = facts_loader
+        def _transition_side_effect(current_state, transition_intent, decision):
+            captured["decision"] = decision
+            current_state.greeted = True
+            return current_state
+
+        state_store.transition.side_effect = _transition_side_effect
 
         from modules.ai.brain.pipeline import MerchantBrain
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
@@ -654,6 +663,7 @@ class TestBrainPipeline:
         from modules.ai.brain.compose.responder import DefaultComposer
 
         memory_updater = self._mock_memory_updater()
+        persona_reply = "وعليكم السلام 🌷 تفضل وش تحتاج اليوم؟"
 
         b = MerchantBrain(
             classifier=classifier,
@@ -666,20 +676,32 @@ class TestBrainPipeline:
             memory_updater=memory_updater,
         )
 
-        reply = _run(b.process(
-            db=self._db(),
-            tenant_id=1,
-            customer_phone="+966500000001",
-            message="مرحبا",
-            history=[],
-            profile={},
-        ))
+        with patch(
+            "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
+            new_callable=AsyncMock,
+            return_value=persona_reply,
+        ):
+            reply = _run(b.process(
+                db=self._db(),
+                tenant_id=1,
+                customer_phone="+966500000001",
+                message="مرحبا",
+                history=[],
+                profile={},
+            ))
 
         assert isinstance(reply, dict)
         assert isinstance(reply.get("reply"), str)
+        assert reply["reply"] == persona_reply
         assert len(reply["reply"]) > 0
-        # Greeting template should mention متجرنا or the store name
-        assert "أهلاً" in reply["reply"] or "مرحب" in reply["reply"] or "متجر" in reply["reply"]
+
+        decision = captured.get("decision")
+        assert decision is not None
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+        assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+        assert decision.args.get("block_commerce_escalation") is True
+        assert decision.action != ACTION_GREET
 
     def test_no_products_scenario(self):
         intent = Intent(name=INTENT_ASK_PRODUCT, confidence=0.90, raw_message="عندكم منتج؟",
