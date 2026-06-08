@@ -258,8 +258,10 @@ def test_prompt_includes_payment_media_first_rule():
         assert keyword in prompt.lower() or keyword in prompt, (
             f"payment-media rule missing keyword {keyword!r}"
         )
-    # And it must explicitly forbid the fallback that broke things.
-    assert "تواصل مع المتجر" in prompt or "هذه وسائل التواصل" in prompt
+    # Must forbid handoff/contact-owner fallback when media is available.
+    # Phase-1 prompt refactor (708655b1) moved this policy into
+    # high_priority_layer.BASELINE_POLICY_RULES with updated wording.
+    assert "سأحوّلك للفريق" in prompt or "مكتبة الوسائط" in prompt
     assert "MEDIA_ID=12" in prompt  # GPT can see the exact id to cite
     assert "باركود التحويل البنكي الراجحي" in prompt
 
