@@ -157,6 +157,9 @@ class TestDecisionEngine:
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
+        # Thin pure greeting — DAF (09fd5319) bypasses only actionable substance.
+        ctx.message = "مرحبا"
+        ctx.intent.raw_message = "مرحبا"
         d = eng.decide(ctx)
         assert d.action == ACTION_GREET
 
