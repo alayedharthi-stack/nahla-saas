@@ -27,6 +27,7 @@ from modules.ai.media.semantic_classifier import (
     apply_semantic_payment_override,
     classify_media_semantic,
     compose_neutral_attachment_ack,
+    metadata_qualifies_for_payment_evidence_soft_reply,
 )
 
 
@@ -122,6 +123,19 @@ class TestMediaSemanticClassifier:
         )
         assert sem.reason != "generic_document"
         assert sem.category == MEDIA_UNRELATED
+
+    def test_soft_reply_pair_qualifies_without_semantic_ack(self):
+        md = {
+            "payment_evidence_status": "pre_transfer_review",
+            "pdf_kind": "payment_pre_review",
+        }
+        assert metadata_qualifies_for_payment_evidence_soft_reply(md)
+        assert not allows_payment_media_ack(
+            semantic_category=MEDIA_UNRELATED,
+            payment_evidence_status="pre_transfer_review",
+            awaiting_payment_receipt=False,
+            has_active_order=True,
+        )
 
     def test_payment_evidence_slots_not_erased_by_semantic_override(self):
         """Hybrid B: semantic may gate acks but not erase PE verdicts."""

@@ -325,6 +325,27 @@ def metadata_has_payment_evidence_kind_slots(metadata: Dict[str, Any]) -> bool:
     )
 
 
+_SOFT_REPLY_STATUS_KIND: Dict[str, str] = {
+    "pre_transfer_review": "payment_pre_review",
+    "needs_confirmation": "payment_pending_evidence",
+}
+
+
+def metadata_qualifies_for_payment_evidence_soft_reply(
+    metadata: Dict[str, Any],
+) -> bool:
+    """True when ``core.payment_evidence`` + normalizer stamped a matched
+    non-confirmed verdict/kind pair that warrants
+    ``compose_payment_evidence_reply`` — not a completed-payment ACK."""
+    md = metadata or {}
+    pe = str(md.get("payment_evidence_status") or "").strip()
+    expected_kind = _SOFT_REPLY_STATUS_KIND.get(pe)
+    if not expected_kind:
+        return False
+    kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip()
+    return kind == expected_kind
+
+
 def apply_semantic_payment_override(metadata: Dict[str, Any]) -> Dict[str, Any]:
     """Downgrade payment-evidence slots when semantic says non-payment."""
     md = dict(metadata or {})
@@ -373,4 +394,5 @@ __all__ = [
     "log_payment_media_confirmed",
     "log_payment_media_rejected",
     "metadata_has_payment_evidence_kind_slots",
+    "metadata_qualifies_for_payment_evidence_soft_reply",
 ]

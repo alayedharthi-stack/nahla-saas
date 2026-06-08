@@ -310,6 +310,16 @@ def _recent_visual_batch_count(history: Optional[Sequence[Any]]) -> int:
     return count
 
 
+def _metadata_qualifies_for_pe_soft_reply(meta: dict) -> bool:
+    try:
+        from modules.ai.media.semantic_classifier import (  # noqa: PLC0415
+            metadata_qualifies_for_payment_evidence_soft_reply,
+        )
+        return metadata_qualifies_for_payment_evidence_soft_reply(meta)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_visual_batch_context(
     *,
     message: str = "",
@@ -319,6 +329,8 @@ def is_visual_batch_context(
 ) -> bool:
     """Multimodal inbound without current-turn payment relevance."""
     meta = inbound_metadata or {}
+    if _metadata_qualifies_for_pe_soft_reply(meta):
+        return False
     stripped = strip_media_framing(message)
     sem = _media_semantic_category(meta)
     pe = str(meta.get("payment_evidence_status") or "").strip().lower()
@@ -540,6 +552,10 @@ def evaluate_payment_relevance(
     )
     workflow_fresh = _workflow_is_fresh(summary, dispatch_kind=dispatch_kind)
 
+    pe_soft_reply = _metadata_qualifies_for_pe_soft_reply(
+        inbound_metadata or {},
+    )
+
     media_relevant = True
     if sem in _NON_PAYMENT_MEDIA_SEMANTIC and pe not in {
         "confirmed", "needs_confirmation", "pre_transfer_review",
@@ -547,6 +563,9 @@ def evaluate_payment_relevance(
         media_relevant = False
     if visual_batch:
         media_relevant = False
+    if pe_soft_reply and dispatch_kind == DISPATCH_EVIDENCE_PROMPT:
+        visual_batch = False
+        media_relevant = True
 
     def _emit_log(verdict: PaymentRelevanceVerdict) -> None:
         ctx = log_context or PaymentRelevanceLogContext()

@@ -17,9 +17,11 @@ for _p in [_backend, os.path.join(_backend, "..")]:
 
 from core.order_flow import context_aware_dedup_fallback
 from core.payment_relevance_gate import (
+    DISPATCH_EVIDENCE_PROMPT,
     evaluate_payment_relevance,
     is_visual_batch_context,
     outbound_text_is_payment_artifact,
+    validate_payment_evidence_prompt,
     validate_payment_outbound_artifact,
     validate_payment_workflow_resume,
 )
@@ -217,6 +219,29 @@ class TestEvidencePromptGate:
             route="test",
         )
         assert not verdict.allowed
+
+    def test_allows_deterministic_pre_review_document_evidence_prompt(self):
+        meta = {
+            "pdf_kind": "payment_pre_review",
+            "payment_evidence_status": "pre_transfer_review",
+        }
+        assert not is_visual_batch_context(
+            message="",
+            inbound_metadata=meta,
+            normalized_type="document",
+        )
+        verdict = validate_payment_evidence_prompt(
+            message="",
+            inbound_metadata=meta,
+            normalized_type="document",
+            state_summary={
+                "awaiting_payment_receipt": False,
+                "selected_product": "عسل",
+            },
+            route="payment_evidence_inbound",
+        )
+        assert verdict.allowed
+        assert verdict.dispatch_kind == DISPATCH_EVIDENCE_PROMPT
 
 
 class TestShortContinuationPaymentFlow:
