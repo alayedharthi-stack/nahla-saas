@@ -745,13 +745,14 @@ class TestStateDrivenSimplification:
             facts=facts,
         )
 
-    # --- DecisionEngine: continuation no longer captures product questions ---
+    # --- DecisionEngine: mid-order checkout lock (87e028ea) + fulfillment slots (0526ae17) ---
 
-    def test_ask_product_mid_order_routes_to_search_not_continuation(self):
-        """The screenshot bug: customer mid-order asks 'تعرض لي المنتجات بالصور'
-        and the bot replies with 'سجلت اهتمامك بـ فستان'. After the
-        simplification pass, ASK_PRODUCT mid-order must fall through to
-        SEARCH_PRODUCTS, not coerce into propose_draft_order.
+    def test_ask_product_mid_order_with_order_prep_continues_checkout(self):
+        """Mid-order ASK_PRODUCT with default order_prep → rule_based_checkout since 87e028ea.
+
+        Section 3.7 no longer treats ASK_PRODUCT as continuation, but the earlier
+        deterministic checkout block still fires while order_prep is active unless
+        has_explicit_commerce_topic_change bypasses it.
         """
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
@@ -763,14 +764,11 @@ class TestStateDrivenSimplification:
         ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts(),
                         message="تعرض لي المنتجات بالصور؟")
         d = eng.decide(ctx)
-        assert d.action == ACTION_SEARCH_PRODUCTS, (
-            f"ASK_PRODUCT mid-order must go to SEARCH_PRODUCTS, got {d.action}"
-        )
+        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert "rule_based_checkout" in (d.reason or "")
 
-    def test_address_message_mid_order_still_continues_via_slots(self):
-        """The legitimate 'الرياض ABCD1234' case: classified as something
-        else but carries checkout slot data → must still route to
-        propose_draft_order via the slots clause, not get demoted."""
+    def test_address_message_mid_order_captures_fulfillment_slots(self):
+        """City + short code mid-order → order_context_update since 0526ae17."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         state = _make_state(
@@ -784,7 +782,10 @@ class TestStateDrivenSimplification:
             slots={"city": "الرياض", "short_address_code": "ABCD1234"},
         )
         d = eng.decide(ctx)
-        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert d.action == ACTION_ORDER_CONTEXT_UPDATE
+        assert d.args.get("city") == "الرياض"
+        assert d.args.get("short_address_code") == "ABCD1234"
+        assert d.args.get("fulfillment_kind") == "location_update"
 
     # --- Conversation Commerce State Tracking (merchant feedback round 2) ---
     #
