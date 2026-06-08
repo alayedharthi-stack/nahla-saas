@@ -410,8 +410,12 @@ class TestProviderPostWithContext:
                 path="messages",
                 json={"to": "+966537970430"},
             ))
-        # Body passed through (error already present).
-        assert data == {"error": "unauthorized"}
+        # Provider body preserved; wire-layer may attach _nahla_* metadata.
+        assert data["error"] == "unauthorized"
+        assert data["_nahla_classification"] == "non_2xx"
+        assert data["_nahla_wamid"] is None
+        assert data["_nahla_is_send"] is True
+        assert isinstance(data["_nahla_duration_ms"], (int, float))
 
         from core.wa_provider_observability import get_recent_attempts
         latest = get_recent_attempts(33)[0]
