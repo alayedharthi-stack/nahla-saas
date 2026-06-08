@@ -521,33 +521,19 @@ class TestDispatchNow:
         assert result["ok"] is True
 
     def test_returns_immediately_with_kicked_flag(self, monkeypatch):
-        # The endpoint must spawn the dispatcher in the background
-        # via asyncio.create_task and return ``kicked: true`` BEFORE
-        # the dispatcher has done any work. We assert this by
-        # patching create_task to record the call.
+        # The endpoint must hand off via _spawn_dispatch_in_background
+        # and return ``kicked: true`` BEFORE the dispatcher runs.
         db, _ = _make_db()
         t, tpl, c = _seed(db, status="active", audience_count=2)
 
         spawned: list = []
-        import asyncio as _aio
-        original_create_task = _aio.create_task
 
-        def _capture(coro, *args, **kwargs):
-            spawned.append(coro)
-            # Schedule the coroutine on the running loop so it does
-            # not raise "coroutine was never awaited" warnings; the
-            # test event loop closes before the dispatcher runs.
-            return original_create_task(coro, *args, **kwargs)
+        def _capture_spawn(campaign_id: int) -> None:
+            spawned.append(campaign_id)
 
-        monkeypatch.setattr(_aio, "create_task", _capture)
-
-        # Stub the actual dispatch so the background coroutine is
-        # cheap (we're testing the endpoint, not the dispatcher).
-        async def _fake(_db, cid):
-            return {"campaign_id": cid, "status": "completed", "sent": 2,
-                    "failed": 0, "queued": 0, "errors": []}
-        import services.campaign_dispatcher as cd
-        monkeypatch.setattr(cd, "dispatch_campaign", _fake)
+        monkeypatch.setattr(
+            campaigns_router, "_spawn_dispatch_in_background", _capture_spawn,
+        )
 
         result = _call_dispatch_now(db, t.id, c.id)
         assert result["ok"] is True
@@ -555,8 +541,7 @@ class TestDispatchNow:
         # Status pre-flipped to 'active' so the next list refresh
         # immediately shows "جاري الإرسال".
         assert result["status"] == "active"
-        # A background coroutine was actually scheduled.
-        assert len(spawned) == 1
+        assert spawned == [c.id]
 
     def test_pre_flips_status_to_active(self, monkeypatch):
         # A campaign that was stuck in 'draft' should flip to
@@ -585,7 +570,7 @@ class TestDispatchNow:
             self, monkeypatch,
     ):
         """``bypass_frequency_cap=true`` persists ``_bypass_frequency_cap``
-        on the campaign row before the async task starts; the dispatcher
+        on the campaign row before the background spawn; the dispatcher
         consumes it as a one-shot flag."""
         db, _ = _make_db()
         t, tpl, c = _seed(db, status="draft", audience_count=2)
@@ -594,31 +579,17 @@ class TestDispatchNow:
 
         spawned: list = []
 
-        def _capture_only(coro):  # noqa: ANN001
-            try:
-                coro.close()
-            except (RuntimeError, GeneratorExit):
-                pass
-            spawned.append(coro)
+        def _capture_spawn(campaign_id: int) -> None:
+            spawned.append(campaign_id)
 
-            class _Dummy:
-                def cancel(self):
-                    pass
-
-            return _Dummy()
-
-        monkeypatch.setattr(asyncio, "create_task", _capture_only)
-
-        async def _noop(_db, cid):
-            return {"campaign_id": cid, "status": "completed", "sent": 0,
-                    "failed": 0, "queued": 0, "errors": []}
-        import services.campaign_dispatcher as cd  # noqa: PLC0415
-        monkeypatch.setattr(cd, "dispatch_campaign", _noop)
+        monkeypatch.setattr(
+            campaigns_router, "_spawn_dispatch_in_background", _capture_spawn,
+        )
 
         result = _call_dispatch_now(db, t.id, c.id, bypass_frequency_cap=True)
         assert result["ok"] is True
         assert result["bypass_frequency_cap"] is True
-        assert len(spawned) == 1
+        assert spawned == [c.id]
 
         db.refresh(c)
         assert (c.template_variables or {}).get("_bypass_frequency_cap") == "true"

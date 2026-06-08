@@ -291,6 +291,8 @@ def test_summarise_converted_when_recovery_converted_at_set():
 
 # ── 7. Cancel service: failed status with skip_reason → treated as skipped ──
 def test_step_recorded_as_skipped_when_failed_status_carries_metrics_skip_reason():
+    """Stage-1 skip_reason is surfaced on the real step; later configured
+    stages appear as ``upcoming`` in the full recovery roadmap."""
     db, tid = _db()
     cust = _customer(db, tid)
     auto = _automation(db, tid)
@@ -304,10 +306,13 @@ def test_step_recorded_as_skipped_when_failed_status_carries_metrics_skip_reason
     o = _order(db, tid, recovery_event_id=ev.id)
 
     tl = timeline_for_order(db, tid, o)
-    assert len(tl["steps"]) == 1
-    step = tl["steps"][0]
-    assert step["status"] == "skipped"
-    assert step["skip_reason"] == "customer_purchased"
+    assert len(tl["steps"]) == 3
+    stage1 = next(s for s in tl["steps"] if s["step_idx"] == 1)
+    assert stage1["status"] == "skipped"
+    assert stage1["skip_reason"] == "customer_purchased"
+    upcoming = [s for s in tl["steps"] if s["status"] == "upcoming"]
+    assert len(upcoming) == 2
+    assert [s["step_idx"] for s in upcoming] == [2, 3]
 
 
 # ── 8. timeline_for_order returns chronological steps with full context ─────
