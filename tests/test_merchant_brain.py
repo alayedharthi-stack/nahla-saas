@@ -7,7 +7,7 @@ These tests are *pure unit tests* — no database, no HTTP, no LLM calls.
 Every external dependency is replaced with a mock or stub.
 
 Scenarios:
-  1. greeting      — customer says "مرحبا" → ACTION_GREET, greet template
+  1. greeting      — customer says "مرحبا" → persona_social greeting compose
   2. ask_product   — customer asks for a product → ACTION_SEARCH_PRODUCTS
   3. draft_order   — customer says "أبغى أطلب" with product in focus → ACTION_PROPOSE_DRAFT_ORDER
   4. no_products   — store has no products → ACTION_LLM_REPLY (or search with empty result → no_products template)
@@ -155,13 +155,21 @@ class TestDecisionEngine:
 
     def test_greeting_decision(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.persona_expression import (
+            PERSONA_KIND_GREETING,
+            PERSONA_TOPIC_SOCIAL,
+        )
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
         # Thin pure greeting — DAF (09fd5319) bypasses only actionable substance.
         ctx.message = "مرحبا"
         ctx.intent.raw_message = "مرحبا"
         d = eng.decide(ctx)
-        assert d.action == ACTION_GREET
+        assert d.action == ACTION_LLM_REPLY
+        assert d.args.get("topic") == PERSONA_TOPIC_SOCIAL
+        assert d.args.get("persona_kind") == PERSONA_KIND_GREETING
+        assert d.args.get("block_commerce_escalation") is True
+        assert d.action != ACTION_GREET
 
     def _product_inquiry_ctx(
         self, state: MerchantConversationState,
