@@ -1099,8 +1099,11 @@ def clarify_instead_of_top_products(
                     route="clarify_fallback_llm",
                     preview=msg,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                logger.exception(
+                    "[SOLUTION_SEEKING] telemetry log failed tenant=%s",
+                    tenant_id,
+                )
             return Decision(
                 action=ACTION_LLM_REPLY,
                 args={

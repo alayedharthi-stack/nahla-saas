@@ -292,8 +292,8 @@ def log_price_turn_classification(
             str(getattr(ctx, "message", "") or "")[:80],
             _has_active_focus(ctx),
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[PRICE_TURN] classification log failed")
 
 
 __all__ = [
