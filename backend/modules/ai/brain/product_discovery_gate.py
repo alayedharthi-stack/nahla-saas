@@ -279,7 +279,12 @@ def classify_product_inquiry_route(
             return INQUIRY_CLASS_BROWSE, "clarify"
         return INQUIRY_CLASS_BROWSE, "clarify"
 
-    price_subject = _extract_price_subject(msg)
+    try:
+        from .commerce.price_turn_classifier import normalize_price_subject  # noqa: PLC0415
+
+        price_subject = normalize_price_subject(ctx) or _extract_price_subject(msg)
+    except Exception:  # noqa: BLE001
+        price_subject = _extract_price_subject(msg)
     if price_subject and price_subject.strip() == q and not is_generic_category_noun(q):
         return INQUIRY_CLASS_SPECIFIC, "search"
 
@@ -420,12 +425,22 @@ def _extract_price_subject(message: str) -> str:
 def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
     intent = ctx.intent
     slots = getattr(intent, "slots", None) or {}
-    return (
+    slot_query = (
         str(slots.get("product_query") or "").strip()
         or str(slots.get("product_name") or "").strip()
-        or str(extracted or "").strip()
-        or _extract_price_subject(ctx.message or "")
     )
+    if slot_query:
+        return slot_query
+    if str(extracted or "").strip():
+        return str(extracted or "").strip()
+    try:
+        from .commerce.price_turn_classifier import (  # noqa: PLC0415
+            normalize_price_subject,
+        )
+
+        return normalize_price_subject(ctx)
+    except Exception:  # noqa: BLE001 — never break routing
+        return _extract_price_subject(ctx.message or "")
 
 
 def _is_unit_only_price_message(message: str) -> bool:
@@ -482,8 +497,18 @@ def is_price_without_product_context(
     msg = ctx.message or ""
     if _is_unit_only_price_message(msg):
         return True
-    if _extract_price_subject(msg):
-        return False
+    try:
+        from .commerce.price_turn_classifier import (  # noqa: PLC0415
+            PriceTurnKind,
+            classify_price_turn,
+        )
+
+        kind = classify_price_turn(ctx)
+        if kind == PriceTurnKind.PRODUCT_PRICE_ASK:
+            return False
+    except Exception:  # noqa: BLE001
+        if _extract_price_subject(msg):
+            return False
     norm = _normalize_ar(msg)
     return bool(_PRICE_ONLY_RE.search(norm))
 
@@ -747,17 +772,47 @@ def try_price_query_decision(
     focus = ctx.state.current_product_focus
     product_query = _resolved_product_query(ctx, extracted_product_query)
 
-    if focus and (not product_query or _is_unit_only_price_message(msg)):
+    _price_kind = None
+    _focus_first_kinds: set = set()
+    try:
+        from .commerce.price_turn_classifier import (  # noqa: PLC0415
+            PriceTurnKind,
+            classify_price_turn,
+            log_price_turn_classification,
+        )
+
+        _price_kind = classify_price_turn(ctx)
+        _focus_first_kinds = {
+            PriceTurnKind.PRONOUN_REFERENCE,
+            PriceTurnKind.PRICE_COMMENT,
+            PriceTurnKind.UNIT_PRICE_REFERENCE,
+        }
+    except Exception:  # noqa: BLE001
+        pass
+
+    if focus and (
+        (_price_kind in _focus_first_kinds)
+        or not product_query
+        or _is_unit_only_price_message(msg)
+    ):
         try:
             from .commerce.variant_pricing import try_variant_pricing_decision  # noqa: PLC0415
 
             _variant_dec = try_variant_pricing_decision(ctx)
             if _variant_dec is not None:
+                if _price_kind is not None:
+                    log_price_turn_classification(
+                        ctx, kind=_price_kind, normalized=product_query,
+                    )
                 return _variant_dec
         except Exception as _vp_exc:  # noqa: BLE001
             logger.debug(
                 "[VARIANT_PRICING] decision hook failed tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None), _vp_exc,
+            )
+        if _price_kind is not None:
+            log_price_turn_classification(
+                ctx, kind=_price_kind, normalized=product_query,
             )
         return Decision(
             action=ACTION_LLM_REPLY,
@@ -766,7 +821,15 @@ def try_price_query_decision(
             confidence=0.88,
         )
 
-    if product_query and not _is_unit_only_price_message(product_query):
+    if (
+        product_query
+        and _price_kind == PriceTurnKind.PRODUCT_PRICE_ASK
+        and not _is_unit_only_price_message(product_query)
+    ):
+        if _price_kind is not None:
+            log_price_turn_classification(
+                ctx, kind=_price_kind, normalized=product_query,
+            )
         return None
 
     if is_price_without_product_context(ctx, extracted_product_query=extracted_product_query):

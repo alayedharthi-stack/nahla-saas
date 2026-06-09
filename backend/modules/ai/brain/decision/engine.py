@@ -2237,7 +2237,7 @@ class DefaultDecisionEngine:
             from ..product_discovery_gate import (  # noqa: PLC0415
                 clarify_instead_of_top_products,
                 try_price_query_decision,
-                _extract_price_subject,
+                _resolved_product_query,
             )
             if _is_commerce_blocked(ctx):
                 return Decision(
@@ -2260,11 +2260,8 @@ class DefaultDecisionEngine:
             if _price_dec is not None:
                 return _price_dec
             if facts.has_products:
-                query = (
-                    intent.slots.get("product_query")
-                    or intent.slots.get("product_name")
-                    or _extracted_product_query
-                    or _extract_price_subject(ctx.message or "")
+                query = _resolved_product_query(
+                    ctx, _extracted_product_query,
                 )
                 if not query:
                     from ..product_discovery_gate import extract_inquiry_product_query  # noqa: PLC0415
