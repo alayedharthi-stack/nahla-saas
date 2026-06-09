@@ -90,7 +90,30 @@ def log_clarification_skipped(
         pass
 
 
+def log_clarification_leak_event(
+    *,
+    tenant_id: Any = None,
+    source: str = "",
+    normalized_subject: str = "",
+    resolved_query: str = "",
+    preview: str = "",
+    blocked_text: str = "",
+) -> None:
+    """Production validation — grep ``[CLARIFICATION_LEAK]``."""
+    from .resolved_product_guard import log_clarification_leak  # noqa: PLC0415
+
+    log_clarification_leak(
+        tenant_id=tenant_id,
+        source=source,
+        normalized_subject=normalized_subject,
+        resolved_query=resolved_query,
+        preview=preview,
+        blocked_text=blocked_text,
+    )
+
+
 __all__ = [
+    "log_clarification_leak_event",
     "log_clarification_routed",
     "log_clarification_shadow",
     "log_clarification_skipped",

@@ -236,24 +236,40 @@ class DefaultComposer:
             if not result.success or data.get("message") == "no_products_in_catalog":
                 query = str((decision.args or {}).get("query") or "").strip()
                 inquiry_query = ""
-                _inquiry = False
                 try:
                     from ..product_discovery_gate import (  # noqa: PLC0415
                         extract_inquiry_product_query,
-                        has_explicit_product_inquiry,
                     )
                     inquiry_query = extract_inquiry_product_query(ctx.message or "")
-                    _inquiry = has_explicit_product_inquiry(ctx.message or "")
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — product_discovery_gate optional; generic clarify if unavailable
                     pass
-                subject = query or inquiry_query
-                if _inquiry or subject:
-                    return (
-                        "حاضر 🌷 "
-                        f"بخصوص *{subject or 'المنتج'}* — "
-                        "أي نوع أو صفة تهمك بالضبط؟ "
-                        "مثلاً سدر، طلح، أو حجم معيّن — وأرشّح لك الأنسب."
+                try:
+                    from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                        compose_resolved_product_search_miss,
+                        extract_resolved_product_subject,
+                        log_clarification_leak,
                     )
+                    subject = extract_resolved_product_subject(
+                        ctx, query=query, inquiry_query=inquiry_query,
+                    )
+                    if subject:
+                        log_clarification_leak(
+                            tenant_id=getattr(ctx, "tenant_id", None),
+                            source="search_miss_compose",
+                            normalized_subject=subject,
+                            resolved_query=query or subject,
+                            preview=str(ctx.message or "")[:80],
+                            blocked_text=(
+                                "search_miss_type_clarify:"
+                                f"{data.get('message') or result.error or 'unknown'}"
+                            ),
+                        )
+                        return compose_resolved_product_search_miss(
+                            subject,
+                            variant=self._variant_idx(ctx),
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
                 variant = self._variant_idx(ctx)
                 text = T.no_products(variant=variant)
                 if self._is_duplicate(text, ctx):
@@ -536,7 +552,20 @@ class DefaultComposer:
 
         # ── Clarify ────────────────────────────────────────────────────────
         if action == ACTION_CLARIFY:
-            return T.clarify(question=data.get("question", ""))
+            question = str(data.get("question") or "").strip()
+            try:
+                from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                    apply_resolved_product_clarify_guard,
+                )
+                question = apply_resolved_product_clarify_guard(
+                    ctx,
+                    question,
+                    source="compose_clarify",
+                    query=str((decision.args or {}).get("query") or ""),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return T.clarify(question=question)
 
         # ── Variant-bound pricing (deterministic) ──────────────────────────
         if action == ACTION_VARIANT_PRICING:

@@ -1166,6 +1166,20 @@ def clarify_instead_of_top_products(
         )
 
     try:
+        from .clarification.resolved_product_guard import (  # noqa: PLC0415
+            apply_resolved_product_clarify_guard,
+            has_resolved_product_subject,
+        )
+        if has_resolved_product_subject(ctx):
+            _question = apply_resolved_product_clarify_guard(
+                ctx,
+                _question,
+                source="clarify_instead_of_top_products",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
         from .commerce.solution_seeking import log_intelligent_need_clarification  # noqa: PLC0415
 
         log_intelligent_need_clarification(

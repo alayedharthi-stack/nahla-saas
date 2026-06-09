@@ -190,6 +190,18 @@ class _ClarifyHandler:
     """Ask the customer one focused clarifying question."""
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         question = decision.args.get("question", "ما الذي تبحث عنه بالضبط؟")
+        try:
+            from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                apply_resolved_product_clarify_guard,
+            )
+            question = apply_resolved_product_clarify_guard(
+                ctx,
+                str(question or ""),
+                source="executor_clarify",
+                query=str((decision.args or {}).get("query") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return ActionResult(success=True, data={"question": question, "type": "clarify"})
 
 

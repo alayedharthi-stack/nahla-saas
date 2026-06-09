@@ -6724,19 +6724,31 @@ async def _handle_merchant_message(
                         )
                     except Exception:  # noqa: BLE001
                         pass
-                    # Substitute a short, actionable clarifying reply
-                    # that addresses the ask (price) while still
-                    # acknowledging the salaam — exactly what the
-                    # welcome-gate would produce. We deliberately don't
-                    # invent a price; we ask which type of honey so the
-                    # next turn can answer with the catalogue.
+                    # Substitute a short reply that addresses the ask without
+                    # re-opening product identification when the subject is
+                    # already present in the inbound message.
                     _wg_before = reply
-                    reply = (
-                        "وعليكم السلام ورحمة الله 🌷\n"
-                        "أكيد، عندنا عدة أنواع من العسل. "
-                        "تحب أعطيك الأسعار حسب النوع (سدر / طلح / "
-                        "ضهيان)؟"
-                    )
+                    try:
+                        from modules.ai.brain.clarification.resolved_product_guard import (  # noqa: PLC0415
+                            compose_resolved_product_price_ack,
+                            extract_resolved_product_subject_from_message,
+                        )
+                        _wg_subject = extract_resolved_product_subject_from_message(
+                            text or "",
+                        )
+                    except Exception:  # noqa: BLE001
+                        _wg_subject = ""
+                    if _wg_subject:
+                        reply = (
+                            "وعليكم السلام ورحمة الله 🌷\n"
+                            + compose_resolved_product_price_ack(_wg_subject)
+                        )
+                    else:
+                        reply = (
+                            "وعليكم السلام ورحمة الله 🌷\n"
+                            "أكيد — اكتب اسم المنتج أو نوعه وسأعطيك السعر "
+                            "من الكتالوج."
+                        )
                     _persona_ownership.on_text_replaced(
                         layer="welcome_gate_substitute",
                         reason=_POReason.FALLBACK_REPLY,

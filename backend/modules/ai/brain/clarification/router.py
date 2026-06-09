@@ -73,6 +73,16 @@ def _decision_from_spec(
                 preview=ctx.message or "",
             )
             return None
+        try:
+            from .resolved_product_guard import apply_resolved_product_clarify_guard  # noqa: PLC0415
+
+            question = apply_resolved_product_clarify_guard(
+                ctx,
+                question,
+                source="contextual_clarify_deterministic",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         dec = Decision(
             action=ACTION_CLARIFY,
             args={"question": question},
