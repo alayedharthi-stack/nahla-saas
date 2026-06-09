@@ -10452,6 +10452,28 @@ async def _handle_merchant_message(
                     str(bool(_recovered)).lower(),
                     _delivery_audit,
                 )
+                try:
+                    from modules.ai.brain.commerce.presentation_mode import (  # noqa: PLC0415
+                        log_presentation_mode_dispatch_shadow as _log_pm_shadow,
+                    )
+
+                    _pm_mode = ""
+                    if isinstance(_bs_for_nc, dict):
+                        _pm_mode = str(
+                            _bs_for_nc.get("last_presentation_mode") or ""
+                        ).strip()
+                    _log_pm_shadow(
+                        tenant_id=tenant_id,
+                        presentation_mode=_pm_mode,
+                        delivery_audit=_delivery_audit,
+                        brain_action=_br_action or "",
+                        inbound_preview=text or "",
+                    )
+                except Exception as _pm_shadow_exc:  # noqa: BLE001  # noqa: silent-ok — dispatch shadow is observability-only
+                    logger.debug(
+                        "[PRESENTATION_MODE_SHADOW] tenant=%s skipped: %s",
+                        tenant_id, _pm_shadow_exc,
+                    )
                 if _wants and not _mode_ok(_final_mode):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
