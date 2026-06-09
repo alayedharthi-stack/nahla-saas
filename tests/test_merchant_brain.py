@@ -966,7 +966,14 @@ class TestStateDrivenSimplification:
         reply = _run(composer.compose(
             Decision(action=ACTION_GREET), ActionResult(success=True), ctx,
         ))
-        assert "متجر تجريبي" in reply or "أهلاً" in reply
+        # ARCH-KB-001: ACTION_GREET still fires; phatic reply + salam etiquette.
+        assert reply.strip()
+        assert "وعليكم السلام" in reply
+        assert "هلا" in reply
+        assert "أنا " not in reply
+        assert "كيف أقدر" not in reply
+        # variant=0 (empty history) — store name not required in phatic greeting.
+        assert "متجر تجريبي" not in reply
 
     # --- LLM fallback contract: intent + state + product + goal ---
 
