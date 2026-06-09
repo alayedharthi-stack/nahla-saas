@@ -857,8 +857,8 @@ def scrub_internal_markers(text: str) -> str:
 # to always pick the asset, so the webhook double-checks.
 _PAYMENT_QUERY_RE = re.compile(
     r"("
-    # Banks / accounts
-    r"الراجحي|راجحي|الأهلي|اهلي|الرياض|"
+    # Banks / accounts — ``بنك الرياض`` only; bare city ``الرياض`` is NOT a bank.
+    r"الراجحي|راجحي|الأهلي|اهلي|بنك\s*الرياض|"
     r"حساب\s*(الـ?بنك|بنكي?|الراجحي|الأهلي)|رقم\s*الحساب|"
     r"ارسل(?:وا)?\s*(?:لي\s+)?(?:ال)?حساب|"
     # IBAN
@@ -904,6 +904,30 @@ _PAYMENT_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Service / therapy / informational asks — never payment consent (P0 May 2026).
+_NON_PAYMENT_SERVICE_INQUIRY_RE = re.compile(
+    r"(?:"
+    r"لسع\s*(?:ال)?نحل|"
+    r"يلسع(?:ني|ون|هم)?|"
+    r"يسوي\s*لسع|"
+    r"علاج\s*لسع|"
+    r"فائد(?:ه|ة)\s+لسع|"
+    r"وش\s+فائد(?:ه|ة)|"
+    r"فائد(?:ه|ة)\s+(?:البروبوليس|بروبوليس)|"
+    r"وين\s+أ?لقى|"
+    r"هل\s+فيه\s+احد|"
+    r"فيه\s+احد\s+يقدر"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_non_payment_service_inquiry(message: str) -> bool:
+    """True when the customer asks about a service/info — not bank transfer."""
+    if not (message or "").strip():
+        return False
+    return bool(_NON_PAYMENT_SERVICE_INQUIRY_RE.search(_normalize_for_match(message)))
+
 
 def is_payment_query(message: str) -> bool:
     """Cheap rule-based check used by the webhook to decide whether to
@@ -911,6 +935,8 @@ def is_payment_query(message: str) -> bool:
     the asset finder filters by tag relevance — but false negatives are
     not, since the whole point is to recover when GPT misses the asset."""
     if not message:
+        return False
+    if is_non_payment_service_inquiry(message):
         return False
     raw = str(message)
     if _PAYMENT_QUERY_RE.search(raw):

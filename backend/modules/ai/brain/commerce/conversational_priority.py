@@ -59,7 +59,7 @@ _COMMERCE_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
 _PAYMENT_SEMANTIC_RE = re.compile(
     r"(?:"
     r"ارسل(?:وا)?\s*(?:لي\s+)?(?:ال)?حساب|"
-    r"(?:ابي|ابغى|أبي|أبغى|ودي|حاب)\s+(?:احول|أحول|ادفع|أدفع)|"
+    r"(?:ابي|ابغى|ابغي|أبي|أبغى|ودي|حاب)\s+(?:احول|أحول|ادفع|أدفع)|"
     r"وين\s+(?:ال)?(?:دفع|تحويل)|"
     r"جاهز(?:ه|ة)?\s*(?:لل)?تحويل|"
     r"(?:حساب|رقم)\s*(?:ال)?بنك|"
@@ -407,6 +407,10 @@ def detect_payment_intent_strength(
         return PaymentIntentVerdict(0.0, "blocked")
 
     msg = (message or "").strip()
+    from core.ai_libraries import is_non_payment_service_inquiry  # noqa: PLC0415
+    if is_non_payment_service_inquiry(msg):
+        return PaymentIntentVerdict(0.0, "blocked")
+
     norm = _norm(msg)
 
     try:
