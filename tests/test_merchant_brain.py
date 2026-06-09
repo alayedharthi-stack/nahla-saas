@@ -291,10 +291,22 @@ class TestDecisionEngine:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestComposerTemplates:
-    def test_greeting_contains_store_name(self):
+    def test_greeting_phatic_variant_may_include_store_name(self):
         from modules.ai.brain.compose.templates import greeting
-        text = greeting(store_name="متجر النور")
+
+        # ARCH-KB-001: store name only in variant 2 — phatic, no self-intro.
+        text = greeting(store_name="متجر النور", variant=2)
         assert "متجر النور" in text
+        assert "أنا " not in text
+        assert "كيف أقدر" not in text
+
+    def test_greeting_default_variant_is_phatic_without_store_name(self):
+        from modules.ai.brain.compose.templates import greeting
+
+        text = greeting(store_name="متجر النور", variant=0)
+        assert "متجر النور" not in text
+        assert "أنا " not in text
+        assert "كيف أقدر" not in text
 
     def test_product_results(self):
         from modules.ai.brain.compose.templates import product_results
