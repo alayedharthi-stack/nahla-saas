@@ -89,6 +89,35 @@ _STOP_PRODUCT_TOKENS = frozenset({
     "اللي", "لي", "وين", "فين", "سعر", "كم", "بكم", "ثمن", "ريال",
 })
 
+# Vision-template tokens — never valid catalog queries (ARCH-MEDIA-001 Wave 0).
+_VISION_QUERY_STOPLIST_RAW = (
+    "المحتوى",
+    "نوع المحتوى",
+    "صورة",
+    "صورة عامة",
+    "عام",
+    "المحتوى العام",
+    "الوصف",
+    "وصف الصورة",
+)
+
+_BOT_FRAMING_LINE_PREFIXES = (
+    "[وصف الصورة",
+    "[وصف الفيديو",
+    "[تصنيف الصورة",
+    "[تصنيف الوسائط",
+    "[فيديو من العميل",
+    "[تفريغ التسجيل",
+    "[طلب كتالوج",
+)
+
+_BOT_FRAMING_SKIP_LINE_MARKERS = (
+    "استنتاج خفيف من النص",
+    "اقرأ السياق ورد على العميل",
+    "ملاحظة: الفيديو",
+    "ملاحظة: تعذّر استخراج",
+)
+
 
 @dataclass(frozen=True)
 class TrustedFocusResult:
@@ -116,6 +145,11 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+_VISION_QUERY_STOPLIST = frozenset(
+    {_norm(v) for v in _VISION_QUERY_STOPLIST_RAW if v}
+)
+
+
 def _strip_voice_framing(text: str) -> str:
     """Remove ``[تفريغ التسجيل]`` and similar media prefixes."""
     s = (text or "").strip()
@@ -123,9 +157,60 @@ def _strip_voice_framing(text: str) -> str:
     return s.strip()
 
 
+def strip_bot_media_framing(text: str) -> str:
+    """Strip normalizer / brain framing; keep customer caption + vision body.
+
+    Removes bot-generated lines such as ``[وصف الصورة المرسلة]``,
+    ``[تصنيف الصورة: …]``, and video instruction blocks.  When a
+    vision line carries a ``]`` suffix, only the OCR/vision body after
+    the closing bracket is kept.
+    """
+    if not text:
+        return ""
+    lines: List[str] = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if any(s.startswith(prefix) for prefix in _BOT_FRAMING_LINE_PREFIXES):
+            if (
+                s.startswith("[وصف الصورة")
+                or s.startswith("[وصف الفيديو")
+                or s.startswith("[تفريغ التسجيل")
+            ):
+                if "]" in s:
+                    remainder = s.split("]", 1)[-1].strip()
+                    if remainder:
+                        lines.append(remainder)
+                else:
+                    remainder = _strip_voice_framing(s)
+                    if remainder:
+                        lines.append(remainder)
+            continue
+        if s.startswith("[تصنيف") or s.startswith("[طلب كتالوج"):
+            continue
+        if any(marker in s for marker in _BOT_FRAMING_SKIP_LINE_MARKERS):
+            continue
+        lines.append(s)
+    return "\n".join(lines).strip()
+
+
+def _is_vision_stoplist_query(candidate: str) -> bool:
+    """True when *candidate* is a vision-template token, not a SKU."""
+    core = _norm((candidate or "").strip())
+    if not core:
+        return True
+    if core in _VISION_QUERY_STOPLIST:
+        return True
+    for stop in _VISION_QUERY_STOPLIST_RAW:
+        if core == _norm(stop):
+            return True
+    return False
+
+
 def normalize_for_visual_detection(text: str) -> str:
     """Normalize inbound (incl. STT quirks) before visual intent detection."""
-    raw = _strip_voice_framing(text or "")
+    raw = strip_bot_media_framing(text or "")
     norm = _norm(raw)
     for pat, repl in _STT_REPLACEMENTS:
         norm = re.sub(pat, repl, norm)
@@ -145,7 +230,7 @@ def prepare_inbound_for_commerce(
     same turn, then applies lightweight STT normalization.
     """
     bs = brain_state or {}
-    raw = _strip_voice_framing(raw_message or "")
+    raw = strip_bot_media_framing(_strip_voice_framing(raw_message or ""))
     canonical = str(bs.get("last_inbound_canonical") or "").strip()
     canon_turn = int(bs.get("last_inbound_canonical_turn") or 0)
     current_turn = int(bs.get("turn") or 0)
@@ -565,6 +650,38 @@ def is_deictic_visual_request(message: str) -> bool:
     return False
 
 
+def _customer_visual_ask_present(norm: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:اب(?:ي|غ(?:ى|a)?)|أ(?:بي|ب(?:غ(?:ى|a)?)?)|ودي|ور(?:ي|)ني|"
+            r"ار(?:سل|سل)|ابعث|اشوف|أشوف|اعرض|وين|فين)",
+            norm,
+        )
+    )
+
+
+def _is_customer_named_visual_request(norm: str) -> bool:
+    """Named visual asks only — reject vision-OCR ``في الصورة`` descriptions."""
+    if _GENERIC_VISUAL_RE.search(norm):
+        return True
+    m = _NAMED_VISUAL_RE.search(norm)
+    if not m:
+        return False
+    gd = m.groupdict()
+    product = (gd.get("product") or "").strip()
+    product2 = (gd.get("product2") or "").strip()
+    product3 = (gd.get("product3") or "").strip()
+    if product or product2:
+        return True
+    if product3:
+        if _norm(product3) in _STOP_PRODUCT_TOKENS:
+            return False
+        if _is_vision_stoplist_query(product3):
+            return False
+        return _customer_visual_ask_present(norm)
+    return _customer_visual_ask_present(norm)
+
+
 def is_product_visual_request(message: str) -> bool:
     """True for any product image / catalog-card visual ask."""
     raw = (message or "").strip()
@@ -575,9 +692,7 @@ def is_product_visual_request(message: str) -> bool:
         return False
     if is_deictic_visual_request(raw):
         return True
-    if _GENERIC_VISUAL_RE.search(norm):
-        return True
-    if _NAMED_VISUAL_RE.search(norm):
+    if _is_customer_named_visual_request(norm):
         return True
     if re.search(
         r"^(?:ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a)|اعرض(?:\s*لي)?)\s+[\w\u0600-\u06FF]{2,40}\s*$",
@@ -598,7 +713,9 @@ def extract_visual_product_query(message: str) -> str:
         norm,
     )
     if m2:
-        return (m2.group(1) or "").strip()
+        cand = (m2.group(1) or "").strip()
+        if not _is_vision_stoplist_query(cand):
+            return cand
     m_carousel = re.search(
         r"(?:ال)?(?:عسل|منتج|طلح|سدر|سمر)\s+(?:اللي\s+)?(?:فوق|هذا|هذي)\b",
         norm,
@@ -608,7 +725,10 @@ def extract_visual_product_query(message: str) -> str:
     m3 = re.search(r"([\w\u0600-\u06FF]{2,20})\s+صور(?:ه|ة)?", norm)
     if m3:
         cand = (m3.group(1) or "").strip()
-        if cand not in _STOP_PRODUCT_TOKENS:
+        if (
+            cand not in _STOP_PRODUCT_TOKENS
+            and not _is_vision_stoplist_query(cand)
+        ):
             return cand
     m4 = re.search(
         r"^(?:ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a)|اعرض(?:\s*لي)?)\s+([\w\u0600-\u06FF]{2,40})\s*$",
@@ -616,13 +736,21 @@ def extract_visual_product_query(message: str) -> str:
     )
     if m4:
         cand = (m4.group(1) or "").strip()
-        if cand not in _STOP_PRODUCT_TOKENS and cand not in {"شكل", "شكلها", "شكله"}:
+        if (
+            cand not in _STOP_PRODUCT_TOKENS
+            and cand not in {"شكل", "شكلها", "شكله"}
+            and not _is_vision_stoplist_query(cand)
+        ):
             return cand
     m = _NAMED_VISUAL_RE.search(norm)
     if m:
         for g in ("product", "product2", "product3"):
             val = (m.group(g) or "").strip()
-            if val and val not in _STOP_PRODUCT_TOKENS:
+            if (
+                val
+                and val not in _STOP_PRODUCT_TOKENS
+                and not _is_vision_stoplist_query(val)
+            ):
                 return val.strip()
     return ""
 
@@ -726,5 +854,6 @@ __all__ = [
     "stamp_product_focus_metadata",
     "stamp_visual_focus_from_outbound_reply",
     "stamp_visual_focus_metadata",
+    "strip_bot_media_framing",
     "visual_focus_age_turns",
 ]
