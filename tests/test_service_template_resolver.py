@@ -5,17 +5,19 @@ Lock down the smart cart-recovery template resolver so the production
 automation engine never again refuses to send because an APPROVED
 template exists but isn't bound to its `service_key` / `step_number`.
 
-The five fallback layers we test:
+Fallback layers exercised by ``resolve_template_for_send``:
 
   a. Strict resolve (active + visible + APPROVED + matching slot)
   b. Same slot but `is_active=False` → auto-promote
   c. Bind via `nahla_source_key` matching the library entry for the slot
   d. Bind via legacy config-level `template_name`
   e. Same `service_key`, ANY `step_number` → bind to the requested step
+     (**disabled for ``cart_recovery``** — each stage needs its own template)
+  f. Keyword pattern on template name
+     (**disabled for ``cart_recovery``** — no guessing; stage does not send)
 
-For (b)–(e) we also assert the row is **persisted** with
-`service_key`, `step_number`, and `is_active=True` so subsequent sends
-hit the strict path.
+``cart_recovery`` uses layers a–d only (3-stage template-only autopilot).
+Other services still use e/f where applicable.
 """
 from __future__ import annotations
 
@@ -193,24 +195,40 @@ class TestResolveTemplateForSend:
         finally:
             db.close()
 
-    def test_e_match_any_step_on_same_service_auto_binds(self):
-        """When the merchant only has one cart-recovery template approved,
-        we should still send something rather than fail every stage."""
+    def test_e_cart_recovery_skips_cross_step_fallback(self):
+        """cart_recovery must not borrow a template bound to another stage."""
         db, _ = _make_db()
         try:
             tenant = _seed_tenant(db)
-            # Bound to step 1 only, but stage-2 send is being attempted.
             tpl = _seed_template(
                 db, tenant.id,
                 name="cart_recovery_only",
                 service_key="cart_recovery", step_number=1, is_active=True,
             )
             got = resolve_template_for_send(db, tenant.id, "cart_recovery", 2)
+            assert got is None
+            db.refresh(tpl)
+            assert tpl.step_number == 1
+            assert tpl.service_key == "cart_recovery"
+        finally:
+            db.close()
+
+    def test_e_any_step_still_auto_binds_for_non_cart_recovery_services(self):
+        """Layer e remains active for services that allow cross-step fallback."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="payment_reminder_step1",
+                service_key="payment_reminder", step_number=1, is_active=True,
+            )
+            got = resolve_template_for_send(db, tenant.id, "payment_reminder", 2)
             assert got is not None and got.id == tpl.id
-            # Notice: we don't reassign step on the original — we DO,
-            # because the auto-bind logic stamps the requested step.
             db.refresh(tpl)
             assert tpl.step_number == 2
+            assert tpl.service_key == "payment_reminder"
+            assert tpl.is_active is True
         finally:
             db.close()
 
@@ -249,11 +267,8 @@ class TestResolveTemplateForSend:
         finally:
             db.close()
 
-    def test_f_keyword_pattern_matches_english_name(self):
-        """Real-world: merchant created template directly in Meta Business
-        Manager named e.g. `cart_reminder_v2_ar`. No service_key, no
-        nahla_source_key, no exact-name match — but the keyword fallback
-        recognises 'cart' and binds it."""
+    def test_f_cart_recovery_skips_keyword_pattern_english_name(self):
+        """cart_recovery must not guess from template name keywords."""
         db, _ = _make_db()
         try:
             tenant = _seed_tenant(db)
@@ -264,17 +279,16 @@ class TestResolveTemplateForSend:
                 service_key=None, step_number=None, is_active=False,
             )
             got = resolve_template_for_send(db, tenant.id, "cart_recovery", 1)
-            assert got is not None and got.id == tpl.id
+            assert got is None
             db.refresh(tpl)
-            assert tpl.service_key == "cart_recovery"
-            assert tpl.step_number == 1
-            assert tpl.is_active is True
+            assert tpl.service_key is None
+            assert tpl.step_number is None
+            assert tpl.is_active is False
         finally:
             db.close()
 
-    def test_f_keyword_pattern_matches_arabic_name(self):
-        """Same as above but the merchant's template name is in Arabic
-        (`تذكير_السلة_المتروكة`). The Arabic patterns must also catch it."""
+    def test_f_cart_recovery_skips_keyword_pattern_arabic_name(self):
+        """cart_recovery must not guess from Arabic cart-related names."""
         db, _ = _make_db()
         try:
             tenant = _seed_tenant(db)
@@ -285,7 +299,31 @@ class TestResolveTemplateForSend:
                 service_key=None, step_number=None, is_active=False,
             )
             got = resolve_template_for_send(db, tenant.id, "cart_recovery", 1)
+            assert got is None
+            db.refresh(tpl)
+            assert tpl.service_key is None
+            assert tpl.step_number is None
+            assert tpl.is_active is False
+        finally:
+            db.close()
+
+    def test_f_keyword_pattern_matches_english_name_for_other_services(self):
+        """Keyword fallback (layer f) still works outside cart_recovery."""
+        db, _ = _make_db()
+        try:
+            tenant = _seed_tenant(db)
+            tpl = _seed_template(
+                db, tenant.id,
+                name="unpaid_order_reminder_ar",
+                category="MARKETING",
+                service_key=None, step_number=None, is_active=False,
+            )
+            got = resolve_template_for_send(db, tenant.id, "payment_reminder", 1)
             assert got is not None and got.id == tpl.id
+            db.refresh(tpl)
+            assert tpl.service_key == "payment_reminder"
+            assert tpl.step_number == 1
+            assert tpl.is_active is True
         finally:
             db.close()
 

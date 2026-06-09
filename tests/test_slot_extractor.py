@@ -33,7 +33,9 @@ from modules.ai.brain.intent.slot_extractor import (
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # Fresh loop per call — get_event_loop() fails on Python 3.12+ after
+    # prior tests (e.g. test_salla_pages_sync) close the default loop.
+    return asyncio.run(coro)
 
 
 def _mock_haiku_response(json_payload: Dict[str, Any]):
