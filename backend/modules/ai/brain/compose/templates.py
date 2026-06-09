@@ -64,56 +64,18 @@ from .mirror_replies import mirror_reply as _mirror_reply
 #     "مساعد {store_name}" phrasing. Kept so an explicit empty
 #     setting still produces a polite greeting.
 
+# ARCH-KB-001: phatic greetings only — no self-intro, no capability bullets,
+# no help-desk closers. Used only on rollback paths when persona compose is OFF.
 _GREETING_NAMED_VARIANTS = [
-    # variant 0
-    lambda persona, store: (
-        f"أهلاً! أنا {persona} 🤖 مساعدتك من *{store}*.\n"
-        "أقدر أساعدك في:\n"
-        "• البحث عن منتج معيّن أو معرفة الأسعار\n"
-        "• إنشاء طلب مباشرة من هنا\n"
-        "• متابعة الشحن والاستفسارات\n\n"
-        "وش تحتاج اليوم؟"
-    ),
-    # variant 1
-    lambda persona, store: (
-        f"مرحباً بك في *{store}*! 👋\n"
-        f"أنا {persona}، أقدر أساعدك في:\n"
-        "• اقتراح المنتج المناسب لك\n"
-        "• إنشاء طلبك مباشرة\n"
-        "• الإجابة عن الشحن والدفع\n\n"
-        "بماذا أخدمك؟"
-    ),
-    # variant 2
-    lambda persona, store: (
-        f"أهلاً وسهلاً! 🌟 معك *{persona}* من *{store}*.\n"
-        "قولي وش تحتاج — منتج، سعر، طلب، أو أي استفسار — وأنا هنا."
-    ),
+    lambda persona, store: "يا هلا 🌷",
+    lambda persona, store: "حياك الله 💛",
+    lambda persona, store: f"وعليكم السلام 🌷 — نورت *{store}*",
 ]
 
 _GREETING_GENERIC_VARIANTS = [
-    # variant 0
-    lambda store: (
-        f"أهلاً! أنا مساعد {store} الذكي 🤖\n"
-        "هنا أساعدك في أي شي تحتاجه:\n"
-        "• استفسارات عن المنتجات والأسعار\n"
-        "• إنشاء طلب مباشرة من هنا\n"
-        "• متابعة الشحن\n\n"
-        "كيف أقدر أساعدك اليوم؟"
-    ),
-    # variant 1
-    lambda store: (
-        f"مرحباً بك في {store}! 👋\n"
-        "أنا المساعد الذكي وأقدر أساعدك في:\n"
-        "• البحث عن المنتج المناسب\n"
-        "• إنشاء طلبك مباشرة\n"
-        "• الاستفسار عن الشحن والدفع\n\n"
-        "بماذا أخدمك؟"
-    ),
-    # variant 2
-    lambda store: (
-        f"أهلاً وسهلاً! 🌟 معك مساعد {store}.\n"
-        "قولي وش تحتاج — منتج، سعر، طلب، أو أي استفسار — وأنا هنا."
-    ),
+    lambda store: "يا هلا 🌷",
+    lambda store: "حياك الله 💛",
+    lambda store: f"وعليكم السلام 🌷 — نورت *{store}*",
 ]
 
 
@@ -139,9 +101,9 @@ def greeting(
 # introduced=True`` only the explicit identity FAQ (faq_identity) is
 # allowed to re-state who the bot is.
 _REGREET_VARIANTS = [
-    "ياهلا 🌷 وش أقدر أخدمك فيه؟",
-    "حياك الله 💛 تحت أمرك.",
-    "أهلاً 🌷 قول وش تحتاج وأكمل معك.",
+    "ياهلا 🌷",
+    "حياك الله 💛",
+    "أهلاً 🌷",
 ]
 
 

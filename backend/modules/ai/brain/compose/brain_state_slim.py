@@ -332,7 +332,10 @@ def prepare_brain_state_dict_with_telemetry(
     contract_eligible = is_persona_contract_eligible(state)
     removed: List[str] = []
     if persona_mode:
-        actual_dict = slim_brain_state_dict_for_persona(raw_dict)
+        actual_dict = slim_brain_state_dict_for_persona(
+            raw_dict,
+            persona_topic=str(getattr(state, "persona_topic", "") or ""),
+        )
         if contract_eligible:
             slim_profile = "persona_contract_shadow"
             slim_reason = "persona_contract_shadow_metrics"

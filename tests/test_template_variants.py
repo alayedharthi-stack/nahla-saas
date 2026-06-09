@@ -78,9 +78,11 @@ class TestGreetingVariants:
         assert T.greeting(variant=3) == T.greeting(variant=0)
         assert T.greeting(variant=4) == T.greeting(variant=1)
 
-    def test_store_name_injected(self):
-        result = T.greeting(store_name="متجر الاختبار", variant=0)
+    def test_store_name_injected_on_phatic_variant(self):
+        # ARCH-KB-001: only variant 2 weaves store name — phatic, no self-intro.
+        result = T.greeting(store_name="متجر الاختبار", variant=2)
         assert "متجر الاختبار" in result
+        assert "أنا " not in result
 
 
 class TestProductResultsVariants:

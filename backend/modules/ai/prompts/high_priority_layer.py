@@ -32,7 +32,19 @@ Design constraints
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
+
+# Lines stripped from owner_instructions on persona turns (ARCH-KB-001).
+_PERSONA_OWNER_STRIP_RE = re.compile(
+    r"(?:"
+    r"عرّف|عرفي\s+نفس|أول\s+رسالة|"
+    r"مستشارة|موظف|موظفة|خدمة\s+العملاء|"
+    r"كيف\s+أقدر\s+أخدم|كيف\s+أساعد|"
+    r"\[COUPON|\[TEMPLATE|\[TRANSFER|\$\{knowledge\}"
+    r")",
+    re.IGNORECASE,
+)
 
 # ── Reused normalization maps from the legacy overlay ────────────────────────
 # We import lazily inside the function to avoid an import cycle if a future
@@ -61,13 +73,37 @@ def _normalize_style(settings: Dict[str, Any]) -> Dict[str, str]:
     return out
 
 
-def _normalize_policy(settings: Dict[str, Any]) -> Dict[str, str]:
+def filter_owner_instructions_for_persona(text: str) -> str:
+    """Drop identity/sales/script lines from owner_instructions on persona turns."""
+    if not (text or "").strip():
+        return ""
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _PERSONA_OWNER_STRIP_RE.search(stripped):
+            continue
+        kept.append(stripped)
+    return "\n".join(kept)
+
+
+def _normalize_policy(
+    settings: Dict[str, Any],
+    *,
+    persona_expression_mode: bool = False,
+) -> Dict[str, str]:
     """Pull owner_instructions / coupon_rules / escalation_rules out."""
     out: Dict[str, str] = {}
 
     owner_instructions = str(settings.get("owner_instructions") or "").strip()
     if owner_instructions:
-        out["owner_instructions"] = owner_instructions
+        if persona_expression_mode:
+            owner_instructions = filter_owner_instructions_for_persona(
+                owner_instructions
+            )
+        if owner_instructions:
+            out["owner_instructions"] = owner_instructions
 
     coupon_rules = str(settings.get("coupon_rules") or "").strip()
     allowed_discount = str(settings.get("allowed_discount_levels") or "").strip()
@@ -293,7 +329,7 @@ BASELINE_POLICY_RULES: tuple[str, ...] = (
     # customer asked a direct identity question.
     "تعريف النفس مرة واحدة فقط في المحادثة. إذا identity_already_introduced=true ممنوع تمامًا تكتبي «أنا نحلة / أنا مساعدة / أنا مستشارة / أنا ذكاء اصطناعي» في أي رد لاحق. الردود تبقى طبيعية ومباشرة («ياهلا 🌷» / «حياك الله» / «تحت أمرك»).",
     "الاستثناء الوحيد: إذا سأل العميل صراحةً «هل أنت ذكاء اصطناعي؟ / هل أنت بوت؟ / هل هذا رد آلي؟ / هل أنت إنسان؟ / مين أنت؟» — جاوبي بجملة قصيرة طبيعية مثل: «نعم 🌷 أنا نظام ذكي يساعد في خدمة العملاء والطلبات.» بدون قائمة قدرات وبدون شرح طويل.",
-    "ممنوع إعادة الترحيب الكامل في المحادثة الواحدة. لو state.greeted=true، الرد على «هلا/مرحبا/السلام عليكم» هو سطر واحد دافئ بدون تعريف («ياهلا 🌷 وش أقدر أخدمك فيه؟»).",
+    "ممنوع إعادة الترحيب الكامل في المحادثة الواحدة. لو state.greeted=true، الرد على «هلا/مرحبا/السلام عليكم» هو سطر واحد دافئ بدون تعريف («ياهلا 🌷» / «حياك الله» — بدون «كيف أقدر أخدمك»).",
     "لا ترسل رقم موظف أو معلومات تواصل بشري في أول رسالة. اسأل أولًا عن طبيعة الاستفسار.",
     "للتصعيد للموظف: استخدم intent التصعيد الرسمي فقط — لا تكتب رقم الموظف في النص.",
     "قبل أن تذكر منتجًا اسمًا وسعرًا، اطلب الكرت الكامل عبر [PRODUCT:<اسم المنتج>] — النظام سيرسل الصورة والسعر والرابط.",
@@ -463,7 +499,10 @@ def build_high_priority_block(
     """
     settings = settings or {}
     style_overrides = _normalize_style(settings)
-    policy_overrides = _normalize_policy(settings)
+    policy_overrides = _normalize_policy(
+        settings,
+        persona_expression_mode=persona_expression_mode,
+    )
 
     lines: list[str] = []
 
