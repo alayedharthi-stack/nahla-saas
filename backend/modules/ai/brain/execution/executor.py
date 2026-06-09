@@ -200,8 +200,10 @@ class _ClarifyHandler:
                 source="executor_clarify",
                 query=str((decision.args or {}).get("query") or ""),
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception(
+                "[EXECUTOR] resolved_product_clarify_guard failed",
+            )
         return ActionResult(success=True, data={"question": question, "type": "clarify"})
 
 

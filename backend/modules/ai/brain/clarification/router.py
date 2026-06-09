@@ -8,6 +8,7 @@ Phase 1: ``CONTEXTUAL_CLARIFY_ENABLED=true`` replaces legacy template fallback.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from ..decision.actions import ACTION_CLARIFY, ACTION_LLM_REPLY
@@ -26,6 +27,8 @@ from .types import (
     ClarificationSpec,
     RECOVERY_GENERATIVE,
 )
+
+logger = logging.getLogger("nahla.brain.clarification.router")
 
 
 def record_clarification_shadow(
@@ -81,8 +84,10 @@ def _decision_from_spec(
                 question,
                 source="contextual_clarify_deterministic",
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception(
+                "[CLARIFICATION] resolved_product_clarify_guard failed",
+            )
         dec = Decision(
             action=ACTION_CLARIFY,
             args={"question": question},

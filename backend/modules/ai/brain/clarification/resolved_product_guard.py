@@ -71,8 +71,10 @@ def extract_resolved_product_subject(
         resolved = str(_resolved_product_query(ctx) or "").strip()
         if resolved and _has_product_substance(resolved):
             return resolved
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception(
+            "[RESOLVED_PRODUCT_GUARD] _resolved_product_query failed",
+        )
 
     focus = getattr(getattr(ctx, "state", None), "current_product_focus", None) or {}
     if isinstance(focus, dict):
@@ -154,7 +156,7 @@ def log_clarification_leak(
             (preview or "")[:80],
             (blocked_text or "")[:120],
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — telemetry emit must never raise to caller
         pass
 
 
@@ -251,8 +253,10 @@ def extract_resolved_product_subject_from_message(message: str) -> str:
             c = str(candidate or "").strip()
             if c and _has_product_substance(c):
                 return c
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception(
+            "[RESOLVED_PRODUCT_GUARD] message subject extraction failed",
+        )
     return ""
 
 

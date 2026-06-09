@@ -1127,8 +1127,10 @@ def clarify_instead_of_top_products(
             )
             if _ctx_clar is not None:
                 return _ctx_clar
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception(
+                "[PRODUCT_DISCOVERY] contextual_clarification_fallback failed",
+            )
 
         _question = intelligent_need_clarification("general_attribute")
         if should_suppress_repeat_need_clarification(state, "general_attribute", _question):

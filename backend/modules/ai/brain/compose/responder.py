@@ -268,8 +268,10 @@ class DefaultComposer:
                             subject,
                             variant=self._variant_idx(ctx),
                         )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:
+                    logger.exception(
+                        "[RESPONDER] resolved_product_search_miss compose failed",
+                    )
                 variant = self._variant_idx(ctx)
                 text = T.no_products(variant=variant)
                 if self._is_duplicate(text, ctx):
@@ -563,8 +565,10 @@ class DefaultComposer:
                     source="compose_clarify",
                     query=str((decision.args or {}).get("query") or ""),
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                logger.exception(
+                    "[RESPONDER] resolved_product_clarify_guard failed",
+                )
             return T.clarify(question=question)
 
         # ── Variant-bound pricing (deterministic) ──────────────────────────
@@ -960,7 +964,7 @@ class DefaultComposer:
                         goal_regimen_bundle=getattr(ctx, "goal_regimen_bundle", None),
                         history_messages=history_messages,
                     )
-            except Exception:  # noqa: BLE001 — shadow must never break compose
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — shadow must never break compose
                 pass
 
             payload = await asyncio.wait_for(
