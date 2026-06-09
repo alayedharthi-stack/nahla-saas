@@ -1127,8 +1127,10 @@ def clarify_instead_of_top_products(
             )
             if _ctx_clar is not None:
                 return _ctx_clar
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception(
+                "[PRODUCT_DISCOVERY] contextual_clarification_fallback failed",
+            )
 
         _question = intelligent_need_clarification("general_attribute")
         if should_suppress_repeat_need_clarification(state, "general_attribute", _question):
@@ -1164,6 +1166,20 @@ def clarify_instead_of_top_products(
             "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة "
             "وأرشّح لك الأنسب — بدون ما تحتاج تكتب اسم منتج."
         )
+
+    try:
+        from .clarification.resolved_product_guard import (  # noqa: PLC0415
+            apply_resolved_product_clarify_guard,
+            has_resolved_product_subject,
+        )
+        if has_resolved_product_subject(ctx):
+            _question = apply_resolved_product_clarify_guard(
+                ctx,
+                _question,
+                source="clarify_instead_of_top_products",
+            )
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         from .commerce.solution_seeking import log_intelligent_need_clarification  # noqa: PLC0415

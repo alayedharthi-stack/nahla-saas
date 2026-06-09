@@ -197,6 +197,26 @@ class ProductSearchHandler:
             )
             products = list(runtime_result.payload.get("products") or [])
 
+            # Intelligent retry when exact FTS misses but subject is resolved.
+            if not products and str(query or "").strip():
+                from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                    search_retry_queries,
+                )
+                for alt_query in search_retry_queries(str(query)):
+                    retry_result = await runtime.execute(
+                        "search_products",
+                        {"query": alt_query, "limit": fetch_limit},
+                    )
+                    retry_products = list(retry_result.payload.get("products") or [])
+                    if retry_products:
+                        logger.info(
+                            "[SearchHandler] retry_hit | tenant=%s orig=%r "
+                            "alt=%r count=%d",
+                            ctx.tenant_id, query, alt_query, len(retry_products),
+                        )
+                        products = retry_products
+                        break
+
             # If search produced nothing but products exist → fallback to top sellers
             if not products:
                 if allows_search_top_products_fallback(
