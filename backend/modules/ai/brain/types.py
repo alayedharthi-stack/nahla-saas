@@ -405,6 +405,9 @@ class MerchantConversationState:
     # `stash_address_pre_product`, …) — used for the BRAIN_RESULT trace
     # log and the `/debug/recent-whatsapp-turns` endpoint.
     last_action: str = ""
+    # Shadow/future enforce: last resolved PresentationMode for this turn
+    # (price_only | visual | discovery_list | …). Empty when unclassified.
+    last_presentation_mode: str = ""
     # Number of consecutive turns where the customer's intent was GENERAL
     # (unrecognised / off-topic). Reset to 0 whenever a specific intent fires.
     # Used by RealPolicyGate._auto_escalate for a real streak check instead of
@@ -497,6 +500,7 @@ class MerchantConversationState:
             "pending_google_maps_url": self.pending_google_maps_url,
             "pending_city": self.pending_city,
             "last_action": self.last_action,
+            "last_presentation_mode": self.last_presentation_mode,
             "general_streak": self.general_streak,
             "current_selected_options": self.current_selected_options,
             "pending_option_groups": list(self.pending_option_groups or []),
@@ -552,6 +556,7 @@ class MerchantConversationState:
             pending_google_maps_url=str(d.get("pending_google_maps_url", "") or ""),
             pending_city=str(d.get("pending_city", "") or ""),
             last_action=str(d.get("last_action", "") or ""),
+            last_presentation_mode=str(d.get("last_presentation_mode", "") or ""),
             general_streak=int(d.get("general_streak", 0) or 0),
             current_selected_options=dict(d.get("current_selected_options") or {}),
             pending_option_groups=[
