@@ -407,12 +407,9 @@ def detect_payment_intent_strength(
         return PaymentIntentVerdict(0.0, "blocked")
 
     msg = (message or "").strip()
-    try:
-        from core.ai_libraries import is_non_payment_service_inquiry  # noqa: PLC0415
-        if is_non_payment_service_inquiry(msg):
-            return PaymentIntentVerdict(0.0, "blocked")
-    except Exception:  # noqa: BLE001
-        pass
+    from core.ai_libraries import is_non_payment_service_inquiry  # noqa: PLC0415
+    if is_non_payment_service_inquiry(msg):
+        return PaymentIntentVerdict(0.0, "blocked")
 
     norm = _norm(msg)
 
