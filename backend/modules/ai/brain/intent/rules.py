@@ -761,20 +761,39 @@ def match(message: str) -> Optional[Intent]:
         ))
 
     # ── Layer 3: regex chain (commerce / FAQ / order intents) ───────────
+    # ARCH-MEDIA-001 Wave 0: match on customer/vision body only — never on
+    # normalizer framing like ``[وصف الصورة المرسلة] وصف الصورة``.
+    try:
+        from ..commerce.product_visual import (  # noqa: PLC0415
+            is_product_visual_request,
+            strip_bot_media_framing,
+        )
+        _regex_surface = strip_bot_media_framing(message) or message
+    except Exception:  # noqa: BLE001
+        is_product_visual_request = None  # type: ignore[misc, assignment]
+        _regex_surface = message
+
     for ruleset, compiled in _RULES:
         for pattern in compiled:
-            if pattern.search(message):
-                candidates.append((
-                    ruleset.confidence,
-                    Intent(
-                        name=ruleset.intent,
-                        confidence=ruleset.confidence,
-                        slots=dict(ruleset.slots),
-                        raw_message=message,
-                        extraction_method="rules",
-                    ),
-                ))
-                break   # first pattern that fires for this ruleset is enough
+            if not pattern.search(_regex_surface):
+                continue
+            if (
+                ruleset.intent == INTENT_PRODUCT_VISUAL_REQUEST
+                and is_product_visual_request is not None
+                and not is_product_visual_request(_regex_surface)
+            ):
+                continue
+            candidates.append((
+                ruleset.confidence,
+                Intent(
+                    name=ruleset.intent,
+                    confidence=ruleset.confidence,
+                    slots=dict(ruleset.slots),
+                    raw_message=message,
+                    extraction_method="rules",
+                ),
+            ))
+            break   # first pattern that fires for this ruleset is enough
 
     if not candidates:
         return None
