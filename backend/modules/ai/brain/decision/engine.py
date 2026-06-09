@@ -793,29 +793,23 @@ class DefaultDecisionEngine:
         # in the webhook can log it (useful for audit / "this customer
         # bailed mid-cart" support tickets).
         if intent.name == INTENT_TALK_HUMAN:
-            try:
-                from ..intent.service_availability_gate import (  # noqa: PLC0415
-                    is_service_availability_inquiry,
+            from ..intent.service_availability_gate import (  # noqa: PLC0415
+                is_service_availability_inquiry,
+            )
+            if is_service_availability_inquiry(ctx.message or ""):
+                logger.info(
+                    "[HANDOFF] service availability inquiry — not handoff | "
+                    "tenant=%s preview=%r",
+                    getattr(ctx, "tenant_id", "?"),
+                    (ctx.message or "")[:80],
                 )
-                if is_service_availability_inquiry(ctx.message or ""):
-                    logger.info(
-                        "[HANDOFF] service availability inquiry — not handoff | "
-                        "tenant=%s preview=%r",
-                        getattr(ctx, "tenant_id", "?"),
-                        (ctx.message or "")[:80],
-                    )
-                    return Decision(
-                        action=ACTION_LLM_REPLY,
-                        args={"policy_reason": "service_availability_not_handoff"},
-                        reason=(
-                            "service availability inquiry — route to LLM, "
-                            "not ACTION_HANDOFF"
-                        ),
-                    )
-            except Exception as _sag_exc:  # noqa: BLE001
-                logger.debug(
-                    "[HANDOFF] service_availability_gate skipped err=%s",
-                    _sag_exc,
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"policy_reason": "service_availability_not_handoff"},
+                    reason=(
+                        "service availability inquiry — route to LLM, "
+                        "not ACTION_HANDOFF"
+                    ),
                 )
 
             # ``order_prep`` is a default-initialised dataclass on every

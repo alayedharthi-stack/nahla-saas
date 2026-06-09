@@ -32,6 +32,10 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, Optional
 
+from modules.ai.brain.intent.service_availability_gate import (
+    is_service_availability_inquiry,
+)
+
 
 # ── Arabic normalisation ────────────────────────────────────────────
 #
@@ -757,14 +761,8 @@ def is_handoff_request(text: Optional[str]) -> bool:
 
     # ARCH-HANDOFF-001 — align with rules gate: «هل يوجد أحد يقدر…» is
     # service availability, not a handoff request.
-    try:
-        from modules.ai.brain.intent.service_availability_gate import (  # noqa: PLC0415
-            is_service_availability_inquiry,
-        )
-        if is_service_availability_inquiry(text or ""):
-            return False
-    except Exception:  # noqa: BLE001
-        pass
+    if is_service_availability_inquiry(text or ""):
+        return False
 
     return True
 
