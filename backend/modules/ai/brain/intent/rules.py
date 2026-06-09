@@ -468,10 +468,16 @@ _register(RuleSet(
         # PRE-BRAIN handoff guard misses a regional phrasing.
         r"المالك|مالك|صاحب المحل|صاحب المتجر|صاحبك|"
         r"الإدارة|الادارة|إدارة|ادارة)?",
-        # "في أحد يرد / فيه أحد يرد / هل في أحد / محد رد / ما حد رد"
+        # "في أحد يرد / فيه أحد يرد" — response verb required (ARCH-HANDOFF-001).
         r"(في|فيه|هل في|هل يوجد|يوجد|ما في|مافي|محد|ماحد)"
         r"\s*(أحد|احد|واحد|حد)"
-        r"\s*(يرد|يردّ|يرد علي|يكلمني|يتواصل|يحكي|يجاوب|يجاوبني)?",
+        r"\s*(يرد|يردّ|يرد علي|يكلمني|يتواصل|يحكي|يجاوبني|يجاوب علي)",
+        # Bare "anyone there?" — short message ending after أحد (not service X).
+        r"(?:^|\s)(في|فيه|هل في|هل يوجد|يوجد)"
+        r"\s*(أحد|احد|واحد|حد)\s*[\?؟]?\s*$",
+        # ``فيه أحد هنا`` — presence check, not service availability.
+        r"(?:^|\s)(في|فيه|هل في|هل يوجد|يوجد)"
+        r"\s*(أحد|احد|واحد|حد)\s+هنا",
         # "محد رد علي / ما حد رد علي / محد يرد"
         r"(محد|ماحد|ما\s*أحد|ما\s*احد)\s*(رد|يرد|يجاوب|يكلمني)",
         # Standalone polite escalations seen in production:
@@ -604,16 +610,23 @@ def match_top_k(message: str, *, k: int = 3) -> List[Tuple[float, "Intent"]]:
 
     for ruleset, compiled in _RULES:
         for pattern in compiled:
-            if pattern.search(message):
-                out.append((
-                    ruleset.confidence,
-                    Intent(
-                        name=ruleset.intent, confidence=ruleset.confidence,
-                        slots=dict(ruleset.slots),
-                        raw_message=message, extraction_method="rules",
-                    ),
-                ))
-                break
+            if not pattern.search(message):
+                continue
+            if ruleset.intent == INTENT_TALK_HUMAN:
+                from .service_availability_gate import (  # noqa: PLC0415
+                    is_service_availability_inquiry,
+                )
+                if is_service_availability_inquiry(message):
+                    break
+            out.append((
+                ruleset.confidence,
+                Intent(
+                    name=ruleset.intent, confidence=ruleset.confidence,
+                    slots=dict(ruleset.slots),
+                    raw_message=message, extraction_method="rules",
+                ),
+            ))
+            break
 
     out.sort(key=lambda x: x[0], reverse=True)
     return out[: max(1, int(k))]
@@ -783,6 +796,12 @@ def match(message: str) -> Optional[Intent]:
                 and not is_product_visual_request(_regex_surface)
             ):
                 continue
+            if ruleset.intent == INTENT_TALK_HUMAN:
+                from .service_availability_gate import (  # noqa: PLC0415
+                    is_service_availability_inquiry,
+                )
+                if is_service_availability_inquiry(message):
+                    break
             candidates.append((
                 ruleset.confidence,
                 Intent(
