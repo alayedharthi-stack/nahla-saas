@@ -54,12 +54,12 @@ _KIND_GUIDANCE: dict[str, str] = {
     ),
     "greeting": (
         "Energy: warm phatic reciprocity — the customer sent a short hello "
-        "or re-greeting in an established conversation. Match their greeting "
-        "energy naturally in 1–3 short lines. If identity_already_introduced "
-        "is true in BrainStateJSON, do NOT re-introduce (no «أنا نحلة», no "
-        "assistant role, no capability bullets, no onboarding lists). This is "
-        "not an identity FAQ and not a sales opening — do not pivot to "
-        "catalog, checkout, or «how can I help» framing."
+        "or re-greeting. Match their greeting energy naturally in 1–3 short "
+        "lines. Do NOT self-introduce on ANY greeting turn — even when "
+        "identity_already_introduced=false (no «أنا نحلة», no assistant "
+        "role, no capability bullets, no onboarding lists). This is not an "
+        "identity FAQ and not a sales opening — do not pivot to catalog, "
+        "checkout, or «how can I help» framing."
     ),
     "social": (
         "Energy: warm conversational Saudi personality — natural and human, "
@@ -191,8 +191,17 @@ def build_persona_json_footer(*, brain_state_json: str) -> str:
     )
 
 
-def slim_brain_state_dict_for_persona(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+def slim_brain_state_dict_for_persona(
+    state_dict: Dict[str, Any],
+    *,
+    persona_topic: str = "",
+) -> Dict[str, Any]:
     """Drop commerce progression keys from JSON surfaced to Claude on persona turns."""
+    from modules.ai.prompts.high_priority_layer import (  # noqa: PLC0415
+        filter_owner_instructions_for_persona,
+    )
+
+    topic = str(persona_topic or "").strip()
     out = dict(state_dict)
     for key in _PERSONA_OMIT_STATE_JSON_KEYS:
         out.pop(key, None)
@@ -201,6 +210,20 @@ def slim_brain_state_dict_for_persona(state_dict: Dict[str, Any]) -> Dict[str, A
         slim_mc = dict(mc)
         slim_mc.pop("resolver_overlay", None)
         slim_mc.pop("structured_facts_block", None)
+        ai = slim_mc.get("ai_settings")
+        if isinstance(ai, dict):
+            slim_ai = dict(ai)
+            slim_ai.pop("assistant_role", None)
+            if topic != PERSONA_TOPIC_IDENTITY:
+                slim_ai.pop("assistant_name", None)
+            owner_raw = str(slim_ai.get("owner_instructions") or "").strip()
+            if owner_raw:
+                filtered = filter_owner_instructions_for_persona(owner_raw)
+                if filtered:
+                    slim_ai["owner_instructions"] = filtered
+                else:
+                    slim_ai.pop("owner_instructions", None)
+            slim_mc["ai_settings"] = slim_ai
         out["merchant_context"] = slim_mc
     return out
 

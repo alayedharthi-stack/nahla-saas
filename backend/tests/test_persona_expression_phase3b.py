@@ -78,13 +78,15 @@ def test_persona_high_priority_omits_service_greeting_example() -> None:
     assert "جولة persona" in block
 
 
-def test_commerce_high_priority_keeps_service_greeting_example() -> None:
+def test_commerce_high_priority_phatic_re_greet_not_service_closer() -> None:
     block = build_high_priority_block(
         {},
         omit_sales_behavior=False,
         persona_expression_mode=False,
     )
-    assert "وش أقدر أخدمك فيه؟" in block
+    # ARCH-KB-001: re-greet example is phatic only — no help-desk closer.
+    assert "وش أقدر أخدمك فيه؟" not in block
+    assert "حياك الله" in block
     assert "relational_frame" in block
 
 
