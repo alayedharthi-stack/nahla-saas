@@ -55,8 +55,6 @@ class TestStoreLinkIntent:
         "أرسل الرابط",
         "ابعث اللينك",
         "أبي رابط المتجر؟",
-        "موقعكم",
-        "رابط الموقع",
         "المتجر الإلكتروني",
         "store link",
         "send the link",
@@ -81,6 +79,19 @@ class TestStoreLinkIntent:
             _looks_like_store_link_request,
         )
         assert _looks_like_store_link_request(msg) is False, msg
+
+    @pytest.mark.parametrize("msg", [
+        "موقعكم",
+        "رابط الموقع",
+    ])
+    def test_location_phrases_not_store_link_intent(self, msg):
+        """May 2026 #36: bare موقع / رابط الموقع → location safety net."""
+        from modules.ai.postprocess.safety_nets import (
+            _looks_like_location_request,
+            _looks_like_store_link_request,
+        )
+        assert _looks_like_store_link_request(msg) is False, msg
+        assert _looks_like_location_request(msg) is True, msg
 
 
 # ──────────────────────────────────────────────────────────────────

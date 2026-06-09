@@ -7,7 +7,7 @@ it is the single source of truth for all five consumers:
   1. GET /billing/status  → frontend TrialBanner
   2. has_billing_access() → automation engine guard
   3. has_billing_access() → webhook AI-reply guard
-  4. require_billing_access() → campaigns guard
+  4. require_outbound_access() → campaigns guard (outbound send)
   5. require_billing_access() → automations router guard
 
 Three scenarios tested:
@@ -226,11 +226,13 @@ class TestUnifiedCallChain:
         src = inspect.getsource(process_pending_events)
         assert "has_billing_access" in src
 
-    def test_campaigns_uses_require_billing_access(self):
+    def test_campaigns_uses_require_outbound_access(self):
+        """Campaign create is an outbound send — gated by require_outbound_access
+        since 6d96e8e7 (not the legacy require_billing_access helper)."""
         import inspect
         from routers.campaigns import create_campaign
         src = inspect.getsource(create_campaign)
-        assert "require_billing_access" in src
+        assert "require_outbound_access" in src
 
     def test_webhook_ai_guard_uses_has_billing_access(self):
         """The webhook AI-reply path must call has_billing_access."""

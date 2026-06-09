@@ -68,6 +68,12 @@ def _seed(db, *, tenant_name, phone_number_id, waba_id, status="connected", send
     return tenant, conn
 
 
+def _session_local_factory(db):
+    """Mirror production: ``_handle_360dialog_body`` opens ``SessionLocal()``,
+    not ``get_db()``. Bind a factory to the fixture's in-memory engine."""
+    return sessionmaker(bind=db.get_bind())
+
+
 def _seed_coexistence(db, *, tenant_name, phone_number_id, status="connected"):
     tenant = Tenant(name=tenant_name, is_active=True)
     db.add(tenant)
@@ -221,12 +227,12 @@ def test_360dialog_messages_field_dispatches_customer_message(db):
             }],
         }],
     }
-    request = SimpleNamespace(headers={"X-Nahla-Coexistence-Secret": "secret-123"})
+    headers = {"x_nahla_coexistence_secret": "secret-123"}
 
-    with patch.object(wa_webhook, "get_db", return_value=iter([db])), patch.object(
+    with patch.object(wa_webhook, "SessionLocal", _session_local_factory(db)), patch.object(
         wa_webhook, "_dispatch_message", new=AsyncMock()
     ) as mock_dispatch:
-        asyncio.run(wa_webhook._handle_360dialog_body(payload, request))
+        asyncio.run(wa_webhook._handle_360dialog_body(payload, headers))
 
     mock_dispatch.assert_awaited_once()
     dispatched_phone_id, dispatched_msg, _value = mock_dispatch.await_args.args
@@ -259,12 +265,12 @@ def test_360dialog_smb_echoes_are_stored_without_dispatch(db):
             }],
         }],
     }
-    request = SimpleNamespace(headers={"X-Nahla-Coexistence-Secret": "secret-123"})
+    headers = {"x_nahla_coexistence_secret": "secret-123"}
 
-    with patch.object(wa_webhook, "get_db", return_value=iter([db])), patch.object(
+    with patch.object(wa_webhook, "SessionLocal", _session_local_factory(db)), patch.object(
         wa_webhook, "_dispatch_message", new=AsyncMock()
     ) as mock_dispatch:
-        asyncio.run(wa_webhook._handle_360dialog_body(payload, request))
+        asyncio.run(wa_webhook._handle_360dialog_body(payload, headers))
 
     mock_dispatch.assert_not_awaited()
     stored = db.query(MessageEvent).filter(
