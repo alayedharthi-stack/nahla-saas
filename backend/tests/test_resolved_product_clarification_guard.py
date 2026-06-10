@@ -88,7 +88,7 @@ class TestClarifyGuard:
     def test_blocks_type_clarify_when_subject_resolved(self):
         ctx = _ctx("عسل السمر بكم الكيلو")
         bad = (
-            "حاضر 🌷 بخصوص *عسل السمر* — أي نوع أو صفة تهمك بالضبط؟ "
+            "حاضر، بخصوص *عسل السمر* — أي نوع أو صفة تهمك بالضبط؟ "
             "مثلاً سدر، طلح، أو حجم معيّن — وأرشّح لك الأنسب."
         )
         out = apply_resolved_product_clarify_guard(ctx, bad, source="test")

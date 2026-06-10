@@ -1658,7 +1658,7 @@ class DefaultDecisionEngine:
                         action=ACTION_CLARIFY,
                         args={
                             "topic": "product_visual",
-                            "question": "أي منتج تقصد صورته؟ 🌷",
+                            "question": "أي منتج تقصد صورته؟",
                         },
                         reason=trusted.reason or "deictic visual ask without trusted focus",
                         confidence=0.88,
@@ -1678,7 +1678,7 @@ class DefaultDecisionEngine:
                 action=ACTION_CLARIFY,
                 args={
                     "topic": "product_visual",
-                    "question": "أي منتج تبغى صورته؟ 🌷",
+                    "question": "أي منتج تبغى صورته؟",
                 },
                 reason="product visual ask without resolved SKU",
                 confidence=0.85,

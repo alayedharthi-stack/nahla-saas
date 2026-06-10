@@ -62,10 +62,10 @@ def detect_salam_level(message: str) -> Optional[str]:
 def salam_return_text(level: str) -> str:
     """Matching reciprocal salam — concise, one line."""
     if level == SALAM_BARAKA:
-        return "وعليكم السلام ورحمة الله وبركاته 🌷"
+        return "وعليكم السلام ورحمة الله وبركاته"
     if level == SALAM_RAHMA:
-        return "وعليكم السلام ورحمة الله 🌷"
-    return "وعليكم السلام 🌷"
+        return "وعليكم السلام ورحمة الله"
+    return "وعليكم السلام"
 
 
 def reply_already_has_salam_return(reply: str) -> bool:
