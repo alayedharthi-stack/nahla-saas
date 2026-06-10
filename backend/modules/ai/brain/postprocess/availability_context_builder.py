@@ -48,7 +48,18 @@ def _can_checkout_from_row(row: Any, variants_ok: bool = True) -> bool:
     in_stock = meta.get("in_stock", getattr(row, "in_stock", True))
     stock_qty = meta.get("stock_qty", getattr(row, "stock_quantity", None))
     qty_ok = stock_qty is None or _safe_int(stock_qty, 0) > 0
-    return bool(ext) and status == "active" and bool(in_stock) and qty_ok and variants_ok
+    basic = (
+        bool(ext)
+        and status == "active"
+        and bool(in_stock)
+        and qty_ok
+        and variants_ok
+    )
+    if not basic:
+        return False
+    from core.catalog import is_catalog_active  # noqa: PLC0415
+
+    return bool(is_catalog_active(row))
 
 
 def _kb_polarity(title: str, body: str) -> str:
@@ -119,7 +130,6 @@ def build_availability_context(
             })
         ctx["catalog_skus"] = catalog_skus
 
-    try:
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
 
         sections = (

@@ -287,3 +287,116 @@ class TestPolarityDetection:
         os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
         os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD", None)
         assert product_availability_guard_mode() == "off"
+
+
+class TestAvailabilityContextBuilder:
+    def test_module_compiles(self) -> None:
+        import py_compile
+        from pathlib import Path
+
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "modules/ai/brain/postprocess/availability_context_builder.py"
+        )
+        py_compile.compile(str(path), doraise=True)
+
+    def test_can_checkout_respects_merchant_hidden(self) -> None:
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: E402
+            _can_checkout_from_row,
+        )
+
+        hidden = SimpleNamespace(
+            external_id="27449738824609642",
+            extra_metadata={"status": "active", "in_stock": True},
+            in_stock=True,
+            catalog_status="merchant_hidden",
+            merchant_hidden_at=datetime.now(timezone.utc),
+            meta_removed_at=None,
+            archived_at=None,
+        )
+        active = SimpleNamespace(
+            external_id="27310682888555270",
+            extra_metadata={"status": "active", "in_stock": True},
+            in_stock=True,
+            catalog_status="active",
+            merchant_hidden_at=None,
+            meta_removed_at=None,
+            archived_at=None,
+        )
+        assert _can_checkout_from_row(hidden) is False
+        assert _can_checkout_from_row(active) is True
+
+
+class TestInactiveCatalogLineStrip:
+    """Regression: tenant-33 style availability list must drop hidden SKUs."""
+
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def _tenant33_skus(self) -> list:
+        return [
+            _sku(
+                103,
+                "\u0639\u0633\u0644 \u0627\u0644\u0636\u064f\u0631\u0645 \u0627\u0644\u062c\u0628\u0644\u064a",
+                checkout=False,
+            ),
+            _sku(
+                109,
+                "\u0639\u0633\u0644 \u0637\u0644\u062d \u0646\u062c\u062f \u0627\u0644\u0628\u0631\u064a \u0625\u0646\u062a\u0627\u062c \u0645\u0646\u062d\u0644\u0646\u0627  1 \u0643\u064a\u0644\u0648",
+                checkout=True,
+            ),
+            _sku(
+                111,
+                "\u0639\u0633\u0644 \u0633\u0645\u0631 \u0627\u0644\u062d\u062c\u0627\u0632 \u0625\u0646\u062a\u0627\u062c \u0642\u062f\u064a\u0645",
+                checkout=True,
+            ),
+        ]
+
+    def test_enforce_strips_hidden_dharm_from_availability_list(self) -> None:
+        raw = (
+            "\u0639\u0646\u062f\u0646\u0627 \u062d\u0627\u0644\u064a\u0627\u064b:\n\n"
+            "\u2022 \u0627\u0644\u0637\u0644\u062d \u0627\u0644\u0628\u0644\u062f\u064a\n"
+            "\u2022 \u0633\u0645\u0631 \u0627\u0644\u062d\u062c\u0627\u0632 (\u062c\u062f\u064a\u062f 1447 + \u0642\u062f\u064a\u0645 1446)\n"
+            "\u2022 \u0627\u0644\u0636\u064f\u0631\u0645 \u0627\u0644\u062c\u0628\u0644\u064a\n\n"
+            "\u0648\u0628\u0639\u062f \u0641\u064a\u0647 \u0645\u0646\u062a\u062c\u0627\u062a \u0646\u062d\u0644"
+        )
+        ctx = _ctx(skus=self._tenant33_skus())
+        result = apply_product_availability_truth_guard(
+            reply=raw,
+            availability_context=ctx,
+            inbound_text="\u0648\u0634 \u0627\u0644\u0645\u062a\u0648\u0641\u0631 \u0627\u0644\u0627\u0646",
+            tenant_id=33,
+        )
+        assert result.replaced is True
+        assert "\u0627\u0644\u0636\u064f\u0631\u0645" not in result.reply
+        assert "\u0627\u0644\u0637\u0644\u062d" in result.reply
+        assert "\u0633\u0645\u0631 \u0627\u0644\u062d\u062c\u0627\u0632" in result.reply
+        assert result.action == "strip_inactive_catalog_lines"
+
+    def test_enforce_keeps_active_talh_when_focused(self) -> None:
+        reply = "\u0645\u0646 \u0623\u0642\u0648\u0649 \u0627\u0644\u0623\u0646\u0648\u0627\u0639 \u0639\u0646\u062f\u0646\u0627"
+        ctx = _ctx(
+            skus=self._tenant33_skus(),
+            focus={
+                "id": 109,
+                "title": "\u0639\u0633\u0644 \u0637\u0644\u062d \u0646\u062c\u062f \u0627\u0644\u0628\u0631\u064a \u0625\u0646\u062a\u0627\u062c \u0645\u0646\u062d\u0644\u0646\u0627  1 \u0643\u064a\u0644\u0648",
+            },
+        )
+        result = apply_product_availability_truth_guard(
+            reply=reply,
+            availability_context=ctx,
+            inbound_text="\u0627\u0628\u064a \u0635\u0648\u0631\u0629 \u0627\u0644\u0637\u0644\u062d",
+            tenant_id=33,
+        )
+        assert result.replaced is False
+        assert result.reply == reply
