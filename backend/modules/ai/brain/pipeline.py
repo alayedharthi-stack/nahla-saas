@@ -2121,6 +2121,12 @@ class MerchantBrain:
             "handoff": decision.action == ACTION_HANDOFF,
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
+            "non_commerce_block_mode": bool(
+                getattr(ctx, "block_commerce_escalation", False)
+            ),
+            "non_commerce_category": str(
+                getattr(ctx, "non_commerce_category", "") or ""
+            ),
         }
 
 

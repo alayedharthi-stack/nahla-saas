@@ -6022,6 +6022,9 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _brain_handoff: bool = False  # set True only by the brain handoff branch
+        _brain_nc_block: bool = False
+        _brain_nc_category: str = ""
+        _nc_turn = None
         _br_action: str = ""  # brain last_action — used by final dispatch guard
         # Tenant 33 #49 (Commit 3): empty string when the relational
         # layer is disabled or no moment was identified — guarantees
@@ -6544,6 +6547,12 @@ async def _handle_merchant_message(
                         _persona_ownership.merge_from_dict(
                             brain_result.get("persona_ownership")
                         )
+                        _brain_nc_block = bool(
+                            brain_result.get("non_commerce_block_mode")
+                        )
+                        _brain_nc_category = str(
+                            brain_result.get("non_commerce_category") or ""
+                        ).strip()
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []
@@ -7501,10 +7510,16 @@ async def _handle_merchant_message(
                     if isinstance(inbound_metadata, dict)
                     else {}
                 )
+                if _brain_nc_category:
+                    _nc_meta.setdefault("non_commerce_category", _brain_nc_category)
+                if _brain_nc_block:
+                    _nc_meta.setdefault("block_commerce_escalation", True)
                 _scg = apply_service_closer_guard(
                     reply,
                     inbound_text=text or "",
                     inbound_metadata=_nc_meta,
+                    non_commerce_block_mode=_brain_nc_block,
+                    block_commerce_escalation=_brain_nc_block,
                     tenant_id=tenant_id,
                 )
                 if _scg.stripped:
@@ -8986,6 +9001,47 @@ async def _handle_merchant_message(
                 after=reply or "",
             )
 
+        # ── Service-closer guard (pass 2 — post safety nets) ─────────────
+        if reply and not _brain_handoff:
+            _po_reply_before_scg2 = reply
+            try:
+                from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
+                    apply_service_closer_guard as _apply_scg_pass2,
+                )
+                _nc_meta_scg2 = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                if _brain_nc_category:
+                    _nc_meta_scg2.setdefault(
+                        "non_commerce_category", _brain_nc_category,
+                    )
+                if _commerce_blocked and _nc_turn is not None:
+                    _nc_meta_scg2.setdefault("non_commerce_category", _nc_turn.category)
+                    _nc_meta_scg2.setdefault("block_commerce_escalation", True)
+                _scg_pass2 = _apply_scg_pass2(
+                    reply,
+                    inbound_text=text or "",
+                    inbound_metadata=_nc_meta_scg2,
+                    non_commerce_block_mode=(_brain_nc_block or _commerce_blocked),
+                    block_commerce_escalation=(_brain_nc_block or _commerce_blocked),
+                    tenant_id=tenant_id,
+                )
+                if _scg_pass2.stripped:
+                    reply = _scg_pass2.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="service_closer_guard_pass2",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_scg2,
+                        after=reply,
+                    )
+            except Exception as _scg2_exc:  # noqa: BLE001
+                logger.debug(
+                    "[SERVICE_CLOSER_GUARD] pass2 failed tenant=%s err=%s",
+                    tenant_id, _scg2_exc,
+                )
+
         # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
         # Drops lines that contain leaked reasoning prose (e.g. "بناءً
         # على السياق", "في قاعدة المعرفة"). Runs AFTER marker
@@ -10292,7 +10348,7 @@ async def _handle_merchant_message(
                                 phone=to,
                                 entries=_contact_entries,
                             )
-                        except Exception as _ces_exc:  # noqa: BLE001
+                        except Exception as _ces_exc:  # noqa: BLE001  # noqa: silent-ok — contact persist after send is best-effort
                             logger.debug(
                                 "[CONTACT_ESCALATION] persist after send "
                                 "failed tenant=%s err=%s",

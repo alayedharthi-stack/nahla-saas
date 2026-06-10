@@ -1,7 +1,7 @@
 """
 core/fallback_policy.py
 ─────────────────────────
-Platform-wide fallback policy (P1-D-1).
+Platform-wide fallback policy (P1-D-1 / P1-D-2).
 
 Operational replies may be deterministic; personality / CS closers must not
 come from static template pools.
@@ -44,6 +44,27 @@ _SERVICE_CLOSER_MARKERS: Tuple[str, ...] = (
     "إذا تحتاج أي تفاصيل",
     "اذا احتجت اي مساعده",
     "إذا احتجت أي مساعدة",
+    "إذا تحتاج أي مساعدة",
+    "اذا تحتاج مساعده",
+    "إذا تحتاج مساعدة",
+    "لو تحتاج أي مساعدة",
+    "عندك استفسار",
+    "عندك اي استفسار",
+    "عندك أي استفسار",
+    "انا هنا",
+    "أنا هنا",
+    "انا موجود",
+    "أنا موجود",
+    "كيف حالك اليوم",
+    "كيف حالك",
+    "وش الخدمه",
+    "وش الخدمة",
+    "وش اللي تحتاجه",
+    "وش تحتاج",
+    "انا معك خطوه بخطوه",
+    "أنا معك خطوة بخطوة",
+    "بالخدمه",
+    "بالخدمة",
     "خبرني كيف اساعدك",
     "تحت امرك",
     "تحت أمرك",
@@ -66,6 +87,23 @@ _SALES_CLOSER_MARKERS: Tuple[str, ...] = (
     "تحب أعرض لك",
 )
 
+# Inline CS tail — match from opener to end-of-line (keep phatic prefix).
+_INLINE_TAIL_START_RE = re.compile(
+    r"(?:[،,.!\s…]|^)"
+    r"(?:"
+    r"(?:إذا|لو)\s+تحتاج(?:\s+أي|\s+مس)?"
+    r"|عندك(?:\s+أي)?\s+استفسار"
+    r"|(?:أنا\s+هنا|أنا\s+موجود)"
+    r"|كيف\s+حالك(?:\s+اليوم)?"
+    r"|وش\s+(?:الخدمة|الخدمه|لي\s+تحتاج(?:ه)?|تحتاج)"
+    r"|أنا\s+معك\s+خطوة\s+بخطوة"
+    r"|(?:^|[،.\s])بالخدمة"
+    r"|(?:^|[،.\s])بالخدمه"
+    r"|تحت\s+أمر(?:ك|كم|كن)"
+    r"|(?:^|[،.\s])(?:كيف\s+أ(?:قدر|خدم)|خبرني\s+كيف)"
+    r")",
+    re.UNICODE,
+)
 
 def _normalize_ar(text: str) -> str:
     if not text:
@@ -76,6 +114,11 @@ def _normalize_ar(text: str) -> str:
     t = t.replace("ى", "ي").replace("ة", "ه")
     t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)
     return re.sub(r"\s+", " ", t).strip()
+
+
+# Rebuild normalized marker tuples after _normalize_ar is defined.
+_NORM_SERVICE_MARKERS = tuple(_normalize_ar(m) for m in _SERVICE_CLOSER_MARKERS)
+_NORM_SALES_MARKERS = tuple(_normalize_ar(m) for m in _SALES_CLOSER_MARKERS)
 
 
 def empty_reply_fallback() -> str:
@@ -98,31 +141,55 @@ def contains_service_closer(text: str) -> bool:
     norm = _normalize_ar(text)
     if not norm:
         return False
-    return any(_normalize_ar(m) in norm for m in _SERVICE_CLOSER_MARKERS)
+    if any(m in norm for m in _NORM_SERVICE_MARKERS):
+        return True
+    for line in (text or "").splitlines():
+        if _strip_inline_service_tail(line.strip())[1]:
+            return True
+    return False
 
 
 def contains_sales_closer(text: str) -> bool:
     norm = _normalize_ar(text)
     if not norm:
         return False
-    return any(_normalize_ar(m) in norm for m in _SALES_CLOSER_MARKERS)
+    return any(m in norm for m in _NORM_SALES_MARKERS)
 
 
 def _segment_matches_markers(segment: str, *, include_sales: bool) -> bool:
     norm = _normalize_ar(segment)
     if not norm:
         return False
-    if any(m in norm for m in _SERVICE_CLOSER_MARKERS):
+    if any(m in norm for m in _NORM_SERVICE_MARKERS):
         return True
-    if include_sales and any(m in norm for m in _SALES_CLOSER_MARKERS):
+    if include_sales and any(m in norm for m in _NORM_SALES_MARKERS):
         return True
     if is_personality_fallback_text(segment):
         return True
     return False
 
 
+def _strip_inline_service_tail(line: str) -> Tuple[str, bool]:
+    """Remove CS-closer tail from a single line, keeping phatic prefix."""
+    raw = (line or "").strip()
+    if not raw:
+        return "", False
+
+    match = _INLINE_TAIL_START_RE.search(raw)
+    if not match:
+        norm = _normalize_ar(raw)
+        if norm in _NORM_SERVICE_MARKERS:
+            return "", True
+        return raw, False
+
+    kept = raw[: match.start()].rstrip(" ،,.!…")
+    if not kept.strip():
+        return "", True
+    return kept.strip(), True
+
+
 def strip_closer_segments(text: str, *, non_commerce: bool = False) -> Tuple[str, bool]:
-    """Remove paragraph/line segments that match CS or (on non-commerce) sales closers."""
+    """Remove CS closers (inline tails or whole segments/lines)."""
     raw = (text or "").strip()
     if not raw:
         return "", False
@@ -136,13 +203,42 @@ def strip_closer_segments(text: str, *, non_commerce: bool = False) -> Tuple[str
         if not p:
             continue
         if _segment_matches_markers(p, include_sales=include_sales):
+            # Try inline tail strip before dropping the whole paragraph.
+            inline_lines: list[str] = []
+            paragraph_stripped = False
+            for ln in p.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                cleaned, did = _strip_inline_service_tail(ln)
+                if did:
+                    paragraph_stripped = True
+                if cleaned and not _segment_matches_markers(
+                    cleaned, include_sales=include_sales
+                ):
+                    inline_lines.append(cleaned)
+            if inline_lines:
+                if paragraph_stripped:
+                    stripped_any = True
+                kept_paragraphs.append("\n".join(inline_lines))
+                continue
             stripped_any = True
             continue
+
         lines = [ln.strip() for ln in p.splitlines() if ln.strip()]
-        kept_lines = [
-            ln for ln in lines
-            if not _segment_matches_markers(ln, include_sales=include_sales)
-        ]
+        kept_lines: list[str] = []
+        for ln in lines:
+            cleaned, did_inline = _strip_inline_service_tail(ln)
+            if did_inline:
+                stripped_any = True
+            candidate = cleaned if did_inline else ln
+            if not candidate:
+                continue
+            if _segment_matches_markers(candidate, include_sales=include_sales):
+                stripped_any = True
+                continue
+            kept_lines.append(candidate)
+
         if len(kept_lines) < len(lines):
             stripped_any = True
         if kept_lines:

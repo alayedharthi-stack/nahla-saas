@@ -92,9 +92,9 @@ _MIRROR_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # carries a different meaning. The patterns require word-end
     # anchoring or a short vocative tail.
     (re.compile(r"^\s*تسلمون\s*[.!،]?\s*$"),
-     "الله يسلمكم 🌹\nأي وقت تحت أمركم."),
+     "الله يسلمكم 🌹"),
     (re.compile(r"^\s*تسلموا?\s*[.!،]?\s*$"),
-     "الله يسلمكم 🌹\nأي وقت تحت أمركم."),
+     "الله يسلمكم 🌹"),
     # Singular: "تسلم" / "تسلمي" / "تسلم يا غالي" / "تسلم لك" /
     # "تسلم كثير". We accept a single courtesy tail token; anything
     # longer falls through.
@@ -104,7 +104,7 @@ _MIRROR_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         r"حبيب|الحبيب|اخ|الاخ|اخت|الاخت))?"
         r"\s*(?:لك|لكم|كثير|كثيرا|جزيلا)?\s*[.!،]?\s*$"
      ),
-     "الله يسلمك 🌹\nأي وقت تحت أمرك."),
+     "الله يسلمك 🌹"),
 
     # ── "جزاك الله خير" → "وإياك ..." ────────────────────────────────
     # The conventional Arabic reciprocal is "وإياك"; the pool variant
