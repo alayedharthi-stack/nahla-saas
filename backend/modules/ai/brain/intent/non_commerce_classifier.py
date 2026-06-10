@@ -182,8 +182,39 @@ _STRONG_COMMERCE_MARKERS = (
     "ابغي", "ابغى", "ابي", "اريد", "أريد", "اطلب", "اشتري",
     "سعر", "بكم", "كم سعر", "منتج", "المنتج", "متوفر", "موجود",
     "كيلو", "جرام", "شحن", "توصيل", "رابط الدفع", "sku",
-    "buy", "price", "product", "order",
+    "buy", "price", "product", "order", "شراء",
 )
+
+# Product / honey media tokens — single hit vetoes occasion non-commerce block.
+_PRODUCT_DOMAIN_MARKERS: tuple[str, ...] = (
+    "عسل", "نحل", "منحل", "خلية", "للبيع", "سدر", "سمر", "طلح",
+    "bee", "honey", "hive",
+)
+
+_COMMERCE_TOPIC_HINT_LABELS: frozenset[str] = frozenset({
+    "نحل_أو_عسل",
+    "منتج_أو_شراء",
+})
+
+# Explicit inbound occasion markers (P1-D-3). Bare «بارك» / «مبارك» are excluded.
+_OCCASION_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"كل\s*عام"),
+    re.compile(r"كل\s*سنه"),
+    re.compile(r"كل\s*سنة"),
+    re.compile(r"عيد\s*مبار"),
+    re.compile(r"عيدكم\s*مبار"),
+    re.compile(r"تقبل\s*الله"),
+    re.compile(r"رمضان\s*مبار"),
+    re.compile(r"جمعة\s*مبار"),
+    re.compile(r"eid\s*mubarak", re.I),
+    re.compile(r"ramadan\s*mubarak", re.I),
+)
+
+_OCCASION_GATED_NC_CATEGORIES: frozenset[str] = frozenset({
+    NC_EID_GREETING,
+    NC_DUA,
+    NC_RELIGIOUS_MEDIA,
+})
 
 
 def _strip_media_framing(message: str) -> str:
@@ -298,6 +329,76 @@ def _has_strong_commerce(norm: str) -> bool:
     return hits >= 2
 
 
+def inbound_has_occasion_signal(text: str) -> bool:
+    """True when inbound text explicitly carries Eid/seasonal/dua occasion signal."""
+    body = _strip_media_framing(text or "")
+    norm = _norm(body)
+    if not norm:
+        return False
+    return any(p.search(norm) for p in _OCCASION_SIGNAL_PATTERNS)
+
+
+def has_commerce_topic_hints(topic_hints: Optional[Sequence[str]]) -> bool:
+    hints = [str(h) for h in (topic_hints or []) if h]
+    for label in hints:
+        if label in _COMMERCE_TOPIC_HINT_LABELS:
+            return True
+        if "منتج" in label or "شراء" in label:
+            return True
+    return False
+
+
+def has_product_commerce_signal(
+    text: str,
+    *,
+    topic_hints: Optional[Sequence[str]] = None,
+) -> bool:
+    """True when inbound carries product/honey/commerce semantics (P1-D-3 veto)."""
+    norm = _norm(_strip_media_framing(text or ""))
+    if not norm:
+        return has_commerce_topic_hints(topic_hints)
+    if has_commerce_topic_hints(topic_hints):
+        return True
+    if _has_strong_commerce(norm):
+        return True
+    return any(_commerce_keyword_hit(norm, kw) for kw in _PRODUCT_DOMAIN_MARKERS)
+
+
+def _gate_non_commerce_category(
+    category: str,
+    raw: str,
+    norm: str,
+    topic_hints: Optional[Sequence[str]],
+) -> Optional[str]:
+    """Return category when block is allowed, else None (commerce may proceed)."""
+    if category not in _OCCASION_GATED_NC_CATEGORIES:
+        return category
+    has_occasion = inbound_has_occasion_signal(raw)
+    has_product = has_product_commerce_signal(raw, topic_hints=topic_hints)
+    if category in {NC_EID_GREETING, NC_DUA} and not has_occasion:
+        return None
+    if has_product and not has_occasion:
+        return None
+    if category == NC_RELIGIOUS_MEDIA and has_product and not has_occasion:
+        return None
+    return category
+
+
+def _make_non_commerce_match(
+    category: str,
+    *,
+    confidence: float,
+    source: str,
+    raw: str,
+    norm: str,
+    topic_hints: Optional[Sequence[str]],
+) -> Optional[NonCommerceMatch]:
+    gated = _gate_non_commerce_category(category, raw, norm, topic_hints)
+    if not gated:
+        return None
+    return NonCommerceMatch(category=gated, confidence=confidence, source=source)
+
+
 def classify_non_commerce(
     message: str,
     *,
@@ -317,14 +418,19 @@ def classify_non_commerce(
     if not raw:
         return None
 
+    hints = [str(h) for h in (topic_hints or []) if h]
+
     # 0. Explicit media tag from normalizer — highest priority.
     if any(tag in raw for tag in _NON_COMMERCE_TAGS):
         body_norm = _norm(_strip_media_framing(raw))
         cat = _match_strong_patterns(body_norm) or NC_RELIGIOUS_MEDIA
-        return NonCommerceMatch(
-            category=cat,
+        return _make_non_commerce_match(
+            cat,
             confidence=0.98,
             source="media_tag",
+            raw=raw,
+            norm=body_norm,
+            topic_hints=hints,
         )
 
     # 1. Delegate to short social classifier (thanks / basmala / …).
@@ -355,23 +461,34 @@ def classify_non_commerce(
         ):
             pass
         else:
-            return NonCommerceMatch(
-                category=strong_cat,
+            return _make_non_commerce_match(
+                strong_cat,
                 confidence=0.97,
                 source="text",
+                raw=raw,
+                norm=norm,
+                topic_hints=hints,
             )
 
     # 3. Video topic hint advisory (from normalizer).
-    hints = [str(h) for h in (topic_hints or []) if h]
     if hints:
         if any("دعاء" in h or "تهنئة" in h for h in hints):
-            if not any("منتج" in h or "شراء" in h for h in hints):
-                if not _has_strong_commerce(norm):
-                    return NonCommerceMatch(
-                        category=NC_DUA if "دعاء" in hints[0] else NC_EID_GREETING,
-                        confidence=0.96,
-                        source="topic_hint",
-                    )
+            if (
+                not has_commerce_topic_hints(hints)
+                and inbound_has_occasion_signal(raw)
+                and not _has_strong_commerce(norm)
+            ):
+                cat = NC_DUA if "دعاء" in hints[0] else NC_EID_GREETING
+                matched = _make_non_commerce_match(
+                    cat,
+                    confidence=0.96,
+                    source="topic_hint",
+                    raw=raw,
+                    norm=norm,
+                    topic_hints=hints,
+                )
+                if matched is not None:
+                    return matched
 
     # 4. Score-based dominance for long OCR / forwards.
     scored = _score_categories(norm)
@@ -382,20 +499,30 @@ def classify_non_commerce(
 
         # Long religious OCR: ≥2 independent non-commerce hits wins.
         if top_hits >= 2:
-            return NonCommerceMatch(
-                category=top_cat,
+            matched = _make_non_commerce_match(
+                top_cat,
                 confidence=0.95,
                 source="ocr" if _is_media_origin(raw) else "text",
+                raw=raw,
+                norm=norm,
+                topic_hints=hints,
             )
+            if matched is not None:
+                return matched
 
         # Single strong religious token on media-origin input.
         if top_hits >= 1 and (_is_media_origin(raw) or media_type in {"image", "video"}):
             if top_cat in {NC_EID_GREETING, NC_DUA, NC_RELIGIOUS_MEDIA, NC_CONDOLENCE}:
-                return NonCommerceMatch(
-                    category=top_cat,
+                matched = _make_non_commerce_match(
+                    top_cat,
                     confidence=0.94,
                     source="ocr" if _is_media_origin(raw) else "media_semantics",
+                    raw=raw,
+                    norm=norm,
+                    topic_hints=hints,
                 )
+                if matched is not None:
+                    return matched
 
         # WhatsApp forward + any greeting/dua signal.
         if forward_hit and top_hits >= 1 and commerce_hits == 0:
@@ -415,11 +542,16 @@ def classify_non_commerce(
         if weak_intent and scored and not _has_strong_commerce(norm):
             top_cat, top_hits = scored[0]
             if top_hits >= 1:
-                return NonCommerceMatch(
-                    category=top_cat,
+                matched = _make_non_commerce_match(
+                    top_cat,
                     confidence=0.92,
                     source="media_semantics",
+                    raw=raw,
+                    norm=norm,
+                    topic_hints=hints,
                 )
+                if matched is not None:
+                    return matched
 
     return None
 
@@ -433,13 +565,22 @@ def resolve_commerce_block(
 ) -> Optional[NonCommerceMatch]:
     """Turn-level helper: metadata flag OR live classification."""
     meta = inbound_metadata or {}
+    hints_list: Optional[List[str]] = None
+    if isinstance(meta.get("topic_hints"), list):
+        hints_list = [str(x) for x in meta["topic_hints"]]
     if meta.get("block_commerce_escalation"):
         cat = str(meta.get("non_commerce_category") or NC_RELIGIOUS_MEDIA)
-        return NonCommerceMatch(
-            category=cat,
+        matched = _make_non_commerce_match(
+            cat,
             confidence=0.98,
             source=str(meta.get("non_commerce_source") or "media_tag"),
+            raw=message,
+            norm=_norm(_strip_media_framing(message)),
+            topic_hints=hints_list,
         )
+        if matched is not None:
+            return matched
+        return None
     media_type = meta.get("source_type") or meta.get("normalized_type")
     hints = meta.get("topic_hints")
     if isinstance(hints, list):
@@ -522,6 +663,9 @@ __all__ = [
     "POSITIVE_COMMERCE_INTENTS",
     "classify_non_commerce",
     "commerce_escalation_allowed",
+    "has_commerce_topic_hints",
     "has_positive_commerce_intent",
+    "has_product_commerce_signal",
+    "inbound_has_occasion_signal",
     "resolve_commerce_block",
 ]

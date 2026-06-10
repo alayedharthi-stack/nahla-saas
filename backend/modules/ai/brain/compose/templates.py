@@ -937,6 +937,13 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
 }
 
 
+_OCCASION_GATED_SOCIAL_CATEGORIES = frozenset({
+    "eid_greeting",
+    "dua",
+    "religious_media",
+})
+
+
 def social_reply(
     category: str = "general_courtesy",
     variant: int = 0,
@@ -961,6 +968,14 @@ def social_reply(
     unchanged — they just won't benefit from the mirror layer until
     they start forwarding the customer message.
     """
+    cat = (category or "").strip().lower() or "general_courtesy"
+    if cat in _OCCASION_GATED_SOCIAL_CATEGORIES:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            inbound_has_occasion_signal,
+        )
+        if not inbound_has_occasion_signal(inbound_text):
+            return ""
+
     # 1) Mirror layer — deterministic cultural reciprocal.
     mirrored = _mirror_reply(inbound_text)
     if mirrored:

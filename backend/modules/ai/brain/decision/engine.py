@@ -614,6 +614,8 @@ class DefaultDecisionEngine:
         # (or intent slots) marks the turn, block ALL commerce branches
         # below — including text-pattern top_products / replay fallbacks
         # and LLM catalog drift — and respond socially instead.
+        # P1-D-3: occasion-gated categories require explicit inbound signal;
+        # product/honey media without occasion falls through to commerce/LLM.
         if _is_commerce_blocked(ctx) and intent.name not in (
             INTENT_WHO_ARE_YOU,
             INTENT_PERSONA_INTERACTION,
@@ -621,21 +623,53 @@ class DefaultDecisionEngine:
             nc_category = str(
                 (intent.slots or {}).get("social_category") or "religious_media"
             )
-            logger.info(
-                "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
-                getattr(ctx, "tenant_id", None),
-                nc_category,
-                (ctx.message or "")[:60],
-            )
-            return Decision(
-                action=ACTION_SOCIAL_REPLY,
-                args={
-                    "social_category": nc_category,
-                    "block_commerce_escalation": True,
-                },
-                reason=f"non-commerce safety gate ({nc_category})",
-                confidence=max(float(intent.confidence or 0.0), 0.94),
-            )
+            _occasion_social = frozenset({
+                "eid_greeting", "dua", "religious_media",
+            })
+            if nc_category in _occasion_social:
+                from ..intent.non_commerce_classifier import (  # noqa: PLC0415
+                    inbound_has_occasion_signal,
+                )
+                if not inbound_has_occasion_signal(ctx.message or ""):
+                    logger.info(
+                        "[NON_COMMERCE_ROUTE] tenant=%s category=%s "
+                        "skipped=occasion_gate preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        nc_category,
+                        (ctx.message or "")[:60],
+                    )
+                else:
+                    logger.info(
+                        "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        nc_category,
+                        (ctx.message or "")[:60],
+                    )
+                    return Decision(
+                        action=ACTION_SOCIAL_REPLY,
+                        args={
+                            "social_category": nc_category,
+                            "block_commerce_escalation": True,
+                        },
+                        reason=f"non-commerce safety gate ({nc_category})",
+                        confidence=max(float(intent.confidence or 0.0), 0.94),
+                    )
+            else:
+                logger.info(
+                    "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    nc_category,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_SOCIAL_REPLY,
+                    args={
+                        "social_category": nc_category,
+                        "block_commerce_escalation": True,
+                    },
+                    reason=f"non-commerce safety gate ({nc_category})",
+                    confidence=max(float(intent.confidence or 0.0), 0.94),
+                )
 
         # ── 0a.55 Short transactional continuation (product focus) ─────────
         try:

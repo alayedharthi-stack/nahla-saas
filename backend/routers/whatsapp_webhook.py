@@ -9042,6 +9042,37 @@ async def _handle_merchant_message(
                     tenant_id, _scg2_exc,
                 )
 
+        # ── Occasion reply guard (P1-D-3 — post safety nets belt) ────────
+        if reply and not _brain_handoff:
+            _po_reply_before_org = reply
+            try:
+                from modules.ai.brain.postprocess.occasion_reply_guard import (  # noqa: PLC0415
+                    apply_occasion_reply_guard,
+                )
+                _org = apply_occasion_reply_guard(
+                    reply,
+                    inbound_text=text or "",
+                    inbound_metadata=(
+                        dict(inbound_metadata or {})
+                        if isinstance(inbound_metadata, dict)
+                        else {}
+                    ),
+                    tenant_id=tenant_id,
+                )
+                if _org.stripped:
+                    reply = _org.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="occasion_reply_guard",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_org,
+                        after=reply,
+                    )
+            except Exception as _org_exc:  # noqa: BLE001  # noqa: silent-ok — occasion guard best-effort
+                logger.debug(
+                    "[OCCASION_REPLY_GUARD] failed tenant=%s err=%s",
+                    tenant_id, _org_exc,
+                )
+
         # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
         # Drops lines that contain leaked reasoning prose (e.g. "بناءً
         # على السياق", "في قاعدة المعرفة"). Runs AFTER marker
@@ -10270,7 +10301,7 @@ async def _handle_merchant_message(
                                 _delivery_audit["cta_url_sent_count"] = (
                                     int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
                                 )
-                        except Exception as _cta_exc:
+                        except Exception as _cta_exc:  # noqa: BLE001  # noqa: silent-ok — product CTA append best-effort
                             logger.debug(
                                 "[ProductCard.cta] tenant=%s product_id=%s "
                                 "cta_failed: %s",
