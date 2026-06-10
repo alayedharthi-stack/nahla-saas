@@ -8,8 +8,11 @@ across both the legacy WhatsApp AI path and the Merchant Brain LLM
 fallback. These tests pin down the public signals that downstream
 prompt layers depend on:
 
-  - bee 🐝 + flower 🌷 emoji hooks are present
-  - flexible visual-marketing guidance (not a fixed emoji map) since 7f3213ef
+  - Nahla identity hook (🐝) on the persona name line only — not a
+    mandatory decorative emoji signature on every reply
+  - emoji optional (P1-F) — warmth from language/context, not fixed
+    flower or emoji hooks
+  - flexible visual-marketing guidance (not a fixed emoji map or quota)
   - store name is interpolated when supplied
   - merchant store context is appended as a clearly-fenced block
   - no stale references to «نظام» / «روبوت» language
@@ -21,20 +24,29 @@ from modules.ai.prompts.nahla_persona import (
 
 
 class TestPersonaConstants:
-    def test_persona_uses_bee_and_flower_hooks(self):
-        # Bee belongs to the Nahla identity; flower to greetings.
-        assert "🐝" in NAHLA_PERSONA
-        assert "🌷" in NAHLA_PERSONA
+    def test_persona_does_not_require_fixed_emoji_hooks(self):
+        """P1-F: warmth from language — emoji optional, no flower signature."""
+        assert "🐝" in NAHLA_PERSONA  # Nahla identity line only
+        assert "🌷" not in NAHLA_PERSONA
+        assert "الإيموجي اختياري" in NAHLA_PERSONA
+        assert "3–4 إيموجيات" not in NAHLA_PERSONA
+        assert "🌷 للتحية" not in NAHLA_PERSONA
+        tone_examples = NAHLA_PERSONA.split("## أمثلة سريعة على النبرة", 1)[-1]
+        for ch in ("🌷", "🍯", "💪", "🚚"):
+            assert ch not in tone_examples, f"decorative {ch} in tone examples"
 
     def test_persona_uses_flexible_visual_guidance(self):
-        """Contextual emoji taste since 7f3213ef — examples, not a fixed map."""
+        """P1-F: contextual emoji taste — optional, not a fixed map or quota."""
         assert "## الذوق البصري والتسويقي" in NAHLA_PERSONA
-        assert "العروض والكوبونات" in NAHLA_PERSONA
-        for emoji in ("🌷", "👍", "🛍️", "🚚"):
-            assert emoji in NAHLA_PERSONA, f"missing example emoji {emoji}"
+        assert "CTA" in NAHLA_PERSONA
+        assert "الإيموجي اختياري" in NAHLA_PERSONA
+        assert "مهرجان إيموجيات" in NAHLA_PERSONA
+        assert "3–4 إيموجيات" not in NAHLA_PERSONA
+        assert "🌷" not in NAHLA_PERSONA
 
     def test_persona_caps_emoji_usage(self):
-        assert "1–2" in NAHLA_PERSONA or "1-2" in NAHLA_PERSONA or "واحد" in NAHLA_PERSONA
+        assert "اختياري" in NAHLA_PERSONA
+        assert "3–4 إيموجيات" not in NAHLA_PERSONA
 
     def test_persona_includes_saudi_dialect_guidance(self):
         assert "اللهجة السعودية" in NAHLA_PERSONA
