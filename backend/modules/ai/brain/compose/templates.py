@@ -591,6 +591,27 @@ def no_orders(**_: Any) -> str:
     return "لم أجد أي طلبات مسجّلة لرقمك. هل تريد إنشاء طلب جديد؟"
 
 
+def order_creation_in_progress(
+    product: Dict[str, Any] | None = None,
+    reference: str = "",
+    **_: Any,
+) -> str:
+    title = (product or {}).get("title") or "طلبك"
+    if reference:
+        return (
+            f"طلب *{title}* قيد الإنشاء — رقم الطلب: *{reference}*."
+        )
+    return f"طلب *{title}* قيد الإنشاء الآن — لحظات ويظهر رقم الطلب."
+
+
+def order_creation_failed(product: Dict[str, Any] | None = None, **_: Any) -> str:
+    title = (product or {}).get("title") or "المنتج المحدد"
+    return (
+        f"تعذّر إنشاء طلب *{title}* تلقائياً الآن.\n"
+        "بياناتك محفوظة — جرّب مرة أخرى أو تواصل مع المتجر لإتمام الطلب."
+    )
+
+
 # ── FAQ ───────────────────────────────────────────────────────────────────────
 
 def faq_identity(

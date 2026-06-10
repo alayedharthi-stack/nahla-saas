@@ -344,7 +344,12 @@ def validate_state_relevance_from_summary(
                 awaiting_payment_receipt = bool(s.get("awaiting_payment_receipt"))
                 awaiting_variant_choice = False
                 missing_fields = list(s.get("missing_fields") or [])
-                product_id = str(s.get("product_id") or "")
+                product_id = str(s.get("product_id") or s.get("selected_product_id") or "")
+                payment_receipt_received = bool(s.get("payment_receipt_received"))
+                order_creation_status = str(s.get("order_creation_status") or "")
+                salla_order_id = str(s.get("salla_order_id") or "")
+                salla_failure_count = int(s.get("salla_failure_count") or 0)
+                last_order_failed = bool(s.get("last_order_failed"))
 
             self.order_prep = _OP()
 
