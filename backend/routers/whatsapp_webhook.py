@@ -7537,6 +7537,31 @@ async def _handle_merchant_message(
                 )
 
         if reply and not _brain_handoff:
+            _po_reply_before_spg = reply
+            try:
+                from modules.ai.brain.postprocess.social_phrase_quality_guard import (  # noqa: PLC0415
+                    apply_social_phrase_quality_guard,
+                )
+                _spg = apply_social_phrase_quality_guard(
+                    reply,
+                    inbound_text=text or "",
+                    tenant_id=tenant_id,
+                )
+                if _spg.stripped:
+                    reply = _spg.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="social_phrase_quality_guard",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_spg,
+                        after=reply,
+                    )
+            except Exception as _spg_exc:  # noqa: BLE001  # noqa: silent-ok — belt guard best-effort
+                logger.debug(
+                    "[SOCIAL_PHRASE_QUALITY_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _spg_exc,
+                )
+
+        if reply and not _brain_handoff:
             _po_reply_before_guards = reply
             try:
                 from core.payment_intent import (  # noqa: PLC0415
@@ -9040,6 +9065,32 @@ async def _handle_merchant_message(
                 logger.debug(
                     "[SERVICE_CLOSER_GUARD] pass2 failed tenant=%s err=%s",
                     tenant_id, _scg2_exc,
+                )
+
+        # ── Social phrase quality guard (P1-F — post safety nets belt) ───
+        if reply and not _brain_handoff:
+            _po_reply_before_spg2 = reply
+            try:
+                from modules.ai.brain.postprocess.social_phrase_quality_guard import (  # noqa: PLC0415
+                    apply_social_phrase_quality_guard as _apply_spg_pass2,
+                )
+                _spg_pass2 = _apply_spg_pass2(
+                    reply,
+                    inbound_text=text or "",
+                    tenant_id=tenant_id,
+                )
+                if _spg_pass2.stripped:
+                    reply = _spg_pass2.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="social_phrase_quality_guard_pass2",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_spg2,
+                        after=reply,
+                    )
+            except Exception as _spg2_exc:  # noqa: BLE001  # noqa: silent-ok — belt guard best-effort
+                logger.debug(
+                    "[SOCIAL_PHRASE_QUALITY_GUARD] pass2 failed tenant=%s err=%s",
+                    tenant_id, _spg2_exc,
                 )
 
         # ── Occasion reply guard (P1-D-3 — post safety nets belt) ────────

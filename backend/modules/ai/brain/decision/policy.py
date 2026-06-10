@@ -231,21 +231,22 @@ class RealPolicyGate:
             return decision
         category = str(getattr(ctx, "non_commerce_category", "") or "religious_media")
         logger.info(
-            "[PolicyGate] non_commerce_clamp tenant=%s action=%s → social_reply "
+            "[PolicyGate] non_commerce_clamp tenant=%s action=%s → social route "
             "category=%s",
             getattr(ctx, "tenant_id", None),
             decision.action,
             category,
         )
-        return Decision(
-            action=ACTION_SOCIAL_REPLY,
-            args={
-                "social_category": category,
-                "block_commerce_escalation": True,
+        from modules.ai.brain.persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+        return build_social_courtesy_decision(
+            category,
+            confidence=0.94,
+            reason=f"non-commerce clamp blocked {decision.action}",
+            block_commerce=True,
+            extra_args={
                 "policy_reason": "non_commerce_clamp",
             },
-            reason=f"non-commerce clamp blocked {decision.action}",
-            confidence=0.94,
         )
 
     # ── Rule 1: working hours ─────────────────────────────────────────────────

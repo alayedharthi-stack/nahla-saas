@@ -127,14 +127,17 @@ def test_mirror_skips_when_no_rule(msg: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.  Integration — social_reply() honours the mirror over the pool.
+# 3.  Emergency mirror fallback — not used by social_reply() on healthy path.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_social_reply_uses_mirror_over_pool() -> None:
-    """When ``inbound_text`` matches a mirror rule, the returned
-    reply MUST be the mirror string, not a pool variant. We assert
-    this stays consistent across variant indices so the rotation
-    cannot leak through."""
+def test_social_mirror_fallback_uses_mirror_not_pool() -> None:
+    reply = T.social_mirror_fallback_reply("تسلم")
+    assert reply
+    assert reply == mirror_reply("تسلم")
+
+
+def test_social_reply_does_not_use_mirror_layer() -> None:
+    """P1-F: template path must not mirror-before-pool."""
     for variant in range(6):
         for sub in range(5):
             reply = T.social_reply(
@@ -143,9 +146,11 @@ def test_social_reply_uses_mirror_over_pool() -> None:
                 sub_variant=sub,
                 inbound_text="تسلم",
             )
-            assert "الله يسلمك" in reply, (
-                f"variant=({variant},{sub}) leaked pool reply: {reply!r}"
-            )
+            mirrored = mirror_reply("تسلم") or ""
+            if mirrored:
+                assert reply != mirrored, (
+                    f"social_reply must not mirror on healthy template path: {reply!r}"
+                )
 
 
 def test_social_reply_falls_back_to_pool_without_match() -> None:
