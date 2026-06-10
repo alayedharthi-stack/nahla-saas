@@ -33,6 +33,7 @@ def apply_service_closer_guard(
     *,
     inbound_text: str = "",
     non_commerce_block_mode: bool = False,
+    block_commerce_escalation: bool = False,
     inbound_metadata: Optional[dict[str, Any]] = None,
     tenant_id: Optional[int] = None,
 ) -> ServiceCloserGuardResult:
@@ -41,8 +42,11 @@ def apply_service_closer_guard(
         return ServiceCloserGuardResult(reply="", stripped=False, non_commerce=False)
 
     meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
-    non_commerce = bool(non_commerce_block_mode) or bool(
-        str(meta.get("non_commerce_category") or "").strip()
+    non_commerce = bool(
+        non_commerce_block_mode
+        or block_commerce_escalation
+        or meta.get("block_commerce_escalation")
+        or str(meta.get("non_commerce_category") or "").strip()
     )
 
     if not (
