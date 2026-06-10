@@ -386,22 +386,85 @@ def test_readiness_preview_body_bounds_image_url_length():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_studio_filters_helper_is_no_op_on_empty_filters():
-    """Empty filter set must return the query unchanged — the grid's
-    initial load (no filters) MUST behave identically to the legacy
-    ``/products`` listing."""
+def test_studio_filters_default_visibility_applies_active_predicates():
+    """P1-G1: empty optional filters still default to active-only listing."""
     from routers.catalog import _apply_studio_filters  # noqa: PLC0415
 
     class _Q:
-        """Minimal Query stand-in that records ``filter`` calls."""
-        def __init__(self): self.calls = 0
+        def __init__(self):
+            self.calls = 0
+
         def filter(self, *_a, **_k):
             self.calls += 1
             return self
+
     q = _Q()
     out = _apply_studio_filters(
         q,
-        q=None, source=None, has_image=None, has_retailer_id=None, in_stock=None,
+        q=None,
+        source=None,
+        has_image=None,
+        has_retailer_id=None,
+        in_stock=None,
+    )
+    assert out is q
+    assert q.calls == 2  # catalog_status=active + merchant_hidden_at IS NULL
+
+
+def test_studio_filters_catalog_visibility_all_skips_active_predicates():
+    from routers.catalog import _apply_studio_filters  # noqa: PLC0415
+
+    class _Q:
+        def __init__(self):
+            self.calls = 0
+
+        def filter(self, *_a, **_k):
+            self.calls += 1
+            return self
+
+    q = _Q()
+    out = _apply_studio_filters(
+        q,
+        q=None,
+        source=None,
+        has_image=None,
+        has_retailer_id=None,
+        in_stock=None,
+        catalog_visibility="all",
     )
     assert out is q
     assert q.calls == 0
+
+
+@pytest.mark.parametrize(
+    "visibility,expected_calls",
+    [
+        ("hidden", 1),
+        ("removed", 1),
+        ("archived", 1),
+    ],
+)
+def test_studio_filters_visibility_modes_apply_single_predicate(
+    visibility, expected_calls,
+):
+    from routers.catalog import _apply_studio_filters  # noqa: PLC0415
+
+    class _Q:
+        def __init__(self):
+            self.calls = 0
+
+        def filter(self, *_a, **_k):
+            self.calls += 1
+            return self
+
+    q = _Q()
+    _apply_studio_filters(
+        q,
+        q=None,
+        source=None,
+        has_image=None,
+        has_retailer_id=None,
+        in_stock=None,
+        catalog_visibility=visibility,
+    )
+    assert q.calls == expected_calls
