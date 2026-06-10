@@ -246,13 +246,13 @@ def resolve_arrival_contact_policy(
     if db is not None and tenant_id:
         try:
             from models import MerchantKnowledgeSection  # noqa: PLC0415
+            from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
 
             sections = (
-                db.query(MerchantKnowledgeSection)
-                .filter(
-                    MerchantKnowledgeSection.tenant_id == tenant_id,
-                    MerchantKnowledgeSection.is_active.is_(True),
+                apply_ai_visible_kb_query_filters(
+                    db.query(MerchantKnowledgeSection)
                 )
+                .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
                 .order_by(
                     MerchantKnowledgeSection.priority.asc(),
                     MerchantKnowledgeSection.updated_at.desc(),

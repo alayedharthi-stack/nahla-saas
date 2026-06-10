@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from core.catalog import apply_active_catalog_query_filters
 from core.store_display import clean_store_name
 
 from ..types import CommerceFacts
@@ -77,12 +78,13 @@ class DefaultFactsLoader:
         # Unsynced products cannot be ordered through Salla, so they must not
         # inflate `orderable` or appear in top_products shown to customers.
         in_stock_count = (
-            db.query(func.count(Product.id))
-            .filter(
-                Product.tenant_id == tenant_id,
-                Product.in_stock.is_(True),
-                Product.external_id.isnot(None),
-                Product.external_id != "",
+            apply_active_catalog_query_filters(
+                db.query(func.count(Product.id)).filter(
+                    Product.tenant_id == tenant_id,
+                    Product.external_id.isnot(None),
+                    Product.external_id != "",
+                ),
+                Product,
             )
             .scalar()
         ) or 0
@@ -94,12 +96,13 @@ class DefaultFactsLoader:
         # be resolved to a real Salla product. Products without external_id
         # are unsynced and must never appear in customer-facing lists.
         top_rows = (
-            db.query(Product)
-            .filter(
-                Product.tenant_id == tenant_id,
-                Product.in_stock.is_(True),
-                Product.external_id.isnot(None),
-                Product.external_id != "",
+            apply_active_catalog_query_filters(
+                db.query(Product).filter(
+                    Product.tenant_id == tenant_id,
+                    Product.external_id.isnot(None),
+                    Product.external_id != "",
+                ),
+                Product,
             )
             .order_by(Product.id)
             .limit(5)

@@ -256,13 +256,17 @@ def load_tenant_payment_accounts(
             return TenantPaymentAccounts()
 
     try:
+        from models import MerchantKnowledgeSection  # type: ignore  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
               .filter(MerchantKnowledgeSection.tenant_id == int(tenant_id))
               .filter(MerchantKnowledgeSection.kind.in_(
                   ("bank_transfer", "payment_method"),
               ))
-              .filter(MerchantKnowledgeSection.is_active.is_(True))
               .all()
         )
     except Exception as exc:  # noqa: BLE001

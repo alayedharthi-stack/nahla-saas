@@ -1052,11 +1052,13 @@ def _emit_staff_contact_graph_trace(
         return
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
             )
             .order_by(
@@ -1222,11 +1224,13 @@ def _lookup_staff_phone_in_kb(
 
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
             )
             .order_by(
@@ -2750,11 +2754,13 @@ def _lookup_tenant_maps_url(db: Any, tenant_id: int) -> Tuple[str, str]:
     # ── 3) KB free-form sections (branches / store_story / custom) ─
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(_MAPS_KB_FALLBACK_KINDS),
             )
             .order_by(

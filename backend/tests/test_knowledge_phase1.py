@@ -380,6 +380,7 @@ def test_knowledge_router_exposes_expected_paths() -> None:
         # Phase 1
         "/knowledge/section-kinds",
         "/knowledge/sections",
+        "/knowledge/sections/search",
         "/knowledge/sections/{section_id}",
         "/knowledge/sections/{section_id}/toggle",
         "/knowledge/sections/{section_id}/media",

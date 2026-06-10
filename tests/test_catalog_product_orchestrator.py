@@ -24,11 +24,15 @@ for p in [str(REPO_ROOT), str(BACKEND_DIR)]:
 os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
 from core.catalog import (  # noqa: E402
+    CATALOG_STATUS_ACTIVE,
+    CATALOG_STATUS_MERCHANT_HIDDEN,
+    CATALOG_STATUS_REMOVED_FROM_META,
     evaluate_tenant_catalog_send_readiness,
     whatsapp_commerce_diagnostics_readiness,
 )
 from services.catalog_product_orchestrator import (  # noqa: E402
     ProductCardSendAction,
+    REASON_CATALOG_NOT_ELIGIBLE,
     REASON_OK,
     REASON_RETAILER_ID_COLLISION,
     REASON_SYNTHETIC_RETAILER_ID,
@@ -80,6 +84,8 @@ class _Product:
     external_id: str = ""
     meta_retailer_id: str | None = None
     in_stock: bool = True
+    catalog_status: str = CATALOG_STATUS_ACTIVE
+    merchant_hidden_at: object | None = None
 
 
 class TestSharedReadiness:
@@ -184,16 +190,67 @@ class TestOrchestratorDecisions:
         )
         assert d.reason == REASON_TENANT_MISMATCH
 
-    def test_out_of_stock_allows_catalog_with_warning(self):
+    def test_out_of_stock_falls_back_to_legacy(self):
         d = evaluate_product_card_send(
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(in_stock=False),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10", in_stock=False),
+            product_row=_Product(
+                id=10, tenant_id=1, external_id="ext-10", in_stock=False,
+            ),
+            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+        )
+        assert d.action == ProductCardSendAction.FALLBACK_LEGACY
+        assert d.reason == REASON_CATALOG_NOT_ELIGIBLE
+        assert d.diagnostics.get("eligibility_reason") == "product_not_active"
+
+    def test_active_in_stock_product_sends_catalog(self):
+        d = evaluate_product_card_send(
+            tenant_id=1,
+            connection=_conn(),
+            attachment=_attachment(in_stock=True),
+            product_row=_Product(
+                id=10, tenant_id=1, external_id="ext-10", in_stock=True,
+            ),
             tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
-        assert d.stock_warning is True
+        assert d.reason == REASON_OK
+
+    def test_removed_from_meta_falls_back_to_legacy(self):
+        d = evaluate_product_card_send(
+            tenant_id=1,
+            connection=_conn(),
+            attachment=_attachment(),
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                catalog_status=CATALOG_STATUS_REMOVED_FROM_META,
+            ),
+        )
+        assert d.action == ProductCardSendAction.FALLBACK_LEGACY
+        assert d.reason == REASON_CATALOG_NOT_ELIGIBLE
+        assert d.diagnostics.get("eligibility_reason") == "product_not_active"
+
+    def test_merchant_hidden_falls_back_to_legacy(self):
+        from datetime import datetime, timezone
+
+        d = evaluate_product_card_send(
+            tenant_id=1,
+            connection=_conn(),
+            attachment=_attachment(),
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                catalog_status=CATALOG_STATUS_MERCHANT_HIDDEN,
+                merchant_hidden_at=datetime.now(timezone.utc),
+            ),
+        )
+        assert d.action == ProductCardSendAction.FALLBACK_LEGACY
+        assert d.reason == REASON_CATALOG_NOT_ELIGIBLE
+        assert d.diagnostics.get("eligibility_reason") == "product_not_active"
 
     def test_no_image_with_url_suggests_cta_only(self):
         d = evaluate_product_card_send(

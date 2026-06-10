@@ -103,6 +103,37 @@ class TestSocialPersonaRouting:
         decision = DefaultDecisionEngine().decide(ctx)
         _assert_llm_social_persona(decision)
 
+    def test_classified_allah_yeslamk_routes_to_llm_not_template(self) -> None:
+        match = classify_social("الله يسلمك")
+        assert match is not None
+        assert match.category == "blessing"
+        ctx = _social_ctx(message="الله يسلمك", social_category=match.category)
+        decision = DefaultDecisionEngine().decide(ctx)
+        _assert_llm_social_persona(decision)
+
+    def test_allah_yeslamk_end_to_end_from_rules_match(self) -> None:
+        from modules.ai.brain.intent import rules as intent_rules  # noqa: PLC0415
+
+        matched = intent_rules.match("الله يسلمك")
+        assert matched is not None
+        assert matched.name == INTENT_SOCIAL
+        assert (matched.slots or {}).get("social_category") == "blessing"
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000000",
+            message="الله يسلمك",
+            intent=matched,
+            state=MerchantConversationState(),
+            facts=CommerceFacts(
+                has_products=True,
+                product_count=3,
+                orderable=True,
+                store_name="متجر الاختبار",
+            ),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        _assert_llm_social_persona(decision)
+
 
 class TestSocialPersonaGoal:
     def test_goal_is_principle_based_not_phrase_prescriptive(self) -> None:
@@ -111,6 +142,20 @@ class TestSocialPersonaGoal:
         assert "Principles:" in goal or "Principles" in goal
         assert "يطري" not in goal
         assert "دوم بخير" not in goal
+
+    def test_goal_forbids_follow_up_and_status_questions(self) -> None:
+        goal = compose_social_persona_goal("blessing")
+        assert "follow-up question" in goal.lower()
+        assert "status" in goal.lower()
+        assert "customer-care" in goal.lower() or "customer care" in goal.lower()
+        assert "آمين" not in goal
+        assert "كيف أمورك" not in goal
+
+    def test_goal_does_not_compress_to_one_line_ack(self) -> None:
+        goal = compose_social_persona_goal("blessing")
+        assert "one short" not in goal.lower()
+        assert "1-line" not in goal.lower()
+        assert "not a forced one-line" in goal.lower()
 
     def test_pipeline_wires_social_persona_goal(self) -> None:
         decision = Decision(

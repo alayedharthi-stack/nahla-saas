@@ -16,10 +16,11 @@ def test_persona_uses_flexible_visual_marketing_guidance() -> None:
 
     assert "الذوق البصري والتسويقي" in prompt
     assert "CTA" in prompt
-    assert "3–4 إيموجيات" in prompt
+    assert "3–4 إيموجيات" not in prompt
     assert "قالب محفوظ" in prompt
     assert "🌷 للتحية" not in prompt
     assert "ضعي الإيموجي في بداية الجملة أو نهايتها فقط" not in prompt
+    assert "الإيموجي اختياري" in prompt
 
 
 def test_high_priority_style_allows_contextual_emoji_variation() -> None:
@@ -28,7 +29,6 @@ def test_high_priority_style_allows_contextual_emoji_variation() -> None:
     block = build_high_priority_block({}, store_name="آل عايد")
 
     assert "الإيموجي والتنسيق البصري" in block
-    assert "3–4 إيموجيات" in block
-    assert "لا تكرري نفس الرمز دائماً" in block
+    assert "3–4 إيموجيات" not in block
+    assert "لا تكرري نفس الرمز" in block
     assert "إيموجي بحد أقصى 1-2" not in block
-

@@ -299,6 +299,64 @@ KNOWN_SOURCES = frozenset({
     SOURCE_SALLA, SOURCE_ZID, SOURCE_META, SOURCE_MANUAL, SOURCE_UNKNOWN,
 })
 
+# ── Catalog visibility (P1-G1) ─────────────────────────────────────────────
+# Single vocabulary for AI + dashboard + Meta reconciliation. Legacy rows
+# without ``catalog_status`` are treated as ``active``.
+
+CATALOG_STATUS_ACTIVE = "active"
+CATALOG_STATUS_ARCHIVED = "archived"
+CATALOG_STATUS_REMOVED_FROM_META = "removed_from_meta"
+CATALOG_STATUS_MERCHANT_HIDDEN = "merchant_hidden"
+
+INACTIVE_CATALOG_STATUSES = frozenset({
+    CATALOG_STATUS_ARCHIVED,
+    CATALOG_STATUS_REMOVED_FROM_META,
+    CATALOG_STATUS_MERCHANT_HIDDEN,
+})
+
+
+def catalog_status_of(product: Any) -> str:
+    """Normalized catalog_status for ORM rows or formatted dicts."""
+    if product is None:
+        return CATALOG_STATUS_ACTIVE
+    raw = getattr(product, "catalog_status", None)
+    if raw is None and isinstance(product, dict):
+        raw = product.get("catalog_status")
+    status = str(raw or CATALOG_STATUS_ACTIVE).strip().lower()
+    return status or CATALOG_STATUS_ACTIVE
+
+
+def is_catalog_active(product: Any) -> bool:
+    """True when a product may appear in AI search, recommendations, or sends.
+
+    Enforces merchant hide, Meta removal/archive, and out-of-stock — the
+    LLM must never receive inactive rows as available choices.
+    """
+    if product is None:
+        return False
+    if getattr(product, "merchant_hidden_at", None) is not None:
+        return False
+    if isinstance(product, dict) and product.get("merchant_hidden_at"):
+        return False
+    status = catalog_status_of(product)
+    if status != CATALOG_STATUS_ACTIVE:
+        return False
+    in_stock = getattr(product, "in_stock", None)
+    if in_stock is None and isinstance(product, dict):
+        in_stock = product.get("in_stock", True)
+    if in_stock is None:
+        in_stock = True
+    return bool(in_stock)
+
+
+def apply_active_catalog_query_filters(query: Any, product_model: Any) -> Any:
+    """SQLAlchemy filter for tenant-scoped active catalog listings."""
+    return (
+        query.filter(product_model.catalog_status == CATALOG_STATUS_ACTIVE)
+        .filter(product_model.merchant_hidden_at.is_(None))
+        .filter(product_model.in_stock.is_(True))
+    )
+
 
 # Output channels — for the dashboard hub diagram + future export jobs.
 # Strings are stable: campaign senders + future Google Merchant export
@@ -471,6 +529,8 @@ def is_catalog_eligible(
     if not product_list:
         return CatalogEligibility(ok=False, reason="empty_products")
     for p in product_list:
+        if not is_catalog_active(p):
+            return CatalogEligibility(ok=False, reason="product_not_active")
         if not effective_retailer_id(p):
             return CatalogEligibility(ok=False, reason="no_retailer_id")
     return _OK
@@ -652,6 +712,13 @@ __all__: List[str] = [
     "effective_variant_retailer_id",
     "evaluate_tenant_catalog_send_readiness",
     "is_catalog_eligible",
+    "is_catalog_active",
+    "catalog_status_of",
+    "apply_active_catalog_query_filters",
+    "CATALOG_STATUS_ACTIVE",
+    "CATALOG_STATUS_ARCHIVED",
+    "CATALOG_STATUS_MERCHANT_HIDDEN",
+    "CATALOG_STATUS_REMOVED_FROM_META",
     "is_synthetic_retailer_id",
     "whatsapp_commerce_diagnostics_readiness",
 ]

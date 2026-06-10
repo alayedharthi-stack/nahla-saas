@@ -42,19 +42,19 @@ def test_detect_salam_baraka():
 def test_salam_return_matches_level():
     assert "وبركاته" in salam_return_text(SALAM_BARAKA)
     assert "ورحمة الله" in salam_return_text(SALAM_RAHMA)
-    assert salam_return_text(SALAM_BASIC) == "وعليكم السلام 🌷"
+    assert salam_return_text(SALAM_BASIC) == "وعليكم السلام"
 
 
 def test_prepend_before_intro():
     intro = T.greeting(store_name="متجر", assistant_name="نحلة", variant=0)
     out = apply_greeting_etiquette(intro, "السلام عليكم", MerchantConversationState(turn=1))
     assert out.startswith("وعليكم السلام")
-    assert "نحلة" in out
+    assert intro.strip() in out
     assert out.count("وعليكم السلام") == 1
 
 
 def test_no_duplicate_salam():
-    reply = "وعليكم السلام 🌷\nحياك الله"
+    reply = "وعليكم السلام\nحياك الله"
     out = apply_greeting_etiquette(reply, "السلام عليكم", MerchantConversationState(turn=1))
     assert out.count("وعليكم السلام") == 1
 
@@ -82,7 +82,7 @@ def test_greeting_template_with_full_salam():
         MerchantConversationState(turn=1),
     )
     assert out.startswith("وعليكم السلام ورحمة الله وبركاته")
-    assert "نحلة" in out
+    assert intro.strip() in out
 
 
 def test_salam_media_transcript():

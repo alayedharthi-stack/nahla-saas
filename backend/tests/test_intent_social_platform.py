@@ -126,6 +126,10 @@ def test_social_thanks(message: str) -> None:
     "الله يحفظك",
     "الله يوفقك",
     "الله يسعدك",
+    "الله يسلمك",
+    "الله يسلمكم",
+    "يسلمك",
+    "يسلمكم",
 ])
 def test_social_blessing(message: str) -> None:
     m = classify_social(message)
@@ -410,6 +414,7 @@ def test_platform_does_not_fire_on_honey_context(message: str) -> None:
     # Social
     ("جزاك الله خير",                     INTENT_SOCIAL),
     ("الله يعافيك",                        INTENT_SOCIAL),
+    ("الله يسلمك",                         INTENT_SOCIAL),
     ("صلى الله عليه وسلم",                 INTENT_SOCIAL),
     ("بسم الله",                           INTENT_SOCIAL),
     ("كفو",                                 INTENT_SOCIAL),

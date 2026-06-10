@@ -42,7 +42,7 @@ import {
   Search, X, Image as ImageIcon, ExternalLink, Loader2,
   AlertTriangle, CheckCircle2, XCircle, Package,
   Filter as FilterIcon, ChevronLeft, ChevronRight, ChevronDown,
-  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers,
+  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers, EyeOff, RotateCcw,
 } from 'lucide-react'
 import {
   catalogApi,
@@ -57,6 +57,7 @@ import {
   type ReadinessPreviewBody,
   type StudioFilters,
   type StudioProduct,
+  type CatalogVisibility,
 } from '../api/catalog'
 import { useLanguage } from '../i18n/context'
 import type { Lang, Translations } from '../i18n/types'
@@ -246,6 +247,20 @@ function FiltersBar(props: {
           <option value="">{f.stockAll}</option>
           <option value="yes">{f.stockYes}</option>
           <option value="no">{f.stockNo}</option>
+        </select>
+        <select
+          value={props.filters.catalog_visibility ?? 'active'}
+          onChange={e => {
+            const v = e.target.value as CatalogVisibility
+            set({ catalog_visibility: v === 'active' ? undefined : v })
+          }}
+          className="rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white"
+        >
+          <option value="active">{f.visibilityAll}</option>
+          <option value="hidden">{f.visibilityHidden}</option>
+          <option value="removed">{f.visibilityRemoved}</option>
+          <option value="archived">{f.visibilityArchived}</option>
+          <option value="all">{f.visibilityEvery}</option>
         </select>
 
         {activeCount > 0 && (
@@ -842,6 +857,7 @@ function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
 function ProductDrawer(props: {
   productId: number
   onClose: () => void
+  onMutated: () => void
 }) {
   const { t, dir, lang } = useLanguage()
   const dr = t(tr => tr.catalogMgmt.studio.drawer)
@@ -852,6 +868,7 @@ function ProductDrawer(props: {
   const [loading, setLoading] = useState(true)
   const [draft, setDraft]     = useState<ReadinessPreviewBody>({})
   const [perChannel, setPerChannel] = useState<ChannelReadiness[]>([])
+  const [actionBusy, setActionBusy] = useState(false)
   const previewTimer = useRef<number | null>(null)
 
   // Initial load.
@@ -917,6 +934,38 @@ function ProductDrawer(props: {
     return () => window.removeEventListener('keydown', onKey)
   }, [props])
 
+  const catalogStatus = data?.product.catalog_status ?? 'active'
+  const isMerchantHidden =
+    catalogStatus === 'merchant_hidden' || Boolean(data?.product.merchant_hidden_at)
+  const isRemovedMeta = catalogStatus === 'removed_from_meta'
+
+  const onHide = async () => {
+    if (!window.confirm(dr.hideConfirm)) return
+    setActionBusy(true)
+    try {
+      await catalogApi.hideProduct(props.productId)
+      props.onMutated()
+      props.onClose()
+    } catch {
+      window.alert(dr.hideFailed)
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const onRestore = async () => {
+    setActionBusy(true)
+    try {
+      await catalogApi.restoreProduct(props.productId)
+      props.onMutated()
+      props.onClose()
+    } catch {
+      window.alert(dr.restoreFailed)
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex" dir={dir}>
       <div className="flex-1 bg-slate-900/40" onClick={props.onClose} />
@@ -929,13 +978,45 @@ function ProductDrawer(props: {
               {loading ? dr.loading : (data?.product.title || dr.defaultTitle)}
             </h3>
             {data && <SourcePill source={data.product.source} />}
+            {isRemovedMeta && (
+              <span className="text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-full px-2 py-0.5">
+                {dr.statusRemovedMeta}
+              </span>
+            )}
+            {isMerchantHidden && (
+              <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                {dr.statusHidden}
+              </span>
+            )}
           </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {data && !isMerchantHidden && !isRemovedMeta && (
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void onHide()}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                <EyeOff className="w-3.5 h-3.5" /> {dr.hideBtn}
+              </button>
+            )}
+            {data && isMerchantHidden && (
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void onRestore()}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                <RotateCcw className="w-3.5 h-3.5" /> {dr.restoreBtn}
+              </button>
+            )}
           <button
             onClick={props.onClose}
             className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500"
           >
             <X className="w-5 h-5" />
           </button>
+          </div>
         </div>
 
         {loading || !data ? (
@@ -1157,6 +1238,7 @@ export default function ProductStudio() {
         <ProductDrawer
           productId={selectedId}
           onClose={() => setSelectedId(null)}
+          onMutated={() => { void reload() }}
         />
       )}
     </div>
