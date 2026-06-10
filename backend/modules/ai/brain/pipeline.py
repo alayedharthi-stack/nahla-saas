@@ -2569,6 +2569,15 @@ def _compose_base_response_goal(decision: Decision, suggestion: SuggestionSnapsh
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "social_persona_ack"
+    ):
+        from .persona_expression import compose_social_persona_goal  # noqa: PLC0415
+
+        _sc = str((decision.args or {}).get("social_category") or "social").strip()
+        return compose_social_persona_goal(_sc)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "merchant_praise_ack"
     ):
         return (

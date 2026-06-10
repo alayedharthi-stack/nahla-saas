@@ -907,14 +907,13 @@ def try_social_non_commerce_decision(ctx: Any, *, route: str = "") -> Optional[A
         social=category,
         topic=category,
     )
-    return Decision(
-        action=ACTION_SOCIAL_REPLY,
-        args={
-            "social_category": category,
-            "block_commerce_escalation": True,
-        },
-        reason=f"conversational priority — social/non-commerce ({category})",
+    from modules.ai.brain.persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+    return build_social_courtesy_decision(
+        category,
         confidence=0.94,
+        reason=f"conversational priority — social/non-commerce ({category})",
+        block_commerce=True,
     )
 
 

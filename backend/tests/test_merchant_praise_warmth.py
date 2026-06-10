@@ -73,24 +73,28 @@ def test_compliment_routes_to_generative_praise_ack() -> None:
     assert decision.action != ACTION_SOCIAL_REPLY
 
 
-def test_thanks_stays_on_social_template_path() -> None:
-    from modules.ai.brain.decision.actions import ACTION_SOCIAL_REPLY
+def test_thanks_routes_to_social_persona_llm() -> None:
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.persona_expression import PERSONA_TOPIC_SOCIAL_PERSONA_ACK
 
     ctx = _build_social_decision_ctx(message="جزاك الله خير", social_category="thanks")
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_SOCIAL_REPLY
+
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
     assert decision.args.get("social_category") == "thanks"
 
 
-def test_strong_praise_stays_on_social_template_path() -> None:
-    from modules.ai.brain.decision.actions import ACTION_SOCIAL_REPLY
+def test_strong_praise_routes_to_social_persona_llm() -> None:
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.persona_expression import PERSONA_TOPIC_SOCIAL_PERSONA_ACK
 
     ctx = _build_social_decision_ctx(message="كفو", social_category="strong_praise")
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_SOCIAL_REPLY
-    assert decision.args.get("social_category") == "strong_praise"
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
 
 
 def test_merchant_praise_ack_response_goal() -> None:
