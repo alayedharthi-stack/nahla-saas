@@ -285,6 +285,10 @@ def build_structured_facts_block(
     """
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import (  # noqa: PLC0415
+            apply_ai_visible_kb_query_filters,
+            section_has_catalog_active_product,
+        )
         from services.knowledge_section_kinds import (  # noqa: PLC0415
             group_for,
             is_behavioral_kind,
@@ -295,11 +299,10 @@ def build_structured_facts_block(
 
     try:
         rows = (
-            db.query(MerchantKnowledgeSection)
-            .filter(
-                MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
             )
+            .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
             .order_by(
                 MerchantKnowledgeSection.priority.asc(),
                 MerchantKnowledgeSection.updated_at.desc(),
@@ -344,12 +347,16 @@ def build_structured_facts_block(
     # ── Phase 3 product-scope filter ────────────────────────────────────
     filtered_rows: List[Any] = []
     scoped_dropped = 0
+    catalog_dropped = 0
     queried_non_behavior_rows = list(rows)
     for r in rows:
         linked_pids = {
             int(lk.product_id)
             for lk in (getattr(r, "product_links", None) or [])
         }
+        if linked_pids and not section_has_catalog_active_product(db, tenant_id, r):
+            catalog_dropped += 1
+            continue
         if not linked_pids:
             # Global section — always include.
             filtered_rows.append(r)
@@ -500,6 +507,7 @@ def build_behavioral_overlay_block(db: Any, tenant_id: int) -> str:
     """
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
         from services.knowledge_section_kinds import (  # noqa: PLC0415
             BEHAVIORAL_KINDS,
         )
@@ -509,10 +517,11 @@ def build_behavioral_overlay_block(db: Any, tenant_id: int) -> str:
 
     try:
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(list(BEHAVIORAL_KINDS)),
             )
             .order_by(

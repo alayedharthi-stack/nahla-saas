@@ -66,6 +66,7 @@ import {
   type SectionKindsResponse,
   type LegacyKnowledgeBaseResponse,
   type MediaLinkRow,
+  type KnowledgeSectionSearchHit,
 } from '../api/knowledge'
 import {
   intelligenceLibrariesApi,
@@ -1329,6 +1330,7 @@ function SectionCard({
 
   return (
     <div
+      id={`kb-section-${section.id}`}
       className={classNames(
         'rounded-xl border p-3.5 bg-white',
         section.is_active ? 'border-slate-200' : 'border-slate-200 bg-slate-50/60 opacity-70',
@@ -2124,6 +2126,206 @@ function ImprovementSuggestionsCard({
 
 
 // ───────────────────────────────────────────────────────────────────────────
+// KB search (P1-G2)
+// ───────────────────────────────────────────────────────────────────────────
+
+type ActiveFilter = 'all' | 'active' | 'inactive'
+
+function KnowledgeSearchPanel({
+  kindLabelByKind,
+  onOpenSection,
+  onToggle,
+  onDelete,
+}: {
+  kindLabelByKind: Map<string, string>
+  onOpenSection: (sectionId: number) => void
+  onToggle: (sectionId: number) => Promise<void>
+  onDelete: (sectionId: number) => Promise<void>
+}) {
+  const [query, setQuery] = useState('')
+  const [activeFilter, setActiveFilter] = useState<ActiveFilter>('all')
+  const [results, setResults] = useState<KnowledgeSectionSearchHit[]>([])
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
+  const [busyId, setBusyId] = useState<number | null>(null)
+
+  useEffect(() => {
+    const term = query.trim()
+    if (term.length < 2) {
+      setResults([])
+      setSearchError(null)
+      return
+    }
+    const handle = window.setTimeout(async () => {
+      setSearching(true)
+      setSearchError(null)
+      try {
+        const onlyActive =
+          activeFilter === 'active' ? true : activeFilter === 'inactive' ? false : null
+        const res = await knowledgeApi.searchSections({ q: term, onlyActive })
+        setResults(res.items)
+      } catch (err) {
+        setSearchError((err as Error).message || 'تعذّر البحث')
+        setResults([])
+      } finally {
+        setSearching(false)
+      }
+    }, 300)
+    return () => window.clearTimeout(handle)
+  }, [query, activeFilter])
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Search className="w-4 h-4 text-slate-400 shrink-0" />
+        <input
+          type="search"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="بحث في قاعدة المعرفة"
+          className="flex-1 text-sm border-0 outline-none bg-transparent placeholder:text-slate-400"
+          aria-label="بحث في قاعدة المعرفة"
+        />
+        {searching && <Loader2 className="w-4 h-4 animate-spin text-brand-500 shrink-0" />}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        {(
+          [
+            ['all', 'الكل'],
+            ['active', 'النشطة فقط'],
+            ['inactive', 'عرض غير النشطة'],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveFilter(key)}
+            className={classNames(
+              'px-2.5 py-1 rounded-full border font-medium transition-colors',
+              activeFilter === key
+                ? 'bg-brand-50 border-brand-200 text-brand-800'
+                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {searchError && (
+        <p className="text-xs text-red-600">{searchError}</p>
+      )}
+
+      {query.trim().length >= 2 && !searching && results.length === 0 && !searchError && (
+        <p className="text-xs text-slate-500">لا توجد نتائج.</p>
+      )}
+
+      {results.length > 0 && (
+        <ul className="divide-y divide-slate-100 border border-slate-100 rounded-lg overflow-hidden">
+          {results.map(hit => (
+            <li key={hit.id} className="p-3 bg-slate-50/40 hover:bg-slate-50">
+              <div className="flex items-start justify-between gap-2 mb-1">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-brand-50 text-brand-700">
+                      {kindLabelByKind.get(hit.kind) || hit.kind}
+                    </span>
+                    {!hit.is_active && (
+                      <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                        غير مفعّل
+                      </span>
+                    )}
+                  </div>
+                  {hit.title && (
+                    <p className="text-sm font-semibold text-slate-900 truncate">{hit.title}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    title="فتح"
+                    onClick={() => onOpenSection(hit.id)}
+                    className="px-2 py-1 text-[11px] rounded hover:bg-white border border-slate-200 text-slate-600"
+                  >
+                    فتح
+                  </button>
+                  <button
+                    type="button"
+                    title={hit.is_active ? 'تعطيل' : 'تفعيل'}
+                    disabled={busyId === hit.id}
+                    onClick={async () => {
+                      setBusyId(hit.id)
+                      try {
+                        await onToggle(hit.id)
+                      } finally {
+                        setBusyId(null)
+                      }
+                    }}
+                    className="p-1.5 rounded hover:bg-white text-slate-500"
+                  >
+                    {busyId === hit.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : hit.is_active ? (
+                      <Power className="w-3.5 h-3.5" />
+                    ) : (
+                      <PowerOff className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    title="حذف"
+                    onClick={() => setConfirmDeleteId(hit.id)}
+                    className="p-1.5 rounded hover:bg-red-50 text-red-500"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+              {hit.snippet && (
+                <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">{hit.snippet}</p>
+              )}
+              {confirmDeleteId === hit.id && (
+                <div className="mt-2 p-2 rounded-lg bg-red-50 border border-red-200 flex items-center gap-2 text-xs text-red-800">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span className="flex-1">حذف هذا القسم؟</span>
+                  <button
+                    type="button"
+                    disabled={busyId === hit.id}
+                    onClick={async () => {
+                      setBusyId(hit.id)
+                      try {
+                        await onDelete(hit.id)
+                        setConfirmDeleteId(null)
+                        setResults(prev => prev.filter(r => r.id !== hit.id))
+                      } finally {
+                        setBusyId(null)
+                      }
+                    }}
+                    className="px-2 py-1 rounded bg-red-500 hover:bg-red-600 text-white font-semibold disabled:opacity-50"
+                  >
+                    حذف
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(null)}
+                    className="px-2 py-1 text-red-700 hover:bg-red-100 rounded"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+
+// ───────────────────────────────────────────────────────────────────────────
 // Main page
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -2362,6 +2564,19 @@ export default function KnowledgeBase() {
     return map
   }, [sections])
 
+  const openSectionById = useCallback(
+    (sectionId: number) => {
+      const section = sectionsById.get(sectionId)
+      if (section) {
+        openEdit(section)
+        return
+      }
+      const el = document.getElementById(`kb-section-${sectionId}`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    },
+    [sectionsById, openEdit],
+  )
+
   const groups = registry?.groups || []
   const kinds = registry?.kinds || []
 
@@ -2423,6 +2638,14 @@ export default function KnowledgeBase() {
         mediaPool={mediaPool}
         onSaveQuick={handleQuickSave}
         onFormatWithAI={handleFormatWithAI}
+      />
+
+      {/* KB search (P1-G2) */}
+      <KnowledgeSearchPanel
+        kindLabelByKind={kindLabelByKind}
+        onOpenSection={openSectionById}
+        onToggle={handleToggleSection}
+        onDelete={handleDeleteSection}
       />
 
       {/* KB-Improve V1 — proactive improvement suggestions */}

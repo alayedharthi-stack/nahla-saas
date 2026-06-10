@@ -9,9 +9,10 @@ one-shot import endpoint that lifts the legacy
 ``ai_settings.manual_knowledge_base`` blob into structured sections
 on first use of the redesigned dashboard page.
 
-Routes:
+    Routes:
     GET    /knowledge/section-kinds
     GET    /knowledge/sections
+    GET    /knowledge/sections/search
     POST   /knowledge/sections
     PATCH  /knowledge/sections/{section_id}
     POST   /knowledge/sections/{section_id}/toggle
@@ -40,6 +41,12 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.knowledge import (
+    apply_ai_visible_kb_query_filters,
+    apply_kb_list_query_filters,
+    apply_visible_kb_query_filters,
+    metadata_searchable_strings,
+)
 from core.tenant import (
     get_or_create_settings,
     get_or_create_tenant,
@@ -255,9 +262,105 @@ def _serialize_section(section: MerchantKnowledgeSection) -> Dict[str, Any]:
         "conflicts_json": section.conflicts_json,
         "created_at": section.created_at.isoformat() if section.created_at else None,
         "updated_at": section.updated_at.isoformat() if section.updated_at else None,
+        "deleted_at": (
+            section.deleted_at.isoformat() if getattr(section, "deleted_at", None) else None
+        ),
         "media_links": [_serialize_media_link(lk) for lk in media_links],
         "product_links": [_serialize_product_link(lk) for lk in product_links],
     }
+
+
+def _build_snippet(text: str, query: str, *, max_len: int = 160) -> str:
+    body = (text or "").strip()
+    if not body:
+        return ""
+    q = (query or "").strip()
+    if not q:
+        return body[:max_len] + ("…" if len(body) > max_len else "")
+    lower_body = body.lower()
+    lower_q = q.lower()
+    idx = lower_body.find(lower_q)
+    if idx < 0:
+        return body[:max_len] + ("…" if len(body) > max_len else "")
+    start = max(0, idx - 40)
+    end = min(len(body), idx + len(q) + 80)
+    snippet = body[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(body):
+        snippet = snippet + "…"
+    return snippet
+
+
+def _section_matches_query(section: MerchantKnowledgeSection, query: str) -> bool:
+    q = (query or "").strip().lower()
+    if not q:
+        return True
+    haystacks = [
+        section.title or "",
+        section.body or "",
+        section.kind or "",
+        section.source or "",
+    ]
+    haystacks.extend(metadata_searchable_strings(section.metadata_json))
+    return any(q in h.lower() for h in haystacks)
+
+
+def _snippet_source_for_hit(section: MerchantKnowledgeSection, query: str) -> str:
+    """Pick a human-readable snippet source — never raw metadata JSON."""
+    q = (query or "").strip().lower()
+    title = (section.title or "").strip()
+    body = (section.body or "").strip()
+    if q and q in body.lower():
+        return body
+    if q and q in title.lower():
+        return title
+    if q:
+        for meta_text in metadata_searchable_strings(section.metadata_json):
+            if q in meta_text.lower():
+                return meta_text
+    return body or title
+
+
+def _serialize_search_hit(
+    section: MerchantKnowledgeSection,
+    query: str,
+) -> Dict[str, Any]:
+    title = section.title or ""
+    snippet_source = _snippet_source_for_hit(section, query)
+    return {
+        "id": int(section.id),
+        "title": title or None,
+        "snippet": _build_snippet(snippet_source, query),
+        "kind": section.kind,
+        "group": group_for(section.kind),
+        "source": section.source,
+        "is_active": bool(section.is_active),
+        "deleted_at": (
+            section.deleted_at.isoformat() if getattr(section, "deleted_at", None) else None
+        ),
+        "updated_at": section.updated_at.isoformat() if section.updated_at else None,
+    }
+
+
+def _get_mutable_section(
+    db: Session,
+    tenant_id: int,
+    section_id: int,
+) -> MerchantKnowledgeSection:
+    row = (
+        db.query(MerchantKnowledgeSection)
+        .filter(
+            MerchantKnowledgeSection.id == section_id,
+            MerchantKnowledgeSection.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="not_found")
+    if getattr(row, "deleted_at", None) is not None:
+        raise HTTPException(status_code=409, detail="section_deleted")
+    return row
 
 
 # ── Section-kinds registry ──────────────────────────────────────────────────
@@ -299,6 +402,7 @@ async def list_sections(
     only_active: bool = Query(False),
     kind: Optional[str] = Query(None),
     group: Optional[int] = Query(None, ge=1, le=6),
+    include_deleted: bool = Query(False),
 ):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
@@ -306,8 +410,9 @@ async def list_sections(
     q = db.query(MerchantKnowledgeSection).filter(
         MerchantKnowledgeSection.tenant_id == tenant_id,
     )
-    if only_active:
-        q = q.filter(MerchantKnowledgeSection.is_active.is_(True))
+    q = apply_kb_list_query_filters(
+        q, only_active=only_active, include_deleted=include_deleted,
+    )
     if kind:
         q = q.filter(MerchantKnowledgeSection.kind == kind.strip().lower())
     rows = q.order_by(
@@ -320,6 +425,62 @@ async def list_sections(
         rows = [r for r in rows if group_for(r.kind) == group]
 
     return {"items": [_serialize_section(r) for r in rows]}
+
+
+@router.get("/knowledge/sections/search")
+async def search_sections(
+    request: Request,
+    db: Session = Depends(get_db),
+    q: str = Query(..., min_length=2, max_length=200),
+    kind: Optional[str] = Query(None),
+    group: Optional[int] = Query(None, ge=1, le=6),
+    only_active: Optional[bool] = Query(
+        None,
+        description="true=active only, false=inactive only, omit=all",
+    ),
+    include_deleted: bool = Query(False),
+):
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    term = q.strip()
+    if len(term) < 2:
+        raise HTTPException(status_code=400, detail="query_too_short")
+
+    pattern = f"%{term}%"
+    query = db.query(MerchantKnowledgeSection).filter(
+        MerchantKnowledgeSection.tenant_id == tenant_id,
+    )
+    if not include_deleted:
+        query = query.filter(MerchantKnowledgeSection.deleted_at.is_(None))
+    if only_active is True:
+        query = query.filter(MerchantKnowledgeSection.is_active.is_(True))
+    elif only_active is False:
+        query = query.filter(MerchantKnowledgeSection.is_active.is_(False))
+    if kind:
+        query = query.filter(MerchantKnowledgeSection.kind == kind.strip().lower())
+
+    query = query.filter(
+        sa.or_(
+            MerchantKnowledgeSection.title.ilike(pattern),
+            MerchantKnowledgeSection.body.ilike(pattern),
+            MerchantKnowledgeSection.kind.ilike(pattern),
+            MerchantKnowledgeSection.source.ilike(pattern),
+            sa.cast(MerchantKnowledgeSection.metadata_json, sa.String).ilike(pattern),
+        )
+    )
+    rows = query.order_by(
+        MerchantKnowledgeSection.updated_at.desc(),
+        MerchantKnowledgeSection.id.desc(),
+    ).limit(100).all()
+
+    if group is not None:
+        rows = [r for r in rows if group_for(r.kind) == group]
+
+    # Post-filter metadata string leaves the SQL cast may miss.
+    rows = [r for r in rows if _section_matches_query(r, term)]
+
+    return {"items": [_serialize_search_hit(r, term) for r in rows]}
 
 
 @router.post("/knowledge/sections", status_code=201)
@@ -364,16 +525,7 @@ async def update_section(
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
-    row = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.id == section_id,
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="not_found")
+    row = _get_mutable_section(db, tenant_id, section_id)
 
     data = payload.model_dump(exclude_unset=True)
     if "kind" in data and data["kind"]:
@@ -404,16 +556,7 @@ async def toggle_section(
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
-    row = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.id == section_id,
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="not_found")
+    row = _get_mutable_section(db, tenant_id, section_id)
     row.is_active = not bool(row.is_active)
     db.commit()
     db.refresh(row)
@@ -431,20 +574,13 @@ async def delete_section(
     db: Session = Depends(get_db),
 ):
     tenant_id = resolve_tenant_id(request)
-    row = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.id == section_id,
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="not_found")
-    db.delete(row)
+    row = _get_mutable_section(db, tenant_id, section_id)
+    now = datetime.now(timezone.utc)
+    row.deleted_at = now
+    row.is_active = False
     db.commit()
-    _logger.info("[KB.section.delete] tenant=%s id=%s", tenant_id, section_id)
-    return {"deleted": True, "id": int(section_id)}
+    _logger.info("[KB.section.soft_delete] tenant=%s id=%s", tenant_id, section_id)
+    return {"deleted": True, "id": int(section_id), "deleted_at": now.isoformat()}
 
 
 # ── Media linking ───────────────────────────────────────────────────────────
@@ -459,16 +595,7 @@ async def link_media(
 ):
     tenant_id = resolve_tenant_id(request)
 
-    section = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.id == section_id,
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not section:
-        raise HTTPException(status_code=404, detail="section_not_found")
+    section = _get_mutable_section(db, tenant_id, section_id)
 
     media = (
         db.query(AIMediaItem)
@@ -1083,11 +1210,10 @@ def _existing_sections_for_prompt(
     db: Session, tenant_id: int,
 ) -> List[ExistingSection]:
     rows = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-            MerchantKnowledgeSection.is_active.is_(True),
+        apply_ai_visible_kb_query_filters(
+            db.query(MerchantKnowledgeSection)
         )
+        .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
         .order_by(MerchantKnowledgeSection.priority.asc())
         .all()
     )
@@ -1710,17 +1836,7 @@ class ProductLinkIn(BaseModel):
 def _section_for_tenant_or_404(
     db: Session, tenant_id: int, section_id: int,
 ) -> MerchantKnowledgeSection:
-    section = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.id == section_id,
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-        )
-        .first()
-    )
-    if not section:
-        raise HTTPException(status_code=404, detail="section_not_found")
-    return section
+    return _get_mutable_section(db, tenant_id, section_id)
 
 
 @router.get("/knowledge/sections/{section_id}/products")
@@ -1899,11 +2015,10 @@ async def repair_preview(
     get_or_create_tenant(db, tenant_id)
 
     rows = (
-        db.query(MerchantKnowledgeSection)
-        .filter(
-            MerchantKnowledgeSection.tenant_id == tenant_id,
-            MerchantKnowledgeSection.is_active.is_(True),
+        apply_ai_visible_kb_query_filters(
+            db.query(MerchantKnowledgeSection)
         )
+        .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
         .order_by(MerchantKnowledgeSection.id.asc())
         .all()
     )
@@ -2102,8 +2217,10 @@ async def improvement_suggestions(
 
     phase = _time.monotonic()
     rows = (
-        db.query(MerchantKnowledgeSection)
-        .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
+        apply_visible_kb_query_filters(
+            db.query(MerchantKnowledgeSection)
+            .filter(MerchantKnowledgeSection.tenant_id == tenant_id)
+        )
         .order_by(MerchantKnowledgeSection.id.asc())
         .all()
     )
