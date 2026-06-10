@@ -1664,16 +1664,7 @@ async def _process_video(
             f"النص الظاهر/الوصف من الفيديو: "
             f"{base_meta['frame_vision_text']}"
         )
-    elif base_meta.get("frame_vision_status") in ("skipped", "failed", "empty"):
-        # Honest about what we tried. The brain reads this as
-        # "no visual signal" but the conversation context + caption
-        # still drive the reply.
-        _why = str(base_meta.get("frame_vision_error") or "").strip()
-        if _why:
-            pieces.append(
-                f"ملاحظة: تعذّر استخراج وصف بصري من الفيديو "
-                f"({_why})."
-            )
+    # Vision failure stays in metadata/logs only (P1-E) — not customer-facing.
 
     # ── Lightweight topic inference ────────────────────────────
     # Now that we may have frame-vision text, fold it into the
@@ -1689,31 +1680,14 @@ async def _process_video(
     if _hints:
         base_meta["topic_hints"] = list(_hints)
         pieces.append("استنتاج خفيف من النص المتاح: " + "، ".join(_hints))
+        if any(h in ("نحل_أو_عسل", "منتج_أو_شراء") for h in _hints):
+            base_meta["product_media_signal"] = True
 
-    # Hard rules for the brain (NOT canned replies — the brain
-    # composes the actual words). These mirror the user spec:
-    #   * Don't say "I can't see the video" — interpret what you
-    #     can from caption/filename/forward markers/topic hints.
-    #   * Keep the existing conversation context: if it's about
-    #     an order or shipment, the natural reply may keep the
-    #     thread (e.g. "ووصلتك الشحنة؟"). Do NOT discard memory.
-    #   * Only suggest product selection if the customer actually
-    #     asks to buy — viral content / dua / greeting reels MUST
-    #     NOT route to product picking.
-    #   * If the video genuinely carries zero textual signal AND
-    #     no topic hint matched, reply politely and ask an open
-    #     question while preserving the active topic — never use
-    #     "ما أقدر أشوف الفيديو" or "لا أستطيع مشاهدة الفيديو".
+    # Minimal framing — typed product_media response_goal owns reply policy (P1-E).
     pieces.append(
-        "اقرأ السياق ورد على العميل بأسلوبك الطبيعي حسب محتوى "
-        "الفيديو وسياق المحادثة الحالية. ممنوع قول «ما أقدر "
-        "أشوف الفيديو» أو «لا أستطيع مشاهدة الفيديو». استخدم "
-        "أي إشارة متاحة (التعليق، اسم الملف، علامات إعادة "
-        "التوجيه، الاستنتاج أعلاه) لفهم محتواه والرد عليه "
-        "بطبيعية. حافظ على ربط المحادثة بالطلب أو الشحنة إذا "
-        "كانت مفتوحة. ممنوع اقتراح اختيار منتج إلا إذا العميل "
-        "فعلاً يطلب شراءً. إذا لم يتضح المحتوى نهائياً، رد "
-        "بلطف بسؤال مفتوح يحافظ على السياق الحالي."
+        "هذا فيديو من العميل. استخدم الوصف/التعليق/الاستنتاج أعلاه "
+        "لفهم المحتوى. لا تذكر للعميل فشل الرؤية الآلي — إن نقص "
+        "الوصف اسأل بلطف ماذا يريد أن يفعل بالمحتوى."
     )
     combined = "\n".join(pieces)
 
@@ -3306,15 +3280,15 @@ async def _describe_image_with_openai(
     data_url = f"data:{safe_mime};base64,{b64}"
 
     system_prompt = (
-        "أنت مساعد بصري في متجر إلكتروني عربي. مهمتك وصف الصورة "
-        "المرسلة من العميل بشكل موجز وعملي، بحيث يستفيد منها مساعد "
-        "خدمة العملاء لاحقاً. اذكر:\n"
-        "1) نوع المحتوى (منتج / فاتورة / لقطة شاشة / إيصال / إثبات دفع "
-        "/ شخصية / مستند / صورة عامة).\n"
+        "أنت مساعد بصري لمتجر إلكتروني عربي. مهمتك وصف ما يظهر في "
+        "الصورة أو إطار الفيديو بشكل موجز وعملي لمساعدة التاجر في فهم "
+        "محتوى المنتج أو العملية المعروضة. اذكر:\n"
+        "1) نوع المحتوى (منتج / عسل / نحل / عملية إنتاج / فاتورة / "
+        "إيصال / لقطة شاشة / مستند / صورة عامة).\n"
         "2) النص المرئي إن وُجد (اقرأه كما هو دون ترجمة).\n"
-        "3) أي تفاصيل مهمة قد يحتاجها فريق الدعم (رقم طلب، اسم منتج، "
-        "مبلغ، تاريخ، علامة تجارية).\n"
-        "اكتب الوصف بالعربية الفصحى، في حدود 3–5 أسطر، دون مقدمات."
+        "3) تفاصيل المنتج أو العملية (نوع العسل، مرحلة التصفية/الفرز، "
+        "التاريخ/المصدر إن ظهر، العلامة).\n"
+        "اكتب الوصف بالعربية، في حدود 3–5 أسطر، دون مقدمات."
     )
     user_text = (
         f"وصف الصورة المرفقة. تعليق العميل المرفق (قد يكون فارغاً): "

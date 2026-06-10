@@ -9073,6 +9073,37 @@ async def _handle_merchant_message(
                     tenant_id, _org_exc,
                 )
 
+        # ── Product media reply guard (P1-E — belt) ───────────────────────
+        if reply and not _brain_handoff:
+            _po_reply_before_pmg = reply
+            try:
+                from modules.ai.brain.postprocess.product_media_reply_guard import (  # noqa: PLC0415
+                    apply_product_media_reply_guard,
+                )
+                _pmg = apply_product_media_reply_guard(
+                    reply,
+                    inbound_text=text or "",
+                    inbound_metadata=(
+                        dict(inbound_metadata or {})
+                        if isinstance(inbound_metadata, dict)
+                        else {}
+                    ),
+                    tenant_id=tenant_id,
+                )
+                if _pmg.stripped:
+                    reply = _pmg.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="product_media_reply_guard",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_pmg,
+                        after=reply,
+                    )
+            except Exception as _pmg_exc:  # noqa: BLE001  # noqa: silent-ok — product media guard best-effort
+                logger.debug(
+                    "[PRODUCT_MEDIA_REPLY_GUARD] failed tenant=%s err=%s",
+                    tenant_id, _pmg_exc,
+                )
+
         # ── Internal-reasoning scrubber (Phase 6) ──────────────────────
         # Drops lines that contain leaked reasoning prose (e.g. "بناءً
         # على السياق", "في قاعدة المعرفة"). Runs AFTER marker

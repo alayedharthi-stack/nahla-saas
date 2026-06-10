@@ -898,7 +898,7 @@ class DefaultDecisionEngine:
                         ),
                         confidence=0.96,
                     )
-            except Exception as _ftp_exc:  # noqa: BLE001
+            except Exception as _ftp_exc:  # noqa: BLE001  # noqa: silent-ok — payment promise check best-effort
                 logger.debug(
                     "[PAYMENT_TRANSFER_PROMISE] check skipped tenant=%s err=%s",
                     ctx.tenant_id, _ftp_exc,
@@ -2675,6 +2675,49 @@ class DefaultDecisionEngine:
                 reason="non-commerce media — LLM reply without catalog tools",
                 confidence=0.88,
             )
+
+        # P1-E: typed product-media goal (honey/process video, product info text)
+        try:
+            from ..commerce.product_media import (  # noqa: PLC0415
+                build_product_media_decision_args,
+                detect_product_media_turn,
+            )
+            _profile = getattr(ctx, "profile", None) or {}
+            _in_meta = (
+                _profile.get("inbound_metadata")
+                if isinstance(_profile, dict) else None
+            )
+            _pm = detect_product_media_turn(
+                ctx.message or "",
+                inbound_metadata=_in_meta if isinstance(_in_meta, dict) else None,
+                intent_name=intent.name,
+                commerce_blocked=False,
+            )
+            if _pm.matched:
+                _bundle = getattr(ctx, "commerce_bundle", None) or {}
+                logger.info(
+                    "[PRODUCT_MEDIA_ROUTE] tenant=%s vision=%s hint_only=%s "
+                    "preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _pm.has_vision_evidence,
+                    _pm.has_hint_only,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args=build_product_media_decision_args(
+                        _pm,
+                        commerce_bundle=_bundle if isinstance(_bundle, dict) else {},
+                    ),
+                    reason="product/inbound media — typed LLM goal",
+                    confidence=0.86,
+                )
+        except Exception as _pm_exc:  # noqa: BLE001  # noqa: silent-ok — product media route best-effort
+            logger.debug(
+                "[PRODUCT_MEDIA_ROUTE] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _pm_exc,
+            )
+
         return Decision(
             action=ACTION_LLM_REPLY,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",
