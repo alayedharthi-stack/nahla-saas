@@ -1001,6 +1001,21 @@ class MerchantBrain:
                 getattr(ctx, "tenant_id", "?"), _rr_exc,
             )
 
+        # ── 4.6 PresentationMode shadow (P1-B Phase 1) ───────────────────
+        # Evidence-based mode on Decision.args + [PRESENTATION_MODE] log.
+        # Does not change action, compose, or dispatch.
+        try:
+            from .commerce.presentation_mode import (  # noqa: PLC0415
+                apply_presentation_mode_shadow as _apply_presentation_shadow,
+            )
+
+            decision = _apply_presentation_shadow(ctx, decision)
+        except Exception as _pm_exc:  # noqa: BLE001  # noqa: silent-ok — shadow must never break a turn
+            logger.debug(
+                "[PRESENTATION_MODE] shadow stamp skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", "?"), _pm_exc,
+            )
+
         # Visible in all Railway log levels — critical checkpoint.
         _policy_changed = (decision.reason != reason_before_policy)
         logger.info(
@@ -1045,6 +1060,9 @@ class MerchantBrain:
         # `BRAIN_RESULT` log line and `/debug/recent-whatsapp-turns`
         # endpoint can report it without parsing free-form logs.
         new_state.last_action = str(decision.action or "")
+        new_state.last_presentation_mode = str(
+            (decision.args or {}).get("presentation_mode") or ""
+        )
 
         # ── Conversation-context memory (May 2026) ───────────────────────
         # Persist the platform topic so a bare "نعم" on the NEXT turn

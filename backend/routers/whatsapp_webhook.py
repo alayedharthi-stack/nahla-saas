@@ -6024,10 +6024,8 @@ async def _handle_merchant_message(
         from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
             MODE_IDENTITY_REPLY,
             mode_prompt_overlay,
-            render_identity_reply,
             resolve_conversation_mode,
             save_lease,
-            should_use_greeting_fast_path,
         )
         from core.ownership_state import (  # noqa: PLC0415
             attempt_implicit_takeover_recovery,
@@ -6091,52 +6089,15 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
-        # ── Identity / greeting fast path ────────────────────────────────────
-        # Pure short greetings on cold start (or automation_recovery escape)
-        # get the deterministic card. Established live_chat conversations
-        # and active leases yield to the Brain for non-deterministic
-        # re-greeting (Nahla Constitution — personality is not deterministic).
-        # Identity probes ("من أنت؟" / "هل أنت AI؟") fall through to the
-        # Brain so thin persona compose (persona_identity) can answer naturally.
+        # Pure greetings (cold or established) route through Brain persona_social
+        # compose — no PRE_BRAIN_FAST_PATH / render_identity_reply shortcut.
         if (
             mode_decision.mode == MODE_IDENTITY_REPLY
             and mode_decision.identity_topic == "greeting"
         ):
-            if should_use_greeting_fast_path(
-                mode_decision=mode_decision,
-                convo=convo,
-                history=history,
-            ):
-                reply = render_identity_reply(
-                    db, tenant_id=tenant_id, topic=mode_decision.identity_topic,
-                )
-                _persona_ownership.mark_bypass(
-                    _POReason.PRE_BRAIN_FAST_PATH,
-                    owner="render_identity_reply",
-                )
-                StateManager.save_message(
-                    db, to, reply, "outbound",
-                    conversation_id=convo.id, tenant_id=tenant_id,
-                    extra_metadata=_persona_ownership.to_metadata(),
-                )
-                await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=reply,
-                    _tenant_id=tenant_id, _db=db,
-                )
-                _trace.mark_outbound_sent(
-                    source=_TS.SOURCE_WELCOME_GATE,
-                    length=len(reply or ""),
-                )
-                _sync_persona_observability()
-                logger.info(
-                    "[Mode] identity_reply tenant=%s topic=%s",
-                    tenant_id, mode_decision.identity_topic,
-                )
-                return
             logger.info(
-                "[Mode] greeting_fast_path_skipped tenant=%s to=%s "
-                "previous_mode=%s reason=established_conversation",
-                tenant_id, to, mode_decision.previous_mode,
+                "[PERSONA_SOCIAL] route=brain persona_social greeting tenant=%s",
+                tenant_id,
             )
 
         if (
@@ -6763,19 +6724,31 @@ async def _handle_merchant_message(
                         )
                     except Exception:  # noqa: BLE001
                         pass
-                    # Substitute a short, actionable clarifying reply
-                    # that addresses the ask (price) while still
-                    # acknowledging the salaam — exactly what the
-                    # welcome-gate would produce. We deliberately don't
-                    # invent a price; we ask which type of honey so the
-                    # next turn can answer with the catalogue.
+                    # Substitute a short reply that addresses the ask without
+                    # re-opening product identification when the subject is
+                    # already present in the inbound message.
                     _wg_before = reply
-                    reply = (
-                        "وعليكم السلام ورحمة الله 🌷\n"
-                        "أكيد، عندنا عدة أنواع من العسل. "
-                        "تحب أعطيك الأسعار حسب النوع (سدر / طلح / "
-                        "ضهيان)؟"
-                    )
+                    try:
+                        from modules.ai.brain.clarification.resolved_product_guard import (  # noqa: PLC0415
+                            compose_resolved_product_price_ack,
+                            extract_resolved_product_subject_from_message,
+                        )
+                        _wg_subject = extract_resolved_product_subject_from_message(
+                            text or "",
+                        )
+                    except Exception:  # noqa: BLE001
+                        _wg_subject = ""
+                    if _wg_subject:
+                        reply = (
+                            "وعليكم السلام ورحمة الله 🌷\n"
+                            + compose_resolved_product_price_ack(_wg_subject)
+                        )
+                    else:
+                        reply = (
+                            "وعليكم السلام ورحمة الله 🌷\n"
+                            "أكيد — اكتب اسم المنتج أو نوعه وسأعطيك السعر "
+                            "من الكتالوج."
+                        )
                     _persona_ownership.on_text_replaced(
                         layer="welcome_gate_substitute",
                         reason=_POReason.FALLBACK_REPLY,
@@ -10479,6 +10452,28 @@ async def _handle_merchant_message(
                     str(bool(_recovered)).lower(),
                     _delivery_audit,
                 )
+                try:
+                    from modules.ai.brain.commerce.presentation_mode import (  # noqa: PLC0415
+                        log_presentation_mode_dispatch_shadow as _log_pm_shadow,
+                    )
+
+                    _pm_mode = ""
+                    if isinstance(_bs_for_nc, dict):
+                        _pm_mode = str(
+                            _bs_for_nc.get("last_presentation_mode") or ""
+                        ).strip()
+                    _log_pm_shadow(
+                        tenant_id=tenant_id,
+                        presentation_mode=_pm_mode,
+                        delivery_audit=_delivery_audit,
+                        brain_action=_br_action or "",
+                        inbound_preview=text or "",
+                    )
+                except Exception as _pm_shadow_exc:  # noqa: BLE001  # noqa: silent-ok — dispatch shadow is observability-only
+                    logger.debug(
+                        "[PRESENTATION_MODE_SHADOW] tenant=%s skipped: %s",
+                        tenant_id, _pm_shadow_exc,
+                    )
                 if _wants and not _mode_ok(_final_mode):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "

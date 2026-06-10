@@ -604,16 +604,10 @@ def build_tenant_overlay_split(
     if not settings:
         return buckets
 
-    # ── identity ──────────────────────────────────────────────────────────
+    # ── identity (ARCH-KB-001: presence name only — no role essay) ───────
     name = str(settings.get("assistant_name") or "").strip()
-    role = str(settings.get("assistant_role") or "").strip()
-    if name or role:
-        identity_lines: list[str] = []
-        if name:
-            identity_lines.append(f"- اسمك: {name}")
-        if role:
-            identity_lines.append(f"- دورك: {role}")
-        buckets["identity"] = "هوية المساعد:\n" + "\n".join(identity_lines)
+    if name:
+        buckets["identity"] = f"هوية المساعد:\n- اسمك: {name}"
 
     # ── style (tone + language + length) ──────────────────────────────────
     style_parts: list[str] = []

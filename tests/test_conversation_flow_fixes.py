@@ -376,9 +376,13 @@ def test_decision_engine_refuses_to_greet_during_checkout():
 
 
 def test_decision_engine_greets_on_first_turn_in_discovery():
-    """Sanity check — greeting still works for genuine first-time hellos."""
+    """Sanity check — first-time hellos route to persona_social greeting compose."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_GREET
+    from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY
+    from modules.ai.brain.persona_expression import (
+        PERSONA_KIND_GREETING,
+        PERSONA_TOPIC_SOCIAL,
+    )
     from modules.ai.brain.state.stages import STAGE_DISCOVERY
     from modules.ai.brain.types import INTENT_GREETING, Intent
 
@@ -392,7 +396,11 @@ def test_decision_engine_greets_on_first_turn_in_discovery():
             message="مرحبا",
         )
     )
-    assert decision.action == ACTION_GREET
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.args.get("block_commerce_escalation") is True
+    assert decision.action != ACTION_GREET
 
 
 def test_decision_engine_does_not_re_greet_already_greeted_customer():

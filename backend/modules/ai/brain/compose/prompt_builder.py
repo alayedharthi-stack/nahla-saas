@@ -323,14 +323,32 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     selected_title = ""
     if isinstance(state.selected_product, dict):
         selected_title = str(state.selected_product.get("title") or "")
-    identity_line = (
-        "- ✅ identity_already_introduced=TRUE — ممنوع تكرار "
-        "«أنا نحلة / أنا مساعدة / أنا ذكاء اصطناعي» في هذا الرد. "
-        "الترحيب يكون قصيراً وبدون تعريف."
-        if state.identity_already_introduced
-        else "- identity_already_introduced=false — يمكن تعريف النفس "
-             "مرة واحدة فقط (مرة في هذه الجولة)."
-    )
+    _persona_topic = str(getattr(state, "persona_topic", "") or "").strip()
+    _is_persona_identity_turn = _persona_topic == "persona_identity"
+    if _persona_expression_mode:
+        if _is_persona_identity_turn:
+            identity_line = (
+                "- persona_identity — مسموح تعريف قصير طبيعي (جملة أو "
+                "جملتان) لأن العميل سأل عن الهوية صراحةً."
+            )
+        else:
+            identity_line = (
+                "- جولة persona — **ممنوع** التعريف بالنفس («أنا نحلة»، "
+                "«مساعدة»، «ذكاء اصطناعي»، دور مهني) حتى لو "
+                "identity_already_introduced=false."
+            )
+    elif state.identity_already_introduced:
+        identity_line = (
+            "- ✅ identity_already_introduced=TRUE — ممنوع تكرار "
+            "«أنا نحلة / أنا مساعدة / أنا ذكاء اصطناعي» في هذا الرد. "
+            "الترحيب يكون قصيراً وبدون تعريف."
+        )
+    else:
+        identity_line = (
+            "- identity_already_introduced=false — **ممنوع** التعريف "
+            "التلقائي في التحية أو الرد العادي. التعريف مسموح فقط عند "
+            "سؤال هوية صريح (من أنت؟ / هل أنت بوت؟)."
+        )
     # May 2026 #7 — surface the relational frame in the decision block so
     # the LLM sees it BEFORE the response_goal text. Hidden when the
     # detector returned "unknown" so the prompt shape stays identical for
@@ -425,7 +443,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
 
     # ── Assemble ──────────────────────────────────────────────────────────
     parts: list[str] = [persona_block, high_priority_block]
-    if identity_block:
+    # ARCH-KB-001: identity (assistant name) only on commerce turns.
+    if identity_block and not _persona_expression_mode:
         parts.append(identity_block)
     if kb_block:
         parts.append(kb_block)

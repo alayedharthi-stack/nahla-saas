@@ -32,6 +32,10 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, Optional
 
+from modules.ai.brain.intent.service_availability_gate import (
+    is_service_availability_inquiry,
+)
+
 
 # ── Arabic normalisation ────────────────────────────────────────────
 #
@@ -222,11 +226,13 @@ _SUBSTRING_HANDOFF_PHRASES = tuple(normalize_arabic_text(p) for p in (
     "ما حد رد علي",
     "ماحد رد علي",
     "محد رد علي",
-    # "Is anybody there / answering?"
+    # "Is anybody there / answering?" — require response verb; bare
+    # «هل في احد» substring removed (ARCH-HANDOFF-001) — it matched
+    # service questions like «هل يوجد أحد يقدر يشرح».
     "في احد يرد علي",
     "فيه احد يرد علي",
-    "هل في احد",
-    "هل يوجد احد",
+    "هل في احد يرد",
+    "هل يوجد احد يرد",
     # "I want / need customer service / support"
     "ابي خدمه العملاء",
     "ابغى خدمه العملاء",
@@ -744,11 +750,21 @@ def is_handoff_request(text: Optional[str]) -> bool:
         return True
 
     # Substring scan against the high-precision phrase library.
+    matched = False
     for phrase in _SUBSTRING_HANDOFF_PHRASES:
         if phrase and phrase in norm:
-            return True
+            matched = True
+            break
 
-    return False
+    if not matched:
+        return False
+
+    # ARCH-HANDOFF-001 — align with rules gate: «هل يوجد أحد يقدر…» is
+    # service availability, not a handoff request.
+    if is_service_availability_inquiry(text or ""):
+        return False
+
+    return True
 
 
 # Single-line handoff acknowledgement. Kept short and tone-safe; no

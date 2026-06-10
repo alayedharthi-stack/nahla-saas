@@ -48,8 +48,11 @@ Invariants under test
 4. Missing shipment outbound history → gate inert (no false-positive).
 5. ``maybe_handle_payment_claim`` skips gracefully on the gate hit.
 6. ``context_aware_dedup_fallback`` falls through to the default
-   fallback when the gate fires AND ``awaiting_payment_receipt`` is
-   set; still re-prompts for receipt when the gate is inert.
+   fallback when the delivery-confirmation gate fires AND
+   ``awaiting_payment_receipt`` is set.  Non-payment inbound text is
+   blocked by the payment workflow resume gate (``dc18f473``) — no
+   receipt re-prompt.  Re-prompt fires only when that gate allows
+   workflow resume (e.g. explicit transfer language).
 """
 from __future__ import annotations
 
@@ -381,6 +384,12 @@ class TestContextAwareDedupFallbackHonoursGate:
         )
 
     def test_awaiting_receipt_reprompt_suppressed_under_gate(self, monkeypatch):
+        """Delivery-confirmation inbound must not get a receipt re-prompt.
+
+        Suppression may occur via ``payment_relevance_gate`` (no payment
+        semantics on the turn) before the post-shipment delivery gate is
+        even evaluated — both paths must keep the receipt reminder out.
+        """
         from core.order_flow import context_aware_dedup_fallback
 
         self._patch_brain_state(monkeypatch, {
@@ -400,17 +409,18 @@ class TestContextAwareDedupFallbackHonoursGate:
             default_fallback="تأمر بشيء أكمّل لك فيه؟",
             inbound_text="وصل الله يوصل في عمرك بوهشام اليوم اخذته",
         )
-        # The receipt re-prompt MUST NOT appear when the gate fires.
         assert "بانتظار إيصال التحويل" not in out, (
-            "receipt re-prompt leaked despite delivery-confirmation gate"
+            "receipt re-prompt must not resurrect on delivery confirmation"
         )
-        # Falls through to the default fallback (or a deeper branch
-        # like selected_product, but here there's no product set).
         assert out == "تأمر بشيء أكمّل لك فيه؟"
 
     def test_awaiting_receipt_reprompt_still_fires_without_gate(self, monkeypatch):
-        """Inbound that does NOT look like delivery confirmation
-        keeps the original behaviour — re-ask for the receipt."""
+        """Commerce/shipping queries must not resurrect payment workflow.
+
+        ``payment_relevance_gate`` / ``state_relevance`` block receipt
+        reminders when the current turn has no payment semantics — dedup
+        falls through to ``default_fallback`` instead.
+        """
         from core.order_flow import context_aware_dedup_fallback
 
         self._patch_brain_state(monkeypatch, {
@@ -429,13 +439,19 @@ class TestContextAwareDedupFallbackHonoursGate:
             default_fallback="تأمر بشيء أكمّل لك فيه؟",
             inbound_text="بكم سعر التوصيل؟",
         )
-        assert "بانتظار إيصال التحويل" in out, (
-            "non-delivery inbound must still get the receipt re-prompt"
+        assert "بانتظار إيصال التحويل" not in out, (
+            "payment workflow resume gate must block receipt re-prompt "
+            "for non-payment shipping-price query"
         )
+        assert out == "تأمر بشيء أكمّل لك فيه؟"
 
     def test_awaiting_receipt_reprompt_when_inbound_text_omitted(self, monkeypatch):
-        """Backwards-compat: callers that don't pass ``inbound_text``
-        keep the legacy behaviour (re-prompt for the receipt)."""
+        """Omitted ``inbound_text`` cannot prove payment relevance.
+
+        Production webhook always passes ``inbound_text=text``; when
+        callers omit it, ``payment_relevance_gate`` blocks workflow
+        resurrection rather than dispatching a receipt reminder blindly.
+        """
         from core.order_flow import context_aware_dedup_fallback
 
         self._patch_brain_state(monkeypatch, {
@@ -451,5 +467,27 @@ class TestContextAwareDedupFallbackHonoursGate:
             history=[],
             default_fallback="تأمر بشيء أكمّل لك فيه؟",
             # inbound_text intentionally omitted
+        )
+        assert "بانتظار إيصال التحويل" not in out
+        assert out == "تأمر بشيء أكمّل لك فيه؟"
+
+    def test_dedup_reprompt_fires_for_transfer_claim(self, monkeypatch):
+        """Payment-relevant inbound while awaiting receipt gets re-prompt."""
+        from core.order_flow import context_aware_dedup_fallback
+
+        self._patch_brain_state(monkeypatch, {
+            "awaiting_payment_receipt": True,
+            "payment_receipt_received": False,
+            "selected_product": None,
+            "order_status": "awaiting_receipt",
+        })
+
+        out = context_aware_dedup_fallback(
+            MagicMock(),
+            tenant_id=1,
+            phone="+966500000001",
+            history=[],
+            default_fallback="تأمر بشيء أكمّل لك فيه؟",
+            inbound_text="حولت الآن",
         )
         assert "بانتظار إيصال التحويل" in out

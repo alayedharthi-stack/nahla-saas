@@ -11,14 +11,20 @@ This test statically inspects the backend tree and enforces two invariants:
      It was deleted; this test prevents it from being reintroduced via a
      helpful-looking utility module or a copy-paste from git history.
 
-  2. `provider_send_message(...)` is only called from a tiny allow-list:
-       - backend/core/automation_engine.py    (the canonical automation path)
-       - backend/services/whatsapp_platform/  (the provider module itself)
-       - backend/routers/whatsapp_webhook.py  (conversational replies to the
-         customer's inbound message — NOT an automation)
+  2. `provider_send_message(...)` is only called from an explicit per-file
+     allow-list (see ``PROVIDER_SEND_ALLOWLIST``). Core entries:
 
-     Any new call-site means someone has re-opened a parallel execution path
-     that bypasses AutomationExecution accounting.
+       - backend/core/automation_engine.py — canonical SmartAutomation path
+       - backend/services/whatsapp_platform/service.py — provider impl
+       - backend/services/whatsapp_platform/catalog_sender.py — catalog wire
+         layer invoked from the webhook conversational loop
+       - backend/routers/whatsapp_webhook.py — inbound chat replies
+       - plus documented non-automation sends (COD, campaign wizard test,
+         bulk campaign dispatch, admin debug) each with their own evidence
+         trail — not AutomationExecution accounting.
+
+     Any new call-site outside the allow-list means a parallel send path was
+     added without an architectural review.
 
 The test walks the AST instead of grepping raw text, so comments, docstrings,
 and string literals mentioning these names in documentation do not trip it.
@@ -41,6 +47,11 @@ PROVIDER_SEND_ALLOWLIST = {
     BACKEND_DIR / "core" / "automation_engine.py",
     # The provider implementation itself — this is where the function lives.
     BACKEND_DIR / "services" / "whatsapp_platform" / "service.py",
+    # Meta WhatsApp Catalog wire layer (single/multi product interactive
+    # payloads). Called from whatsapp_webhook during product replies — part
+    # of the conversational loop, not SmartAutomation. The webhook owns message
+    # persistence; catalog_sender only builds payloads and dispatches.
+    BACKEND_DIR / "services" / "whatsapp_platform" / "catalog_sender.py",
     # Conversational replies to incoming WhatsApp messages. Not an automation;
     # this path is synchronous with the webhook and is part of the chat-agent
     # loop, not the Event → Engine → Execution pipeline. Still funnels through
@@ -67,6 +78,14 @@ PROVIDER_SEND_ALLOWLIST = {
     # synchronous wizard step and needs the message in seconds, not
     # after the next 60-second engine tick.
     BACKEND_DIR / "services" / "campaign_wizard" / "test_send.py",
+    # Bulk manual marketing campaign dispatch. Uses CampaignSendLog
+    # idempotency/accounting — outside SmartAutomation and AutomationExecution.
+    # Cart recovery and other event-driven automations stay on automation_engine.
+    BACKEND_DIR / "services" / "campaign_dispatcher.py",
+    # Admin support: synchronous single-template send for diagnosing provider
+    # errors (raw Meta/360dialog response). Debug-only — no campaign log and
+    # no AutomationExecution row.
+    BACKEND_DIR / "routers" / "admin_debug.py",
 }
 
 # Directories we never scan (tests, migrations, cached bytecode, vendored).

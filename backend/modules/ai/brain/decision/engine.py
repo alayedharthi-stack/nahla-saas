@@ -793,6 +793,25 @@ class DefaultDecisionEngine:
         # in the webhook can log it (useful for audit / "this customer
         # bailed mid-cart" support tickets).
         if intent.name == INTENT_TALK_HUMAN:
+            from ..intent.service_availability_gate import (  # noqa: PLC0415
+                is_service_availability_inquiry,
+            )
+            if is_service_availability_inquiry(ctx.message or ""):
+                logger.info(
+                    "[HANDOFF] service availability inquiry — not handoff | "
+                    "tenant=%s preview=%r",
+                    getattr(ctx, "tenant_id", "?"),
+                    (ctx.message or "")[:80],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"policy_reason": "service_availability_not_handoff"},
+                    reason=(
+                        "service availability inquiry — route to LLM, "
+                        "not ACTION_HANDOFF"
+                    ),
+                )
+
             # ``order_prep`` is a default-initialised dataclass on every
             # MerchantConversationState, so it's always truthy. We need
             # to ask whether it carries actual order data (a product
@@ -2009,6 +2028,32 @@ class DefaultDecisionEngine:
                             (ctx.message or "")[:80],
                         )
                     else:
+                        from ..persona_expression import (  # noqa: PLC0415
+                            PERSONA_KIND_GREETING,
+                            PERSONA_TOPIC_SOCIAL,
+                            is_established_greet_persona_compose_enabled,
+                        )
+
+                        if is_established_greet_persona_compose_enabled():
+                            logger.info(
+                                "[PERSONA_SOCIAL] kind=greeting route=first_turn_greeting "
+                                "tenant=%s preview=%r",
+                                getattr(ctx, "tenant_id", None),
+                                (ctx.message or "")[:60],
+                            )
+                            return Decision(
+                                action=ACTION_LLM_REPLY,
+                                args={
+                                    "topic": PERSONA_TOPIC_SOCIAL,
+                                    "persona_kind": PERSONA_KIND_GREETING,
+                                    "block_commerce_escalation": True,
+                                },
+                                reason=(
+                                    "first-turn pure greeting — persona_social "
+                                    "compose (persona_kind=greeting)"
+                                ),
+                                confidence=0.85,
+                            )
                         return Decision(
                             action=ACTION_GREET,
                             reason="explicit greeting on first turn",
@@ -2192,7 +2237,7 @@ class DefaultDecisionEngine:
             from ..product_discovery_gate import (  # noqa: PLC0415
                 clarify_instead_of_top_products,
                 try_price_query_decision,
-                _extract_price_subject,
+                _resolved_product_query,
             )
             if _is_commerce_blocked(ctx):
                 return Decision(
@@ -2215,11 +2260,8 @@ class DefaultDecisionEngine:
             if _price_dec is not None:
                 return _price_dec
             if facts.has_products:
-                query = (
-                    intent.slots.get("product_query")
-                    or intent.slots.get("product_name")
-                    or _extracted_product_query
-                    or _extract_price_subject(ctx.message or "")
+                query = _resolved_product_query(
+                    ctx, _extracted_product_query,
                 )
                 if not query:
                     from ..product_discovery_gate import extract_inquiry_product_query  # noqa: PLC0415
