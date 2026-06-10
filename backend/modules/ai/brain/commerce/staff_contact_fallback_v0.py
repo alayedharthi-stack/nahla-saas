@@ -558,13 +558,15 @@ def load_staff_chain_sections(db: Any, tenant_id: int) -> Sequence[Any]:
         return ()
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
 
         kinds = tuple(_CHAIN_SCAN_KINDS | _OWNER_IDENTITY_KINDS)
         return (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(kinds),
             )
             .order_by(

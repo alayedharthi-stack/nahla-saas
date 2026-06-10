@@ -79,8 +79,21 @@ export interface KnowledgeSection {
   conflicts_json: Record<string, unknown> | null
   created_at: string | null
   updated_at: string | null
+  deleted_at?: string | null
   media_links: MediaLinkRow[]
   product_links?: ProductLinkRow[]
+}
+
+export interface KnowledgeSectionSearchHit {
+  id: number
+  title: string | null
+  snippet: string
+  kind: string
+  group: number
+  source: string
+  is_active: boolean
+  deleted_at: string | null
+  updated_at: string | null
 }
 
 export interface SectionInput {
@@ -214,14 +227,39 @@ export const knowledgeApi = {
   },
 
   // ── Sections ───────────────────────────────────────────────────────────
-  listSections(opts?: { onlyActive?: boolean; kind?: string; group?: number }) {
+  listSections(opts?: {
+    onlyActive?: boolean
+    kind?: string
+    group?: number
+    includeDeleted?: boolean
+  }) {
     const params = new URLSearchParams()
     if (opts?.onlyActive) params.set('only_active', 'true')
     if (opts?.kind) params.set('kind', opts.kind)
     if (typeof opts?.group === 'number') params.set('group', String(opts.group))
+    if (opts?.includeDeleted) params.set('include_deleted', 'true')
     const qs = params.toString()
     return apiCall<{ items: KnowledgeSection[] }>(
       `/knowledge/sections${qs ? `?${qs}` : ''}`,
+    )
+  },
+
+  searchSections(opts: {
+    q: string
+    kind?: string
+    group?: number
+    onlyActive?: boolean | null
+    includeDeleted?: boolean
+  }) {
+    const params = new URLSearchParams()
+    params.set('q', opts.q)
+    if (opts.kind) params.set('kind', opts.kind)
+    if (typeof opts.group === 'number') params.set('group', String(opts.group))
+    if (opts.onlyActive === true) params.set('only_active', 'true')
+    else if (opts.onlyActive === false) params.set('only_active', 'false')
+    if (opts.includeDeleted) params.set('include_deleted', 'true')
+    return apiCall<{ items: KnowledgeSectionSearchHit[] }>(
+      `/knowledge/sections/search?${params.toString()}`,
     )
   },
 

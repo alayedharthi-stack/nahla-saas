@@ -41,16 +41,21 @@ def retrieve_goal_recommendations(
 
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import (  # noqa: PLC0415
+            apply_ai_visible_kb_query_filters,
+            goal_metadata_has_catalog_active_product,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[GOAL_KB_RETRIEVAL] import failed: %s", exc)
         return []
 
     try:
         rows = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == int(tenant_id),
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind == GOAL_KB_KIND,
             )
             .order_by(
@@ -74,6 +79,10 @@ def retrieve_goal_recommendations(
     for row in rows:
         meta = GoalKBMetadata.from_metadata_json(getattr(row, "metadata_json", None))
         if not meta:
+            continue
+        if not goal_metadata_has_catalog_active_product(
+            db, int(tenant_id), getattr(row, "metadata_json", None),
+        ):
             continue
         if goal_norm not in meta.goal_tags:
             continue

@@ -119,11 +119,15 @@ def build_availability_context(
             })
         ctx["catalog_skus"] = catalog_skus
 
+    try:
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
         sections = (
-            db.query(MerchantKnowledgeSection)
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
-                MerchantKnowledgeSection.is_active.is_(True),
                 MerchantKnowledgeSection.kind.in_(tuple(_OPS_KINDS)),
             )
             .all()
@@ -152,6 +156,7 @@ def build_availability_context(
             )
             .filter(
                 MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.deleted_at.is_(None),
                 MerchantKnowledgeSection.is_active.is_(True),
             )
             .all()
