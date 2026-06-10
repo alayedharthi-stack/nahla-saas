@@ -1784,6 +1784,11 @@ export interface Translations {
         stockAll:          string
         stockYes:          string
         stockNo:           string
+        visibilityAll:     string
+        visibilityHidden:  string
+        visibilityRemoved: string
+        visibilityArchived:string
+        visibilityEvery:   string
         clear:             string
         showing:           string
       }
@@ -1879,6 +1884,15 @@ export interface Translations {
           availability: string
           condition:    string
         }
+        hideBtn:           string
+        restoreBtn:        string
+        hideConfirm:       string
+        hideSuccess:       string
+        hideFailed:        string
+        restoreSuccess:    string
+        restoreFailed:     string
+        statusRemovedMeta: string
+        statusHidden:      string
       }
     }
   }

@@ -196,6 +196,7 @@ class DefaultSalesContextLoader:
             return []
 
         try:
+            from core.catalog import is_catalog_active  # noqa: PLC0415
             from database.models import Product, ProductAffinity
 
             rows = (
@@ -218,6 +219,7 @@ class DefaultSalesContextLoader:
                     "reason": "high_affinity",
                 }
                 for affinity, product in rows
+                if is_catalog_active(product)
             ]
         except Exception:
             return []
@@ -233,6 +235,7 @@ class DefaultSalesContextLoader:
             return []
 
         try:
+            from core.catalog import is_catalog_active  # noqa: PLC0415
             from database.models import PredictiveReorderEstimate, Product
 
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -262,6 +265,7 @@ class DefaultSalesContextLoader:
                     "confidence": float(getattr(estimate, "confidence_score", 0.0) or 0.0),
                 }
                 for estimate, product in rows
+                if is_catalog_active(product)
             ]
         except Exception:
             return []

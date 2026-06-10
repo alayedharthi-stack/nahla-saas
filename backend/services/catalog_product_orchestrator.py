@@ -22,8 +22,8 @@ Invariants
 * Weak confidence blocks catalog when ``CATALOG_WEAK_CONFIDENCE_BLOCK=true``
   (default).
 * Retailer-id collision ALWAYS falls back — never sends official card.
-* Out-of-stock products may still receive catalog cards; ``stock_warning``
-  is diagnostics-only.
+* Out-of-stock and non-active catalog products fall back to legacy —
+  official catalog cards require ``is_catalog_active`` (P1-G1).
 
 Attachment immutability (commerce runtime boundary)
 ───────────────────────────────────────────────────
@@ -448,7 +448,7 @@ def evaluate_product_card_send(
             diagnostics={"eligibility_reason": elig.reason},
         )
 
-    # ── Stock warning (diagnostics only — no block) ─────────────────
+    # ── Stock warning (diagnostics only when catalog send proceeds) ───
     in_stock = attachment.get("in_stock")
     if in_stock is None and product_row is not None:
         in_stock = getattr(product_row, "in_stock", True)

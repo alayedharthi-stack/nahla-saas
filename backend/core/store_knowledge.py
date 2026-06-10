@@ -383,8 +383,10 @@ class CatalogContextBuilder:
             and (stock_qty is None or _safe_int(stock_qty, 0) > 0)
             and variants_ok
         )
-        # `orderable` is kept as an alias so existing code that reads it
-        # continues to work without modification.
+        from core.catalog import catalog_status_of, is_catalog_active  # noqa: PLC0415
+
+        if not is_catalog_active(p):
+            can_checkout = False
         orderable = can_checkout
         return {
             "id":              p.id,
@@ -402,6 +404,7 @@ class CatalogContextBuilder:
             "orderable":       orderable,
             "can_checkout":    can_checkout,
             "status":          status,
+            "catalog_status":  catalog_status_of(p),
             "variants_in_stock": variants_in_stock,
             # Variant/option names (e.g. "S, M, L" or "أحمر، أزرق") —
             # only in-stock combinations, max 6 entries.

@@ -186,6 +186,8 @@ export interface CatalogProductVariantRow {
   image_url:        string
 }
 
+export type CatalogVisibility = 'active' | 'hidden' | 'removed' | 'archived' | 'all'
+
 export interface CatalogProductDiagRow {
   id:                    number
   title:                 string
@@ -201,6 +203,9 @@ export interface CatalogProductDiagRow {
   image_url:             string
   product_url:           string
   source:                ProductSource
+  catalog_status?:       string
+  merchant_hidden_at?:   string | null
+  meta_removed_at?:      string | null
   readiness_badge:       ProductBadge | null
   // Parent / variant intelligence layer (migration 0064).
   has_variants?:               boolean
@@ -242,6 +247,7 @@ export interface CatalogProductDiagResponse {
     has_image:       boolean | null
     has_retailer_id: boolean | null
     in_stock:        boolean | null
+    catalog_visibility?: string | null
   }
 }
 
@@ -252,6 +258,7 @@ export interface StudioFilters {
   has_image?:       boolean
   has_retailer_id?: boolean
   in_stock?:        boolean
+  catalog_visibility?: CatalogVisibility
 }
 
 // Full product detail returned by GET /products/{id}.
@@ -281,6 +288,9 @@ export interface StudioProduct {
   mpn:                         string
   variants:                    Array<Record<string, unknown>>
   meta_catalog_published_at:   string | null
+  catalog_status?:            string
+  merchant_hidden_at?:        string | null
+  meta_removed_at?:           string | null
 }
 
 export interface ProductDetailResponse {
@@ -525,7 +535,14 @@ export const catalogApi = {
     if (filters?.has_image       !== undefined) qs.set('has_image',       String(filters.has_image))
     if (filters?.has_retailer_id !== undefined) qs.set('has_retailer_id', String(filters.has_retailer_id))
     if (filters?.in_stock        !== undefined) qs.set('in_stock',        String(filters.in_stock))
+    if (filters?.catalog_visibility)             qs.set('catalog_visibility', filters.catalog_visibility)
     return apiCall<CatalogProductDiagResponse>(`/merchant/catalog/products?${qs.toString()}`)
+  },
+  hideProduct(id: number): Promise<{ ok: boolean; product_id: number; catalog_status: string }> {
+    return apiCall(`/merchant/catalog/products/${id}/hide`, { method: 'POST' })
+  },
+  restoreProduct(id: number): Promise<{ ok: boolean; product_id: number; catalog_status: string }> {
+    return apiCall(`/merchant/catalog/products/${id}/restore`, { method: 'POST' })
   },
   productDetail(id: number): Promise<ProductDetailResponse> {
     return apiCall<ProductDetailResponse>(`/merchant/catalog/products/${id}`)
