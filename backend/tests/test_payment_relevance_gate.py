@@ -143,7 +143,7 @@ class TestDedupFallbackIntegration:
                 tenant_id=99,
                 phone="966500000001",
                 history=[],
-                default_fallback="كيف أقدر أساعدك؟",
+                default_fallback="",
                 inbound_text="[وصف الصورة المرسلة] black olives can",
                 inbound_metadata={
                     "media_semantic_category": "unknown_media",
@@ -157,7 +157,7 @@ class TestDedupFallbackIntegration:
             of._focus_summary = orig_focus
 
         assert "بانتظار إيصال التحويل" not in reply
-        assert "كيف أقدر أساعدك؟" in reply or "عسل سدر" in reply
+        assert "كيف أقدر أساعدك؟" not in reply
 
     def test_dedup_still_blocks_commerce_query_via_gate(self):
         class _FakeDB:

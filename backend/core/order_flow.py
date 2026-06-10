@@ -1443,7 +1443,8 @@ def context_aware_dedup_fallback(
            resume gate allows the payment flow to continue.
         4. Empty / discovery state → the original ``default_fallback``.
 
-    Never raises. Always returns a non-empty string.
+    Never raises. Returns empty string when no operational substitute exists
+    (P1-D-1: no personality / CS canned ``default_fallback``).
     """
     try:
         _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
@@ -1609,4 +1610,4 @@ def context_aware_dedup_fallback(
             exc,
         )
 
-    return default_fallback or "تأمر بشيء أكمّل لك فيه؟"
+    return default_fallback or ""
