@@ -14,7 +14,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from modules.ai.brain.postprocess.product_availability_evidence import (
     EVIDENCE_CONFLICT,
@@ -65,6 +65,71 @@ _UNKNOWN_REPLY_AR = (
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "notify_me_back_in_stock_ack",
 })
+
+_TITLE_STOP_TOKENS = frozenset({
+    "عسل", "انتاج", "إنتاج", "منحل", "منحلنا", "مناحل", "مناحلنا",
+    "نجد", "البري", "البلدي", "جرام", "كيلو", "سطل", "وزن",
+})
+
+
+def _distinctive_title_tokens(title: str) -> set[str]:
+    from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
+
+    return {
+        t
+        for t in tokenize(normalize_arabic(title or ""))
+        if len(t) >= 3 and t not in _TITLE_STOP_TOKENS
+    }
+
+
+def _line_references_product_title(line: str, title: str) -> bool:
+    from modules.ai.knowledge.product_matcher import normalize_arabic  # noqa: PLC0415
+
+    line_norm = normalize_arabic(line or "")
+    if not line_norm:
+        return False
+    title_norm = normalize_arabic(title or "")
+    if title_norm and title_norm in line_norm:
+        return True
+    toks = _distinctive_title_tokens(title)
+    if not toks:
+        return False
+    hits = sum(1 for t in toks if t in line_norm)
+    need = 2 if len(toks) >= 2 else 1
+    return hits >= need
+
+
+def strip_non_checkout_catalog_product_lines(
+    reply: str,
+    catalog_skus: Optional[Sequence[Dict[str, Any]]],
+) -> tuple[str, bool]:
+    """Remove lines that name catalog SKUs the customer cannot checkout."""
+    original = str(reply or "")
+    if not original.strip() or not catalog_skus:
+        return original, False
+
+    inactive = [
+        sku for sku in catalog_skus
+        if sku.get("id") is not None and not bool(sku.get("can_checkout"))
+    ]
+    if not inactive:
+        return original, False
+
+    kept: List[str] = []
+    removed = False
+    for line in original.splitlines():
+        drop = any(
+            _line_references_product_title(line, str(sku.get("title") or ""))
+            for sku in inactive
+        )
+        if drop:
+            removed = True
+            continue
+        kept.append(line)
+
+    if not removed:
+        return original, False
+    return "\n".join(kept).strip(), True
 
 
 def product_availability_guard_mode() -> str:
@@ -232,7 +297,44 @@ def apply_product_availability_truth_guard(
         if path in _DETERMINISTIC_ALLOW_PATHS:
             return ProductAvailabilityTruthGuardResult(reply=original, action="allowed")
 
-        claim_polarity = reply_availability_polarity(original)
+        catalog_skus = list((availability_context or {}).get("catalog_skus") or [])
+        working = original
+        stripped_inactive = False
+        if mode == "enforce":
+            working, stripped_inactive = strip_non_checkout_catalog_product_lines(
+                working, catalog_skus,
+            )
+        elif mode == "shadow":
+            _, stripped_inactive = strip_non_checkout_catalog_product_lines(
+                original, catalog_skus,
+            )
+
+        if stripped_inactive and mode == "enforce":
+            log_product_availability_truth_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                evidence_state="-",
+                conflict_type="-",
+                guard_mode=mode,
+                guard_action="strip_inactive_catalog_lines",
+                would_rewrite=False,
+                entity_resolution_mode="-",
+                entity_product_id=None,
+                entity_confidence=0.0,
+                catalog_checkout=None,
+                kb_polarity="-",
+                claim_polarity="-",
+                reason="removed_non_checkout_catalog_product_lines",
+            )
+            return ProductAvailabilityTruthGuardResult(
+                reply=working,
+                action="strip_inactive_catalog_lines",
+                replaced=True,
+                reason="removed_non_checkout_catalog_product_lines",
+                availability_claim_blocked=True,
+            )
+
+        claim_polarity = reply_availability_polarity(working)
         evidence = evaluate_product_availability_evidence(
             availability_context=availability_context,
             inbound_text=inbound_text,
@@ -246,23 +348,30 @@ def apply_product_availability_truth_guard(
                 conflict_type=evidence.conflict_type or "-",
                 guard_mode=mode,
                 guard_action="allowed",
-                would_rewrite=False,
+                would_rewrite=stripped_inactive,
                 entity_resolution_mode=evidence.entity.resolution_mode,
                 entity_product_id=evidence.entity.product_id,
                 entity_confidence=evidence.entity.confidence,
                 catalog_checkout=evidence.catalog_checkout,
                 kb_polarity=evidence.kb_avail_polarity or "-",
                 claim_polarity="-",
-                reason="no_availability_claim_wording",
+                reason=(
+                    "shadow_would_strip_inactive_catalog_lines"
+                    if stripped_inactive
+                    else "no_availability_claim_wording"
+                ),
             )
             return ProductAvailabilityTruthGuardResult(
                 reply=original,
                 action="allowed",
                 evidence=evidence,
+                shadow_mode=(mode == "shadow"),
+                would_rewrite=stripped_inactive,
+                availability_claim_blocked=stripped_inactive,
             )
 
         guard_action = _decide_guard_action(evidence, claim_polarity)
-        would_rw = _would_rewrite(guard_action, mode)
+        would_rw = _would_rewrite(guard_action, mode) or stripped_inactive
 
         log_product_availability_truth_guard(
             tenant_id=tenant_id,
@@ -283,7 +392,7 @@ def apply_product_availability_truth_guard(
 
         if mode == "shadow" or not would_rw:
             return ProductAvailabilityTruthGuardResult(
-                reply=original,
+                reply=original if mode == "shadow" else working,
                 action=guard_action if would_rw else "allowed",
                 replaced=False,
                 reason=evidence.reason,
