@@ -417,9 +417,14 @@ class DefaultComposer:
                 )
             if data.get("intent_only"):
                 return T.order_intent_captured(product=data.get("product", {}))
+            _order_ref = str(
+                data.get("reference") or data.get("order_id") or ""
+            ).strip()
+            if not _order_ref:
+                return T.order_intent_captured(product=data.get("product", {}))
             return T.draft_order_created(
                 product=data.get("product", {}),
-                reference=str(data.get("reference", "")),
+                reference=_order_ref,
                 checkout_url=data.get("checkout_url", ""),
                 total=float(data.get("total") or 0),
                 currency=data.get("currency", "SAR"),
@@ -456,6 +461,19 @@ class DefaultComposer:
             except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up gate best-effort; fall through to template
                 pass
             if not result.success or data.get("message") == "no_orders_found":
+                try:
+                    from core.order_creation_evidence import (  # noqa: PLC0415
+                        resolve_track_order_fallback,
+                    )
+
+                    _honest = resolve_track_order_fallback(
+                        state=ctx.state,
+                        history=ctx.history,
+                    )
+                    if _honest:
+                        return _honest
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — track evidence fallback best-effort
+                    pass
                 return T.no_orders()
             return self._with_follow_up(
                 T.order_status(
