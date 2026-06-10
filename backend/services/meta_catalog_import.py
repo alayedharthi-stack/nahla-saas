@@ -106,12 +106,19 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
 
-from core.catalog import SOURCE_MANUAL, SOURCE_META, assign_canonical_retailer_id
+from core.catalog import (
+    CATALOG_STATUS_ACTIVE,
+    CATALOG_STATUS_REMOVED_FROM_META,
+    SOURCE_MANUAL,
+    SOURCE_META,
+    assign_canonical_retailer_id,
+    catalog_status_of,
+)
 from core.config import META_GRAPH_API_VERSION, WA_TOKEN
 from models import Product, WhatsAppConnection
 
@@ -419,6 +426,14 @@ class ImportReport:
     edge_used:         str = ""
     attempted_edges:   List[str] = field(default_factory=list)
     unsupported_edges: List[str] = field(default_factory=list)
+    # P1-G1 — Meta reconciliation (full import only).
+    seen_meta_external_ids: Set[str] = field(default_factory=set)
+    seen_meta_retailer_ids: Set[str] = field(default_factory=set)
+    reconciled_missing:     int = 0
+    restored_from_meta:     int = 0
+    reconciliation_skipped: bool = False
+    reconciliation_skip_reason: str = ""
+    pagination_incomplete:  bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -436,6 +451,10 @@ class ImportReport:
             "selected_edge":     self.edge_used or None,
             "attempted_edges":   list(self.attempted_edges),
             "unsupported_edges": list(self.unsupported_edges),
+            "reconciled_missing": self.reconciled_missing,
+            "restored_from_meta": self.restored_from_meta,
+            "reconciliation_skipped": self.reconciliation_skipped,
+            "reconciliation_skip_reason": self.reconciliation_skip_reason or None,
         }
 
 
@@ -1900,6 +1919,7 @@ def _import_from_meta_body(
                     "meta_catalog_import: page %d HTTP %d body=%s",
                     page_idx, resp.status_code, _body_preview,
                 )
+                report.pagination_incomplete = True
                 break
 
             try:
@@ -1975,7 +1995,95 @@ def _import_from_meta_body(
         tenant_id, report.scanned, report.created, report.updated,
         report.skipped_manual, report.errors, report.truncated,
     )
+    _maybe_reconcile_meta_missing(db, tenant_id, report)
     return report
+
+
+def _import_eligible_for_reconciliation(report: ImportReport) -> bool:
+    """Reconcile only after a complete, successful Meta import."""
+    if report.discovery_only:
+        return False
+    if report.truncated:
+        return False
+    if report.pagination_incomplete:
+        return False
+    if report.pages_fetched < 1:
+        return False
+    return True
+
+
+def _meta_product_seen_in_import(
+    product: Any,
+    seen_external_ids: Set[str],
+    seen_retailer_ids: Set[str],
+) -> bool:
+    """True when *product* matches any Meta row from the import pass.
+
+    Mirrors the upsert matcher in ``_process_one_meta_product``:
+      * ``external_id`` vs Meta global id
+      * ``meta_retailer_id`` vs Meta retailer_id
+      * legacy ``external_id`` holding the retailer_id
+    """
+    ext = str(getattr(product, "external_id", None) or "").strip()
+    rid = str(getattr(product, "meta_retailer_id", None) or "").strip()
+    if ext and ext in seen_external_ids:
+        return True
+    if rid and rid in seen_retailer_ids:
+        return True
+    if ext and ext in seen_retailer_ids:
+        return True
+    return False
+
+
+def _maybe_reconcile_meta_missing(
+    db: Session, tenant_id: int, report: ImportReport,
+) -> None:
+    if not _import_eligible_for_reconciliation(report):
+        report.reconciliation_skipped = True
+        if report.discovery_only:
+            report.reconciliation_skip_reason = "discovery_only"
+        elif report.truncated:
+            report.reconciliation_skip_reason = "truncated"
+        elif report.pagination_incomplete:
+            report.reconciliation_skip_reason = "pagination_incomplete"
+        elif report.pages_fetched < 1:
+            report.reconciliation_skip_reason = "no_pages_fetched"
+        else:
+            report.reconciliation_skip_reason = "not_eligible"
+        return
+
+    seen_ext = set(report.seen_meta_external_ids or set())
+    seen_rid = set(report.seen_meta_retailer_ids or set())
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(Product)
+        .filter(Product.tenant_id == tenant_id)
+        .filter(Product.source == SOURCE_META)
+        .all()
+    )
+    for p in rows:
+        if _meta_product_seen_in_import(p, seen_ext, seen_rid):
+            continue
+        ext = str(getattr(p, "external_id", None) or "").strip()
+        rid = str(getattr(p, "meta_retailer_id", None) or "").strip()
+        if not ext and not rid:
+            continue
+        if catalog_status_of(p) == CATALOG_STATUS_REMOVED_FROM_META:
+            continue
+        p.catalog_status = CATALOG_STATUS_REMOVED_FROM_META
+        p.in_stock = False
+        p.meta_removed_at = now
+        report.reconciled_missing += 1
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning(
+            "[META_IMPORT][RECONCILE] tenant=%s commit_failed=%r",
+            tenant_id, exc,
+        )
+        report.reconciliation_skipped = True
+        report.reconciliation_skip_reason = "reconcile_commit_failed"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2062,6 +2170,9 @@ def _process_one_meta_product(
                 })
             return
 
+        report.seen_meta_external_ids.add(meta_id)
+        report.seen_meta_retailer_ids.add(retailer_id)
+        now = datetime.now(timezone.utc)
         # Match by Meta's global id first (``external_id``), then
         # by retailer_id on either column for backwards-compat with
         # the previous import (which stored retailer_id in BOTH
@@ -2122,6 +2233,8 @@ def _process_one_meta_product(
                 in_stock         = in_stock,
                 extra_metadata   = meta_blob,
                 source           = SOURCE_META,
+                catalog_status   = CATALOG_STATUS_ACTIVE,
+                meta_last_seen_at = now,
             )
             db.add(p)
             db.flush()
@@ -2135,6 +2248,15 @@ def _process_one_meta_product(
             existing.description = row.get("description") or existing.description
             existing.price       = price_blob["raw"] or existing.price
             existing.in_stock    = in_stock
+            existing.meta_last_seen_at = now
+            if getattr(existing, "merchant_hidden_at", None) is None:
+                prev_status = catalog_status_of(existing)
+                if prev_status == CATALOG_STATUS_REMOVED_FROM_META:
+                    existing.catalog_status = CATALOG_STATUS_ACTIVE
+                    existing.meta_removed_at = None
+                    report.restored_from_meta += 1
+                elif prev_status != CATALOG_STATUS_MERCHANT_HIDDEN:
+                    existing.catalog_status = CATALOG_STATUS_ACTIVE
             # Merge metadata instead of replacing so anything other
             # writers stamped (e.g. recommendation tags) survives.
             merged = dict(existing.extra_metadata or {})

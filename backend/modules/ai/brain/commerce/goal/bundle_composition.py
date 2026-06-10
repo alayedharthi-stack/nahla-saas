@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.catalog import is_catalog_active
 from .goal_retrieval import GoalKBEntry
 from .goal_schema import GoalProductRef
 from .telemetry import log_goal_resolution_failed
@@ -99,8 +100,8 @@ def _resolve_product_ref(
             )
             if row is None:
                 return None, "product_id_not_found"
-            if not bool(getattr(row, "is_active", True)):
-                return None, "product_disabled"
+            if not is_catalog_active(row):
+                return None, "product_not_active"
             return _product_row_to_dict(row), "product_id"
         except Exception:  # noqa: BLE001
             return None, "product_id_lookup_error"
@@ -112,11 +113,14 @@ def _resolve_product_ref(
     rows = catalog_rows
     if rows is None:
         try:
+            from core.catalog import apply_active_catalog_query_filters  # noqa: PLC0415
             from models import Product  # noqa: PLC0415
 
             rows = list(
-                db.query(Product)
-                .filter(Product.tenant_id == int(tenant_id))
+                apply_active_catalog_query_filters(
+                    db.query(Product).filter(Product.tenant_id == int(tenant_id)),
+                    Product,
+                )
                 .limit(2000)
                 .all()
             )
@@ -137,6 +141,7 @@ def _resolve_product_ref(
                 external_id=str(getattr(r, "external_id", "") or "") or None,
             )
             for r in rows or []
+            if is_catalog_active(r)
         ]
         matches = match_products(ref, catalog, limit=2, min_confidence=0.40)
         if not matches:
@@ -146,8 +151,8 @@ def _resolve_product_ref(
         best = matches[0]
         for r in rows or []:
             if int(getattr(r, "id", 0) or 0) == best.product_id:
-                if not bool(getattr(r, "is_active", True)):
-                    return None, "product_disabled"
+                if not is_catalog_active(r):
+                    return None, "product_not_active"
                 return _product_row_to_dict(r), "title_match"
         return None, "match_row_missing"
     except Exception:  # noqa: BLE001
@@ -178,11 +183,14 @@ def compose_regimen_bundle(
 
     catalog_rows: Optional[List[Any]] = None
     try:
+        from core.catalog import apply_active_catalog_query_filters  # noqa: PLC0415
         from models import Product  # noqa: PLC0415
 
         catalog_rows = list(
-            db.query(Product)
-            .filter(Product.tenant_id == int(tenant_id))
+            apply_active_catalog_query_filters(
+                db.query(Product).filter(Product.tenant_id == int(tenant_id)),
+                Product,
+            )
             .limit(2000)
             .all()
         )

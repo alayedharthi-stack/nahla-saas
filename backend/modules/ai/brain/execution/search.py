@@ -102,7 +102,19 @@ class ProductSearchHandler:
         # Verbatim repeat — same list the customer already saw.
         replay_candidates = decision.args.get("replay_candidates")
         if replay_candidates:
-            products = _apply_affinity_boost(list(replay_candidates), ctx)
+            from core.catalog import is_catalog_active  # noqa: PLC0415
+
+            active_replay = [
+                p for p in list(replay_candidates)
+                if is_catalog_active(p)
+            ]
+            if not active_replay:
+                return ActionResult(
+                    success=False,
+                    error="replay_products_inactive",
+                    data={"message": "replay_products_inactive"},
+                )
+            products = _apply_affinity_boost(active_replay, ctx)
             return _format_result(products, query=str(decision.args.get("query") or ""))
 
         query = decision.args.get("query", ctx.message)

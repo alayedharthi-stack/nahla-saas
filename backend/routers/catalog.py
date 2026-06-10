@@ -59,11 +59,16 @@ from sqlalchemy.orm import Session
 from core.audit import audit
 from core.auth import get_current_user, require_admin
 from core.catalog import (
+    CATALOG_STATUS_ACTIVE,
+    CATALOG_STATUS_ARCHIVED,
+    CATALOG_STATUS_MERCHANT_HIDDEN,
+    CATALOG_STATUS_REMOVED_FROM_META,
     KNOWN_SOURCES,
     SOURCE_MANUAL,
     SOURCE_UNKNOWN,
     assign_canonical_retailer_id,
     canonical_retailer_id,
+    catalog_status_of,
     catalog_summary,
     dominant_source,
     effective_retailer_id,
@@ -899,6 +904,7 @@ def _apply_studio_filters(
     has_image: Optional[bool],
     has_retailer_id: Optional[bool],
     in_stock: Optional[bool],
+    catalog_visibility: Optional[str] = None,
 ):
     """Apply Studio filters to a base ``Query(Product)``.
 
@@ -937,6 +943,26 @@ def _apply_studio_filters(
     if in_stock is not None:
         query = query.filter(_Product.in_stock == bool(in_stock))
 
+    vis = (catalog_visibility or "active").strip().lower()
+    if vis == "active":
+        query = (
+            query.filter(_Product.catalog_status == CATALOG_STATUS_ACTIVE)
+            .filter(_Product.merchant_hidden_at.is_(None))
+        )
+    elif vis == "hidden":
+        query = query.filter(
+            (_Product.catalog_status == CATALOG_STATUS_MERCHANT_HIDDEN)
+            | (_Product.merchant_hidden_at.isnot(None))
+        )
+    elif vis == "removed":
+        query = query.filter(_Product.catalog_status == CATALOG_STATUS_REMOVED_FROM_META)
+    elif vis == "archived":
+        query = query.filter(
+            (_Product.catalog_status == CATALOG_STATUS_ARCHIVED)
+            | (_Product.archived_at.isnot(None))
+        )
+    # ``all`` and unknown values → no visibility filter
+
     # ``has_image`` reads from JSONB — slower than the column-level
     # filters but bounded by the prior narrowing. Applied last.
     if has_image is not None:
@@ -965,6 +991,7 @@ def _product_diag_rows(
     has_image: Optional[bool] = None,
     has_retailer_id: Optional[bool] = None,
     in_stock: Optional[bool] = None,
+    catalog_visibility: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the response shape for ``GET /merchant/catalog/products``.
 
@@ -1014,6 +1041,7 @@ def _product_diag_rows(
         filtered_q,
         q=q, source=source, has_image=has_image,
         has_retailer_id=has_retailer_id, in_stock=in_stock,
+        catalog_visibility=catalog_visibility,
     )
     try:
         filtered_total = filtered_q.with_entities(sa.func.count(_Product.id)).scalar() or 0
@@ -1106,6 +1134,15 @@ def _product_diag_rows(
             # post-migration 0062) with JSONB + heuristic fallback —
             # see ``core.catalog.product_source`` for the contract.
             "source":                product_source(p),
+            "catalog_status":        catalog_status_of(p),
+            "merchant_hidden_at":    (
+                p.merchant_hidden_at.isoformat()
+                if getattr(p, "merchant_hidden_at", None) else None
+            ),
+            "meta_removed_at":       (
+                p.meta_removed_at.isoformat()
+                if getattr(p, "meta_removed_at", None) else None
+            ),
             # One-pill readiness summary — see ``ProductBadge``.
             "readiness_badge":       badge,
             # Parent / variants intelligence (migration 0064).
@@ -1243,6 +1280,7 @@ def _product_diag_rows(
             "has_image":       has_image,
             "has_retailer_id": has_retailer_id,
             "in_stock":        in_stock,
+            "catalog_visibility": (catalog_visibility or "active"),
         },
     }
 
@@ -1354,6 +1392,10 @@ async def merchant_catalog_products(
     has_image:        Optional[bool] = Query(None, description="True = only products with an image; False = only without"),
     has_retailer_id:  Optional[bool] = Query(None),
     in_stock:         Optional[bool] = Query(None),
+    catalog_visibility: Optional[str] = Query(
+        None,
+        description="active (default) | hidden | removed | archived | all",
+    ),
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -1363,13 +1405,17 @@ async def merchant_catalog_products(
     filters; see ``_apply_studio_filters`` for the predicate map.
     Pagination is offset-based — the grid uses page-size 50 by
     default and bumps to 100 on big screens.
+
+    By default only ``active`` products are returned (merchant-hidden
+    and Meta-removed rows are excluded). Pass ``catalog_visibility=all``
+    to include every row.
     """
     tenant_id = resolve_tenant_id(request)
     return _product_diag_rows(
         db, tenant_id, limit=limit, offset=offset,
         q=q, source=source,
         has_image=has_image, has_retailer_id=has_retailer_id,
-        in_stock=in_stock,
+        in_stock=in_stock, catalog_visibility=catalog_visibility,
     )
 
 
@@ -1408,7 +1454,12 @@ async def merchant_catalog_resync(
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Backfill ``meta_retailer_id`` across the merchant's products.
+    """Backfill local ``meta_retailer_id`` / WhatsApp retailer IDs.
+
+    This is **not** a Meta Catalog import — it only walks existing Nahla
+    rows and assigns canonical retailer ids for the WhatsApp send chain.
+    To fetch the current product list from Meta Commerce Manager, use
+    ``POST /merchant/catalog/import/meta`` instead.
 
     Plan-gated: this is a write operation that prepares the catalog
     for live sends — same gate as the config / test-send endpoints.
@@ -1425,6 +1476,82 @@ async def merchant_catalog_resync(
     return {"ok": True, "report": report}
 
 
+@merchant_router.post("/products/{product_id}/hide")
+async def merchant_hide_catalog_product(
+    product_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Soft-hide a product from Nahla (AI, WhatsApp, dashboard active list).
+
+    Does not delete the row — orders and affinities may still reference it.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    p = (
+        db.query(Product)
+        .filter(Product.tenant_id == tenant_id, Product.id == product_id)
+        .first()
+    )
+    if p is None:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    now = datetime.now(timezone.utc)
+    p.catalog_status = CATALOG_STATUS_MERCHANT_HIDDEN
+    p.merchant_hidden_at = now
+    db.commit()
+    audit(
+        "merchant_catalog_product_hide",
+        tenant_id=tenant_id,
+        product_id=product_id,
+    )
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "catalog_status": CATALOG_STATUS_MERCHANT_HIDDEN,
+        "merchant_hidden_at": now.isoformat(),
+    }
+
+
+@merchant_router.post("/products/{product_id}/restore")
+async def merchant_restore_catalog_product(
+    product_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Restore a merchant-hidden product to the active catalog."""
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    p = (
+        db.query(Product)
+        .filter(Product.tenant_id == tenant_id, Product.id == product_id)
+        .first()
+    )
+    if p is None:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    if (
+        catalog_status_of(p) != CATALOG_STATUS_MERCHANT_HIDDEN
+        and getattr(p, "merchant_hidden_at", None) is None
+    ):
+        raise HTTPException(status_code=400, detail="not_merchant_hidden")
+    p.catalog_status = CATALOG_STATUS_ACTIVE
+    p.merchant_hidden_at = None
+    db.commit()
+    audit(
+        "merchant_catalog_product_restore",
+        tenant_id=tenant_id,
+        product_id=product_id,
+    )
+    return {
+        "ok": True,
+        "product_id": product_id,
+        "catalog_status": CATALOG_STATUS_ACTIVE,
+    }
+
+
 # ── Admin variants ────────────────────────────────────────────────────
 
 @admin_router.get("/products")
@@ -1437,6 +1564,7 @@ async def admin_catalog_products(
     has_image:        Optional[bool] = Query(None),
     has_retailer_id:  Optional[bool] = Query(None),
     in_stock:         Optional[bool] = Query(None),
+    catalog_visibility: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
@@ -1444,7 +1572,7 @@ async def admin_catalog_products(
         db, tenant_id, limit=limit, offset=offset,
         q=q, source=source,
         has_image=has_image, has_retailer_id=has_retailer_id,
-        in_stock=in_stock,
+        in_stock=in_stock, catalog_visibility=catalog_visibility,
     )
 
 
@@ -2143,6 +2271,15 @@ def _serialise_studio_product(p: "Product") -> Dict[str, Any]:
         # ``ProductVariant`` table lands. UI displays them read-only.
         "variants":           meta.get("variants") or [],
         "meta_catalog_published_at": p.meta_catalog_published_at.isoformat() if p.meta_catalog_published_at else None,
+        "catalog_status":            catalog_status_of(p),
+        "merchant_hidden_at":        (
+            p.merchant_hidden_at.isoformat()
+            if getattr(p, "merchant_hidden_at", None) else None
+        ),
+        "meta_removed_at":           (
+            p.meta_removed_at.isoformat()
+            if getattr(p, "meta_removed_at", None) else None
+        ),
     }
 
 

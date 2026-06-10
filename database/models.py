@@ -218,6 +218,16 @@ class Product(Base):
     # the Zid sync; ``"unknown"`` for legacy rows whose origin we
     # can't determine.
     source = Column(String(32), nullable=True, index=True)
+    # ── Catalog visibility (migration 0072 — P1-G1) ───────────────────────
+    # Soft lifecycle for Meta reconciliation + merchant hide. Never hard-
+    # delete rows that orders / affinities / KB links may reference.
+    catalog_status = Column(
+        String(32), nullable=False, server_default=sa.text("'active'"), default="active",
+    )
+    merchant_hidden_at = Column(DateTime(timezone=True), nullable=True)
+    meta_last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    meta_removed_at = Column(DateTime(timezone=True), nullable=True)
+    archived_at = Column(DateTime(timezone=True), nullable=True)
     # ── Parent / variants intelligence layer (migration 0064) ──────────────
     # ``Product`` is now treated as the PARENT (non-sellable when
     # ``has_variants=True``). Every sellable SKU lives as a row in the
