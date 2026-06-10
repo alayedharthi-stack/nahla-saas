@@ -573,6 +573,7 @@ def _dict_to_resolution(
 def format_product_card_caption(
     res: ProductResolution,
     *,
+    include_description: bool = True,
     max_length: int = 1024,
 ) -> str:
     """Render a product into a WhatsApp image caption.
@@ -582,13 +583,16 @@ def format_product_card_caption(
 
         <title>
         السعر: <price> ر.س
-        <description-first-line>
+        [<description-first-line when include_description=True>]
 
     Honours WhatsApp's 1024-char image caption limit. Description
     is truncated last. Price is rendered with a friendly suffix
     (``ر.س``) when the field is purely numeric; if the merchant
     or the adapter already includes a currency, we leave it
     alone.
+
+    Visual / card-send paths pass ``include_description=False`` so
+    the card body stays short; detail/info flows keep the default.
     """
     lines: List[str] = [res.title]
     if res.price:
@@ -605,7 +609,7 @@ def format_product_card_caption(
             lines.append(f"السعر: {price_text}")
     if not res.in_stock:
         lines.append("⚠️ غير متوفر حالياً")
-    if res.description:
+    if include_description and res.description:
         # First sentence / first 200 chars — keep the caption tight.
         first = re.split(r"[.\n!؟]", res.description, maxsplit=1)[0].strip()
         if first:

@@ -371,7 +371,7 @@ def apply_product_safety_net(
         "title":        resolution.title,
         "media_type":   "image",
         "file_url":     resolution.image_url,
-        "caption":      _caption(resolution),
+        "caption":      _caption(resolution, include_description=False),
         "product_url":  resolution.product_url,
         "price":        resolution.price,
         "in_stock":     resolution.in_stock,

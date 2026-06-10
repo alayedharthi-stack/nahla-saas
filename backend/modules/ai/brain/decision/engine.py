@@ -1477,6 +1477,17 @@ class DefaultDecisionEngine:
                     confidence=0.90,
                 )
 
+        try:
+            from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                global_availability_browse_requested,
+            )
+
+            _is_global_browse = global_availability_browse_requested(
+                ctx.message or "",
+            )
+        except Exception:  # noqa: BLE001
+            _is_global_browse = False
+
         # ── 3.7 Continue order preparation while collecting checkout details ──
         # While ordering we treat slot-bearing messages and a small set of
         # "neutral" intents as continuation so the funnel doesn't reset.
@@ -1505,6 +1516,7 @@ class DefaultDecisionEngine:
             and not state.checkout_url
             and not _active_candidates          # GUARD: no pending list
             and not _explicit_commerce_switch
+            and not _is_global_browse
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
@@ -1542,15 +1554,7 @@ class DefaultDecisionEngine:
         _msg_norm = _normalize_ar(ctx.message or "")
 
         # ── 3.8a Top-sellers / "show me products" request ────────────────
-        _TOP_SELLER_PATTERNS = [
-            "الاكثر مبيعا", "اكثر مبيعا", "الاكثر مبيعًا", "اكثر مبيعًا",
-            "الاكثر طلبا", "اكثر طلبا", "الاكثر طلبًا",
-            "اعرض المنتجات", "اعرض المنتجات", "وريني المنتجات",
-            "ما المنتجات", "ما المتاح", "ما المتوفر", "ما عندكم",
-            "ما عندك", "ايش عندك", "ايش عندكم",
-            "show products", "show me", "top products", "best sellers",
-        ]
-        _is_top_seller_req = any(p in _msg_norm for p in _TOP_SELLER_PATTERNS)
+        _is_top_seller_req = _is_global_browse
 
         # ── 3.8b Show more / replay list ──────────────────────────────────
         _SHOW_MORE_PATTERNS = [
@@ -2496,7 +2500,12 @@ class DefaultDecisionEngine:
             pass
 
         if state.stage in (STAGE_ORDERING, STAGE_DECIDING):
-            if state.current_product_focus and facts.orderable and not state.checkout_url:
+            if (
+                state.current_product_focus
+                and facts.orderable
+                and not state.checkout_url
+                and not _is_global_browse
+            ):
                 logger.info(
                     "[ORDER FLOW] FORCED action=propose_draft_order "
                     "reason=ordering_stage_safety_net | tenant=%s product=%r intent=%s "

@@ -34,7 +34,10 @@ def log_intent_priority_verdict(
             json.dumps(payload, ensure_ascii=False),
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[INTENT_PRIORITY] telemetry log failed tenant=%s",
+            tenant_id if tenant_id is not None else "-",
+        )
 
 
 __all__ = ["log_intent_priority_verdict"]

@@ -659,6 +659,24 @@ class MerchantBrain:
             )
             _state_relevance = None
 
+        _browse_defocus = False
+        try:
+            from .commerce.product_breadth_policy import (  # noqa: PLC0415
+                global_availability_browse_requested,
+            )
+
+            _browse_defocus = global_availability_browse_requested(
+                _raw_message or message or "",
+            )
+            if _browse_defocus:
+                logger.info(
+                    "[BROWSE_DEFOCUS] tenant=%s preview=%r — unscoped catalog + KB",
+                    tenant_id,
+                    (_raw_message or message or "")[:80],
+                )
+        except Exception:  # noqa: BLE001
+            _browse_defocus = False
+
         _nc_match = None
         try:
             from .intent.non_commerce_classifier import resolve_commerce_block  # noqa: PLC0415
@@ -761,11 +779,13 @@ class MerchantBrain:
                     db,
                     tenant_id      = tenant_id,
                     customer_phone = customer_phone,
-                    product_query  = message or "",
+                    product_query  = "" if _browse_defocus else (message or ""),
                     state          = state,
                     history        = history,
                     profile        = profile,
                 ) or {}
+                if _browse_defocus:
+                    merchant_context["browse_defocus"] = True
             except Exception as exc:
                 logger.warning(
                     "[BrainPipeline] build_merchant_context failed tenant=%s — "
@@ -1443,17 +1463,14 @@ class MerchantBrain:
             # showing every product extra.
             _active_pids: Optional[set] = None
             try:
-                _pid_candidates: set = set()
-                _focus = getattr(new_state, "current_product_focus", None) or {}
-                _focus_id = _focus.get("id") if isinstance(_focus, dict) else None
-                if isinstance(_focus_id, int):
-                    _pid_candidates.add(_focus_id)
-                for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
-                    _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
-                    if isinstance(_rid, int):
-                        _pid_candidates.add(_rid)
-                if _pid_candidates:
-                    _active_pids = _pid_candidates
+                from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
+                    resolve_kb_active_product_ids,
+                )
+
+                _active_pids = resolve_kb_active_product_ids(
+                    new_state,
+                    _raw_message or message or "",
+                )
             except Exception:  # noqa: BLE001
                 _active_pids = None
 
@@ -2281,7 +2298,21 @@ def _build_reply_state(
         _stance_result = None
 
     sensitivity_score = float(ctx.profile.get("price_sensitivity_score") or 0.5)
-    selected_product = current_state.current_product_focus or None
+    _browse_defocus = bool((merchant_context or {}).get("browse_defocus"))
+    if not _browse_defocus:
+        try:
+            from .commerce.product_breadth_policy import (  # noqa: PLC0415
+                global_availability_browse_requested,
+            )
+
+            _browse_defocus = global_availability_browse_requested(ctx.message or "")
+        except Exception:  # noqa: BLE001
+            _browse_defocus = False
+    selected_product = (
+        None
+        if _browse_defocus
+        else (current_state.current_product_focus or None)
+    )
 
     platform_kb_mode = False
     platform_topic = ""
