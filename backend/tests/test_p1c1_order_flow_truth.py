@@ -111,7 +111,7 @@ class TestDedupOrderStateGate:
                 tenant_id=1,
                 phone="966500000001",
                 history=[],
-                default_fallback="كيف أقدر أساعدك؟",
+                default_fallback="",
                 inbound_text="بكم يطلع الكيلو",
             )
         finally:
@@ -119,7 +119,7 @@ class TestDedupOrderStateGate:
             of._focus_summary = orig_focus
 
         assert "تحت المراجعة" not in reply
-        assert reply == "كيف أقدر أساعدك؟"
+        assert reply == ""
 
     def test_dedup_still_shows_under_review_for_neutral_followup(self):
         of, fake_load, fake_focus = _patch_dedup_state({

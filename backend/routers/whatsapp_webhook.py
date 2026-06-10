@@ -320,61 +320,47 @@ def _reply_carries_new_signal(reply: str) -> bool:
     return False
 
 
-# Dedup fallback replies (May 2026 #19 — re-tuned tone; #33 — warmer #3).
-#
-# History
-# ───────
-# v1 (May 2026 #2): closed-tone set —
-#   "تأمر بشي ثاني؟ / إذا في شي ثاني تحتاجه أنا معك. / خبرني لو احتجت شي ثاني."
-# All three implicitly say "we're done". But the dedup guard fires
-# EXACTLY when the customer is still engaged and the brain repeated
-# itself (typically because the customer just asked for elaboration
-# like "تفاصيل اكثر" / "اشرح اكثر"). The closed tone read as the bot
-# dismissing the customer mid-question.
-#
-# v2 (May 2026 #19): clarification-tone — instead of farewell phrases
-# we invite the customer to specify what aspect they want clarified.
-# The brain's near-duplicate is treated as a signal that we don't
-# have NEW substantive content to add, but we leave the conversation
-# open and put the next move in the customer's hands.
-#
-# v2.1 (May 2026 #33): the third entry —
-#   "تكلمنا عنها فوق، شف وش الجانب اللي تبي تعرف عنه أكثر."
-# was reported as too stiff: "تكلمنا عنها فوق" reads accusatory
-# (like the bot is scolding the customer for repeating) and the
-# command tone "شف وش الجانب اللي تبي تعرف" doesn't fit Nahla's
-# voice. We rewrite ONLY that string into the same warmer shape as
-# entries 1 and 2 — acknowledge similarity without blame, ask one
-# open soft question. Entries 1 and 2 stay untouched since they
-# already pass review.
-#
-# Why this is NOT a keyword→reply rule:
-# the trigger is STRUCTURAL (overlap ≥ 60% with a recent outbound,
-# computed lexically) — the substitute lines just acknowledge the
-# repetition transparently and ask the customer to point at the
-# specific gap. The brain's understanding of context is still the
-# layer doing the work; this is only a graceful-degradation prompt
-# when the brain ran out of new content.
-_DEDUP_FALLBACK_REPLIES = [
-    "ذكرت لك للتو نفس النقطة 🌷 وش الجزء اللي تبيني أوضحه أكثر؟",
-    "هذي نفس الإجابة قبل قليل — قلي على وجه التحديد إيش الناقص.",
-    "هذي قريبة من سؤال قبل قليل 🌷 أي نقطة تحب أوضحها لك أكثر؟",
-]
+# P1-D-1: dedup must not substitute rotating canned personality text.
+# Hard-tier near-duplicate handling uses ``context_aware_dedup_fallback``
+# for operational state only; otherwise the outbound is suppressed.
 
 
-def _short_followup_instead_of_repeat(history: list) -> str:
-    """Pick a varied short follow-up to substitute when the generated
-    reply was flagged as a repeat. Uses the count of outbound turns in
-    the history as a deterministic rotation key so a customer who keeps
-    poking the bot does not see the SAME fallback every time either."""
+def _dedup_operational_substitute(
+    db,
+    *,
+    tenant_id: int,
+    phone: str,
+    history: list,
+    inbound_text: str,
+    inbound_metadata: dict | None,
+    normalized_type: str | None,
+) -> str:
+    """Operational dedup fallback only — empty when no state-backed message."""
     try:
-        out_count = sum(
-            1 for t in (history or [])
-            if str((t or {}).get("direction") or "").lower() in ("out", "outbound")
+        from core.order_flow import context_aware_dedup_fallback  # noqa: PLC0415
+
+        return context_aware_dedup_fallback(
+            db,
+            tenant_id=tenant_id,
+            phone=phone,
+            history=history,
+            default_fallback="",
+            inbound_text=inbound_text,
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
         )
-    except Exception:  # noqa: BLE001 silent-ok
-        out_count = 0
-    return _DEDUP_FALLBACK_REPLIES[out_count % len(_DEDUP_FALLBACK_REPLIES)]
+    except Exception as _ctx_exc:  # noqa: BLE001
+        logger.debug(
+            "[CHAT_DEDUP] context-aware fallback failed: %s",
+            _ctx_exc,
+        )
+        return ""
+
+
+def _empty_reply_fallback() -> str:
+    from core.fallback_policy import empty_reply_fallback  # noqa: PLC0415
+
+    return empty_reply_fallback()
 
 
 # ── Smart notification helpers ────────────────────────────────────────────────
@@ -7282,7 +7268,7 @@ async def _handle_merchant_message(
                     prompt_overrides={"__full_system_prompt": full_prompt},
                     provider_hint="anthropic",
                 )
-                reply = payload.reply_text.strip() or "كيف أقدر أساعدك؟"
+                reply = payload.reply_text.strip() or _empty_reply_fallback()
 
         # ── Outbound dedup guard (May 2026 #34 — tiered) ─────────────────
         # Last-mile safety net for BOTH paths (Brain + legacy). The
@@ -7401,49 +7387,48 @@ async def _handle_merchant_message(
                         )
                     else:
                         _orig_len = len(reply)
-                        _default_short = _short_followup_instead_of_repeat(history)
-                        # ── Context-aware fallback ────────────────────────────
-                        try:
-                            from core.order_flow import (  # noqa: PLC0415
-                                context_aware_dedup_fallback,
-                            )
-                            reply = context_aware_dedup_fallback(
-                                db,
-                                tenant_id=tenant_id,
-                                phone=to,
-                                history=history,
-                                default_fallback=_default_short,
-                                inbound_text=text,
-                                inbound_metadata=(
-                                    dict(inbound_metadata or {})
-                                    if isinstance(inbound_metadata, dict)
-                                    else None
-                                ),
-                                normalized_type=str(
-                                    (inbound_metadata or {}).get("source_type")
-                                    or (inbound_metadata or {}).get("normalized_type")
-                                    or ""
-                                ) or None,
-                            )
-                        except Exception as _ctx_exc:  # noqa: BLE001
-                            logger.debug(
-                                "[CHAT_DEDUP] context-aware fallback failed: %s",
-                                _ctx_exc,
-                            )
-                            reply = _default_short
-                        _persona_ownership.on_text_replaced(
-                            layer="dedup_substitution",
-                            reason=_POReason.DEDUP_REPLY,
-                            before=_po_reply_before_dedup,
-                            after=reply,
+                        _meta_for_dedup = (
+                            dict(inbound_metadata or {})
+                            if isinstance(inbound_metadata, dict)
+                            else None
                         )
-                        logger.info(
-                            "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
-                            "replaced near-duplicate outbound "
-                            "(orig_len=%d new_len=%d brain=%s)",
-                            tenant_id, to, _overlap,
-                            _orig_len, len(reply), _brain_active,
+                        _norm_type = str(
+                            (inbound_metadata or {}).get("source_type")
+                            or (inbound_metadata or {}).get("normalized_type")
+                            or ""
+                        ) or None
+                        reply = _dedup_operational_substitute(
+                            db,
+                            tenant_id=tenant_id,
+                            phone=to,
+                            history=history,
+                            inbound_text=text,
+                            inbound_metadata=_meta_for_dedup,
+                            normalized_type=_norm_type,
                         )
+                        if not (reply or "").strip():
+                            logger.info(
+                                "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
+                                "suppressed=true personality_substitute_blocked "
+                                "(orig_len=%d brain=%s)",
+                                tenant_id, to, _overlap,
+                                _orig_len, _brain_active,
+                            )
+                            reply = ""
+                        else:
+                            _persona_ownership.on_text_replaced(
+                                layer="dedup_substitution",
+                                reason=_POReason.DEDUP_REPLY,
+                                before=_po_reply_before_dedup,
+                                after=reply,
+                            )
+                            logger.info(
+                                "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
+                                "replaced near-duplicate outbound "
+                                "(orig_len=%d new_len=%d brain=%s)",
+                                tenant_id, to, _overlap,
+                                _orig_len, len(reply), _brain_active,
+                            )
             elif _is_hard and _carries_signal:
                 # Near-verbatim wording, BUT the reply ships a URL /
                 # phone / asset marker. The customer asked again
@@ -7478,6 +7463,37 @@ async def _handle_merchant_message(
         # inbound is a payment-confirmation claim AND the outbound
         # matches a known generic fallback marker — so legitimate
         # replies never get touched.
+        if reply and not _brain_handoff:
+            _po_reply_before_guards = reply
+            try:
+                from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
+                    apply_service_closer_guard,
+                )
+                _nc_meta = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                _scg = apply_service_closer_guard(
+                    reply,
+                    inbound_text=text or "",
+                    inbound_metadata=_nc_meta,
+                    tenant_id=tenant_id,
+                )
+                if _scg.stripped:
+                    reply = _scg.reply
+                    _persona_ownership.on_text_replaced(
+                        layer="service_closer_guard",
+                        reason=_POReason.FALLBACK_REPLY,
+                        before=_po_reply_before_guards,
+                        after=reply,
+                    )
+            except Exception as _scg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[SERVICE_CLOSER_GUARD] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _scg_exc,
+                )
+
         if reply and not _brain_handoff:
             _po_reply_before_guards = reply
             try:
@@ -10397,7 +10413,7 @@ async def _handle_merchant_message(
                                     "confidence=%s",
                                     tenant_id, _r.id, _r.confidence,
                                 )
-                        except Exception as _rescue_exc:  # noqa: BLE001
+                        except Exception as _rescue_exc:  # noqa: BLE001  # noqa: silent-ok — visual rescue best-effort
                             logger.debug(
                                 "[VISUAL_FALLBACK_RESCUE] tenant=%s "
                                 "resolver_failed: %s", tenant_id, _rescue_exc,
@@ -10844,7 +10860,7 @@ async def _call_claude_with_context(
             prompt_overrides={"__full_system_prompt": full_prompt},
             provider_hint="anthropic",
         )
-        return payload.reply_text.strip() or "كيف أقدر أساعدك؟"
+        return payload.reply_text.strip() or _empty_reply_fallback()
     except Exception as exc:
         logger.error("[Claude] Call failed: %s", exc)
         return "عذراً، حدث خطأ مؤقت. يرجى المحاولة مرة أخرى."

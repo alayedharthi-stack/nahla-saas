@@ -1224,17 +1224,11 @@ def narrow_choices(
 
 
 _GENERIC_FALLBACK_VARIANTS = [
-    # variant 0
-    "شكراً على تواصلك! هل يمكنك توضيح طلبك أكثر؟\n"
-    "يمكنني مساعدتك في البحث عن المنتجات أو إنشاء طلب.",
-    # variant 1
-    "وصلني سؤالك! لو تقدر تعطيني تفاصيل أكثر سأكون أقدر على المساعدة.\n"
-    "ابحث عن منتج أو أبدأ لك طلباً مباشرة.",
-    # variant 2
-    "أنا هنا لمساعدتك. 🤝\n"
-    "هل تبحث عن منتج معين أو تريد مساعدة في طلب سابق؟",
+    # P1-D-1: retired CS/sales rotation pool — single operational honesty line.
 ]
 
 
 def generic_fallback(variant: int = 0, **_: Any) -> str:
-    return _GENERIC_FALLBACK_VARIANTS[variant % 3]
+    from core.fallback_policy import operational_compose_error_fallback  # noqa: PLC0415
+
+    return operational_compose_error_fallback(variant=variant)

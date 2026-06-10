@@ -4,8 +4,9 @@ tests/test_template_variants.py
 Unit tests for Phase 3 — Template Dedup + Variations.
 
 Covers:
-  1. Each of the 6 variant-aware templates returns a DIFFERENT string for
+  1. Each of the 5 variant-aware templates returns a DIFFERENT string for
      each of the three variants (0, 1, 2) — guarantees wording actually rotates.
+     ``generic_fallback`` is excluded: P1-D-1 uses one stable operational line.
   2. DefaultComposer._variant_idx() returns len(history) % 3.
   3. DefaultComposer._last_outbound() finds the latest "out"/"outbound" turn.
   4. DefaultComposer._is_duplicate() detects when first-70-chars match.
@@ -157,16 +158,29 @@ class TestHandoffVariants:
 
 
 class TestGenericFallbackVariants:
-    def test_all_three_variants_differ(self):
+    """P1-D-1: generic_fallback is a stable operational line, not a variant pool."""
+
+    _BANNED_CLOSER_FRAGMENTS = (
+        "كيف أقدر أساعدك",
+        "أنا هنا للمساعدة",
+        "المنتجات أو الأسعار",
+        "يمكنني مساعدتك في البحث عن المنتجات",
+    )
+
+    def test_stable_operational_fallback_across_variant_index(self):
         v0 = T.generic_fallback(variant=0)
         v1 = T.generic_fallback(variant=1)
         v2 = T.generic_fallback(variant=2)
-        assert v0 != v1
-        assert v1 != v2
-        assert v0 != v2
+        assert v0 == v1 == v2
+        assert len(v0) > 0
 
-    def test_variant_wraps_modulo(self):
+    def test_variant_index_is_ignored(self):
         assert T.generic_fallback(variant=3) == T.generic_fallback(variant=0)
+
+    def test_no_customer_service_or_sales_closers(self):
+        text = T.generic_fallback(variant=0)
+        for fragment in self._BANNED_CLOSER_FRAGMENTS:
+            assert fragment not in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
