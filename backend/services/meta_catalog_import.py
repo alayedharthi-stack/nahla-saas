@@ -113,6 +113,7 @@ from sqlalchemy.orm import Session
 
 from core.catalog import (
     CATALOG_STATUS_ACTIVE,
+    CATALOG_STATUS_MERCHANT_HIDDEN,
     CATALOG_STATUS_REMOVED_FROM_META,
     SOURCE_MANUAL,
     SOURCE_META,
