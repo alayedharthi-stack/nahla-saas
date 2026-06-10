@@ -2136,11 +2136,13 @@ function KnowledgeSearchPanel({
   onOpenSection,
   onToggle,
   onDelete,
+  onSearchActiveChange,
 }: {
   kindLabelByKind: Map<string, string>
   onOpenSection: (sectionId: number) => void
   onToggle: (sectionId: number) => Promise<void>
   onDelete: (sectionId: number) => Promise<void>
+  onSearchActiveChange: (active: boolean) => void
 }) {
   const [query, setQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState<ActiveFilter>('all')
@@ -2150,11 +2152,18 @@ function KnowledgeSearchPanel({
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
   const [busyId, setBusyId] = useState<number | null>(null)
 
+  const trimmedQuery = query.trim()
+  const searchActive = trimmedQuery.length >= 2
+
   useEffect(() => {
-    const term = query.trim()
-    if (term.length < 2) {
+    onSearchActiveChange(searchActive)
+  }, [searchActive, onSearchActiveChange])
+
+  useEffect(() => {
+    if (!searchActive) {
       setResults([])
       setSearchError(null)
+      setSearching(false)
       return
     }
     const handle = window.setTimeout(async () => {
@@ -2163,34 +2172,56 @@ function KnowledgeSearchPanel({
       try {
         const onlyActive =
           activeFilter === 'active' ? true : activeFilter === 'inactive' ? false : null
-        const res = await knowledgeApi.searchSections({ q: term, onlyActive })
+        const res = await knowledgeApi.searchSections({ q: trimmedQuery, onlyActive })
         setResults(res.items)
       } catch (err) {
-        setSearchError((err as Error).message || 'تعذّر البحث')
+        const msg = (err as Error).message || 'تعذّر البحث'
+        setSearchError(msg)
         setResults([])
       } finally {
         setSearching(false)
       }
     }, 300)
     return () => window.clearTimeout(handle)
-  }, [query, activeFilter])
+  }, [trimmedQuery, activeFilter, searchActive])
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Search className="w-4 h-4 text-slate-400 shrink-0" />
+    <section
+      id="kb-local-search-panel"
+      aria-labelledby="kb-local-search-heading"
+      className="rounded-2xl border-2 border-brand-200 bg-gradient-to-b from-brand-50/80 to-white p-4 md:p-5 space-y-4 shadow-sm"
+    >
+      <div className="space-y-1">
+        <h2
+          id="kb-local-search-heading"
+          className="text-base md:text-lg font-bold text-slate-900 flex items-center gap-2"
+        >
+          <Search className="w-5 h-5 text-brand-600 shrink-0" />
+          بحث في قاعدة المعرفة
+        </h2>
+        <p id="kb-local-search-help" className="text-xs md:text-sm text-slate-600 leading-relaxed">
+          ابحث في العنوان أو النص أو الملاحظات المحفوظة في قاعدة المعرفة.
+        </p>
+      </div>
+
+      <div className="relative">
+        <Search className="absolute start-4 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-500 pointer-events-none" />
         <input
+          id="kb-local-search"
           type="search"
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="بحث في قاعدة المعرفة"
-          className="flex-1 text-sm border-0 outline-none bg-transparent placeholder:text-slate-400"
-          aria-label="بحث في قاعدة المعرفة"
+          placeholder="ابحث داخل قاعدة المعرفة"
+          aria-labelledby="kb-local-search-heading"
+          aria-describedby="kb-local-search-help"
+          autoComplete="off"
+          className="w-full ps-12 pe-4 py-3.5 md:py-4 text-base md:text-lg bg-white border-2 border-brand-300 rounded-xl
+                     shadow-inner placeholder:text-slate-400 text-slate-900
+                     focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
         />
-        {searching && <Loader2 className="w-4 h-4 animate-spin text-brand-500 shrink-0" />}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-xs md:text-sm">
         {(
           [
             ['all', 'الكل'],
@@ -2203,9 +2234,9 @@ function KnowledgeSearchPanel({
             type="button"
             onClick={() => setActiveFilter(key)}
             className={classNames(
-              'px-2.5 py-1 rounded-full border font-medium transition-colors',
+              'px-3 py-1.5 rounded-full border font-medium transition-colors',
               activeFilter === key
-                ? 'bg-brand-50 border-brand-200 text-brand-800'
+                ? 'bg-brand-600 border-brand-600 text-white shadow-sm'
                 : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50',
             )}
           >
@@ -2215,112 +2246,133 @@ function KnowledgeSearchPanel({
       </div>
 
       {searchError && (
-        <p className="text-xs text-red-600">{searchError}</p>
+        <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+          {searchError}
+        </div>
       )}
 
-      {query.trim().length >= 2 && !searching && results.length === 0 && !searchError && (
-        <p className="text-xs text-slate-500">لا توجد نتائج.</p>
+      {searchActive && searching && (
+        <div className="flex items-center gap-2 text-sm text-brand-700 py-2">
+          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+          <span>جاري البحث...</span>
+        </div>
       )}
 
-      {results.length > 0 && (
-        <ul className="divide-y divide-slate-100 border border-slate-100 rounded-lg overflow-hidden">
-          {results.map(hit => (
-            <li key={hit.id} className="p-3 bg-slate-50/40 hover:bg-slate-50">
-              <div className="flex items-start justify-between gap-2 mb-1">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-brand-50 text-brand-700">
-                      {kindLabelByKind.get(hit.kind) || hit.kind}
-                    </span>
-                    {!hit.is_active && (
-                      <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
-                        غير مفعّل
+      {searchActive && !searching && results.length === 0 && !searchError && (
+        <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center">
+          <p className="text-sm font-medium text-slate-700">لا توجد نتائج في قاعدة المعرفة</p>
+          <p className="text-xs text-slate-500 mt-1">جرّب كلمة مختلفة أو غيّر فلتر النشاط.</p>
+        </div>
+      )}
+
+      {searchActive && results.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-slate-500">
+            {results.length} نتيجة في قاعدة المعرفة
+          </p>
+          <ul className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden bg-white shadow-sm">
+            {results.map(hit => (
+              <li key={hit.id} className="p-3.5 md:p-4 hover:bg-slate-50/80">
+                <div className="flex items-start justify-between gap-2 mb-1">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-brand-50 text-brand-700">
+                        {kindLabelByKind.get(hit.kind) || hit.kind}
                       </span>
+                      {!hit.is_active && (
+                        <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                          غير مفعّل
+                        </span>
+                      )}
+                    </div>
+                    {hit.title && (
+                      <p className="text-sm md:text-base font-semibold text-slate-900 truncate">
+                        {hit.title}
+                      </p>
                     )}
                   </div>
-                  {hit.title && (
-                    <p className="text-sm font-semibold text-slate-900 truncate">{hit.title}</p>
-                  )}
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <button
+                      type="button"
+                      title="فتح"
+                      onClick={() => onOpenSection(hit.id)}
+                      className="px-2.5 py-1 text-xs rounded-lg hover:bg-white border border-slate-200 text-slate-600 font-medium"
+                    >
+                      فتح
+                    </button>
+                    <button
+                      type="button"
+                      title={hit.is_active ? 'تعطيل' : 'تفعيل'}
+                      disabled={busyId === hit.id}
+                      onClick={async () => {
+                        setBusyId(hit.id)
+                        try {
+                          await onToggle(hit.id)
+                        } finally {
+                          setBusyId(null)
+                        }
+                      }}
+                      className="p-1.5 rounded-lg hover:bg-white text-slate-500"
+                    >
+                      {busyId === hit.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : hit.is_active ? (
+                        <Power className="w-3.5 h-3.5" />
+                      ) : (
+                        <PowerOff className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      title="حذف"
+                      onClick={() => setConfirmDeleteId(hit.id)}
+                      className="p-1.5 rounded-lg hover:bg-red-50 text-red-500"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-0.5 shrink-0">
-                  <button
-                    type="button"
-                    title="فتح"
-                    onClick={() => onOpenSection(hit.id)}
-                    className="px-2 py-1 text-[11px] rounded hover:bg-white border border-slate-200 text-slate-600"
-                  >
-                    فتح
-                  </button>
-                  <button
-                    type="button"
-                    title={hit.is_active ? 'تعطيل' : 'تفعيل'}
-                    disabled={busyId === hit.id}
-                    onClick={async () => {
-                      setBusyId(hit.id)
-                      try {
-                        await onToggle(hit.id)
-                      } finally {
-                        setBusyId(null)
-                      }
-                    }}
-                    className="p-1.5 rounded hover:bg-white text-slate-500"
-                  >
-                    {busyId === hit.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : hit.is_active ? (
-                      <Power className="w-3.5 h-3.5" />
-                    ) : (
-                      <PowerOff className="w-3.5 h-3.5" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    title="حذف"
-                    onClick={() => setConfirmDeleteId(hit.id)}
-                    className="p-1.5 rounded hover:bg-red-50 text-red-500"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-              {hit.snippet && (
-                <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">{hit.snippet}</p>
-              )}
-              {confirmDeleteId === hit.id && (
-                <div className="mt-2 p-2 rounded-lg bg-red-50 border border-red-200 flex items-center gap-2 text-xs text-red-800">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                  <span className="flex-1">حذف هذا القسم؟</span>
-                  <button
-                    type="button"
-                    disabled={busyId === hit.id}
-                    onClick={async () => {
-                      setBusyId(hit.id)
-                      try {
-                        await onDelete(hit.id)
-                        setConfirmDeleteId(null)
-                        setResults(prev => prev.filter(r => r.id !== hit.id))
-                      } finally {
-                        setBusyId(null)
-                      }
-                    }}
-                    className="px-2 py-1 rounded bg-red-500 hover:bg-red-600 text-white font-semibold disabled:opacity-50"
-                  >
-                    حذف
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDeleteId(null)}
-                    className="px-2 py-1 text-red-700 hover:bg-red-100 rounded"
-                  >
-                    إلغاء
-                  </button>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
+                {hit.snippet && (
+                  <p className="text-xs md:text-sm text-slate-600 leading-relaxed line-clamp-3">
+                    {hit.snippet}
+                  </p>
+                )}
+                {confirmDeleteId === hit.id && (
+                  <div className="mt-2.5 p-2.5 rounded-lg bg-red-50 border border-red-200 flex items-center gap-2 text-xs text-red-800">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    <span className="flex-1">حذف هذا القسم؟</span>
+                    <button
+                      type="button"
+                      disabled={busyId === hit.id}
+                      onClick={async () => {
+                        setBusyId(hit.id)
+                        try {
+                          await onDelete(hit.id)
+                          setConfirmDeleteId(null)
+                          setResults(prev => prev.filter(r => r.id !== hit.id))
+                        } finally {
+                          setBusyId(null)
+                        }
+                      }}
+                      className="px-2.5 py-1 rounded bg-red-500 hover:bg-red-600 text-white font-semibold disabled:opacity-50"
+                    >
+                      حذف
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(null)}
+                      className="px-2 py-1 text-red-700 hover:bg-red-100 rounded"
+                    >
+                      إلغاء
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
-    </div>
+    </section>
   )
 }
 
@@ -2352,6 +2404,11 @@ export default function KnowledgeBase() {
 
   // Phase 2 — draft preview drawer
   const [activeDraft, setActiveDraft] = useState<KnowledgeDraft | null>(null)
+  const [kbSearchActive, setKbSearchActive] = useState(false)
+
+  const handleKbSearchActiveChange = useCallback((active: boolean) => {
+    setKbSearchActive(active)
+  }, [])
 
   // ── Initial load ────────────────────────────────────────────────────────
   const loadAll = useCallback(async () => {
@@ -2640,64 +2697,69 @@ export default function KnowledgeBase() {
         onFormatWithAI={handleFormatWithAI}
       />
 
-      {/* KB search (P1-G2) */}
+      {/* KB search — dedicated local field directly above section buckets */}
       <KnowledgeSearchPanel
         kindLabelByKind={kindLabelByKind}
         onOpenSection={openSectionById}
         onToggle={handleToggleSection}
         onDelete={handleDeleteSection}
+        onSearchActiveChange={handleKbSearchActiveChange}
       />
 
-      {/* KB-Improve V1 — proactive improvement suggestions */}
-      <ImprovementSuggestionsCard
-        kindLabelByKind={kindLabelByKind}
-        onApproved={draft => setActiveDraft(draft)}
-        onToast={text => setToast(text)}
-        onError={text => setError(text)}
-      />
-
-      {/* Groups 1..5 */}
-      {groups
-        .filter(g => g.id >= 1 && g.id <= 5)
-        .map(g => (
-          <SectionGroup
-            key={g.id}
-            groupId={g.id}
-            label={g.label_ar}
-            description={
-              g.id === 1
-                ? 'ملاحظات سريعة كتبتها مؤخراً (سيتم تصنيفها في Phase 2).'
-                : g.id === 2
-                ? 'القصة، النبرة، اللهجة، أوقات العمل، الفروع.'
-                : g.id === 3
-                ? 'الدفع، التحويل البنكي، الدفع عند الاستلام، الإرجاع، الضمان.'
-                : g.id === 4
-                ? 'الشركات، المناطق، الشحن المبرد، ملاحظات الصيف.'
-                : 'طريقة الاستخدام، الوصفات، الفوائد، التخزين، الفروقات.'
-            }
-            sections={sections}
-            kinds={kinds}
-            defaultOpen={g.id === 1 || g.id === 2}
-            onAdd={openCreate}
-            renderChild={s => (
-              <SectionCard
-                key={s.id}
-                section={s}
-                kindLabel={kindLabelByKind.get(s.kind) || s.kind}
-                onEdit={() => openEdit(s)}
-                onDelete={() => handleDeleteSection(s.id)}
-                onToggle={() => handleToggleSection(s.id)}
-                onAttachMedia={() => setPickerSectionId(s.id)}
-                onDetachMedia={linkId => handleUnlinkMedia(s.id, linkId)}
-                onAttachProduct={() => setProductPickerSectionId(s.id)}
-                onDetachProduct={linkId => handleUnlinkProduct(s.id, linkId)}
-              />
-            )}
+      {!kbSearchActive && (
+        <>
+          {/* KB-Improve V1 — proactive improvement suggestions */}
+          <ImprovementSuggestionsCard
+            kindLabelByKind={kindLabelByKind}
+            onApproved={draft => setActiveDraft(draft)}
+            onToast={text => setToast(text)}
+            onError={text => setError(text)}
           />
-        ))}
 
-      {/* Group 6 — linked media summary */}
-      <LinkedMediaSummary sections={sections} />
+          {/* Groups 1..5 */}
+          {groups
+            .filter(g => g.id >= 1 && g.id <= 5)
+            .map(g => (
+              <SectionGroup
+                key={g.id}
+                groupId={g.id}
+                label={g.label_ar}
+                description={
+                  g.id === 1
+                    ? 'ملاحظات سريعة كتبتها مؤخراً (سيتم تصنيفها في Phase 2).'
+                    : g.id === 2
+                    ? 'القصة، النبرة، اللهجة، أوقات العمل، الفروع.'
+                    : g.id === 3
+                    ? 'الدفع، التحويل البنكي، الدفع عند الاستلام، الإرجاع، الضمان.'
+                    : g.id === 4
+                    ? 'الشركات، المناطق، الشحن المبرد، ملاحظات الصيف.'
+                    : 'طريقة الاستخدام، الوصفات، الفوائد، التخزين، الفروقات.'
+                }
+                sections={sections}
+                kinds={kinds}
+                defaultOpen={g.id === 1 || g.id === 2}
+                onAdd={openCreate}
+                renderChild={s => (
+                  <SectionCard
+                    key={s.id}
+                    section={s}
+                    kindLabel={kindLabelByKind.get(s.kind) || s.kind}
+                    onEdit={() => openEdit(s)}
+                    onDelete={() => handleDeleteSection(s.id)}
+                    onToggle={() => handleToggleSection(s.id)}
+                    onAttachMedia={() => setPickerSectionId(s.id)}
+                    onDetachMedia={linkId => handleUnlinkMedia(s.id, linkId)}
+                    onAttachProduct={() => setProductPickerSectionId(s.id)}
+                    onDetachProduct={linkId => handleUnlinkProduct(s.id, linkId)}
+                  />
+                )}
+              />
+            ))}
+
+          {/* Group 6 — linked media summary */}
+          <LinkedMediaSummary sections={sections} />
+        </>
+      )}
 
       {/* Modals */}
       <SectionEditor

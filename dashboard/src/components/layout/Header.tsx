@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Bell, Search, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle, Headphones, AlertCircle, Sun, Moon, Monitor } from 'lucide-react'
+import { Bell, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, Clock, CheckCircle, XCircle, Headphones, AlertCircle, Sun, Moon, Monitor } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
 import { useTheme, type ThemeMode } from '../../hooks/useTheme'
@@ -390,17 +390,6 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
             دعم فني: {impersonInfo?.storeName || 'متجر'}
           </div>
         )}
-
-        {/* Search */}
-        <div className="relative hidden md:block">
-          <Search className="absolute start-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-          <input
-            type="text"
-            placeholder={t(tr => tr.topbar.searchPlaceholder)}
-            className="ps-9 pe-4 py-1.5 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 dark:text-slate-100 dark:placeholder:text-slate-500 rounded-lg w-52
-                       focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
-          />
-        </div>
 
         {/* Theme toggle */}
         <button
