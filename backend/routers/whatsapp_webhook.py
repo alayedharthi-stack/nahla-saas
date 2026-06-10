@@ -363,6 +363,33 @@ def _empty_reply_fallback() -> str:
     return empty_reply_fallback()
 
 
+def _should_suppress_empty_outbound_reply(
+    reply: str | None,
+    *,
+    brain_buttons: list | None = None,
+) -> bool:
+    """True when the final reply carries no sendable text or buttons."""
+    if brain_buttons:
+        return False
+    return not (reply or "").strip()
+
+
+def _log_empty_outbound_suppressed(
+    *,
+    tenant_id: int,
+    to: str,
+    conversation_id: int | None,
+    reason: str,
+) -> None:
+    logger.info(
+        "[OUTBOUND_SUPPRESSED_EMPTY_REPLY] tenant=%s to=%s conversation_id=%s reason=%s",
+        tenant_id,
+        to,
+        conversation_id,
+        reason,
+    )
+
+
 # ── Smart notification helpers ────────────────────────────────────────────────
 
 def _should_notify_merchant_email(
@@ -7820,12 +7847,20 @@ async def _handle_merchant_message(
             except Exception as _loop_exc:
                 logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
 
-        # Save outbound reply after generation.
-        StateManager.save_message(
-            db, to, reply, "outbound",
-            conversation_id=convo.id, tenant_id=tenant_id,
-            extra_metadata=_persona_ownership.to_metadata(),
-        )
+        # Save outbound reply after generation (skip empty — P0 wire suppress).
+        if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
+            _log_empty_outbound_suppressed(
+                tenant_id=tenant_id,
+                to=to,
+                conversation_id=getattr(convo, "id", None),
+                reason="skip_persist",
+            )
+        else:
+            StateManager.save_message(
+                db, to, reply, "outbound",
+                conversation_id=convo.id, tenant_id=tenant_id,
+                extra_metadata=_persona_ownership.to_metadata(),
+            )
 
         latency_ms = 0
         try:
@@ -9317,7 +9352,15 @@ async def _handle_merchant_message(
                     _sync_exc,
                 )
 
-        if _brain_buttons and reply:
+        _send_ok = False
+        if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
+            _log_empty_outbound_suppressed(
+                tenant_id=tenant_id,
+                to=to,
+                conversation_id=getattr(convo, "id", None),
+                reason="skip_wire_send",
+            )
+        elif _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
                 body_text=reply,

@@ -637,6 +637,45 @@ async def provider_send_message(
     prefer_platform: bool = False,
     timeout: float = 20,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
+    send_payload = dict(payload or {})
+    raw_to = str(send_payload.get("to") or "").strip()
+    if raw_to:
+        from utils.phone_utils import (  # noqa: PLC0415
+            format_wa_send_recipient,
+            redact_phone_for_log,
+        )
+        formatted_to = format_wa_send_recipient(raw_to)
+        if not formatted_to:
+            logger.warning(
+                "[WA_RECIPIENT_INVALID] tenant_id=%s operation=%s phone_number_id=%s "
+                "raw_recipient=%s normalized_absent=true — skipping provider send",
+                tenant_id,
+                operation,
+                phone_id,
+                redact_phone_for_log(raw_to),
+            )
+            return (
+                {
+                    "error": {
+                        "code": "invalid_recipient",
+                        "type": "ValidationError",
+                        "message": (
+                            "Recipient phone could not be normalized for WhatsApp send"
+                        ),
+                    },
+                    "_nahla_classification": "recipient_invalid",
+                },
+                WhatsAppTokenContext(
+                    token="",
+                    source="validation_skip",
+                    token_status="skipped",
+                    expires_at=None,
+                    oauth_session_status="",
+                    oauth_session_message=None,
+                ),
+            )
+        send_payload["to"] = formatted_to
+
     ctx = await get_token_for_operation(
         db,
         conn,
@@ -651,7 +690,7 @@ async def provider_send_message(
     # manual /conversations/reply, automation engine, orders,
     # cart recovery, admin direct-send) before any byte leaves
     # this process. See _scrub_outbound_payload docstring.
-    send_payload = _scrub_outbound_payload(dict(payload or {}))
+    send_payload = _scrub_outbound_payload(send_payload)
     if provider == WHATSAPP_PROVIDER_360DIALOG:
         send_payload.setdefault("recipient_type", "individual")
         data = await provider_post_with_context(
