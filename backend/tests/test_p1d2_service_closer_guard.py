@@ -62,6 +62,15 @@ class TestLiveStringGuard:
         assert "كيف حالك" not in cleaned
         assert "يا هلا" in cleaned
 
+    def test_status_opener_tail_stripped_keeps_reciprocal_prefix(self) -> None:
+        raw = "آمين وياك 🌹 كيف أمورك اليوم؟"
+        result = apply_service_closer_guard(raw, tenant_id=1)
+        assert result.stripped is True
+        assert "كيف أمورك" not in result.reply
+        assert "آمين وياك" in result.reply
+        assert result.reply != raw
+        assert "؟" not in result.reply or "كيف" not in result.reply
+
 
 class TestSocialTemplatePools:
     _POOLS = (
