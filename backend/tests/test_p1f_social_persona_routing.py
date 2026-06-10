@@ -151,6 +151,12 @@ class TestSocialPersonaGoal:
         assert "آمين" not in goal
         assert "كيف أمورك" not in goal
 
+    def test_goal_does_not_compress_to_one_line_ack(self) -> None:
+        goal = compose_social_persona_goal("blessing")
+        assert "one short" not in goal.lower()
+        assert "1-line" not in goal.lower()
+        assert "not a forced one-line" in goal.lower()
+
     def test_pipeline_wires_social_persona_goal(self) -> None:
         decision = Decision(
             action=ACTION_LLM_REPLY,

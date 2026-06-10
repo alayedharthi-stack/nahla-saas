@@ -108,7 +108,7 @@ def is_product_identification_clarification(text: str) -> bool:
 def compose_resolved_product_price_ack(subject: str) -> str:
     """Short price-turn ack when subject is known — no re-identification."""
     name = (subject or "المنتج").strip()
-    return f"حاضر 🌷 بخصوص *{name}* — راجع معي السعر من الكتالوج."
+    return f"حاضر، بخصوص *{name}* — راجع معي السعر من الكتالوج."
 
 
 def compose_resolved_product_search_miss(
@@ -120,7 +120,7 @@ def compose_resolved_product_search_miss(
     name = (subject or "المنتج").strip()
     variants = (
         (
-            f"حاضر 🌷 بخصوص *{name}* — ما لقيت تطابقاً واضحاً في الكتالوج "
+            f"حاضر، بخصوص *{name}* — ما لقيت تطابقاً واضحاً في الكتالوج "
             "حالياً.\n"
             "جرّب اسم المنتج كما يظهر في المتجر، أو اكتب «أكثر مبيعاً»."
         ),
@@ -129,7 +129,7 @@ def compose_resolved_product_search_miss(
             "إذا عندك اسم أدق للمنتج أرسله، أو قول «أكثر مبيعاً»."
         ),
         (
-            f"حاضر 🌷 ما لقيت *{name}* في الكتالوج حالياً.\n"
+            f"حاضر، ما لقيت *{name}* في الكتالوج حالياً.\n"
             "أرسل الاسم كما في المتجر أو اطلب «أكثر مبيعاً»."
         ),
     )
