@@ -35,6 +35,26 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 
+# P1-E: vision/download failure is metadata-only — never customer-facing brain text.
+_FORBIDDEN_CUSTOMER_FACING_IN_BRAIN = (
+    "تعذّر استخراج وصف بصري",
+    "لم أتمكن من مشاهدة",
+    "لم أستطيع مشاهدة",
+    "لا أستطيع مشاهدة",
+    "غير مفهوم",
+    "ممنوع القراءة",
+    "حافظ على ربط المحادثة بالطلب أو الشحنة",
+)
+
+
+def _assert_brain_text_has_no_customer_facing_failure(text: str | None) -> None:
+    body = text or ""
+    for phrase in _FORBIDDEN_CUSTOMER_FACING_IN_BRAIN:
+        assert phrase not in body, (
+            f"forbidden customer-facing phrase in brain text: {phrase!r}"
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -119,9 +139,11 @@ class TestVideoDispatch:
         assert res.normalized_type == "video"
         assert res.should_process is True
         assert "[فيديو من العميل]" in (res.text or "")
-        # No caption → still has the open-question instruction line
-        # so the brain knows to ask politely.
-        assert "غير مفهوم" in (res.text or "") or "ممنوع اقتراح" in (res.text or "")
+        # P1-E: still a customer video turn; failure details stay in metadata only.
+        _assert_brain_text_has_no_customer_facing_failure(res.text)
+        assert "هذا فيديو من العميل" in (res.text or "")
+        assert res.metadata.get("video_download_status") == "failed"
+        assert res.metadata.get("frame_vision_error") == "video_not_downloaded"
 
     def test_forwarded_marker_is_threaded_to_brain(self, monkeypatch):
         """``context.frequently_forwarded`` gives the brain a strong
@@ -443,10 +465,8 @@ class TestVideoTopicHints:
         _nrm = _patched_video_normaliser(monkeypatch)
         assert _nrm._infer_video_topic_hints(caption="", filename="") == []
 
-    def test_brain_text_forbids_cannot_see_video_phrase(self, monkeypatch):
-        """The brain-facing text must explicitly forbid the canned
-        excuse the bot was producing in production. This is a hard
-        regression guard — if someone removes it, this test fails."""
+    def test_brain_text_surfaces_topic_hints_without_failure_notes(self, monkeypatch):
+        """P1-E: topic hints reach the brain; vision/failure notes do not."""
         _nrm = _patched_video_normaliser(monkeypatch)
 
         async def _go():
@@ -466,23 +486,13 @@ class TestVideoTopicHints:
 
         res = _run(_go())
         assert res.text is not None
-        # Hard ban on the canned excuse phrasing.
-        assert "ما أقدر أشوف الفيديو" in res.text  # = the forbidden line
-        assert "ممنوع قول" in res.text             # = the imperative wrapping it
-        # Topic hint is surfaced.
+        _assert_brain_text_has_no_customer_facing_failure(res.text)
         assert "دعاء_أو_تهنئة" in res.text
-        # Context preservation directive is present.
-        assert "حافظ على ربط المحادثة بالطلب أو الشحنة" in res.text
-        # And the topic hint is on the metadata for downstream consumers.
         assert "topic_hints" in res.metadata
         assert "دعاء_أو_تهنئة" in res.metadata["topic_hints"]
 
-    def test_brain_text_for_no_signal_video_still_keeps_context(self, monkeypatch):
-        """A bare video (no caption, auto filename) STILL must:
-          1. forbid 'ما أقدر أشوف الفيديو',
-          2. instruct preserving the current conversation topic,
-          3. NOT produce any topic_hints (we don't lie).
-        """
+    def test_brain_text_for_no_signal_video_still_processes(self, monkeypatch):
+        """Bare video (no caption, auto filename) still routes; no false hints."""
         _nrm = _patched_video_normaliser(monkeypatch)
 
         async def _go():
@@ -502,9 +512,11 @@ class TestVideoTopicHints:
 
         res = _run(_go())
         assert res.text is not None
-        assert "ما أقدر أشوف الفيديو" in res.text
-        assert "حافظ على ربط المحادثة" in res.text
+        assert res.should_process is True
+        _assert_brain_text_has_no_customer_facing_failure(res.text)
+        assert "[فيديو من العميل]" in res.text
         assert res.metadata.get("topic_hints") in (None, [])
+        assert res.metadata.get("frame_vision_error") == "video_not_downloaded"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -602,9 +614,8 @@ class TestVideoFrameVision:
         # produces the greeting/dua hint even without a caption.
         assert "topic_hints" in res.metadata
         assert "دعاء_أو_تهنئة" in res.metadata["topic_hints"]
-        # Hard rules survived.
-        assert "ما أقدر أشوف الفيديو" in res.text  # the forbidden line is mentioned in the ban
-        assert "حافظ على ربط المحادثة" in res.text
+        _assert_brain_text_has_no_customer_facing_failure(res.text)
+        assert res.metadata.get("product_media_signal") is not True
 
     def test_vision_failure_does_not_drop_video(self, monkeypatch):
         _nrm = self._patch_download_and_vision(
@@ -632,9 +643,9 @@ class TestVideoFrameVision:
         assert res.should_process is True
         assert res.metadata["frame_extracted"] is True
         assert res.metadata["frame_vision_status"] == "failed"
-        # Honest error note instead of pretending we saw the video.
-        assert "تعذّر استخراج وصف بصري" in res.text
-        # Caption-driven topic hint still works.
+        assert res.metadata.get("frame_vision_error")
+        _assert_brain_text_has_no_customer_facing_failure(res.text)
+        # Caption-driven topic hint still works for downstream routing.
         assert "دعاء_أو_تهنئة" in res.metadata.get("topic_hints") or []
 
     def test_no_openai_key_skips_vision_gracefully(self, monkeypatch):
