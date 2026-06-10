@@ -550,12 +550,9 @@ class DefaultDecisionEngine:
                 "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
                 getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
             )
-            # May 2026 — merchant praise warmth: the compliment pool was
-            # producing literary Gulf-generic lines ("دوم إحساسك") that
-            # bypass persona guidance. Route pure praise/compliment turns
-            # to generative compose with a strict relational goal; keep
-            # thanks/blessing/basmala/prophet on the zero-latency template
-            # path (and strong_praise on its dedicated reciprocal pool).
+            # P1-F — personality social (thanks/blessing/courtesy/warmth) →
+            # LLM persona compose. Compliment keeps merchant_praise_ack.
+            # Occasion/safety categories use build_social_courtesy_decision.
             if category == "compliment":
                 return Decision(
                     action=ACTION_LLM_REPLY,
@@ -566,11 +563,12 @@ class DefaultDecisionEngine:
                     reason=f"merchant praise — generative warmth ack ({category})",
                     confidence=intent.confidence,
                 )
-            return Decision(
-                action=ACTION_SOCIAL_REPLY,
-                args={"social_category": category},
-                reason=f"social courtesy ack ({category})",
+            from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+            return build_social_courtesy_decision(
+                category,
                 confidence=intent.confidence,
+                reason=f"social courtesy ack ({category})",
             )
 
         # ── 0a.42 Persona social / emotional (Phase 2 routing) ─────────────
@@ -661,14 +659,13 @@ class DefaultDecisionEngine:
                     nc_category,
                     (ctx.message or "")[:60],
                 )
-                return Decision(
-                    action=ACTION_SOCIAL_REPLY,
-                    args={
-                        "social_category": nc_category,
-                        "block_commerce_escalation": True,
-                    },
-                    reason=f"non-commerce safety gate ({nc_category})",
+                from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+                return build_social_courtesy_decision(
+                    nc_category,
                     confidence=max(float(intent.confidence or 0.0), 0.94),
+                    reason=f"non-commerce safety gate ({nc_category})",
+                    block_commerce=True,
                 )
 
         # ── 0a.55 Short transactional continuation (product focus) ─────────

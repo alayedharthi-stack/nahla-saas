@@ -830,7 +830,6 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
 _SOCIAL_THANKS_VARIANTS = [
     "وياك يا غالي 🌹\nالله يجزاك خير.",
     "الله يبارك فيك 🌹",
-    "يعافيك ربي وأحسن الله إليك 🤍\nدوم بخير.",
     "مو عليك يا الغالي 🤍\nالله يعافيك.",
     "الله يخليك 🤍\nتشرفنا فيك.",
     "العفو يا الغالي 🌹",
@@ -843,10 +842,7 @@ _SOCIAL_THANKS_VARIANTS = [
 # blessing turn. Heavy reciprocal stays in the strong-praise pool.
 _SOCIAL_BLESSING_VARIANTS = [
     "آمين وإياك 🌹\nالله يسعدك.",
-    "ولك بمثل ما دعيت وأضعاف 🤍",
-    "آمين يارب… ولك بالمثل أضعاف 🤍",
     "الله يكرمك 🤍\nشكراً لذوقك.",
-    "ربي يعافيك ويطوّل بعمرك 🌹\nالله يطرّي أيامك 🤍",
     "الله يعافيك ويسعدك 🌷\nأي وقت.",
 ]
 
@@ -944,6 +940,18 @@ _OCCASION_GATED_SOCIAL_CATEGORIES = frozenset({
 })
 
 
+def social_mirror_fallback_reply(inbound_text: str = "") -> str:
+    """Emergency fallback only — exact mirror reciprocal, no template pool.
+
+    Used when ``social_persona_ack`` LLM compose is empty or hard-fails.
+    Normal healthy social personality turns must not call this before LLM.
+    """
+    if not inbound_text:
+        return ""
+    mirrored = _mirror_reply(inbound_text)
+    return mirrored or ""
+
+
 def social_reply(
     category: str = "general_courtesy",
     variant: int = 0,
@@ -952,21 +960,14 @@ def social_reply(
     inbound_text: str = "",
     **_: Any,
 ) -> str:
-    """Pick a warm Gulf-style social acknowledgment (1–2 short lines).
+    """Deterministic social reply for occasion/safety categories only (P1-F).
 
-    Priority cascade:
+    Normal personality social turns (thanks, blessing, courtesy, warmth)
+    route to ``ACTION_LLM_REPLY`` + ``social_persona_ack`` — they must not
+    reach this function on the healthy path.
 
-    1. ``mirror_reply(inbound_text)`` — if the customer used a
-       culturally-anchored blessing ("تسلم" / "بيض الله وجهك" /
-       "جزاك الله خير" / ...) we deterministically return its
-       conventional reciprocal. This was the May 2026 #9 fix for
-       "pool answers feel disconnected from what the customer said".
-    2. Otherwise rotate through the per-category pool keyed by
-       ``variant`` × ``sub_variant`` for variety across turns.
-
-    ``inbound_text`` is keyword-only so existing callers pass through
-    unchanged — they just won't benefit from the mirror layer until
-    they start forwarding the customer message.
+    No mirror layer here; mirror is emergency-only via
+    ``social_mirror_fallback_reply()``.
     """
     cat = (category or "").strip().lower() or "general_courtesy"
     if cat in _OCCASION_GATED_SOCIAL_CATEGORIES:
@@ -976,12 +977,6 @@ def social_reply(
         if not inbound_has_occasion_signal(inbound_text):
             return ""
 
-    # 1) Mirror layer — deterministic cultural reciprocal.
-    mirrored = _mirror_reply(inbound_text)
-    if mirrored:
-        return mirrored
-
-    # 2) Pool rotation — historical behaviour.
     bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(
         (category or "").strip().lower() or "general_courtesy",
         _SOCIAL_GENERAL_COURTESY_VARIANTS,

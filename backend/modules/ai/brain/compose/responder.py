@@ -529,33 +529,17 @@ class DefaultComposer:
         if action == ACTION_OUT_OF_SCOPE:
             return T.hard_out_of_scope_reply(variant=self._variant_idx(ctx))
 
-        # ── Social / courtesy / religious (May 2026 #4) ────────────────────
+        # ── Social / courtesy — occasion/safety templates only (P1-F) ─────
         if action == ACTION_SOCIAL_REPLY:
             category = str((decision.args or {}).get("social_category") or "general_courtesy")
-            # Two rotation axes: turn index × category → more variety without drift.
             v_main = self._variant_idx(ctx)
             v_secondary = (len(ctx.history or []) // 3) % 5
-            # Forward the inbound text so the mirror layer (May 2026 #9)
-            # can return a culturally-anchored reciprocal when the
-            # customer's exact phrasing carries one ("تسلم" → "الله
-            # يسلمك" / "بيض الله وجهك" → "وجهك أبيض"). When no mirror
-            # rule fires the pool rotation takes over unchanged.
             reply = T.social_reply(
                 category=category,
                 variant=v_main,
                 sub_variant=v_secondary,
                 inbound_text=(ctx.message or ""),
             )
-            # Light gender-awareness layer (May 2026 — surgical add-on).
-            # The default template is masculine (Arabic's unmarked
-            # default) and reads naturally to either gender. When we
-            # have HIGH confidence (>=0.70) that the customer is
-            # female — derived from verb suffixes, name whitelist,
-            # or a sticky prior hint — we conjugate a closed set of
-            # phrases to the female form. Any uncertainty or
-            # missing data is a NO-OP: the masculine template
-            # passes through unchanged. We never modify any other
-            # action's reply.
             return self._apply_gender_hint(reply, ctx)
 
         # ── Platform / SaaS inquiry ────────────────────────────────────────
@@ -655,6 +639,11 @@ class DefaultComposer:
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
             text = await self._llm_compose(ctx, result)
+            _topic = str((decision.args or {}).get("topic") or "").strip()
+            if _topic == "social_persona_ack":
+                text = self._social_persona_emergency_fallback_if_needed(
+                    text, ctx, result,
+                )
             return self._apply_established_greeting_etiquette(text, ctx, decision)
 
         variant = self._variant_idx(ctx)
@@ -704,6 +693,23 @@ class DefaultComposer:
     # Errors anywhere here are swallowed and the original reply is
     # returned. A gender misclassification must NEVER produce a
     # silent reply or a 500.
+
+    def _social_persona_emergency_fallback_if_needed(
+        self,
+        text: str,
+        ctx: BrainContext,
+        result: ActionResult,
+    ) -> str:
+        """Mirror reciprocal only when LLM compose is empty or hard-failed."""
+        cleaned = (text or "").strip()
+        path = str(result.data.get("chosen_path") or "")
+        if cleaned and path != "llm_fallback_failed":
+            return cleaned
+        mirrored = T.social_mirror_fallback_reply(ctx.message or "")
+        if mirrored:
+            result.data["chosen_path"] = "social_mirror_emergency_fallback"
+            return self._apply_gender_hint(mirrored, ctx)
+        return cleaned
 
     def _apply_gender_hint(self, reply: str, ctx: BrainContext) -> str:
         if not reply:
