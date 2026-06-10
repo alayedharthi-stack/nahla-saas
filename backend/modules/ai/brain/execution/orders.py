@@ -917,6 +917,20 @@ class DraftOrderHandler:
                 "[ORDER FLOW] order created | order_id=%s tenant=%s",
                 order_id, ctx.tenant_id,
             )
+            try:
+                from core.order_creation_evidence import (  # noqa: PLC0415
+                    OrderCreationStatus,
+                    stamp_order_prep_creation,
+                )
+
+                stamp_order_prep_creation(
+                    prep,
+                    status=OrderCreationStatus.CREATED,
+                    salla_order_id=str(order_id),
+                )
+                prep.last_order_failed = False
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — creation status stamp must not block order success
+                pass
             if checkout_url:
                 logger.info(
                     "[ORDER FLOW] payment url extracted | %s tenant=%s",
@@ -1306,6 +1320,17 @@ class DraftOrderHandler:
                     ctx.tenant_id, external_id,
                     prep.salla_failure_count, prep.short_address_code,
                 )
+                try:
+                    from core.order_creation_evidence import (  # noqa: PLC0415
+                        OrderCreationStatus,
+                        stamp_order_prep_creation,
+                    )
+
+                    stamp_order_prep_creation(
+                        prep, status=OrderCreationStatus.CREATING,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — creation status stamp must not block retry path
+                    pass
                 return ActionResult(
                     success=True,
                     data={
@@ -1320,6 +1345,17 @@ class DraftOrderHandler:
             if has_address and prep.salla_failure_count >= 2:
                 # Second+ failure — escalate to human without clearing any data.
                 # Do NOT re-ask for address: the data is already there.
+                try:
+                    from core.order_creation_evidence import (  # noqa: PLC0415
+                        OrderCreationStatus,
+                        stamp_order_prep_creation,
+                    )
+
+                    stamp_order_prep_creation(
+                        prep, status=OrderCreationStatus.FAILED,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — creation status stamp must not block escalate path
+                    pass
                 return ActionResult(
                     success=True,
                     data={
@@ -1351,6 +1387,15 @@ class DraftOrderHandler:
                 )
 
         # No name/city at all — adapter missing or completely fresh start
+        try:
+            from core.order_creation_evidence import (  # noqa: PLC0415
+                OrderCreationStatus,
+                stamp_order_prep_creation,
+            )
+
+            stamp_order_prep_creation(prep, status=OrderCreationStatus.FAILED)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — creation status stamp must not block intent-only path
+            pass
         return ActionResult(
             success=True,
             data={

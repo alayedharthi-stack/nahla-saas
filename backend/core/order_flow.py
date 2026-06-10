@@ -403,6 +403,8 @@ def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
         "awaiting_payment_receipt": bool(op.get("awaiting_payment_receipt")),
         "payment_receipt_received": bool(op.get("payment_receipt_received")),
         "order_status":          str(op.get("order_status") or ""),
+        "order_creation_status": str(op.get("order_creation_status") or ""),
+        "salla_order_id":        str(op.get("salla_order_id") or ""),
         "payment_method":        str(
             brain_state.get("payment_method") or op.get("payment_method") or ""
         ),
@@ -1441,23 +1443,46 @@ def context_aware_dedup_fallback(
            resume gate allows the payment flow to continue.
         4. Empty / discovery state → the original ``default_fallback``.
 
-    Never raises. Always returns a non-empty string.
+    Never raises. Returns empty string when no operational substitute exists
+    (P1-D-1: no personality / CS canned ``default_fallback``).
     """
     try:
         _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
         s = _focus_summary(bs)
 
+        from core.dedup_order_state_gate import (  # noqa: PLC0415
+            log_dedup_state_mismatch,
+            should_suppress_dedup_order_templates,
+        )
+
+        _suppress, _suppress_reason = should_suppress_dedup_order_templates(
+            message=inbound_text or "",
+            summary=s,
+            inbound_metadata=inbound_metadata,
+            normalized_type=normalized_type,
+        )
+
         if s.get("payment_receipt_received"):
-            prod = s.get("selected_product")
-            if prod:
-                return (
-                    f"طلبك ({prod}) تحت المراجعة الآن — "
-                    "بنتواصل معك أول ما يتجهز للشحن بإذن الله. 🌷"
+            if _suppress:
+                log_dedup_state_mismatch(
+                    tenant_id=tenant_id,
+                    phone_tail=(phone[-4:] if phone else ""),
+                    reason=_suppress_reason,
+                    inbound_preview=inbound_text or "",
+                    blocked_template="payment_receipt_under_review",
+                    payment_receipt_received=True,
                 )
-            return (
-                "طلبك تحت المراجعة الآن — بنتواصل معك أول ما يتجهز "
-                "للشحن بإذن الله. 🌷"
-            )
+            else:
+                prod = s.get("selected_product")
+                if prod:
+                    return (
+                        f"طلبك ({prod}) تحت المراجعة الآن — "
+                        "بنتواصل معك أول ما يتجهز للشحن بإذن الله. 🌷"
+                    )
+                return (
+                    "طلبك تحت المراجعة الآن — بنتواصل معك أول ما يتجهز "
+                    "للشحن بإذن الله. 🌷"
+                )
 
         if s.get("awaiting_payment_receipt"):
             _payment_resume = True
@@ -1547,22 +1572,42 @@ def context_aware_dedup_fallback(
                     )
 
         if s.get("selected_product") and s.get("price") is not None:
-            price_str = _format_price(s["price"], s.get("currency") or "SAR")
-            base = f"طلبك الحالي: {s['selected_product']}"
-            if price_str:
-                base += f" بسعر {price_str}"
-            base += ". تأمر بشيء أكمّل لك فيه؟"
-            return base
+            if _suppress:
+                log_dedup_state_mismatch(
+                    tenant_id=tenant_id,
+                    phone_tail=(phone[-4:] if phone else ""),
+                    reason=_suppress_reason,
+                    inbound_preview=inbound_text or "",
+                    blocked_template="active_order_nudge_with_price",
+                    payment_receipt_received=bool(s.get("payment_receipt_received")),
+                )
+            else:
+                price_str = _format_price(s["price"], s.get("currency") or "SAR")
+                base = f"طلبك الحالي: {s['selected_product']}"
+                if price_str:
+                    base += f" بسعر {price_str}"
+                base += ". تأمر بشيء أكمّل لك فيه؟"
+                return base
 
         if s.get("selected_product"):
-            return (
-                f"طلبك الحالي: {s['selected_product']}. "
-                "تأمر بشيء أكمّل لك فيه؟"
-            )
+            if _suppress:
+                log_dedup_state_mismatch(
+                    tenant_id=tenant_id,
+                    phone_tail=(phone[-4:] if phone else ""),
+                    reason=_suppress_reason,
+                    inbound_preview=inbound_text or "",
+                    blocked_template="active_order_nudge",
+                    payment_receipt_received=bool(s.get("payment_receipt_received")),
+                )
+            else:
+                return (
+                    f"طلبك الحالي: {s['selected_product']}. "
+                    "تأمر بشيء أكمّل لك فيه؟"
+                )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "[ORDER_FLOW_STATE] context_aware_dedup_fallback failed: %s",
             exc,
         )
 
-    return default_fallback or "تأمر بشيء أكمّل لك فيه؟"
+    return default_fallback or ""

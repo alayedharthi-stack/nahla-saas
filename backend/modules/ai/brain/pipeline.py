@@ -2157,6 +2157,12 @@ class MerchantBrain:
             "handoff": decision.action == ACTION_HANDOFF,
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
+            "non_commerce_block_mode": bool(
+                getattr(ctx, "block_commerce_escalation", False)
+            ),
+            "non_commerce_category": str(
+                getattr(ctx, "non_commerce_category", "") or ""
+            ),
         }
 
 
@@ -2602,6 +2608,23 @@ def _compose_base_response_goal(
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "product_media"
+    ):
+        _goal = str((decision.args or {}).get("response_goal") or "").strip()
+        if _goal:
+            return _goal
+        from .commerce.product_media import compose_product_media_response_goal  # noqa: PLC0415
+
+        return compose_product_media_response_goal(
+            has_vision_evidence=bool((decision.args or {}).get("has_vision_evidence")),
+            has_hint_only=not bool((decision.args or {}).get("has_vision_evidence")),
+            active_order_evidence=bool(
+                (decision.args or {}).get("active_order_evidence")
+            ),
+        )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "product_visual"
     ):
         _focus = str((decision.args or {}).get("focus_product") or "").strip()
@@ -2620,6 +2643,15 @@ def _compose_base_response_goal(
             "ممنوع اقتراح منتجات أخرى (مثل سم النحل) إذا لم يطلبها العميل."
         )
         return " | ".join(lines)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "social_persona_ack"
+    ):
+        from .persona_expression import compose_social_persona_goal  # noqa: PLC0415
+
+        _sc = str((decision.args or {}).get("social_category") or "social").strip()
+        return compose_social_persona_goal(_sc)
 
     if (
         decision.action == ACTION_LLM_REPLY

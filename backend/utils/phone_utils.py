@@ -146,3 +146,29 @@ def normalize_phone_compat(raw: object) -> str:
     """
     result = normalize_to_e164(str(raw or "").strip())
     return result or ""
+
+
+def format_wa_send_recipient(raw: Optional[str]) -> Optional[str]:
+    """Normalize *raw* to a WhatsApp Cloud API ``to`` value: MSISDN digits only.
+
+    Accepts international (``966564725255``), E.164 (``+966564725255``),
+    and Saudi local (``0564725255``) shapes. Returns ``None`` when the
+    input cannot be validated — callers must skip the provider POST.
+    """
+    e164 = normalize_to_e164(raw)
+    if not e164:
+        return None
+    digits = e164[1:] if e164.startswith("+") else e164
+    if not digits.isdigit() or len(digits) < 8 or len(digits) > 15:
+        return None
+    return digits
+
+
+def redact_phone_for_log(raw: Optional[str]) -> str:
+    """Mask a phone for structured logs — never log full MSISDN."""
+    digits = re.sub(r"\D", "", str(raw or ""))
+    if not digits:
+        return "***"
+    if len(digits) <= 4:
+        return "***"
+    return f"{digits[:4]}***{digits[-2:]}"

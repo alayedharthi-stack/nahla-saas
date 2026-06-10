@@ -591,6 +591,27 @@ def no_orders(**_: Any) -> str:
     return "لم أجد أي طلبات مسجّلة لرقمك. هل تريد إنشاء طلب جديد؟"
 
 
+def order_creation_in_progress(
+    product: Dict[str, Any] | None = None,
+    reference: str = "",
+    **_: Any,
+) -> str:
+    title = (product or {}).get("title") or "طلبك"
+    if reference:
+        return (
+            f"طلب *{title}* قيد الإنشاء — رقم الطلب: *{reference}*."
+        )
+    return f"طلب *{title}* قيد الإنشاء الآن — لحظات ويظهر رقم الطلب."
+
+
+def order_creation_failed(product: Dict[str, Any] | None = None, **_: Any) -> str:
+    title = (product or {}).get("title") or "المنتج المحدد"
+    return (
+        f"تعذّر إنشاء طلب *{title}* تلقائياً الآن.\n"
+        "بياناتك محفوظة — جرّب مرة أخرى أو تواصل مع المتجر لإتمام الطلب."
+    )
+
+
 # ── FAQ ───────────────────────────────────────────────────────────────────────
 
 def faq_identity(
@@ -808,11 +829,10 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
 # triggers (بيض الله وجهك / ما قصرت / كفو / رفعت رأسنا / ...).
 _SOCIAL_THANKS_VARIANTS = [
     "وياك يا غالي 🌹\nالله يجزاك خير.",
-    "الله يبارك فيك 🌹\nأي وقت وتحت أمرك.",
-    "يعافيك ربي وأحسن الله إليك 🤍\nدوم بخير.",
+    "الله يبارك فيك 🌹",
     "مو عليك يا الغالي 🤍\nالله يعافيك.",
     "الله يخليك 🤍\nتشرفنا فيك.",
-    "العفو يا الغالي 🌹\nأي وقت وتحت أمرك.",
+    "العفو يا الغالي 🌹",
 ]
 
 # May 2026 #8 — same surgery here. The reciprocal "الله يبيض وجهك مثل
@@ -822,10 +842,7 @@ _SOCIAL_THANKS_VARIANTS = [
 # blessing turn. Heavy reciprocal stays in the strong-praise pool.
 _SOCIAL_BLESSING_VARIANTS = [
     "آمين وإياك 🌹\nالله يسعدك.",
-    "ولك بمثل ما دعيت وأضعاف 🤍",
-    "آمين يارب… ولك بالمثل أضعاف 🤍",
     "الله يكرمك 🤍\nشكراً لذوقك.",
-    "ربي يعافيك ويطوّل بعمرك 🌹\nالله يطرّي أيامك 🤍",
     "الله يعافيك ويسعدك 🌷\nأي وقت.",
 ]
 
@@ -853,7 +870,7 @@ _SOCIAL_PROPHET_INVOCATION_VARIANTS = [
 _SOCIAL_BASMALA_VARIANTS = [
     "بسم الله يا الغالي 🤍\nتفضل…",
     "بسم الله الرحمن الرحيم 🌹\nوعليك السلام والبركة.",
-    "بسم الله 🌷\nتفضل… أنا معك خطوة بخطوة.",
+    "بسم الله 🌷\nتفضل…",
 ]
 
 _SOCIAL_COMPLIMENT_VARIANTS = [
@@ -863,11 +880,11 @@ _SOCIAL_COMPLIMENT_VARIANTS = [
 ]
 
 _SOCIAL_GENERAL_COURTESY_VARIANTS = [
-    "الله يحييك 🌹\nوش الخدمة؟",
+    "الله يحييك 🌹",
     "حياك الله 🤍",
     "هلا وسهلا 🌹\nتشرفنا.",
     "أهلًا فيك 🤍",
-    "يامرحبا 🌹\nوش اللي تحتاجه؟",
+    "يامرحبا 🌹",
 ]
 
 _SOCIAL_WARM_ACK_VARIANTS = [
@@ -916,6 +933,25 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
 }
 
 
+_OCCASION_GATED_SOCIAL_CATEGORIES = frozenset({
+    "eid_greeting",
+    "dua",
+    "religious_media",
+})
+
+
+def social_mirror_fallback_reply(inbound_text: str = "") -> str:
+    """Emergency fallback only — exact mirror reciprocal, no template pool.
+
+    Used when ``social_persona_ack`` LLM compose is empty or hard-fails.
+    Normal healthy social personality turns must not call this before LLM.
+    """
+    if not inbound_text:
+        return ""
+    mirrored = _mirror_reply(inbound_text)
+    return mirrored or ""
+
+
 def social_reply(
     category: str = "general_courtesy",
     variant: int = 0,
@@ -924,28 +960,23 @@ def social_reply(
     inbound_text: str = "",
     **_: Any,
 ) -> str:
-    """Pick a warm Gulf-style social acknowledgment (1–2 short lines).
+    """Deterministic social reply for occasion/safety categories only (P1-F).
 
-    Priority cascade:
+    Normal personality social turns (thanks, blessing, courtesy, warmth)
+    route to ``ACTION_LLM_REPLY`` + ``social_persona_ack`` — they must not
+    reach this function on the healthy path.
 
-    1. ``mirror_reply(inbound_text)`` — if the customer used a
-       culturally-anchored blessing ("تسلم" / "بيض الله وجهك" /
-       "جزاك الله خير" / ...) we deterministically return its
-       conventional reciprocal. This was the May 2026 #9 fix for
-       "pool answers feel disconnected from what the customer said".
-    2. Otherwise rotate through the per-category pool keyed by
-       ``variant`` × ``sub_variant`` for variety across turns.
-
-    ``inbound_text`` is keyword-only so existing callers pass through
-    unchanged — they just won't benefit from the mirror layer until
-    they start forwarding the customer message.
+    No mirror layer here; mirror is emergency-only via
+    ``social_mirror_fallback_reply()``.
     """
-    # 1) Mirror layer — deterministic cultural reciprocal.
-    mirrored = _mirror_reply(inbound_text)
-    if mirrored:
-        return mirrored
+    cat = (category or "").strip().lower() or "general_courtesy"
+    if cat in _OCCASION_GATED_SOCIAL_CATEGORIES:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            inbound_has_occasion_signal,
+        )
+        if not inbound_has_occasion_signal(inbound_text):
+            return ""
 
-    # 2) Pool rotation — historical behaviour.
     bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(
         (category or "").strip().lower() or "general_courtesy",
         _SOCIAL_GENERAL_COURTESY_VARIANTS,
@@ -1203,17 +1234,11 @@ def narrow_choices(
 
 
 _GENERIC_FALLBACK_VARIANTS = [
-    # variant 0
-    "شكراً على تواصلك! هل يمكنك توضيح طلبك أكثر؟\n"
-    "يمكنني مساعدتك في البحث عن المنتجات أو إنشاء طلب.",
-    # variant 1
-    "وصلني سؤالك! لو تقدر تعطيني تفاصيل أكثر سأكون أقدر على المساعدة.\n"
-    "ابحث عن منتج أو أبدأ لك طلباً مباشرة.",
-    # variant 2
-    "أنا هنا لمساعدتك. 🤝\n"
-    "هل تبحث عن منتج معين أو تريد مساعدة في طلب سابق؟",
+    # P1-D-1: retired CS/sales rotation pool — single operational honesty line.
 ]
 
 
 def generic_fallback(variant: int = 0, **_: Any) -> str:
-    return _GENERIC_FALLBACK_VARIANTS[variant % 3]
+    from core.fallback_policy import operational_compose_error_fallback  # noqa: PLC0415
+
+    return operational_compose_error_fallback(variant=variant)

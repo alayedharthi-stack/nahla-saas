@@ -198,6 +198,11 @@ class OrderPreparationState:
     payment_receipt_at:       str = ""
     payment_receipt_metadata: Dict[str, Any] = field(default_factory=dict)
     order_status: str = ""
+    # ── Order creation evidence (P1-C-1) ───────────────────────────────
+    # ``creating`` | ``created`` | ``failed`` — stamped by DraftOrderHandler
+    # so track-order and outbound guards speak honestly about Salla state.
+    order_creation_status: str = ""
+    salla_order_id: str = ""
     # ── Text-only payment claim understanding flag (Wave 1, W1.1) ────
     # Stamped by ``core.payment_intent._stamp_text_claim_unverified_state``
     # when the customer says "حولت" / "تم التحويل" without attached
@@ -269,6 +274,8 @@ class OrderPreparationState:
             "payment_receipt_at":       self.payment_receipt_at,
             "payment_receipt_metadata": dict(self.payment_receipt_metadata or {}),
             "order_status":             self.order_status,
+            "order_creation_status":    self.order_creation_status,
+            "salla_order_id":           self.salla_order_id,
             "payment_claim_unverified":    self.payment_claim_unverified,
             "payment_claim_unverified_at": self.payment_claim_unverified_at,
             "payment_claim_text_preview":  self.payment_claim_text_preview,
@@ -325,6 +332,8 @@ class OrderPreparationState:
             payment_receipt_at=str(raw.get("payment_receipt_at", "") or ""),
             payment_receipt_metadata=dict(raw.get("payment_receipt_metadata") or {}),
             order_status=str(raw.get("order_status", "") or ""),
+            order_creation_status=str(raw.get("order_creation_status", "") or ""),
+            salla_order_id=str(raw.get("salla_order_id", "") or ""),
             payment_claim_unverified=bool(raw.get("payment_claim_unverified", False)),
             payment_claim_unverified_at=str(raw.get("payment_claim_unverified_at", "") or ""),
             payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),

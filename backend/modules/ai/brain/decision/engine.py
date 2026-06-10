@@ -550,12 +550,9 @@ class DefaultDecisionEngine:
                 "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
                 getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
             )
-            # May 2026 — merchant praise warmth: the compliment pool was
-            # producing literary Gulf-generic lines ("دوم إحساسك") that
-            # bypass persona guidance. Route pure praise/compliment turns
-            # to generative compose with a strict relational goal; keep
-            # thanks/blessing/basmala/prophet on the zero-latency template
-            # path (and strong_praise on its dedicated reciprocal pool).
+            # P1-F — personality social (thanks/blessing/courtesy/warmth) →
+            # LLM persona compose. Compliment keeps merchant_praise_ack.
+            # Occasion/safety categories use build_social_courtesy_decision.
             if category == "compliment":
                 return Decision(
                     action=ACTION_LLM_REPLY,
@@ -566,11 +563,12 @@ class DefaultDecisionEngine:
                     reason=f"merchant praise — generative warmth ack ({category})",
                     confidence=intent.confidence,
                 )
-            return Decision(
-                action=ACTION_SOCIAL_REPLY,
-                args={"social_category": category},
-                reason=f"social courtesy ack ({category})",
+            from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+            return build_social_courtesy_decision(
+                category,
                 confidence=intent.confidence,
+                reason=f"social courtesy ack ({category})",
             )
 
         # ── 0a.42 Persona social / emotional (Phase 2 routing) ─────────────
@@ -614,6 +612,8 @@ class DefaultDecisionEngine:
         # (or intent slots) marks the turn, block ALL commerce branches
         # below — including text-pattern top_products / replay fallbacks
         # and LLM catalog drift — and respond socially instead.
+        # P1-D-3: occasion-gated categories require explicit inbound signal;
+        # product/honey media without occasion falls through to commerce/LLM.
         if _is_commerce_blocked(ctx) and intent.name not in (
             INTENT_WHO_ARE_YOU,
             INTENT_PERSONA_INTERACTION,
@@ -621,21 +621,52 @@ class DefaultDecisionEngine:
             nc_category = str(
                 (intent.slots or {}).get("social_category") or "religious_media"
             )
-            logger.info(
-                "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
-                getattr(ctx, "tenant_id", None),
-                nc_category,
-                (ctx.message or "")[:60],
-            )
-            return Decision(
-                action=ACTION_SOCIAL_REPLY,
-                args={
-                    "social_category": nc_category,
-                    "block_commerce_escalation": True,
-                },
-                reason=f"non-commerce safety gate ({nc_category})",
-                confidence=max(float(intent.confidence or 0.0), 0.94),
-            )
+            _occasion_social = frozenset({
+                "eid_greeting", "dua", "religious_media",
+            })
+            if nc_category in _occasion_social:
+                from ..intent.non_commerce_classifier import (  # noqa: PLC0415
+                    inbound_has_occasion_signal,
+                )
+                if not inbound_has_occasion_signal(ctx.message or ""):
+                    logger.info(
+                        "[NON_COMMERCE_ROUTE] tenant=%s category=%s "
+                        "skipped=occasion_gate preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        nc_category,
+                        (ctx.message or "")[:60],
+                    )
+                else:
+                    logger.info(
+                        "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        nc_category,
+                        (ctx.message or "")[:60],
+                    )
+                    return Decision(
+                        action=ACTION_SOCIAL_REPLY,
+                        args={
+                            "social_category": nc_category,
+                            "block_commerce_escalation": True,
+                        },
+                        reason=f"non-commerce safety gate ({nc_category})",
+                        confidence=max(float(intent.confidence or 0.0), 0.94),
+                    )
+            else:
+                logger.info(
+                    "[NON_COMMERCE_ROUTE] tenant=%s category=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    nc_category,
+                    (ctx.message or "")[:60],
+                )
+                from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+                return build_social_courtesy_decision(
+                    nc_category,
+                    confidence=max(float(intent.confidence or 0.0), 0.94),
+                    reason=f"non-commerce safety gate ({nc_category})",
+                    block_commerce=True,
+                )
 
         # ── 0a.55 Short transactional continuation (product focus) ─────────
         try:
@@ -864,7 +895,7 @@ class DefaultDecisionEngine:
                         ),
                         confidence=0.96,
                     )
-            except Exception as _ftp_exc:  # noqa: BLE001
+            except Exception as _ftp_exc:  # noqa: BLE001  # noqa: silent-ok — payment promise check best-effort
                 logger.debug(
                     "[PAYMENT_TRANSFER_PROMISE] check skipped tenant=%s err=%s",
                     ctx.tenant_id, _ftp_exc,
@@ -2641,6 +2672,49 @@ class DefaultDecisionEngine:
                 reason="non-commerce media — LLM reply without catalog tools",
                 confidence=0.88,
             )
+
+        # P1-E: typed product-media goal (honey/process video, product info text)
+        try:
+            from ..commerce.product_media import (  # noqa: PLC0415
+                build_product_media_decision_args,
+                detect_product_media_turn,
+            )
+            _profile = getattr(ctx, "profile", None) or {}
+            _in_meta = (
+                _profile.get("inbound_metadata")
+                if isinstance(_profile, dict) else None
+            )
+            _pm = detect_product_media_turn(
+                ctx.message or "",
+                inbound_metadata=_in_meta if isinstance(_in_meta, dict) else None,
+                intent_name=intent.name,
+                commerce_blocked=False,
+            )
+            if _pm.matched:
+                _bundle = getattr(ctx, "commerce_bundle", None) or {}
+                logger.info(
+                    "[PRODUCT_MEDIA_ROUTE] tenant=%s vision=%s hint_only=%s "
+                    "preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _pm.has_vision_evidence,
+                    _pm.has_hint_only,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args=build_product_media_decision_args(
+                        _pm,
+                        commerce_bundle=_bundle if isinstance(_bundle, dict) else {},
+                    ),
+                    reason="product/inbound media — typed LLM goal",
+                    confidence=0.86,
+                )
+        except Exception as _pm_exc:  # noqa: BLE001  # noqa: silent-ok — product media route best-effort
+            logger.debug(
+                "[PRODUCT_MEDIA_ROUTE] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _pm_exc,
+            )
+
         return Decision(
             action=ACTION_LLM_REPLY,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",

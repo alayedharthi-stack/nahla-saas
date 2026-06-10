@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 PERSONA_TOPIC_IDENTITY = "persona_identity"
 PERSONA_TOPIC_SOCIAL = "persona_social"
+PERSONA_TOPIC_SOCIAL_PERSONA_ACK = "social_persona_ack"
 PERSONA_TOPIC_NON_SALES_AMBIGUOUS = "non_sales_ambiguous"
 
 PERSONA_KIND_GREETING = "greeting"
@@ -20,7 +21,17 @@ _ESTABLISHED_GREET_PERSONA_FLAG = "ESTABLISHED_GREET_PERSONA_COMPOSE_ENABLED"
 PERSONA_TOPICS = frozenset({
     PERSONA_TOPIC_IDENTITY,
     PERSONA_TOPIC_SOCIAL,
+    PERSONA_TOPIC_SOCIAL_PERSONA_ACK,
     PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+})
+
+# Occasion / safety categories that remain on deterministic templates
+# (P1-D-3 occasion gate). All other social warmth → LLM compose.
+TEMPLATE_ONLY_SOCIAL_CATEGORIES = frozenset({
+    "eid_greeting",
+    "dua",
+    "religious_media",
+    "condolence",
 })
 
 # Shared negative guidance — behavioral only, not reply text.
@@ -113,6 +124,89 @@ def persona_topic_from_decision_args(args: Optional[dict]) -> str:
     if topic in PERSONA_TOPICS:
         return topic
     return ""
+
+
+def is_template_only_social_category(category: str) -> bool:
+    return (category or "").strip().lower() in TEMPLATE_ONLY_SOCIAL_CATEGORIES
+
+
+def build_social_courtesy_decision(
+    category: str,
+    *,
+    confidence: float,
+    reason: str,
+    block_commerce: bool = False,
+    extra_args: Optional[dict] = None,
+) -> Any:
+    """Route social courtesy to LLM persona compose or template-only safety."""
+    from modules.ai.brain.decision.actions import (  # noqa: PLC0415
+        ACTION_LLM_REPLY,
+        ACTION_SOCIAL_REPLY,
+    )
+    from modules.ai.brain.types import Decision  # noqa: PLC0415
+
+    cat = (category or "general_courtesy").strip().lower() or "general_courtesy"
+    args: dict[str, Any] = dict(extra_args or {})
+    if block_commerce:
+        args["block_commerce_escalation"] = True
+
+    if is_template_only_social_category(cat):
+        args.setdefault("social_category", cat)
+        return Decision(
+            action=ACTION_SOCIAL_REPLY,
+            args=args,
+            reason=reason,
+            confidence=confidence,
+        )
+
+    args.setdefault("topic", PERSONA_TOPIC_SOCIAL_PERSONA_ACK)
+    args.setdefault("social_category", cat)
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args=args,
+        reason=reason,
+        confidence=confidence,
+    )
+
+
+_SOCIAL_CATEGORY_CONTEXT: dict[str, str] = {
+    "thanks": "The customer is thanking you.",
+    "blessing": "The customer sent a brief blessing or dua.",
+    "strong_praise": (
+        "The customer gave explicit strong praise of the shop, service, or merchant."
+    ),
+    "compliment": "The customer complimented the shop or service.",
+    "general_courtesy": "The customer sent a short courtesy or phatic message.",
+    "emotional_personal": "The customer sent a warm personal or emotional message.",
+    "prophet_invocation": "The customer invoked blessings on the Prophet.",
+    "basmala": "The customer opened with basmala.",
+    "social_forward": "The customer forwarded or shared a social message.",
+    "morning_greeting": "The customer sent a morning greeting.",
+    "celebration": "The customer shared a celebration or congratulation.",
+    "informational_only": "The customer sent a brief social acknowledgment.",
+}
+
+
+def compose_social_persona_goal(social_category: str) -> str:
+    """Principle-based response goal for personality social turns (P1-F)."""
+    cat = str(social_category or "social").strip() or "social"
+    ctx_note = _SOCIAL_CATEGORY_CONTEXT.get(
+        cat,
+        "The customer sent a short social or phatic message.",
+    )
+    return (
+        f"social_persona_ack — {ctx_note} "
+        "Compose a short natural Saudi Arabic WhatsApp reply. "
+        "Principles: respond naturally in Saudi tone; warm but not poetic; "
+        "one social beat is enough unless the context clearly needs slightly "
+        "more; do not stack multiple prayers or duas; match the customer's "
+        "tone and context; vary wording naturally across turns. "
+        "Do not add customer-service or sales closers. "
+        "Do not invent operational facts. "
+        "Do not mention products, orders, payment, or shipping unless the "
+        "customer's message actually requires it. "
+        f"{_NO_SERVICE_CLOSER}"
+    )
 
 
 def is_persona_expression_topic(topic: str) -> bool:
@@ -233,15 +327,20 @@ __all__ = [
     "PERSONA_KIND_GUIDANCE",
     "PERSONA_TOPIC_IDENTITY",
     "PERSONA_TOPIC_SOCIAL",
+    "PERSONA_TOPIC_SOCIAL_PERSONA_ACK",
+    "PERSONA_TOPIC_NON_SALES_AMBIGUOUS",
     "PERSONA_TOPICS",
+    "TEMPLATE_ONLY_SOCIAL_CATEGORIES",
     "is_established_greet_persona_compose_enabled",
     "build_persona_json_footer",
     "build_persona_residual_rules",
+    "build_social_courtesy_decision",
     "compose_non_sales_ambiguous_goal",
     "compose_persona_identity_goal",
     "compose_persona_social_goal",
-    "PERSONA_TOPIC_NON_SALES_AMBIGUOUS",
+    "compose_social_persona_goal",
     "is_persona_expression_topic",
+    "is_template_only_social_category",
     "persona_kind_guidance",
     "persona_topic_from_decision_args",
     "slim_brain_state_dict_for_persona",

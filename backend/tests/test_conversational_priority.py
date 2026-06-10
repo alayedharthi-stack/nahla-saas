@@ -125,14 +125,16 @@ def test_clarify_short_circuits_generic_need_question():
 def test_clarify_social_before_solution_seeking():
     ctx = _ctx("مبروك يا غالي على التخرج")
     dec = clarify_instead_of_top_products(ctx, reason="test_social")
-    assert dec.action == "social_reply"
+    assert dec.action == "llm_reply"
+    assert dec.args.get("topic") == "social_persona_ack"
 
 
 def test_priority_social_routes_celebration():
     ctx = _ctx("مبروك عليك")
     dec = try_priority_before_suppression(ctx, route="test")
     assert dec is not None
-    assert dec.action == "social_reply"
+    assert dec.action == "llm_reply"
+    assert dec.args.get("topic") == "social_persona_ack"
 
 
 def test_single_offer_short_acceptance_never_generic_clarify():
