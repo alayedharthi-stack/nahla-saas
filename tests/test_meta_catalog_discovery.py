@@ -324,6 +324,9 @@ def _stub_db(monkeypatch):
         def first(self):
             return _Conn()
 
+        def all(self):
+            return []
+
     class _DB:
         def query(self, *a, **kw):
             return _Query()
