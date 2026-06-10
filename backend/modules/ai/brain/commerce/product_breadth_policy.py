@@ -62,6 +62,34 @@ _SOFT_INVENTORY_BROWSE_PHRASES = (
     "ما المتوفر",
 )
 
+# Global availability / catalog browse — defocus stale product_focus for the turn.
+# ``وش``-prefixed inventory questions plus top-seller list triggers.
+# ``explicit_broad_browse_requested`` (soft/hard) is checked first in
+# ``global_availability_browse_requested``.
+_GLOBAL_CATALOG_BROWSE_PHRASES = (
+    "وش المتوفر",
+    "ايش المتوفر",
+    "ايه المتوفر",
+    "وش المنتجات",
+    "ايش المنتجات",
+    "وش الانواع",
+    "ايش الانواع",
+    "وش المنتجات كلها",
+    "الاكثر مبيعا",
+    "اكثر مبيعا",
+    "الاكثر مبيعًا",
+    "اكثر مبيعًا",
+    "الاكثر طلبا",
+    "اكثر طلبا",
+    "الاكثر طلبًا",
+    "اعرض المنتجات",
+    "وريني المنتجات",
+    "show products",
+    "show me",
+    "top products",
+    "best sellers",
+)
+
 # Hard explicit browse — customer wants wide exploration.
 _HARD_BROAD_BROWSE_PHRASES = (
     "ورني كل الانواع",
@@ -140,6 +168,45 @@ def explicit_broad_browse_requested(message: str) -> bool:
     return explicit_soft_browse_requested(message) or explicit_hard_browse_requested(
         message
     )
+
+
+def global_availability_browse_requested(message: str) -> bool:
+    """Store-wide inventory browse — do not narrow to stale ``product_focus``.
+
+    Deterministic context gate only; the LLM still composes the reply freely.
+    """
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    if explicit_broad_browse_requested(message):
+        return True
+    return any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES)
+
+
+def resolve_kb_active_product_ids(
+    state: Any,
+    message: str,
+) -> Optional[set]:
+    """Catalog product ids for KB section scoping.
+
+    Returns ``None`` (unscoped) on global browse turns or when there is no
+    focus signal; otherwise a set of ids from focus + recent recommendations.
+    """
+    if global_availability_browse_requested(message or ""):
+        return None
+    pid_candidates: set = set()
+    try:
+        focus = getattr(state, "current_product_focus", None) or {}
+        focus_id = focus.get("id") if isinstance(focus, dict) else None
+        if isinstance(focus_id, int):
+            pid_candidates.add(focus_id)
+        for rec in (getattr(state, "last_recommended_products", None) or [])[:5]:
+            rid = (rec or {}).get("id") if isinstance(rec, dict) else None
+            if isinstance(rid, int):
+                pid_candidates.add(rid)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — KB id extraction fallback returns unscoped
+        return None
+    return pid_candidates if pid_candidates else None
 
 
 def _product_key(product: Dict[str, Any]) -> str:
@@ -422,12 +489,14 @@ __all__ = [
     "explicit_broad_browse_requested",
     "explicit_hard_browse_requested",
     "explicit_soft_browse_requested",
+    "global_availability_browse_requested",
     "limit_initial_product_options_enabled",
     "limit_recommendation_breadth_enabled",
     "log_product_breadth",
     "next_catalog_browse_batch",
     "resolve_breadth_for_inbound",
     "resolve_catalog_card_limit",
+    "resolve_kb_active_product_ids",
     "resolve_product_breadth",
     "resolve_product_breadth_from_context",
 ]

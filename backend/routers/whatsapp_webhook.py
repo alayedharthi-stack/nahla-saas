@@ -9893,7 +9893,9 @@ async def _handle_merchant_message(
                                     "title":        _vp_res.title,
                                     "media_type":   "image",
                                     "file_url":     _vp_res.image_url,
-                                    "caption":      _vp_caption(_vp_res),
+                                    "caption":      _vp_caption(
+                                        _vp_res, include_description=False,
+                                    ),
                                     "product_url":  _vp_res.product_url,
                                     "price":        _vp_res.price,
                                     "in_stock":     _vp_res.in_stock,
@@ -9927,7 +9929,9 @@ async def _handle_merchant_message(
                                     "title":        _vp_res.title,
                                     "media_type":   "image",
                                     "file_url":     "",
-                                    "caption":      _vp_caption(_vp_res),
+                                    "caption":      _vp_caption(
+                                        _vp_res, include_description=False,
+                                    ),
                                     "product_url":  _vp_res.product_url,
                                     "price":        _vp_res.price,
                                     "in_stock":     _vp_res.in_stock,

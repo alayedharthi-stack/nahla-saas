@@ -170,6 +170,16 @@ def detect_topic_shift(
     intent_name: str = "",
 ) -> bool:
     try:
+        from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+
+        if global_availability_browse_requested(message or ""):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — browse defocus gate must not break relevance
+        pass
+
+    try:
         from ..order_context_gate import has_explicit_commerce_topic_change  # noqa: PLC0415
 
         if has_explicit_commerce_topic_change(message or ""):
@@ -253,6 +263,16 @@ def validate_state_relevance(
         msg, semantic_intent=sem_intent, intent_name=intent_name,
     )
 
+    _global_browse = False
+    try:
+        from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+
+        _global_browse = global_availability_browse_requested(msg)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — browse gate fallback treats turn as focused
+        _global_browse = False
+
     op = getattr(st, "order_prep", None)
     awaiting_payment = bool(
         op is not None and getattr(op, "awaiting_payment_receipt", False)
@@ -282,8 +302,10 @@ def validate_state_relevance(
     product_replay_relevant = replay_turn
 
     stale_focus_relevant = (
-        commerce_turn or fulfillment_turn or payment_turn
-    ) and not (awaiting_payment and commerce_turn and not payment_turn)
+        (commerce_turn or fulfillment_turn or payment_turn)
+        and not (awaiting_payment and commerce_turn and not payment_turn)
+        and not _global_browse
+    )
 
     addon_relevant = (
         intent_name in {"start_order", "pay_now", "ask_product"}
