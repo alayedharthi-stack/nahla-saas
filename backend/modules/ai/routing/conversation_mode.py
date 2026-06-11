@@ -1177,41 +1177,41 @@ def _load_store_name(db: Any, tenant_id: int) -> str:
 # ── Identity / greeting variants ──────────────────────────────────────────────
 # Multiple short variants are rotated so the bot does not feel scripted.
 # Each variant follows the global emoji rules:
-#   - 1-2 emojis maximum per message
-#   - 🌷 for greeting, 🐝 for the Nahla identity hook (assistant name only),
-#     👍 for help / confirmation
+#   - 1-2 emojis maximum per message when used
+#   - 🐝 for the Nahla identity hook (assistant name only)
+#   - 👍 for help / confirmation
 #   - emoji at start or end of a sentence — never mid-sentence
 
 def _greeting_variants(assistant_name: str, store_name: str) -> List[str]:
     """Greeting variants used right after السلام عليكم / مرحبا.
     The assistant name carries the bee 🐝 so the persona stays linked
-    to the brand mark; the leading 🌷 sets a warm tone."""
+    to the brand mark."""
     if assistant_name:
         return [
             (
-                f"وعليكم السلام 🌷\n"
+                f"وعليكم السلام\n"
                 f"أنا {assistant_name} 🐝 موجودة أساعدك في المنتجات أو "
                 f"الطلبات أو أي استفسار.\n"
                 f"وش تحب أعرفك عليه؟"
             ),
             (
-                f"حياك الله 🌷\n"
+                f"حياك الله\n"
                 f"أنا {assistant_name} 🐝 كيف أقدر أخدمك اليوم؟"
             ),
             (
-                f"أهلاً وسهلاً 🌷\n"
+                f"أهلاً وسهلاً\n"
                 f"أنا {assistant_name} 🐝 من {store_name}. "
                 f"وش تحب نبدأ فيه؟"
             ),
         ]
     return [
         (
-            f"وعليكم السلام 🌷\n"
+            f"وعليكم السلام\n"
             f"أهلاً فيك في {store_name}. "
             f"وش تحب أعرفك عليه اليوم؟"
         ),
         (
-            f"حياك الله 🌷\n"
+            f"حياك الله\n"
             f"أهلاً فيك في {store_name}. كيف أقدر أخدمك؟"
         ),
     ]
@@ -1268,8 +1268,8 @@ def render_identity_reply(
 
     Uses the merchant's configured assistant name when available, picks
     one of several warm variants so the same trigger does not get the
-    same line every time, and follows the global emoji rules (1-2 max,
-    🌷 for greeting, 🐝 for the Nahla persona hook, 👍 for help)."""
+    same line every time, and follows the global emoji rules (1-2 max
+    when used, 🐝 for the Nahla persona hook, 👍 for help)."""
     assistant_name = _load_assistant_name(db, tenant_id)
     store_name = _load_store_name(db, tenant_id) or "متجرنا"
 
