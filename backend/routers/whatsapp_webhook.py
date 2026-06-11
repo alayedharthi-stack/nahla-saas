@@ -9578,10 +9578,9 @@ async def _handle_merchant_message(
                 customer_id=_cust_id_vp,
             )
         except Exception as _vp_pre_exc:  # noqa: BLE001
-            logger.debug(
-                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s pre_send failed: %s",
+            logger.exception(
+                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s pre_send failed",
                 tenant_id,
-                _vp_pre_exc,
             )
 
         if (
@@ -11606,8 +11605,11 @@ async def _post_wa(
                                     operation="send_message_retry",
                                     error_text=f"{type(retry_exc).__name__}: {retry_exc}",
                                 )
-                            except Exception:
-                                pass
+                            except Exception:  # noqa: BLE001
+                                logger.exception(
+                                    "[WA] stamp_outbound_send_status failed tenant=%s",
+                                    _tenant_id,
+                                )
                     else:
                         logger.error(
                             "[WA] auto-register FAILED — tenant=%s phone_id=%s err=%r — "

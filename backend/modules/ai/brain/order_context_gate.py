@@ -317,14 +317,20 @@ def is_fulfillment_discovery_unlock(
         if global_availability_browse_requested(message):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[ORDER_CONTEXT_GATE] global browse unlock check failed msg=%r",
+            (message or "")[:80],
+        )
     try:
         from .commerce.product_visual import is_product_visual_request  # noqa: PLC0415
 
         if is_product_visual_request(message):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[ORDER_CONTEXT_GATE] product visual unlock check failed msg=%r",
+            (message or "")[:80],
+        )
     if str(intent_name or "").strip() == "product_visual_request":
         return True
     return False
@@ -676,7 +682,10 @@ def log_order_context_block(*, tenant_id: Any, reason: str, preview: str = "") -
             (preview or "")[:80],
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[ORDER_CONTEXT_GATE] telemetry log failed tenant=%s",
+            tenant_id if tenant_id is not None else "-",
+        )
 
 
 def log_fulfillment_lock(*, tenant_id: Any, reason: str, preview: str = "") -> None:
@@ -688,7 +697,10 @@ def log_fulfillment_lock(*, tenant_id: Any, reason: str, preview: str = "") -> N
             (preview or "")[:80],
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[FULFILLMENT_LOCK] telemetry log failed tenant=%s",
+            tenant_id if tenant_id is not None else "-",
+        )
 
 
 __all__ = [
