@@ -990,6 +990,19 @@ class MerchantBrain:
         reason_before_policy = decision.reason
         decision             = self._policy_gate.gate(decision, ctx)
 
+        try:
+            from .commerce.catalog_search_evidence import (  # noqa: PLC0415
+                apply_catalog_search_evidence_gate,
+            )
+
+            decision = apply_catalog_search_evidence_gate(ctx, decision)
+        except Exception as _csg_exc:  # noqa: BLE001
+            logger.exception(
+                "[CATALOG_SEARCH_GATE] apply failed tenant=%s err=%s",
+                tenant_id,
+                _csg_exc,
+            )
+
         # ── 4.5 Relational decision router (May 2026 — Tenant 33 #49,
         # Commit 2). Behind ``RELATIONAL_DECISION_ROUTER_ENABLED``
         # (independent kill switch from the Commit-1 telemetry flag).

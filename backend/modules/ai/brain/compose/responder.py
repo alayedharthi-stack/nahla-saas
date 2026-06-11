@@ -249,10 +249,13 @@ class DefaultComposer:
                         extract_resolved_product_subject,
                         log_clarification_leak,
                     )
+                    from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
+                        should_use_search_miss_template,
+                    )
                     subject = extract_resolved_product_subject(
                         ctx, query=query, inquiry_query=inquiry_query,
                     )
-                    if subject:
+                    if subject and should_use_search_miss_template(ctx, query, subject):
                         log_clarification_leak(
                             tenant_id=getattr(ctx, "tenant_id", None),
                             source="search_miss_compose",
@@ -268,6 +271,16 @@ class DefaultComposer:
                             subject,
                             variant=self._variant_idx(ctx),
                         )
+                    if subject:
+                        logger.info(
+                            "[CATALOG_SEARCH_GATE] search_miss_skip_template "
+                            "tenant=%s subject=%r query=%r → llm_compose",
+                            getattr(ctx, "tenant_id", None),
+                            subject[:40],
+                            (query or "")[:40],
+                        )
+                        result.data["chosen_path"] = "catalog_miss_llm_fallback"
+                        return await self._llm_compose(ctx, result)
                 except Exception:
                     logger.exception(
                         "[RESPONDER] resolved_product_search_miss compose failed",

@@ -157,6 +157,21 @@ def _strip_voice_framing(text: str) -> str:
     return s.strip()
 
 
+def customer_authored_caption(message: str) -> str:
+    """Customer lines before the first bot media/vision framing block."""
+    lines: List[str] = []
+    for line in (message or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if any(s.startswith(prefix) for prefix in _BOT_FRAMING_LINE_PREFIXES):
+            break
+        if s.startswith("[تصنيف") or s.startswith("[طلب كتالوج"):
+            break
+        lines.append(s)
+    return "\n".join(lines).strip()
+
+
 def strip_bot_media_framing(text: str) -> str:
     """Strip normalizer / brain framing; keep customer caption + vision body.
 
@@ -704,7 +719,7 @@ def is_product_visual_request(message: str) -> bool:
 
 def extract_visual_product_query(message: str) -> str:
     """Extract explicit product name from a visual request, if any."""
-    raw = (message or "").strip()
+    raw = customer_authored_caption(message) or (message or "").strip()
     if not raw:
         return ""
     norm = normalize_for_visual_detection(raw)
