@@ -301,6 +301,35 @@ def has_explicit_commerce_topic_change(message: str) -> bool:
     return any(_normalize_ar(p) in norm for p in _EXPLICIT_COMMERCE_TOPIC_CHANGE)
 
 
+def is_fulfillment_discovery_unlock(
+    message: str,
+    *,
+    intent_name: Optional[str] = None,
+) -> bool:
+    """Deterministic unlock for broad browse / explicit product visual during fulfillment lock."""
+    if has_explicit_commerce_topic_change(message):
+        return True
+    try:
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+
+        if global_availability_browse_requested(message):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .commerce.product_visual import is_product_visual_request  # noqa: PLC0415
+
+        if is_product_visual_request(message):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if str(intent_name or "").strip() == "product_visual_request":
+        return True
+    return False
+
+
 def fulfillment_lock_reason(ctx: BrainContext) -> Optional[str]:
     if not is_fulfillment_session_locked(ctx):
         return None
@@ -384,8 +413,9 @@ def is_order_fulfillment_product_query(extracted_query: str) -> bool:
 def should_block_product_discovery(ctx: BrainContext, message: Optional[str] = None) -> bool:
     """Block catalog search / recommendations during fulfillment session."""
     msg = message if message is not None else (ctx.message or "")
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
 
-    if has_explicit_commerce_topic_change(msg):
+    if is_fulfillment_discovery_unlock(msg, intent_name=intent_name):
         return False
 
     if not is_fulfillment_session_locked(ctx):
@@ -426,7 +456,7 @@ def should_suppress_product_escalation(
         )
         return should_block_product_discovery(ctx, message)
     except Exception:  # noqa: BLE001
-        if has_explicit_commerce_topic_change(message):
+        if is_fulfillment_discovery_unlock(message, intent_name=intent_name):
             return False
         return _order_prep_dict_has_progress((brain_state or {}).get("order_prep"))
 
@@ -580,7 +610,8 @@ def try_fulfillment_lock_continuation(ctx: BrainContext) -> Optional[Decision]:
     """When discovery is locked, keep the checkout funnel alive."""
     if not is_fulfillment_session_locked(ctx):
         return None
-    if has_explicit_commerce_topic_change(ctx.message or ""):
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if is_fulfillment_discovery_unlock(ctx.message or "", intent_name=intent_name):
         return None
 
     try:
@@ -668,6 +699,7 @@ __all__ = [
     "fulfillment_lock_reason",
     "has_active_order_context",
     "has_explicit_commerce_topic_change",
+    "is_fulfillment_discovery_unlock",
     "is_fulfillment_session_locked",
     "is_order_fulfillment_product_query",
     "log_fulfillment_lock",

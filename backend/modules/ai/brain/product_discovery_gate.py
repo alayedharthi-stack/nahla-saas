@@ -92,9 +92,11 @@ def _normalize_ar(text: str) -> str:
 def has_explicit_broad_browse_request(message: str) -> bool:
     """Strict allowlist — ``top_products`` may run only on explicit browse."""
     try:
-        from .commerce.product_breadth_policy import explicit_broad_browse_requested  # noqa: PLC0415
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
 
-        if explicit_broad_browse_requested(message):
+        if global_availability_browse_requested(message):
             return True
     except Exception:  # noqa: BLE001
         pass

@@ -101,6 +101,24 @@ class TestFinalDispatchGuard:
         )
         assert cleared == []
 
+    def test_visual_request_unlocks_during_fulfillment_lock(self):
+        d = should_allow_product_attachment_dispatch(
+            brain_action="llm_reply",
+            intent_name="general",
+            inbound_message="ابي صورة الطلح",
+            reply_text="",
+            fulfillment_discovery_blocked=True,
+            brain_state={
+                "order_prep": {
+                    "awaiting_payment_receipt": True,
+                    "payment_receipt_received": True,
+                    "product_id": "ext-talh",
+                },
+                "current_product_focus": {"id": 109, "title": "عسل طلح"},
+            },
+        )
+        assert d.allow is True
+
     def test_unknown_clarify_with_top_products_blocked(self):
         d = should_allow_product_attachment_dispatch(
             brain_action=ACTION_CLARIFY,

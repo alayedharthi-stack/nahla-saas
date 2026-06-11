@@ -367,9 +367,12 @@ def _should_suppress_empty_outbound_reply(
     reply: str | None,
     *,
     brain_buttons: list | None = None,
+    pending_attachments: list | None = None,
 ) -> bool:
     """True when the final reply carries no sendable text or buttons."""
     if brain_buttons:
+        return False
+    if pending_attachments:
         return False
     return not (reply or "").strip()
 
@@ -6617,61 +6620,77 @@ async def _handle_merchant_message(
                     _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
 
                 if not _billing_denied and not (reply or "").strip():
-                    _trace.brain_silent    = True
-                    _trace.fallback_source = "brain_silent_ack"
-                    _trace.response_goal   = "ack"
+                    _skip_silent_ack = False
                     try:
-                        _matched_intent = ""
-                        _matched_action = ""
-                        try:
-                            from modules.ai.brain.intent.rules import (  # noqa: PLC0415
-                                match as _rules_match,
-                            )
-                            _mi = _rules_match(text or "")
-                            if _mi is not None:
-                                _matched_intent = _mi.name
-                        except Exception:  # noqa: BLE001
-                            pass
-                        try:
-                            _bs_dbg = (
-                                (convo.extra_metadata or {}).get("brain_state") or {}
-                            )
-                            _matched_action = str(_bs_dbg.get("last_action") or "")
-                        except Exception:  # noqa: BLE001
-                            pass
-                        _wamid_dbg = ""
-                        try:
-                            _wamid_dbg = str(
-                                ((value or {}).get("messages") or [{}])[0].get("id")
-                                or ""
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                        logger.error(
-                            "[BRAIN_SILENT_REPLY] tenant=%s phone=*%s "
-                            "inbound_text=%r matched_intent=%r "
-                            "selected_action=%r final_reply_empty=true "
-                            "webhook_event_id=%r",
-                            tenant_id,
-                            (to or "")[-4:],
-                            (text or "")[:120],
-                            _matched_intent,
-                            _matched_action,
-                            _wamid_dbg,
+                        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+                            is_product_visual_request as _is_visual_turn,
                         )
+                        _skip_silent_ack = bool(_is_visual_turn(text or ""))
                     except Exception:  # noqa: BLE001
-                        pass
-                    # Substitute a polite, fact-free ack so the customer
-                    # gets a reply within the 24h window even when the
-                    # brain produced nothing. Deliberately non-committal
-                    # so we don't promise a product/price/policy fact.
-                    _persona_ownership.mark_bypass(
-                        _POReason.BRAIN_SILENT_ACK,
-                        owner="brain_silent_ack",
-                    )
-                    reply = (
-                        "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
-                    )
+                        _skip_silent_ack = False
+                    if _skip_silent_ack:
+                        logger.info(
+                            "[BRAIN_SILENT_REPLY] tenant=%s skipped reason="
+                            "product_visual_card_pending inbound=%r",
+                            tenant_id,
+                            (text or "")[:80],
+                        )
+                    else:
+                        _trace.brain_silent    = True
+                        _trace.fallback_source = "brain_silent_ack"
+                        _trace.response_goal   = "ack"
+                        try:
+                            _matched_intent = ""
+                            _matched_action = ""
+                            try:
+                                from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+                                    match as _rules_match,
+                                )
+                                _mi = _rules_match(text or "")
+                                if _mi is not None:
+                                    _matched_intent = _mi.name
+                            except Exception:  # noqa: BLE001
+                                pass
+                            try:
+                                _bs_dbg = (
+                                    (convo.extra_metadata or {}).get("brain_state") or {}
+                                )
+                                _matched_action = str(_bs_dbg.get("last_action") or "")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            _wamid_dbg = ""
+                            try:
+                                _wamid_dbg = str(
+                                    ((value or {}).get("messages") or [{}])[0].get("id")
+                                    or ""
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            logger.error(
+                                "[BRAIN_SILENT_REPLY] tenant=%s phone=*%s "
+                                "inbound_text=%r matched_intent=%r "
+                                "selected_action=%r final_reply_empty=true "
+                                "webhook_event_id=%r",
+                                tenant_id,
+                                (to or "")[-4:],
+                                (text or "")[:120],
+                                _matched_intent,
+                                _matched_action,
+                                _wamid_dbg,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # Substitute a polite, fact-free ack so the customer
+                        # gets a reply within the 24h window even when the
+                        # brain produced nothing. Deliberately non-committal
+                        # so we don't promise a product/price/policy fact.
+                        _persona_ownership.mark_bypass(
+                            _POReason.BRAIN_SILENT_ACK,
+                            owner="brain_silent_ack",
+                        )
+                        reply = (
+                            "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
+                        )
 
                 # ── Welcome-gate reply validation (May 2026) ─────────────
                 # Production regression: "السلام عليكم أبي سعر العسل" was
@@ -8240,6 +8259,17 @@ async def _handle_merchant_message(
                 brain_state=_bs_for_nc,
                 intent_name=_intent_for_nc or None,
             )
+            try:
+                from modules.ai.brain.order_context_gate import (  # noqa: PLC0415
+                    is_fulfillment_discovery_unlock as _fulfillment_unlock,
+                )
+                if _fulfillment_discovery_blocked and _fulfillment_unlock(
+                    text or "",
+                    intent_name=_intent_for_nc or None,
+                ):
+                    _fulfillment_discovery_blocked = False
+            except Exception:  # noqa: BLE001
+                pass
             _positive_commerce = has_positive_commerce_intent(_intent_for_nc)
             _catalog_card_limit = resolve_breadth_for_inbound(
                 message=text or "",
@@ -9521,8 +9551,70 @@ async def _handle_merchant_message(
                     _sync_exc,
                 )
 
+        _visual_enforced_pre_send = False
+        try:
+            from services.visual_product_dispatch import (  # noqa: PLC0415
+                maybe_enforce_visual_product_card as _maybe_visual_card,
+            )
+            _cust_id_vp = None
+            try:
+                _cust_id_vp = getattr(convo, "customer_id", None) or None
+            except Exception:  # noqa: BLE001
+                _cust_id_vp = None
+            _product_attachments, _visual_enforced_pre_send = _maybe_visual_card(
+                db=db,
+                tenant_id=tenant_id,
+                inbound_message=text or "",
+                reply_text=reply or "",
+                brain_action=_br_action or "",
+                brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else {},
+                product_attachments=_product_attachments,
+                media_attachments=_media_attachments,
+                product_escalation_blocked=_product_escalation_blocked,
+                fulfillment_discovery_blocked=_fulfillment_discovery_blocked,
+                allow_product_cards=_allow_product_cards,
+                dispatch_guard_reason=_dispatch_guard_reason,
+                catalog_card_limit=_catalog_card_limit,
+                customer_id=_cust_id_vp,
+            )
+        except Exception as _vp_pre_exc:  # noqa: BLE001
+            logger.debug(
+                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s pre_send failed: %s",
+                tenant_id,
+                _vp_pre_exc,
+            )
+
+        if (
+            not _allow_product_cards
+            and _product_attachments
+            and _dispatch_decision is not None
+        ):
+            try:
+                from services.final_dispatch_guard import (  # noqa: PLC0415
+                    suppress_product_attachments as _purge_product_atts_pre,
+                )
+                _product_attachments, reply = _purge_product_atts_pre(
+                    product_attachments=_product_attachments,
+                    reply_text=reply or "",
+                    decision=_dispatch_decision,
+                    tenant_id=tenant_id,
+                    had_stale_candidates=bool(_product_attachments),
+                )
+            except Exception as _purge_pre_exc:  # noqa: BLE001
+                logger.debug(
+                    "[FINAL_DISPATCH_GUARD] pre_send purge failed tenant=%s: %s",
+                    tenant_id,
+                    _purge_pre_exc,
+                )
+
         _send_ok = False
-        if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
+        if _should_suppress_empty_outbound_reply(
+            reply,
+            brain_buttons=_brain_buttons,
+            pending_attachments=(
+                (_product_attachments or []) + (_media_attachments or [])
+            ),
+        ):
             _log_empty_outbound_suppressed(
                 tenant_id=tenant_id,
                 to=to,
@@ -9722,9 +9814,10 @@ async def _handle_merchant_message(
                 len(_brain_buttons or []), len(reply or ""),
             )
 
+        if _send_ok or _product_attachments or _media_attachments:
             # Dispatch any media library attachments now that the text /
-            # interactive reply has been delivered. We send them in order
-            # so the customer sees the explanation first, then the file.
+            # interactive reply has been delivered (when present). Card-only
+            # visual turns may have no text — attachments still dispatch.
             #
             # Each attachment passes through the final-stage safety gate
             # (`validate_media_for_send`) before we call the WhatsApp
@@ -9800,7 +9893,7 @@ async def _handle_merchant_message(
             # Scope is intentionally narrow: only fires on visual
             # intents, only when no rich content exists, only
             # attaches ONE card. Zero impact on any other path.
-            _enforcement_applied = False
+            _enforcement_applied = bool(_visual_enforced_pre_send)
             try:
                 from modules.observability import (  # noqa: PLC0415
                     customer_wants_product_or_image as _wants_visual,

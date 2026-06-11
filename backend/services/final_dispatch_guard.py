@@ -38,6 +38,7 @@ from modules.ai.brain.product_discovery_gate import (
     has_explicit_broad_browse_request,
     product_discovery_block_reason,
 )
+from modules.ai.brain.order_context_gate import is_fulfillment_discovery_unlock
 from modules.ai.brain.intent.non_commerce_classifier import (
     has_positive_commerce_intent,
 )
@@ -190,6 +191,12 @@ def should_allow_product_attachment_dispatch(
         product_discovery_blocked = bool(_pdr)
     except Exception:  # noqa: BLE001
         product_discovery_blocked = False
+
+    if fulfillment_discovery_blocked and is_fulfillment_discovery_unlock(
+        inbound_effective or inbound_message or "",
+        intent_name=intent,
+    ):
+        fulfillment_discovery_blocked = False
 
     # ── Hard suppress (never attach) ───────────────────────────────
     if brain_handoff or action == ACTION_HANDOFF:
