@@ -1192,6 +1192,27 @@ class StateManager:
                 )
                 safe_body = body
 
+        # Inbound PDF/OCR bodies can contain NUL bytes from pypdf; PostgreSQL
+        # rejects them and poisons the session for the rest of the turn.
+        if isinstance(safe_body, str) and safe_body and direction in ("inbound", "in"):
+            try:
+                from core.persistence_text_sanitize import sanitize_persistence_text  # noqa: PLC0415
+
+                _scrubbed = sanitize_persistence_text(safe_body)
+                if _scrubbed != safe_body:
+                    logger.info(
+                        "[PERSIST_SCRUB] inbound control-char scrub "
+                        "tenant=%s phone=%s len_before=%d len_after=%d",
+                        _tid, phone, len(safe_body), len(_scrubbed),
+                    )
+                    safe_body = _scrubbed
+            except Exception as _ctrl_exc:  # noqa: BLE001
+                logger.warning(
+                    "[PERSIST_SCRUB] inbound control-char scrub failed "
+                    "tenant=%s err=%s — writing original body",
+                    _tid, _ctrl_exc,
+                )
+
         try:
             from models import MessageEvent  # noqa: PLC0415
             meta: Dict[str, Any] = {"phone": phone}

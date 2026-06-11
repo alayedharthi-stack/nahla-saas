@@ -498,6 +498,9 @@ def _extract_pdf_text(
 
     combined = "\n".join(chunks).strip()
     if combined:
+        from core.persistence_text_sanitize import sanitize_persistence_text  # noqa: PLC0415
+
+        combined = sanitize_persistence_text(combined)
         if len(combined) > _PDF_TEXT_CHAR_LIMIT:
             combined = combined[:_PDF_TEXT_CHAR_LIMIT]
         logger.info(
@@ -2534,6 +2537,9 @@ async def _process_document(
                 )
                 ocr_text = ""
             if ocr_text:
+                from core.persistence_text_sanitize import sanitize_persistence_text  # noqa: PLC0415
+
+                ocr_text = sanitize_persistence_text(ocr_text)
                 extracted_text = ocr_text
                 base_meta["pdf_text_status"]  = "ocr"
                 base_meta["pdf_text_length"]  = len(ocr_text)
