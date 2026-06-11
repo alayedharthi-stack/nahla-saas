@@ -276,18 +276,18 @@ def test_cold_first_turn_not_action_greet_template_path() -> None:
     assert decision.action != ACTION_GREET
 
 
-def test_greeting_templates_pool_still_contains_banned_phrases_until_deprecated() -> None:
-    """Sanity: templates.greeting is the residual we are retiring from routing."""
+def test_greeting_templates_pool_phatic_only_no_cs_closers() -> None:
+    """Rollback templates.greeting are phatic-only (ARCH-KB-001)."""
     from modules.ai.brain.compose import templates as T  # noqa: PLC0415
 
     texts = [
         T.greeting(store_name="متجر تجريبي", assistant_name="", variant=v)
         for v in range(3)
     ]
-    assert any(
+    assert not any(
         any(phrase in text for phrase in _BANNED_FIRST_GREETING_PHRASES)
         for text in texts
-    ), "at least one greeting template variant still carries banned CS phrasing"
+    ), "rollback greeting templates must not carry CS opener/closer phrasing"
 
 
 def test_unified_path_must_not_select_template_greeting_for_cold_turn() -> None:

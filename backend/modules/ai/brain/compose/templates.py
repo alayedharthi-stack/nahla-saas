@@ -67,15 +67,15 @@ from .mirror_replies import mirror_reply as _mirror_reply
 # ARCH-KB-001: phatic greetings only — no self-intro, no capability bullets,
 # no help-desk closers. Used only on rollback paths when persona compose is OFF.
 _GREETING_NAMED_VARIANTS = [
-    lambda persona, store: "يا هلا 🌷",
+    lambda persona, store: "يا هلا",
     lambda persona, store: "حياك الله 💛",
-    lambda persona, store: f"وعليكم السلام 🌷 — نورت *{store}*",
+    lambda persona, store: f"وعليكم السلام — نورت *{store}*",
 ]
 
 _GREETING_GENERIC_VARIANTS = [
-    lambda store: "يا هلا 🌷",
+    lambda store: "يا هلا",
     lambda store: "حياك الله 💛",
-    lambda store: f"وعليكم السلام 🌷 — نورت *{store}*",
+    lambda store: f"وعليكم السلام — نورت *{store}*",
 ]
 
 
@@ -101,9 +101,9 @@ def greeting(
 # introduced=True`` only the explicit identity FAQ (faq_identity) is
 # allowed to re-state who the bot is.
 _REGREET_VARIANTS = [
-    "ياهلا 🌷",
+    "ياهلا",
     "حياك الله 💛",
-    "أهلاً 🌷",
+    "أهلاً",
 ]
 
 
@@ -798,15 +798,14 @@ def web_search_summary(summary: str = "", citations: List[str] | None = None, **
 # A single soft redirect to honey/orders. The customer can take it
 # from there or move on.
 _HARD_OUT_OF_SCOPE_VARIANTS = [
-    "أعتذر، هذا خارج تخصصي. لو تحب أساعدك في شي يخص العسل أو الطلب، أنا جاهزة 🌷",
-    "ما أقدر أساعدك في هذا الموضوع، لكني معك في كل ما يخص العسل والطلبات 🌷",
-    "هالأمر يحتاج جهة مختصة، أما من ناحية العسل والطلبات فأنا في الخدمة 🌷",
+    "أعتذر، هذا خارج تخصصي. لو تحب أساعدك في شي يخص العسل أو الطلب، أنا جاهزة",
+    "ما أقدر أساعدك في هذا الموضوع، لكني معك في كل ما يخص العسل والطلبات",
+    "هالأمر يحتاج جهة مختصة، أما من ناحية العسل والطلبات فأنا في الخدمة",
 ]
 
 
 def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
-    """Polite, calm redirect for clearly off-domain topics. One 🌷
-    emoji max, no laughter, no rotating gimmicks."""
+    """Polite, calm redirect for clearly off-domain topics."""
     return _HARD_OUT_OF_SCOPE_VARIANTS[variant % len(_HARD_OUT_OF_SCOPE_VARIANTS)]
 
 
@@ -817,7 +816,7 @@ def hard_out_of_scope_reply(variant: int = 0, **_: Any) -> str:
 # culturally auditable copy. Two rotation indices (``variant`` ×
 # ``sub_variant``) widen variety without spamming the same line every hour.
 #
-# Tone: خليجية دافئة، سطر أو سطرين، إيموجي خفيف (🌹/🌷) — بدون ضحك مفرط
+# Tone: خليجية دافئة، سطر أو سطرين، إيموجي خفيف عند الحاجة — بدون ضحك مفرط
 # وبلا طرح بيعي.
 
 # May 2026 #8 — REMOVED the "وهذا من ذوقك … الله يبيض وجهك" entry.
@@ -843,7 +842,7 @@ _SOCIAL_THANKS_VARIANTS = [
 _SOCIAL_BLESSING_VARIANTS = [
     "آمين وإياك 🌹\nالله يسعدك.",
     "الله يكرمك 🤍\nشكراً لذوقك.",
-    "الله يعافيك ويسعدك 🌷\nأي وقت.",
+    "الله يعافيك ويسعدك\nأي وقت.",
 ]
 
 # Strong-praise reciprocal pool — reached ONLY when the social
@@ -855,14 +854,14 @@ _SOCIAL_STRONG_PRAISE_VARIANTS = [
     "الله يبيض وجهك مثل ما بيضت وجهنا 🌹\nويحفظك.",
     "تسلم يا الغالي 🌹\nالله يبيض وجهك ويرفع قدرك.",
     "ما قصّرت 🤍\nالله يبيض وجهك ويعطيك العافية.",
-    "كفو والله 🌷\nالله يبيض وجهك وقدّرك خير.",
+    "كفو والله\nالله يبيض وجهك وقدّرك خير.",
 ]
 
 _SOCIAL_PROPHET_INVOCATION_VARIANTS = [
     "صلى الله عليه وسلم 🌹\nجزاك الله خير.",
     "صلى الله عليه وسلم 🌹\nجزاك الله خير وكتب أجرك.",
     "عليه أفضل الصلاة وأزكى السلام 🤍\nالله يجزاك الخير الجميل.",
-    "صلى الله عليه وسلم 🌷\nويبارك الله فيك.",
+    "صلى الله عليه وسلم\nويبارك الله فيك.",
     "اللهم صل وسلم على نبينا محمد 🤍\nوشكراً لذوقك الطيب.",
     "صلى الله عليه وسلم عدد خلق الله 🤍\nوما أحسنت.",
 ]
@@ -870,7 +869,7 @@ _SOCIAL_PROPHET_INVOCATION_VARIANTS = [
 _SOCIAL_BASMALA_VARIANTS = [
     "بسم الله يا الغالي 🤍\nتفضل…",
     "بسم الله الرحمن الرحيم 🌹\nوعليك السلام والبركة.",
-    "بسم الله 🌷\nتفضل…",
+    "بسم الله\nتفضل…",
 ]
 
 _SOCIAL_COMPLIMENT_VARIANTS = [
@@ -896,7 +895,7 @@ _SOCIAL_WARM_ACK_VARIANTS = [
 _SOCIAL_EID_GREETING_VARIANTS = [
     "كل عام وأنتم بخير 🤍\nتقبل الله طاعتكم.",
     "عيدكم مبارك 🌹\nالله يبارك فيكم.",
-    "تقبل الله منا ومنكم 🌷\nعساكم من عواده.",
+    "تقبل الله منا ومنكم\nعساكم من عواده.",
     "كل عام وأنت بخير 🌹\nالله يجعل أيامكم مباركة.",
 ]
 
@@ -908,7 +907,7 @@ _SOCIAL_DUA_VARIANTS = [
 
 _SOCIAL_CONDOLENCE_VARIANTS = [
     "الله يرحمه ويغفر له 🤍",
-    "إنا لله وإنا إليه راجعون 🌷",
+    "إنا لله وإنا إليه راجعون",
     "الله يصبركم ويعظم أجركم 🤍",
 ]
 
