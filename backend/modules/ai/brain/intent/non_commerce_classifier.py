@@ -338,6 +338,46 @@ def inbound_has_occasion_signal(text: str) -> bool:
     return any(p.search(norm) for p in _OCCASION_SIGNAL_PATTERNS)
 
 
+_CLASSIFIED_SOCIAL_RELIGIOUS_NC = frozenset({
+    NC_RELIGIOUS_MEDIA,
+    "prophet_invocation",
+    NC_DUA,
+    NC_EID_GREETING,
+    NC_SOCIAL_FORWARD,
+    NC_CONDOLENCE,
+    NC_MORNING_GREETING,
+    NC_EMOTIONAL,
+    NC_INFORMATIONAL,
+    "social_image",
+    "religious_social_forward",
+})
+
+_VISION_FRAMING_MARKERS = (
+    "[وصف الصورة]",
+    "[وصف الفيديو]",
+    "[تصنيف الصورة",
+    "[تصنيف الوسائط",
+)
+
+
+def inbound_has_classified_social_religious_media(
+    message: str,
+    *,
+    block_commerce: bool = False,
+    nc_category: str = "",
+) -> bool:
+    """True when inbound carries understood social/religious media (not unknown)."""
+    raw = message or ""
+    if any(tag in raw for tag in _NON_COMMERCE_TAGS):
+        return True
+    cat = (nc_category or "").strip().lower()
+    if cat in _CLASSIFIED_SOCIAL_RELIGIOUS_NC:
+        return True
+    if block_commerce and cat and any(m in raw for m in _VISION_FRAMING_MARKERS):
+        return True
+    return False
+
+
 def has_commerce_topic_hints(topic_hints: Optional[Sequence[str]]) -> bool:
     hints = [str(h) for h in (topic_hints or []) if h]
     for label in hints:
@@ -667,5 +707,6 @@ __all__ = [
     "has_positive_commerce_intent",
     "has_product_commerce_signal",
     "inbound_has_occasion_signal",
+    "inbound_has_classified_social_religious_media",
     "resolve_commerce_block",
 ]

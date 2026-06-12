@@ -629,6 +629,27 @@ class DefaultDecisionEngine:
                     inbound_has_occasion_signal,
                 )
                 if not inbound_has_occasion_signal(ctx.message or ""):
+                    if nc_category == "religious_media":
+                        from ..persona_expression import (  # noqa: PLC0415
+                            build_social_courtesy_decision,
+                        )
+
+                        logger.info(
+                            "[NON_COMMERCE_ROUTE] tenant=%s category=%s "
+                            "route=persona_compose preview=%r",
+                            getattr(ctx, "tenant_id", None),
+                            nc_category,
+                            (ctx.message or "")[:60],
+                        )
+                        return build_social_courtesy_decision(
+                            nc_category,
+                            confidence=max(float(intent.confidence or 0.0), 0.94),
+                            reason=(
+                                "non-commerce religious media — persona compose "
+                                "(no occasion template gate)"
+                            ),
+                            block_commerce=True,
+                        )
                     logger.info(
                         "[NON_COMMERCE_ROUTE] tenant=%s category=%s "
                         "skipped=occasion_gate preview=%r",
