@@ -424,11 +424,10 @@ def _maybe_log_outbound_candidate_abort(
             expression_owner=expression_owner,
             candidate_preview=candidate,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[OUTBOUND_CANDIDATE_ABORT] audit emit failed tenant=%s err=%s",
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[OUTBOUND_CANDIDATE_ABORT_AUDIT_FAILED] tenant=%s",
             tenant_id,
-            exc,
         )
 
 
