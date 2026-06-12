@@ -7463,6 +7463,28 @@ async def _handle_merchant_message(
                 except Exception:  # noqa: BLE001
                     _skip_dedup_substitution = False
 
+                if not _skip_dedup_substitution:
+                    try:
+                        from modules.ai.brain.commerce.dedup_operational_delta import (  # noqa: PLC0415
+                            has_operational_delta_since_last_reply,
+                            last_outbound_body as _dedup_last_outbound_body,
+                        )
+                        if has_operational_delta_since_last_reply(
+                            text or "",
+                            _po_reply_before_dedup,
+                            _dedup_last_outbound_body(history),
+                            history=history,
+                        ):
+                            _skip_dedup_substitution = True
+                            logger.info(
+                                "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                                "overlap=%.2f operational_delta=true — "
+                                "pass-through (customer added new order detail)",
+                                tenant_id, to, _overlap,
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+
                 if _skip_dedup_substitution:
                     pass
                 else:
