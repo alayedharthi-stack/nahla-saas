@@ -128,6 +128,7 @@ class TestInternationalNormalization:
         # UAE
         ("+971501234567",   "+971501234567"),
         ("00971501234567",  "+971501234567"),
+        ("971501234567",    "+971501234567"),
         # Egypt
         ("+201234567890",   "+201234567890"),
         ("00201234567890",  "+201234567890"),
@@ -141,6 +142,10 @@ class TestInternationalNormalization:
         ("+962791234567",   "+962791234567"),
         # Kuwait (mobile starts with 5, 6, or 9 — 8 digits)
         ("+96551234567",    "+96551234567"),
+        ("96590008658",     "+96590008658"),
+        ("+96590008658",    "+96590008658"),
+        # Germany (digits-only from webhook)
+        ("4915563130364",   "+4915563130364"),
         # Bahrain (mobile starts with 3 or 6 — 8 digits)
         ("+97336123456",    "+97336123456"),
     ])
@@ -163,6 +168,14 @@ class TestEdgeCases:
         None, "", " ", "abc", "123", "+0", "00000000",
     ])
     def test_invalid_returns_none(self, raw):
+        assert normalize_to_e164(raw) is None
+
+    @pytest.mark.parametrize("raw", [
+        "90008658",       # Kuwait local without country — ambiguous
+        "1234567",        # too short for international +digits path
+        "1234567890123456",  # too long / not valid anywhere
+    ])
+    def test_ambiguous_local_without_country_returns_none(self, raw):
         assert normalize_to_e164(raw) is None
 
     def test_normalize_phone_compat_returns_empty_string(self):

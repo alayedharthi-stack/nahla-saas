@@ -27,6 +27,16 @@ class TestFormatWaSendRecipient:
     def test_international_digits_unchanged(self) -> None:
         assert format_wa_send_recipient("966564725255") == "966564725255"
 
+    def test_kuwait_digits_only_from_webhook(self) -> None:
+        assert format_wa_send_recipient("96590008658") == "96590008658"
+        assert format_wa_send_recipient("+96590008658") == "96590008658"
+
+    def test_uae_digits_only_from_webhook(self) -> None:
+        assert format_wa_send_recipient("971501234567") == "971501234567"
+
+    def test_germany_digits_only_from_webhook(self) -> None:
+        assert format_wa_send_recipient("4915563130364") == "4915563130364"
+
     def test_e164_strips_plus(self) -> None:
         assert format_wa_send_recipient("+966564725255") == "966564725255"
 
@@ -163,6 +173,49 @@ class TestProviderSendBoundary:
             ))
 
         assert posted[0]["to"] == "966564725255"
+
+    def test_kuwait_digits_only_not_recipient_invalid(self) -> None:
+        from services.whatsapp_platform.service import provider_send_message
+
+        posted: List[Dict[str, Any]] = []
+
+        async def fake_post(_conn, _ctx, *, json=None, **kwargs):
+            posted.append(dict(json or {}))
+            return {"messages": [{"id": "wamid.kw"}]}
+
+        conn = MagicMock()
+        conn.extra_metadata = {}
+
+        with patch(
+            "services.whatsapp_platform.service.get_token_for_operation",
+            new=AsyncMock(),
+        ) as mock_token, patch(
+            "services.whatsapp_platform.service.provider_post_with_context",
+            new=fake_post,
+        ), patch(
+            "services.whatsapp_platform.service.wa_provider",
+            return_value="360dialog",
+        ):
+            mock_token.return_value = MagicMock(token="tok", source="test")
+
+            resp, _ = _run(provider_send_message(
+                MagicMock(),
+                conn,
+                tenant_id=33,
+                operation="send_message",
+                phone_id="PH1",
+                payload={
+                    "messaging_product": "whatsapp",
+                    "to": "96590008658",
+                    "type": "text",
+                    "text": {"body": "وعليكم السلام"},
+                },
+            ))
+
+        assert "error" not in resp
+        assert resp.get("_nahla_classification") != "recipient_invalid"
+        assert posted[0]["to"] == "96590008658"
+        mock_token.assert_called_once()
 
 
 class TestPostWaSendBoundary:
