@@ -7843,10 +7843,23 @@ async def _handle_merchant_message(
                         _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
                         if isinstance(_rid, int):
                             _pavg_rec_ids.append(_rid)
+                    _pavg_focus = _pavg_bs.get("current_product_focus")
+                    try:
+                        from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
+                            global_availability_browse_requested as _pavg_global_browse,
+                        )
+                        from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+                            browse_alternatives_requested as _pavg_browse_alt,
+                        )
+
+                        if _pavg_global_browse(text or "") or _pavg_browse_alt(text or ""):
+                            _pavg_focus = None
+                    except Exception:  # noqa: BLE001
+                        pass
                     _pavg_ctx = build_availability_context(
                         db,
                         tenant_id,
-                        focus_product=_pavg_bs.get("current_product_focus"),
+                        focus_product=_pavg_focus,
                         recommended_product_ids=_pavg_rec_ids,
                     )
                     _pavg_path = str(

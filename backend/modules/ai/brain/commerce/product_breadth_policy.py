@@ -90,7 +90,6 @@ _GLOBAL_CATALOG_BROWSE_PHRASES = (
     "best sellers",
 )
 
-# Hard explicit browse — customer wants wide exploration.
 _HARD_BROAD_BROWSE_PHRASES = (
     "ورني كل الانواع",
     "وريني كل الانواع",
@@ -179,6 +178,16 @@ def global_availability_browse_requested(message: str) -> bool:
     if not norm:
         return False
     if explicit_broad_browse_requested(message):
+        return True
+    return any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES)
+
+
+def global_catalog_browse_requested(message: str) -> bool:
+    """Catalog-wide type/availability asks — not soft-only «وش عندكم»."""
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    if explicit_hard_browse_requested(message):
         return True
     return any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES)
 
@@ -301,7 +310,17 @@ def resolve_product_breadth(
     )
     soft_browse = explicit_soft_browse_requested(message)
     hard_browse = explicit_hard_browse_requested(message)
-    explicit_broad = soft_browse or hard_browse
+    catalog_global = global_catalog_browse_requested(message)
+    global_browse = global_availability_browse_requested(message)
+    try:
+        from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+            browse_alternatives_requested,
+        )
+
+        alt_browse = browse_alternatives_requested(message)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import for breadth policy
+        alt_browse = False
+    explicit_broad = soft_browse or hard_browse or global_browse or alt_browse
 
     limit_low = _env_int("PRODUCT_DISPLAY_LIMIT_LOW", 1)
     limit_medium = _env_int("PRODUCT_DISPLAY_LIMIT_MEDIUM", 3)
@@ -323,10 +342,10 @@ def resolve_product_breadth(
 
     if total_available == 1:
         display, mode, catalog = 1, "focused", catalog_low
-    elif hard_browse:
+    elif hard_browse or catalog_global:
         display, mode, catalog = limit_broad, "broad", catalog_medium
-    elif soft_browse:
-        # "وش عندكم؟" → guided browse, not a catalog wall.
+    elif soft_browse or alt_browse:
+        # "وش عندكم؟" / "وش غيرها؟" → guided browse, not a catalog wall.
         display, mode, catalog = limit_medium, "browse", catalog_medium
     elif (source or "").strip().lower() in _CONTINUATION_SOURCES:
         display, mode, catalog = limit_medium, "standard", catalog_medium
