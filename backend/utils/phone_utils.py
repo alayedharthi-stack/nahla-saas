@@ -10,6 +10,9 @@ Examples
   +966570000000   → +966570000000
   00966570000000  → +966570000000
   +971501234567   → +971501234567   (UAE)
+  971501234567    → +971501234567   (UAE, digits-only from webhook)
+  +96590008658    → +96590008658    (Kuwait)
+  96590008658     → +96590008658    (Kuwait, digits-only from webhook)
   +201234567890   → +201234567890   (Egypt)
   +447911123456   → +447911123456   (UK)
   +12125551234    → +12125551234    (USA)
@@ -98,13 +101,26 @@ def normalize_to_e164(
             return result
 
         if not stripped.startswith("+"):
-            # Try with explicit region hint
+            # Webhook / coexistence often delivers MSISDN digits without '+'.
+            # After Saudi heuristics, treat remaining all-digit input as
+            # international when libphonenumber validates +digits (e.g.
+            # 96590008658 → +96590008658). Skip short/ambiguous strings.
+            digits_only = stripped
+            if digits_only.isdigit() and len(digits_only) >= 10:
+                result = _parse_and_format("+" + digits_only, None)
+                if result:
+                    return result
+
+            # Try with explicit region hint for bare local numbers
             region = default_region or "SA"
             result = _parse_and_format(stripped, region)
             if result:
                 return result
 
-        logger.debug("normalize_to_e164: could not parse '%s'", raw)
+        logger.debug(
+            "normalize_to_e164: could not parse raw=%s",
+            redact_phone_for_log(raw),
+        )
         return None
 
     # ── Fallback: no library — use sanitized stripped string ─────────────────
@@ -157,9 +173,17 @@ def format_wa_send_recipient(raw: Optional[str]) -> Optional[str]:
     """
     e164 = normalize_to_e164(raw)
     if not e164:
+        logger.debug(
+            "format_wa_send_recipient: invalid raw=%s reason=e164_normalization_failed",
+            redact_phone_for_log(raw),
+        )
         return None
     digits = e164[1:] if e164.startswith("+") else e164
     if not digits.isdigit() or len(digits) < 8 or len(digits) > 15:
+        logger.debug(
+            "format_wa_send_recipient: invalid raw=%s reason=e164_length_out_of_range",
+            redact_phone_for_log(raw),
+        )
         return None
     return digits
 
