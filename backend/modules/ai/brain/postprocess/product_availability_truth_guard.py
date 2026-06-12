@@ -21,8 +21,12 @@ from modules.ai.brain.postprocess.product_availability_evidence import (
     EVIDENCE_RESOLVED_AVAILABLE,
     EVIDENCE_RESOLVED_UNAVAILABLE,
     EVIDENCE_UNKNOWN,
+    EVIDENCE_VARIANT_OPTIONS,
     ProductAvailabilityEvidenceResult,
     evaluate_product_availability_evidence,
+)
+from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+    should_block_availability_rewrite,
 )
 
 logger = logging.getLogger("nahla.brain.postprocess.product_availability_truth_guard")
@@ -181,6 +185,8 @@ def _decide_guard_action(
 ) -> str:
     state = evidence.evidence_state
     if state == EVIDENCE_RESOLVED_AVAILABLE and claim_polarity == "positive":
+        return "allowed"
+    if state == EVIDENCE_VARIANT_OPTIONS and claim_polarity == "positive":
         return "allowed"
     if state == EVIDENCE_RESOLVED_UNAVAILABLE and claim_polarity == "negative":
         return "allowed"
@@ -372,6 +378,15 @@ def apply_product_availability_truth_guard(
 
         guard_action = _decide_guard_action(evidence, claim_polarity)
         would_rw = _would_rewrite(guard_action, mode) or stripped_inactive
+
+        if should_block_availability_rewrite(
+            inbound_text=inbound_text,
+            evidence_state=evidence.evidence_state,
+            guard_action=guard_action,
+        ):
+            would_rw = False
+            if guard_action.startswith("rewrite"):
+                guard_action = "allowed"
 
         log_product_availability_truth_guard(
             tenant_id=tenant_id,

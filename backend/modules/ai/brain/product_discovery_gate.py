@@ -850,7 +850,7 @@ def try_price_query_decision(
             )
             if _ctx_price is not None:
                 return _ctx_price
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price clarify import
             pass
 
         return Decision(
@@ -880,6 +880,36 @@ def clarify_instead_of_top_products(
         source="top_products",
     )
     msg = ctx.message or ""
+    state = ctx.state
+    try:
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: PLC0415
+
+        if global_availability_browse_requested(msg) or has_explicit_broad_browse_request(msg):
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "", "source": "global_browse_recovery"},
+                reason=f"global availability browse — recover from blocked top_products ({reason})",
+                confidence=0.91,
+            )
+        from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+            browse_alternatives_requested,
+        )
+
+        if browse_alternatives_requested(msg) and _has_prior_browse_context(ctx):
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={
+                    "query": str(getattr(state, "last_browse_query", "") or ""),
+                    "source": "show_more",
+                },
+                reason=f"browse alternatives — recover from blocked top_products ({reason})",
+                confidence=0.90,
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse recovery imports
+        pass
     try:
         from .intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415
 
@@ -911,7 +941,6 @@ def clarify_instead_of_top_products(
     except Exception:  # noqa: BLE001
         pass
     tenant_id = getattr(ctx, "tenant_id", None)
-    state = ctx.state
     history = list(getattr(ctx, "history", None) or [])
     if not history and state is not None:
         for turn in list(getattr(state, "recent_messages", None) or [])[-8:]:

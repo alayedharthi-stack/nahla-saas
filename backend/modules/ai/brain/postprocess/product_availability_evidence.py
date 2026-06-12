@@ -17,6 +17,7 @@ from core.product_entity_resolution import (
 
 EVIDENCE_RESOLVED_AVAILABLE = "resolved_available"
 EVIDENCE_RESOLVED_UNAVAILABLE = "resolved_unavailable"
+EVIDENCE_VARIANT_OPTIONS = "variant_options"
 EVIDENCE_CONFLICT = "conflict"
 EVIDENCE_UNKNOWN = "unknown"
 
@@ -159,22 +160,35 @@ def evaluate_product_availability_evidence(
         true_n = len(fam.get("checkout_true") or [])
         false_n = len(fam.get("checkout_false") or [])
         if true_n > 0 and false_n > 0:
-            ctype = CONFLICT_FAMILY_MIXED
-            if CONFLICT_YEAR_MISMATCH in kb_flags:
-                ctype = CONFLICT_YEAR_MISMATCH
-            elif CONFLICT_MISSING_CATALOG_ENTITY in kb_flags:
-                ctype = CONFLICT_MISSING_CATALOG_ENTITY
+            if kb_flags:
+                ctype = kb_flags[0]
+                if CONFLICT_YEAR_MISMATCH in kb_flags:
+                    ctype = CONFLICT_YEAR_MISMATCH
+                elif CONFLICT_MISSING_CATALOG_ENTITY in kb_flags:
+                    ctype = CONFLICT_MISSING_CATALOG_ENTITY
+                return ProductAvailabilityEvidenceResult(
+                    evidence_state=EVIDENCE_CONFLICT,
+                    evidence_ok_for_positive=False,
+                    evidence_ok_for_negative=False,
+                    conflict_type=ctype,
+                    entity=entity,
+                    catalog_checkout=None,
+                    kb_avail_polarity=kb_pol,
+                    family_checkout_summary=fam,
+                    evidence_source="catalog_family",
+                    reason="kb_catalog_divergence_on_family",
+                )
             return ProductAvailabilityEvidenceResult(
-                evidence_state=EVIDENCE_CONFLICT,
-                evidence_ok_for_positive=False,
-                evidence_ok_for_negative=False,
-                conflict_type=ctype,
+                evidence_state=EVIDENCE_VARIANT_OPTIONS,
+                evidence_ok_for_positive=True,
+                evidence_ok_for_negative=false_n > 0,
+                conflict_type=None,
                 entity=entity,
-                catalog_checkout=None,
+                catalog_checkout=True,
                 kb_avail_polarity=kb_pol,
                 family_checkout_summary=fam,
                 evidence_source="catalog_family",
-                reason="mixed_family_checkout_states",
+                reason="family_variant_options",
             )
         if true_n > 0 and false_n == 0:
             if kb_flags:

@@ -1582,13 +1582,22 @@ class DefaultDecisionEngine:
             "باقي الخيارات", "وريني باقي", "خيارات اكثر", "خيارات أكثر",
             "more options", "show more",
         ]
+        try:
+            from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+                browse_alternatives_requested as _browse_alt_requested,
+            )
+        except Exception:  # noqa: BLE001
+            _browse_alt_requested = lambda _m: False  # noqa: E731
+        _is_show_more_req = (
+            any(p in _msg_norm for p in _SHOW_MORE_PATTERNS)
+            or _browse_alt_requested(ctx.message or "")
+        )
         _REPEAT_PATTERNS = [
             "مره ثانيه", "مره اخرى", "مرة اخرى", "مرة ثانية",
             "كرر", "اعد", "اعيد", "وريني الخيارات",
             "وريني تاني", "وريني ثاني", "ارسل مره", "ارسل تاني",
             "repeat", "show again", "list again",
         ]
-        _is_show_more_req = any(p in _msg_norm for p in _SHOW_MORE_PATTERNS)
         _is_repeat_req = any(p in _msg_norm for p in _REPEAT_PATTERNS)
 
         # ── 3.8c Extract product name from order phrases ──────────────────

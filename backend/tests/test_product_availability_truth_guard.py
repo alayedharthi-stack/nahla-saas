@@ -133,7 +133,11 @@ class TestEvidenceStates:
         assert ev.evidence_state == EVIDENCE_CONFLICT
         assert ev.conflict_type in (CONFLICT_YEAR_MISMATCH, CONFLICT_MISSING_CATALOG_ENTITY)
 
-    def test_family_mixed_availability(self) -> None:
+    def test_family_mixed_availability_is_variant_options(self) -> None:
+        from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa: PLC0415
+            EVIDENCE_VARIANT_OPTIONS,
+        )
+
         fam = "delta|series"
         ev = evaluate_product_availability_evidence(
             availability_context=_ctx(
@@ -152,7 +156,8 @@ class TestEvidenceStates:
             ),
             inbound_text="Delta Series small",
         )
-        assert ev.evidence_state in (EVIDENCE_CONFLICT, EVIDENCE_RESOLVED_UNAVAILABLE, EVIDENCE_UNKNOWN)
+        assert ev.evidence_state == EVIDENCE_VARIANT_OPTIONS
+        assert ev.reason == "family_variant_options"
 
     def test_unknown_no_catalog(self) -> None:
         ev = evaluate_product_availability_evidence(
