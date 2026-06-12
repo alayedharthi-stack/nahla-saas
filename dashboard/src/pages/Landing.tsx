@@ -28,6 +28,7 @@ import {
   RefreshCw,
   Menu,
   X,
+  Smartphone,
   Shield,
   Quote,
   AlertCircle,
@@ -406,7 +407,11 @@ export default function Landing() {
   const scrollTo = (id: string) => {
     setMobile(false)
     setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      const el = document.getElementById(id)
+      if (!el) return
+      const navOffset = 72
+      const top = el.getBoundingClientRect().top + window.scrollY - navOffset
+      window.scrollTo({ top, behavior: 'smooth' })
     }, 50)
   }
 
@@ -518,48 +523,76 @@ export default function Landing() {
         <div className="landing-hero-content relative z-10 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center sm:py-20">
 
           {/* Urgency badge */}
-          <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/25 rounded-full px-4 py-2 mb-8">
+          <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/25 rounded-full px-4 py-2 mb-6">
             <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse" />
             <span className="text-amber-300 text-sm font-bold">
               عرض الإطلاق — خصم 50٪ لأول شهرين
             </span>
           </div>
 
-          {/* Headline — pain hook first */}
-          <h1 className="text-[2.6rem] sm:text-5xl lg:text-[5.5rem] font-black text-white leading-[1.1] mb-6 tracking-tight">
-            عملاؤك يرسلون
+          {/* Core promise — WhatsApp stays on your phone */}
+          <h1 className="text-[2rem] sm:text-5xl lg:text-[4.25rem] font-black text-white leading-[1.12] mb-4 sm:mb-5 tracking-tight max-w-3xl mx-auto">
+            واتسابك يبقى معك…
             <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-l from-amber-300 via-amber-400 to-yellow-500">
-              ومتجرك لا يرد؟
+              ونحلة تبيع معك
             </span>
           </h1>
 
-          {/* Value proposition — specific & punchy */}
-          <p className="text-lg sm:text-xl text-slate-300 max-w-2xl mx-auto leading-relaxed mb-3 font-medium">
-            نحلة تحوّل كل رسالة واتساب إلى فرصة بيع حقيقية — ترد، تقترح، وتُتمّ الطلب بدلاً عنك.
-          </p>
-          <p className="text-base text-slate-500 max-w-xl mx-auto leading-loose mb-10">
-            أدخل منتجاتك وعروضك مرة واحدة… ونحلة تعمل على مدار الساعة.
+          <p className="text-base sm:text-xl text-slate-300 max-w-2xl mx-auto leading-relaxed mb-6 sm:mb-8 font-medium">
+            اربط واتساب الأعمال بالذكاء والحملات، واستمر في استخدام جوالك كالمعتاد بينما نحلة ترد، تقترح، وتتابع الطلبات عنك.
           </p>
 
-          {/* Primary CTA — single clear action */}
-          <div className="relative z-20 flex flex-col sm:flex-row items-center justify-center gap-3">
+          {/* Primary CTA — above visual block so trial stays reachable on mobile */}
+          <div className="relative z-20 flex flex-col sm:flex-row items-center justify-center gap-3 mb-6 sm:mb-8">
             <Link
               to="/register"
-              className="landing-trial-btn group inline-flex items-center gap-2.5 text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl w-full sm:w-auto justify-center"
+              className="landing-trial-btn group inline-flex items-center gap-2.5 text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl w-full sm:w-auto justify-center order-1"
             >
-              {/* Mobile: emphasise the free trial duration */}
               <span className="sm:hidden pointer-events-none">جرّب مجانًا لمدة 14 يوم</span>
-              {/* Desktop: full motivational copy */}
               <span className="hidden sm:inline pointer-events-none">ابدأ تجربتك المجانية الآن</span>
               <ArrowLeft size={18} className="pointer-events-none transition-transform motion-safe:group-hover:-translate-x-1" />
             </Link>
             <button
               onClick={() => scrollTo('how')}
-              className="flex items-center gap-2 text-slate-400 hover:text-white border border-white/15 hover:border-white/30 text-sm sm:text-base px-6 py-4 rounded-2xl transition-all duration-200 w-full sm:w-auto justify-center"
+              className="flex items-center gap-2 text-slate-300 hover:text-white border border-white/15 hover:border-amber-400/35 hover:bg-amber-500/5 text-sm sm:text-base px-6 py-4 rounded-2xl transition-all duration-200 w-full sm:w-auto justify-center order-2"
             >
-              شاهد كيف تعمل
+              <MessageCircle size={17} className="text-emerald-400/80 shrink-0" />
+              كيف يعمل مع واتساب الأعمال؟
             </button>
+          </div>
+
+          {/* Visual stack — WA → AI → campaigns (compact support block) */}
+          <div className="landing-hero-value">
+            <div className="landing-hero-pill">
+              <Smartphone size={13} className="shrink-0 text-amber-400" />
+              واتساب الأعمال + الذكاء + الحملات في مكان واحد
+            </div>
+            <div className="landing-hero-stack" aria-label="واتساب الأعمال ثم الذكاء ثم الحملات">
+              <div className="landing-hero-stack-item">
+                <div className="landing-hero-stack-icon landing-hero-stack-icon--wa">
+                  <MessageCircle size={18} />
+                </div>
+                <span className="landing-hero-stack-label">واتساب الأعمال</span>
+              </div>
+              <ArrowLeft size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
+              <div className="landing-hero-stack-item">
+                <div className="landing-hero-stack-icon landing-hero-stack-icon--ai">
+                  <Bot size={18} />
+                </div>
+                <span className="landing-hero-stack-label">ذكاء يرد ويقترح</span>
+              </div>
+              <ArrowLeft size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
+              <div className="landing-hero-stack-item">
+                <div className="landing-hero-stack-icon landing-hero-stack-icon--campaign">
+                  <Send size={17} />
+                </div>
+                <span className="landing-hero-stack-label">حملات ومتابعة</span>
+              </div>
+            </div>
+            <p className="landing-hero-stack-note hidden sm:block">
+              لا تغيّر طريقة عملك — نحلة تضيف الردود التلقائية والحملات فوق واتسابك الحالي على الجوال.
+            </p>
           </div>
 
           {/* Risk-reversal micro-copy */}
@@ -568,7 +601,7 @@ export default function Landing() {
           </p>
 
           {/* Social proof bar */}
-          <div className="mt-14 inline-flex flex-wrap items-center justify-center gap-4 sm:gap-6 bg-white/3 border border-white/8 rounded-2xl px-6 py-4 backdrop-blur-sm">
+          <div className="mt-8 sm:mt-12 inline-flex flex-wrap items-center justify-center gap-4 sm:gap-6 bg-white/3 border border-white/8 rounded-2xl px-5 sm:px-6 py-3.5 sm:py-4 backdrop-blur-sm">
             <div className="flex items-center gap-2.5">
               <div className="flex -space-x-2 space-x-reverse">
                 {['🧑‍💼', '👩‍💼', '👨‍💻', '👩‍🍳'].map((e, i) => (
@@ -633,7 +666,7 @@ export default function Landing() {
       {/* ══════════════════════════════════════════════════════════
           HOW IT WORKS
       ══════════════════════════════════════════════════════════ */}
-      <section id="how" className="py-24 relative overflow-hidden bg-slate-900">
+      <section id="how" className="py-24 relative overflow-hidden bg-slate-900 scroll-mt-20">
         <HoneycombBg />
         <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="text-center mb-14">
