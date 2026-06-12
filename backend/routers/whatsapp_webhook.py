@@ -6628,6 +6628,44 @@ async def _handle_merchant_message(
                         _skip_silent_ack = bool(_is_visual_turn(text or ""))
                     except Exception:  # noqa: BLE001
                         _skip_silent_ack = False
+                    if not _skip_silent_ack:
+                        try:
+                            from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+                                inbound_has_classified_social_religious_media as _is_social_media,
+                            )
+                            _nc_cat = ""
+                            try:
+                                _nc_cat = str(
+                                    ((convo.extra_metadata or {}).get("inbound_media") or {})
+                                    .get("non_commerce_category")
+                                    or ((convo.extra_metadata or {}).get("brain_state") or {})
+                                    .get("non_commerce_category")
+                                    or ""
+                                )
+                            except Exception:  # noqa: BLE001
+                                _nc_cat = ""
+                            if _is_social_media(
+                                text or "",
+                                block_commerce=bool(
+                                    ((convo.extra_metadata or {}).get("brain_state") or {})
+                                    .get("block_commerce_escalation")
+                                ),
+                                nc_category=_nc_cat,
+                            ):
+                                _skip_silent_ack = True
+                                logger.error(
+                                    "[BRAIN_SILENT_REPLY] tenant=%s skipped="
+                                    "classified_social_religious_media "
+                                    "no_generic_silent_ack preview=%r",
+                                    tenant_id,
+                                    (text or "")[:80],
+                                )
+                        except Exception as _social_silent_exc:  # noqa: BLE001
+                            logger.exception(
+                                "[BRAIN_SILENT_REPLY] classified_social_media "
+                                "guard failed tenant=%s",
+                                tenant_id,
+                            )
                     if _skip_silent_ack:
                         logger.info(
                             "[BRAIN_SILENT_REPLY] tenant=%s skipped reason="
@@ -11582,8 +11620,13 @@ async def _post_wa(
                                     succeeded=("error" not in (retry_data or {}))
                                               and bool(_retry_wamid),
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _dedup_rec_exc:  # noqa: BLE001
+                                logger.exception(
+                                    "[OUTBOUND_DEDUP] record_outbound_result failed "
+                                    "tenant=%s recipient=*%s",
+                                    _tenant_id,
+                                    (recipient or "")[-4:],
+                                )
                             return "error" not in (retry_data or {})
                         except Exception as retry_exc:  # noqa: BLE001
                             logger.error(

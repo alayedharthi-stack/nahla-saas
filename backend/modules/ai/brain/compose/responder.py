@@ -553,6 +553,12 @@ class DefaultComposer:
                 sub_variant=v_secondary,
                 inbound_text=(ctx.message or ""),
             )
+            if not (reply or "").strip() and self._understood_social_religious_media(ctx):
+                result.data["chosen_path"] = "social_persona_compose_from_empty_template"
+                reply = await self._compose_social_persona_ack(
+                    ctx, result, social_category=category,
+                )
+                return reply
             return self._apply_gender_hint(reply, ctx)
 
         # ── Platform / SaaS inquiry ────────────────────────────────────────
@@ -657,6 +663,16 @@ class DefaultComposer:
                 text = self._social_persona_emergency_fallback_if_needed(
                     text, ctx, result,
                 )
+            elif not (text or "").strip() and self._understood_social_religious_media(ctx):
+                _cat = str(
+                    (decision.args or {}).get("social_category")
+                    or getattr(ctx, "non_commerce_category", "")
+                    or "general_courtesy"
+                )
+                result.data["chosen_path"] = "social_persona_compose_from_empty_llm"
+                text = await self._compose_social_persona_ack(
+                    ctx, result, social_category=_cat,
+                )
             return self._apply_established_greeting_etiquette(text, ctx, decision)
 
         variant = self._variant_idx(ctx)
@@ -723,6 +739,46 @@ class DefaultComposer:
             result.data["chosen_path"] = "social_mirror_emergency_fallback"
             return self._apply_gender_hint(mirrored, ctx)
         return cleaned
+
+    @staticmethod
+    def _understood_social_religious_media(ctx: BrainContext) -> bool:
+        from ..intent.non_commerce_classifier import (  # noqa: PLC0415
+            inbound_has_classified_social_religious_media,
+        )
+
+        nc = str(getattr(ctx, "non_commerce_category", "") or "")
+        if not nc and ctx.intent is not None:
+            nc = str((ctx.intent.slots or {}).get("social_category") or "")
+        return inbound_has_classified_social_religious_media(
+            ctx.message or "",
+            block_commerce=bool(getattr(ctx, "block_commerce_escalation", False)),
+            nc_category=nc,
+        )
+
+    async def _compose_social_persona_ack(
+        self,
+        ctx: BrainContext,
+        result: ActionResult,
+        *,
+        social_category: str,
+    ) -> str:
+        """LLM social persona compose for understood social/religious media."""
+        from ..persona_expression import compose_social_persona_goal  # noqa: PLC0415
+
+        category = (social_category or "general_courtesy").strip() or "general_courtesy"
+        goal = compose_social_persona_goal(category)
+        rs = ctx.reply_state
+        orig_goal = None
+        if rs is not None:
+            orig_goal = rs.response_goal
+            rs.response_goal = goal
+        try:
+            text = await self._llm_compose(ctx, result)
+        finally:
+            if rs is not None and orig_goal is not None:
+                rs.response_goal = orig_goal
+        text = self._social_persona_emergency_fallback_if_needed(text, ctx, result)
+        return self._apply_gender_hint(text, ctx)
 
     def _apply_gender_hint(self, reply: str, ctx: BrainContext) -> str:
         if not reply:

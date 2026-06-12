@@ -30,7 +30,6 @@ PERSONA_TOPICS = frozenset({
 TEMPLATE_ONLY_SOCIAL_CATEGORIES = frozenset({
     "eid_greeting",
     "dua",
-    "religious_media",
     "condolence",
 })
 

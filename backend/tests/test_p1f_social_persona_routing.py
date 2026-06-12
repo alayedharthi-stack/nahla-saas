@@ -259,7 +259,7 @@ class TestTemplateOnlyCategories:
         assert decision.action == ACTION_SOCIAL_REPLY
         assert decision.args.get("social_category") == "condolence"
 
-    def test_policy_clamp_religious_media_stays_template(self) -> None:
+    def test_policy_clamp_religious_media_routes_to_llm_persona(self) -> None:
         from modules.ai.brain.decision.actions import ACTION_CLARIFY
 
         gate = RealPolicyGate()
@@ -280,5 +280,6 @@ class TestTemplateOnlyCategories:
         ctx.block_commerce_escalation = True
         ctx.non_commerce_category = "religious_media"
         out = gate.gate(incoming, ctx)
-        assert out.action == ACTION_SOCIAL_REPLY
+        assert out.action == ACTION_LLM_REPLY
+        assert out.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
         assert out.args.get("social_category") == "religious_media"
