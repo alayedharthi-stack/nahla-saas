@@ -850,7 +850,7 @@ def try_price_query_decision(
             )
             if _ctx_price is not None:
                 return _ctx_price
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price clarify import
             pass
 
         return Decision(
@@ -908,7 +908,7 @@ def clarify_instead_of_top_products(
                 reason=f"browse alternatives — recover from blocked top_products ({reason})",
                 confidence=0.90,
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse recovery imports
         pass
     try:
         from .intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415

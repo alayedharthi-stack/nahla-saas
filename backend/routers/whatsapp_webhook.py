@@ -7854,7 +7854,7 @@ async def _handle_merchant_message(
 
                         if _pavg_global_browse(text or "") or _pavg_browse_alt(text or ""):
                             _pavg_focus = None
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse defocus imports
                         pass
                     _pavg_ctx = build_availability_context(
                         db,
@@ -10458,7 +10458,7 @@ async def _handle_merchant_message(
                                     _delivery_audit["cta_url_sent_count"] = (
                                         int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
                                     )
-                            except Exception:
+                            except Exception:  # noqa: silent-ok — CTA-only fallback must not block card loop
                                 pass
                         continue
                 elif _validate_media is not None:
