@@ -33,6 +33,7 @@ import {
   ResponseQualityData,
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
+import { CategoryBadges, OperationalFactWarning } from './knowledge/aiSettingsHints'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -183,12 +184,18 @@ function AISettingsPanel() {
   return (
     <div className="space-y-5">
 
-      {/* ── Personality ── */}
+      <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-900 leading-relaxed">
+        الحقائق التشغيلية (الأسعار، التوفر، الشحن، الدفع، الموقع، أرقام التواصل) لا تُدار
+        من شخصية المساعد. يجب إدارتها من{' '}
+        <a href="/knowledge-base" className="font-semibold underline">قاعدة المعرفة</a>
+        {' '}أو الكتالوج أو إعدادات التصعيد.
+      </div>
+
+      {/* ── 1. Personality ── */}
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <Bot className="w-4 h-4 text-brand-500" />
           <h2 className="text-sm font-semibold text-slate-900">شخصية المساعد</h2>
-          <p className="text-xs text-slate-400 mr-1">اسم نحلة ونبرتها وطريقة تواصلها</p>
         </div>
         <div className="p-5 grid sm:grid-cols-2 gap-4">
           <Field label="اسم المساعد">
@@ -216,62 +223,52 @@ function AISettingsPanel() {
             </select>
           </Field>
           <div className="sm:col-span-2">
-            <Field label="دور ووصف المساعد" hint="يُقرأ بواسطة الذكاء الاصطناعي لفهم طبيعة المتجر وشخصيته">
+            <Field label="دور ووصف المساعد" hint="سياق المتجر — ليس حقائق تشغيلية">
               <textarea
                 className="input min-h-[90px] resize-y"
                 value={ai.assistant_role}
                 onChange={e => patch({ assistant_role: e.target.value })}
-                placeholder="مثال: أنت مساعدة لمتجر ملابس رجالية فاخرة في الرياض. تُجيب بلهجة ودية ومحترفة وتساعد العملاء في اختيار المنتجات المناسبة..."
               />
+              <CategoryBadges text={ai.assistant_role} />
             </Field>
           </div>
         </div>
       </div>
 
-      {/* ── Owner Instructions ── */}
+      {/* ── 2. Behavior rules ── */}
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <Settings2 className="w-4 h-4 text-brand-500" />
-          <h2 className="text-sm font-semibold text-slate-900">تعليمات المالك</h2>
-          <p className="text-xs text-slate-400 mr-1">قواعد وسياسات تُضاف لكل محادثة</p>
+          <h2 className="text-sm font-semibold text-slate-900">قواعد السلوك</h2>
         </div>
         <div className="p-5 space-y-4">
-          <Field label="تعليمات عامة" hint="قواعد يجب أن تلتزم بها نحلة دائماً في كل محادثة">
+          <Field label="تعليمات عامة (أسلوب وسلوك)" hint="كيف يتصرف المساعد — بدون حقائق تشغيلية">
             <textarea
               className="input min-h-[100px] resize-y"
               value={ai.owner_instructions}
               onChange={e => patch({ owner_instructions: e.target.value })}
-              placeholder="مثال: لا تعطِ وعوداً بالتوصيل قبل التأكد من المخزون. لا تذكر أسعار المنافسين. تعامل مع الشكاوى بأعلى مستوى من الاحترام..."
             />
-          </Field>
-          <Field label="متى تقترح الخصومات؟" hint="كيف يتصرف الذكاء عند الحديث عن العروض والكوبونات">
-            <div className="rounded-lg border border-amber-200/70 bg-amber-50/60 px-3 py-2 mb-2 text-[11px] text-amber-800 leading-relaxed">
-              هذا الحقل يتحكم في نبرة المحادثة فقط. إدارة قواعد الكوبونات الفعلية (نسبة الخصم، الصلاحية) تتم من صفحة <a href="/coupons" className="underline font-semibold">الكوبونات</a>.
-            </div>
-            <textarea
-              className="input min-h-[80px] resize-y"
-              value={ai.coupon_rules}
-              onChange={e => patch({ coupon_rules: e.target.value })}
-              placeholder="مثال: اقترح خصماً فقط عند تردد العميل أو عند عدم الشراء لأكثر من 30 يوماً..."
-            />
-          </Field>
-          <Field label="قواعد التصعيد للإنسان" hint="متى تحوّل نحلة المحادثة للمالك أو فريق الدعم">
-            <textarea
-              className="input min-h-[80px] resize-y"
-              value={ai.escalation_rules}
-              onChange={e => patch({ escalation_rules: e.target.value })}
-              placeholder="مثال: حوّل المحادثة للمالك عند: شكاوى الجودة، الطلبات بأكثر من 500 ريال، العملاء الغاضبين..."
-            />
+            <CategoryBadges text={ai.owner_instructions} />
+            <OperationalFactWarning text={ai.owner_instructions} />
           </Field>
         </div>
       </div>
 
-      {/* ── Discounts & Recommendations ── */}
+      {/* ── 3. Sales rules ── */}
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100">
-          <h2 className="text-sm font-semibold text-slate-900">الخصومات والتوصيات</h2>
+          <h2 className="text-sm font-semibold text-slate-900">قواعد البيع</h2>
+          <p className="text-xs text-slate-500 mt-0.5">متى يُقترح بديل أو عرض — منفصلة عن شخصية المساعد</p>
         </div>
         <div className="p-5 space-y-4">
+          <Field label="متى تقترح الخصومات؟">
+            <textarea
+              className="input min-h-[80px] resize-y"
+              value={ai.coupon_rules}
+              onChange={e => patch({ coupon_rules: e.target.value })}
+            />
+            <CategoryBadges text={ai.coupon_rules} />
+          </Field>
           <Field label="الحد الأقصى للخصم المسموح به">
             <select className="input" value={ai.allowed_discount_levels} onChange={e => patch({ allowed_discount_levels: e.target.value })}>
               <option value="0">بدون خصم</option>
@@ -288,12 +285,37 @@ function AISettingsPanel() {
             value={ai.recommendations_enabled}
             onChange={v => patch({ recommendations_enabled: v })}
           />
-          <div className="p-3 bg-amber-50 rounded-lg border border-amber-200">
-            <p className="text-xs text-amber-700 flex items-start gap-2">
-              <Bot className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              التغييرات تُطبَّق فوراً على المحادثات الجديدة. المحادثات الجارية لا تتأثر.
-            </p>
-          </div>
+        </div>
+      </div>
+
+      {/* ── 4. KB links ── */}
+      <div className="card border-brand-100 bg-brand-50/30">
+        <div className="px-5 py-4 border-b border-brand-100/60">
+          <h2 className="text-sm font-semibold text-slate-900">روابط إلى قاعدة المعرفة</h2>
+        </div>
+        <ul className="p-5 space-y-2 text-sm">
+          <li><a href="/knowledge-base#kb-bucket-shipping" className="text-brand-700 font-medium hover:underline">الشحن والتوصيل</a></li>
+          <li><a href="/knowledge-base#kb-bucket-policies" className="text-brand-700 font-medium hover:underline">السياسات</a></li>
+          <li><a href="/knowledge-base#kb-bucket-payment" className="text-brand-700 font-medium hover:underline">الدفع والتحويل</a></li>
+          <li><a href="/knowledge-base#kb-bucket-escalation" className="text-brand-700 font-medium hover:underline">التصعيد والتواصل</a></li>
+        </ul>
+      </div>
+
+      {/* ── Escalation (legacy field — classified, not deleted) ── */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100">
+          <h2 className="text-sm font-semibold text-slate-900">قواعد التصعيد (نص حر — يُنقل لاحقاً لقاعدة المعرفة)</h2>
+        </div>
+        <div className="p-5">
+          <Field label="متى تحوّل للإنسان">
+            <textarea
+              className="input min-h-[80px] resize-y"
+              value={ai.escalation_rules}
+              onChange={e => patch({ escalation_rules: e.target.value })}
+            />
+            <CategoryBadges text={ai.escalation_rules} />
+            <OperationalFactWarning text={ai.escalation_rules} />
+          </Field>
         </div>
       </div>
 

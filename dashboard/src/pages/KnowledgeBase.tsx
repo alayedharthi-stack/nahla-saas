@@ -73,6 +73,21 @@ import {
   type AIMediaItem,
 } from '../api/intelligenceLibraries'
 import { useLanguage } from '../i18n/context'
+import {
+  UI_BUCKETS,
+  defaultKindForBucket,
+  uiBucketForKind,
+  type UiBucketId,
+} from './knowledge/kbUiCategories'
+import { KbPageHeaderBlock, KbDoctrineBanner } from './knowledge/KbPageHeaderBlock'
+import { KbReviewCenter } from './knowledge/KbReviewCenter'
+import { KbAiPreviewModal, KbAiPreviewButton } from './knowledge/KbAiPreviewModal'
+import {
+  sectionHasSensitiveOperational,
+  sectionNeedsReview,
+  type SearchFilterKey,
+  matchesClientFilter,
+} from './knowledge/kbHeuristics'
 
 // ───────────────────────────────────────────────────────────────────────────
 // Constants + helpers
@@ -796,6 +811,7 @@ function QuickUpdateCard({ mediaPool, onSaveQuick, onFormatWithAI }: QuickUpdate
   const [error, setError] = useState<string | null>(null)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [attached, setAttached] = useState<number[]>([])
+  const [expanded, setExpanded] = useState(false)
 
   const attachedMedia = useMemo(
     () => attached.map(id => mediaPool.find(m => m.id === id)).filter(Boolean) as AIMediaItem[],
@@ -814,6 +830,7 @@ function QuickUpdateCard({ mediaPool, onSaveQuick, onFormatWithAI }: QuickUpdate
       }
       setText('')
       setAttached([])
+      setExpanded(false)
     } catch (err) {
       setError((err as Error).message || 'تعذّر التنفيذ')
     } finally {
@@ -822,96 +839,102 @@ function QuickUpdateCard({ mediaPool, onSaveQuick, onFormatWithAI }: QuickUpdate
   }
 
   return (
-    <div className="card border-brand-100 bg-gradient-to-br from-brand-50/60 to-white">
-      <div className="px-5 py-3.5 border-b border-brand-100/70 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-brand-100 text-brand-700 flex items-center justify-center shrink-0">
-            <Sparkles className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-slate-900">تحديثات سريعة</p>
-            <p className="text-xs text-slate-500">اكتب أي معلومة جديدة، ولا تقلق بشأن المكان — سيتم تصنيفها لاحقاً.</p>
+    <div id="kb-quick-update" className="rounded-xl border border-brand-200/70 bg-white shadow-sm">
+      <button
+        type="button"
+        onClick={() => setExpanded(prev => !prev)}
+        className="w-full px-4 py-3 flex items-center justify-between gap-2 hover:bg-brand-50/40 rounded-xl"
+      >
+        <div className="flex items-center gap-2 min-w-0 text-start">
+          <Sparkles className="w-4 h-4 text-brand-600 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-slate-900">تحديث سريع</p>
+            <p className="text-[11px] text-slate-500">
+              اكتب معلومة جديدة، ونحلة ستقترح القسم المناسب قبل الحفظ.
+            </p>
           </div>
         </div>
-        <span className="hidden sm:inline-flex items-center px-2 py-1 rounded-md bg-amber-100 text-amber-800 text-[10px] font-semibold">
-          AI
-        </span>
-      </div>
+        {expanded ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+      </button>
 
-      <div className="p-5 space-y-3">
-        <textarea
-          value={text}
-          onChange={e => setText(e.target.value)}
-          rows={4}
-          className="input text-sm leading-relaxed"
-          placeholder="مثال: السبت إجازة هذا الأسبوع، أو: شحن الراجحي ينتهي قبل 2 ظهراً، أو: منتج العسل اليمني نفد مؤقتاً، أو: وصفة عسل + ليمون لنزلات البرد."
-          maxLength={4000}
-        />
+      {expanded && (
+        <div className="px-4 pb-4 pt-0 space-y-2.5 border-t border-slate-100">
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            rows={3}
+            className="input text-sm leading-relaxed"
+            placeholder="مثال: السبت إجازة — أو: شحن سمسا 3–5 أيام للرياض."
+            maxLength={4000}
+          />
 
-        {/* Attached media chips */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {attachedMedia.map(m => (
-            <span
-              key={m.id}
-              className="inline-flex items-center gap-1.5 pl-1.5 pr-1 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[11px] text-slate-700"
-            >
-              {mediaIcon(m.media_type)}
-              <span className="truncate max-w-[140px]">{m.title}</span>
-              <button
-                type="button"
-                onClick={() => setAttached(prev => prev.filter(id => id !== m.id))}
-                className="text-slate-400 hover:text-red-500"
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {attachedMedia.map(m => (
+              <span
+                key={m.id}
+                className="inline-flex items-center gap-1 pl-1.5 pr-1 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[11px] text-slate-700"
               >
-                <X className="w-3 h-3" />
-              </button>
-            </span>
-          ))}
-          <button
-            type="button"
-            onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-brand-700 hover:bg-brand-50 border border-dashed border-brand-300"
-          >
-            <Paperclip className="w-3 h-3" /> أرفق وسائط
-          </button>
-        </div>
+                {mediaIcon(m.media_type)}
+                <span className="truncate max-w-[120px]">{m.title}</span>
+                <button
+                  type="button"
+                  onClick={() => setAttached(prev => prev.filter(id => id !== m.id))}
+                  className="text-slate-400 hover:text-red-500"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => setPickerOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-brand-700 border border-dashed border-brand-300"
+            >
+              <Paperclip className="w-3 h-3" /> وسائط
+            </button>
+          </div>
 
-        {error && (
-          <p className="text-xs text-red-600 inline-flex items-center gap-1">
-            <AlertCircle className="w-3.5 h-3.5" /> {error}
-          </p>
-        )}
+          {error && (
+            <p className="text-xs text-red-600 inline-flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" /> {error}
+            </p>
+          )}
 
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <p className="text-[11px] text-slate-500 leading-relaxed flex-1 min-w-[200px]">
-            <Info className="w-3 h-3 inline-block ms-1" />
-            <span className="font-semibold">حفظ كملاحظة</span> يضع النص في "التحديثات السريعة".
-            {' '}
-            <span className="font-semibold">تنسيق ودمج بالذكاء</span> يصنّف النص ويُريك معاينة قبل الحفظ.
-          </p>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap gap-2 justify-end">
             <button
               type="button"
               onClick={() => runWith('format')}
               disabled={busyKind !== null || !text.trim()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-semibold disabled:opacity-50"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-orange-300 bg-orange-50 text-orange-800 text-xs font-semibold disabled:opacity-50"
             >
               {busyKind === 'format' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-              تنسيق ودمج بالذكاء
+              اقتراح التصنيف
             </button>
             <button
               type="button"
               onClick={() => runWith('save')}
               disabled={busyKind !== null || !text.trim()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold disabled:opacity-50"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 text-xs font-semibold disabled:opacity-50"
             >
               {busyKind === 'save' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-              حفظ كملاحظة
+              حفظ كمسودة
+            </button>
+            <button
+              type="button"
+              onClick={() => runWith('format')}
+              disabled={busyKind !== null || !text.trim()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-brand-500 text-white text-xs font-semibold disabled:opacity-50"
+            >
+              {busyKind === 'format' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+              تنسيق بالذكاء
             </button>
           </div>
+          <p className="text-[10px] text-slate-400">
+            المعاينة فقط — لا يُطبَّق أي تغيير حتى توافقك.
+          </p>
         </div>
-      </div>
+      )}
 
-      {/* Quick-update media picker */}
       <MediaPicker
         open={pickerOpen}
         media={mediaPool}
@@ -1309,6 +1332,7 @@ interface SectionCardProps {
   onDetachMedia: (linkId: number) => Promise<void>
   onAttachProduct: () => void
   onDetachProduct: (linkId: number) => Promise<void>
+  onPreview: (section: KnowledgeSection) => void
 }
 
 function SectionCard({
@@ -1321,6 +1345,7 @@ function SectionCard({
   onDetachMedia,
   onAttachProduct,
   onDetachProduct,
+  onPreview,
 }: SectionCardProps) {
   const [busyLink, setBusyLink] = useState<number | null>(null)
   const [busyProductLink, setBusyProductLink] = useState<number | null>(null)
@@ -1352,12 +1377,23 @@ function SectionCard({
                 غير مفعّل
               </span>
             )}
+            {sectionNeedsReview(section) && (
+              <span className="text-[10px] text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">
+                يحتاج مراجعة
+              </span>
+            )}
+            {sectionHasSensitiveOperational(section) && (
+              <span className="text-[10px] text-red-700 bg-red-50 px-1.5 py-0.5 rounded">
+                حقيقة حساسة
+              </span>
+            )}
           </div>
           {section.title && (
             <p className="text-sm font-semibold text-slate-900 truncate">{section.title}</p>
           )}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
+          <KbAiPreviewButton section={section} onPreview={onPreview} />
           <button
             type="button"
             onClick={async () => {
@@ -1581,44 +1617,57 @@ function MediaChip({
 // ───────────────────────────────────────────────────────────────────────────
 
 interface SectionGroupProps {
-  groupId: number
+  bucketOrder: number
   label: string
   description?: string
+  sensitive?: boolean
+  anchorId?: string
   sections: KnowledgeSection[]
   kinds: SectionKindMeta[]
   defaultOpen: boolean
   onAdd: (kind: string) => void
   renderChild: (section: KnowledgeSection) => JSX.Element
+  extraFooter?: React.ReactNode
 }
 
 function SectionGroup({
-  groupId,
+  bucketOrder,
   label,
   description,
+  sensitive,
+  anchorId,
   sections,
   kinds,
   defaultOpen,
   onAdd,
   renderChild,
+  extraFooter,
 }: SectionGroupProps) {
   const [open, setOpen] = useState(defaultOpen)
   const [pickerOpen, setPickerOpen] = useState(false)
-  const kindsInGroup = useMemo(() => kinds.filter(k => k.group === groupId), [kinds, groupId])
-  const visibleSections = sections.filter(s => s.group === groupId)
+  const kindSet = useMemo(() => new Set(kinds.map(k => k.kind)), [kinds])
+  const visibleSections = sections.filter(s => kindSet.has(s.kind))
 
   return (
-    <div className="card overflow-hidden">
+    <div id={anchorId} className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm scroll-mt-4">
       <button
         type="button"
         onClick={() => setOpen(prev => !prev)}
-        className="w-full px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-slate-50/60"
+        className="w-full px-4 py-3 flex items-center justify-between gap-3 hover:bg-slate-50/60"
       >
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-brand-50 text-brand-700 flex items-center justify-center shrink-0 font-bold text-sm">
-            {groupId}
+            {bucketOrder}
           </div>
           <div className="text-start min-w-0">
-            <p className="text-sm font-semibold text-slate-900">{label}</p>
+            <p className="text-sm font-semibold text-slate-900 flex items-center gap-2 flex-wrap">
+              {label}
+              {sensitive && (
+                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-100">
+                  حقيقة تشغيلية حساسة
+                </span>
+              )}
+            </p>
             {description && (
               <p className="text-[11px] text-slate-500 mt-0.5">{description}</p>
             )}
@@ -1641,20 +1690,22 @@ function SectionGroup({
           )}
           {visibleSections.map(s => renderChild(s))}
 
+          {extraFooter}
+
           {/* Add button with kind dropdown */}
-          {kindsInGroup.length > 0 && (
+          {kinds.length > 0 && (
             <div className="pt-2 relative">
               <button
                 type="button"
                 onClick={() => setPickerOpen(prev => !prev)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-semibold"
               >
-                <Plus className="w-3.5 h-3.5" /> أضف قسماً
+                <Plus className="w-3.5 h-3.5" /> أضف معلومة
                 {pickerOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
               </button>
               {pickerOpen && (
-                <div className="absolute z-10 mt-1 start-0 bg-white border border-slate-200 rounded-lg shadow-lg p-1 min-w-[200px]">
-                  {kindsInGroup.map(k => (
+                <div className="absolute z-10 mt-1 start-0 bg-white border border-slate-200 rounded-lg shadow-lg p-1 min-w-[200px] max-h-48 overflow-y-auto">
+                  {kinds.map(k => (
                     <button
                       key={k.kind}
                       type="button"
@@ -1681,7 +1732,13 @@ function SectionGroup({
 // Group 6 — media library quick view (read-only mirror of linked media)
 // ───────────────────────────────────────────────────────────────────────────
 
-function LinkedMediaSummary({ sections }: { sections: KnowledgeSection[] }) {
+function LinkedMediaSummary({
+  sections,
+  compact = false,
+}: {
+  sections: KnowledgeSection[]
+  compact?: boolean
+}) {
   const allLinks = useMemo(() => {
     const out: { link: MediaLinkRow; section: KnowledgeSection }[] = []
     for (const s of sections) {
@@ -1691,6 +1748,49 @@ function LinkedMediaSummary({ sections }: { sections: KnowledgeSection[] }) {
     }
     return out
   }, [sections])
+
+  const body = allLinks.length === 0 ? (
+    <p className="text-xs text-slate-400 py-4 text-center">
+      لم يتم ربط وسائط بأي قسم بعد.
+    </p>
+  ) : (
+    <ul className="space-y-2">
+      {allLinks.map(({ link, section }) => (
+        <li
+          key={link.id}
+          className="flex items-center gap-3 p-2 rounded-lg border border-slate-200 bg-white"
+        >
+          <div className="w-9 h-9 rounded bg-slate-100 flex items-center justify-center shrink-0 overflow-hidden">
+            {link.media?.thumbnail_url ||
+            (link.media?.media_type === 'image' && link.media?.file_url) ? (
+              <img
+                src={link.media?.thumbnail_url || link.media?.file_url}
+                alt={link.media?.title || ''}
+                className="w-full h-full object-cover"
+                onError={e => {
+                  ;(e.currentTarget as HTMLImageElement).style.display = 'none'
+                }}
+              />
+            ) : (
+              mediaIcon(link.media?.media_type)
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-slate-900 truncate">
+              {link.media?.title || `وسيط #${link.media_id}`}
+            </p>
+            <p className="text-[11px] text-slate-500 truncate">
+              {section.title || section.kind} • {LINK_ROLE_LABELS_AR[link.link_role]}
+            </p>
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+
+  if (compact) {
+    return <div className="pt-1">{body}</div>
+  }
 
   return (
     <div className="card overflow-hidden">
@@ -1702,7 +1802,7 @@ function LinkedMediaSummary({ sections }: { sections: KnowledgeSection[] }) {
           <div>
             <p className="text-sm font-semibold text-slate-900">مكتبة الوسائط المرتبطة</p>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              كل الوسائط المرتبطة بأقسام قاعدة المعرفة. لإدارة المكتبة كاملة، افتح صفحة "نحلة الذكية".
+              كل الوسائط المرتبطة بأقسام قاعدة المعرفة.
             </p>
           </div>
         </div>
@@ -1713,46 +1813,7 @@ function LinkedMediaSummary({ sections }: { sections: KnowledgeSection[] }) {
           فتح مكتبة الوسائط <Link2 className="w-3 h-3" />
         </a>
       </div>
-      <div className="p-4">
-        {allLinks.length === 0 ? (
-          <p className="text-xs text-slate-400 py-6 text-center">
-            لم يتم ربط وسائط بأي قسم بعد. استخدم زر "اربط وسائط" داخل أي بطاقة.
-          </p>
-        ) : (
-          <ul className="space-y-2">
-            {allLinks.map(({ link, section }) => (
-              <li
-                key={link.id}
-                className="flex items-center gap-3 p-2 rounded-lg border border-slate-200 bg-white"
-              >
-                <div className="w-9 h-9 rounded bg-slate-100 flex items-center justify-center shrink-0 overflow-hidden">
-                  {link.media?.thumbnail_url ||
-                  (link.media?.media_type === 'image' && link.media?.file_url) ? (
-                    <img
-                      src={link.media?.thumbnail_url || link.media?.file_url}
-                      alt={link.media?.title || ''}
-                      className="w-full h-full object-cover"
-                      onError={e => {
-                        ;(e.currentTarget as HTMLImageElement).style.display = 'none'
-                      }}
-                    />
-                  ) : (
-                    mediaIcon(link.media?.media_type)
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">
-                    {link.media?.title || `وسيط #${link.media_id}`}
-                  </p>
-                  <p className="text-[11px] text-slate-500 truncate">
-                    {section.title || section.kind} • {LINK_ROLE_LABELS_AR[link.link_role]}
-                  </p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <div className="p-4">{body}</div>
     </div>
   )
 }
@@ -2129,24 +2190,28 @@ function ImprovementSuggestionsCard({
 // KB search (P1-G2)
 // ───────────────────────────────────────────────────────────────────────────
 
-type ActiveFilter = 'all' | 'active' | 'inactive'
+type ActiveFilter = SearchFilterKey
 
 function KnowledgeSearchPanel({
   kindLabelByKind,
+  sectionsById,
   onOpenSection,
   onToggle,
   onDelete,
+  onPreview,
   onSearchActiveChange,
 }: {
   kindLabelByKind: Map<string, string>
+  sectionsById: Map<number, KnowledgeSection>
   onOpenSection: (sectionId: number) => void
   onToggle: (sectionId: number) => Promise<void>
   onDelete: (sectionId: number) => Promise<void>
+  onPreview: (section: KnowledgeSection) => void
   onSearchActiveChange: (active: boolean) => void
 }) {
   const [query, setQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState<ActiveFilter>('all')
-  const [results, setResults] = useState<KnowledgeSectionSearchHit[]>([])
+  const [rawResults, setRawResults] = useState<KnowledgeSectionSearchHit[]>([])
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
@@ -2155,13 +2220,21 @@ function KnowledgeSearchPanel({
   const trimmedQuery = query.trim()
   const searchActive = trimmedQuery.length >= 2
 
+  const results = useMemo(() => {
+    return rawResults.filter(hit => {
+      const section = sectionsById.get(hit.id)
+      if (!section) return activeFilter === 'all' || activeFilter === 'active' || activeFilter === 'inactive'
+      return matchesClientFilter(section, activeFilter)
+    })
+  }, [rawResults, sectionsById, activeFilter])
+
   useEffect(() => {
     onSearchActiveChange(searchActive)
   }, [searchActive, onSearchActiveChange])
 
   useEffect(() => {
     if (!searchActive) {
-      setResults([])
+      setRawResults([])
       setSearchError(null)
       setSearching(false)
       return
@@ -2171,13 +2244,17 @@ function KnowledgeSearchPanel({
       setSearchError(null)
       try {
         const onlyActive =
-          activeFilter === 'active' ? true : activeFilter === 'inactive' ? false : null
+          activeFilter === 'active' || activeFilter === 'ai_visible'
+            ? true
+            : activeFilter === 'inactive' || activeFilter === 'ai_hidden'
+              ? false
+              : null
         const res = await knowledgeApi.searchSections({ q: trimmedQuery, onlyActive })
-        setResults(res.items)
+        setRawResults(res.items)
       } catch (err) {
         const msg = (err as Error).message || 'تعذّر البحث'
         setSearchError(msg)
-        setResults([])
+        setRawResults([])
       } finally {
         setSearching(false)
       }
@@ -2211,7 +2288,7 @@ function KnowledgeSearchPanel({
           type="search"
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="ابحث داخل قاعدة المعرفة"
+          placeholder="ابحث في قاعدة المعرفة…"
           aria-labelledby="kb-local-search-heading"
           aria-describedby="kb-local-search-help"
           autoComplete="off"
@@ -2221,12 +2298,19 @@ function KnowledgeSearchPanel({
         />
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 text-xs md:text-sm">
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
         {(
           [
             ['all', 'الكل'],
             ['active', 'النشطة فقط'],
-            ['inactive', 'عرض غير النشطة'],
+            ['drafts', 'المسودات'],
+            ['inactive', 'غير النشطة'],
+            ['needs_review', 'تحتاج مراجعة'],
+            ['has_phone', 'تحتوي رقم'],
+            ['has_price', 'تحتوي سعر'],
+            ['linked_product', 'مرتبطة بمنتج'],
+            ['ai_visible', 'يستخدمها الذكاء'],
+            ['ai_hidden', 'لا يستخدمها الذكاء'],
           ] as const
         ).map(([key, label]) => (
           <button
@@ -2271,13 +2355,22 @@ function KnowledgeSearchPanel({
             {results.length} نتيجة في قاعدة المعرفة
           </p>
           <ul className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden bg-white shadow-sm">
-            {results.map(hit => (
+            {results.map(hit => {
+              const full = sectionsById.get(hit.id)
+              const aiUsed = hit.is_active && !hit.deleted_at
+              return (
               <li key={hit.id} className="p-3.5 md:p-4 hover:bg-slate-50/80">
                 <div className="flex items-start justify-between gap-2 mb-1">
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
                       <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-brand-50 text-brand-700">
                         {kindLabelByKind.get(hit.kind) || hit.kind}
+                      </span>
+                      <span className={classNames(
+                        'text-[10px] px-1.5 py-0.5 rounded font-medium',
+                        aiUsed ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500',
+                      )}>
+                        {aiUsed ? 'يستخدمها الذكاء' : 'لا يستخدمها الذكاء'}
                       </span>
                       {!hit.is_active && (
                         <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
@@ -2290,8 +2383,23 @@ function KnowledgeSearchPanel({
                         {hit.title}
                       </p>
                     )}
+                    {hit.updated_at && (
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        آخر تحديث: {new Date(hit.updated_at).toLocaleDateString('ar-SA')}
+                      </p>
+                    )}
                   </div>
-                  <div className="flex items-center gap-0.5 shrink-0">
+                  <div className="flex items-center gap-0.5 shrink-0 flex-wrap justify-end">
+                    {full && (
+                      <button
+                        type="button"
+                        title="معاينة كما يراها الذكاء"
+                        onClick={() => onPreview(full)}
+                        className="px-2 py-1 text-[10px] rounded-lg border border-brand-200 text-brand-700 font-medium"
+                      >
+                        معاينة AI
+                      </button>
+                    )}
                     <button
                       type="button"
                       title="فتح"
@@ -2349,7 +2457,7 @@ function KnowledgeSearchPanel({
                         try {
                           await onDelete(hit.id)
                           setConfirmDeleteId(null)
-                          setResults(prev => prev.filter(r => r.id !== hit.id))
+                          setRawResults(prev => prev.filter(r => r.id !== hit.id))
                         } finally {
                           setBusyId(null)
                         }
@@ -2368,7 +2476,7 @@ function KnowledgeSearchPanel({
                   </div>
                 )}
               </li>
-            ))}
+            )})}
           </ul>
         </div>
       )}
@@ -2405,6 +2513,7 @@ export default function KnowledgeBase() {
   // Phase 2 — draft preview drawer
   const [activeDraft, setActiveDraft] = useState<KnowledgeDraft | null>(null)
   const [kbSearchActive, setKbSearchActive] = useState(false)
+  const [previewSection, setPreviewSection] = useState<KnowledgeSection | null>(null)
 
   const handleKbSearchActiveChange = useCallback((active: boolean) => {
     setKbSearchActive(active)
@@ -2634,8 +2743,53 @@ export default function KnowledgeBase() {
     [sectionsById, openEdit],
   )
 
-  const groups = registry?.groups || []
   const kinds = registry?.kinds || []
+
+  const kindsForBucket = useCallback(
+    (bucketId: UiBucketId) => {
+      const bucket = UI_BUCKETS.find(b => b.id === bucketId)
+      if (!bucket || bucket.kinds.length === 0) return kinds
+      const allowed = new Set(bucket.kinds as readonly string[])
+      return kinds.filter(k => allowed.has(k.kind))
+    },
+    [kinds],
+  )
+
+  const sectionsForBucket = useCallback(
+    (bucketId: UiBucketId) =>
+      sections.filter(s => uiBucketForKind(s.kind) === bucketId),
+    [sections],
+  )
+
+  const renderSectionCard = useCallback(
+    (s: KnowledgeSection) => (
+      <SectionCard
+        key={s.id}
+        section={s}
+        kindLabel={kindLabelByKind.get(s.kind) || s.kind}
+        onEdit={() => openEdit(s)}
+        onDelete={() => handleDeleteSection(s.id)}
+        onToggle={() => handleToggleSection(s.id)}
+        onAttachMedia={() => setPickerSectionId(s.id)}
+        onDetachMedia={linkId => handleUnlinkMedia(s.id, linkId)}
+        onAttachProduct={() => setProductPickerSectionId(s.id)}
+        onDetachProduct={linkId => handleUnlinkProduct(s.id, linkId)}
+        onPreview={setPreviewSection}
+      />
+    ),
+    [
+      kindLabelByKind,
+      openEdit,
+      handleDeleteSection,
+      handleToggleSection,
+      handleUnlinkMedia,
+      handleUnlinkProduct,
+    ],
+  )
+
+  const scrollTo = useCallback((id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
 
   const pickerSection = pickerSectionId != null
     ? sections.find(s => s.id === pickerSectionId) || null
@@ -2658,22 +2812,19 @@ export default function KnowledgeBase() {
   }
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title={t(tr => tr.pages.knowledgeBase.title)}
-        subtitle={t(tr => tr.pages.knowledgeBase.subtitle)}
-        action={
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-brand-50 text-brand-700 text-[11px] font-semibold">
-            <BookOpen className="w-3 h-3" /> Phase 1
-          </span>
-        }
-      />
-
-      {/* Toasts */}
+    <div className="space-y-4 max-w-5xl mx-auto pb-8">
       {toast && <SuccessToast text={toast} onDismiss={() => setToast(null)} />}
       {error && <ErrorToast text={error} onDismiss={() => setError(null)} />}
 
-      {/* Platform precedence reminder */}
+      <KbPageHeaderBlock
+        sections={sections}
+        onAddInfo={() => openCreate('store_story')}
+        onQuickUpdate={() => scrollTo('kb-quick-update')}
+        onOrganize={() => scrollTo('kb-review-center')}
+        onReviewCenter={() => scrollTo('kb-review-center')}
+      />
+
+      <KbDoctrineBanner />
       <PlatformPrecedenceCard platformLabel={platformLabel} />
 
       {/* Legacy migration */}
@@ -2700,63 +2851,98 @@ export default function KnowledgeBase() {
       {/* KB search — dedicated local field directly above section buckets */}
       <KnowledgeSearchPanel
         kindLabelByKind={kindLabelByKind}
+        sectionsById={sectionsById}
         onOpenSection={openSectionById}
         onToggle={handleToggleSection}
         onDelete={handleDeleteSection}
+        onPreview={setPreviewSection}
         onSearchActiveChange={handleKbSearchActiveChange}
       />
 
       {!kbSearchActive && (
         <>
-          {/* KB-Improve V1 — proactive improvement suggestions */}
-          <ImprovementSuggestionsCard
+          {UI_BUCKETS.filter(b => b.id !== 'review').map(bucket => {
+            if (bucket.id === 'media') {
+              return (
+                <SectionGroup
+                  key={bucket.id}
+                  bucketOrder={bucket.order}
+                  anchorId={`kb-bucket-${bucket.id}`}
+                  label={bucket.label_ar}
+                  description={bucket.description_ar}
+                  sections={sections.filter(s => (s.media_links?.length ?? 0) > 0)}
+                  kinds={kindsForBucket('payment')}
+                  defaultOpen={false}
+                  onAdd={() => openCreate('payment_method')}
+                  renderChild={renderSectionCard}
+                  extraFooter={<LinkedMediaSummary sections={sections} compact />}
+                />
+              )
+            }
+            if (bucket.id === 'sales_rules') {
+              return (
+                <SectionGroup
+                  key={bucket.id}
+                  bucketOrder={bucket.order}
+                  anchorId={`kb-bucket-${bucket.id}`}
+                  label={bucket.label_ar}
+                  description={bucket.description_ar}
+                  sections={[]}
+                  kinds={[]}
+                  defaultOpen={false}
+                  onAdd={() => openCreate('custom')}
+                  renderChild={renderSectionCard}
+                  extraFooter={
+                    <p className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                      قواعد البيع والعروض تُكمّل من{' '}
+                      <a href="/intelligence" className="text-brand-600 font-semibold underline">
+                        نحلة الذكية → قواعد البيع
+                      </a>
+                      . الحقائق التشغيلية للأسعار والتوفر من الكتالوج.
+                    </p>
+                  }
+                />
+              )
+            }
+            const bucketSections = sectionsForBucket(bucket.id)
+            return (
+              <SectionGroup
+                key={bucket.id}
+                bucketOrder={bucket.order}
+                anchorId={`kb-bucket-${bucket.id}`}
+                label={bucket.label_ar}
+                description={bucket.description_ar}
+                sensitive={bucket.sensitive}
+                sections={bucketSections}
+                kinds={kindsForBucket(bucket.id)}
+                defaultOpen={bucket.id === 'store_info' || bucket.id === 'assistant_behavior'}
+                onAdd={() => openCreate(defaultKindForBucket(bucket.id))}
+                renderChild={renderSectionCard}
+                extraFooter={
+                  bucket.id === 'product_notes' ? (
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      لا تضع الأسعار أو التوفر هنا إذا كانت موجودة في الكتالوج — المصدر
+                      الرسمي للأسعار والمخزون هو منصة التجارة.
+                    </p>
+                  ) : undefined
+                }
+              />
+            )
+          })}
+
+          <KbReviewCenter
             kindLabelByKind={kindLabelByKind}
-            onApproved={draft => setActiveDraft(draft)}
-            onToast={text => setToast(text)}
-            onError={text => setError(text)}
+            onOpenSection={openSectionById}
+            improvementSlot={
+              <ImprovementSuggestionsCard
+                kindLabelByKind={kindLabelByKind}
+                onApproved={draft => setActiveDraft(draft)}
+                onToast={text => setToast(text)}
+                onError={text => setError(text)}
+              />
+            }
           />
 
-          {/* Groups 1..5 */}
-          {groups
-            .filter(g => g.id >= 1 && g.id <= 5)
-            .map(g => (
-              <SectionGroup
-                key={g.id}
-                groupId={g.id}
-                label={g.label_ar}
-                description={
-                  g.id === 1
-                    ? 'ملاحظات سريعة كتبتها مؤخراً (سيتم تصنيفها في Phase 2).'
-                    : g.id === 2
-                    ? 'القصة، النبرة، اللهجة، أوقات العمل، الفروع.'
-                    : g.id === 3
-                    ? 'الدفع، التحويل البنكي، الدفع عند الاستلام، الإرجاع، الضمان.'
-                    : g.id === 4
-                    ? 'الشركات، المناطق، الشحن المبرد، ملاحظات الصيف.'
-                    : 'طريقة الاستخدام، الوصفات، الفوائد، التخزين، الفروقات.'
-                }
-                sections={sections}
-                kinds={kinds}
-                defaultOpen={g.id === 1 || g.id === 2}
-                onAdd={openCreate}
-                renderChild={s => (
-                  <SectionCard
-                    key={s.id}
-                    section={s}
-                    kindLabel={kindLabelByKind.get(s.kind) || s.kind}
-                    onEdit={() => openEdit(s)}
-                    onDelete={() => handleDeleteSection(s.id)}
-                    onToggle={() => handleToggleSection(s.id)}
-                    onAttachMedia={() => setPickerSectionId(s.id)}
-                    onDetachMedia={linkId => handleUnlinkMedia(s.id, linkId)}
-                    onAttachProduct={() => setProductPickerSectionId(s.id)}
-                    onDetachProduct={linkId => handleUnlinkProduct(s.id, linkId)}
-                  />
-                )}
-              />
-            ))}
-
-          {/* Group 6 — linked media summary */}
           <LinkedMediaSummary sections={sections} />
         </>
       )}
@@ -2804,6 +2990,11 @@ export default function KnowledgeBase() {
         onApprove={handleApproveDraft}
         onReject={handleRejectDraft}
         onClose={() => setActiveDraft(null)}
+      />
+
+      <KbAiPreviewModal
+        section={previewSection}
+        onClose={() => setPreviewSection(null)}
       />
     </div>
   )
