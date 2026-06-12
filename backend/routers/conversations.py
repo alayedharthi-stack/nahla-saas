@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
+from core.conversation_timeline import merge_trace_rows_into_timeline
 from core.wa_usage import has_open_service_window
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
@@ -1431,35 +1432,12 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
         .all()
     )
 
-    def _near(ts):
-        if not ts:
-            return False
-        for met in me_times:
-            if met and abs((ts - met).total_seconds()) < 3:
-                return True
-        return False
-
-    for idx, row in enumerate(trace_rows):
-        if row.message and not _near(row.created_at):
-            messages.append({
-                "id": f"in-{idx}",
-                "direction": "in",
-                "body": row.message,
-                "time": row.created_at.isoformat() if row.created_at else "",
-                "isAI": False,
-                "eventType": "customer",
-                "_ts": row.created_at,
-            })
-        if row.response_text and not _near(row.created_at):
-            messages.append({
-                "id": f"out-{idx}",
-                "direction": "out",
-                "body": row.response_text,
-                "time": row.created_at.isoformat() if row.created_at else "",
-                "isAI": bool(row.orchestrator_used),
-                "eventType": "ai",
-                "_ts": row.created_at,
-            })
+    merge_trace_rows_into_timeline(
+        messages,
+        trace_rows,
+        me_times,
+        include_trace_outbound=False,
+    )
 
     messages.sort(key=lambda m: m.get("_ts") or "")
     messages = messages[-limit:]

@@ -393,6 +393,44 @@ def _log_empty_outbound_suppressed(
     )
 
 
+def _maybe_log_outbound_candidate_abort(
+    *,
+    tenant_id: int,
+    conversation_id: int | None,
+    customer_id: int | None,
+    brain_candidate: str | None,
+    final_reply: str | None,
+    abort_reason: str,
+    final_stage: str,
+    suppressor: str | None = None,
+    expression_owner: str | None = None,
+) -> None:
+    """Structured audit when brain produced text that never persisted/sent."""
+    candidate = (brain_candidate or "").strip()
+    if not candidate or (final_reply or "").strip():
+        return
+    try:
+        from core.outbound_abort_audit import log_outbound_candidate_abort  # noqa: PLC0415
+
+        log_outbound_candidate_abort(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            customer_id=customer_id,
+            generated_candidate_non_empty=True,
+            final_response_empty=True,
+            abort_reason=abort_reason,
+            final_stage=final_stage,
+            suppressor=suppressor,
+            expression_owner=expression_owner,
+            candidate_preview=candidate,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[OUTBOUND_CANDIDATE_ABORT_AUDIT_FAILED] tenant=%s",
+            tenant_id,
+        )
+
+
 # ── Smart notification helpers ────────────────────────────────────────────────
 
 def _should_notify_merchant_email(
@@ -5277,6 +5315,10 @@ async def _handle_merchant_message(
         sync_persona_to_turn_trace as _sync_po_trace,
     )
     _persona_ownership = _PORecord()
+    _brain_reply_candidate = ""
+    _outbound_abort_suppressor = ""
+    _outbound_abort_audited = False
+    _outbound_customer_id: int | None = None
 
     def _sync_persona_observability() -> None:
         _sync_po_trace(_trace, _persona_ownership)
@@ -6536,6 +6578,8 @@ async def _handle_merchant_message(
                         _relational_moment = ""
                     else:
                         reply   = brain_result.get("reply", "") or ""
+                        _brain_reply_candidate = (reply or "").strip()
+                        _outbound_customer_id = profile.get("id")
                         _brain_buttons = brain_result.get("buttons") or []
                         _brain_handoff = bool(brain_result.get("handoff"))
                         # Tenant 33 #49 (Commit 3): the brain pipeline
@@ -7507,6 +7551,7 @@ async def _handle_merchant_message(
                                 tenant_id, to, _overlap,
                                 _orig_len, _brain_active,
                             )
+                            _outbound_abort_suppressor = "chat_dedup_hard"
                             reply = ""
                         else:
                             _persona_ownership.on_text_replaced(
@@ -7946,6 +7991,19 @@ async def _handle_merchant_message(
 
         # Save outbound reply after generation (skip empty — P0 wire suppress).
         if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
+            if not _outbound_abort_audited:
+                _maybe_log_outbound_candidate_abort(
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                    customer_id=_outbound_customer_id,
+                    brain_candidate=_brain_reply_candidate,
+                    final_reply=reply,
+                    abort_reason="skip_persist",
+                    final_stage="pre_persist",
+                    suppressor=_outbound_abort_suppressor or None,
+                    expression_owner=_persona_ownership.expression_owner,
+                )
+                _outbound_abort_audited = True
             _log_empty_outbound_suppressed(
                 tenant_id=tenant_id,
                 to=to,
@@ -9652,6 +9710,19 @@ async def _handle_merchant_message(
                 (_product_attachments or []) + (_media_attachments or [])
             ),
         ):
+            if not _outbound_abort_audited:
+                _maybe_log_outbound_candidate_abort(
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                    customer_id=_outbound_customer_id,
+                    brain_candidate=_brain_reply_candidate,
+                    final_reply=reply,
+                    abort_reason="skip_wire_send",
+                    final_stage="pre_provider_send",
+                    suppressor=_outbound_abort_suppressor or None,
+                    expression_owner=_persona_ownership.expression_owner,
+                )
+                _outbound_abort_audited = True
             _log_empty_outbound_suppressed(
                 tenant_id=tenant_id,
                 to=to,
