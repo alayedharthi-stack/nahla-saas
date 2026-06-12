@@ -459,6 +459,11 @@ export const knowledgeApi = {
       }),
     })
   },
+
+  /** KB-2 repair advisor — preview-only, no mutations. */
+  getRepairPreview() {
+    return apiCall<RepairPreviewResponse>('/knowledge/repair/preview')
+  },
 }
 
 
@@ -524,6 +529,31 @@ export interface ImprovementSuggestionsResponse {
   scanned_sections: number
   model: string
   conversation_signals?: ConversationSignalSummary
+}
+
+// ── KB-2 Repair preview ───────────────────────────────────────────────────
+
+export type RepairSuggestionKind = 'move' | 'duplicate' | 'contamination'
+
+export interface RepairSuggestion {
+  kind: RepairSuggestionKind
+  severity: 'info' | 'warn' | 'critical'
+  section_ids: number[]
+  title_preview: string
+  body_preview: string
+  current_kind: string | null
+  suggested_kind: string | null
+  reason_ar: string
+}
+
+export interface RepairPreviewResponse {
+  suggestions: RepairSuggestion[]
+  summary: {
+    total: number
+    move: number
+    duplicate: number
+    contamination: number
+  }
 }
 
 // Re-export the AIMediaItem-related types from intelligenceLibraries so
