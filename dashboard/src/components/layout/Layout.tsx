@@ -208,7 +208,7 @@ export default function Layout() {
        * ms-0 on mobile (sidebar overlays as a drawer).
        * ms-60 on lg+ (sidebar is always visible and takes up 240 px).
        */}
-      <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-dvh overflow-x-hidden">
+      <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-0 h-dvh max-h-dvh overflow-hidden">
         <Header
           title={meta.title}
           subtitle={meta.subtitle}
@@ -217,7 +217,7 @@ export default function Layout() {
         <ImpersonationBanner />
         <SupportAccessWarningBanner />
         <TrialBanner />
-        <main dir={dir} className="flex-1 p-3 md:p-6 overflow-x-auto">
+        <main dir={dir} className="flex-1 min-h-0 p-3 md:p-6 overflow-y-auto overflow-x-hidden dashboard-main-scroll">
           <Outlet />
         </main>
         {/* iOS home-bar safe area */}

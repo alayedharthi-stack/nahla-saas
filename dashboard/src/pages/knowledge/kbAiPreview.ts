@@ -1,5 +1,5 @@
 /**
- * Client-side "as AI sees it" preview (PR-2).
+ * Client-side "as Nahlah uses it" preview (PR-2).
  *
  * Mirrors backend visibility rules from tenant_overlay + core/knowledge
  * for merchant education only — does NOT drive runtime.
@@ -34,7 +34,7 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
   const groupNum = registryGroupForKind(kind)
 
   if (!active) {
-    messages.push('هذه المعلومة غير نشطة، ولن يستخدمها الذكاء.')
+    messages.push('هذه المعلومة غير نشطة — لن تُستخدم في الردود.')
     return {
       active: false,
       inPrompt: false,
@@ -49,7 +49,7 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
 
   if (behavioral && kind === 'escalation_rules') {
     messages.push(
-      'هذه المعلومة نشطة وستُحقَن في طبقة سلوك/سياسة عالية الأولوية — وليس في facts block.',
+      'هذه المعلومة نشطة وتُستخدم لقواعد التصعيد وسلوك المساعد — وليست حقائق تجارية.',
     )
     return {
       active: true,
@@ -65,7 +65,7 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
 
   if (behavioral) {
     messages.push(
-      'هذه المعلومة نشطة وتُحقَن كقواعد سلوك في الطبقة عالية الأولوية — ليست حقائق تجارية.',
+      'هذه المعلومة نشطة وتُستخدم كقواعد سلوك للمساعد — وليست حقائق تجارية.',
     )
     return {
       active: true,
@@ -81,10 +81,10 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
 
   if (kind === 'goal_based_recommendation' || metadataOnly) {
     messages.push(
-      'هذه المعلومة محفوظة كبيانات منظمة (metadata). قد لا تظهر نصياً في facts block إلا عبر consumer مخصص (مثل توصيات حسب الهدف).',
+      'هذه المعلومة محفوظة كبيانات منظمة. قد لا تظهر نصّياً في الردود إلا عند الحاجة (مثل التوصيات حسب الهدف).',
     )
     if (active && !behavioral) {
-      messages.push('العنوان والنص قد يظهران أيضاً في facts block إذا كان النص غير فارغ.')
+      messages.push('قد تظهر أيضاً في الردود إذا كان النص غير فارغ.')
     }
     return {
       active: true,
@@ -99,11 +99,11 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
   }
 
   const groupLabel = PROMPT_FACT_GROUP_AR[groupNum] ?? 'معلومات المتجر'
-  messages.push(`هذه المعلومة نشطة وستظهر للذكاء ضمن قسم «${groupLabel}».`)
+  messages.push(`هذه المعلومة نشطة — قد تستخدمها نحلة في الردود ضمن قسم «${groupLabel}».`)
 
   if (productScoped) {
     messages.push(
-      'قسم مرتبط بمنتج: قد يُقيد ظهوره عندما لا يكون المحادثة عن أحد المنتجات المربوطة.',
+      'قسم مرتبط بمنتج: قد يُقيد ظهوره عندما لا تكون المحادثة عن أحد المنتجات المربوطة.',
     )
   }
 
@@ -111,10 +111,10 @@ export function buildAiPreviewVerdict(section: KnowledgeSection): AiPreviewVerdi
     const withKey = section.media_links.filter(l => l.media?.media_key)
     if (withKey.length > 0) {
       messages.push(
-        `وسائط مرتبطة: سيُعرَض ${withKey.length} marker [MEDIA_KEY:…] في facts block عند وجود media_key.`,
+        `وسائط مرتبطة: قد تُرفق ${withKey.length} وسيط في الردود عند الحاجة.`,
       )
     } else {
-      messages.push('وسائط مرتبطة بدون media_key — قد لا تظهر كـ marker في facts block.')
+      messages.push('وسائط مرتبطة — قد لا تُرفق في الردود بدون مفتاح وسائط.')
     }
   }
 

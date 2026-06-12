@@ -542,7 +542,7 @@ function ProductPicker({ open, alreadyLinkedIds, onPick, onClose }: ProductPicke
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">
             <Info className="w-3 h-3 inline-block ms-1" />
-            عند ربط منتج، يستخدم الذكاء هذا القسم فقط عند الحديث عن المنتج المرتبط.
+            عند ربط منتج، قد تستخدم نحلة هذا القسم فقط عند الحديث عن المنتج المرتبط.
             الأقسام غير المربوطة بمنتج تبقى عامة لكل المحادثات.
           </p>
         </div>
@@ -859,6 +859,10 @@ function QuickUpdateCard({ mediaPool, onSaveQuick, onFormatWithAI }: QuickUpdate
 
       {expanded && (
         <div className="px-4 pb-4 pt-0 space-y-2.5 border-t border-slate-100">
+          <p className="text-[10px] text-slate-500 leading-relaxed pt-2">
+            لن يتم استخدام المعلومة في الردود إلا بعد حفظها كعنصر نشط ومسموح
+            للاستخدام.
+          </p>
           <textarea
             value={text}
             onChange={e => setText(e.target.value)}
@@ -1093,13 +1097,12 @@ function DraftPreviewDrawer({
               <Wand2 className="w-4 h-4" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-slate-900">معاينة تنسيق الذكاء</p>
+              <p className="text-sm font-semibold text-slate-900">معاينة التنسيق المقترح</p>
               <p className="text-[11px] text-slate-500">
                 راجع الاقتراحات قبل الحفظ. الثقة:{' '}
                 <span className="font-semibold">
                   {Math.round((draft.proposal.confidence || 0) * 100)}%
                 </span>
-                {draft.proposal.model ? ` • ${draft.proposal.model}` : ''}
               </p>
             </div>
           </div>
@@ -1127,7 +1130,7 @@ function DraftPreviewDrawer({
           {conflicts.length > 0 && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
               <p className="text-xs font-semibold text-amber-900 mb-1.5 inline-flex items-center gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5" /> تعارضات اكتشفها الذكاء
+                <AlertTriangle className="w-3.5 h-3.5" /> تعارضات اكتشفتها نحلة
               </p>
               <ul className="space-y-1 text-xs text-amber-800">
                 {conflicts.map((c, idx) => (
@@ -1149,7 +1152,7 @@ function DraftPreviewDrawer({
           {isFallback && (
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
               <p className="font-semibold mb-1 inline-flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5" /> الذكاء لم يستطع التصنيف
+                <Info className="w-3.5 h-3.5" /> لم نستطع اقتراح تصنيف تلقائي
               </p>
               <p>تم حفظ النص كملاحظة سريعة. يمكنك نقله يدوياً إلى القسم المناسب لاحقاً.</p>
             </div>
@@ -1158,7 +1161,7 @@ function DraftPreviewDrawer({
           {/* Proposed ops */}
           {ops.length === 0 ? (
             <p className="text-sm text-slate-400 py-6 text-center">
-              لم يُنتج الذكاء أي اقتراحات.
+              لم تُنتج أي اقتراحات.
             </p>
           ) : (
             <ul className="space-y-2.5">
@@ -1982,15 +1985,17 @@ function ImprovementSuggestionsCard({
           </div>
           <div className="min-w-0">
             <p className="text-sm font-semibold text-slate-900">
-              اقتراحات نحلة لتحسين المعرفة ✨
+              اقتراحات ذكية لتحسين المعرفة
             </p>
             <p className="text-xs text-slate-500">
-              نحلل قاعدة المعرفة ونقترح تحسينات تساعد الذكاء يرد بدقة أكبر — كل اقتراح يحتاج موافقتك.
+              تحلل نحلة قاعدة المعرفة وتقترح تحسينات مثل نقل المعلومة للقسم الصحيح،
+              كشف التكرار، أو التنبيه على المعلومات الناقصة. كل اقتراح يحتاج
+              موافقتك قبل التطبيق.
             </p>
           </div>
         </div>
         <span className="hidden sm:inline-flex items-center px-2 py-1 rounded-md bg-purple-100 text-purple-800 text-[10px] font-semibold">
-          Preview
+          معاينة
         </span>
       </div>
 
@@ -2143,7 +2148,7 @@ function ImprovementSuggestionsCard({
                           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-600 hover:bg-slate-100"
                           title="لن يظهر هذا الاقتراح مرة أخرى لمدة 7 أيام"
                         >
-                          رفض
+                          تجاهل
                         </button>
                         <button
                           type="button"
@@ -2163,7 +2168,7 @@ function ImprovementSuggestionsCard({
                           className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-purple-500 hover:bg-purple-600 text-white text-[11px] font-semibold disabled:opacity-50"
                         >
                           {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                          تطبيق كمقترح
+                          تطبيق الاقتراح
                         </button>
                       </>
                     )}
@@ -2309,8 +2314,8 @@ function KnowledgeSearchPanel({
             ['has_phone', 'تحتوي رقم'],
             ['has_price', 'تحتوي سعر'],
             ['linked_product', 'مرتبطة بمنتج'],
-            ['ai_visible', 'يستخدمها الذكاء'],
-            ['ai_hidden', 'لا يستخدمها الذكاء'],
+            ['ai_visible', 'يُستخدم في الردود'],
+            ['ai_hidden', 'غير مستخدم في الردود'],
           ] as const
         ).map(([key, label]) => (
           <button
@@ -2370,7 +2375,7 @@ function KnowledgeSearchPanel({
                         'text-[10px] px-1.5 py-0.5 rounded font-medium',
                         aiUsed ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500',
                       )}>
-                        {aiUsed ? 'يستخدمها الذكاء' : 'لا يستخدمها الذكاء'}
+                        {aiUsed ? 'قد تستخدمها نحلة' : 'لا تُستخدم في الردود'}
                       </span>
                       {!hit.is_active && (
                         <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
@@ -2393,11 +2398,11 @@ function KnowledgeSearchPanel({
                     {full && (
                       <button
                         type="button"
-                        title="معاينة كما يراها الذكاء"
+                        title="معاينة كما تراها نحلة"
                         onClick={() => onPreview(full)}
                         className="px-2 py-1 text-[10px] rounded-lg border border-brand-200 text-brand-700 font-medium"
                       >
-                        معاينة AI
+                        معاينة كما تراها نحلة
                       </button>
                     )}
                     <button
@@ -2602,7 +2607,7 @@ export default function KnowledgeBase() {
       try {
         const updated = await knowledgeApi.approveDraft(draftId, opIds)
         setActiveDraft(null)
-        setToast(`تم تطبيق ${updated.applied_op_ids.length} اقتراحاً من الذكاء`)
+        setToast(`تم تطبيق ${updated.applied_op_ids.length} اقتراحاً`)
         void refreshSections().catch(() => {})
       } catch (err) {
         const msg = (err as Error).message || 'فشل التطبيق'
@@ -2635,7 +2640,7 @@ export default function KnowledgeBase() {
     async (draftId: number) => {
       await knowledgeApi.rejectDraft(draftId)
       setActiveDraft(null)
-      setToast('تم تجاهل اقتراحات الذكاء')
+      setToast('تم تجاهل الاقتراحات')
     },
     [],
   )

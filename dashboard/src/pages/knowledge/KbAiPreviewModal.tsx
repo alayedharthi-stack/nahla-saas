@@ -7,6 +7,12 @@ function classNames(...parts: Array<string | false | null | undefined>): string 
   return parts.filter(Boolean).join(' ')
 }
 
+const CHANNEL_LABEL_AR: Record<string, string> = {
+  facts: 'معلومات المتجر',
+  behavior: 'سلوك المساعد',
+  metadata_consumer: 'بيانات منظمة',
+}
+
 interface KbAiPreviewModalProps {
   section: KnowledgeSection | null
   onClose: () => void
@@ -17,6 +23,7 @@ export function KbAiPreviewModal({ section, onClose }: KbAiPreviewModalProps) {
 
   const verdict = buildAiPreviewVerdict(section)
   const sensitive = sectionHasSensitiveOperational(section)
+  const channelLabel = CHANNEL_LABEL_AR[verdict.channel]
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-2 sm:p-6">
@@ -25,7 +32,7 @@ export function KbAiPreviewModal({ section, onClose }: KbAiPreviewModalProps) {
           <div className="flex items-center gap-2 min-w-0">
             <Bot className="w-4 h-4 text-brand-500 shrink-0" />
             <h3 className="text-sm font-semibold text-slate-900 truncate">
-              معاينة كما يراها الذكاء
+              معاينة كما تراها نحلة
             </h3>
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700">
@@ -45,11 +52,11 @@ export function KbAiPreviewModal({ section, onClose }: KbAiPreviewModalProps) {
               tone={verdict.active ? 'green' : 'gray'}
             />
             <StatusPill
-              label={verdict.inPrompt ? 'يدخل الـ prompt' : 'لا يدخل الـ prompt'}
+              label={verdict.inPrompt ? 'قابل للاستخدام في الردود' : 'غير مستخدم في الردود'}
               tone={verdict.inPrompt ? 'blue' : 'gray'}
             />
-            {verdict.channel !== 'none' && (
-              <StatusPill label={`قناة: ${verdict.channel}`} tone="purple" />
+            {channelLabel && (
+              <StatusPill label={channelLabel} tone="purple" />
             )}
             {sensitive && (
               <StatusPill label="حقيقة تشغيلية حساسة" tone="amber" />
@@ -79,14 +86,14 @@ export function KbAiPreviewModal({ section, onClose }: KbAiPreviewModalProps) {
             <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-900 flex gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <span>
-                أرقام الدفع والتواصل حقائق تشغيلية — يجب أن تطابق الواقع. الذكاء لا يخترع
-                أرقاماً غير مهيأة.
+                أرقام الدفع والتواصل حقائق تشغيلية — يجب أن تطابق الواقع. نحلة لا
+                تخترع أرقاماً غير مهيأة.
               </span>
             </div>
           )}
 
           <p className="text-[10px] text-slate-400 leading-relaxed border-t border-slate-100 pt-3">
-            هذه المعاينة تعليمية وتعكس قواعد العرض الحالية — لا تغيّر سلوك الإنتاج.
+            معاينة تعليمية — تعكس ما قد تستخدمه نحلة في الردود، ولا تغيّر سلوك متجرك.
           </p>
         </div>
 
@@ -141,7 +148,7 @@ export function KbAiPreviewButton({
   return (
     <button
       type="button"
-      title="معاينة كما يراها الذكاء"
+      title="معاينة كما تراها نحلة"
       onClick={() => onPreview(section)}
       className="p-1.5 rounded hover:bg-brand-50 text-brand-600"
     >

@@ -147,8 +147,9 @@ export function KbDoctrineBanner() {
     <div className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-xs text-slate-700 leading-relaxed flex gap-2">
       <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
       <span>
-        الحقائق التشغيلية (أسعار، توفر، شحن، دفع، أرقام تواصل) يجب أن تطابق الكتالوج
-        أو قاعدة المعرفة — الشخصية والنبرة في «سلوك المساعد» و«نحلة الذكية».
+        الحقائق التشغيلية لها مصادر محددة: الأسعار والتوفر والأصناف من الكتالوج،
+        الشحن والدفع والسياسات من قاعدة المعرفة، وأرقام التواصل من إعدادات التصعيد.
+        لا تضع معلومة تشغيلية في غير مصدرها حتى لا تظهر ردود غير دقيقة.
       </span>
     </div>
   )
