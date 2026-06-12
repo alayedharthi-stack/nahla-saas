@@ -58,10 +58,11 @@ export function KbRepairPanel({ kindLabelByKind, onOpenSection }: KbRepairPanelP
         <div className="min-w-0">
           <p className="text-sm font-semibold text-slate-900 flex items-center gap-2">
             <Wand2 className="w-4 h-4 text-orange-600" />
-            اقتراح تنظيم بالذكاء
+            فحص التنظيم
           </p>
           <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
-            فحص هيكلي بدون GPT — يقترح إعادة تصنيف أو دمج. لا يُطبَّق تلقائياً.
+            يفحص ترتيب الأقسام والمعلومات ويقترح إعادة تنظيم أو دمج عند الحاجة.
+            لا يطبق أي تغيير تلقائيًا.
           </p>
         </div>
         <button
@@ -150,7 +151,8 @@ export function KbReviewCenter({
       <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50">
         <h2 className="text-base font-bold text-slate-900">المراجعة والتحذيرات</h2>
         <p className="text-xs text-slate-600 mt-0.5">
-          اقتراحات التحسين والتنظيم — معاينة فقط، بدون تطبيق تلقائي.
+          اقتراحات لتحسين وتنظيم قاعدة المعرفة — معاينة فقط، ولا يتم تطبيق أي
+          تغيير بدون موافقتك.
         </p>
       </div>
       <div className="p-5 space-y-5">

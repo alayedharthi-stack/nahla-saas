@@ -83,7 +83,7 @@ const en: Translations = {
     automations:      { title: 'Smart Automations',    subtitle: 'Marketing automations driven by customer behavior' },
     smartAutomations: { title: 'Autopilot',            subtitle: 'Manage smart automations' },
     intelligence:     { title: 'Nahla Intelligence',   subtitle: 'Predictive insights and AI-driven marketing recommendations' },
-    knowledgeBase:    { title: 'Knowledge Base',       subtitle: 'Everything you want the AI to know about your store and products' },
+    knowledgeBase:    { title: 'Knowledge Base',       subtitle: 'Everything Nahlah should know about your store and policies' },
     analytics:        { title: 'Analytics & AI',       subtitle: 'Revenue, conversion & top products' },
     integrations:     { title: 'Integrations',         subtitle: 'Salla, Zid & WhatsApp API connections' },
     settings:         { title: 'Settings',             subtitle: 'Store settings, AI permissions & billing' },

@@ -87,7 +87,7 @@ const ar: Translations = {
     automations:      { title: 'التشغيل التلقائي الذكي', subtitle: 'أتمتة تسويقية مبنية على سلوك العملاء' },
     smartAutomations: { title: 'الطيار الآلي',           subtitle: 'إدارة الأتمتة الذكية' },
     intelligence:     { title: 'نحلة الذكية',            subtitle: 'رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي' },
-    knowledgeBase:    { title: 'قاعدة المعرفة',          subtitle: 'كل ما تريد أن يعرفه الذكاء عن متجرك ومنتجاتك' },
+    knowledgeBase:    { title: 'قاعدة المعرفة',          subtitle: 'كل ما تعرفه نحلة عن متجرك وسياساتك' },
     analytics:        { title: 'التحليلات والذكاء',      subtitle: 'الإيرادات والتحويل والمنتجات الأكثر مبيعاً' },
     integrations:     { title: 'التكاملات',              subtitle: 'ربط سلة وزد وواتساب بنحلة' },
     settings:         { title: 'الإعدادات',              subtitle: 'إعدادات المتجر وصلاحيات الذكاء الاصطناعي' },
