@@ -34,6 +34,20 @@ def resolve_anthropic_model() -> str:
         return "claude-haiku-4-5"
 
 
+def resolve_model_from_audit(
+    audit_context: Optional[Dict[str, Any]],
+    *,
+    default: str,
+) -> str:
+    """Per-call model override from audit/router metadata — never raises."""
+    if not audit_context:
+        return default
+    override = str(
+        audit_context.get("model_override") or audit_context.get("model") or ""
+    ).strip()
+    return override or default
+
+
 def emit_llm_cost_audit(**fields: Any) -> None:
     """Emit one ``[LLM_COST_AUDIT]`` line; never raises."""
     try:

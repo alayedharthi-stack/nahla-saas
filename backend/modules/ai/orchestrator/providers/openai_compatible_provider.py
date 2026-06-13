@@ -31,7 +31,11 @@ import os
 from typing import Any, Dict, List, Optional
 
 from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_openai_compatible
-from modules.ai.orchestrator.llm_cost_audit import approx_tokens_from_chars, emit_llm_cost_audit
+from modules.ai.orchestrator.llm_cost_audit import (
+    approx_tokens_from_chars,
+    emit_llm_cost_audit,
+    resolve_model_from_audit,
+)
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as engine
@@ -99,6 +103,8 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 "status":     "no_http_client",
             }
 
+        model = resolve_model_from_audit(audit_context, default=_MODEL)
+
         try:
             headers = {
                 "Authorization": f"Bearer {_API_KEY}",
@@ -106,7 +112,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
             }
             merged_messages = [{"role": "system", "content": prompt}, *_merge_history(history, message)]
             body = {
-                "model": _MODEL,
+                "model": model,
                 "messages": merged_messages,
                 "max_tokens":  1024,
                 "temperature": 0.7,
@@ -118,7 +124,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 tenant_id=audit_extra.get("tenant_id"),
                 conversation_id=audit_extra.get("conversation_id"),
                 turn_id=audit_extra.get("turn_id"),
-                model=_MODEL,
+                model=model,
                 provider="openai_compatible",
                 messages_count=len(merged_messages) - 1,
                 system_chars=len(prompt or ""),
@@ -132,6 +138,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 intent=audit_extra.get("intent"),
                 stage=audit_extra.get("stage"),
                 channel=audit_extra.get("channel"),
+                model_tier=audit_extra.get("model_tier"),
             )
             with httpx.Client(timeout=_TIMEOUT) as client:
                 resp = client.post(
@@ -146,18 +153,18 @@ class OpenAICompatibleProvider(BaseAIProvider):
             logger.info(
                 "[engine] Modular path used — OpenAI-compatible | "
                 "provider=openai_compatible model=%s reply_len=%d",
-                _MODEL, len(reply),
+                model, len(reply),
             )
             record_ai_usage_from_openai_compatible(
                 audit_extra=audit_extra,
-                model=_MODEL,
+                model=model,
                 httpx_data=data,
                 reply_text=reply,
                 total_prompt_chars=total_prompt_chars,
             )
             return {
                 "provider":   "openai_compatible",
-                "model":      _MODEL,
+                "model":      model,
                 "reply_text": reply,
                 "status":     "ok",
             }
