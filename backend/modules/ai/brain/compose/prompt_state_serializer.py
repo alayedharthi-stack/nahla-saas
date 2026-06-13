@@ -113,32 +113,195 @@ _COMMERCE_SLIM_RESIDUAL_RULES = (
     "- سؤال متابعة واحد عند نقص المعلومة.\n"
 )
 
+_PAYMENT_ORDER_INTENTS: FrozenSet[str] = frozenset({
+    "track_order",
+    "pay_now",
+    "start_order",
+    "ask_payment_info",
+})
+
+_DISCOVERY_STAGES: FrozenSet[str] = frozenset({
+    "discovery",
+    "exploring",
+    "deciding",
+})
+
+_IDLE_ORDER_STATUSES: FrozenSet[str] = frozenset({
+    "none",
+    "idle",
+    "new",
+    "",
+})
+
 
 def is_commerce_prompt_slim_enabled() -> bool:
     return _bool_env(_SLIM_FLAG, "false")
 
 
-def _checkout_blocks_commerce_prompt_slim(state: BrainReplyState) -> bool:
-    """Block slim only during operational checkout — not product_id in prep alone."""
-    checkout = dict(
-        (getattr(state, "known_facts", None) or {}).get("checkout_preparation") or {}
+def _state_relevance_verdict_from_state(
+    state: BrainReplyState,
+) -> Optional["StateRelevanceVerdict"]:
+    from ..state.state_relevance import StateRelevanceVerdict  # noqa: PLC0415
+
+    raw = dict(
+        (getattr(state, "known_facts", None) or {}).get("state_relevance_verdict") or {}
     )
-    status = str(checkout.get("order_status") or "").strip().lower()
-    if status and status not in {"none", "idle", "new", ""}:
-        return True
-    for flag in (
+    if not raw:
+        return None
+    workflows = raw.get("active_workflows") or []
+    return StateRelevanceVerdict(
+        payment_state_relevant=bool(raw.get("payment_state_relevant")),
+        fulfillment_state_relevant=bool(raw.get("fulfillment_state_relevant")),
+        product_replay_relevant=bool(raw.get("product_replay_relevant")),
+        addon_recommendation_relevant=bool(raw.get("addon_recommendation_relevant")),
+        stale_product_focus_relevant=bool(raw.get("stale_product_focus_relevant")),
+        pending_candidates_relevant=bool(raw.get("pending_candidates_relevant")),
+        safe_to_resume_state=bool(raw.get("safe_to_resume_state", True)),
+        detected_topic_shift=bool(raw.get("detected_topic_shift")),
+        relevance_confidence=float(raw.get("relevance_confidence") or 0.5),
+        active_workflows=tuple(workflows),
+        current_intent_hint=str(raw.get("current_intent_hint") or ""),
+    )
+
+
+def _is_commerce_info_slim_turn(state: BrainReplyState) -> bool:
+    intent = str(getattr(state, "intent_name", "") or "").strip().lower()
+    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
+    if intent in _PAYMENT_ORDER_INTENTS:
+        return False
+    return intent in _COMMERCE_SLIM_INTENTS or goal in _COMMERCE_SLIM_GOALS
+
+
+def _collect_active_checkout_flags(checkout: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    for key in (
         "awaiting_payment_receipt",
         "payment_receipt_received",
         "awaiting_variant_choice",
         "awaiting_option_confirmation",
         "payment_claim_unverified",
     ):
-        if checkout.get(flag):
-            return True
-    stage = str(getattr(state, "stage", "") or "").strip().lower()
-    if stage in {"ordering", "checkout"}:
+        if checkout.get(key):
+            flags.append(key)
+    status = str(checkout.get("order_status") or "").strip().lower()
+    if status and status not in _IDLE_ORDER_STATUSES:
+        flags.append(f"order_status:{status}")
+    return flags
+
+
+def _has_payment_checkout_flags(active_flags: List[str]) -> bool:
+    if any(
+        flag in active_flags
+        for flag in (
+            "awaiting_payment_receipt",
+            "payment_receipt_received",
+            "payment_claim_unverified",
+        )
+    ):
         return True
-    return False
+    return any(flag.startswith("order_status:") for flag in active_flags)
+
+
+def _stale_checkout_allows_commerce_slim(
+    state: BrainReplyState,
+    *,
+    active_flags: List[str],
+    verdict: Optional["StateRelevanceVerdict"],
+) -> bool:
+    if not _is_commerce_info_slim_turn(state):
+        return False
+    if not active_flags:
+        return False
+
+    if verdict is not None:
+        if not verdict.detected_topic_shift:
+            return False
+        from ..state.state_relevance import should_block_workflow_resume  # noqa: PLC0415
+
+        if _has_payment_checkout_flags(active_flags) and should_block_workflow_resume(
+            "awaiting_payment_receipt",
+            verdict,
+        ):
+            return True
+        if (
+            "awaiting_variant_choice" in active_flags
+            or "awaiting_option_confirmation" in active_flags
+        ) and should_block_workflow_resume("active_fulfillment", verdict):
+            return True
+        if "pending_candidates" in (verdict.active_workflows or ()) and should_block_workflow_resume(
+            "pending_candidates",
+            verdict,
+        ):
+            return True
+        return False
+
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
+    return (
+        stage in _DISCOVERY_STAGES
+        and goal == GOAL_PRODUCT_AVAILABILITY
+        and _has_payment_checkout_flags(active_flags)
+    )
+
+
+def _evaluate_checkout_slim_blocker(
+    state: BrainReplyState,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Return (blocks_slim, telemetry) for checkout/payment stale-state gating."""
+    checkout = dict(
+        (getattr(state, "known_facts", None) or {}).get("checkout_preparation") or {}
+    )
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    active_flags = _collect_active_checkout_flags(checkout)
+    verdict = _state_relevance_verdict_from_state(state)
+
+    meta: Dict[str, Any] = {
+        "checkout_blocked": False,
+        "checkout_relevant": bool(active_flags),
+        "state_topic_shift": bool(verdict.detected_topic_shift) if verdict else False,
+        "active_checkout_flags": active_flags,
+    }
+
+    if stage in {"ordering", "checkout"}:
+        meta["checkout_blocked"] = True
+        meta["checkout_relevant"] = True
+        return True, meta
+
+    if not active_flags:
+        meta["checkout_relevant"] = False
+        return False, meta
+
+    if _stale_checkout_allows_commerce_slim(
+        state,
+        active_flags=active_flags,
+        verdict=verdict,
+    ):
+        meta["checkout_relevant"] = False
+        meta["checkout_blocked"] = False
+        return False, meta
+
+    if verdict is not None:
+        meta["checkout_relevant"] = bool(
+            verdict.payment_state_relevant or verdict.fulfillment_state_relevant
+        )
+        if verdict.payment_state_relevant and _has_payment_checkout_flags(active_flags):
+            meta["checkout_blocked"] = True
+            return True, meta
+        if verdict.fulfillment_state_relevant and any(
+            flag in active_flags
+            for flag in ("awaiting_variant_choice", "awaiting_option_confirmation")
+        ):
+            meta["checkout_blocked"] = True
+            return True, meta
+
+    meta["checkout_blocked"] = True
+    meta["checkout_relevant"] = True
+    return True, meta
+
+
+def _checkout_blocks_commerce_prompt_slim(state: BrainReplyState) -> bool:
+    blocked, _meta = _evaluate_checkout_slim_blocker(state)
+    return blocked
 
 
 def explain_commerce_prompt_slim_gate(
@@ -179,7 +342,9 @@ def explain_commerce_prompt_slim_gate(
     if bool(getattr(state, "contextual_clarify_mode", False)):
         decision["reason_if_false"] = "contextual_clarify_mode"
         return False, "contextual_clarify_mode", decision
-    if _checkout_blocks_commerce_prompt_slim(state):
+    checkout_blocked, checkout_meta = _evaluate_checkout_slim_blocker(state)
+    decision.update(checkout_meta)
+    if checkout_blocked:
         decision["reason_if_false"] = "active_checkout"
         return False, "active_checkout", decision
     if not eligible_intent:

@@ -281,3 +281,63 @@ class TestNeedBasedDiscoveryPath:
         prompt = build_brain_reply_prompt(state)
         assert len(prompt) < 25_000
         assert "ai_settings" not in prompt
+
+    def test_stale_awaiting_receipt_does_not_block_slim(self, slim_enabled: None) -> None:
+        state = _heavy_commerce_state(
+            stage="discovery",
+            intent_name=INTENT_SOLUTION_SEEKING_COMMERCE,
+            need_based_advice_mode=True,
+            primary_customer_goal=GOAL_PRODUCT_AVAILABILITY,
+            known_facts={
+                "checkout_preparation": {
+                    "order_status": "awaiting_receipt",
+                    "awaiting_payment_receipt": True,
+                    "product_id": "99",
+                },
+                "state_relevance_verdict": {
+                    "payment_state_relevant": False,
+                    "fulfillment_state_relevant": False,
+                    "detected_topic_shift": True,
+                    "active_workflows": [
+                        "awaiting_payment_receipt",
+                        "pending_candidates",
+                    ],
+                    "current_intent_hint": "solution_seeking_commerce",
+                },
+            },
+        )
+        eligible, reason, decision = explain_commerce_prompt_slim_gate(state)
+        assert eligible is True
+        assert reason == "eligible"
+        assert decision["checkout_blocked"] is False
+        assert decision["checkout_relevant"] is False
+        assert decision["state_topic_shift"] is True
+        assert "awaiting_payment_receipt" in decision["active_checkout_flags"]
+        prompt = build_brain_reply_prompt(state)
+        assert len(prompt) < 25_000
+        assert len(prompt) // 4 < 7_000
+
+    def test_payment_receipt_turn_still_blocks_slim(self, slim_enabled: None) -> None:
+        state = _heavy_commerce_state(
+            stage="discovery",
+            intent_name=INTENT_ASK_PRODUCT,
+            need_based_advice_mode=False,
+            known_facts={
+                "checkout_preparation": {
+                    "order_status": "awaiting_receipt",
+                    "awaiting_payment_receipt": True,
+                },
+                "state_relevance_verdict": {
+                    "payment_state_relevant": True,
+                    "fulfillment_state_relevant": False,
+                    "detected_topic_shift": False,
+                    "active_workflows": ["awaiting_payment_receipt"],
+                    "current_intent_hint": "ask_product",
+                },
+            },
+        )
+        eligible, reason, decision = explain_commerce_prompt_slim_gate(state)
+        assert eligible is False
+        assert reason == "active_checkout"
+        assert decision["checkout_blocked"] is True
+        assert decision["checkout_relevant"] is True
