@@ -16,13 +16,19 @@ if _BACKEND not in sys.path:
 from modules.ai.brain.compose.persona_template_engine import (  # noqa: E402
     PERSONA_ALLOWED_EMOJI,
     PERSONA_GREETING_COLD,
+    PERSONA_SOCIAL_DUA_FALLBACK,
     PERSONA_SOCIAL_DUA_THANKS,
     PERSONA_SOCIAL_WARM_BY_CATEGORY,
+    dua_reply_has_required_marker,
+    enforce_persona_dua_reply_guard,
     pick_persona_greeting,
     pick_persona_social_reply,
     pick_persona_variant,
     persona_reply_has_light_emoji,
     persona_reply_is_warm_greeting,
+)
+from modules.ai.brain.postprocess.social_phrase_quality_guard import (  # noqa: E402
+    apply_social_phrase_quality_guard,
 )
 from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
 from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_SOCIAL_REPLY  # noqa: E402
@@ -146,15 +152,26 @@ class TestPersonaSocialVariants:
 
         reply = asyncio.run(_run())
         assert reply.strip()
-        assert reply in PERSONA_SOCIAL_DUA_THANKS
         assert "العفو" not in reply
+        assert "وأحسن" != reply.strip()
+        assert dua_reply_has_required_marker(reply)
         assert persona_reply_has_light_emoji(reply)
 
-    def test_religious_thanks_uses_dua_pool_not_alafu(self) -> None:
-        ctx = _ctx(message="جزاك الله خير")
-        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="جزاك الله خير")
-        assert reply in PERSONA_SOCIAL_DUA_THANKS
+    @pytest.mark.parametrize(
+        ("message", "category"),
+        [
+            ("جزاك الله خير", "thanks"),
+            ("الله يجزاك خير", "thanks"),
+            ("بارك الله فيك", "blessing"),
+            ("بيض الله وجهك", "strong_praise"),
+        ],
+    )
+    def test_religious_dua_phrases_use_complete_reply(self, message: str, category: str) -> None:
+        ctx = _ctx(message=message)
+        reply = pick_persona_social_reply(ctx, category, inbound_text=message)
         assert "العفو" not in reply
+        assert reply.strip() not in {"وأحسن", "وأحسن 🌷", "بالمثل", "ولك"}
+        assert dua_reply_has_required_marker(reply)
 
     def test_plain_thanks_stays_on_secular_pool(self) -> None:
         ctx = _ctx(message="شكرا")
@@ -176,6 +193,56 @@ class TestPersonaSocialVariants:
         )
         reply = pick_persona_social_reply(ctx, "thanks", inbound_text="جزاك الله خير")
         assert reply != first
+        assert dua_reply_has_required_marker(reply)
+
+
+class TestDuaFragmentGuard:
+    def test_enforce_guard_replaces_fragment(self) -> None:
+        fixed = enforce_persona_dua_reply_guard("وأحسن 🌷", inbound_text="جزاك الله خير")
+        assert fixed == PERSONA_SOCIAL_DUA_FALLBACK
+        assert dua_reply_has_required_marker(fixed)
+
+    def test_social_phrase_guard_preserves_persona_dua_reply(self) -> None:
+        raw = "ولك بالمثل وأحسن 🌷"
+        result = apply_social_phrase_quality_guard(
+            raw,
+            inbound_text="جزاك الله خير",
+            tenant_id=1,
+        )
+        assert result.reply == raw
+        assert result.stripped is False
+
+    def test_social_phrase_guard_still_strips_generic_without_dua_inbound(self) -> None:
+        result = apply_social_phrase_quality_guard(
+            "ولك بالمثل وأحسن 🌷",
+            inbound_text="شكرا",
+            tenant_id=1,
+        )
+        assert result.stripped is True
+        assert "ولك بالمثل" not in result.reply
+
+    def test_anti_repeat_history_still_yields_complete_dua(self) -> None:
+        """Simulate prior outbound variants — reply must stay complete, not fragment."""
+        ctx = _ctx(
+            message="جزاك الله خير",
+            history=[
+                {"direction": "out", "body": "ولك بالمثل وأحسن 🌷"},
+                {"direction": "out", "body": "آمين، ولك بالمثل 🤍"},
+            ],
+        )
+        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="جزاك الله خير")
+        guarded = apply_social_phrase_quality_guard(
+            reply,
+            inbound_text="جزاك الله خير",
+            tenant_id=ctx.tenant_id,
+        ).reply
+        assert dua_reply_has_required_marker(guarded)
+        assert guarded.strip() not in {"وأحسن", "وأحسn 🌷"}
+
+    def test_plain_thanks_unaffected(self) -> None:
+        ctx = _ctx(message="شكرا")
+        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="شكرا")
+        assert reply in PERSONA_SOCIAL_WARM_BY_CATEGORY["thanks"]
 
     def test_dua_thanks_no_tenant_33_special_case(self) -> None:
         t7 = pick_persona_social_reply(
@@ -241,6 +308,14 @@ class TestCommerceSafety:
         )
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action != ACTION_GREET
+
+    def test_embedded_greeting_product_question_not_dua_inbound(self) -> None:
+        from modules.ai.brain.compose.persona_template_engine import (  # noqa: PLC0415
+            inbound_is_religious_dua_exchange,
+        )
+
+        msg = "هلا عندكم عسل طلح؟"
+        assert not inbound_is_religious_dua_exchange(msg)
 
 
 class TestOrderAwareGreeting:

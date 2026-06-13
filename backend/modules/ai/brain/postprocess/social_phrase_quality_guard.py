@@ -196,6 +196,16 @@ def apply_social_phrase_quality_guard(
     if not text:
         return SocialPhraseQualityGuardResult(reply="", stripped=False)
 
+    try:
+        from modules.ai.brain.compose.persona_template_engine import (  # noqa: PLC0415
+            inbound_is_religious_dua_exchange,
+        )
+
+        if inbound_is_religious_dua_exchange(inbound_text):
+            return SocialPhraseQualityGuardResult(reply=text, stripped=False)
+    except Exception:  # noqa: BLE001 — bypass must never break outbound
+        pass
+
     cleaned, stripped = strip_social_phrase_violations(text)
     if stripped:
         logger.info(
