@@ -1,0 +1,431 @@
+"""
+prompt_state_serializer.py
+──────────────────────────
+PR2C — commerce prompt payload slimming for MerchantBrain LLM compose.
+
+Reduces system prompt size for routine commerce turns without changing
+availability guards, product resolution, or card/media dispatch behavior.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, FrozenSet, List, Optional
+
+from ..intent_priority.types import (
+    GOAL_PRICE_INQUIRY,
+    GOAL_PRODUCT_AVAILABILITY,
+)
+from ..types import (
+    INTENT_ASK_PRICE,
+    INTENT_ASK_PRODUCT,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
+    INTENT_SOLUTION_SEEKING_COMMERCE,
+    BrainReplyState,
+)
+from .prompt_payload_slim import (
+    _KB_TRUNCATION_MARKER,
+    _checkout_is_active,
+    is_routine_social_turn,
+    strip_state_dict_for_prompt,
+)
+
+_log = logging.getLogger("nahla.ai.commerce_prompt_slim")
+
+_SLIM_FLAG = "NAHLA_COMMERCE_PROMPT_SLIM_ENABLED"
+_MAX_CHARS_ENV = "NAHLA_COMMERCE_PROMPT_MAX_CHARS"
+_KB_MAX_ENV = "NAHLA_COMMERCE_KB_MAX_CHARS"
+
+_COMMERCE_SLIM_INTENTS: FrozenSet[str] = frozenset({
+    INTENT_ASK_PRODUCT,
+    INTENT_ASK_PRICE,
+    INTENT_SOLUTION_SEEKING_COMMERCE,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
+    "product_availability",
+    "product_reference",
+})
+
+_COMMERCE_SLIM_GOALS: FrozenSet[str] = frozenset({
+    GOAL_PRODUCT_AVAILABILITY,
+    "product_reference",
+    GOAL_PRICE_INQUIRY,
+})
+
+_AI_SETTINGS_KEEP: FrozenSet[str] = frozenset({
+    "reply_tone",
+    "default_language",
+    "reply_length",
+    "assistant_name",
+    "assistant_role",
+    "store_display_name",
+})
+
+_CHECKOUT_FACT_KEYS: FrozenSet[str] = frozenset({
+    "order_status",
+    "awaiting_payment_receipt",
+    "payment_receipt_received",
+    "awaiting_variant_choice",
+    "awaiting_option_confirmation",
+    "payment_claim_unverified",
+    "product_id",
+    "variant_id",
+    "quantity",
+    "payment_method",
+})
+
+_PRODUCT_JSON_KEEP: FrozenSet[str] = frozenset({
+    "id",
+    "title",
+    "name",
+    "price",
+    "currency",
+    "available",
+    "in_stock",
+    "stock_status",
+    "sku",
+    "variant_id",
+})
+
+_COMPACT_RESOLVER_PROTOCOL = (
+    "## بروتوكول الوسائط والمنتجات (مختصر)\n"
+    "- طلب منتج → [PRODUCT:اسم من الكتالوج] في بداية الرد.\n"
+    "- باركود/صورة/فيديو → [MEDIA_KEY:مفتاح من القائمة] في بداية الرد.\n"
+    "- رقم موظف → [CALL:<رقم>|<اسم>] في نهاية الرد.\n"
+    "- لا تكتبي https:// كنص — النظام يضيف الروابط تلقائياً.\n"
+    "- لا تخترعي أسعاراً مع [PRODUCT:...] — النظام يضيفها.\n"
+)
+
+_NEED_ADVICE_SLIM_APPENDIX = (
+    "### استشارة تجارية (مختصر)\n"
+    "- أجيبي على الحاجة أو الصفة — لا تطلبي اسم SKU أولاً.\n"
+    "- استخدمي selected_product وBrainStateJSON وFacts فقط.\n"
+)
+
+_COMMERCE_SLIM_RESIDUAL_RULES = (
+    "## قواعد تشغيل Brain (commerce slim)\n"
+    "- اتبعي stage وresponse_goal وselected_product.\n"
+    "- ردّي باختصار (2–5 أسطر) مناسب لواتساب.\n"
+    "- لا تخترعي حقائق — استخدمي BrainStateJSON وFacts فقط.\n"
+    "- سؤال متابعة واحد عند نقص المعلومة.\n"
+)
+
+
+def is_commerce_prompt_slim_enabled() -> bool:
+    return os.getenv(_SLIM_FLAG, "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def commerce_prompt_max_chars() -> int:
+    raw = os.getenv(_MAX_CHARS_ENV, "25000").strip()
+    try:
+        return max(5000, int(raw))
+    except ValueError:
+        return 25000
+
+
+def commerce_kb_max_chars() -> int:
+    raw = os.getenv(_KB_MAX_ENV, "3500").strip()
+    try:
+        return max(500, int(raw))
+    except ValueError:
+        return 5000
+
+
+def should_apply_commerce_prompt_slim(state: BrainReplyState) -> bool:
+    if not is_commerce_prompt_slim_enabled():
+        return False
+    if is_routine_social_turn(state):
+        return False
+    if bool(getattr(state, "platform_kb_mode", False)):
+        return False
+    if bool(getattr(state, "contextual_clarify_mode", False)):
+        return False
+    if _checkout_is_active(state):
+        return False
+
+    intent = str(getattr(state, "intent_name", "") or "").strip().lower()
+    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
+    return intent in _COMMERCE_SLIM_INTENTS or goal in _COMMERCE_SLIM_GOALS
+
+
+def slim_ai_settings_for_commerce_prompt(settings: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(settings, dict):
+        return {}
+    slim = {k: settings[k] for k in _AI_SETTINGS_KEEP if k in settings}
+    owner = str(settings.get("owner_instructions") or "").strip()
+    if owner:
+        slim["owner_instructions"] = owner[:500]
+    return slim
+
+
+def should_omit_kb_block_for_commerce_slim(state: BrainReplyState) -> bool:
+    """Drop KB Facts block when structured product/availability context suffices."""
+    if not should_apply_commerce_prompt_slim(state):
+        return False
+    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
+    if goal not in {GOAL_PRODUCT_AVAILABILITY, "product_reference", GOAL_PRICE_INQUIRY}:
+        return False
+    if not isinstance(getattr(state, "selected_product", None), dict):
+        return False
+    facts = dict(getattr(state, "known_facts", None) or {})
+    return bool(facts.get("availability") or facts.get("product_focus"))
+
+
+def cap_commerce_kb_block(text: str) -> str:
+    body = (text or "").strip()
+    if not body:
+        return ""
+    limit = commerce_kb_max_chars()
+    if len(body) <= limit:
+        return body
+    return body[:limit] + _KB_TRUNCATION_MARKER
+
+
+def slim_resolver_overlay_for_commerce(resolver_overlay: str) -> str:
+    overlay = (resolver_overlay or "").strip()
+    if not overlay:
+        return ""
+    keys_block = ""
+    marker = "أدوات الوسائط المتوفرة في هذا المتجر:"
+    if marker in overlay:
+        keys_block = overlay.split(marker, 1)[1].strip()
+    parts = [_COMPACT_RESOLVER_PROTOCOL]
+    if keys_block:
+        parts.append(f"\n{marker}\n{keys_block[:2000]}")
+    return "\n".join(parts)
+
+
+def slim_libraries_for_commerce(
+    libraries_text: str,
+    *,
+    include_coupons: bool,
+) -> str:
+    if not include_coupons:
+        return ""
+    text = (libraries_text or "").strip()
+    if len(text) <= 1500:
+        return text
+    return text[:1500] + "\n[... libraries truncated for commerce slim ...]"
+
+
+def _slim_product_row(row: Any) -> Dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    return {k: row[k] for k in _PRODUCT_JSON_KEEP if k in row}
+
+
+def _slim_known_facts(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    checkout = raw.get("checkout_preparation")
+    if isinstance(checkout, dict):
+        slim_checkout = {
+            k: checkout[k]
+            for k in _CHECKOUT_FACT_KEYS
+            if k in checkout and checkout[k] not in (None, "", False)
+        }
+        if slim_checkout:
+            out["checkout_preparation"] = slim_checkout
+    for key in ("availability", "product_focus", "payment_flags", "fulfillment_flags"):
+        if key in raw and raw[key]:
+            out[key] = raw[key]
+    return out
+
+
+def serialize_commerce_brain_state(
+    state_dict: Dict[str, Any],
+    state: BrainReplyState,
+    *,
+    kb_in_prompt_block: bool,
+) -> Dict[str, Any]:
+    """Aggressive BrainStateJSON for commerce slim turns."""
+    base = strip_state_dict_for_prompt(
+        state_dict,
+        state,
+        kb_in_prompt_block=kb_in_prompt_block,
+    )
+    out = dict(base)
+
+    for key in (
+        "store_knowledge",
+        "conversation_summary",
+        "tenant_overlay",
+        "coupon_policy",
+        "policy_reason",
+        "explicit_pending_action",
+        "last_recommended_products",
+    ):
+        out.pop(key, None)
+
+    turns = out.get("recent_turns")
+    if isinstance(turns, list):
+        out["recent_turns"] = list(turns)[-2:]
+
+    memory = out.get("customer_memory")
+    if isinstance(memory, dict):
+        out["customer_memory"] = {
+            k: memory[k]
+            for k in ("segment", "is_returning")
+            if k in memory
+        }
+
+    facts = _slim_known_facts(out.get("known_facts"))
+    if facts:
+        out["known_facts"] = facts
+    else:
+        out.pop("known_facts", None)
+
+    mc = dict(out.get("merchant_context") or {})
+    if mc:
+        slim_mc: Dict[str, Any] = {}
+        if mc.get("tenant_id") is not None:
+            slim_mc["tenant_id"] = mc["tenant_id"]
+        products = mc.get("products")
+        if isinstance(products, list):
+            slim_mc["products"] = [
+                _slim_product_row(p) for p in products[:3] if _slim_product_row(p)
+            ]
+        profile = mc.get("brain_profile")
+        if isinstance(profile, dict):
+            slim_mc["brain_profile"] = {
+                k: profile[k]
+                for k in ("autopilot_enabled", "orderable", "tenant_id")
+                if k in profile
+            }
+        for flag_key in ("payment_enabled", "shipping_enabled", "cod_enabled"):
+            if flag_key in mc:
+                slim_mc[flag_key] = mc[flag_key]
+        out["merchant_context"] = slim_mc
+
+    return out
+
+
+def measure_commerce_prompt_contributors(
+    state: BrainReplyState,
+    *,
+    kb_block: str = "",
+    structured_behavior_block: str = "",
+) -> Dict[str, int]:
+    """Top contributor sizes for audit — no customer message content."""
+    mc = dict(getattr(state, "merchant_context", None) or {})
+    ai = dict(mc.get("ai_settings") or {})
+    manual_kb = str(
+        ai.get("manual_knowledge_base")
+        or ai.get("manual_knowledge_base_v2")
+        or ""
+    )
+    structured_facts = str(mc.get("structured_facts_block") or "")
+    products = mc.get("products") or []
+    return {
+        "ai_settings_chars": len(json.dumps(ai, ensure_ascii=False)),
+        "manual_kb_chars": len(manual_kb),
+        "structured_facts_block_chars": len(structured_facts),
+        "structured_behavior_block_chars": len(structured_behavior_block or ""),
+        "product_context_chars": len(
+            json.dumps(getattr(state, "selected_product", None) or {}, ensure_ascii=False)
+        ),
+        "catalog_products_chars": len(json.dumps(products, ensure_ascii=False)),
+        "kb_block_chars": len(kb_block or ""),
+        "resolver_overlay_chars": len(str(mc.get("resolver_overlay") or "")),
+        "duplicated_structured_facts_in_json": int(
+            bool(kb_block)
+            and "structured_facts_block" in mc
+            and structured_facts[:80] in kb_block[: max(len(structured_facts), 80)]
+        ),
+    }
+
+
+def emit_commerce_prompt_contributors_audit(
+    *,
+    state: BrainReplyState,
+    contributors: Dict[str, int],
+    slim_applied: bool,
+    total_prompt_chars: Optional[int] = None,
+) -> None:
+    try:
+        mc = state.merchant_context or {}
+        payload = {
+            "event": "commerce_prompt_contributors",
+            "tenant_id": mc.get("tenant_id"),
+            "intent": getattr(state, "intent_name", None),
+            "slim_applied": slim_applied,
+            "total_prompt_chars": total_prompt_chars,
+            **contributors,
+        }
+        top = sorted(
+            ((k, v) for k, v in contributors.items() if k.endswith("_chars")),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:6]
+        payload["top_contributors"] = [k for k, _ in top]
+        _log.info(
+            "[COMMERCE_PROMPT_CONTRIBUTORS] %s",
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never break replies
+        _log.warning(
+            "[COMMERCE_PROMPT_CONTRIBUTORS_ERROR] err=%s",
+            type(exc).__name__,
+        )
+
+
+def emit_commerce_prompt_slim_error(*, err: str, intent: Optional[str] = None) -> None:
+    _log.warning(
+        "[COMMERCE_PROMPT_SLIM_ERROR] %s",
+        json.dumps({"intent": intent, "err": err}, ensure_ascii=False),
+    )
+
+
+@dataclass(frozen=True)
+class CommercePromptSlimLayers:
+    settings_for_overlay: Dict[str, Any]
+    kb_block: str
+    libraries_text: str
+    resolver_overlay: str
+    structured_behavior_block: str
+    state_dict: Dict[str, Any]
+    need_advice_appendix: str
+
+
+def apply_commerce_prompt_slim_layers(
+    *,
+    state: BrainReplyState,
+    settings_for_overlay: Dict[str, Any],
+    kb_block: str,
+    libraries_text: str,
+    resolver_overlay: str,
+    structured_behavior_block: str,
+    state_dict: Dict[str, Any],
+    kb_in_prompt_block: bool,
+    need_advice_mode: bool,
+) -> CommercePromptSlimLayers:
+    slim_settings = slim_ai_settings_for_commerce_prompt(settings_for_overlay)
+    slim_kb = cap_commerce_kb_block(kb_block)
+    include_coupons = _checkout_is_active(state) or str(
+        getattr(state, "intent_name", "") or ""
+    ).strip().lower() in {INTENT_ASK_PRICE, "ask_payment_info"}
+    slim_libraries = slim_libraries_for_commerce(
+        libraries_text,
+        include_coupons=include_coupons,
+    )
+    slim_resolver = slim_resolver_overlay_for_commerce(resolver_overlay)
+    slim_behavior = (structured_behavior_block or "")[:1500]
+    slim_state = serialize_commerce_brain_state(
+        state_dict,
+        state,
+        kb_in_prompt_block=kb_in_prompt_block,
+    )
+    need_appendix = _NEED_ADVICE_SLIM_APPENDIX if need_advice_mode else ""
+    return CommercePromptSlimLayers(
+        settings_for_overlay=slim_settings,
+        kb_block=slim_kb,
+        libraries_text=slim_libraries,
+        resolver_overlay=slim_resolver,
+        structured_behavior_block=slim_behavior,
+        state_dict=slim_state,
+        need_advice_appendix=need_appendix,
+    )

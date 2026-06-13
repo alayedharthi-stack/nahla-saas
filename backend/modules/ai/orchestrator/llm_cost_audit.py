@@ -193,6 +193,10 @@ def build_brain_compose_audit_extra(
         resolve_kb_block_for_prompt,
         strip_state_dict_for_prompt,
     )
+    from modules.ai.brain.compose.prompt_state_serializer import (  # noqa: PLC0415
+        serialize_commerce_brain_state,
+        should_apply_commerce_prompt_slim,
+    )
     from modules.ai.prompts.tenant_overlay import build_tenant_overlay_split  # noqa: PLC0415
 
     mc = dict(getattr(reply_state, "merchant_context", None) or {})
@@ -220,11 +224,18 @@ def build_brain_compose_audit_extra(
 
         state_dict = asdict(reply_state)
         state_dict.pop("tenant_overlay", None)
-        state_dict = strip_state_dict_for_prompt(
-            state_dict,
-            reply_state,
-            kb_in_prompt_block=bool(kb_block),
-        )
+        if should_apply_commerce_prompt_slim(reply_state):
+            state_dict = serialize_commerce_brain_state(
+                state_dict,
+                reply_state,
+                kb_in_prompt_block=bool(kb_block),
+            )
+        else:
+            state_dict = strip_state_dict_for_prompt(
+                state_dict,
+                reply_state,
+                kb_in_prompt_block=bool(kb_block),
+            )
         slim = prepare_brain_state_dict_with_telemetry(reply_state, state_dict)
         brain_state_json_chars = len(
             json.dumps(slim, ensure_ascii=False, indent=2)
@@ -254,4 +265,5 @@ def build_brain_compose_audit_extra(
         "system_chars": system_chars,
         "total_prompt_chars": system_chars + history_chars,
         "reason": source,
+        "commerce_prompt_slim": should_apply_commerce_prompt_slim(reply_state),
     }
