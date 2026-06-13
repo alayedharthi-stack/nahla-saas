@@ -98,6 +98,7 @@ class AIOrchestratorEngine:
         """
         observer = ChainObserver(provider_chain.providers)
         request_obj = self._coerce_request(request)
+        audit_context = self._audit_context_from_request(request_obj)
 
         for provider_name in provider_chain.providers:
             provider = get_provider(provider_name)
@@ -123,6 +124,10 @@ class AIOrchestratorEngine:
                 provider_name, _PROVIDER_TIMEOUT,
             )
             _t0 = time.monotonic()
+            _history = [
+                {"role": msg.role, "content": msg.content}
+                for msg in request_obj.history
+            ]
             raw = call_with_resilience(
                 provider_name,
                 (
@@ -131,13 +136,15 @@ class AIOrchestratorEngine:
                         prompt=prompt,
                         tools=request_obj.tool_definitions,
                         tool_choice="auto",
-                        history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+                        history=_history,
+                        audit_context=audit_context,
                     )
                     if request_obj.tool_definitions and hasattr(p, "call_with_tools")
                     else p.call(
                         request_obj.message,
                         prompt,
-                        history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+                        history=_history,
+                        audit_context=audit_context,
                     )
                 ),
                 timeout=_PROVIDER_TIMEOUT,
@@ -182,12 +189,14 @@ class AIOrchestratorEngine:
                 tools=request_obj.tool_definitions,
                 tool_choice="auto",
                 history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+                audit_context=audit_context,
             )
         else:
             result = self._provider.call(
                 request_obj.message,
                 prompt,
                 history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
+                audit_context=audit_context,
             )
         _duration_ms = (time.monotonic() - _t0) * 1000
         _fallback_status = "succeeded" if result.get("reply_text") else "failed"
@@ -239,6 +248,16 @@ class AIOrchestratorEngine:
 
     # ── Provider call ─────────────────────────────────────────────────────────
 
+    def _audit_context_from_request(
+        self, request: AIOrchestrationRequest,
+    ) -> Dict[str, Any]:
+        audit = dict(request.prompt_overrides.get("__llm_cost_audit") or {})
+        if not audit.get("tenant_id"):
+            audit["tenant_id"] = request.context.tenant_id
+        if not audit.get("channel"):
+            audit["channel"] = request.context.channel
+        return audit
+
     def call_provider(
         self,
         request: AIOrchestrationRequest,
@@ -259,6 +278,7 @@ class AIOrchestratorEngine:
         """
         if provider_chain is not None:
             return self._call_with_chain(request, prompt, provider_chain)
+        audit_context = self._audit_context_from_request(request)
         if request.tool_definitions and hasattr(self._provider, "call_with_tools"):
             return self._provider.call_with_tools(
                 message=request.message,
@@ -266,11 +286,13 @@ class AIOrchestratorEngine:
                 tools=request.tool_definitions,
                 tool_choice="auto",
                 history=[{"role": msg.role, "content": msg.content} for msg in request.history],
+                audit_context=audit_context,
             )
         return self._provider.call(
             request.message,
             prompt,
             history=[{"role": msg.role, "content": msg.content} for msg in request.history],
+            audit_context=audit_context,
         )
 
     def _coerce_request(self, request: AIOrchestrationRequest | str) -> AIOrchestrationRequest:
