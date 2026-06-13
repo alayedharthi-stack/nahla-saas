@@ -1034,6 +1034,13 @@ class TestStateDrivenSimplification:
         """When the cart-recovery path forgot to stamp brain_state, the
         next inbound MUST still be treated as 'already greeted' because
         history shows we already talked to the customer."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_ALLOWED_EMOJI,
+            PERSONA_GREETING_COLD,
+            PERSONA_GREETING_REGREET,
+            persona_reply_has_light_emoji,
+            persona_reply_is_warm_greeting,
+        )
         from modules.ai.brain.pipeline import MerchantBrain
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         from modules.ai.brain.decision.policy import PassThroughPolicyGate
@@ -1073,14 +1080,24 @@ class TestStateDrivenSimplification:
             {"direction": "out", "body": "صبحًا خصمك جاهز — اضغط الزر تحت لإكمال الطلب"},
         ]
 
+        llm_mock = AsyncMock(return_value="must not call llm")
         with patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
-            new_callable=AsyncMock, return_value="contextual reply",
-        ) as mock_llm:
+            llm_mock,
+        ):
             reply = _run(b.process(
                 db=MagicMock(), tenant_id=1, customer_phone="+966500000001",
                 message="هلا", history=history, profile={},
             ))
 
-        assert reply["reply"] == "contextual reply"
-        mock_llm.assert_called_once()
+        llm_mock.assert_not_called()
+        text = reply["reply"]
+        assert isinstance(text, str)
+        assert text.strip()
+        assert persona_reply_is_warm_greeting(text)
+        assert persona_reply_has_light_emoji(text)
+        assert sum(text.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
+        assert text not in PERSONA_GREETING_COLD
+        assert text in PERSONA_GREETING_REGREET or persona_reply_is_warm_greeting(text)
+        assert "المنتج" not in text
+        assert "السعر" not in text
