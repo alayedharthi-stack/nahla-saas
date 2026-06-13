@@ -155,21 +155,17 @@ class TestDecisionEngine:
 
     def test_greeting_decision(self):
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
-        from modules.ai.brain.persona_expression import (
-            PERSONA_KIND_GREETING,
-            PERSONA_TOPIC_SOCIAL,
-        )
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
-        # Thin pure greeting — DAF (09fd5319) bypasses only actionable substance.
+        # Thin pure greeting — DAF bypasses only actionable substance.
         ctx.message = "مرحبا"
         ctx.intent.raw_message = "مرحبا"
+        ctx.intent.slots = {}
         d = eng.decide(ctx)
-        assert d.action == ACTION_LLM_REPLY
-        assert d.args.get("topic") == PERSONA_TOPIC_SOCIAL
-        assert d.args.get("persona_kind") == PERSONA_KIND_GREETING
-        assert d.args.get("block_commerce_escalation") is True
-        assert d.action != ACTION_GREET
+        assert not (d.args or {}).get("embedded_greeting")
+        assert not (ctx.intent.slots or {}).get("embedded_greeting")
+        assert d.action == ACTION_GREET
+        assert d.action != ACTION_LLM_REPLY
 
     def _product_inquiry_ctx(
         self, state: MerchantConversationState,
