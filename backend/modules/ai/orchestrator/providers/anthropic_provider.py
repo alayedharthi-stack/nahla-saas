@@ -25,6 +25,7 @@ from modules.ai.orchestrator.llm_cost_audit import (
     emit_llm_cost_audit,
     approx_tokens_from_chars,
     resolve_anthropic_model,
+    resolve_model_from_audit,
 )
 from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic
 from modules.ai.orchestrator.providers.base import BaseAIProvider
@@ -163,7 +164,10 @@ class AnthropicProvider(BaseAIProvider):
                 "actions":    [],
             }
 
-        model = resolve_anthropic_model()
+        model = resolve_model_from_audit(
+            audit_context,
+            default=resolve_anthropic_model(),
+        )
         system_chars = len(prompt or "")
         messages_chars = sum(len(str(m.get("content") or "")) for m in messages)
         total_prompt_chars = system_chars + messages_chars
@@ -189,6 +193,7 @@ class AnthropicProvider(BaseAIProvider):
             intent=audit_extra.get("intent"),
             stage=audit_extra.get("stage"),
             channel=audit_extra.get("channel"),
+            model_tier=audit_extra.get("model_tier"),
         )
 
         # ── Path 1: Anthropic SDK (sync) ──────────────────────────────────────

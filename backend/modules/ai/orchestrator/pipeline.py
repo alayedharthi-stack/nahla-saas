@@ -62,7 +62,15 @@ class AIOrchestrationPipeline:
 
         No DB calls.  No network calls.  Safe for scaffolding.
         """
-        chain = get_provider_chain(hint=request.provider_hint)
+        router_meta = request.prompt_overrides.get("__model_router") or {}
+        override = router_meta.get("provider_chain_override")
+        if override:
+            chain = get_provider_chain(
+                hint=request.provider_hint,
+                override_chain=list(override),
+            )
+        else:
+            chain = get_provider_chain(hint=request.provider_hint)
         logger.debug(
             "[pipeline] provider chain resolved | hint=%s chain=%s",
             request.provider_hint,
@@ -153,6 +161,7 @@ class AIOrchestrationPipeline:
                 "provider_chain":        provider_chain.providers,
                 "provider_hint":         request.provider_hint,
                 "provider_routing":      "active",
+                "model_tier":            (request.prompt_overrides.get("__model_router") or {}).get("tier"),
             }
         )
         return payload

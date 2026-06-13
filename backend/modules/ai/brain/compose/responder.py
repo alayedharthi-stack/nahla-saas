@@ -1133,7 +1133,20 @@ class DefaultComposer:
             except Exception:  # noqa: BLE001  # noqa: silent-ok — shadow must never break compose
                 pass
 
+            from ..cost.model_router import resolve_compose_model_route  # noqa: PLC0415
             from ..cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+
+            _compose_route = resolve_compose_model_route(
+                intent_name=_intent_name,
+                social_category=_social_cat,
+                decision_action=(decision.action if decision is not None else None),
+                human_priority=bool(getattr(ctx, "human_priority", False)),
+                reply_state=reply_state,
+                result_data=dict(getattr(result, "data", None) or {}),
+            )
+            _llm_audit.update(_compose_route.to_audit_dict())
+            if _compose_route.enforced and _compose_route.model:
+                _llm_audit["model_override"] = _compose_route.model
 
             maybe_audit_model_router(
                 call_site="brain.compose._llm_compose",
@@ -1144,6 +1157,23 @@ class DefaultComposer:
                 tenant_id=ctx.tenant_id,
                 conversation_id=getattr(ctx, "conversation_id", None),
                 turn_id=getattr(getattr(ctx, "state", None), "turn", None),
+                extra={
+                    "mode": "enforce" if _compose_route.enforced else "audit_only",
+                    **_compose_route.to_audit_dict(),
+                },
+            )
+
+            _prompt_overrides: dict = {
+                "__full_system_prompt": prompt,
+                "__llm_cost_audit": _llm_audit,
+            }
+            if _compose_route.enforced:
+                _prompt_overrides["__model_router"] = _compose_route.to_prompt_override()
+
+            _provider_hint = (
+                _compose_route.provider_hint
+                if _compose_route.enforced
+                else "anthropic"
             )
 
             payload = await asyncio.wait_for(
@@ -1161,11 +1191,8 @@ class DefaultComposer:
                         "suggestion": asdict(ctx.suggestion) if ctx.suggestion else {},
                         "sales_context": ctx.sales_context.to_dict() if ctx.sales_context else {},
                     },
-                    prompt_overrides={
-                        "__full_system_prompt": prompt,
-                        "__llm_cost_audit": _llm_audit,
-                    },
-                    provider_hint="anthropic",
+                    prompt_overrides=_prompt_overrides,
+                    provider_hint=_provider_hint,
                 ),
                 timeout=_TIMEOUT,
             )
