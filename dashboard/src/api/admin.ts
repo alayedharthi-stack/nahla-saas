@@ -314,14 +314,44 @@ export interface AdminSubscription {
 export interface AdminAIUsageTenant {
   tenant_id: number
   tenant_name?: string
+  period?: string
   turns_total: number
   turns_orchestrated: number
   ai_actions_logged: number
   avg_latency_ms: number
+  calls_total: number
+  actual_total_tokens: number
   estimated_total_tokens: number
+  actual_total_cost_usd: number
   estimated_total_cost_usd: number
+  unattributed_total_cost_usd: number
   models: Array<{ model: string; count: number }>
   providers: Array<{ provider: string; count: number }>
+  reasons: Array<{ reason: string; count: number }>
+}
+
+export interface AdminAICostsSummary {
+  period: string
+  actual_total_cost_usd: number
+  estimated_total_cost_usd: number
+  unattributed_total_cost_usd: number
+  actual_total_tokens: number
+  estimated_total_tokens: number
+  calls_total: number
+  providers: Array<{ provider: string; count: number }>
+  models: Array<{ model: string; count: number }>
+  reasons: Array<{ reason: string; count: number }>
+  tenants: Array<{
+    tenant_id: number
+    tenant_name: string
+    store_id: number
+    actual_total_cost_usd: number
+    estimated_total_cost_usd: number
+    total_cost_usd: number
+    actual_total_tokens: number
+    estimated_total_tokens: number
+    calls_total: number
+  }>
 }
 
 export interface AdminSystemEvent {
@@ -420,19 +450,19 @@ export const adminApi = {
   revenueTimeseries: (days = 30) =>
     apiCall<{ days: number; points: Array<{ date: string; revenue_sar: number }> }>(`/admin/revenue/timeseries?days=${days}`),
 
-  aiUsage: () =>
-    apiCall<{ tenants: AdminAIUsageTenant[] }>('/admin/ai/usage'),
+  aiUsage: (period = '7d') =>
+    apiCall<{ tenants: AdminAIUsageTenant[]; period: string }>(`/admin/ai/usage?period=${period}`),
 
-  aiUsageTenant: (tenantId: number) =>
-    apiCall<AdminAIUsageTenant>(`/admin/ai/usage/${tenantId}`),
+  aiUsageTenant: (tenantId: number, period = '7d') =>
+    apiCall<AdminAIUsageTenant>(`/admin/ai/usage/${tenantId}?period=${period}`),
 
-  aiCosts: () =>
-    apiCall<{ estimated_total_cost_usd: number; estimated_total_tokens: number; tenants: Array<{ tenant_id: number; tenant_name: string; estimated_total_cost_usd: number; estimated_total_tokens: number }> }>(
-      '/admin/ai/costs',
+  aiCosts: (period = '7d') =>
+    apiCall<AdminAICostsSummary>(`/admin/ai/costs?period=${period}`),
+
+  aiProviders: (period = '7d') =>
+    apiCall<{ period: string; providers: Array<{ provider: string; count: number }>; models: Array<{ model: string; count: number }> }>(
+      `/admin/ai/providers?period=${period}`,
     ),
-
-  aiProviders: () =>
-    apiCall<{ providers: Array<{ provider: string; count: number }>; models: Array<{ model: string; count: number }> }>('/admin/ai/providers'),
 
   systemHealth: () =>
     apiCall<AdminSystemHealth>('/admin/system/health'),
