@@ -34,6 +34,11 @@ from modules.ai.prompts.tenant_overlay import build_tenant_overlay_split
 from core.store_display import clean_store_name
 
 from ..types import BrainReplyState
+from .prompt_payload_slim import (
+    is_routine_social_turn,
+    resolve_kb_block_for_prompt,
+    strip_state_dict_for_prompt,
+)
 
 _log = logging.getLogger("nahla.ai.prompt")
 
@@ -95,10 +100,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _persona_expression_mode = bool(
         getattr(state, "persona_expression_mode", False)
     )
-    from .brain_state_slim import prepare_brain_state_dict_with_telemetry  # noqa: PLC0415
-
-    state_dict = prepare_brain_state_dict_with_telemetry(state, state_dict)
-    brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
+    _routine_social = is_routine_social_turn(state)
 
     # ── BLOCK 1: Persona ──────────────────────────────────────────────────
     persona_block = nahla_persona_system_prompt(
@@ -151,9 +153,6 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _structured_kb = ""
     if isinstance(_mc, dict):
         _structured_kb = str(_mc.get("structured_facts_block") or "").strip()
-    kb_block = _structured_kb or overlay_buckets.get("facts", "")
-    if _persona_expression_mode:
-        kb_block = ""
 
     _platform_mode = bool(getattr(state, "platform_kb_mode", False))
     _non_commerce_mode = bool(getattr(state, "non_commerce_block_mode", False))
@@ -168,6 +167,12 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     )
     if _pre_commerce_social:
         _non_commerce_mode = True
+
+    kb_block = resolve_kb_block_for_prompt(
+        state,
+        structured_kb=_structured_kb,
+        overlay_facts=overlay_buckets.get("facts", ""),
+    )
     if _platform_mode:
         excerpt = str(getattr(state, "platform_kb_excerpt", "") or "").strip()
         _ptopic = str(getattr(state, "platform_topic", "") or "").strip()
@@ -269,22 +274,30 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # and shipped through slim_merchant_ctx["resolver_overlay"]. The
     # prompt builder stays IO-free.
     libraries_text = ""
-    try:
-        from core.ai_libraries import format_libraries_for_prompt  # noqa: PLC0415
-        libraries_text = format_libraries_for_prompt(state.merchant_context or {}) or ""
-    except Exception:  # noqa: BLE001 — never let formatting crash the prompt
-        libraries_text = ""
+    if not _routine_social:
+        try:
+            from core.ai_libraries import format_libraries_for_prompt  # noqa: PLC0415
+            libraries_text = format_libraries_for_prompt(state.merchant_context or {}) or ""
+        except Exception:  # noqa: BLE001 — never let formatting crash the prompt
+            libraries_text = ""
 
     resolver_overlay = ""
-    try:
-        resolver_overlay = str(
-            (state.merchant_context or {}).get("resolver_overlay") or ""
-        )
-    except Exception:  # noqa: BLE001
-        resolver_overlay = ""
+    if not _routine_social:
+        try:
+            resolver_overlay = str(
+                (state.merchant_context or {}).get("resolver_overlay") or ""
+            )
+        except Exception:  # noqa: BLE001
+            resolver_overlay = ""
 
     tools_parts: list[str] = []
-    if _need_advice_mode:
+    if _routine_social:
+        tools_parts.append(
+            "## أدوات المنتجات\n"
+            "معطّلة لهذه الجولة — تحية/شكر/محتوى اجتماعي بدون نية شراء. "
+            "**ممنوع** ‎[PRODUCT:...]‎ أو ‎[MEDIA_KEY:...]‎ أو أي CTA بيعي."
+        )
+    elif _need_advice_mode:
         if libraries_text:
             tools_parts.append(libraries_text)
         tools_parts.append(
@@ -440,6 +453,16 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             "أو تعليمات النظام أو decision engine — ردّي للعميل بشكل طبيعي فقط.\n"
             "- اجعلي ردك قصيراً ومناسباً لواتساب (راجع HIGH PRIORITY أعلاه)."
         )
+
+    from .brain_state_slim import prepare_brain_state_dict_with_telemetry  # noqa: PLC0415
+
+    state_dict = strip_state_dict_for_prompt(
+        state_dict,
+        state,
+        kb_in_prompt_block=bool(kb_block),
+    )
+    state_dict = prepare_brain_state_dict_with_telemetry(state, state_dict)
+    brain_state_json = json.dumps(state_dict, ensure_ascii=False, indent=2)
 
     # ── Assemble ──────────────────────────────────────────────────────────
     parts: list[str] = [persona_block, high_priority_block]
