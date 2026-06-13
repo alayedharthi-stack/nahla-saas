@@ -913,9 +913,14 @@ class TestStateDrivenSimplification:
     # --- Composer: defense-in-depth greet guard ---
 
     def test_composer_downgrades_greet_when_already_greeted(self):
-        """Even if some upstream layer produces ACTION_GREET against state
-        that says greeted=True, the Composer must downgrade to LLM rather
-        than send the greeting template."""
+        """PR2B — when greeted=True, Composer uses warm re-greet template
+        instead of full onboarding greet or LLM downgrade."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_ALLOWED_EMOJI,
+            PERSONA_GREETING_REGREET,
+            persona_reply_has_light_emoji,
+            persona_reply_is_warm_greeting,
+        )
         from modules.ai.brain.compose.responder import DefaultComposer
         composer = DefaultComposer()
         state = _make_state(greeted=True)
@@ -925,15 +930,21 @@ class TestStateDrivenSimplification:
             state=state, facts=_make_facts(), profile={},
         )
         decision = Decision(action=ACTION_GREET)
+        llm_mock = AsyncMock(return_value="must not call llm")
         with patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
-            new_callable=AsyncMock, return_value="contextual reply",
-        ) as mock_llm:
+            llm_mock,
+        ):
             reply = _run(composer.compose(decision, ActionResult(success=True), ctx))
-        assert reply == "contextual reply"
-        assert decision.action == ACTION_LLM_REPLY
-        assert "composer_guard" in (decision.reason or "")
-        mock_llm.assert_called_once()
+        llm_mock.assert_not_called()
+        assert reply.strip()
+        assert reply in PERSONA_GREETING_REGREET or persona_reply_is_warm_greeting(reply)
+        assert persona_reply_has_light_emoji(reply)
+        assert sum(reply.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
+        assert "المنتج" not in reply
+        assert "السعر" not in reply
+        assert decision.action == ACTION_GREET
+        assert decision.action != ACTION_LLM_REPLY
 
     def test_composer_downgrades_greet_when_mid_order(self):
         """Greet must also be blocked when the customer is past discovery,
