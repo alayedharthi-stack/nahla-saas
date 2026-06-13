@@ -58,6 +58,172 @@ def extract_anthropic_usage(
     return None, False
 
 
+def extract_openai_usage(
+    *,
+    httpx_data: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, int]], bool]:
+    """Parse OpenAI Chat Completions usage from httpx JSON."""
+    if httpx_data is None:
+        return None, False
+    usage = httpx_data.get("usage")
+    if not isinstance(usage, dict):
+        return None, False
+    if "prompt_tokens" not in usage and "completion_tokens" not in usage:
+        return None, False
+    return {
+        "input_tokens": int(usage.get("prompt_tokens") or 0),
+        "output_tokens": int(usage.get("completion_tokens") or 0),
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }, True
+
+
+def extract_gemini_usage(
+    *,
+    httpx_data: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, int]], bool]:
+    """Parse Gemini generateContent usageMetadata from httpx JSON."""
+    if httpx_data is None:
+        return None, False
+    meta = httpx_data.get("usageMetadata")
+    if not isinstance(meta, dict):
+        return None, False
+    if not any(
+        key in meta
+        for key in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount")
+    ):
+        return None, False
+    return {
+        "input_tokens": int(meta.get("promptTokenCount") or 0),
+        "output_tokens": int(meta.get("candidatesTokenCount") or 0),
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }, True
+
+
+def _record_ai_usage_from_provider_response(
+    *,
+    audit_extra: Optional[Mapping[str, Any]],
+    provider: str,
+    model: str,
+    default_reason: str,
+    usage: Optional[Dict[str, int]],
+    has_actual: bool,
+    reply_text: str,
+    total_prompt_chars: int,
+    request_id: Optional[str] = None,
+    db: Any = None,
+) -> None:
+    extra = dict(audit_extra or {})
+    est_input = int(
+        extra.get("estimated_input_tokens")
+        or approx_tokens_from_chars(total_prompt_chars)
+    )
+    est_output = approx_tokens_from_chars(len(reply_text or ""))
+    reason = str(extra.get("reason") or default_reason)
+
+    if has_actual and usage is not None:
+        record_ai_usage_event(
+            tenant_id=extra.get("tenant_id"),
+            store_id=extra.get("store_id"),
+            conversation_id=extra.get("conversation_id"),
+            turn_id=extra.get("turn_id"),
+            provider=provider,
+            model=model,
+            reason=reason,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cache_read_tokens=usage.get("cache_read_tokens", 0),
+            cache_write_tokens=usage.get("cache_write_tokens", 0),
+            estimated_input_tokens=est_input,
+            estimated_output_tokens=est_output,
+            token_source=TOKEN_SOURCE_ACTUAL,
+            request_id=request_id,
+            db=db,
+        )
+        return
+
+    record_ai_usage_event(
+        tenant_id=extra.get("tenant_id"),
+        store_id=extra.get("store_id"),
+        conversation_id=extra.get("conversation_id"),
+        turn_id=extra.get("turn_id"),
+        provider=provider,
+        model=model,
+        reason=reason,
+        estimated_input_tokens=est_input,
+        estimated_output_tokens=est_output,
+        token_source=TOKEN_SOURCE_ESTIMATED,
+        request_id=request_id,
+        db=db,
+    )
+
+
+def record_ai_usage_from_openai_compatible(
+    *,
+    audit_extra: Optional[Mapping[str, Any]] = None,
+    model: str,
+    httpx_data: Optional[Mapping[str, Any]] = None,
+    reply_text: str = "",
+    total_prompt_chars: int = 0,
+    db: Any = None,
+) -> None:
+    """Convenience wrapper for OpenAI-compatible call sites; never raises."""
+    try:
+        usage, has_actual = extract_openai_usage(httpx_data=httpx_data)
+        request_id = httpx_data.get("id") if httpx_data is not None else None
+        _record_ai_usage_from_provider_response(
+            audit_extra=audit_extra,
+            provider="openai_compatible",
+            model=model,
+            default_reason="openai_compatible_provider.call",
+            usage=usage,
+            has_actual=has_actual,
+            reply_text=reply_text,
+            total_prompt_chars=total_prompt_chars,
+            request_id=request_id,
+            db=db,
+        )
+    except Exception as exc:  # noqa: BLE001 — ledger must never break replies
+        _log.warning(
+            "[AI_USAGE_LEDGER_WRITE_ERROR] provider=openai_compatible model=%s err=%s",
+            model,
+            type(exc).__name__,
+        )
+
+
+def record_ai_usage_from_gemini(
+    *,
+    audit_extra: Optional[Mapping[str, Any]] = None,
+    model: str,
+    httpx_data: Optional[Mapping[str, Any]] = None,
+    reply_text: str = "",
+    total_prompt_chars: int = 0,
+    db: Any = None,
+) -> None:
+    """Convenience wrapper for Gemini call sites; never raises."""
+    try:
+        usage, has_actual = extract_gemini_usage(httpx_data=httpx_data)
+        _record_ai_usage_from_provider_response(
+            audit_extra=audit_extra,
+            provider="gemini",
+            model=model,
+            default_reason="gemini_provider.call",
+            usage=usage,
+            has_actual=has_actual,
+            reply_text=reply_text,
+            total_prompt_chars=total_prompt_chars,
+            request_id=None,
+            db=db,
+        )
+    except Exception as exc:  # noqa: BLE001 — ledger must never break replies
+        _log.warning(
+            "[AI_USAGE_LEDGER_WRITE_ERROR] provider=gemini model=%s err=%s",
+            model,
+            type(exc).__name__,
+        )
+
+
 def _resolve_store_id(tenant_id: Optional[int], store_id: Optional[int]) -> Optional[int]:
     if store_id is not None:
         return store_id
