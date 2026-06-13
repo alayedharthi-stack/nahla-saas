@@ -237,7 +237,7 @@ class TestDuaFragmentGuard:
             tenant_id=ctx.tenant_id,
         ).reply
         assert dua_reply_has_required_marker(guarded)
-        assert guarded.strip() not in {"وأحسن", "وأحسn 🌷"}
+        assert guarded.strip() not in {"وأحسن", "وأحسن 🌷"}
 
     def test_plain_thanks_unaffected(self) -> None:
         ctx = _ctx(message="شكرا")
