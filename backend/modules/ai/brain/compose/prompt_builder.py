@@ -44,6 +44,7 @@ from .prompt_state_serializer import (
     _NEED_ADVICE_SLIM_APPENDIX,
     cap_commerce_kb_block,
     emit_commerce_prompt_contributors_audit,
+    emit_commerce_prompt_slim_applied,
     emit_commerce_prompt_slim_error,
     measure_commerce_prompt_contributors,
     serialize_commerce_brain_state,
@@ -105,7 +106,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # merchant-intent turns. Platform-intent turns bypass `facts` and
     # use `extract_platform_kb_excerpt` against the raw KB instead.
     settings_for_overlay = _extract_ai_settings_from_state(state)
-    _commerce_slim = should_apply_commerce_prompt_slim(state)
+    _commerce_slim_eligible = should_apply_commerce_prompt_slim(state)
+    _commerce_slim = _commerce_slim_eligible
     if _commerce_slim:
         settings_for_overlay = slim_ai_settings_for_commerce_prompt(settings_for_overlay)
     overlay_buckets = build_tenant_overlay_split(settings_for_overlay)
@@ -140,6 +142,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         ).strip()
     except Exception:  # noqa: BLE001
         structured_behavior_block = ""
+    if _commerce_slim and structured_behavior_block:
+        structured_behavior_block = structured_behavior_block[:800]
     merchant_behavior_extra = (
         structured_behavior_block or overlay_buckets.get("behavior", "")
     )
@@ -342,14 +346,13 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             )
         except Exception as exc:  # noqa: BLE001
             emit_commerce_prompt_slim_error(
-                err=type(exc).__name__,
+                err=f"block_slim:{type(exc).__name__}",
                 intent=getattr(state, "intent_name", None),
             )
             libraries_text = _orig_libraries
             resolver_overlay = _orig_resolver
             high_priority_block = _orig_high_priority
             structured_behavior_block = _orig_behavior
-            _commerce_slim = False
 
     tools_parts: list[str] = []
     if _routine_social:
@@ -523,13 +526,23 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     from .brain_state_slim import prepare_brain_state_dict_with_telemetry  # noqa: PLC0415
 
     _kb_in_prompt = bool(kb_block)
-    if _commerce_slim:
+    _before_json_chars = 0
+    if _commerce_slim_eligible:
+        try:
+            _before_json_chars = len(
+                json.dumps(state_dict, ensure_ascii=False, indent=2)
+            )
+        except Exception:  # noqa: BLE001
+            _before_json_chars = 0
+    _state_slim_applied = False
+    if _commerce_slim_eligible:
         try:
             state_dict = serialize_commerce_brain_state(
                 state_dict,
                 state,
                 kb_in_prompt_block=_kb_in_prompt,
             )
+            _state_slim_applied = True
         except Exception as exc:  # noqa: BLE001
             emit_commerce_prompt_slim_error(
                 err=type(exc).__name__,
@@ -539,6 +552,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 state_dict,
                 state,
                 kb_in_prompt_block=_kb_in_prompt,
+                force_commerce_lite=True,
             )
     else:
         state_dict = strip_state_dict_for_prompt(
@@ -581,6 +595,33 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     parts.append(brain_json_tail)
 
     final_prompt = "\n\n".join(parts)
+
+    if _state_slim_applied:
+        _commerce_slim = True
+        try:
+            _after_json_chars = len(brain_state_json)
+            _system_chars_after = max(
+                0,
+                len(final_prompt) - len(brain_json_tail),
+            )
+            _json_saved = max(0, _before_json_chars - _after_json_chars)
+            _removed_ai_settings = (
+                '"ai_settings"' not in brain_state_json
+                and bool((state.merchant_context or {}).get("ai_settings"))
+            )
+            emit_commerce_prompt_slim_applied(
+                state=state,
+                before_chars=len(final_prompt) + _json_saved,
+                after_chars=len(final_prompt),
+                removed_ai_settings=_removed_ai_settings,
+                system_chars_before=_system_chars_after + _json_saved,
+                system_chars_after=_system_chars_after,
+            )
+        except Exception as exc:  # noqa: BLE001 — audit must never break replies
+            emit_commerce_prompt_slim_error(
+                err=f"applied_audit:{type(exc).__name__}",
+                intent=getattr(state, "intent_name", None),
+            )
 
     # ── Structured log ────────────────────────────────────────────────────
     # Emits per-block sizes so we can see (a) when the KB grows huge,

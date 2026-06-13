@@ -168,6 +168,12 @@ def should_omit_kb_block_for_commerce_slim(state: BrainReplyState) -> bool:
     goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
     if goal not in {GOAL_PRODUCT_AVAILABILITY, "product_reference", GOAL_PRICE_INQUIRY}:
         return False
+    mc = getattr(state, "merchant_context", None) or {}
+    structured_kb = ""
+    if isinstance(mc, dict):
+        structured_kb = str(mc.get("structured_facts_block") or "").strip()
+    if goal in {GOAL_PRODUCT_AVAILABILITY, "product_reference"} and structured_kb:
+        return True
     if not isinstance(getattr(state, "selected_product", None), dict):
         return False
     facts = dict(getattr(state, "known_facts", None) or {})
@@ -247,6 +253,7 @@ def serialize_commerce_brain_state(
         state_dict,
         state,
         kb_in_prompt_block=kb_in_prompt_block,
+        force_commerce_lite=True,
     )
     out = dict(base)
 
@@ -378,6 +385,41 @@ def emit_commerce_prompt_slim_error(*, err: str, intent: Optional[str] = None) -
         "[COMMERCE_PROMPT_SLIM_ERROR] %s",
         json.dumps({"intent": intent, "err": err}, ensure_ascii=False),
     )
+
+
+def emit_commerce_prompt_slim_applied(
+    *,
+    state: BrainReplyState,
+    before_chars: int,
+    after_chars: int,
+    removed_ai_settings: bool,
+    system_chars_before: int,
+    system_chars_after: int,
+    conversation_id: Optional[int] = None,
+    turn_id: Optional[int] = None,
+) -> None:
+    try:
+        mc = state.merchant_context or {}
+        payload = {
+            "tenant_id": mc.get("tenant_id"),
+            "conversation_id": conversation_id if conversation_id is not None else mc.get("conversation_id"),
+            "turn_id": turn_id if turn_id is not None else mc.get("turn_id"),
+            "intent": getattr(state, "intent_name", None),
+            "before_chars": before_chars,
+            "after_chars": after_chars,
+            "removed_ai_settings": removed_ai_settings,
+            "system_chars_before": system_chars_before,
+            "system_chars_after": system_chars_after,
+        }
+        _log.info(
+            "[COMMERCE_PROMPT_SLIM_APPLIED] %s",
+            json.dumps(payload, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never break replies
+        _log.warning(
+            "[COMMERCE_PROMPT_SLIM_ERROR] %s",
+            json.dumps({"err": type(exc).__name__}, ensure_ascii=False),
+        )
 
 
 @dataclass(frozen=True)
