@@ -246,23 +246,16 @@ def test_first_turn_thin_general_still_greets() -> None:
     assert "first-turn general" in decision.reason
 
 
-def test_first_turn_pure_greeting_routes_persona_social_not_welcome_card() -> None:
-    """Pure salaam on first turn → persona_social compose (not ACTION_GREET)."""
-    from modules.ai.brain.persona_expression import (
-        PERSONA_KIND_GREETING,
-        PERSONA_TOPIC_SOCIAL,
-    )
-
+def test_first_turn_pure_greeting_routes_template_greet_not_welcome_card_llm() -> None:
+    """Pure salaam on first turn → ACTION_GREET template (PR2B, no Sonnet)."""
     ctx = _first_turn_ctx(
         message="السلام عليكم", intent_name=INTENT_GREETING,
     )
 
     decision = DefaultDecisionEngine().decide(ctx)
 
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
-    assert decision.action != ACTION_GREET
+    assert decision.action == ACTION_GREET
+    assert decision.action != ACTION_LLM_REPLY
 
 
 def test_first_turn_greeting_with_substance_bypasses_belt_and_suspenders(
@@ -315,4 +308,4 @@ def test_embedded_greeting_path_still_works() -> None:
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert decision.action != ACTION_GREET
-    assert decision.action == ACTION_LLM_REPLY
+    assert decision.action in {ACTION_LLM_REPLY, "search_products", "ask_product"}

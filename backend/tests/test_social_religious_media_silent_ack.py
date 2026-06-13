@@ -79,7 +79,20 @@ def _media_ctx(
 
 
 class TestReligiousMediaRouting:
-    def test_religious_media_routes_to_llm_not_template(self) -> None:
+    def test_religious_media_routes_to_template_under_cost_policy(self) -> None:
+        decision = build_social_courtesy_decision(
+            "religious_media",
+            confidence=0.95,
+            reason="test",
+            block_commerce=True,
+        )
+        assert decision.action == ACTION_SOCIAL_REPLY
+        assert decision.args.get("social_category") == "religious_media"
+
+    def test_religious_media_routes_to_llm_when_avoid_disabled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "false")
         decision = build_social_courtesy_decision(
             "religious_media",
             confidence=0.95,
@@ -89,21 +102,21 @@ class TestReligiousMediaRouting:
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
 
-    def test_hadith_image_intent_social_routes_to_persona(self) -> None:
+    def test_hadith_image_intent_social_routes_to_template(self) -> None:
         ctx = _media_ctx(message=_HADITH_IMAGE, social_category="religious_media")
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
+        assert decision.action == ACTION_SOCIAL_REPLY
+        assert decision.args.get("social_category") == "religious_media"
 
-    def test_prophet_invocation_still_llm(self) -> None:
+    def test_prophet_invocation_routes_to_template(self) -> None:
         ctx = _media_ctx(
             message=_HADITH_IMAGE,
             social_category="prophet_invocation",
             nc_category="prophet_invocation",
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
+        assert decision.action == ACTION_SOCIAL_REPLY
+        assert decision.args.get("social_category") == "prophet_invocation"
 
     def test_classified_helper_matches_non_commerce_tag(self) -> None:
         assert inbound_has_classified_social_religious_media(_HADITH_IMAGE) is True

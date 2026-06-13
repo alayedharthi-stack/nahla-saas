@@ -35,6 +35,7 @@ class DefaultSalesContextLoader:
         profile: Dict[str, Any],
         customer_id: Optional[int] = None,
         tenant_context: Optional[TenantContext] = None,
+        pre_commerce_shortcut: bool = False,
     ) -> SalesContextSnapshot:
         from core.store_knowledge import StoreKnowledgeLoader
         from services.offer_decision_service import collect_signals
@@ -54,6 +55,9 @@ class DefaultSalesContextLoader:
                     "sales context tenant mismatch: "
                     f"context={tenant_context.tenant_id} vs requested={tenant_id}"
                 )
+
+        if pre_commerce_shortcut:
+            return SalesContextSnapshot()
 
         snapshot = SalesContextSnapshot()
 
