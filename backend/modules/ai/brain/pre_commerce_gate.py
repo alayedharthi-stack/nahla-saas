@@ -85,8 +85,11 @@ def should_pre_commerce_shortcut(
                 and not _first_turn_has_actionable_substance(message)
             ):
                 return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[PRE_COMMERCE_GATE_ERROR] failed to evaluate routine greeting gate: %s",
+                type(exc).__name__,
+            )
 
     if message and state is not None:
         try:
@@ -104,8 +107,11 @@ def should_pre_commerce_shortcut(
                     nc_match=nc_match,
                 ):
                     return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[PRE_COMMERCE_GATE_ERROR] failed to evaluate commerce signal gate: %s",
+                type(exc).__name__,
+            )
 
     return False
 
