@@ -183,6 +183,14 @@ class TestAuditSafety:
         assert "[COMMERCE_PROMPT_CONTRIBUTORS]" in joined
         assert _CUSTOMER_MSG not in joined
 
+    def test_slim_applied_audit_log(self, slim_enabled: None, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.INFO, logger="nahla.ai.commerce_prompt_slim")
+        build_brain_reply_prompt(_heavy_commerce_state())
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "[COMMERCE_PROMPT_SLIM_APPLIED]" in joined
+        assert "removed_ai_settings" in joined
+        assert _CUSTOMER_MSG not in joined
+
     def test_audit_extra_marks_slim_enabled(self, slim_enabled: None) -> None:
         state = _heavy_commerce_state()
         prompt = build_brain_reply_prompt(state)
@@ -233,3 +241,18 @@ class TestNoTenantSpecialCase:
         )
         prompt = build_brain_reply_prompt(state)
         assert len(prompt) < 25_000
+
+
+class TestNeedBasedDiscoveryPath:
+    def test_discovery_without_selected_product_meets_target(self, slim_enabled: None) -> None:
+        state = _heavy_commerce_state(selected_product=None)
+        prompt = build_brain_reply_prompt(state)
+        assert len(prompt) < 25_000
+        assert len(prompt) // 4 < 7_000
+        assert "manual_knowledge_base" not in prompt
+
+    def test_commerce_lite_applies_for_need_based_when_flag_on(self, slim_enabled: None) -> None:
+        from modules.ai.brain.compose.prompt_payload_slim import should_apply_commerce_lite
+
+        state = _heavy_commerce_state()
+        assert should_apply_commerce_lite(state) is True

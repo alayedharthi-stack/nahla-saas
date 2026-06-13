@@ -165,6 +165,12 @@ def _checkout_is_active(state: BrainReplyState) -> bool:
     return False
 
 
+def _is_commerce_prompt_slim_flag_on() -> bool:
+    return os.getenv("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def should_apply_commerce_lite(state: BrainReplyState) -> bool:
     if is_routine_social_turn(state):
         return False
@@ -172,7 +178,8 @@ def should_apply_commerce_lite(state: BrainReplyState) -> bool:
         return False
     if bool(getattr(state, "contextual_clarify_mode", False)):
         return False
-    if bool(getattr(state, "need_based_advice_mode", False)):
+    need_based = bool(getattr(state, "need_based_advice_mode", False))
+    if need_based and not _is_commerce_prompt_slim_flag_on():
         return False
     if _checkout_is_active(state):
         return False
@@ -229,6 +236,7 @@ def strip_state_dict_for_prompt(
     state: BrainReplyState,
     *,
     kb_in_prompt_block: bool,
+    force_commerce_lite: bool = False,
 ) -> Dict[str, Any]:
     """
     Remove duplicate/heavy fields from BrainStateJSON before serialization.
@@ -237,7 +245,7 @@ def strip_state_dict_for_prompt(
     """
     out = dict(state_dict)
     routine = is_routine_social_turn(state)
-    commerce_lite = should_apply_commerce_lite(state)
+    commerce_lite = force_commerce_lite or should_apply_commerce_lite(state)
 
     if routine:
         for key in _ROUTINE_TOP_OMIT:
