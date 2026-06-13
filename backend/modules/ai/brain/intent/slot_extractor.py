@@ -158,6 +158,10 @@ async def extract_slots(
             reason="brain.intent.slot_extractor",
         )
 
+        from modules.ai.brain.cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+
+        maybe_audit_model_router(call_site="brain.intent.slot_extractor")
+
         # max_tokens raised from 200 → 350.
         # With compact output, 350 is ample for even the densest response
         # (≈ 15 filled fields × ~20 tokens each ≈ 300 tokens).
