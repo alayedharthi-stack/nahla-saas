@@ -376,30 +376,46 @@ def test_decision_engine_refuses_to_greet_during_checkout():
 
 
 def test_decision_engine_greets_on_first_turn_in_discovery():
-    """Sanity check — first-time hellos route to persona_social greeting compose."""
+    """PR2B — pure first-turn hello routes to ACTION_GREET (no Sonnet)."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY
-    from modules.ai.brain.persona_expression import (
-        PERSONA_KIND_GREETING,
-        PERSONA_TOPIC_SOCIAL,
-    )
     from modules.ai.brain.state.stages import STAGE_DISCOVERY
-    from modules.ai.brain.types import INTENT_GREETING, Intent
+    from modules.ai.brain.types import INTENT_GREETING
 
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_DISCOVERY, greeted=False, product=None)
+    msg = "مرحبا"
     decision = engine.decide(
         _ctx(
             state,
             INTENT_GREETING,
             slots={},
-            message="مرحبا",
+            message=msg,
         )
     )
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
-    assert decision.args.get("block_commerce_escalation") is True
+    assert not (decision.args or {}).get("embedded_greeting")
+    assert decision.action == ACTION_GREET
+    assert decision.action != ACTION_LLM_REPLY
+
+
+def test_decision_engine_embedded_greeting_with_product_not_pure_greet():
+    """Greeting wrapper + commerce ask must not collapse to ACTION_GREET only."""
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.decision.actions import ACTION_GREET
+    from modules.ai.brain.state.stages import STAGE_DISCOVERY
+    from modules.ai.brain.types import INTENT_GREETING
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_DISCOVERY, greeted=False, product=None)
+    msg = "هلا عندكم عسل طلح؟"
+    decision = engine.decide(
+        _ctx(
+            state,
+            INTENT_GREETING,
+            slots={"embedded_greeting": True},
+            message=msg,
+        )
+    )
     assert decision.action != ACTION_GREET
 
 
