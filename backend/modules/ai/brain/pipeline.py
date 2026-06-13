@@ -755,7 +755,19 @@ class MerchantBrain:
         state: MerchantConversationState = state_for_classify
         if _pre_commerce_shortcut:
             facts: CommerceFacts = load_minimal_commerce_facts(db, tenant_id)
-            sales_context: SalesContextSnapshot = SalesContextSnapshot()
+            sales_context = self._sales_context_loader.load(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=customer_phone,
+                state=state,
+                history=history,
+                profile=profile,
+                customer_id=customer_id,
+                tenant_context=tenant_ctx,
+                pre_commerce_shortcut=True,
+            )
+            if sales_context is None:
+                sales_context = SalesContextSnapshot()
             merchant_context: Dict[str, Any] = {}
             commerce_bundle: Dict[str, Any] = {}
         else:
