@@ -221,6 +221,54 @@ class TestDirectFamilyAvailabilityAsk:
         assert entity.resolution_mode == "inbound_family"
         assert len(entity.candidate_product_ids) == 2
 
+    def test_arabic_definite_article_inbound_resolves_inbound_family(self):
+        """«هل السمر متوفر؟» must match catalog titles tokenized as «سمر»."""
+        inbound = "\u0647\u0644 \u0627\u0644\u0633\u0645\u0631 \u0645\u062a\u0648\u0641\u0631\u061f"
+        skus = [
+            _sku(11, "\u0639\u0633\u0644 \u0633\u0645\u0631 \u0627\u0644\u062d\u062c\u0627\u0632 \u0625\u0646\u062a\u0627\u062c \u0642\u062f\u064a\u0645", checkout=True, family="a|b"),
+            _sku(12, "\u0639\u0633\u0644 \u0633\u0645\u0631 \u0627\u0644\u062d\u062c\u0627\u0632 \u0627\u0646\u062a\u0627\u062c 1446", checkout=False, family="c|d"),
+        ]
+        entity = resolve_availability_entity(
+            focus_product=None,
+            recommended_product_ids=[],
+            inbound_text=inbound,
+            catalog_skus=skus,
+        )
+        assert entity.resolution_mode == "inbound_family"
+        assert len(entity.candidate_product_ids) == 2
+
+        ctx = _family_ctx(*skus, inbound=inbound)
+        ctx["kb_signals"] = [{
+            "section_id": 185,
+            "kind": "quick_update",
+            "avail_polarity": "positive",
+            "primary_year": "1447",
+            "linked_product_ids": [],
+        }]
+        ev = evaluate_product_availability_evidence(
+            availability_context=ctx,
+            inbound_text=inbound,
+        )
+        assert ev.evidence_state == EVIDENCE_VARIANT_OPTIONS
+        assert ev.conflict_type is None
+
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            result = apply_product_availability_truth_guard(
+                reply="\u0646\u0639\u0645\u060c \u0645\u062a\u0648\u0641\u0631 \u062d\u0627\u0644\u064a\u0627\u064b.",
+                availability_context=ctx,
+                inbound_text=inbound,
+                tenant_id=1,
+            )
+            assert result.replaced is False
+            assert _CONFLICT_REPLY_AR not in result.reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev
+
     def test_direct_ask_mixed_variants_not_conflict_canned(self):
         skus = [
             _sku(1, "Edition Series legacy harvest", checkout=True, family="a|b|legacy"),
