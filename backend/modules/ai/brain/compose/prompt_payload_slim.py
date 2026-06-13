@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, FrozenSet
+
+from core.config import _bool_env
 
 from ..types import (
     INTENT_ASK_PAYMENT_INFO,
@@ -166,9 +167,7 @@ def _checkout_is_active(state: BrainReplyState) -> bool:
 
 
 def _is_commerce_prompt_slim_flag_on() -> bool:
-    return os.getenv("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", "false").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    return _bool_env("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", "false")
 
 
 def should_apply_commerce_lite(state: BrainReplyState) -> bool:

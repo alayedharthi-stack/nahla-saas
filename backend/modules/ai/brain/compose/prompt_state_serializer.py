@@ -12,7 +12,9 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+
+from core.config import _bool_env
 
 from ..intent_priority.types import (
     GOAL_PRICE_INQUIRY,
@@ -113,9 +115,84 @@ _COMMERCE_SLIM_RESIDUAL_RULES = (
 
 
 def is_commerce_prompt_slim_enabled() -> bool:
-    return os.getenv(_SLIM_FLAG, "false").strip().lower() in {
-        "1", "true", "yes", "on",
+    return _bool_env(_SLIM_FLAG, "false")
+
+
+def _checkout_blocks_commerce_prompt_slim(state: BrainReplyState) -> bool:
+    """Block slim only during operational checkout — not product_id in prep alone."""
+    checkout = dict(
+        (getattr(state, "known_facts", None) or {}).get("checkout_preparation") or {}
+    )
+    status = str(checkout.get("order_status") or "").strip().lower()
+    if status and status not in {"none", "idle", "new", ""}:
+        return True
+    for flag in (
+        "awaiting_payment_receipt",
+        "payment_receipt_received",
+        "awaiting_variant_choice",
+        "awaiting_option_confirmation",
+        "payment_claim_unverified",
+    ):
+        if checkout.get(flag):
+            return True
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    if stage in {"ordering", "checkout"}:
+        return True
+    return False
+
+
+def explain_commerce_prompt_slim_gate(
+    state: BrainReplyState,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Return eligibility, reason code, and safe decision fields for audit."""
+    mc = getattr(state, "merchant_context", None) or {}
+    intent = str(getattr(state, "intent_name", "") or "").strip().lower()
+    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    need_based = bool(getattr(state, "need_based_advice_mode", False))
+    flag_enabled = is_commerce_prompt_slim_enabled()
+    eligible_intent = intent in _COMMERCE_SLIM_INTENTS or goal in _COMMERCE_SLIM_GOALS
+    eligible_stage = stage not in {"ordering", "checkout"}
+
+    decision: Dict[str, Any] = {
+        "tenant_id": mc.get("tenant_id") if isinstance(mc, dict) else None,
+        "intent": intent or None,
+        "stage": stage or None,
+        "flag_enabled": flag_enabled,
+        "need_based_advice_mode": need_based,
+        "eligible_intent": eligible_intent,
+        "eligible_stage": eligible_stage,
+        "selected_path": "legacy",
+        "commerce_slim_applied": False,
+        "reason_if_false": "",
     }
+
+    if not flag_enabled:
+        decision["reason_if_false"] = "flag_disabled"
+        return False, "flag_disabled", decision
+    if is_routine_social_turn(state):
+        decision["reason_if_false"] = "routine_social"
+        return False, "routine_social", decision
+    if bool(getattr(state, "platform_kb_mode", False)):
+        decision["reason_if_false"] = "platform_kb_mode"
+        return False, "platform_kb_mode", decision
+    if bool(getattr(state, "contextual_clarify_mode", False)):
+        decision["reason_if_false"] = "contextual_clarify_mode"
+        return False, "contextual_clarify_mode", decision
+    if _checkout_blocks_commerce_prompt_slim(state):
+        decision["reason_if_false"] = "active_checkout"
+        return False, "active_checkout", decision
+    if not eligible_intent:
+        decision["reason_if_false"] = "intent_or_goal_not_eligible"
+        return False, "intent_or_goal_not_eligible", decision
+
+    decision["selected_path"] = "commerce_slim"
+    return True, "eligible", decision
+
+
+def should_apply_commerce_prompt_slim(state: BrainReplyState) -> bool:
+    eligible, _, _ = explain_commerce_prompt_slim_gate(state)
+    return eligible
 
 
 def commerce_prompt_max_chars() -> int:
@@ -132,23 +209,6 @@ def commerce_kb_max_chars() -> int:
         return max(500, int(raw))
     except ValueError:
         return 5000
-
-
-def should_apply_commerce_prompt_slim(state: BrainReplyState) -> bool:
-    if not is_commerce_prompt_slim_enabled():
-        return False
-    if is_routine_social_turn(state):
-        return False
-    if bool(getattr(state, "platform_kb_mode", False)):
-        return False
-    if bool(getattr(state, "contextual_clarify_mode", False)):
-        return False
-    if _checkout_is_active(state):
-        return False
-
-    intent = str(getattr(state, "intent_name", "") or "").strip().lower()
-    goal = str(getattr(state, "primary_customer_goal", "") or "").strip().lower()
-    return intent in _COMMERCE_SLIM_INTENTS or goal in _COMMERCE_SLIM_GOALS
 
 
 def slim_ai_settings_for_commerce_prompt(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -385,6 +445,19 @@ def emit_commerce_prompt_slim_error(*, err: str, intent: Optional[str] = None) -
         "[COMMERCE_PROMPT_SLIM_ERROR] %s",
         json.dumps({"intent": intent, "err": err}, ensure_ascii=False),
     )
+
+
+def emit_commerce_prompt_slim_decision(decision: Dict[str, Any]) -> None:
+    try:
+        _log.info(
+            "[COMMERCE_PROMPT_SLIM_DECISION] %s",
+            json.dumps(decision, ensure_ascii=False),
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never break replies
+        _log.warning(
+            "[COMMERCE_PROMPT_SLIM_ERROR] %s",
+            json.dumps({"err": type(exc).__name__}, ensure_ascii=False),
+        )
 
 
 def emit_commerce_prompt_slim_applied(
