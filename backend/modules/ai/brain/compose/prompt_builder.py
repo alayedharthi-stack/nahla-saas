@@ -617,8 +617,11 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 system_chars_before=_system_chars_after + _json_saved,
                 system_chars_after=_system_chars_after,
             )
-        except Exception:  # noqa: BLE001 — audit must never break replies
-            pass
+        except Exception as exc:  # noqa: BLE001 — audit must never break replies
+            emit_commerce_prompt_slim_error(
+                err=f"applied_audit:{type(exc).__name__}",
+                intent=getattr(state, "intent_name", None),
+            )
 
     # ── Structured log ────────────────────────────────────────────────────
     # Emits per-block sizes so we can see (a) when the KB grows huge,
