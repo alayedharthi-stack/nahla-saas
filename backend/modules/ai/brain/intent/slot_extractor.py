@@ -145,6 +145,19 @@ async def extract_slots(
 
         _slot_model = os.environ.get("ANTHROPIC_SLOT_MODEL") or "claude-3-5-haiku-20241022"
 
+        from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
+
+        emit_llm_cost_audit(
+            model=_slot_model,
+            provider="anthropic",
+            messages_count=1,
+            system_chars=len(_SYSTEM),
+            messages_chars=len(user_content),
+            total_prompt_chars=len(_SYSTEM) + len(user_content),
+            estimated_input_tokens=(len(_SYSTEM) + len(user_content)) // 4,
+            reason="brain.intent.slot_extractor",
+        )
+
         # max_tokens raised from 200 → 350.
         # With compact output, 350 is ample for even the densest response
         # (≈ 15 filled fields × ~20 tokens each ≈ 300 tokens).

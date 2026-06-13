@@ -31,7 +31,11 @@ for _p in (_REPO_ROOT, _BACKEND_DIR):
 from modules.ai.orchestrator.providers.registry import get_provider
 
 CLAUDE_API_KEY  = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY", "")
-CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL", "claude-opus-4-6")
+
+try:
+    from core.config import CLAUDE_MODEL as CLAUDE_MODEL  # noqa: F401
+except ImportError:
+    CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5")
 
 
 # ── Tool definitions ──────────────────────────────────────────────────────────

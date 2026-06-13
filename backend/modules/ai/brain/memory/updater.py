@@ -433,8 +433,22 @@ class DefaultMemoryUpdater:
             )
 
             client = anthropic.Anthropic(api_key=api_key)
+            _summary_model = "claude-haiku-4-5"
+            from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
+
+            emit_llm_cost_audit(
+                tenant_id=ctx.tenant_id,
+                turn_id=getattr(ctx.state, "turn", None),
+                model=_summary_model,
+                provider="anthropic",
+                messages_count=1,
+                messages_chars=len(prompt),
+                total_prompt_chars=len(prompt),
+                estimated_input_tokens=len(prompt) // 4,
+                reason="brain.memory.updater._summarise",
+            )
             response = client.messages.create(
-                model="claude-haiku-4-5",
+                model=_summary_model,
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )

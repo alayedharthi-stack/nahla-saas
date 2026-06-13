@@ -1023,6 +1023,19 @@ class DefaultComposer:
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(ctx.history, ctx.message)
 
+            from modules.ai.orchestrator.llm_cost_audit import (  # noqa: PLC0415
+                build_brain_compose_audit_extra,
+            )
+
+            _llm_audit = build_brain_compose_audit_extra(
+                reply_state=reply_state,
+                prompt=prompt,
+                history_messages=history_messages,
+                tenant_id=ctx.tenant_id,
+                conversation_id=ctx.conversation_id,
+                turn_id=getattr(ctx.state, "turn", None),
+            )
+
             try:
                 from modules.ai.brain.truth_surface import (  # noqa: PLC0415
                     run_truth_surface_shadow_audit,
@@ -1075,7 +1088,10 @@ class DefaultComposer:
                         "suggestion": asdict(ctx.suggestion) if ctx.suggestion else {},
                         "sales_context": ctx.sales_context.to_dict() if ctx.sales_context else {},
                     },
-                    prompt_overrides={"__full_system_prompt": prompt},
+                    prompt_overrides={
+                        "__full_system_prompt": prompt,
+                        "__llm_cost_audit": _llm_audit,
+                    },
                     provider_hint="anthropic",
                 ),
                 timeout=_TIMEOUT,

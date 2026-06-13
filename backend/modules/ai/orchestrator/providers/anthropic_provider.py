@@ -21,13 +21,17 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from modules.ai.orchestrator.llm_cost_audit import (
+    emit_llm_cost_audit,
+    approx_tokens_from_chars,
+    resolve_anthropic_model,
+)
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as engine
 
 # ── Provider configuration ─────────────────────────────────────────────────────
 _API_KEY  = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY", "")
-_MODEL    = os.environ.get("CLAUDE_MODEL", "claude-opus-4-6")
 _API_BASE = "https://api.anthropic.com/v1"
 
 # Try to load the Anthropic SDK (sync client preferred)
@@ -62,7 +66,13 @@ class AnthropicProvider(BaseAIProvider):
         """Return True when ANTHROPIC_API_KEY (or CLAUDE_API_KEY) is set."""
         return bool(_API_KEY)
 
-    def call_messages(self, messages: List[Dict[str, Any]], prompt: str) -> Dict[str, Any]:
+    def call_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        prompt: str,
+        *,
+        audit_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Call Claude with a full message history.
 
@@ -70,7 +80,9 @@ class AnthropicProvider(BaseAIProvider):
         conversation continuity but should no longer own Anthropic execution
         logic directly.
         """
-        return self._call_internal(messages=messages, prompt=prompt)
+        return self._call_internal(
+            messages=messages, prompt=prompt, audit_context=audit_context,
+        )
 
     def call_with_tools(
         self,
@@ -80,6 +92,7 @@ class AnthropicProvider(BaseAIProvider):
         tools: List[Dict[str, Any]],
         tool_choice: str = "auto",
         history: Optional[List[Dict[str, Any]]] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Call Claude with native tool use enabled.
@@ -93,6 +106,7 @@ class AnthropicProvider(BaseAIProvider):
             prompt=prompt,
             tools=tools,
             tool_choice=tool_choice,
+            audit_context=audit_context,
         )
 
     def call(
@@ -101,6 +115,7 @@ class AnthropicProvider(BaseAIProvider):
         prompt: str,
         *,
         history: Optional[List[Dict[str, Any]]] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Call Claude synchronously.
@@ -111,6 +126,7 @@ class AnthropicProvider(BaseAIProvider):
         return self._call_internal(
             messages=_merge_history(history, message),
             prompt=prompt,
+            audit_context=audit_context,
         )
 
     def _call_internal(
@@ -120,6 +136,7 @@ class AnthropicProvider(BaseAIProvider):
         prompt: str,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Shared Anthropic execution path.
@@ -145,12 +162,40 @@ class AnthropicProvider(BaseAIProvider):
                 "actions":    [],
             }
 
+        model = resolve_anthropic_model()
+        system_chars = len(prompt or "")
+        messages_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        total_prompt_chars = system_chars + messages_chars
+        audit_extra = dict(audit_context or {})
+        emit_llm_cost_audit(
+            tenant_id=audit_extra.get("tenant_id"),
+            conversation_id=audit_extra.get("conversation_id"),
+            turn_id=audit_extra.get("turn_id"),
+            model=model,
+            provider="anthropic",
+            messages_count=len(messages),
+            system_chars=system_chars,
+            messages_chars=messages_chars,
+            brain_state_json_chars=audit_extra.get("brain_state_json_chars"),
+            history_chars=audit_extra.get("history_chars", messages_chars),
+            kb_chars=audit_extra.get("kb_chars"),
+            catalog_chars=audit_extra.get("catalog_chars"),
+            product_context_chars=audit_extra.get("product_context_chars"),
+            tools_chars=audit_extra.get("tools_chars"),
+            total_prompt_chars=total_prompt_chars,
+            estimated_input_tokens=approx_tokens_from_chars(total_prompt_chars),
+            reason=audit_extra.get("reason") or "anthropic_provider._call_internal",
+            intent=audit_extra.get("intent"),
+            stage=audit_extra.get("stage"),
+            channel=audit_extra.get("channel"),
+        )
+
         # ── Path 1: Anthropic SDK (sync) ──────────────────────────────────────
         if _SDK_AVAILABLE:
             try:
                 client = _anthropic_sdk.Anthropic(api_key=_API_KEY)
                 request_body: Dict[str, Any] = {
-                    "model":      _MODEL,
+                    "model":      model,
                     "max_tokens": 1024,
                     "system":     prompt,
                     "messages":   messages,
@@ -174,11 +219,11 @@ class AnthropicProvider(BaseAIProvider):
                     "[engine] Modular path used — Claude SDK%s | "
                     "provider=anthropic model=%s reply_len=%d",
                     " + tools" if tools else "",
-                    _MODEL, len(reply),
+                    model, len(reply),
                 )
                 return {
                     "provider":   "anthropic",
-                    "model":      _MODEL,
+                    "model":      model,
                     "reply_text": reply,
                     "status":     "ok",
                     "actions":    actions,
@@ -190,7 +235,7 @@ class AnthropicProvider(BaseAIProvider):
                     "returning empty reply_text (fallback triggered)"
                 )
                 return {
-                    "provider": "anthropic", "model": _MODEL,
+                    "provider": "anthropic", "model": model,
                     "reply_text": "", "status": "auth_error", "actions": [],
                 }
             except _anthropic_sdk.APIConnectionError as exc:
@@ -199,7 +244,7 @@ class AnthropicProvider(BaseAIProvider):
                     "returning empty reply_text (fallback triggered)", exc
                 )
                 return {
-                    "provider": "anthropic", "model": _MODEL,
+                    "provider": "anthropic", "model": model,
                     "reply_text": "", "status": "connection_error", "actions": [],
                 }
             except Exception as exc:
@@ -208,7 +253,7 @@ class AnthropicProvider(BaseAIProvider):
                     "returning empty reply_text (fallback triggered)", exc
                 )
                 return {
-                    "provider": "anthropic", "model": _MODEL,
+                    "provider": "anthropic", "model": model,
                     "reply_text": "", "status": "sdk_error", "actions": [],
                 }
 
@@ -230,7 +275,7 @@ class AnthropicProvider(BaseAIProvider):
                 "content-type":      "application/json",
             }
             body: Dict[str, Any] = {
-                "model":      _MODEL,
+                "model":      model,
                 "max_tokens": 1024,
                 "system":     prompt,
                 "messages":   messages,
@@ -258,11 +303,11 @@ class AnthropicProvider(BaseAIProvider):
                 "[engine] Modular path used — Claude httpx%s | "
                 "provider=anthropic model=%s reply_len=%d",
                 " + tools" if tools else "",
-                _MODEL, len(reply),
+                model, len(reply),
             )
             return {
                 "provider":   "anthropic",
-                "model":      _MODEL,
+                "model":      model,
                 "reply_text": reply,
                 "status":     "ok",
                 "actions":    actions,
@@ -274,7 +319,7 @@ class AnthropicProvider(BaseAIProvider):
                 "returning empty reply_text (fallback triggered)", exc
             )
             return {
-                "provider": "anthropic", "model": _MODEL,
+                "provider": "anthropic", "model": model,
                 "reply_text": "", "status": "httpx_error", "actions": [],
             }
 
