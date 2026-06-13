@@ -42,6 +42,22 @@ PERSONA_GREETING_REGREET: tuple[str, ...] = (
     "هلا وغلا 🤍",
 )
 
+# Mid-order / checkout — warm phatic + resume order context (no generic cold greet).
+PERSONA_GREETING_ORDER_AWARE: tuple[str, ...] = (
+    "يا هلا، نكمل طلبك؟ 😊",
+    "حياك الله، نتابع طلبك 🌷",
+    "أهلًا فيك، نكمل بيانات الطلب؟",
+    "ياهلا، نكمل وإياك 🌷",
+    "هلا، نتابع طلبك؟ 🤍",
+)
+
+PERSONA_GREETING_CHECKOUT_AWARE: tuple[str, ...] = (
+    "يا هلا، نكمل الدفع؟ 😊",
+    "حياك الله، نتابع طلبك 🌷",
+    "أهلًا، جاهزين نكمل طلبك؟ 🤍",
+    "ياهلا، نكمل خطوة الدفع؟ 😊",
+)
+
 # ── Warm social / thanks pools ───────────────────────────────────────────────
 
 PERSONA_SOCIAL_WARM_BY_CATEGORY: dict[str, tuple[str, ...]] = {
@@ -178,7 +194,24 @@ def pick_persona_variant(
     return pool[seed % len(pool)]
 
 
+def _active_commerce_greeting_stage(ctx: BrainContext) -> Optional[str]:
+    """Return ``ordering`` | ``checkout`` when greet must stay order-aware."""
+    from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING  # noqa: PLC0415
+
+    stage = str(getattr(getattr(ctx, "state", None), "stage", "") or "")
+    if stage == STAGE_CHECKOUT:
+        return "checkout"
+    if stage in {STAGE_ORDERING, STAGE_DECIDING}:
+        return "ordering"
+    return None
+
+
 def pick_persona_greeting(ctx: BrainContext, *, re_greet: bool = False) -> str:
+    commerce_ctx = _active_commerce_greeting_stage(ctx)
+    if commerce_ctx == "checkout":
+        return pick_persona_variant(PERSONA_GREETING_CHECKOUT_AWARE, ctx)
+    if commerce_ctx == "ordering":
+        return pick_persona_variant(PERSONA_GREETING_ORDER_AWARE, ctx)
     pool = PERSONA_GREETING_REGREET if re_greet else PERSONA_GREETING_COLD
     return pick_persona_variant(pool, ctx)
 
@@ -234,3 +267,11 @@ def persona_reply_is_warm_greeting(text: str) -> bool:
         return False
     banned = ("كيف أقدر أخدمك", "كيف أقدر أساعدك", "بماذا أخدمك")
     return not any(b in text for b in banned)
+
+
+def persona_reply_is_order_aware_greeting(text: str) -> bool:
+    """True when reply acknowledges an in-progress order/checkout flow."""
+    if not (text or "").strip():
+        return False
+    order_markers = ("طلب", "نكمل", "نتابع", "بيانات", "دفع")
+    return any(m in text for m in order_markers)

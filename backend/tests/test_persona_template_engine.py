@@ -197,3 +197,44 @@ class TestCommerceSafety:
         )
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action != ACTION_GREET
+
+
+class TestOrderAwareGreeting:
+    def test_mid_order_greeting_is_order_aware_not_generic(self) -> None:
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_GREETING_ORDER_AWARE,
+            persona_reply_is_order_aware_greeting,
+        )
+        from modules.ai.brain.state.stages import STAGE_ORDERING
+
+        state = MerchantConversationState(greeted=True, stage=STAGE_ORDERING)
+        ctx = BrainContext(
+            tenant_id=7,
+            customer_phone="+966555555555",
+            message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.95, slots={}, raw_message="هلا"),
+            state=state,
+            facts=_facts(),
+        )
+        reply = pick_persona_greeting(ctx, re_greet=True)
+        assert reply in PERSONA_GREETING_ORDER_AWARE
+        assert persona_reply_is_order_aware_greeting(reply)
+        assert reply not in ("أهلًا فيك 😊", "حياك الله 🌷")
+
+    def test_checkout_greeting_uses_checkout_pool(self) -> None:
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_GREETING_CHECKOUT_AWARE,
+        )
+        from modules.ai.brain.state.stages import STAGE_CHECKOUT
+
+        state = MerchantConversationState(greeted=True, stage=STAGE_CHECKOUT)
+        ctx = BrainContext(
+            tenant_id=7,
+            customer_phone="+966555555555",
+            message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.95, slots={}, raw_message="هلا"),
+            state=state,
+            facts=_facts(),
+        )
+        reply = pick_persona_greeting(ctx, re_greet=True)
+        assert reply in PERSONA_GREETING_CHECKOUT_AWARE

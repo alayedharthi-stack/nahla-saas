@@ -947,8 +947,13 @@ class TestStateDrivenSimplification:
         assert decision.action != ACTION_LLM_REPLY
 
     def test_composer_downgrades_greet_when_mid_order(self):
-        """Greet must also be blocked when the customer is past discovery,
-        regardless of the persisted greeted flag."""
+        """Mid-order greet → order-aware local template, not generic cold greet."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_ALLOWED_EMOJI,
+            PERSONA_GREETING_ORDER_AWARE,
+            persona_reply_has_light_emoji,
+            persona_reply_is_order_aware_greeting,
+        )
         from modules.ai.brain.compose.responder import DefaultComposer
         composer = DefaultComposer()
         state = _make_state(greeted=False, stage="ordering",
@@ -959,13 +964,20 @@ class TestStateDrivenSimplification:
             state=state, facts=_make_facts(), profile={},
         )
         decision = Decision(action=ACTION_GREET)
+        llm_mock = AsyncMock(return_value="must not call llm")
         with patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
-            new_callable=AsyncMock, return_value="ordering reply",
+            llm_mock,
         ):
             reply = _run(composer.compose(decision, ActionResult(success=True), ctx))
-        assert reply == "ordering reply"
-        assert decision.action == ACTION_LLM_REPLY
+        llm_mock.assert_not_called()
+        assert reply.strip()
+        assert reply in PERSONA_GREETING_ORDER_AWARE or persona_reply_is_order_aware_greeting(reply)
+        assert persona_reply_is_order_aware_greeting(reply)
+        assert persona_reply_has_light_emoji(reply)
+        assert sum(reply.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
+        assert decision.action == ACTION_GREET
+        assert decision.action != ACTION_LLM_REPLY
 
     def test_composer_first_greet_still_fires_template(self):
         """Sanity: a fresh customer (greeted=False, stage=discovery)
