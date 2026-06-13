@@ -128,33 +128,39 @@ class DefaultComposer:
                 apply_greeting_etiquette,
                 customer_message_for_etiquette,
             )
+            from ..cost.intent_cost_policy import is_routine_llm_avoid_enabled  # noqa: PLC0415
 
-            variant = self._variant_idx(ctx)
             persona = getattr(ctx.facts, "assistant_name", "") or ""
-            if re_greet_requested:
-                text = T.re_greeting(
-                    store_name=ctx.facts.store_name,
-                    assistant_name=persona,
-                    variant=variant,
-                )
-                if self._is_duplicate(text, ctx):
+            if is_routine_llm_avoid_enabled():
+                from .persona_template_engine import pick_persona_greeting  # noqa: PLC0415
+
+                text = pick_persona_greeting(ctx, re_greet=re_greet_requested)
+            else:
+                variant = self._variant_idx(ctx)
+                if re_greet_requested:
                     text = T.re_greeting(
                         store_name=ctx.facts.store_name,
                         assistant_name=persona,
-                        variant=(variant + 1) % 3,
+                        variant=variant,
                     )
-            else:
-                text = T.greeting(
-                    store_name=ctx.facts.store_name,
-                    assistant_name=persona,
-                    variant=variant,
-                )
-                if self._is_duplicate(text, ctx):
+                    if self._is_duplicate(text, ctx):
+                        text = T.re_greeting(
+                            store_name=ctx.facts.store_name,
+                            assistant_name=persona,
+                            variant=(variant + 1) % 3,
+                        )
+                else:
                     text = T.greeting(
                         store_name=ctx.facts.store_name,
                         assistant_name=persona,
-                        variant=(variant + 1) % 3,
+                        variant=variant,
                     )
+                    if self._is_duplicate(text, ctx):
+                        text = T.greeting(
+                            store_name=ctx.facts.store_name,
+                            assistant_name=persona,
+                            variant=(variant + 1) % 3,
+                        )
             return apply_greeting_etiquette(
                 text,
                 customer_message_for_etiquette(ctx),
@@ -550,14 +556,25 @@ class DefaultComposer:
         # ── Social / courtesy — occasion/safety templates only (P1-F) ─────
         if action == ACTION_SOCIAL_REPLY:
             category = str((decision.args or {}).get("social_category") or "general_courtesy")
-            v_main = self._variant_idx(ctx)
-            v_secondary = (len(ctx.history or []) // 3) % 5
-            reply = T.social_reply(
-                category=category,
-                variant=v_main,
-                sub_variant=v_secondary,
-                inbound_text=(ctx.message or ""),
-            )
+            from ..cost.intent_cost_policy import is_routine_llm_avoid_enabled  # noqa: PLC0415
+
+            if is_routine_llm_avoid_enabled():
+                from .persona_template_engine import pick_persona_social_reply  # noqa: PLC0415
+
+                reply = pick_persona_social_reply(
+                    ctx,
+                    category,
+                    inbound_text=(ctx.message or ""),
+                )
+            else:
+                v_main = self._variant_idx(ctx)
+                v_secondary = (len(ctx.history or []) // 3) % 5
+                reply = T.social_reply(
+                    category=category,
+                    variant=v_main,
+                    sub_variant=v_secondary,
+                    inbound_text=(ctx.message or ""),
+                )
             if not (reply or "").strip() and self._understood_social_religious_media(ctx):
                 result.data["chosen_path"] = "social_persona_compose_from_empty_template"
                 reply = await self._compose_social_persona_ack(

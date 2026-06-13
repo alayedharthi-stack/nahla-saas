@@ -271,6 +271,26 @@ class TestAvoidableCallWarning:
         assert "هلا" not in joined
 
 
+class TestPersonaWarmCompose:
+    def test_pure_greeting_reply_is_warm_not_cold_stub(self) -> None:
+        from modules.ai.brain.compose.persona_template_engine import (  # noqa: PLC0415
+            persona_reply_is_warm_greeting,
+        )
+
+        composer = DefaultComposer()
+        ctx = _greeting_ctx("هلا", greeted=False)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_GREET
+        result = ActionResult(success=True, data={})
+
+        async def _run() -> str:
+            return await composer.compose(decision, result, ctx)
+
+        reply = asyncio.run(_run())
+        assert persona_reply_is_warm_greeting(reply)
+        assert reply not in {"يا هلا", "حياك الله 💛", "أهلاً"}
+
+
 class TestPureGreetingNoKbPrompt:
     def test_greeting_avoid_policy_blocks_kb_in_prompt_when_built(self) -> None:
         state = BrainReplyState(
