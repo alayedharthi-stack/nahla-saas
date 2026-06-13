@@ -642,15 +642,22 @@ class TestBrainPipeline:
         return db
 
     def test_greeting_scenario(self):
-        """Cold greeting runs persona_social compose and returns a non-empty reply."""
-        from modules.ai.brain.persona_expression import (
-            PERSONA_KIND_GREETING,
-            PERSONA_TOPIC_SOCIAL,
+        """Cold pure greeting → ACTION_GREET + warm persona template (PR2B)."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_ALLOWED_EMOJI,
+            PERSONA_GREETING_COLD,
+            persona_reply_has_light_emoji,
+            persona_reply_is_warm_greeting,
         )
 
-        intent = Intent(name=INTENT_GREETING, confidence=0.95, raw_message="مرحبا")
-        state  = _make_state(greeted=False)
-        facts  = _make_facts()
+        intent = Intent(
+            name=INTENT_GREETING,
+            confidence=0.95,
+            raw_message="مرحبا",
+            slots={},
+        )
+        state = _make_state(greeted=False)
+        facts = _make_facts()
 
         classifier = self._mock_classifier(intent)
         state_store = self._mock_state_store(state)
@@ -671,7 +678,7 @@ class TestBrainPipeline:
         from modules.ai.brain.compose.responder import DefaultComposer
 
         memory_updater = self._mock_memory_updater()
-        persona_reply = "وعليكم السلام 🌷 تفضل وش تحتاج اليوم؟"
+        llm_mock = AsyncMock(return_value="must not call llm")
 
         b = MerchantBrain(
             classifier=classifier,
@@ -686,8 +693,7 @@ class TestBrainPipeline:
 
         with patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
-            new_callable=AsyncMock,
-            return_value=persona_reply,
+            llm_mock,
         ):
             reply = _run(b.process(
                 db=self._db(),
@@ -698,18 +704,22 @@ class TestBrainPipeline:
                 profile={},
             ))
 
+        llm_mock.assert_not_called()
         assert isinstance(reply, dict)
-        assert isinstance(reply.get("reply"), str)
-        assert reply["reply"] == persona_reply
-        assert len(reply["reply"]) > 0
+        text = reply.get("reply")
+        assert isinstance(text, str)
+        assert text.strip()
+        assert not (intent.slots or {}).get("embedded_greeting")
+        assert text in PERSONA_GREETING_COLD or persona_reply_is_warm_greeting(text)
+        assert persona_reply_has_light_emoji(text)
+        assert sum(text.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
+        assert "المنتج" not in text
+        assert "السعر" not in text
 
         decision = captured.get("decision")
         assert decision is not None
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-        assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
-        assert decision.args.get("block_commerce_escalation") is True
-        assert decision.action != ACTION_GREET
+        assert decision.action == ACTION_GREET
+        assert decision.action != ACTION_LLM_REPLY
 
     def test_no_products_scenario(self):
         intent = Intent(name=INTENT_ASK_PRODUCT, confidence=0.90, raw_message="عندكم منتج؟",
