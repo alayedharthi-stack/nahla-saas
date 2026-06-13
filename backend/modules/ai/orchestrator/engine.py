@@ -24,6 +24,7 @@ Webhook / runtime paths: unchanged.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -46,6 +47,28 @@ from modules.ai.orchestrator.types import AIOrchestrationRequest, AIReplyPayload
 _PROVIDER_TIMEOUT: float = DEFAULT_TIMEOUT
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")
+
+
+def _supports_audit_context(provider: Any, method_name: str) -> bool:
+    """True when ``provider.<method_name>`` accepts ``audit_context``."""
+    method = getattr(provider, method_name, None)
+    if method is None:
+        return False
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    return "audit_context" in sig.parameters
+
+
+def _audit_kwargs(
+    provider: Any,
+    method_name: str,
+    audit_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    if audit_context and _supports_audit_context(provider, method_name):
+        return {"audit_context": audit_context}
+    return {}
 
 
 class AIOrchestratorEngine:
@@ -137,14 +160,14 @@ class AIOrchestratorEngine:
                         tools=request_obj.tool_definitions,
                         tool_choice="auto",
                         history=_history,
-                        audit_context=audit_context,
+                        **_audit_kwargs(p, "call_with_tools", audit_context),
                     )
                     if request_obj.tool_definitions and hasattr(p, "call_with_tools")
                     else p.call(
                         request_obj.message,
                         prompt,
                         history=_history,
-                        audit_context=audit_context,
+                        **_audit_kwargs(p, "call", audit_context),
                     )
                 ),
                 timeout=_PROVIDER_TIMEOUT,
@@ -189,14 +212,14 @@ class AIOrchestratorEngine:
                 tools=request_obj.tool_definitions,
                 tool_choice="auto",
                 history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
-                audit_context=audit_context,
+                **_audit_kwargs(self._provider, "call_with_tools", audit_context),
             )
         else:
             result = self._provider.call(
                 request_obj.message,
                 prompt,
                 history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
-                audit_context=audit_context,
+                **_audit_kwargs(self._provider, "call", audit_context),
             )
         _duration_ms = (time.monotonic() - _t0) * 1000
         _fallback_status = "succeeded" if result.get("reply_text") else "failed"
@@ -286,13 +309,13 @@ class AIOrchestratorEngine:
                 tools=request.tool_definitions,
                 tool_choice="auto",
                 history=[{"role": msg.role, "content": msg.content} for msg in request.history],
-                audit_context=audit_context,
+                **_audit_kwargs(self._provider, "call_with_tools", audit_context),
             )
         return self._provider.call(
             request.message,
             prompt,
             history=[{"role": msg.role, "content": msg.content} for msg in request.history],
-            audit_context=audit_context,
+            **_audit_kwargs(self._provider, "call", audit_context),
         )
 
     def _coerce_request(self, request: AIOrchestrationRequest | str) -> AIOrchestrationRequest:
