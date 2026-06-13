@@ -16,6 +16,7 @@ if _BACKEND not in sys.path:
 from modules.ai.brain.compose.persona_template_engine import (  # noqa: E402
     PERSONA_ALLOWED_EMOJI,
     PERSONA_GREETING_COLD,
+    PERSONA_SOCIAL_DUA_THANKS,
     PERSONA_SOCIAL_WARM_BY_CATEGORY,
     pick_persona_greeting,
     pick_persona_social_reply,
@@ -145,7 +146,50 @@ class TestPersonaSocialVariants:
 
         reply = asyncio.run(_run())
         assert reply.strip()
+        assert reply in PERSONA_SOCIAL_DUA_THANKS
+        assert "العفو" not in reply
         assert persona_reply_has_light_emoji(reply)
+
+    def test_religious_thanks_uses_dua_pool_not_alafu(self) -> None:
+        ctx = _ctx(message="جزاك الله خير")
+        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="جزاك الله خير")
+        assert reply in PERSONA_SOCIAL_DUA_THANKS
+        assert "العفو" not in reply
+
+    def test_plain_thanks_stays_on_secular_pool(self) -> None:
+        ctx = _ctx(message="شكرا")
+        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="شكرا")
+        assert reply in PERSONA_SOCIAL_WARM_BY_CATEGORY["thanks"]
+
+    def test_dua_thanks_emoji_policy(self) -> None:
+        for text in PERSONA_SOCIAL_DUA_THANKS:
+            assert persona_reply_has_light_emoji(text)
+            emojis = [ch for ch in text if ch in PERSONA_ALLOWED_EMOJI]
+            assert len(emojis) <= 1
+            assert all(ch in PERSONA_ALLOWED_EMOJI for ch in emojis)
+
+    def test_dua_thanks_avoids_immediate_repeat(self) -> None:
+        first = PERSONA_SOCIAL_DUA_THANKS[0]
+        ctx = _ctx(
+            message="جزاك الله خير",
+            history=[{"direction": "out", "body": first}],
+        )
+        reply = pick_persona_social_reply(ctx, "thanks", inbound_text="جزاك الله خير")
+        assert reply != first
+
+    def test_dua_thanks_no_tenant_33_special_case(self) -> None:
+        t7 = pick_persona_social_reply(
+            _ctx(tenant_id=7, message="جزاك الله خير"),
+            "thanks",
+            inbound_text="جزاك الله خير",
+        )
+        t33 = pick_persona_social_reply(
+            _ctx(tenant_id=33, message="جزاك الله خير"),
+            "thanks",
+            inbound_text="جزاك الله خير",
+        )
+        assert t7 in PERSONA_SOCIAL_DUA_THANKS
+        assert t33 in PERSONA_SOCIAL_DUA_THANKS
 
 
 class TestVariationPolicy:
