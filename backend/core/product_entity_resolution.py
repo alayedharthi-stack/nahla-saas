@@ -44,6 +44,10 @@ _AVAIL_QUERY_STOPWORDS = frozenset({
     "عسل", "منتج", "product", "type", "types",
 })
 
+# Trailing Arabic/Latin punctuation often sticks to availability tokens («متوفر؟»).
+_TRAILING_PUNCT_RE = re.compile(r"[\u061f\u003f\u002e\u0021\u002c]+$")
+_AR_DEF_ARTICLE = "\u0627\u0644"  # ال
+
 
 @dataclass(frozen=True)
 class EntityResolutionResult:
@@ -105,14 +109,47 @@ def direct_product_availability_ask(text: str) -> bool:
     return bool(_DIRECT_AVAIL_ASK_RE.search(raw))
 
 
+def _strip_trailing_punct(token: str) -> str:
+    return _TRAILING_PUNCT_RE.sub("", token or "")
+
+
+def _strip_ar_definite_article(token: str) -> str:
+    """«السمر» → «سمر» for cross-surface token matching."""
+    t = token or ""
+    if t.startswith(_AR_DEF_ARTICLE) and len(t) > len(_AR_DEF_ARTICLE) + 1:
+        return t[len(_AR_DEF_ARTICLE):]
+    return t
+
+
+def _token_match_forms(token: str) -> Set[str]:
+    """Expand a token into matchable surface forms (article + punctuation variants)."""
+    base = _strip_trailing_punct(token)
+    if not base or len(base) < 2:
+        return set()
+    forms: Set[str] = {base}
+    bare = _strip_ar_definite_article(base)
+    if bare and bare != base:
+        forms.add(bare)
+    if not base.startswith(_AR_DEF_ARTICLE):
+        forms.add(_AR_DEF_ARTICLE + base)
+    return {f for f in forms if len(f) >= 2}
+
+
 def _distinctive_inbound_product_tokens(inbound_text: str) -> List[str]:
     from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
 
     toks = tokenize(normalize_arabic(inbound_text or ""))
-    return [
-        t for t in toks
-        if len(t) >= 3 and t not in _AVAIL_QUERY_STOPWORDS
-    ]
+    seen: Set[str] = set()
+    out: List[str] = []
+    for raw_t in toks:
+        norm = _strip_trailing_punct(raw_t)
+        stem = _strip_ar_definite_article(norm)
+        if len(stem) < 3 or stem in _AVAIL_QUERY_STOPWORDS:
+            continue
+        if stem not in seen:
+            seen.add(stem)
+            out.append(stem)
+    return out
 
 
 def _catalog_ids_for_product_tokens(
@@ -123,7 +160,11 @@ def _catalog_ids_for_product_tokens(
 
     if not tokens:
         return []
-    token_set = {t for t in tokens if t}
+    inbound_forms: Set[str] = set()
+    for t in tokens:
+        inbound_forms |= _token_match_forms(t)
+    if not inbound_forms:
+        return []
     ids: List[int] = []
     for p in catalog_skus:
         pid = p.get("id")
@@ -131,11 +172,13 @@ def _catalog_ids_for_product_tokens(
             continue
         title = str(p.get("title") or "")
         title_norm = normalize_arabic(title)
-        title_toks = set(tokenize(title_norm))
-        if token_set & title_toks:
+        title_forms: Set[str] = set()
+        for tt in tokenize(title_norm):
+            title_forms |= _token_match_forms(tt)
+        if inbound_forms & title_forms:
             ids.append(int(pid))
             continue
-        if any(t in title_norm for t in token_set):
+        if any(form in title_norm for form in inbound_forms):
             ids.append(int(pid))
     return list(dict.fromkeys(ids))
 
