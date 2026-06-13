@@ -39,9 +39,68 @@ def emit_llm_cost_audit(**fields: Any) -> None:
     try:
         payload = {k: v for k, v in fields.items() if v is not None}
         _log.info("[LLM_COST_AUDIT] %s", json.dumps(payload, ensure_ascii=False))
+        _emit_prompt_size_warnings(payload)
     except Exception as exc:  # noqa: BLE001 — audit must never break replies
         _log.warning(
             "[LLM_COST_AUDIT_ERROR] failed to emit llm cost audit payload: %s",
+            type(exc).__name__,
+        )
+
+
+_PROMPT_SIZE_WARN_TOKENS = int(os.environ.get("NAHLA_PROMPT_SIZE_WARN_TOKENS", "30000"))
+
+
+def _emit_prompt_size_warnings(payload: Dict[str, Any]) -> None:
+    try:
+        from modules.ai.brain.compose.prompt_payload_slim import (  # noqa: PLC0415
+            ROUTINE_SOCIAL_INTENTS,
+        )
+
+        est = int(payload.get("estimated_input_tokens") or 0)
+        if est > _PROMPT_SIZE_WARN_TOKENS:
+            _log.warning(
+                "[LLM_PROMPT_SIZE_WARN] %s",
+                json.dumps(
+                    {
+                        "tenant_id": payload.get("tenant_id"),
+                        "conversation_id": payload.get("conversation_id"),
+                        "turn_id": payload.get("turn_id"),
+                        "intent": payload.get("intent"),
+                        "model": payload.get("model"),
+                        "estimated_input_tokens": est,
+                        "total_prompt_chars": payload.get("total_prompt_chars"),
+                        "system_chars": payload.get("system_chars"),
+                        "brain_state_json_chars": payload.get("brain_state_json_chars"),
+                        "kb_chars": payload.get("kb_chars"),
+                        "catalog_chars": payload.get("catalog_chars"),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        intent = str(payload.get("intent") or "").strip().lower()
+        if intent in ROUTINE_SOCIAL_INTENTS:
+            kb_chars = int(payload.get("kb_chars") or 0)
+            catalog_chars = int(payload.get("catalog_chars") or 0)
+            if kb_chars > 0 or catalog_chars > 0:
+                _log.warning(
+                    "[LLM_PROMPT_ROUTINE_BLOAT_WARN] %s",
+                    json.dumps(
+                        {
+                            "tenant_id": payload.get("tenant_id"),
+                            "conversation_id": payload.get("conversation_id"),
+                            "turn_id": payload.get("turn_id"),
+                            "intent": intent,
+                            "kb_chars": kb_chars,
+                            "catalog_chars": catalog_chars,
+                            "estimated_input_tokens": est,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+    except Exception as exc:  # noqa: BLE001 — warnings must never break replies
+        _log.warning(
+            "[LLM_COST_AUDIT_ERROR] failed prompt size warning: %s",
             type(exc).__name__,
         )
 
@@ -113,25 +172,45 @@ def build_brain_compose_audit_extra(
     source: str = "brain.compose._llm_compose",
 ) -> Dict[str, Any]:
     """Size breakdown for MerchantBrain compose — no message content."""
-    mc = dict(getattr(reply_state, "merchant_context", None) or {})
-    kb_chars = len(str(mc.get("structured_facts_block") or ""))
-    catalog_chars = len(json.dumps(mc.get("products") or [], ensure_ascii=False))
-    product_context_chars = len(
-        json.dumps(getattr(reply_state, "selected_product", None) or {}, ensure_ascii=False)
+    from dataclasses import asdict  # noqa: PLC0415
+
+    from modules.ai.brain.compose.prompt_payload_slim import (  # noqa: PLC0415
+        measure_prompt_layer_chars,
+        resolve_kb_block_for_prompt,
+        strip_state_dict_for_prompt,
     )
-    tools_chars = len(str(mc.get("resolver_overlay") or ""))
+    from modules.ai.prompts.tenant_overlay import build_tenant_overlay_split  # noqa: PLC0415
+
+    mc = dict(getattr(reply_state, "merchant_context", None) or {})
+    ai_settings = dict(mc.get("ai_settings") or {})
+    overlay = build_tenant_overlay_split(ai_settings)
+    structured_kb = str(mc.get("structured_facts_block") or "").strip()
+    kb_block = resolve_kb_block_for_prompt(
+        reply_state,
+        structured_kb=structured_kb,
+        overlay_facts=str(overlay.get("facts") or ""),
+    )
+    layer_sizes = measure_prompt_layer_chars(reply_state, kb_block=kb_block)
+    kb_chars = layer_sizes["kb_chars"]
+    catalog_chars = layer_sizes["catalog_chars"]
+    product_context_chars = layer_sizes["product_context_chars"]
+    tools_chars = layer_sizes["tools_chars"]
     ai_settings_chars = len(json.dumps(mc.get("ai_settings") or {}, ensure_ascii=False))
 
     # BrainStateJSON size proxy (matches prompt_builder serialization path).
     brain_state_json_chars = 0
     try:
-        from dataclasses import asdict  # noqa: PLC0415
         from modules.ai.brain.compose.brain_state_slim import (  # noqa: PLC0415
             prepare_brain_state_dict_with_telemetry,
         )
 
         state_dict = asdict(reply_state)
         state_dict.pop("tenant_overlay", None)
+        state_dict = strip_state_dict_for_prompt(
+            state_dict,
+            reply_state,
+            kb_in_prompt_block=bool(kb_block),
+        )
         slim = prepare_brain_state_dict_with_telemetry(reply_state, state_dict)
         brain_state_json_chars = len(
             json.dumps(slim, ensure_ascii=False, indent=2)
