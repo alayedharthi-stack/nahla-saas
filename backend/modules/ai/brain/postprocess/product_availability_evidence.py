@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from core.product_entity_resolution import (
     EntityResolutionResult,
     family_checkout_summary,
+    family_checkout_summary_for_entity,
     primary_year_from_text,
     resolve_availability_entity,
 )
@@ -29,6 +30,16 @@ CONFLICT_ENTITY_MISMATCH = "ENTITY_MISMATCH"
 CONFLICT_FAMILY_MIXED = "FAMILY_MIXED"
 CONFLICT_MISSING_CATALOG_ENTITY = "MISSING_CATALOG_ENTITY"
 CONFLICT_STALE_PRODUCT_LINK = "STALE_PRODUCT_LINK"
+
+# KB year/SKU skew flags that are expected across variants in one family —
+# must not downgrade a mixed-checkout family to CONFLICT (PR #88 follow-up).
+_FAMILY_NON_FATAL_KB_FLAGS = frozenset({
+    CONFLICT_MISSING_CATALOG_ENTITY,
+    CONFLICT_YEAR_MISMATCH,
+    CONFLICT_STALE_PRODUCT_LINK,
+})
+
+_FAMILY_RESOLUTION_MODES = frozenset({"family", "inbound_family"})
 
 
 @dataclass(frozen=True)
@@ -155,16 +166,20 @@ def evaluate_product_availability_evidence(
     )
 
     # ── Family-level resolution ──────────────────────────────────────────
-    if entity.resolution_mode == "family" and entity.family_key:
-        fam = family_checkout_summary(catalog_skus, entity.family_key)
+    if (
+        entity.resolution_mode in _FAMILY_RESOLUTION_MODES
+        and (entity.family_key or entity.candidate_product_ids)
+    ):
+        fam = family_checkout_summary_for_entity(catalog_skus, entity)
         true_n = len(fam.get("checkout_true") or [])
         false_n = len(fam.get("checkout_false") or [])
         if true_n > 0 and false_n > 0:
-            if kb_flags:
-                ctype = kb_flags[0]
-                if CONFLICT_YEAR_MISMATCH in kb_flags:
+            fatal_flags = [f for f in kb_flags if f not in _FAMILY_NON_FATAL_KB_FLAGS]
+            if fatal_flags:
+                ctype = fatal_flags[0]
+                if CONFLICT_YEAR_MISMATCH in fatal_flags:
                     ctype = CONFLICT_YEAR_MISMATCH
-                elif CONFLICT_MISSING_CATALOG_ENTITY in kb_flags:
+                elif CONFLICT_MISSING_CATALOG_ENTITY in fatal_flags:
                     ctype = CONFLICT_MISSING_CATALOG_ENTITY
                 return ProductAvailabilityEvidenceResult(
                     evidence_state=EVIDENCE_CONFLICT,
@@ -191,12 +206,13 @@ def evaluate_product_availability_evidence(
                 reason="family_variant_options",
             )
         if true_n > 0 and false_n == 0:
-            if kb_flags:
+            fatal_flags = [f for f in kb_flags if f not in _FAMILY_NON_FATAL_KB_FLAGS]
+            if fatal_flags:
                 return ProductAvailabilityEvidenceResult(
                     evidence_state=EVIDENCE_CONFLICT,
                     evidence_ok_for_positive=False,
                     evidence_ok_for_negative=False,
-                    conflict_type=kb_flags[0],
+                    conflict_type=fatal_flags[0],
                     entity=entity,
                     catalog_checkout=True,
                     kb_avail_polarity=kb_pol,

@@ -209,3 +209,32 @@ def has_operational_delta_since_last_reply(
     outbound_slots = set(extract_operational_slots(previous_outbound))
     unanswered = new_vs_prior - outbound_slots
     return bool(unanswered)
+
+
+def prior_outbound_was_unhelpful_availability_rewrite(outbound: str) -> bool:
+    """True when the last bot reply was the availability truth-guard canned rewrite."""
+    ob = (outbound or "").strip()
+    if not ob:
+        return False
+    if "معلومات متعارضة حول التوفر" in ob:
+        return True
+    if "ما أقدر أأكد التوفر الحالي بدقة" in ob:
+        return True
+    return False
+
+
+def should_bypass_hard_dedup_repeat_availability(
+    current_inbound: str,
+    previous_outbound: str,
+) -> bool:
+    """
+    Allow a new reply when the customer repeats a direct availability ask
+    after the guard replaced the prior answer with an unhelpful canned line.
+    """
+    try:
+        from core.product_entity_resolution import direct_product_availability_ask  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return False
+    if not direct_product_availability_ask(current_inbound):
+        return False
+    return prior_outbound_was_unhelpful_availability_rewrite(previous_outbound)

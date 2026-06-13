@@ -10,7 +10,11 @@ for _p in [_backend, os.path.join(_backend, "..")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from core.product_entity_resolution import family_key_from_title  # noqa: E402
+from core.product_entity_resolution import (  # noqa: E402
+    direct_product_availability_ask,
+    family_key_from_title,
+    resolve_availability_entity,
+)
 from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: E402
     global_availability_browse_requested,
     resolve_product_breadth,
@@ -21,6 +25,7 @@ from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: E4
 )
 from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa: E402
     EVIDENCE_CONFLICT,
+    EVIDENCE_RESOLVED_AVAILABLE,
     EVIDENCE_VARIANT_OPTIONS,
     evaluate_product_availability_evidence,
 )
@@ -192,3 +197,93 @@ class TestClarifyRecovery:
         decision = clarify_instead_of_top_products(ctx, reason="weak_or_unknown_intent")
         assert decision.action == ACTION_SEARCH_PRODUCTS
         assert decision.args.get("source") == "global_browse_recovery"
+
+
+class TestDirectFamilyAvailabilityAsk:
+    """PR #88 follow-up — «هل X متوفر؟» must not conflict on variant families."""
+
+    def test_direct_ask_detected(self):
+        assert direct_product_availability_ask("هل السمر متوفر؟")
+        assert direct_product_availability_ask("Edition Series متوفر؟")
+        assert not direct_product_availability_ask("وش أنواع السمر عندكم؟")
+
+    def test_single_token_inbound_resolves_inbound_family(self):
+        skus = [
+            _sku(1, "Edition Series legacy harvest", checkout=True, family="a|b|legacy"),
+            _sku(2, "Edition Series current harvest", checkout=False, family="a|b|current"),
+        ]
+        entity = resolve_availability_entity(
+            focus_product=None,
+            recommended_product_ids=[],
+            inbound_text="هل Edition Series متوفر؟",
+            catalog_skus=skus,
+        )
+        assert entity.resolution_mode == "inbound_family"
+        assert len(entity.candidate_product_ids) == 2
+
+    def test_direct_ask_mixed_variants_not_conflict_canned(self):
+        skus = [
+            _sku(1, "Edition Series legacy harvest", checkout=True, family="a|b|legacy"),
+            _sku(2, "Edition Series current harvest", checkout=False, family="a|b|current"),
+        ]
+        ctx = _family_ctx(*skus, inbound="هل Edition Series متوفر؟")
+        ctx["kb_signals"] = [{
+            "section_id": 99,
+            "kind": "quick_update",
+            "avail_polarity": "positive",
+            "primary_year": "2099",
+            "linked_product_ids": [],
+        }]
+        ev = evaluate_product_availability_evidence(
+            availability_context=ctx,
+            inbound_text="هل Edition Series متوفر؟",
+        )
+        assert ev.evidence_state == EVIDENCE_VARIANT_OPTIONS
+
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            reply = "نعم، متوفر حالياً بأكثر من نسخة."
+            result = apply_product_availability_truth_guard(
+                reply=reply,
+                availability_context=ctx,
+                inbound_text="هل Edition Series متوفر؟",
+                tenant_id=1,
+            )
+            assert result.replaced is False
+            assert _CONFLICT_REPLY_AR not in result.reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev
+
+    def test_types_ask_still_lists_variants(self):
+        skus = [
+            _sku(1, "Edition Series legacy harvest", checkout=True, family="edition|series"),
+            _sku(2, "Edition Series current harvest", checkout=False, family="edition|series"),
+        ]
+        ev = evaluate_product_availability_evidence(
+            availability_context=_family_ctx(*skus, inbound="وش أنواع Edition Series عندكم؟"),
+            inbound_text="وش أنواع Edition Series عندكم؟",
+        )
+        assert ev.evidence_state in {EVIDENCE_VARIANT_OPTIONS, EVIDENCE_RESOLVED_AVAILABLE}
+
+
+class TestRepeatAvailabilityDedupBypass:
+    def test_repeat_after_guard_rewrite_unlocks(self):
+        from modules.ai.brain.commerce.dedup_operational_delta import (  # noqa: E402
+            should_bypass_hard_dedup_repeat_availability,
+        )
+        from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
+            _CONFLICT_REPLY_AR,
+        )
+
+        assert should_bypass_hard_dedup_repeat_availability(
+            "هل Edition Series متوفر؟",
+            _CONFLICT_REPLY_AR,
+        )
+        assert not should_bypass_hard_dedup_repeat_availability(
+            "هل Edition Series متوفر؟",
+            "Edition Series متوفر بصنفين مختلفين.",
+        )

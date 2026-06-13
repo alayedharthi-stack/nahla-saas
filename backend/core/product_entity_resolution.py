@@ -26,7 +26,23 @@ _RESOLUTION_FOCUS = "focus_id"
 _RESOLUTION_RECOMMENDED = "recommended_id"
 _RESOLUTION_INBOUND = "inbound_match"
 _RESOLUTION_FAMILY = "family"
+_RESOLUTION_INBOUND_FAMILY = "inbound_family"
 _RESOLUTION_NONE = "none"
+
+# Generic availability asks — «هل X متوفر؟» / «X متوفر؟»
+_DIRECT_AVAIL_ASK_RE = re.compile(
+    r"(?:"
+    r"هل\s+(?:ال)?[\u0600-\u06FFa-zA-Z]{2,24}\s+م(?:توفر|تاح)(?:\s|$|[؟?.!])"
+    r"|(?:^|\s)(?:ال)?[\u0600-\u06FFa-zA-Z]{2,24}\s+م(?:توفر|تاح)\s*[؟?.!]?\s*$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_AVAIL_QUERY_STOPWORDS = frozenset({
+    "هل", "في", "من", "على", "عند", "عندكم", "عندك", "لديكم", "لديك",
+    "متوفر", "متاح", "موجود", "availability", "available", "stock",
+    "عسل", "منتج", "product", "type", "types",
+})
 
 
 @dataclass(frozen=True)
@@ -79,6 +95,108 @@ def _family_members(
     if not key:
         return []
     return [p for p in catalog_skus if (p.get("family_key") or "") == key]
+
+
+def direct_product_availability_ask(text: str) -> bool:
+    """True for short direct availability questions («هل X متوفر؟»)."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    return bool(_DIRECT_AVAIL_ASK_RE.search(raw))
+
+
+def _distinctive_inbound_product_tokens(inbound_text: str) -> List[str]:
+    from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
+
+    toks = tokenize(normalize_arabic(inbound_text or ""))
+    return [
+        t for t in toks
+        if len(t) >= 3 and t not in _AVAIL_QUERY_STOPWORDS
+    ]
+
+
+def _catalog_ids_for_product_tokens(
+    catalog_skus: Sequence[Dict[str, Any]],
+    tokens: Sequence[str],
+) -> List[int]:
+    from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
+
+    if not tokens:
+        return []
+    token_set = {t for t in tokens if t}
+    ids: List[int] = []
+    for p in catalog_skus:
+        pid = p.get("id")
+        if pid is None:
+            continue
+        title = str(p.get("title") or "")
+        title_norm = normalize_arabic(title)
+        title_toks = set(tokenize(title_norm))
+        if token_set & title_toks:
+            ids.append(int(pid))
+            continue
+        if any(t in title_norm for t in token_set):
+            ids.append(int(pid))
+    return list(dict.fromkeys(ids))
+
+
+def family_checkout_summary_for_entity(
+    catalog_skus: Sequence[Dict[str, Any]],
+    entity: EntityResolutionResult,
+) -> Dict[str, List[int]]:
+    """Checkout split for a family entity (catalog family_key or inbound token group)."""
+    by_id = _catalog_by_id(catalog_skus)
+    if entity.candidate_product_ids:
+        member_ids = [int(i) for i in entity.candidate_product_ids if int(i) in by_id]
+    elif entity.family_key and not str(entity.family_key).startswith("inbound:"):
+        member_ids = [int(p["id"]) for p in _family_members(catalog_skus, entity.family_key)]
+    else:
+        member_ids = []
+    true_ids = [pid for pid in member_ids if by_id.get(pid, {}).get("can_checkout")]
+    false_ids = [pid for pid in member_ids if not by_id.get(pid, {}).get("can_checkout")]
+    return {"checkout_true": true_ids, "checkout_false": false_ids}
+
+
+def _resolve_inbound_product_family(
+    inbound_text: str,
+    catalog_skus: Sequence[Dict[str, Any]],
+    by_id: Dict[int, Dict[str, Any]],
+) -> Optional[EntityResolutionResult]:
+    """
+    Group catalog SKUs by a distinctive inbound token for direct availability asks.
+
+    Closes the gap where ``match_products`` rejects single-token overlap
+    («سمر» vs long honey titles) so «هل السمر متوفر؟» never reached family mode.
+    """
+    if not direct_product_availability_ask(inbound_text):
+        return None
+    tokens = _distinctive_inbound_product_tokens(inbound_text)
+    if not tokens:
+        return None
+    member_ids = _catalog_ids_for_product_tokens(catalog_skus, tokens)
+    if not member_ids:
+        return None
+    if len(member_ids) == 1:
+        pid = member_ids[0]
+        p = by_id.get(pid, {})
+        return EntityResolutionResult(
+            resolved=True,
+            resolution_mode=_RESOLUTION_INBOUND,
+            product_id=pid,
+            family_key=p.get("family_key"),
+            confidence=0.75,
+            candidate_product_ids=(pid,),
+            primary_year=(p.get("years") or [None])[0] if p.get("years") else None,
+        )
+    virtual_key = "inbound:" + "|".join(sorted(tokens)[:3])
+    return EntityResolutionResult(
+        resolved=True,
+        resolution_mode=_RESOLUTION_INBOUND_FAMILY,
+        product_id=None,
+        family_key=virtual_key,
+        confidence=0.78,
+        candidate_product_ids=tuple(member_ids),
+    )
 
 
 def resolve_availability_entity(
@@ -174,6 +292,12 @@ def resolve_availability_entity(
                 candidate_product_ids=tuple(pids),
             )
 
+    inbound_family = _resolve_inbound_product_family(
+        inbound_text, catalog_skus, by_id,
+    )
+    if inbound_family is not None:
+        return inbound_family
+
     return EntityResolutionResult(
         resolved=False,
         resolution_mode=_RESOLUTION_NONE,
@@ -191,3 +315,16 @@ def family_checkout_summary(
     true_ids = [int(p["id"]) for p in members if p.get("can_checkout")]
     false_ids = [int(p["id"]) for p in members if not p.get("can_checkout")]
     return {"checkout_true": true_ids, "checkout_false": false_ids}
+
+
+__all__ = [
+    "EntityResolutionResult",
+    "direct_product_availability_ask",
+    "extract_years",
+    "extract_weights",
+    "family_checkout_summary",
+    "family_checkout_summary_for_entity",
+    "family_key_from_title",
+    "primary_year_from_text",
+    "resolve_availability_entity",
+]

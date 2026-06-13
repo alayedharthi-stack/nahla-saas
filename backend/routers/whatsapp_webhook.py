@@ -7485,6 +7485,26 @@ async def _handle_merchant_message(
                     except Exception:  # noqa: BLE001
                         pass
 
+                    if not _skip_dedup_substitution:
+                        try:
+                            from modules.ai.brain.commerce.dedup_operational_delta import (  # noqa: PLC0415
+                                should_bypass_hard_dedup_repeat_availability,
+                                last_outbound_body as _dedup_last_outbound_body,
+                            )
+                            if should_bypass_hard_dedup_repeat_availability(
+                                text or "",
+                                _dedup_last_outbound_body(history),
+                            ):
+                                _skip_dedup_substitution = True
+                                logger.info(
+                                    "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                                    "overlap=%.2f repeat_availability_after_guard=true — "
+                                    "pass-through (prior guard rewrite was unhelpful)",
+                                    tenant_id, to, _overlap,
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
+
                 if _skip_dedup_substitution:
                     pass
                 else:
