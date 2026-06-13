@@ -39,8 +39,11 @@ def emit_llm_cost_audit(**fields: Any) -> None:
     try:
         payload = {k: v for k, v in fields.items() if v is not None}
         _log.info("[LLM_COST_AUDIT] %s", json.dumps(payload, ensure_ascii=False))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 — audit must never break replies
+        _log.warning(
+            "[LLM_COST_AUDIT_ERROR] failed to emit llm cost audit payload: %s",
+            type(exc).__name__,
+        )
 
 
 def _messages_char_count(messages: List[Mapping[str, Any]]) -> int:
@@ -133,8 +136,11 @@ def build_brain_compose_audit_extra(
         brain_state_json_chars = len(
             json.dumps(slim, ensure_ascii=False, indent=2)
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 — audit must never break replies
+        _log.warning(
+            "[LLM_COST_AUDIT_ERROR] failed to build brain state json char count: %s",
+            type(exc).__name__,
+        )
 
     history_chars = _messages_char_count(history_messages)
     system_chars = len(prompt or "")
