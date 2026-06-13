@@ -1133,6 +1133,19 @@ class DefaultComposer:
             except Exception:  # noqa: BLE001  # noqa: silent-ok — shadow must never break compose
                 pass
 
+            from ..cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+
+            maybe_audit_model_router(
+                call_site="brain.compose._llm_compose",
+                intent_name=getattr(getattr(ctx, "intent", None), "name", None),
+                social_category=(getattr(getattr(ctx, "intent", None), "slots", None) or {}).get(
+                    "social_category",
+                ),
+                tenant_id=ctx.tenant_id,
+                conversation_id=getattr(ctx, "conversation_id", None),
+                turn_id=getattr(getattr(ctx, "state", None), "turn", None),
+            )
+
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     generate_ai_reply,

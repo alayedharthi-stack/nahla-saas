@@ -447,6 +447,13 @@ class DefaultMemoryUpdater:
                 estimated_input_tokens=len(prompt) // 4,
                 reason="brain.memory.updater._summarise",
             )
+            from modules.ai.brain.cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+
+            maybe_audit_model_router(
+                call_site="brain.memory.updater._summarise",
+                tenant_id=ctx.tenant_id,
+                turn_id=getattr(ctx.state, "turn", None),
+            )
             response = client.messages.create(
                 model=_summary_model,
                 max_tokens=300,
