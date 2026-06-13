@@ -102,20 +102,25 @@ class DefaultComposer:
         # it here with a short re-greeting template instead.
         re_greet_requested = bool(decision.args.get("re_greet"))
         if action == ACTION_GREET and self._should_skip_greet(ctx) and not re_greet_requested:
-            logger.info(
-                "[Composer] downgrading ACTION_GREET → LLM | "
-                "tenant=%s greeted=%s stage=%s",
-                ctx.tenant_id,
-                getattr(ctx.state, "greeted", False),
-                getattr(ctx.state, "stage", ""),
-            )
-            decision.action = ACTION_LLM_REPLY
-            decision.reason = (
-                f"composer_guard:greet_blocked greeted={ctx.state.greeted} "
-                f"stage={ctx.state.stage}; "
-                "answer the customer's actual message without re-greeting"
-            )
-            action = ACTION_LLM_REPLY
+            from ..cost.intent_cost_policy import should_avoid_llm_for_intent  # noqa: PLC0415
+
+            if should_avoid_llm_for_intent(getattr(ctx.intent, "name", "")):
+                re_greet_requested = True
+            else:
+                logger.info(
+                    "[Composer] downgrading ACTION_GREET → LLM | "
+                    "tenant=%s greeted=%s stage=%s",
+                    ctx.tenant_id,
+                    getattr(ctx.state, "greeted", False),
+                    getattr(ctx.state, "stage", ""),
+                )
+                decision.action = ACTION_LLM_REPLY
+                decision.reason = (
+                    f"composer_guard:greet_blocked greeted={ctx.state.greeted} "
+                    f"stage={ctx.state.stage}; "
+                    "answer the customer's actual message without re-greeting"
+                )
+                action = ACTION_LLM_REPLY
 
         # ── Greet ──────────────────────────────────────────────────────────
         if action == ACTION_GREET:
@@ -657,7 +662,7 @@ class DefaultComposer:
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
-            text = await self._llm_compose(ctx, result)
+            text = await self._llm_compose(ctx, result, decision=decision)
             _topic = str((decision.args or {}).get("topic") or "").strip()
             if _topic == "social_persona_ack":
                 text = self._social_persona_emergency_fallback_if_needed(
@@ -982,7 +987,13 @@ class DefaultComposer:
 
     # ── LLM delegation ───────────────────────────────────────────────────────
 
-    async def _llm_compose(self, ctx: BrainContext, result: ActionResult) -> str:
+    async def _llm_compose(
+        self,
+        ctx: BrainContext,
+        result: ActionResult,
+        *,
+        decision: Decision | None = None,
+    ) -> str:
         """Use the thin MerchantBrain LLM path, with legacy fallback on hard errors.
 
         The preferred path injects a short prompt + explicit BrainReplyState.
@@ -1023,9 +1034,41 @@ class DefaultComposer:
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(ctx.history, ctx.message)
 
+            from modules.ai.brain.cost.intent_cost_policy import (  # noqa: PLC0415
+                emit_llm_avoidable_call,
+                should_avoid_llm_for_intent,
+                should_avoid_llm_for_social_category,
+            )
             from modules.ai.orchestrator.llm_cost_audit import (  # noqa: PLC0415
+                approx_tokens_from_chars,
                 build_brain_compose_audit_extra,
             )
+
+            _intent_name = str(
+                getattr(ctx.intent, "name", "")
+                or getattr(reply_state, "intent_name", "")
+                or ""
+            )
+            _dec_args = (decision.args if decision is not None else None) or {}
+            _social_cat = str(
+                _dec_args.get("social_category")
+                or getattr(reply_state, "social_category", "")
+                or ""
+            )
+            _avoid = should_avoid_llm_for_intent(_intent_name) or (
+                _social_cat and should_avoid_llm_for_social_category(_social_cat)
+            )
+            if _avoid:
+                emit_llm_avoidable_call(
+                    tenant_id=ctx.tenant_id,
+                    conversation_id=ctx.conversation_id,
+                    turn_id=getattr(ctx.state, "turn", None),
+                    intent=_intent_name or None,
+                    action=(decision.action if decision is not None else ACTION_LLM_REPLY),
+                    reason=(decision.reason if decision is not None else None),
+                    estimated_input_tokens=approx_tokens_from_chars(len(prompt)),
+                    system_chars=len(prompt),
+                )
 
             _llm_audit = build_brain_compose_audit_extra(
                 reply_state=reply_state,

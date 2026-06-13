@@ -1,4 +1,4 @@
-"""P1-F — social personality routes to LLM/persona compose, not templates."""
+"""P1-F social routing — template-first under PR2B intent cost policy."""
 from __future__ import annotations
 
 import asyncio
@@ -62,6 +62,12 @@ def _social_ctx(*, message: str, social_category: str) -> BrainContext:
     )
 
 
+def _assert_template_social(decision: Decision) -> None:
+    assert decision.action == ACTION_SOCIAL_REPLY
+    assert decision.action != ACTION_LLM_REPLY
+    assert decision.args.get("social_category")
+
+
 def _assert_llm_social_persona(decision: Decision) -> None:
     assert decision.action == ACTION_LLM_REPLY
     assert decision.action != ACTION_SOCIAL_REPLY
@@ -80,36 +86,45 @@ class TestSocialPersonaRouting:
             ("كفو", "strong_praise"),
         ],
     )
-    def test_social_categories_route_to_llm_persona(
+    def test_social_categories_route_to_template_not_llm(
         self, message: str, category: str,
     ) -> None:
         decision = DefaultDecisionEngine().decide(
             _social_ctx(message=message, social_category=category),
         )
-        _assert_llm_social_persona(decision)
+        _assert_template_social(decision)
         assert decision.args.get("social_category") == category
 
-    def test_classified_teslam_routes_to_llm_not_template(self) -> None:
+    def test_social_categories_route_to_llm_when_avoid_disabled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "false")
+        decision = DefaultDecisionEngine().decide(
+            _social_ctx(message="جزاك الله خير", social_category="thanks"),
+        )
+        _assert_llm_social_persona(decision)
+
+    def test_classified_teslam_routes_to_template_not_llm(self) -> None:
         match = classify_social("تسلم")
         assert match is not None
         ctx = _social_ctx(message="تسلم", social_category=match.category)
         decision = DefaultDecisionEngine().decide(ctx)
-        _assert_llm_social_persona(decision)
+        _assert_template_social(decision)
 
-    def test_classified_rabi_yahfazk_routes_to_llm_not_template(self) -> None:
+    def test_classified_rabi_yahfazk_routes_to_template_not_llm(self) -> None:
         match = classify_social("ربي يحفظك")
         assert match is not None
         ctx = _social_ctx(message="ربي يحفظك", social_category=match.category)
         decision = DefaultDecisionEngine().decide(ctx)
-        _assert_llm_social_persona(decision)
+        _assert_template_social(decision)
 
-    def test_classified_allah_yeslamk_routes_to_llm_not_template(self) -> None:
+    def test_classified_allah_yeslamk_routes_to_template_not_llm(self) -> None:
         match = classify_social("الله يسلمك")
         assert match is not None
         assert match.category == "blessing"
         ctx = _social_ctx(message="الله يسلمك", social_category=match.category)
         decision = DefaultDecisionEngine().decide(ctx)
-        _assert_llm_social_persona(decision)
+        _assert_template_social(decision)
 
     def test_allah_yeslamk_end_to_end_from_rules_match(self) -> None:
         from modules.ai.brain.intent import rules as intent_rules  # noqa: PLC0415
@@ -132,7 +147,7 @@ class TestSocialPersonaRouting:
             ),
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        _assert_llm_social_persona(decision)
+        _assert_template_social(decision)
 
 
 class TestSocialPersonaGoal:
@@ -259,7 +274,7 @@ class TestTemplateOnlyCategories:
         assert decision.action == ACTION_SOCIAL_REPLY
         assert decision.args.get("social_category") == "condolence"
 
-    def test_policy_clamp_religious_media_routes_to_llm_persona(self) -> None:
+    def test_policy_clamp_religious_media_routes_to_social_template(self) -> None:
         from modules.ai.brain.decision.actions import ACTION_CLARIFY
 
         gate = RealPolicyGate()
@@ -280,6 +295,5 @@ class TestTemplateOnlyCategories:
         ctx.block_commerce_escalation = True
         ctx.non_commerce_category = "religious_media"
         out = gate.gate(incoming, ctx)
-        assert out.action == ACTION_LLM_REPLY
-        assert out.args.get("topic") == PERSONA_TOPIC_SOCIAL_PERSONA_ACK
+        assert out.action == ACTION_SOCIAL_REPLY
         assert out.args.get("social_category") == "religious_media"

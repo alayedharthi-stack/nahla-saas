@@ -150,7 +150,11 @@ def build_social_courtesy_decision(
     if block_commerce:
         args["block_commerce_escalation"] = True
 
-    if is_template_only_social_category(cat):
+    from modules.ai.brain.cost.intent_cost_policy import (  # noqa: PLC0415
+        should_avoid_llm_for_social_category,
+    )
+
+    if is_template_only_social_category(cat) or should_avoid_llm_for_social_category(cat):
         args.setdefault("social_category", cat)
         return Decision(
             action=ACTION_SOCIAL_REPLY,

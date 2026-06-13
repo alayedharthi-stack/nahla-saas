@@ -1,8 +1,8 @@
 """
-Production-shaped routing — bare salaam vs persona greeting compose.
+Production-shaped routing — bare salaam vs template greeting (PR2B).
 
 Pure salaam (no commerce residue) must classify as ``INTENT_GREETING`` and
-reach ``persona_social + persona_kind=greeting`` on established turns.
+reach ``ACTION_GREET`` (template variants) when routine LLM avoid is enabled.
 Mixed salaam+commerce turns still demote via the welcome gate.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
 from modules.ai.brain.persona_expression import (  # noqa: E402
@@ -65,16 +65,16 @@ def _established_ctx(msg: str) -> BrainContext:
     )
 
 
-def test_production_bare_hala_reaches_persona_social_greeting() -> None:
+def test_production_bare_hala_routes_template_re_greet() -> None:
     assert is_established_greet_persona_compose_enabled()
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert ctx.intent.name == INTENT_GREETING
     assert not (ctx.intent.slots or {}).get("embedded_greeting")
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action == ACTION_GREET
+    assert decision.args.get("re_greet") is True
+    assert decision.action != ACTION_LLM_REPLY
 
 
 def test_production_bare_hala_rules_classify_greeting() -> None:
@@ -85,25 +85,25 @@ def test_production_bare_hala_rules_classify_greeting() -> None:
     assert intent.extraction_method == "rules"
 
 
-def test_production_bare_hala_decision_is_persona_greeting_branch() -> None:
+def test_production_bare_hala_decision_is_template_re_greet_branch() -> None:
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert ctx.intent.name == INTENT_GREETING
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action == ACTION_GREET
+    assert decision.args.get("re_greet") is True
 
 
 @pytest.mark.parametrize("msg", ["مرحبا", "السلام عليكم"])
-def test_production_common_greetings_reach_persona_social(msg: str) -> None:
+def test_production_common_greetings_route_template_re_greet(msg: str) -> None:
     ctx = _established_ctx(msg)
     assert ctx.intent.name == INTENT_GREETING
     assert not (ctx.intent.slots or {}).get("embedded_greeting")
 
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action == ACTION_GREET
+    assert decision.args.get("re_greet") is True
+    assert decision.action != ACTION_LLM_REPLY
 
 
 def test_mixed_hala_order_request_still_commerce() -> None:

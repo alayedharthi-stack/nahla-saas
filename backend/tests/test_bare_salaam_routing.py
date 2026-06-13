@@ -24,7 +24,7 @@ from modules.ai.brain.clarification.types import COMPOSE_TOPIC_CONTEXTUAL_CLARIF
 from modules.ai.brain.compose.brain_state_slim import (  # noqa: E402
     should_slim_general_brain_state,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
 from modules.ai.brain.persona_expression import (  # noqa: E402
@@ -196,8 +196,7 @@ def test_pure_hala_slim_eligible_after_reset() -> None:
 # ── 9. Established turn routes persona — not loop-prone clarify path ────────
 
 def test_reset_shaped_hala_avoids_contextual_clarify_decision() -> None:
-    """Wrong routing (start_order → clarify) produced short LLM replies that
-    loop_guard replaced; pure greeting must take persona_social instead."""
+    """Pure greeting must take ACTION_GREET — not loop-prone clarify/LLM path."""
     state = _reset_state()
     intent = rules.match("هلا")
     assert intent is not None
@@ -210,11 +209,9 @@ def test_reset_shaped_hala_avoids_contextual_clarify_decision() -> None:
         facts=_facts(),
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action == ACTION_GREET
+    assert decision.action != ACTION_LLM_REPLY
     assert decision.args.get("topic") != COMPOSE_TOPIC_CONTEXTUAL_CLARIFY
-    assert "persona_social" in (decision.reason or "")
 
 
 # ── 10. Commerce paths preserved ────────────────────────────────────────────

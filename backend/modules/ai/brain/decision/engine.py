@@ -553,17 +553,23 @@ class DefaultDecisionEngine:
             # P1-F — personality social (thanks/blessing/courtesy/warmth) →
             # LLM persona compose. Compliment keeps merchant_praise_ack.
             # Occasion/safety categories use build_social_courtesy_decision.
-            if category == "compliment":
-                return Decision(
-                    action=ACTION_LLM_REPLY,
-                    args={
-                        "topic": "merchant_praise_ack",
-                        "social_category": category,
-                    },
-                    reason=f"merchant praise — generative warmth ack ({category})",
-                    confidence=intent.confidence,
-                )
             from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+            if category == "compliment":
+                from ..cost.intent_cost_policy import (  # noqa: PLC0415
+                    should_avoid_llm_for_social_category,
+                )
+
+                if not should_avoid_llm_for_social_category(category):
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={
+                            "topic": "merchant_praise_ack",
+                            "social_category": category,
+                        },
+                        reason=f"merchant praise — generative warmth ack ({category})",
+                        confidence=intent.confidence,
+                    )
 
             return build_social_courtesy_decision(
                 category,
@@ -2093,12 +2099,34 @@ class DefaultDecisionEngine:
                             (ctx.message or "")[:80],
                         )
                     else:
+                        from ..cost.intent_cost_policy import (  # noqa: PLC0415
+                            should_use_template_for_pure_greeting,
+                        )
                         from ..persona_expression import (  # noqa: PLC0415
                             PERSONA_KIND_GREETING,
                             PERSONA_TOPIC_SOCIAL,
                             is_established_greet_persona_compose_enabled,
                         )
 
+                        if should_use_template_for_pure_greeting(
+                            intent_name=intent.name,
+                            embedded_greeting=False,
+                            has_actionable_substance=False,
+                        ):
+                            logger.info(
+                                "[INTENT_COST] kind=greeting route=template "
+                                "first_turn tenant=%s preview=%r",
+                                getattr(ctx, "tenant_id", None),
+                                (ctx.message or "")[:60],
+                            )
+                            return Decision(
+                                action=ACTION_GREET,
+                                reason=(
+                                    "first-turn pure greeting — template "
+                                    "(intent cost policy, no LLM)"
+                                ),
+                                confidence=0.85,
+                            )
                         if is_established_greet_persona_compose_enabled():
                             logger.info(
                                 "[PERSONA_SOCIAL] kind=greeting route=first_turn_greeting "
@@ -2142,17 +2170,40 @@ class DefaultDecisionEngine:
                 and state.greeted
                 and not bool(_intent_slots.get("embedded_greeting"))
             ):
-                # Established pure greeting → persona_social compose (non-
-                # deterministic personality). Legacy template re-greet only
-                # when ``ESTABLISHED_GREET_PERSONA_COMPOSE_ENABLED=false``.
+                # Established pure greeting → template re-greet when intent
+                # cost policy avoids LLM; persona_social compose only when
+                # ``NAHLA_ROUTINE_LLM_AVOID_ENABLED=false`` and persona flag on.
                 # Mixed turns (``embedded_greeting=True``) fall through so the
                 # actionable half reaches a specific or general LLM route.
+                from ..cost.intent_cost_policy import (  # noqa: PLC0415
+                    should_use_template_for_pure_greeting,
+                )
                 from ..persona_expression import (  # noqa: PLC0415
                     PERSONA_KIND_GREETING,
                     PERSONA_TOPIC_SOCIAL,
                     is_established_greet_persona_compose_enabled,
                 )
 
+                if should_use_template_for_pure_greeting(
+                    intent_name=intent.name,
+                    embedded_greeting=False,
+                    has_actionable_substance=False,
+                ):
+                    logger.info(
+                        "[INTENT_COST] kind=greeting route=template "
+                        "re_greet tenant=%s preview=%r",
+                        getattr(ctx, "tenant_id", None),
+                        (ctx.message or "")[:60],
+                    )
+                    return Decision(
+                        action=ACTION_GREET,
+                        args={"re_greet": True},
+                        reason=(
+                            "established pure greeting — template re-greet "
+                            "(intent cost policy, no LLM)"
+                        ),
+                        confidence=0.85,
+                    )
                 if is_established_greet_persona_compose_enabled():
                     logger.info(
                         "[PERSONA_SOCIAL] kind=greeting route=established_greeting "

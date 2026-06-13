@@ -24,7 +24,7 @@ import os
 from typing import Any, Optional
 
 from .intent.non_commerce_classifier import NonCommerceMatch
-from .types import CommerceFacts, INTENT_PERSONA_INTERACTION, INTENT_SOCIAL, INTENT_WHO_ARE_YOU, Intent
+from .types import CommerceFacts, INTENT_GREETING, INTENT_PERSONA_INTERACTION, INTENT_SOCIAL, INTENT_WHO_ARE_YOU, Intent
 
 logger = logging.getLogger("nahla.brain.pre_commerce_gate")
 
@@ -72,6 +72,21 @@ def should_pre_commerce_shortcut(
 
     if intent.name == INTENT_PERSONA_INTERACTION and conf >= threshold:
         return True
+
+    if intent.name == INTENT_GREETING and conf >= threshold:
+        if slots.get("embedded_greeting"):
+            return False
+        try:
+            from .cost.intent_cost_policy import should_avoid_llm_for_intent  # noqa: PLC0415
+            from .decision.engine import _first_turn_has_actionable_substance  # noqa: PLC0415
+
+            if (
+                should_avoid_llm_for_intent(INTENT_GREETING)
+                and not _first_turn_has_actionable_substance(message)
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
 
     if message and state is not None:
         try:
