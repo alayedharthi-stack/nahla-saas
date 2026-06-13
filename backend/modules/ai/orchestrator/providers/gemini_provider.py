@@ -25,6 +25,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_gemini
+from modules.ai.orchestrator.llm_cost_audit import approx_tokens_from_chars, emit_llm_cost_audit
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as engine
@@ -59,6 +61,7 @@ class GeminiProvider(BaseAIProvider):
         prompt: str,
         *,
         history: Optional[List[Dict[str, Any]]] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Call the Gemini generateContent API synchronously.
@@ -97,16 +100,43 @@ class GeminiProvider(BaseAIProvider):
 
         try:
             url = f"{_API_BASE}/{_MODEL}:generateContent?key={_API_KEY}"
+            contents = _merge_history(history, message)
             body: Dict[str, Any] = {
                 "system_instruction": {
                     "parts": [{"text": prompt}]
                 },
-                "contents": _merge_history(history, message),
+                "contents": contents,
                 "generationConfig": {
                     "maxOutputTokens": 1024,
                     "temperature":     0.7,
                 },
             }
+            audit_extra = dict(audit_context or {})
+            messages_chars = sum(
+                len(str((part or {}).get("text") or ""))
+                for item in contents
+                for part in (item.get("parts") or [])
+            )
+            total_prompt_chars = len(prompt or "") + messages_chars
+            emit_llm_cost_audit(
+                tenant_id=audit_extra.get("tenant_id"),
+                conversation_id=audit_extra.get("conversation_id"),
+                turn_id=audit_extra.get("turn_id"),
+                model=_MODEL,
+                provider="gemini",
+                messages_count=len(contents),
+                system_chars=len(prompt or ""),
+                messages_chars=messages_chars,
+                total_prompt_chars=total_prompt_chars,
+                estimated_input_tokens=int(
+                    audit_extra.get("estimated_input_tokens")
+                    or approx_tokens_from_chars(total_prompt_chars)
+                ),
+                reason=audit_extra.get("reason") or "gemini_provider.call",
+                intent=audit_extra.get("intent"),
+                stage=audit_extra.get("stage"),
+                channel=audit_extra.get("channel"),
+            )
             with httpx.Client(timeout=_TIMEOUT) as client:
                 resp = client.post(url, json=body)
                 resp.raise_for_status()
@@ -119,6 +149,13 @@ class GeminiProvider(BaseAIProvider):
                 "[engine] Modular path used — Gemini | "
                 "provider=gemini model=%s reply_len=%d",
                 _MODEL, len(reply),
+            )
+            record_ai_usage_from_gemini(
+                audit_extra=audit_extra,
+                model=_MODEL,
+                httpx_data=data,
+                reply_text=reply,
+                total_prompt_chars=total_prompt_chars,
             )
             return {
                 "provider":   "gemini",
