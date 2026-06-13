@@ -2403,6 +2403,9 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    _sr = getattr(ctx, "state_relevance", None)
+    if _sr is not None and hasattr(_sr, "to_dict"):
+        known_facts["state_relevance_verdict"] = _sr.to_dict()
 
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
