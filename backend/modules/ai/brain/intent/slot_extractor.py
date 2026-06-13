@@ -171,6 +171,19 @@ async def extract_slots(
             timeout=12.0,
         )
 
+        from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic  # noqa: PLC0415
+
+        record_ai_usage_from_anthropic(
+            audit_extra={
+                "reason": "brain.intent.slot_extractor",
+                "estimated_input_tokens": (len(_SYSTEM) + len(user_content)) // 4,
+            },
+            model=_slot_model,
+            response=response,
+            reply_text=response.content[0].text if response.content else "",
+            total_prompt_chars=len(_SYSTEM) + len(user_content),
+        )
+
         raw = response.content[0].text.strip()
 
         # Strip markdown code fences

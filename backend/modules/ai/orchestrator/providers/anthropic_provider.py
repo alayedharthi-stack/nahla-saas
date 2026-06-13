@@ -26,6 +26,7 @@ from modules.ai.orchestrator.llm_cost_audit import (
     approx_tokens_from_chars,
     resolve_anthropic_model,
 )
+from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as engine
@@ -221,6 +222,13 @@ class AnthropicProvider(BaseAIProvider):
                     " + tools" if tools else "",
                     model, len(reply),
                 )
+                record_ai_usage_from_anthropic(
+                    audit_extra=audit_extra,
+                    model=model,
+                    response=response,
+                    reply_text=reply,
+                    total_prompt_chars=total_prompt_chars,
+                )
                 return {
                     "provider":   "anthropic",
                     "model":      model,
@@ -304,6 +312,13 @@ class AnthropicProvider(BaseAIProvider):
                 "provider=anthropic model=%s reply_len=%d",
                 " + tools" if tools else "",
                 model, len(reply),
+            )
+            record_ai_usage_from_anthropic(
+                audit_extra=audit_extra,
+                model=model,
+                httpx_data=data,
+                reply_text=reply,
+                total_prompt_chars=total_prompt_chars,
             )
             return {
                 "provider":   "anthropic",

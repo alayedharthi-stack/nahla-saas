@@ -2130,6 +2130,36 @@ class AiQualityEvent(Base):
     tenant = relationship('Tenant')
 
 
+class AIUsageEvent(Base):
+    """One row per LLM call — token counts and USD cost, no message content."""
+    __tablename__ = "ai_usage_events"
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
+    store_id = Column(Integer, nullable=True)
+    conversation_id = Column(Integer, nullable=True)
+    turn_id = Column(Integer, nullable=True)
+    provider = Column(String(64), nullable=False)
+    model = Column(String(128), nullable=False)
+    reason = Column(String(128), nullable=False)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    cache_read_tokens = Column(Integer, nullable=True)
+    cache_write_tokens = Column(Integer, nullable=True)
+    estimated_input_tokens = Column(Integer, nullable=True)
+    estimated_output_tokens = Column(Integer, nullable=True)
+    token_source = Column(String(16), nullable=False)  # actual | estimated
+    input_cost_usd = Column(Numeric(18, 8), nullable=True)
+    output_cost_usd = Column(Numeric(18, 8), nullable=True)
+    cache_cost_usd = Column(Numeric(18, 8), nullable=True)
+    total_cost_usd = Column(Numeric(18, 8), nullable=True)
+    pricing_version = Column(String(32), nullable=True)
+    request_id = Column(String(128), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    tenant = relationship("Tenant")
+
+
 class ConversationTrace(Base):
     """Per-turn debug trace for every AI Sales conversation step."""
     __tablename__ = 'conversation_traces'

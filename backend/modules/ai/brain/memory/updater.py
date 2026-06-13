@@ -452,6 +452,21 @@ class DefaultMemoryUpdater:
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
+            from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic  # noqa: PLC0415
+
+            record_ai_usage_from_anthropic(
+                audit_extra={
+                    "tenant_id": ctx.tenant_id,
+                    "turn_id": getattr(ctx.state, "turn", None),
+                    "reason": "brain.memory.updater._summarise",
+                    "estimated_input_tokens": len(prompt) // 4,
+                },
+                model=_summary_model,
+                response=response,
+                reply_text=response.content[0].text if response.content else "",
+                total_prompt_chars=len(prompt),
+                db=db,
+            )
             raw = response.content[0].text.strip()
 
             import json, re

@@ -28,6 +28,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from models import (  # noqa: E402
     AIActionLog,
+    AIUsageEvent,
     BillingInvoice,
     BillingPayment,
     BillingPlan,
@@ -58,6 +59,11 @@ from core.config import INVITE_EXPIRE_H
 from core.database import get_db
 from core.tenant import get_or_create_settings
 from modules.ai.orchestrator.costing import estimate_call_cost
+from modules.ai.orchestrator.ai_usage_ledger import (
+    aggregate_platform_ledger,
+    aggregate_tenant_ledger,
+    ledger_period_start,
+)
 
 logger = logging.getLogger("nahla.admin")
 router = APIRouter()
@@ -1765,7 +1771,12 @@ async def admin_revenue_timeseries(
     }
 
 
-def _tenant_ai_usage_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
+def _tenant_ai_usage_payload(
+    db: Session,
+    tenant_id: int,
+    *,
+    period: str = "7d",
+) -> Dict[str, Any]:
     turns = (
         db.query(ConversationTrace)
         .filter(ConversationTrace.tenant_id == tenant_id)
@@ -1773,37 +1784,32 @@ def _tenant_ai_usage_payload(db: Session, tenant_id: int) -> Dict[str, Any]:
         .all()
     )
     action_count = db.query(func.count(AIActionLog.id)).filter(AIActionLog.tenant_id == tenant_id).scalar() or 0
-    models: Dict[str, int] = {}
-    providers: Dict[str, int] = {}
-    est_cost_usd = 0.0
-    est_tokens = 0
     latency_values: List[int] = []
-
     orchestrated_turns = 0
     for turn in turns:
         if turn.orchestrator_used:
             orchestrated_turns += 1
-        model = turn.model_used or "unknown"
-        models[model] = models.get(model, 0) + 1
-        provider = _provider_from_model(model)
-        providers[provider] = providers.get(provider, 0) + 1
         if turn.latency_ms is not None:
             latency_values.append(int(turn.latency_ms))
-        cost = _estimate_trace_cost(turn)
-        est_cost_usd += float(cost.get("est_cost_usd", 0.0))
-        est_tokens += int(cost.get("est_total_tokens", 0))
 
+    ledger = aggregate_tenant_ledger(db, tenant_id, period=period)
     avg_latency = round(sum(latency_values) / len(latency_values), 1) if latency_values else 0.0
     return {
         "tenant_id": tenant_id,
+        "period": period,
         "turns_total": len(turns),
         "turns_orchestrated": orchestrated_turns,
         "ai_actions_logged": int(action_count),
         "avg_latency_ms": avg_latency,
-        "estimated_total_tokens": int(est_tokens),
-        "estimated_total_cost_usd": round(est_cost_usd, 6),
-        "models": [{"model": model, "count": count} for model, count in sorted(models.items(), key=lambda item: item[1], reverse=True)],
-        "providers": [{"provider": provider, "count": count} for provider, count in sorted(providers.items(), key=lambda item: item[1], reverse=True)],
+        "calls_total": ledger["calls_total"],
+        "actual_total_tokens": ledger["actual_total_tokens"],
+        "estimated_total_tokens": ledger["estimated_total_tokens"],
+        "actual_total_cost_usd": ledger["actual_total_cost_usd"],
+        "estimated_total_cost_usd": ledger["estimated_total_cost_usd"],
+        "unattributed_total_cost_usd": ledger["unattributed_total_cost_usd"],
+        "models": ledger["models"],
+        "providers": ledger["providers"],
+        "reasons": ledger["reasons"],
     }
 
 
@@ -1812,14 +1818,15 @@ async def admin_ai_usage(
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
     limit: int = 100,
+    period: str = Query("7d", description="24h | 7d | mtd | all"),
 ):
     tenants = db.query(Tenant).order_by(Tenant.created_at.desc(), Tenant.id.desc()).limit(min(limit, 200)).all()
     rows = []
     for tenant in tenants:
-        payload = _tenant_ai_usage_payload(db, tenant.id)
+        payload = _tenant_ai_usage_payload(db, tenant.id, period=period)
         payload["tenant_name"] = tenant.name
         rows.append(payload)
-    return {"tenants": rows}
+    return {"tenants": rows, "period": period}
 
 
 @router.get("/admin/ai/usage/{tenant_id}")
@@ -1827,11 +1834,12 @@ async def admin_ai_usage_tenant(
     tenant_id: int,
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
+    period: str = Query("7d", description="24h | 7d | mtd | all"),
 ):
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    payload = _tenant_ai_usage_payload(db, tenant_id)
+    payload = _tenant_ai_usage_payload(db, tenant_id, period=period)
     payload["tenant_name"] = tenant.name
     return payload
 
@@ -1840,25 +1848,39 @@ async def admin_ai_usage_tenant(
 async def admin_ai_costs(
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
+    period: str = Query("7d", description="24h | 7d | mtd | all"),
 ):
+    platform = aggregate_platform_ledger(db, period=period)
     tenants = db.query(Tenant).all()
     per_tenant = []
-    total_cost = 0.0
-    total_tokens = 0
     for tenant in tenants:
-        usage = _tenant_ai_usage_payload(db, tenant.id)
-        total_cost += usage["estimated_total_cost_usd"]
-        total_tokens += usage["estimated_total_tokens"]
+        usage = _tenant_ai_usage_payload(db, tenant.id, period=period)
+        tenant_cost = usage["actual_total_cost_usd"] + usage["estimated_total_cost_usd"]
+        if tenant_cost <= 0 and usage["calls_total"] <= 0:
+            continue
         per_tenant.append({
             "tenant_id": tenant.id,
             "tenant_name": tenant.name,
+            "store_id": tenant.id,
+            "actual_total_cost_usd": usage["actual_total_cost_usd"],
             "estimated_total_cost_usd": usage["estimated_total_cost_usd"],
+            "total_cost_usd": round(tenant_cost, 6),
+            "actual_total_tokens": usage["actual_total_tokens"],
             "estimated_total_tokens": usage["estimated_total_tokens"],
+            "calls_total": usage["calls_total"],
         })
-    per_tenant.sort(key=lambda item: item["estimated_total_cost_usd"], reverse=True)
+    per_tenant.sort(key=lambda item: item["total_cost_usd"], reverse=True)
     return {
-        "estimated_total_cost_usd": round(total_cost, 6),
-        "estimated_total_tokens": int(total_tokens),
+        "period": period,
+        "actual_total_cost_usd": platform["actual_total_cost_usd"],
+        "estimated_total_cost_usd": platform["estimated_total_cost_usd"],
+        "unattributed_total_cost_usd": platform["unattributed_total_cost_usd"],
+        "actual_total_tokens": platform["actual_total_tokens"],
+        "estimated_total_tokens": platform["estimated_total_tokens"],
+        "calls_total": platform["calls_total"],
+        "providers": platform["providers"],
+        "models": platform["models"],
+        "reasons": platform["reasons"],
         "tenants": per_tenant[:100],
     }
 
@@ -1867,16 +1889,20 @@ async def admin_ai_costs(
 async def admin_ai_providers(
     db: Session = Depends(get_db),
     _admin: Dict[str, Any] = Depends(require_admin),
+    period: str = Query("7d", description="24h | 7d | mtd | all"),
 ):
-    rows = db.query(ConversationTrace).all()
+    since = ledger_period_start(period)
+    query = db.query(AIUsageEvent)
+    if since is not None:
+        query = query.filter(AIUsageEvent.created_at >= since)
+    rows = query.all()
     provider_counts: Dict[str, int] = {}
     model_counts: Dict[str, int] = {}
     for row in rows:
-        provider = _provider_from_model(row.model_used or "")
-        provider_counts[provider] = provider_counts.get(provider, 0) + 1
-        model = row.model_used or "unknown"
-        model_counts[model] = model_counts.get(model, 0) + 1
+        provider_counts[row.provider] = provider_counts.get(row.provider, 0) + 1
+        model_counts[row.model] = model_counts.get(row.model, 0) + 1
     return {
+        "period": period,
         "providers": [{"provider": key, "count": value} for key, value in sorted(provider_counts.items(), key=lambda item: item[1], reverse=True)],
         "models": [{"model": key, "count": value} for key, value in sorted(model_counts.items(), key=lambda item: item[1], reverse=True)],
     }
