@@ -30,8 +30,11 @@ from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa
     evaluate_product_availability_evidence,
 )
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
-    _CONFLICT_REPLY_AR,
+    _LEGACY_CONFLICT_REPLY_AR,
     apply_product_availability_truth_guard,
+    build_friendly_availability_conflict_reply,
+    customer_facing_availability_reply_is_clean,
+    log_product_availability_truth_guard,
 )
 
 
@@ -89,7 +92,7 @@ class TestVariantFamilyNotConflict:
             )
             assert result.replaced is False
             assert result.reply == reply
-            assert _CONFLICT_REPLY_AR not in result.reply
+            assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
         finally:
             if prev is None:
                 os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -172,7 +175,7 @@ class TestGuardInboundExempt:
                 tenant_id=1,
             )
             assert result.replaced is False
-            assert _CONFLICT_REPLY_AR not in result.reply
+            assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
         finally:
             if prev is None:
                 os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -262,7 +265,7 @@ class TestDirectFamilyAvailabilityAsk:
                 tenant_id=1,
             )
             assert result.replaced is False
-            assert _CONFLICT_REPLY_AR not in result.reply
+            assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
         finally:
             if prev is None:
                 os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -299,7 +302,7 @@ class TestDirectFamilyAvailabilityAsk:
                 tenant_id=1,
             )
             assert result.replaced is False
-            assert _CONFLICT_REPLY_AR not in result.reply
+            assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
         finally:
             if prev is None:
                 os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -324,14 +327,142 @@ class TestRepeatAvailabilityDedupBypass:
             should_bypass_hard_dedup_repeat_availability,
         )
         from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
-            _CONFLICT_REPLY_AR,
+            _LEGACY_CONFLICT_REPLY_AR,
         )
 
         assert should_bypass_hard_dedup_repeat_availability(
             "هل Edition Series متوفر؟",
-            _CONFLICT_REPLY_AR,
+            _LEGACY_CONFLICT_REPLY_AR,
         )
         assert not should_bypass_hard_dedup_repeat_availability(
             "هل Edition Series متوفر؟",
             "Edition Series متوفر بصنفين مختلفين.",
         )
+
+
+class TestFriendlyAvailabilityConflictReply:
+    def _talh_family_ctx(self):
+        fam = "طلح|عسل"
+        return _family_ctx(
+            _sku(101, "عسل الطلح ربع كilo", checkout=True, family=fam),
+            _sku(102, "عسل الطلح نصف كilo", checkout=False, family=fam),
+            _sku(103, "عسل الطلح كilo", checkout=True, family=fam),
+            inbound="هل عندكم عسل طلح؟",
+        )
+
+    def test_talh_conflict_rewrite_is_commercial_not_system(self):
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            ctx = {
+                **self._talh_family_ctx(),
+                "focus_product": {"id": 101, "title": "عسل الطلح ربع كilo"},
+                "kb_signals": [{
+                    "section_id": 50,
+                    "kind": "quick_update",
+                    "avail_polarity": "positive",
+                    "primary_year": "2024",
+                    "linked_product_ids": [102],
+                }],
+                "product_links": [{
+                    "section_id": 50,
+                    "product_id": 102,
+                    "source": "manual",
+                    "confidence": None,
+                }],
+            }
+            result = apply_product_availability_truth_guard(
+                reply="متوفر",
+                availability_context=ctx,
+                inbound_text="هل عندكم عسل طلح؟",
+                tenant_id=7,
+                conversation_id=99,
+            )
+            assert result.replaced is True
+            assert result.action.startswith("rewrite")
+            assert "معلومات متعارضة" not in result.reply
+            assert customer_facing_availability_reply_is_clean(result.reply)
+            assert "أي حجم" in result.reply
+            assert "عسل" in result.reply
+            assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev
+
+    def test_internal_conflict_still_logged(self, caplog):
+        import logging
+
+        caplog.set_level(
+            logging.INFO,
+            logger="nahla.brain.postprocess.product_availability_truth_guard",
+        )
+        log_product_availability_truth_guard(
+            tenant_id=7,
+            conversation_id=99,
+            evidence_state=EVIDENCE_CONFLICT,
+            conflict_type="MISSING_CATALOG_ENTITY",
+            guard_mode="enforce",
+            guard_action="rewrite_conflict",
+            would_rewrite=True,
+            entity_resolution_mode="family",
+            entity_product_id=101,
+            entity_confidence=0.9,
+            catalog_checkout=None,
+            kb_polarity="positive",
+            claim_polarity="negative",
+            reason="kb_catalog_divergence_on_family",
+        )
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "PRODUCT_AVAILABILITY_CONFLICT=MISSING_CATALOG_ENTITY" in joined
+        assert "معلومات متعارضة" not in joined
+
+    def test_resolved_available_positive_unchanged(self):
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            reply = "عسل الطلح متوفر الآن."
+            result = apply_product_availability_truth_guard(
+                reply=reply,
+                availability_context={
+                    **_family_ctx(
+                        _sku(201, "عسل الطلح كilo", checkout=True, family="طلح|عسل"),
+                        inbound="هل عندكم عسل طلح؟",
+                    ),
+                    "focus_product": {"id": 201, "title": "عسل الطلح كilo"},
+                },
+                inbound_text="هل عندكم عسل طلح؟",
+                tenant_id=7,
+            )
+            assert result.replaced is False
+            assert result.reply == reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev
+
+    def test_browse_types_question_not_rewritten_to_conflict_canned(self):
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            reply = "هذه الخيارات المتاحة لدينا."
+            result = apply_product_availability_truth_guard(
+                reply=reply,
+                availability_context=_family_ctx(
+                    _sku(1, "Edition Series legacy", checkout=True, family="edition|series"),
+                    _sku(2, "Edition Series current", checkout=False, family="edition|series"),
+                    inbound="وش أنواع Edition Series عندكم؟",
+                ),
+                inbound_text="وش أنواع Edition Series عندكم؟",
+                tenant_id=7,
+            )
+            assert result.replaced is False
+            assert result.reply == reply
+            assert "معلومات متعارضة" not in result.reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev

@@ -220,6 +220,8 @@ def prior_outbound_was_unhelpful_availability_rewrite(outbound: str) -> bool:
         return True
     if "ما أقدر أأكد التوفر الحالي بدقة" in ob:
         return True
+    if "ما نقدر نأكد التوفر بدقة" in ob:
+        return True
     return False
 
 

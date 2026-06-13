@@ -24,9 +24,11 @@ from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa
     evaluate_product_availability_evidence,
 )
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
-    _CONFLICT_REPLY_AR,
+    _LEGACY_CONFLICT_REPLY_AR,
     _UNKNOWN_REPLY_AR,
     apply_product_availability_truth_guard,
+    build_friendly_availability_conflict_reply,
+    customer_facing_availability_reply_is_clean,
     product_availability_guard_mode,
     reply_availability_polarity,
 )
@@ -255,18 +257,36 @@ class TestGuardEnforceMode:
             tenant_id=99,
         )
         assert result.replaced is True
-        assert result.reply == _CONFLICT_REPLY_AR
+        assert "معلومات متعارضة" not in result.reply
+        assert customer_facing_availability_reply_is_clean(result.reply)
+        assert "أي حجم" in result.reply
+        assert result.reply == build_friendly_availability_conflict_reply(
+            result.evidence,
+            availability_context=_ctx(
+                skus=[_sku(50, "Theta Model 2025", checkout=False, years=["2025"])],
+                focus={"id": 50, "title": "Theta Model 2025"},
+                kb=[{
+                    "section_id": 30,
+                    "kind": "quick_update",
+                    "avail_polarity": "positive",
+                    "primary_year": "2025",
+                    "linked_product_ids": [50],
+                }],
+                links=[{"section_id": 30, "product_id": 50, "source": "manual", "confidence": None}],
+            ),
+        )
 
     def test_enforce_rewrites_unknown(self) -> None:
         reply = "\u0645\u062a\u0648\u0641\u0631"
         result = apply_product_availability_truth_guard(
             reply=reply,
             availability_context=_ctx(skus=[_sku(60, "Iota Product", checkout=True)], connected=True),
-            inbound_text="generic greeting",
+            inbound_text="",
             tenant_id=99,
         )
         assert result.replaced is True
         assert result.reply == _UNKNOWN_REPLY_AR
+        assert customer_facing_availability_reply_is_clean(result.reply)
 
     def test_enforce_does_not_rewrite_resolved_available_positive(self) -> None:
         reply = "\u0645\u062a\u0648\u0641\u0631"

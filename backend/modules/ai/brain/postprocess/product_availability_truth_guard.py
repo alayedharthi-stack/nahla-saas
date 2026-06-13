@@ -53,18 +53,47 @@ _NEGATIVE_MARKERS = (
     "out of stock",
 )
 
-_CONFLICT_REPLY_AR = (
+_LEGACY_CONFLICT_REPLY_AR = (
     "\u062a\u0648\u062c\u062f \u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0645\u062a\u0639\u0627\u0631\u0636\u0629 "
     "\u062d\u0648\u0644 \u0627\u0644\u062a\u0648\u0641\u0631 \u0627\u0644\u062d\u0627\u0644\u064a "
     "\u2014 \u064a\u062e\u062a\u0644\u0641 \u062d\u0633\u0628 \u0627\u0644\u0635\u0646\u0641 \u0623\u0648 "
     "\u0627\u0644\u0648\u0632\u0646. \u0623\u064a \u062d\u062c\u0645 \u062a\u0642\u0635\u062f\u061f"
 )
 
-_UNKNOWN_REPLY_AR = (
-    "\u0645\u0627 \u0623\u0642\u062f\u0631 \u0623\u0623\u0643\u062f \u0627\u0644\u062a\u0648\u0641\u0631 "
-    "\u0627\u0644\u062d\u0627\u0644\u064a \u0628\u062f\u0642\u0629 \u2014 \u0623\u064a \u0645\u0646\u062a\u062c "
-    "\u0623\u0648 \u0648\u0632\u0646 \u062a\u0642\u0635\u062f\u061f"
+# Backward-compat alias for tests/dedup that reference the legacy canned line.
+_CONFLICT_REPLY_AR = _LEGACY_CONFLICT_REPLY_AR
+
+_CUSTOMER_FORBIDDEN_AVAILABILITY_PHRASES: tuple[str, ...] = (
+    "معلومات متعارضة",
+    "تعارض في البيانات",
+    "conflict",
+    "MISSING_CATALOG_ENTITY",
+    "حسب قاعدة المعرفة",
+    "حسب الكتالوج",
+    "الكتالوج",
 )
+
+_DEFAULT_VARIANT_FOLLOWUP_AR = "أي حجم يناسبك؟"
+
+_UNKNOWN_REPLY_AR = (
+    "\u0645\u0627 \u0646\u0642\u062f\u0631 \u0646\u0623\u0643\u062f \u0627\u0644\u062a\u0648\u0641\u0631 "
+    "\u0628\u062f\u0642\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0646\u062a\u062c \u2014 "
+    "\u0623\u064a \u062d\u062c\u0645 \u062a\u0642\u0635\u062f\u061f"
+)
+
+_INBOUND_AVAIL_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:هل|عندكم|عندك|عند|في|لديكم|لديك|يوجد|عندنا)\s+)+",
+    re.UNICODE | re.IGNORECASE,
+)
+_INBOUND_AVAIL_SUFFIX_RE = re.compile(
+    r"(?:\s*(?:\?|؟|\.)?\s*(?:متوفر|متاح|موجود|available|in stock|عندكم|عندك)\s*)+$",
+    re.UNICODE | re.IGNORECASE,
+)
+_WEIGHT_YEAR_NOISE_RE = re.compile(
+    r"(?:\d+(?:[.,]\d+)?\s*)?(?:نصف\s+|ربع\s+)?(?:كilo|كيلo|كيلو|kg|جرام|gram|grams)\b",
+    re.UNICODE | re.IGNORECASE,
+)
+_YEAR_NOISE_RE = re.compile(r"\b20\d{2}\b")
 
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "notify_me_back_in_stock_ack",
@@ -201,13 +230,132 @@ def _decide_guard_action(
     return "allowed"
 
 
-def _rewrite_for_action(action: str) -> str:
-    if action == "rewrite_conflict":
-        return _CONFLICT_REPLY_AR
+def customer_facing_availability_reply_is_clean(reply: Optional[str]) -> bool:
+    """True when outbound availability wording avoids internal/system phrases."""
+    text = str(reply or "")
+    if not text.strip():
+        return True
+    lower = text.lower()
+    return not any(
+        phrase.lower() in lower if phrase.isascii() else phrase in text
+        for phrase in _CUSTOMER_FORBIDDEN_AVAILABILITY_PHRASES
+    )
+
+
+def _customer_product_label(title: str) -> str:
+    label = _WEIGHT_YEAR_NOISE_RE.sub(" ", title or "")
+    label = _YEAR_NOISE_RE.sub(" ", label)
+    label = re.sub(r"\s+", " ", label).strip(" -–،,.")
+    return label[:48].strip()
+
+
+def _label_from_inbound_availability_ask(inbound_text: str) -> str:
+    raw = (inbound_text or "").strip()
+    if not raw:
+        return ""
+    cleaned = _INBOUND_AVAIL_PREFIX_RE.sub("", raw)
+    cleaned = _INBOUND_AVAIL_SUFFIX_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip("؟? ")
+    if 2 <= len(cleaned) <= 40:
+        return cleaned
+    return ""
+
+
+def _label_from_family_members(
+    members: Sequence[Dict[str, Any]],
+    inbound_text: str,
+) -> str:
+    inbound_label = _label_from_inbound_availability_ask(inbound_text)
+    if inbound_label:
+        return inbound_label
+    if not members:
+        return ""
+    titles = [str(p.get("title") or "").strip() for p in members if p.get("title")]
+    if not titles:
+        return ""
+    if len(titles) == 1:
+        return _customer_product_label(titles[0])
+    prefix = os.path.commonprefix(titles).strip()
+    if len(prefix) >= 4:
+        return _customer_product_label(prefix)
+    first = _customer_product_label(titles[0])
+    return first or ""
+
+
+def _product_label_for_reply(
+    evidence: ProductAvailabilityEvidenceResult,
+    availability_context: Optional[Dict[str, Any]],
+    inbound_text: str,
+) -> str:
+    ctx = availability_context or {}
+    catalog_by_id = {
+        int(p["id"]): p
+        for p in (ctx.get("catalog_skus") or [])
+        if p.get("id") is not None
+    }
+
+    focus = ctx.get("focus_product") or {}
+    if isinstance(focus, dict):
+        title = str(focus.get("title") or "").strip()
+        if title:
+            return _customer_product_label(title)
+
+    pid = evidence.entity.product_id
+    if pid is not None and pid in catalog_by_id:
+        return _customer_product_label(str(catalog_by_id[pid].get("title") or ""))
+
+    family_key = str(evidence.entity.family_key or "").strip()
+    if family_key and not family_key.startswith("inbound:"):
+        members = [
+            p for p in (ctx.get("catalog_skus") or [])
+            if str(p.get("family_key") or "") == family_key
+        ]
+        label = _label_from_family_members(members, inbound_text)
+        if label:
+            return label
+
+    return _label_from_inbound_availability_ask(inbound_text)
+
+
+def build_friendly_availability_conflict_reply(
+    evidence: ProductAvailabilityEvidenceResult,
+    *,
+    availability_context: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+) -> str:
+    """
+    Customer-facing rewrite for availability conflict / variant ambiguity.
+
+    Internal conflict_type remains in logs only — never echoed to the customer.
+    """
+    label = _product_label_for_reply(evidence, availability_context, inbound_text)
+    if label:
+        return f"متوفر {label} بعدة أحجام، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
+    return f"عندنا أكثر من خيار لهذا المنتج، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
+
+
+def _rewrite_for_action(
+    action: str,
+    *,
+    evidence: Optional[ProductAvailabilityEvidenceResult] = None,
+    availability_context: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+) -> str:
+    if action in ("rewrite_conflict", "rewrite_false_negative", "rewrite_false_positive"):
+        if evidence is not None:
+            return build_friendly_availability_conflict_reply(
+                evidence,
+                availability_context=availability_context,
+                inbound_text=inbound_text,
+            )
+        return f"عندنا أكثر من خيار لهذا المنتج، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
     if action == "rewrite_unknown":
+        label = ""
+        if evidence is not None:
+            label = _product_label_for_reply(evidence, availability_context, inbound_text)
+        if label:
+            return f"{label} له أكثر من خيار، أي حجم تقصد؟"
         return _UNKNOWN_REPLY_AR
-    if action in ("rewrite_false_negative", "rewrite_false_positive"):
-        return _CONFLICT_REPLY_AR
     return ""
 
 
@@ -417,7 +565,12 @@ def apply_product_availability_truth_guard(
                 would_rewrite=would_rw,
             )
 
-        new_reply = _rewrite_for_action(guard_action)
+        new_reply = _rewrite_for_action(
+            guard_action,
+            evidence=evidence,
+            availability_context=availability_context,
+            inbound_text=inbound_text,
+        )
         return ProductAvailabilityTruthGuardResult(
             reply=new_reply,
             action=guard_action,
