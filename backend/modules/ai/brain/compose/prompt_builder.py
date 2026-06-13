@@ -45,7 +45,9 @@ from .prompt_state_serializer import (
     cap_commerce_kb_block,
     emit_commerce_prompt_contributors_audit,
     emit_commerce_prompt_slim_applied,
+    emit_commerce_prompt_slim_decision,
     emit_commerce_prompt_slim_error,
+    explain_commerce_prompt_slim_gate,
     measure_commerce_prompt_contributors,
     serialize_commerce_brain_state,
     should_apply_commerce_prompt_slim,
@@ -106,8 +108,12 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     # merchant-intent turns. Platform-intent turns bypass `facts` and
     # use `extract_platform_kb_excerpt` against the raw KB instead.
     settings_for_overlay = _extract_ai_settings_from_state(state)
-    _commerce_slim_eligible = should_apply_commerce_prompt_slim(state)
+    _commerce_slim_eligible, _slim_gate_reason, _slim_decision = (
+        explain_commerce_prompt_slim_gate(state)
+    )
     _commerce_slim = _commerce_slim_eligible
+    _commerce_slim_applied = False
+    _slim_apply_failure = ""
     if _commerce_slim:
         settings_for_overlay = slim_ai_settings_for_commerce_prompt(settings_for_overlay)
     overlay_buckets = build_tenant_overlay_split(settings_for_overlay)
@@ -544,6 +550,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             )
             _state_slim_applied = True
         except Exception as exc:  # noqa: BLE001
+            _slim_apply_failure = f"serialize_error:{type(exc).__name__}"
             emit_commerce_prompt_slim_error(
                 err=type(exc).__name__,
                 intent=getattr(state, "intent_name", None),
@@ -553,6 +560,10 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 state,
                 kb_in_prompt_block=_kb_in_prompt,
                 force_commerce_lite=True,
+            )
+            _state_slim_applied = "ai_settings" not in json.dumps(
+                state_dict.get("merchant_context") or {},
+                ensure_ascii=False,
             )
     else:
         state_dict = strip_state_dict_for_prompt(
@@ -596,8 +607,10 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
 
     final_prompt = "\n\n".join(parts)
 
-    if _state_slim_applied:
-        _commerce_slim = True
+    _commerce_slim_applied = bool(_commerce_slim_eligible and _state_slim_applied)
+    _commerce_slim = _commerce_slim_applied
+
+    if _commerce_slim_applied:
         try:
             _after_json_chars = len(brain_state_json)
             _system_chars_after = max(
@@ -623,6 +636,18 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
                 intent=getattr(state, "intent_name", None),
             )
 
+    _slim_decision["commerce_slim_applied"] = _commerce_slim_applied
+    _slim_decision["selected_path"] = (
+        "commerce_slim" if _commerce_slim_applied else "legacy"
+    )
+    if _commerce_slim_applied:
+        _slim_decision["reason_if_false"] = ""
+    elif _commerce_slim_eligible:
+        _slim_decision["reason_if_false"] = (
+            _slim_apply_failure or "slim_not_applied"
+        )
+    emit_commerce_prompt_slim_decision(_slim_decision)
+
     # ── Structured log ────────────────────────────────────────────────────
     # Emits per-block sizes so we can see (a) when the KB grows huge,
     # (b) when style overrides are missing for a merchant, (c) the
@@ -642,7 +667,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         residual=brain_residual_rules,
         json_block=brain_state_json,
         total=final_prompt,
-        commerce_slim_applied=_commerce_slim,
+        commerce_slim_applied=_commerce_slim_applied,
     )
 
     if should_apply_commerce_prompt_slim(state):
@@ -657,7 +682,7 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
             emit_commerce_prompt_contributors_audit(
                 state=state,
                 contributors=contributors,
-                slim_applied=_commerce_slim,
+                slim_applied=_commerce_slim_applied,
                 total_prompt_chars=len(final_prompt),
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — audit must never break replies

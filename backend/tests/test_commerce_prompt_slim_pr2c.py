@@ -9,6 +9,7 @@ import pytest
 
 from modules.ai.brain.compose.prompt_builder import build_brain_reply_prompt
 from modules.ai.brain.compose.prompt_state_serializer import (
+    explain_commerce_prompt_slim_gate,
     is_commerce_prompt_slim_enabled,
     serialize_commerce_brain_state,
     should_apply_commerce_prompt_slim,
@@ -89,6 +90,11 @@ class TestCommercePromptSlimFlag:
         )
 
     def test_enabled_for_solution_seeking(self, slim_enabled: None) -> None:
+        assert should_apply_commerce_prompt_slim(_heavy_commerce_state())
+
+    def test_quoted_true_flag_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", '"true"')
+        assert is_commerce_prompt_slim_enabled() is True
         assert should_apply_commerce_prompt_slim(_heavy_commerce_state())
 
 
@@ -188,6 +194,7 @@ class TestAuditSafety:
         build_brain_reply_prompt(_heavy_commerce_state())
         joined = "\n".join(r.message for r in caplog.records)
         assert "[COMMERCE_PROMPT_SLIM_APPLIED]" in joined
+        assert "[COMMERCE_PROMPT_SLIM_DECISION]" in joined
         assert "removed_ai_settings" in joined
         assert _CUSTOMER_MSG not in joined
 
@@ -256,3 +263,21 @@ class TestNeedBasedDiscoveryPath:
 
         state = _heavy_commerce_state()
         assert should_apply_commerce_lite(state) is True
+
+    def test_checkout_product_id_does_not_block_slim(self, slim_enabled: None) -> None:
+        state = _heavy_commerce_state(
+            known_facts={
+                "checkout_preparation": {
+                    "order_status": "none",
+                    "product_id": "12345",
+                    "awaiting_payment_receipt": False,
+                },
+            },
+        )
+        eligible, reason, decision = explain_commerce_prompt_slim_gate(state)
+        assert eligible is True
+        assert reason == "eligible"
+        assert decision["reason_if_false"] == ""
+        prompt = build_brain_reply_prompt(state)
+        assert len(prompt) < 25_000
+        assert "ai_settings" not in prompt

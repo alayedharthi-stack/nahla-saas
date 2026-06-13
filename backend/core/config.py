@@ -373,7 +373,8 @@ D360_COHOST_ALLOW_SELF_REQUEST = os.environ.get("D360_COHOST_ALLOW_SELF_REQUEST"
 # `docs/security/WEBHOOK_SECURITY.md` (added in Phase 1B-cleanup) for the
 # operator runbook.
 def _bool_env(name: str, default: str = "false") -> bool:
-    return (os.environ.get(name, default) or default).strip().lower() in (
+    raw = (os.environ.get(name, default) or default).strip().strip('"').strip("'")
+    return raw.lower() in (
         "1", "true", "yes", "on",
     )
 
