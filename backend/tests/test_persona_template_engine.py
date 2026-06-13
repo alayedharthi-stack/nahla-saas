@@ -156,6 +156,21 @@ class TestPersonaSocialVariants:
         assert reply in PERSONA_SOCIAL_DUA_THANKS
         assert "العفو" not in reply
 
+    @pytest.mark.parametrize(
+        ("message", "category"),
+        [
+            ("جزاك الله خير", "thanks"),
+            ("الله يجزاك خير", "thanks"),
+            ("بارك الله فيك", "blessing"),
+            ("بيض الله وجهك", "strong_praise"),
+        ],
+    )
+    def test_religious_dua_phrases_use_dua_pool(self, message: str, category: str) -> None:
+        ctx = _ctx(message=message)
+        reply = pick_persona_social_reply(ctx, category, inbound_text=message)
+        assert reply in PERSONA_SOCIAL_DUA_THANKS
+        assert "العفو" not in reply
+
     def test_plain_thanks_stays_on_secular_pool(self) -> None:
         ctx = _ctx(message="شكرا")
         reply = pick_persona_social_reply(ctx, "thanks", inbound_text="شكرا")

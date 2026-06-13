@@ -69,7 +69,8 @@ PERSONA_SOCIAL_DUA_THANKS: tuple[str, ...] = (
     "آمين، ولك بالمثل وأحسن 🤍",
 )
 
-_RELIGIOUS_THANKS_MARKERS: tuple[str, ...] = (
+_RELIGIOUS_DUA_INBOUND_MARKERS: tuple[str, ...] = (
+    # Religious thanks
     "جزاك الله",
     "جزاكم الله",
     "الله يجزاك",
@@ -77,15 +78,31 @@ _RELIGIOUS_THANKS_MARKERS: tuple[str, ...] = (
     "الله يجزاكم",
     "ربي يجزاك",
     "ربي يجزاكم",
+    # Barakah / praise dua
+    "بارك الله فيك",
+    "بارك الله فيكم",
+    "الله يبارك فيك",
+    "الله يبارك فيكم",
+    "تبارك الله",
+    "بيض الله وجهك",
+    "بيض الله وجوهكم",
+    "الله يبيض وجهك",
 )
 
+# Social categories that may carry pure dua/thanks inbound (no LLM).
+_RELIGIOUS_DUA_SOCIAL_CATEGORIES: frozenset[str] = frozenset({
+    "thanks",
+    "blessing",
+    "strong_praise",
+})
 
-def _inbound_is_religious_thanks(inbound_text: str) -> bool:
-    """True when thanks is dua-shaped (e.g. جزاك الله خير), not bare شكرا."""
+
+def _inbound_is_religious_dua_exchange(inbound_text: str) -> bool:
+    """True for dua-shaped social turns that should not get «العفو»."""
     norm = _norm_phrase(inbound_text)
     if not norm:
         return False
-    return any(marker in norm for marker in _RELIGIOUS_THANKS_MARKERS)
+    return any(marker in norm for marker in _RELIGIOUS_DUA_INBOUND_MARKERS)
 
 
 PERSONA_SOCIAL_WARM_BY_CATEGORY: dict[str, tuple[str, ...]] = {
@@ -254,7 +271,9 @@ def pick_persona_social_reply(
     cat = (category or "general_courtesy").strip().lower() or "general_courtesy"
 
     warm = PERSONA_SOCIAL_WARM_BY_CATEGORY.get(cat)
-    if cat == "thanks" and _inbound_is_religious_thanks(inbound_text):
+    if cat in _RELIGIOUS_DUA_SOCIAL_CATEGORIES and _inbound_is_religious_dua_exchange(
+        inbound_text,
+    ):
         return pick_persona_variant(PERSONA_SOCIAL_DUA_THANKS, ctx)
     if warm:
         return pick_persona_variant(warm, ctx)
