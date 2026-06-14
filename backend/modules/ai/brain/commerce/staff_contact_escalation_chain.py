@@ -188,7 +188,7 @@ def log_escalation_chain_resolve(
             bool(phone),
             reason or "-",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok - escalation chain telemetry must not block contact delivery
         pass
 
 

@@ -117,7 +117,7 @@ def resolve_arrival_contact_evidence(
                         compile_reason=getattr(verdict, "reason", "") or "",
                         source_sections=preferred,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: silent-ok - optional KB phone lookup fallback must not block arrival compile
                 pass
         return None
 
