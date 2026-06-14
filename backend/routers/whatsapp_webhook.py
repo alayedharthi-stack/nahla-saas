@@ -6459,7 +6459,6 @@ async def _handle_merchant_message(
             if (
                 _scp_decision.deliver_contact
                 and _scp_decision.call_target is not None
-                and _staff_call_marker_enabled()
             ):
                 try:
                     from services.call_resolver import (  # noqa: PLC0415
@@ -6578,7 +6577,10 @@ async def _handle_merchant_message(
                 _scr_text_ok = False
 
             _scr_contacts_ok = False
-            if _scr_decision.call_target is not None and _staff_call_marker_enabled():
+            if (
+                _scr_decision.deliver_contact
+                and _scr_decision.call_target is not None
+            ):
                 try:
                     from services.call_resolver import (  # noqa: PLC0415
                         build_contacts_payload as _scr_build_contacts,
@@ -6605,12 +6607,12 @@ async def _handle_merchant_message(
                                     "phone": (
                                         getattr(
                                             _scr_decision.call_target,
-                                            "phone_display",
+                                            "wa_id",
                                             "",
                                         )
                                         or getattr(
                                             _scr_decision.call_target,
-                                            "wa_id",
+                                            "raw_phone",
                                             "",
                                         )
                                         or _scr_decision.next_contact_phone
@@ -8975,6 +8977,11 @@ async def _handle_merchant_message(
                     if _cn.fired and _cn.extra_call_target is not None:
                         _call_targets.append(_cn.extra_call_target)
                         _marker_resolved["call"] += 1
+                        if getattr(_cn, "strip_phones_from_reply", False):
+                            from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
+                                strip_embedded_phones_from_reply as _strip_reply_phones,
+                            )
+                            reply = _strip_reply_phones(reply or "")
                     if _cn.fired or _cn.skipped_reason not in {"claude_marker_present", "already_attached", "empty_msg", "no_staff_intent"}:
                         _payload = {
                             "event":             "safety_net",

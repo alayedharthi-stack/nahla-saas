@@ -331,13 +331,104 @@ MSG_NAME_NOT_CONFIGURED = (
 MSG_ESCALATION_NOT_CONFIGURED = (
     "أرقام التصعيد غير مهيأة لهذا المتجر حالياً."
 )
+MSG_NO_NEXT_ESCALATION = (
+    "حالياً لا يوجد رقم تصعيد إضافي مهيّأ لهذا المتجر."
+)
+
+_ROLE_DISPLAY_LABELS: Dict[str, str] = {
+    "customer_service": "خدمة العملاء",
+    "cs": "خدمة العملاء",
+    "support": "خدمة العملاء",
+    "owner": "الإدارة",
+    "showroom": "بائع المعرض",
+    "seller": "البائع",
+}
+
+# Arabic particles / prepositions that must never ship as vCard names.
+_INVALID_DISPLAY_FRAGMENTS = frozenset({
+    "لم", "لو", "في", "من", "على", "مع", "ان", "ان", "ما", "لا",
+    "هذا", "هذي", "ذلك", "رقم", "التواصل", "رقم التواصل",
+})
+
+
+def _role_display_label(role: str) -> str:
+    key = (role or "").strip().lower()
+    return _ROLE_DISPLAY_LABELS.get(key, "")
+
+
+def is_usable_display_name(name: str) -> bool:
+    """True when *name* is safe to show on a WhatsApp contact card."""
+    label = (name or "").strip()
+    if not label:
+        return False
+    norm = _norm(label)
+    if not norm or norm in _INVALID_DISPLAY_FRAGMENTS:
+        return False
+    if len(norm) <= 2 and " " not in norm:
+        return False
+    if norm in {"رقم", "التواصل", "رقم التواصل"}:
+        return False
+    return True
+
+
+def resolve_contact_display_name(
+    lookup_name: str,
+    *,
+    role: str = "",
+    fallback: str = "خدمة العملاء",
+) -> str:
+    """Return a vCard-safe display name with role/fallback when needed."""
+    label = (lookup_name or "").strip()
+    if is_usable_display_name(label):
+        return label
+    role_label = _role_display_label(role)
+    if role_label:
+        return role_label
+    return fallback
+
+
+def build_staff_call_target(
+    *,
+    lookup_name: str,
+    phone: str,
+    role: str = "",
+) -> Optional[Any]:
+    """Build a normalized ``CallTarget`` when phone evidence is valid."""
+    try:
+        from services.call_resolver import (  # noqa: PLC0415
+            CallTarget,
+            _normalize_saudi_phone,
+            _pretty_phone,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("staff_contact_evidence | call_resolver import failed: %s", exc)
+        return None
+    wa_id = _normalize_saudi_phone(phone)
+    if not wa_id:
+        return None
+    display = resolve_contact_display_name(lookup_name, role=role)
+    return CallTarget(
+        name=display,
+        wa_id=wa_id,
+        phone_display=_pretty_phone(wa_id),
+        raw_phone=phone,
+    )
+
+
+def build_staff_call_target_from_record(record: StaffContactRecord) -> Optional[Any]:
+    return build_staff_call_target(
+        lookup_name=record.lookup_name,
+        phone=record.phone,
+        role=record.role,
+    )
 
 
 def build_deliver_reply_text(record: StaffContactRecord) -> str:
-    label = (record.lookup_name or "").strip()
-    if label:
-        return f"تقدر تتواصل مع {label}."
-    return "تفضل رقم التواصل."
+    label = resolve_contact_display_name(
+        record.lookup_name,
+        role=record.role,
+    )
+    return f"تقدر تتواصل مع {label}."
 
 
 def build_not_configured_reply(resolution: StaffContactResolution) -> str:
@@ -352,14 +443,19 @@ __all__ = [
     "MSG_CS_NOT_CONFIGURED",
     "MSG_ESCALATION_NOT_CONFIGURED",
     "MSG_NAME_NOT_CONFIGURED",
+    "MSG_NO_NEXT_ESCALATION",
     "StaffContactRecord",
     "StaffContactRegistry",
     "StaffContactRequest",
     "StaffContactResolution",
     "build_deliver_reply_text",
     "build_not_configured_reply",
+    "build_staff_call_target",
+    "build_staff_call_target_from_record",
     "classify_staff_contact_request",
     "compile_staff_contact_registry",
+    "is_usable_display_name",
     "load_staff_contact_registry",
+    "resolve_contact_display_name",
     "resolve_staff_contact",
 ]

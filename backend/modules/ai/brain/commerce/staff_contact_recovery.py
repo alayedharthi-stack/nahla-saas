@@ -24,11 +24,12 @@ class StaffContactRecoveryDecision:
     """Deterministic short-circuit payload for the webhook."""
 
     reply_text: str
-    call_target: Any
-    next_contact_name: str
-    next_contact_phone: str
-    reason: str
-    trigger: str
+    call_target: Any = None
+    deliver_contact: bool = True
+    next_contact_name: str = ""
+    next_contact_phone: str = ""
+    reason: str = ""
+    trigger: str = ""
     conversation_turn: int = 0
 
 
@@ -38,8 +39,12 @@ def staff_contact_recovery_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _build_recovery_reply_text(contact_name: str) -> str:
-    label = (contact_name or "").strip()
+def _build_recovery_reply_text(contact_name: str, *, role: str = "") -> str:
+    from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        resolve_contact_display_name,
+    )
+
+    label = resolve_contact_display_name(contact_name, role=role, fallback="")
     if label:
         return f"حاضر، جرّب التواصل مع {label}."
     return "حاضر، هذا رقم التواصل التالي."
@@ -146,6 +151,29 @@ def evaluate_staff_contact_recovery(
     )
 
     if not verdict.enabled or not verdict.next_phone:
+        turn = _conversation_turn(db, tenant_id=tenant_id, phone=phone)
+        if contacts_sent and verdict.reason == "chain_exhausted":
+            from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+                MSG_NO_NEXT_ESCALATION,
+            )
+
+            logger.info(
+                "[STAFF_CONTACT_RECOVERY] tenant=%s conversation_id=%s "
+                "fired=true trigger=employee_not_responding reason=chain_exhausted "
+                "deliver_contact=false contacts_sent_count=%d chain_len=%d",
+                tenant_id,
+                conversation_id if conversation_id is not None else "-",
+                len(contacts_sent),
+                verdict.chain_len,
+            )
+            return StaffContactRecoveryDecision(
+                reply_text=MSG_NO_NEXT_ESCALATION,
+                call_target=None,
+                deliver_contact=False,
+                reason="chain_exhausted",
+                trigger="employee_not_responding",
+                conversation_turn=turn,
+            )
         logger.info(
             "[STAFF_CONTACT_RECOVERY] tenant=%s conversation_id=%s "
             "fired=false reason=%s trigger=employee_not_responding "
@@ -158,22 +186,20 @@ def evaluate_staff_contact_recovery(
         )
         return None
 
-    try:
-        from services.call_resolver import (  # noqa: PLC0415
-            CallTarget,
-            _normalize_saudi_phone,
-            _pretty_phone,
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.warning(
-            "[STAFF_CONTACT_RECOVERY] tenant=%s import_failure err=%s",
-            tenant_id,
-            exc,
-        )
-        return None
+    from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        build_staff_call_target,
+        resolve_contact_display_name,
+    )
 
-    wa_id = _normalize_saudi_phone(verdict.next_phone)
-    if not wa_id:
+    display_name = resolve_contact_display_name(
+        verdict.next_lookup_name,
+        fallback="الإدارة",
+    )
+    call_target = build_staff_call_target(
+        lookup_name=verdict.next_lookup_name,
+        phone=verdict.next_phone,
+    )
+    if call_target is None:
         logger.info(
             "[STAFF_CONTACT_RECOVERY] tenant=%s conversation_id=%s "
             "fired=false reason=phone_normalize_failed",
@@ -182,13 +208,6 @@ def evaluate_staff_contact_recovery(
         )
         return None
 
-    display_name = (verdict.next_lookup_name or "").strip() or "الإدارة"
-    call_target = CallTarget(
-        name=display_name,
-        wa_id=wa_id,
-        phone_display=_pretty_phone(wa_id),
-        raw_phone=verdict.next_phone,
-    )
     turn = _conversation_turn(db, tenant_id=tenant_id, phone=phone)
 
     logger.info(
@@ -205,9 +224,10 @@ def evaluate_staff_contact_recovery(
     )
 
     return StaffContactRecoveryDecision(
-        reply_text=_build_recovery_reply_text(display_name),
+        reply_text=_build_recovery_reply_text(verdict.next_lookup_name),
         call_target=call_target,
-        next_contact_name=display_name,
+        deliver_contact=True,
+        next_contact_name=call_target.name,
         next_contact_phone=verdict.next_phone,
         reason=verdict.reason or "next_in_chain",
         trigger="employee_not_responding",

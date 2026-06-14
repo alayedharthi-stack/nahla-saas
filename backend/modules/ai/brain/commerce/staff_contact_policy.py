@@ -33,25 +33,11 @@ class StaffContactPolicyDecision:
 
 
 def _build_call_target(record: Any) -> Optional[Any]:
-    try:
-        from services.call_resolver import (  # noqa: PLC0415
-            CallTarget,
-            _normalize_saudi_phone,
-            _pretty_phone,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("staff_contact_policy | call_resolver import failed: %s", exc)
-        return None
-    wa_id = _normalize_saudi_phone(record.phone)
-    if not wa_id:
-        return None
-    display = (record.lookup_name or "").strip() or "خدمة العملاء"
-    return CallTarget(
-        name=display,
-        wa_id=wa_id,
-        phone_display=_pretty_phone(wa_id),
-        raw_phone=record.phone,
+    from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        build_staff_call_target_from_record,
     )
+
+    return build_staff_call_target_from_record(record)
 
 
 def evaluate_staff_contact_policy(
