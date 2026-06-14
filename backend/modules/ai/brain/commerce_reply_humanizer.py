@@ -53,6 +53,13 @@ GENERAL_EMOJI_BY_PURPOSE: Dict[str, Tuple[str, ...]] = {
     "support": ("🤍", "✅"),
 }
 
+FAST_DELIVERY_EMOJI: Dict[str, Tuple[str, ...]] = {
+    "fast_delivery": ("✈️", "🚀", "⚡", "🚚"),
+    "urgent_order": ("⚡", "🚀", "🛒"),
+    "quick_preparation": ("⚡", "✅", "🛒"),
+    "delivery_general": ("🚚", "📍"),
+}
+
 EMOJI_BY_PRODUCT_CATEGORY: Dict[str, Tuple[str, ...]] = {
     "honey": ("🍯", "🌿", "✨"),
     "food": ("🍽️", "✨"),
@@ -188,6 +195,52 @@ _MARKETING_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_URGENT_INBOUND_RE = re.compile(
+    r"(?:مستعجل|بسر(?:عة|عه)|اليوم|الحين|أب(?:غ|يه)(?:اه)?\s+سريع|"
+    r"عاجل|فوري|أسرع\s+شي|quick|urgent|asap)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_FAST_PREP_REPLY_RE = re.compile(
+    r"(?:نجهز(?:ه|ها|لك)?|أجهز(?:ه|ها|لك)?|بسر(?:عة|عه)|"
+    r"أسرع\s+(?:وقت|توصيل|شي))",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PLAYFUL_AIR_RE = re.compile(r"طيار[ةه]", re.UNICODE)
+
+_AIR_SHIPPING_LITERAL_RE = re.compile(
+    r"(?:شحن\s+جوي|الشحن\s+الجوي|cargo|air\s+freight|air\s+shipping)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_UNCONFIRMED_TIME_PROMISE_RE = re.compile(
+    r"(?:خلال\s+د(?:قائق|قيق)|(?:ال(?:آ|ا)ن\s+)?فورًا|"
+    r"نوصل(?:ه|ها|ك)?\s+(?:ل?ك?\s*)?(?:خلال|ال(?:آ|ا)ن\s+فور))",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_UNCONFIRMED_SPEED_PROMISE_RES: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"نوصل(?:ه|ها|ك)?\s+ل?ك?\s*خلال\s+د(?:قائق|قيق)[^.!\n؟?]*",
+            re.UNICODE | re.IGNORECASE,
+        ),
+        "",
+    ),
+    (
+        re.compile(r"الشحن\s+الجوي\s+متاح[^.!\n؟?]*", re.UNICODE | re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(
+            r"نوصل(?:ه|ها|ك)?\s+ل?ك?\s*ال(?:آ|ا)ن\s+فورًا[^.!\n؟?]*",
+            re.UNICODE | re.IGNORECASE,
+        ),
+        "",
+    ),
+)
+
 _EMOJI_RE = re.compile(
     "["
     "\U0001F300-\U0001FAFF"
@@ -301,6 +354,128 @@ def _is_sensitive_turn(
     return bool(_COMPLAINT_INBOUND_RE.search(inbound_text or ""))
 
 
+def _resolve_speed_context(
+    *,
+    inbound_text: str,
+    reply: str,
+    intent_name: str,
+    purpose: str,
+) -> Optional[str]:
+    """Classify speed/delivery emoji bucket — never implies operational truth."""
+    inbound = inbound_text or ""
+    text = reply or ""
+    combined = f"{inbound} {text}"
+    intent = (intent_name or "").strip().lower()
+    urgent = bool(_URGENT_INBOUND_RE.search(inbound))
+    fast_prep = bool(_FAST_PREP_REPLY_RE.search(text))
+    playful_air = bool(_PLAYFUL_AIR_RE.search(text))
+    literal_air = bool(_AIR_SHIPPING_LITERAL_RE.search(combined))
+    risky_time = bool(_UNCONFIRMED_TIME_PROMISE_RE.search(text))
+
+    if literal_air or risky_time:
+        return None
+
+    if playful_air and not literal_air:
+        return "fast_delivery"
+
+    if purpose in {"delivery", "location"}:
+        return "delivery_general"
+
+    if intent in {"start_order", "pay_now", "track_order", "ask_payment_info"}:
+        if urgent or fast_prep:
+            return "urgent_order"
+        if fast_prep:
+            return "quick_preparation"
+        return None
+
+    if urgent:
+        return "urgent_order"
+
+    if fast_prep:
+        return "quick_preparation"
+
+    return None
+
+
+def _allow_airplane_emoji(
+    *,
+    inbound_text: str,
+    reply: str,
+    speed_context: Optional[str],
+) -> bool:
+    if not speed_context:
+        return False
+    combined = f"{inbound_text or ''} {reply or ''}"
+    if _AIR_SHIPPING_LITERAL_RE.search(combined):
+        return False
+    if _UNCONFIRMED_TIME_PROMISE_RE.search(reply or ""):
+        return False
+    if _PLAYFUL_AIR_RE.search(reply or ""):
+        return True
+    if speed_context == "fast_delivery" and _MARKETING_RE.search(reply or ""):
+        return True
+    return False
+
+
+def _filter_fast_delivery_emojis(
+    emojis: Sequence[str],
+    *,
+    allow_airplane: bool,
+    purpose: str,
+    speed_context: Optional[str],
+) -> List[str]:
+    filtered: List[str] = []
+    for emoji in emojis:
+        if emoji == "✈️" and not allow_airplane:
+            continue
+        if emoji in {"🚀", "⚡"} and purpose in {"delivery", "location"}:
+            continue
+        if emoji == "✈️" and speed_context == "delivery_general":
+            continue
+        filtered.append(emoji)
+    return filtered
+
+
+def _sanitize_risky_speed_claims(text: str) -> Tuple[str, bool]:
+    """Strip unconfirmed speed/air-shipping promises — never inject fixed templates."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return stripped, False
+
+    changed = False
+    result = stripped
+    for pattern, repl in _UNCONFIRMED_SPEED_PROMISE_RES:
+        new = pattern.sub(repl, result)
+        if new != result:
+            changed = True
+            result = new
+
+    if _AIR_SHIPPING_LITERAL_RE.search(result):
+        new = _AIR_SHIPPING_LITERAL_RE.sub("", result)
+        if new != result:
+            changed = True
+            result = new
+
+    if "✈️" in result and not _allow_airplane_emoji(
+        inbound_text="",
+        reply=result,
+        speed_context=_resolve_speed_context(
+            inbound_text="",
+            reply=result,
+            intent_name="",
+            purpose="delivery" if "توصيل" in result else "shopping",
+        ),
+    ) and not _PLAYFUL_AIR_RE.search(result):
+        new = result.replace("✈️", "")
+        if new != result:
+            changed = True
+            result = new
+
+    result = re.sub(r"\s{2,}", " ", result)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result, changed
+
+
 def _resolve_purpose(
     *,
     intent_name: str,
@@ -330,6 +505,8 @@ def _pick_emojis(
     purpose: str,
     product_category: str,
     reply: str,
+    inbound_text: str = "",
+    speed_context: Optional[str] = None,
     existing_count: int,
     max_total: int = 2,
 ) -> List[str]:
@@ -338,6 +515,21 @@ def _pick_emojis(
         return []
 
     candidates: List[str] = []
+    allow_air = False
+    if speed_context and speed_context in FAST_DELIVERY_EMOJI:
+        allow_air = _allow_airplane_emoji(
+            inbound_text=inbound_text,
+            reply=reply,
+            speed_context=speed_context,
+        )
+        speed_candidates = _filter_fast_delivery_emojis(
+            FAST_DELIVERY_EMOJI[speed_context],
+            allow_airplane=allow_air,
+            purpose=purpose,
+            speed_context=speed_context,
+        )
+        if speed_context == "fast_delivery" and allow_air:
+            candidates.extend(speed_candidates)
     if product_category in EMOJI_BY_PRODUCT_CATEGORY:
         candidates.extend(EMOJI_BY_PRODUCT_CATEGORY[product_category])
     intent = (intent_name or "").strip().lower()
@@ -345,6 +537,16 @@ def _pick_emojis(
         candidates.extend(EMOJI_BY_INTENT[intent])
     if purpose in GENERAL_EMOJI_BY_PURPOSE:
         candidates.extend(GENERAL_EMOJI_BY_PURPOSE[purpose])
+    if speed_context and speed_context in FAST_DELIVERY_EMOJI:
+        if not (speed_context == "fast_delivery" and allow_air):
+            candidates.extend(
+                _filter_fast_delivery_emojis(
+                    FAST_DELIVERY_EMOJI[speed_context],
+                    allow_airplane=allow_air,
+                    purpose=purpose,
+                    speed_context=speed_context,
+                )
+            )
 
     if purpose not in {"offer", "discount"} and not _MARKETING_RE.search(reply or ""):
         candidates = [e for e in candidates if e not in {"🔥", "🏷️"}]
@@ -386,6 +588,23 @@ def _warm_formal_phrases(text: str) -> Tuple[str, bool]:
     warmed = re.sub(r"[ \t]{2,}", " ", warmed)
     warmed = re.sub(r" *\n *", "\n", warmed).strip()
     return warmed, changed or warmed != original
+
+
+def _maybe_soften_urgent_delivery_wording(
+    text: str,
+    *,
+    inbound_text: str,
+    purpose: str,
+) -> Tuple[str, bool]:
+    if purpose not in {"delivery", "location"}:
+        return text, False
+    if not _URGENT_INBOUND_RE.search(inbound_text or ""):
+        return text, False
+    stripped = (text or "").strip()
+    needle = "أتأكد لك من التوصيل"
+    if needle in stripped and "أسرع توصيل" not in stripped:
+        return stripped.replace(needle, "أتأكد لك من أسرع توصيل"), True
+    return stripped, False
 
 
 def _maybe_add_delivery_opener(text: str, *, purpose: str) -> Tuple[str, bool]:
@@ -451,6 +670,14 @@ def _facts_preserved(original: str, candidate: str) -> bool:
         return False
 
     if not _DELIVERY_CONFIRMED_RE.search(orig) and _DELIVERY_CONFIRMED_RE.search(cand):
+        return False
+
+    if not _UNCONFIRMED_TIME_PROMISE_RE.search(orig) and _UNCONFIRMED_TIME_PROMISE_RE.search(
+        cand
+    ):
+        return False
+
+    if not _AIR_SHIPPING_LITERAL_RE.search(orig) and _AIR_SHIPPING_LITERAL_RE.search(cand):
         return False
 
     return True
@@ -536,6 +763,27 @@ def apply_commerce_reply_humanizer(
         warmed_tone = True
         text = warmed
 
+    sanitized, did_sanitize = _sanitize_risky_speed_claims(text)
+    if did_sanitize:
+        warmed_tone = True
+        text = sanitized
+
+    speed_context = _resolve_speed_context(
+        inbound_text=inbound_text,
+        reply=text,
+        intent_name=intent_name,
+        purpose=purpose,
+    )
+
+    softened, did_soften = _maybe_soften_urgent_delivery_wording(
+        text,
+        inbound_text=inbound_text,
+        purpose=purpose,
+    )
+    if did_soften:
+        warmed_tone = True
+        text = softened
+
     with_opener, did_opener = _maybe_add_delivery_opener(text, purpose=purpose)
     if did_opener:
         warmed_tone = True
@@ -552,6 +800,8 @@ def apply_commerce_reply_humanizer(
         purpose=purpose,
         product_category=category,
         reply=text,
+        inbound_text=inbound_text,
+        speed_context=speed_context,
         existing_count=existing_emoji_count,
     )
     added_emojis = False
@@ -602,6 +852,7 @@ __all__ = [
     "CommerceReplyHumanizerResult",
     "EMOJI_BY_INTENT",
     "EMOJI_BY_PRODUCT_CATEGORY",
+    "FAST_DELIVERY_EMOJI",
     "GENERAL_EMOJI_BY_PURPOSE",
     "apply_commerce_reply_humanizer",
     "detect_product_category",

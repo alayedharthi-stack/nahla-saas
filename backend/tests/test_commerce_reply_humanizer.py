@@ -14,6 +14,7 @@ for _p in (_backend, os.path.join(_backend, "..")):
         sys.path.insert(0, _p)
 
 from modules.ai.brain.commerce_reply_humanizer import (  # noqa: E402
+    FAST_DELIVERY_EMOJI,
     apply_commerce_reply_humanizer,
     detect_product_category,
 )
@@ -212,6 +213,82 @@ class TestFactPreservation:
         raw = "أبشر، أتحقق لك من التوفر. أي حجم تقصد؟"
         out = _humanize(raw, inbound="عسل")
         assert "أتحقق" in out or "تحقق" in out
+
+
+class TestFastDeliveryEmoji:
+    def test_urgent_inbound_order_may_get_speed_emoji_not_airplane(self) -> None:
+        raw = "تمام، أجهز لك الطلب. أرسل لي الاسم والموقع."
+        out = _humanize(
+            raw,
+            inbound="أبغاه سريع الحين",
+            intent="start_order",
+            goal="",
+        )
+        assert _emoji_count(out) <= 2
+        assert "✈️" not in out
+        assert any(e in out for e in ("⚡", "🚀", "🛒", "✅"))
+
+    def test_delivery_inquiry_prefers_truck_not_airplane(self) -> None:
+        raw = "أرسل لي موقعك وأتأكد لك من التوصيل."
+        out = _humanize(
+            raw,
+            inbound="هل توصلون الرياض؟",
+            intent="ask_shipping",
+            goal="shipping_inquiry",
+        )
+        assert "🚚" in out or "📍" in out
+        assert "✈️" not in out
+
+    def test_playful_air_metaphor_allows_airplane_emoji(self) -> None:
+        raw = "أبشر، نجهزه لك طيارة. وش الكمية؟"
+        out = _humanize(
+            raw,
+            inbound="أبغاه بسرعة",
+            intent="start_order",
+        )
+        assert "✈️" in out
+        assert _emoji_count(out) <= 2
+
+    def test_literal_air_shipping_strips_risky_claim(self) -> None:
+        raw = "الشحن الجوي متاح ✈️"
+        out = _humanize(
+            raw,
+            inbound="هل عندكم شحن جوي؟",
+            intent="ask_shipping",
+            goal="shipping_inquiry",
+        )
+        assert "الشحن الجوي" not in out
+        assert "✈️" not in out
+
+    def test_unconfirmed_minutes_promise_is_removed(self) -> None:
+        raw = "نوصله لك خلال دقائق 🚀"
+        out = _humanize(
+            raw,
+            inbound="مستعجل",
+            intent="ask_shipping",
+            goal="shipping_inquiry",
+        )
+        assert "خلال دقائق" not in out
+
+    def test_urgent_delivery_softens_wording_without_fixed_template(self) -> None:
+        raw = "أرسل لي موقعك وأتأكد لك من التوصيل."
+        out = _humanize(
+            raw,
+            inbound="مستعجل بسرعة",
+            intent="ask_shipping",
+            goal="shipping_inquiry",
+        )
+        assert "أسرع توصيل" in out
+        assert "خلال دقائق" not in out
+
+    def test_complaint_skips_fast_delivery_emojis(self) -> None:
+        raw = "نجهزه لك طيارة بسرعة"
+        out = _humanize(
+            raw,
+            inbound="أنا زعلان وما راضي مستعجل",
+            intent="start_order",
+        )
+        assert out == raw
 
 
 class TestPromptWarmContract:
