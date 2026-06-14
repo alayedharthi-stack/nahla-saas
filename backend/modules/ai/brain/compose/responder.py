@@ -319,6 +319,20 @@ class DefaultComposer:
                         _p.get("can_checkout"), _p.get("orderable"),
                     )
 
+            from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                filter_products_for_browse_turn,
+            )
+
+            safe_products = filter_products_for_browse_turn(
+                safe_products,
+                message=ctx.message or "",
+                query=str((decision.args or {}).get("query") or data.get("query") or ""),
+                source=str((decision.args or {}).get("source") or "").strip().lower(),
+                last_browse_query=str(
+                    getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""
+                ),
+            )
+
             if not safe_products:
                 return T.no_products(variant=self._variant_idx(ctx))
 

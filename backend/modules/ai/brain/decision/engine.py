@@ -1745,6 +1745,35 @@ class DefaultDecisionEngine:
             and not _is_commerce_blocked(ctx)
             and not _product_discovery_blocked("top_products")
         ):
+            try:
+                from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                    extract_browse_category_scope,
+                )
+
+                _category_scope = extract_browse_category_scope(ctx.message or "", "")
+            except Exception:  # noqa: BLE001
+                _category_scope = ""
+            if _category_scope:
+                logger.info(
+                    "[ORDER FLOW] intent_rule_matched | rule=category_browse "
+                    "query=%r tenant=%s intent=%s msg=%r",
+                    _category_scope,
+                    ctx.tenant_id,
+                    intent.name,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={
+                        "query": _category_scope,
+                        "source": "category_browse",
+                    },
+                    reason=(
+                        "text-pattern: category-scoped inventory browse — "
+                        f"search '{_category_scope}' not top_products"
+                    ),
+                    confidence=0.93,
+                )
             logger.info(
                 "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
                 "tenant=%s intent=%s msg=%r",

@@ -1282,6 +1282,26 @@ class MerchantBrain:
             or result.data.get("recommended_products")
             or []
         )
+        try:
+            from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                filter_products_for_browse_turn,
+            )
+
+            _search_products = filter_products_for_browse_turn(
+                list(_search_products),
+                message=ctx.message or "",
+                query=str(
+                    result.data.get("query")
+                    or (decision.args or {}).get("query")
+                    or ""
+                ),
+                source=str((decision.args or {}).get("source") or "").strip().lower(),
+                last_browse_query=str(getattr(new_state, "last_browse_query", "") or ""),
+            )
+            if result.data.get("products"):
+                result.data["products"] = list(_search_products)
+        except Exception:  # noqa: BLE001
+            logger.exception("[BROWSE_CATEGORY_GUARD] pipeline product filter failed")
         _breadth_cap = 16
         _pb = result.data.get("product_breadth") or {}
         if _pb.get("policy_enabled", True) and _pb.get("display_limit"):
@@ -1715,6 +1735,24 @@ class MerchantBrain:
         _browse_pool = result.data.get("browse_pool")
         _browse_offset = result.data.get("browse_offset")
         if _browse_pool is not None and _src not in {"replay"}:
+            try:
+                from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                    filter_products_for_browse_turn,
+                )
+
+                _browse_pool = filter_products_for_browse_turn(
+                    list(_browse_pool),
+                    message=ctx.message or "",
+                    query=str(
+                        result.data.get("query")
+                        or (decision.args or {}).get("query")
+                        or ""
+                    ),
+                    source=_src,
+                    last_browse_query=str(getattr(new_state, "last_browse_query", "") or ""),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[BROWSE_CATEGORY_GUARD] browse_pool filter failed")
             new_state.catalog_browse_pool = list(_browse_pool)
         if _browse_offset is not None and _src == "show_more":
             new_state.catalog_browse_offset = int(_browse_offset)
