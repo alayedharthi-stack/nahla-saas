@@ -273,6 +273,20 @@ _FORMAL_REPLACEMENTS: Tuple[Tuple[re.Pattern[str], str], ...] = (
         "\nوش الحجم اللي يناسبك؟",
     ),
     (
+        re.compile(
+            rf"[،,]?\s*أي\s+حجم\s+يناسبك\s*{_QMARK}",
+            re.UNICODE,
+        ),
+        "\nوش الحجم اللي يناسبك؟",
+    ),
+    (
+        re.compile(
+            rf"متوفر\s+(.+?)\s+بعدة\s+أحجام[،,]?\s*{_QMARK}?",
+            re.UNICODE,
+        ),
+        r"أبشر، \1 متوفر 🍯",
+    ),
+    (
         re.compile(r"لدينا\s+عدة\s+أحجام[،,]?\s*", re.UNICODE),
         "متوفر بعدة أحجام ",
     ),
@@ -692,6 +706,7 @@ def should_apply_commerce_humanizer(
     locale: str = "ar",
     chosen_path: str = "",
     human_priority: bool = False,
+    post_guard_rewrite: bool = False,
 ) -> bool:
     if not (reply or "").strip():
         return False
@@ -707,7 +722,7 @@ def should_apply_commerce_humanizer(
     }:
         return False
     path = (chosen_path or "").strip().lower()
-    if path and not path.startswith("llm"):
+    if path and not path.startswith("llm") and not post_guard_rewrite:
         return False
     if _is_sensitive_turn(
         intent_name=intent_name,
@@ -730,6 +745,7 @@ def apply_commerce_reply_humanizer(
     product_title: str = "",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    post_guard_rewrite: bool = False,
 ) -> CommerceReplyHumanizerResult:
     original = (reply or "").strip()
     if not should_apply_commerce_humanizer(
@@ -740,6 +756,7 @@ def apply_commerce_reply_humanizer(
         locale=locale,
         chosen_path=chosen_path,
         human_priority=human_priority,
+        post_guard_rewrite=post_guard_rewrite,
     ):
         return CommerceReplyHumanizerResult(
             reply=original,

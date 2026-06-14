@@ -1037,6 +1037,7 @@ class DefaultComposer:
         import asyncio  # noqa: PLC0415
 
         _TIMEOUT = 25  # seconds
+        reply_state = None
 
         try:
             _BACKEND = os.path.abspath(
@@ -1152,6 +1153,10 @@ class DefaultComposer:
 
             from ..cost.model_router import resolve_compose_model_route  # noqa: PLC0415
             from ..cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+            from ..cost.model_router_decision import log_model_router_decision  # noqa: PLC0415
+            from ..compose.prompt_state_serializer import (  # noqa: PLC0415
+                explain_commerce_prompt_slim_gate,
+            )
 
             _compose_route = resolve_compose_model_route(
                 intent_name=_intent_name,
@@ -1193,6 +1198,28 @@ class DefaultComposer:
                 else "anthropic"
             )
 
+            _slim_applied, _slim_reason, _slim_meta = explain_commerce_prompt_slim_gate(
+                reply_state,
+            )
+            log_model_router_decision(
+                tenant_id=ctx.tenant_id,
+                intent=_intent_name,
+                selected_tier=_compose_route.tier,
+                selected_provider=_compose_route.provider,
+                selected_model=_compose_route.model,
+                provider_hint=_provider_hint,
+                fallback_used=False,
+                reason_code=_compose_route.reason,
+                commerce_slim_applied=_slim_applied,
+                prompt_chars=len(prompt),
+                state_topic_shift=bool(_slim_meta.get("state_topic_shift")),
+                checkout_relevant=bool(_slim_meta.get("checkout_relevant")),
+                extra={
+                    "slim_gate_reason": _slim_reason,
+                    "router_enforced": _compose_route.enforced,
+                },
+            )
+
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     generate_ai_reply,
@@ -1220,13 +1247,35 @@ class DefaultComposer:
                 result.data["llm_provider"] = payload.provider_used
                 result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
                 result.data["prompt_mode"] = "merchant_brain_thin"
+                _chain_fallback = bool(
+                    (payload.metadata or {}).get("provider_chain_fallback_used")
+                )
+                if _chain_fallback:
+                    log_model_router_decision(
+                        tenant_id=ctx.tenant_id,
+                        intent=_intent_name,
+                        selected_tier=_compose_route.tier,
+                        selected_provider=str(payload.provider_used or ""),
+                        selected_model=str(
+                            (payload.metadata or {}).get("model") or ""
+                        ),
+                        provider_hint=_provider_hint,
+                        fallback_used=True,
+                        reason_code="provider_chain_fallback",
+                        commerce_slim_applied=_slim_applied,
+                        prompt_chars=len(prompt),
+                        state_topic_shift=bool(_slim_meta.get("state_topic_shift")),
+                        checkout_relevant=bool(_slim_meta.get("checkout_relevant")),
+                    )
                 return reply_text
 
             logger.warning(
                 "[Composer._llm_compose] thin path returned empty reply | tenant=%s",
                 ctx.tenant_id,
             )
-            return await self._legacy_llm_compose(ctx, result, timeout_seconds=15)
+            return await self._legacy_llm_compose(
+                ctx, result, timeout_seconds=15, reply_state=reply_state,
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 "[Composer._llm_compose] thin LLM timed out after %ds | tenant=%s",
@@ -1247,7 +1296,99 @@ class DefaultComposer:
             )
         except Exception as exc:
             logger.error("[Composer._llm_compose] thin path error: %s", exc)
-            return await self._legacy_llm_compose(ctx, result, timeout_seconds=15)
+            return await self._legacy_llm_compose(
+                ctx,
+                result,
+                timeout_seconds=15,
+                reply_state=reply_state,
+            )
+
+    async def _thin_compose_retry(
+        self,
+        ctx: BrainContext,
+        result: ActionResult,
+        *,
+        reply_state: Any = None,
+        timeout_seconds: int = 15,
+    ) -> str:
+        """Second-chance thin compose — never uses the full legacy orchestrator."""
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.orchestrator.adapter import generate_ai_reply  # noqa: PLC0415
+        from modules.ai.orchestrator.llm_cost_audit import build_brain_compose_audit_extra  # noqa: PLC0415
+        from ..cost.model_router import resolve_compose_model_route  # noqa: PLC0415
+        from ..cost.model_router_decision import log_model_router_decision  # noqa: PLC0415
+        from ..compose.prompt_state_serializer import explain_commerce_prompt_slim_gate  # noqa: PLC0415
+
+        rs = reply_state or ctx.reply_state or self._minimal_reply_state(ctx)
+        prompt = build_brain_reply_prompt(rs)
+        locale = str(ctx.profile.get("preferred_language") or "ar")
+        history_messages = _as_ai_history(ctx.history, ctx.message)
+        intent_name = str(
+            getattr(ctx.intent, "name", "") or getattr(rs, "intent_name", "") or ""
+        )
+        route = resolve_compose_model_route(
+            intent_name=intent_name,
+            reply_state=rs,
+            result_data=dict(getattr(result, "data", None) or {}),
+        )
+        audit = build_brain_compose_audit_extra(
+            reply_state=rs,
+            prompt=prompt,
+            history_messages=history_messages,
+            tenant_id=ctx.tenant_id,
+            conversation_id=ctx.conversation_id,
+            turn_id=getattr(ctx.state, "turn", None),
+            source="brain.compose._thin_compose_retry",
+        )
+        audit.update(route.to_audit_dict())
+        if route.enforced and route.model:
+            audit["model_override"] = route.model
+        overrides: dict = {"__full_system_prompt": prompt, "__llm_cost_audit": audit}
+        if route.enforced:
+            overrides["__model_router"] = route.to_prompt_override()
+        provider_hint = route.provider_hint if route.enforced else "openai_compatible"
+        slim_applied, slim_reason, slim_meta = explain_commerce_prompt_slim_gate(rs)
+        log_model_router_decision(
+            tenant_id=ctx.tenant_id,
+            intent=intent_name,
+            selected_tier=route.tier,
+            selected_provider=route.provider,
+            selected_model=route.model,
+            provider_hint=provider_hint,
+            fallback_used=True,
+            reason_code="thin_compose_retry",
+            commerce_slim_applied=slim_applied,
+            prompt_chars=len(prompt),
+            state_topic_shift=bool(slim_meta.get("state_topic_shift")),
+            checkout_relevant=bool(slim_meta.get("checkout_relevant")),
+            extra={"slim_gate_reason": slim_reason},
+        )
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(
+                generate_ai_reply,
+                tenant_id=ctx.tenant_id,
+                customer_phone=ctx.customer_phone,
+                message=ctx.message,
+                store_name=ctx.facts.store_name,
+                channel="whatsapp",
+                locale=locale,
+                history=history_messages,
+                context_metadata={"brain_state": asdict(rs)},
+                prompt_overrides=overrides,
+                provider_hint=provider_hint,
+            ),
+            timeout=timeout_seconds,
+        )
+        reply_text = (payload.reply_text or "").strip()
+        if reply_text:
+            result.data["chosen_path"] = "llm_thin_retry"
+            result.data["llm_provider"] = payload.provider_used
+            result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
+            result.data["prompt_mode"] = "merchant_brain_thin_retry"
+            return reply_text
+        result.data["chosen_path"] = "llm_fallback_failed"
+        return T.generic_fallback(variant=self._variant_idx(ctx))
 
     def _minimal_reply_state(self, ctx: BrainContext):
         """Build a degraded BrainReplyState from ctx alone.
@@ -1273,9 +1414,31 @@ class DefaultComposer:
         ctx: BrainContext,
         result: ActionResult,
         timeout_seconds: int = 15,
+        *,
+        reply_state: Any = None,
     ) -> str:
-        """Emergency fallback while the thin path rolls out."""
+        """Emergency fallback — prefer thin MerchantBrain path when router is enabled."""
         import asyncio  # noqa: PLC0415
+
+        from ..cost.model_router import is_model_router_enabled  # noqa: PLC0415
+
+        if is_model_router_enabled():
+            logger.warning(
+                "[Composer._legacy_llm_compose] router enabled — "
+                "retrying thin compose (no full orchestrator) | tenant=%s",
+                ctx.tenant_id,
+            )
+            try:
+                return await self._thin_compose_retry(
+                    ctx,
+                    result,
+                    reply_state=reply_state,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[Composer._legacy_llm_compose] thin retry failed: %s", exc,
+                )
 
         try:
             _BACKEND = os.path.abspath(

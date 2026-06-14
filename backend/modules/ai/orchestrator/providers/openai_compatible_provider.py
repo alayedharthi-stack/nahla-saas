@@ -35,6 +35,7 @@ from modules.ai.orchestrator.llm_cost_audit import (
     approx_tokens_from_chars,
     emit_llm_cost_audit,
     resolve_model_from_audit,
+    resolve_model_for_provider,
 )
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
@@ -103,7 +104,11 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 "status":     "no_http_client",
             }
 
-        model = resolve_model_from_audit(audit_context, default=_MODEL)
+        model = resolve_model_for_provider(
+            audit_context,
+            provider="openai_compatible",
+            default=_MODEL,
+        )
 
         try:
             headers = {

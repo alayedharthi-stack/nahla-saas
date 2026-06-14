@@ -25,6 +25,7 @@ from modules.ai.brain.cost.model_router_audit import (
 )
 from modules.ai.brain.decision.actions import ACTION_HANDOFF
 from modules.ai.brain.intent_priority.types import (
+    GOAL_PRICE_INQUIRY,
     GOAL_PRODUCT_AVAILABILITY,
     GOAL_STAFF_CONTACT,
 )
@@ -55,6 +56,30 @@ _DISPUTE_RESPONSE_GOAL_MARKERS = (
     "complaint_recovery",
     "payment_dispute",
     "order_dispute",
+)
+
+_ROUTINE_DAILY_COMMERCE_INTENTS = _COMPOSE_CHEAP_INTENTS | frozenset({
+    "browse",
+    "discover_products",
+    "need_based_product_advice",
+})
+
+_ROUTINE_DAILY_COMMERCE_GOALS = _COMPOSE_CHEAP_GOALS | frozenset({
+    GOAL_PRODUCT_AVAILABILITY,
+    GOAL_PRICE_INQUIRY,
+    "product_reference",
+})
+
+# Policy reasons that must not upgrade routine daily commerce to STANDARD.
+_SOFT_POLICY_REASONS = frozenset({
+    "service_availability_not_handoff",
+    "non_commerce_clamp",
+})
+
+_AVAILABILITY_FOCUS_MARKERS = (
+    "product_availability",
+    "product_price_clarify",
+    "availability",
 )
 
 
@@ -123,6 +148,27 @@ def _compose_is_cheap_intent(
     return intent in _COMPOSE_CHEAP_INTENTS or goal in _COMPOSE_CHEAP_GOALS
 
 
+def is_routine_daily_commerce_compose(
+    *,
+    intent_name: str = "",
+    primary_customer_goal: str = "",
+) -> bool:
+    """Routine catalog/availability/price turns that must stay on CHEAP."""
+    intent = str(intent_name or "").strip().lower()
+    goal = str(primary_customer_goal or "").strip().lower()
+    return (
+        intent in _ROUTINE_DAILY_COMMERCE_INTENTS
+        or goal in _ROUTINE_DAILY_COMMERCE_GOALS
+    )
+
+
+def _is_availability_priority_focus(intent_focus: str) -> bool:
+    focus = str(intent_focus or "").strip().lower()
+    if not focus:
+        return False
+    return any(marker in focus for marker in _AVAILABILITY_FOCUS_MARKERS)
+
+
 def detect_compose_standard_signals(
     *,
     intent_name: str = "",
@@ -131,10 +177,17 @@ def detect_compose_standard_signals(
     reply_state: Any = None,
     result_data: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
-    """Return (needs_standard, reason) for compose-only Sonnet routing."""
+    """Return (needs_standard, reason) for compose-only standard-tier routing."""
     intent = str(intent_name or "").strip().lower()
     action = str(decision_action or "").strip()
     data = dict(result_data or {})
+
+    rs = reply_state
+    primary_goal = str(getattr(rs, "primary_customer_goal", "") or "").strip().lower()
+    routine_commerce = is_routine_daily_commerce_compose(
+        intent_name=intent,
+        primary_customer_goal=primary_goal,
+    )
 
     if intent in _STANDARD_INTENTS:
         return True, "standard_intent"
@@ -148,29 +201,39 @@ def detect_compose_standard_signals(
         return True, "handoff_action"
     if human_priority:
         return True, "human_priority"
-    if str(data.get("type") or "") == "llm_fallback" and str(data.get("policy_reason") or "").strip():
+
+    policy_from_result = str(data.get("policy_reason") or "").strip()
+    if (
+        str(data.get("type") or "") == "llm_fallback"
+        and policy_from_result
+        and not (routine_commerce and policy_from_result in _SOFT_POLICY_REASONS)
+    ):
         return True, "tool_failure_recovery"
 
-    rs = reply_state
     if rs is not None:
         policy_reason = str(getattr(rs, "policy_reason", "") or "").strip()
-        if policy_reason:
+        if policy_reason and not (
+            routine_commerce and policy_reason in _SOFT_POLICY_REASONS
+        ):
             return True, "policy_sensitive"
 
         response_goal = str(getattr(rs, "response_goal", "") or "").lower()
         if any(marker in response_goal for marker in _DISPUTE_RESPONSE_GOAL_MARKERS):
             return True, "complaint_or_dispute"
 
-        primary_goal = str(getattr(rs, "primary_customer_goal", "") or "").strip().lower()
         if primary_goal == GOAL_STAFF_CONTACT:
             return True, "staff_contact_goal"
 
         ambiguity = str(getattr(rs, "ambiguity_class", "") or "").strip().lower()
-        if ambiguity in _STANDARD_AMBIGUITY_CLASSES:
+        if ambiguity in _STANDARD_AMBIGUITY_CLASSES and not routine_commerce:
             return True, "high_ambiguity"
 
         intent_focus = str(getattr(rs, "intent_priority_focus", "") or "").lower()
-        if "conflict" in intent_focus:
+        if (
+            "conflict" in intent_focus
+            and not _is_availability_priority_focus(intent_focus)
+            and not routine_commerce
+        ):
             return True, "multi_turn_conflict"
 
     return False, ""

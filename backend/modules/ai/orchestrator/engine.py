@@ -191,6 +191,11 @@ class AIOrchestratorEngine:
                 )
                 observer.record_call(provider_name, _duration_ms, "succeeded")
                 observer.finalize(final_provider=provider_name, fallback_used=False)
+                if provider_chain.providers and provider_name != provider_chain.providers[0]:
+                    raw["provider_chain_fallback_used"] = True
+                    raw["provider_chain_primary"] = provider_chain.providers[0]
+                else:
+                    raw["provider_chain_fallback_used"] = False
                 return raw
 
             logger.info(
@@ -228,6 +233,7 @@ class AIOrchestratorEngine:
             final_provider=self._provider.provider_name if result.get("reply_text") else None,
             fallback_used=True,
         )
+        result["provider_chain_fallback_used"] = bool(result.get("reply_text"))
         return result
 
     # ── Context adapter ───────────────────────────────────────────────────────
@@ -423,5 +429,8 @@ class AIOrchestratorEngine:
                 "model":          raw.get("model", "unknown"),
                 "cost":           cost_meta,        # {} when no reply produced
                 "prompt":         prompt_meta_dict, # {} when no reply produced
+                "provider_chain_fallback_used": bool(
+                    raw.get("provider_chain_fallback_used")
+                ),
             },
         )

@@ -26,6 +26,7 @@ from modules.ai.orchestrator.llm_cost_audit import (
     approx_tokens_from_chars,
     resolve_anthropic_model,
     resolve_model_from_audit,
+    resolve_model_for_provider,
 )
 from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic
 from modules.ai.orchestrator.providers.base import BaseAIProvider
@@ -164,8 +165,9 @@ class AnthropicProvider(BaseAIProvider):
                 "actions":    [],
             }
 
-        model = resolve_model_from_audit(
+        model = resolve_model_for_provider(
             audit_context,
+            provider="anthropic",
             default=resolve_anthropic_model(),
         )
         system_chars = len(prompt or "")

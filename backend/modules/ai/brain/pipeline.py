@@ -2150,6 +2150,10 @@ class MerchantBrain:
                 product_title=_product_title,
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
+                post_guard_rewrite=bool(
+                    _guard_replaced.get("product_availability_truth_guard")
+                    or _guard_replaced.get("commerce_reply_quality_guard")
+                ),
             )
             if _crh.replaced:
                 reply = _crh.reply

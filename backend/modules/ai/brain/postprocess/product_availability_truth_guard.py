@@ -73,7 +73,10 @@ _CUSTOMER_FORBIDDEN_AVAILABILITY_PHRASES: tuple[str, ...] = (
     "الكتالوج",
 )
 
-_DEFAULT_VARIANT_FOLLOWUP_AR = "أي حجم يناسبك؟"
+_DEFAULT_VARIANT_FOLLOWUP_AR = "وش الحجم اللي يناسبك؟"
+
+# Legacy dry template kept for tests asserting migration away from it.
+_LEGACY_DRY_VARIANT_CONFLICT_REPLY_AR = "أي حجم يناسبك؟"
 
 _UNKNOWN_REPLY_AR = (
     "\u0645\u0627 \u0646\u0642\u062f\u0631 \u0646\u0623\u0643\u062f \u0627\u0644\u062a\u0648\u0641\u0631 "
@@ -330,8 +333,8 @@ def build_friendly_availability_conflict_reply(
     """
     label = _product_label_for_reply(evidence, availability_context, inbound_text)
     if label:
-        return f"متوفر {label} بعدة أحجام، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
-    return f"عندنا أكثر من خيار لهذا المنتج، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
+        return f"أبشر، {label} متوفر 🍯\n{_DEFAULT_VARIANT_FOLLOWUP_AR}"
+    return f"أبشر، المنتج متوفر عندنا 🍯\n{_DEFAULT_VARIANT_FOLLOWUP_AR}"
 
 
 def _rewrite_for_action(
@@ -348,7 +351,7 @@ def _rewrite_for_action(
                 availability_context=availability_context,
                 inbound_text=inbound_text,
             )
-        return f"عندنا أكثر من خيار لهذا المنتج، {_DEFAULT_VARIANT_FOLLOWUP_AR}"
+        return f"أبشر، عندنا أكثر من خيار 🍯\n{_DEFAULT_VARIANT_FOLLOWUP_AR}"
     if action == "rewrite_unknown":
         label = ""
         if evidence is not None:

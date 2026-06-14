@@ -292,6 +292,17 @@ def _evaluate_checkout_slim_blocker(
         meta["checkout_relevant"] = False
         return False, meta
 
+    if (
+        verdict is not None
+        and verdict.detected_topic_shift
+        and _is_commerce_info_slim_turn(state)
+        and not _has_payment_checkout_flags(active_flags)
+    ):
+        meta["state_topic_shift"] = True
+        meta["checkout_relevant"] = False
+        meta["checkout_blocked"] = False
+        return False, meta
+
     if _stale_checkout_allows_commerce_slim(
         state,
         active_flags=active_flags,
