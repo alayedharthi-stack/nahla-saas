@@ -118,6 +118,8 @@ _PRODUCT_CATEGORY_KEYWORDS: Tuple[Tuple[str, str], ...] = (
     ("جوال", "mobile"),
     ("جوالات", "mobile"),
     ("موبايل", "mobile"),
+    ("شاحن", "electronics"),
+    ("شواحن", "electronics"),
     ("لابتوب", "computer"),
     ("كمبيوتر", "computer"),
     ("قرطاسية", "stationery"),
@@ -342,6 +344,48 @@ def detect_product_category(
         if keyword in combined:
             return category
     return "general"
+
+
+def pick_category_emojis_for_reply(
+    *,
+    product_title: str = "",
+    inbound_text: str = "",
+    limit: int = 2,
+) -> str:
+    """Up to ``limit`` emojis from product category — never hardcoded per SKU."""
+    category = detect_product_category(
+        f"{product_title} {inbound_text}".strip(),
+        product_title=product_title,
+    )
+    pool = EMOJI_BY_PRODUCT_CATEGORY.get(category) or EMOJI_BY_PRODUCT_CATEGORY["general"]
+    picked: List[str] = []
+    for emoji in pool:
+        if emoji not in picked:
+            picked.append(emoji)
+        if len(picked) >= max(1, limit):
+            break
+    return "".join(picked)
+
+
+def variant_followup_for_product(
+    *,
+    product_title: str = "",
+    inbound_text: str = "",
+) -> str:
+    """Category-aware variant follow-up — size/model/types, not product-specific text."""
+    category = detect_product_category(
+        f"{product_title} {inbound_text}".strip(),
+        product_title=product_title,
+    )
+    if category in {"dress", "clothes", "abaya", "shoes", "bags"}:
+        return "وش المقاس أو الموديل اللي يناسبك؟"
+    if category in {"mobile", "electronics", "computer", "accessories"}:
+        return "وش الموديل اللي تبحث عنه؟"
+    if category in {"stationery", "books"}:
+        return "تحب أرسل لك الأنواع؟"
+    if category in {"honey", "food", "coffee", "dates"}:
+        return "وش الحجم اللي يناسبك؟"
+    return "وش الخيار اللي يناسبك؟"
 
 
 def _normalize_for_match(text: str) -> str:
@@ -873,5 +917,7 @@ __all__ = [
     "GENERAL_EMOJI_BY_PURPOSE",
     "apply_commerce_reply_humanizer",
     "detect_product_category",
+    "pick_category_emojis_for_reply",
     "should_apply_commerce_humanizer",
+    "variant_followup_for_product",
 ]

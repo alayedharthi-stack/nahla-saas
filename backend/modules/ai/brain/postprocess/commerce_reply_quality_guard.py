@@ -18,7 +18,7 @@ from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
 
 _FALLBACK_AVAILABILITY_AR = "أبشر، أتحقق لك من التوفر. أي حجم تقصد؟"
-_FALLBACK_PRODUCT_UNRESOLVED_AR = "أبشر، وش نوع العسل أو الحجم اللي تقصده؟"
+_FALLBACK_PRODUCT_UNRESOLVED_AR = "أبشر، وش المنتج أو المقاس اللي تقصده؟"
 _FALLBACK_DELIVERY_AR = "أبشر، أتحقق لك من التوصيل لمنطقتك."
 
 _MIN_MEANINGFUL_CHARS = 6

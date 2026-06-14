@@ -50,7 +50,7 @@ class TestForbiddenResidue:
 
     def test_asil_only_branding_gets_arabic_fallback(self) -> None:
         out = _guard("Powered by Nahla", inbound="عسل")
-        assert out == "أبشر، وش نوع العسل أو الحجم اللي تقصده؟"
+        assert out == "أبشر، وش المنتج أو المقاس اللي تقصده؟"
 
     def test_arabic_inbound_never_returns_let_me_verify(self) -> None:
         raw = (

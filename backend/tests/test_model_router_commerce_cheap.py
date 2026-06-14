@@ -32,7 +32,12 @@ from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY  # 
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
     build_friendly_availability_conflict_reply,
 )
-from modules.ai.brain.commerce_reply_humanizer import apply_commerce_reply_humanizer  # noqa: E402
+from modules.ai.brain.commerce_reply_humanizer import (  # noqa: E402
+    apply_commerce_reply_humanizer,
+    detect_product_category,
+    pick_category_emojis_for_reply,
+    variant_followup_for_product,
+)
 from modules.ai.brain.types import (  # noqa: E402
     ActionResult,
     BrainContext,
@@ -104,6 +109,12 @@ class TestRoutineCommerceCheapRoute:
         ("message", "intent"),
         [
             ("هل عندكم عسل طلح؟", INTENT_SOLUTION_SEEKING_COMMERCE),
+            ("هل عندكم سدر؟", INTENT_ASK_PRODUCT),
+            ("هل عندكم فساتين؟", INTENT_ASK_PRODUCT),
+            ("عندكم جوالات؟", INTENT_ASK_PRODUCT),
+            ("عندكم أقلام؟", INTENT_ASK_PRODUCT),
+            ("متوفر الشاحن؟", INTENT_ASK_PRODUCT),
+            ("بكم العباية؟", INTENT_ASK_PRICE),
             ("بكم عسل الطلح؟", INTENT_ASK_PRICE),
             ("متوفر السدر؟", INTENT_ASK_PRODUCT),
         ],
@@ -260,3 +271,83 @@ class TestAvailabilityWarmReply:
         route = resolve_compose_model_route(intent_name=INTENT_ASK_PRODUCT)
         assert "sonnet" not in route.model.lower()
         assert route.tier != TIER_STANDARD
+
+
+class TestGeneralityNoProductHardcoding:
+    """Warm replies vary by extracted label/category — not one honey template."""
+
+    @pytest.mark.parametrize(
+        ("label", "inbound", "expected_category", "expected_emoji_chars", "followup_fragment"),
+        [
+            ("عسل طلح", "هل عندكم عسل طلح؟", "honey", ("🍯", "🌿"), "وش الحجم"),
+            ("السدر", "هل عندكم سدر؟", "honey", ("🍯", "🌿"), "وش الحجم"),
+            ("فساتين", "هل عندكم فساتين؟", "dress", ("👗",), "المقاس"),
+            ("جوالات", "عندكم جوالات؟", "mobile", ("📱",), "الموديل"),
+            ("أقلام", "عندكم أقلام؟", "stationery", ("✏️", "📚"), "الأنواع"),
+            ("الشاحن", "متوفر الشاحن؟", "electronics", ("🔌", "📱"), "الموديل"),
+            ("", "عندكم منتجات؟", "general", ("🛒", "✨"), "الخيار"),
+        ],
+    )
+    def test_category_emojis_and_followup_vary(
+        self,
+        label: str,
+        inbound: str,
+        expected_category: str,
+        expected_emoji_chars: tuple[str, ...],
+        followup_fragment: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert detect_product_category(f"{label} {inbound}", product_title=label) == expected_category
+        emojis = pick_category_emojis_for_reply(product_title=label, inbound_text=inbound)
+        assert any(ch in emojis for ch in expected_emoji_chars)
+        assert "🍯" not in emojis or expected_category == "honey"
+        followup = variant_followup_for_product(product_title=label, inbound_text=inbound)
+        assert followup_fragment in followup
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
+            lambda *args, **kwargs: label or "المنتج",
+        )
+        guard_reply = build_friendly_availability_conflict_reply(
+            MagicMock(),
+            inbound_text=inbound,
+        )
+        assert guard_reply != _DRY_AVAILABILITY_REPLY
+        assert "أبشر" in guard_reply
+        assert followup_fragment in guard_reply
+        if label:
+            assert label in guard_reply
+        emoji_text = "".join(_EMOJI_RE.findall(guard_reply))
+        if expected_category == "honey":
+            assert "🍯" in emoji_text
+        elif expected_category != "general":
+            assert "🍯" not in emoji_text
+
+    def test_different_products_do_not_share_identical_guard_reply(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cases = [
+            ("عسل طلح", "هل عندكم عسل طلح؟"),
+            ("فساتين", "هل عندكم فساتين؟"),
+            ("جوالات", "عندكم جوالات؟"),
+        ]
+        replies: list[str] = []
+        for label, inbound in cases:
+
+            def _label_fn(*args, _label=label, **kwargs):
+                return _label
+
+            monkeypatch.setattr(
+                "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
+                _label_fn,
+            )
+            replies.append(
+                build_friendly_availability_conflict_reply(
+                    MagicMock(),
+                    inbound_text=inbound,
+                )
+            )
+        assert len(set(replies)) == len(cases)
+        assert all("🍯" in r for r in replies[:1])
+        assert all("🍯" not in r for r in replies[1:])
