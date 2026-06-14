@@ -352,3 +352,65 @@ class TestInquiryRoutingSplit:
         )
         assert inquiry_class == INQUIRY_CLASS_BROAD
         assert route == "category_discovery"
+
+
+class TestTypesOverviewFollowUp:
+    """Types/options ask must beat stale availability browse context."""
+
+    _TYPES_SAMAR = "\u0648\u0634 \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u0633\u0645\u0631 \u0639\u0646\u062f\u0643\u0645\u061f"
+
+    def test_extract_types_overview_query_strips_storefront_tail(self):
+        from modules.ai.brain.product_discovery_gate import extract_types_overview_query
+
+        assert extract_types_overview_query(self._TYPES_SAMAR) == "\u0633\u0645\u0631"
+
+    def test_classify_types_ask_beats_prior_browse_context(self):
+        from modules.ai.brain.product_discovery_gate import (
+            INQUIRY_CLASS_BROAD,
+            classify_product_inquiry_route,
+        )
+        from modules.ai.brain.types import BrainContext, CommerceFacts, Intent, MerchantConversationState
+
+        ctx = BrainContext(
+            tenant_id=99,
+            customer_phone="966500000001",
+            message=self._TYPES_SAMAR,
+            intent=Intent(name="general", confidence=0.5, raw_message=self._TYPES_SAMAR),
+            state=MerchantConversationState(
+                greeted=True,
+                stage="discovery",
+                last_browse_query="\u0627\u0644\u0633\u0645\u0631",
+                catalog_browse_pool=[{"id": 1, "title": "sample"}],
+            ),
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        inquiry_class, route = classify_product_inquiry_route(
+            ctx, query="\u0633\u0645\u0631",
+        )
+        assert inquiry_class == INQUIRY_CLASS_BROAD
+        assert route == "category_discovery"
+
+    def test_types_ask_after_availability_routes_category_discovery(self):
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.types import BrainContext, CommerceFacts, Intent, MerchantConversationState
+
+        ctx = BrainContext(
+            tenant_id=99,
+            customer_phone="966500000001",
+            message=self._TYPES_SAMAR,
+            intent=Intent(name="general", confidence=0.5, raw_message=self._TYPES_SAMAR),
+            state=MerchantConversationState(
+                greeted=True,
+                stage="discovery",
+                last_browse_query="\u0627\u0644\u0633\u0645\u0631",
+                last_question_asked="\u062a\u0628\u064a \u0627\u0644\u0623\u0633\u0639\u0627\u0631 \u0648\u0627\u0644\u0623\u062d\u062c\u0627\u0645\u061f",
+                catalog_browse_pool=[{"id": 11, "title": "sample samar"}],
+            ),
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "category_discovery"
+        assert decision.args.get("inquiry_kind") == "types_overview"
+        assert decision.args.get("category_hint") == "\u0633\u0645\u0631"

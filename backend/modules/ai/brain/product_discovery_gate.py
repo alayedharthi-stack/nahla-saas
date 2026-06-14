@@ -146,6 +146,12 @@ _TYPES_OVERVIEW_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Trailing storefront fluff after the family noun («… السمر عندكم؟»).
+_TYPES_SUBJECT_TAIL_RE = re.compile(
+    r"(?:\s+(?:عندكم|عندك|لديكم|لديك|متوفرة|متوفر|available))+\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _SKU_SPECIFICITY_RE = re.compile(
     r"(?:"
     r"\d|"
@@ -230,6 +236,25 @@ def has_types_overview_ask(message: str, query: str = "") -> bool:
     return bool(_TYPES_OVERVIEW_RE.search(raw))
 
 
+def extract_types_overview_query(message: str) -> str:
+    """Extract the family/category noun from a types/options ask."""
+    raw = (message or "").strip()
+    if not raw:
+        return ""
+    m = _TYPES_OVERVIEW_RE.search(raw)
+    if not m:
+        return ""
+    candidate = (m.group(1) or "").strip(" ؟?!.")
+    candidate = _TYPES_SUBJECT_TAIL_RE.sub("", candidate).strip(" ؟?!.")
+    candidate = re.sub(
+        r"^(?:ال|about|the)\s+",
+        "",
+        candidate,
+        flags=re.UNICODE | re.IGNORECASE,
+    )
+    return candidate.strip(" ؟?!.")
+
+
 def log_inquiry_class(
     *,
     tenant_id: Any,
@@ -265,6 +290,11 @@ def classify_product_inquiry_route(
     q = (query or "").strip()
     slots = getattr(ctx.intent, "slots", None) or {}
     slot_q = str(slots.get("product_query") or slots.get("product_name") or "").strip()
+
+    types_subject = extract_types_overview_query(msg) or _strip_category_noun(q) or q
+    if has_types_overview_ask(msg, q) and types_subject and is_generic_category_noun(types_subject):
+        if not _SKU_SPECIFICITY_RE.search(msg):
+            return INQUIRY_CLASS_BROAD, "category_discovery"
 
     if _has_prior_browse_context(ctx):
         return INQUIRY_CLASS_SPECIFIC, "search"
@@ -319,15 +349,61 @@ def try_broad_category_inquiry_decision(
         return None
 
     category_hint = _strip_category_noun(query)
+    inquiry_kind = (
+        "types_overview"
+        if has_types_overview_ask(ctx.message or "", query)
+        else "category_browse"
+    )
     return Decision(
         action=ACTION_LLM_REPLY,
         args={
             "topic": "category_discovery",
             "category_hint": category_hint,
             "response_goal": "category_discovery",
+            "inquiry_kind": inquiry_kind,
         },
         reason="broad category inquiry — discovery LLM, not catalog search",
         confidence=0.88,
+    )
+
+
+def try_types_overview_decision(ctx: BrainContext) -> Optional[Decision]:
+    """
+    Route explicit types/options asks to category discovery.
+
+    Beats stale browse/availability follow-up so «وش أنواع X عندكم؟»
+    lists variants instead of jumping to prices/sizes only.
+    """
+    msg = ctx.message or ""
+    if not has_types_overview_ask(msg):
+        return None
+    if not getattr(ctx.facts, "has_products", False):
+        return None
+    subject = extract_types_overview_query(msg)
+    if not subject or not is_generic_category_noun(subject):
+        return None
+    if _SKU_SPECIFICITY_RE.search(msg):
+        return None
+    try:
+        from .order_context_gate import should_block_product_discovery  # noqa: PLC0415
+
+        if should_block_product_discovery(ctx, msg):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+    inquiry_class, route = classify_product_inquiry_route(ctx, query=subject)
+    log_inquiry_class(
+        tenant_id=getattr(ctx, "tenant_id", None),
+        inquiry_class=inquiry_class,
+        route=route,
+        query=subject,
+        preview=msg[:80],
+    )
+    return try_broad_category_inquiry_decision(
+        ctx,
+        query=subject,
+        inquiry_class=inquiry_class,
+        route=route,
     )
 
 
@@ -1238,6 +1314,7 @@ __all__ = [
     "classify_product_inquiry_route",
     "clarify_instead_of_top_products",
     "extract_inquiry_product_query",
+    "extract_types_overview_query",
     "has_explicit_broad_browse_request",
     "has_explicit_product_inquiry",
     "has_inquiry_phrasing",
@@ -1256,4 +1333,5 @@ __all__ = [
     "should_suppress_recommendation_escalation",
     "try_broad_category_inquiry_decision",
     "try_price_query_decision",
+    "try_types_overview_decision",
 ]

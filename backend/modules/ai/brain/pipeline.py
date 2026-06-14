@@ -2849,7 +2849,7 @@ def _compose_base_response_goal(
     ):
         _hint = str((decision.args or {}).get("category_hint") or "").strip()
         _label = f"«{_hint}»" if _hint else "الفئة المطلوبة"
-        return (
+        _base = (
             f"category_discovery — العميل يستفسر عن {_label} في وضع اكتشاف "
             "(Disclosure Ladder — خطوة 1). "
             "اذكر أسماء/أنواع متوفرة فقط (حتى 5) **بدون أسعار** في هذه الرسالة، "
@@ -2857,6 +2857,15 @@ def _compose_base_response_goal(
             "ممنوع قائمة مرقمة بأسعار أو بطاقات منتجات متعددة. "
             "ممنوع اقتراح منتجات لا علاقة لها بالفئة المطلوبة."
         )
+        if str((decision.args or {}).get("inquiry_kind") or "") == "types_overview":
+            return (
+                f"{_base} "
+                f"هذا سؤال صريح عن **أنواع/variants** ضمن {_label} — "
+                "اذكر الأنواع/الخيارات المتوفرة بالاسم أولاً (حتى 5). "
+                "ممنوع الاكتفاء بسؤال الأسعار أو الأحجام بدون listing الأنواع. "
+                "بعد ذكر الأنواع فقط، سؤال توجيه واحد للأسعار/الأحجام إن لزم."
+            )
+        return _base
 
     if (
         decision.action == ACTION_LLM_REPLY
