@@ -290,10 +290,14 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
 
     try:
         from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            has_explicit_contact_intent,
+            should_defer_contact_policies_for_commerce,
             should_defer_staff_contact_policy,
         )
 
         if should_defer_staff_contact_policy(raw):
+            return StaffContactRequest(kind="none")
+        if should_defer_contact_policies_for_commerce(raw):
             return StaffContactRequest(kind="none")
     except Exception as exc:  # noqa: BLE001
         logger.exception(
@@ -328,8 +332,14 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
     if _GENERIC_STAFF_RE.search(norm):
         return StaffContactRequest(kind="generic_staff")
 
+    from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+        has_explicit_contact_intent,
+    )
+
     if _CONTACT_ASK_RE.search(norm):
-        return StaffContactRequest(kind="named")
+        if has_explicit_contact_intent(raw):
+            return StaffContactRequest(kind="named")
+        return StaffContactRequest(kind="none")
 
     # Single-token bare configured name only ("هشام") — not generic phrases.
     words = norm.split()
