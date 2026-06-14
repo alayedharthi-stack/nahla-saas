@@ -1764,6 +1764,7 @@ def apply_staff_contact_safety_net(
     explicit_customer_intent = (
         _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
         or _employee_not_responding is not None
+        or bool(_find_staff_name(msg_norm, _alias_candidates))
     )
     customer_intent = explicit_customer_intent or _arrival_gated_intent
 
@@ -1771,8 +1772,9 @@ def apply_staff_contact_safety_net(
         reply_text or "", _alias_candidates,
     )
     reply_has_digits = bool(_extract_phones(reply_text or ""))
+    reply_offer = bool(reply_offer_verb and reply_offer_name)
     if not customer_intent:
-        if not (reply_offer_verb and reply_offer_name) or reply_has_digits:
+        if not reply_offer:
             if _employee_not_responding is not None:
                 log_contact_escalation(
                     tenant_id=tenant_id,
@@ -1810,7 +1812,15 @@ def apply_staff_contact_safety_net(
                 else "no_staff_intent"
             )
             return result
-        if not (_policy_allowed and _arrival_signal):
+        if reply_has_digits:
+            logger.info(
+                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+                "source=reply_offer_with_digits verb=%r name_chars=%d",
+                int(tenant_id or 0),
+                reply_offer_verb,
+                len(reply_offer_name),
+            )
+        elif not (_policy_allowed and _arrival_signal):
             log_contact_escalation(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
@@ -1835,12 +1845,13 @@ def apply_staff_contact_safety_net(
                 else "no_staff_intent"
             )
             return result
-        logger.info(
-            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-            "source=reply_offer verb_chars=%d name_chars=%d policy_allowed=true",
-            int(tenant_id or 0),
-            len(reply_offer_verb), len(reply_offer_name),
-        )
+        else:
+            logger.info(
+                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+                "source=reply_offer verb_chars=%d name_chars=%d policy_allowed=true",
+                int(tenant_id or 0),
+                len(reply_offer_verb), len(reply_offer_name),
+            )
     else:
         logger.info(
             "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "

@@ -246,3 +246,71 @@ def test_unknown_name_still_not_configured(
     )
     assert decision is not None
     assert decision.deliver_contact is False
+
+
+def test_bare_named_contact_sends_vcard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_call_resolver(monkeypatch)
+    staff = "موظف أ"
+    db = _StubDB([_Section(id=2, kind="custom", body=f"{staff}: 0503333333")])
+    decision = evaluate_staff_contact_policy(
+        db, tenant_id=10, message=staff,
+    )
+    assert decision is not None
+    assert decision.deliver_contact is True
+    assert decision.call_target is not None
+    assert decision.call_target.wa_id == "966503333333"
+
+
+def test_chain_after_arrival_role_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_call_resolver(monkeypatch)
+    sections = [
+        _Section(id=1, kind="custom", body="موظف أ: 0501111111"),
+        _Section(id=2, kind="custom", body="موظف ب: 0502222222"),
+    ]
+    db = _StubDB(sections)
+    recovery = evaluate_staff_contact_recovery(
+        db,
+        tenant_id=10,
+        phone="966500000001",
+        message="مايرد",
+        contacts_sent_raw=[{
+            "name": "بائع المعرض",
+            "phone": "966501111111",
+            "turn": 1,
+        }],
+    )
+    assert recovery is not None
+    assert recovery.deliver_contact is True
+    assert recovery.call_target is not None
+    assert recovery.call_target.wa_id == "966502222222"
+
+
+def test_llm_reply_with_phone_converts_to_vcard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
+
+    _install_call_resolver(monkeypatch)
+    staff = "موظف أ"
+    db = _StubDB([_Section(id=1, kind="custom", body=f"{staff}: 0504444444")])
+    result = apply_staff_contact_safety_net(
+        customer_msg=staff,
+        reply_text=f"تفضل رقم {staff} 0504444444",
+        existing_call_targets=[],
+        detected_call_markers=0,
+        db=db,
+        tenant_id=10,
+    )
+    assert result.fired is True
+    assert result.extra_call_target is not None
+    assert result.strip_phones_from_reply is True
+    assert "0504444444" not in (
+        __import__(
+            "modules.ai.postprocess.safety_nets",
+            fromlist=["strip_embedded_phones_from_reply"],
+        ).strip_embedded_phones_from_reply(f"تفضل رقم {staff} 0504444444")
+    )
