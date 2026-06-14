@@ -705,6 +705,19 @@ def _extract_phones(text: str) -> List[str]:
     return seen
 
 
+def strip_embedded_phones_from_reply(reply_text: str) -> str:
+    """Remove plain-text phone numbers when a vCard will carry the contact."""
+    cleaned = reply_text or ""
+    phones = _extract_phones(cleaned)
+    if not phones:
+        return cleaned
+    for ph in phones:
+        cleaned = cleaned.replace(ph, "")
+    cleaned = re.sub(r"\s*على\s*$", "", cleaned.strip())
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or (reply_text or "")
+
+
 def _kb_contact_labels_only(db: Any, tenant_id: int) -> List[str]:
     """Full contact labels from KB ``label:phone`` lines (graph telemetry)."""
     if db is None or not tenant_id:
@@ -910,19 +923,38 @@ def _find_staff_name(
     customer_msg_norm: str,
     candidates: Optional[List[str]] = None,
 ) -> Optional[str]:
-    """Pick the longest configured alias found in the message."""
+    """Pick the longest configured alias found as a whole token in the message."""
     if not customer_msg_norm:
         return None
     pool = candidates or []
     msg_fold = _normalise_alif(customer_msg_norm)
     hits = [
         n for n in pool
-        if n and _normalise_alif(n) in msg_fold
+        if n and _candidate_token_present(msg_fold, _normalise_alif(n))
     ]
     if not hits:
         return None
     hits.sort(key=len, reverse=True)
     return hits[0]
+
+
+def _candidate_token_present(haystack: str, candidate: str) -> bool:
+    """True when *candidate* appears as its own token, not embedded in a word."""
+    if not haystack or not candidate:
+        return False
+    if candidate not in haystack:
+        return False
+    idx = 0
+    while True:
+        pos = haystack.find(candidate, idx)
+        if pos < 0:
+            return False
+        before = haystack[pos - 1] if pos > 0 else " "
+        after_pos = pos + len(candidate)
+        after = haystack[after_pos] if after_pos < len(haystack) else " "
+        if before.isspace() and after.isspace():
+            return True
+        idx = pos + 1
 
 
 # Inbound-direction tokens used by ``StateManager.load_history`` rows
@@ -1147,7 +1179,7 @@ def _scan_verb_name_pair(
                 break
             after = rn[idx + len(verb): idx + len(verb) + proximity]
             for name in candidates:
-                if name in after:
+                if _candidate_token_present(after, name):
                     return verb, name
             start = idx + len(verb)
     return "", ""
@@ -1336,6 +1368,7 @@ class StaffContactSafetyNetResult:
     #   ``""``          — net did not fire.
     source: str = ""
     extra_call_target: Any = None  # CallTarget when fired
+    strip_phones_from_reply: bool = False
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -2031,21 +2064,44 @@ def apply_staff_contact_safety_net(
         return result
     result.wa_id = wa_id
 
-    # Clean up the display name a bit — strip articles for prettier
-    # cards. "الإدارة" → keeps as-is (institutional label); proper
-    # names stay as the customer typed them so the card matches the
-    # mental model.
-    display_name = name if name not in {"الإدارة", "الادارة"} else "الإدارة"
+    role = ""
+    if db is not None and tenant_id:
+        try:
+            from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+                is_usable_display_name,
+                load_staff_contact_registry,
+            )
 
-    target = CallTarget(
-        name=display_name,
-        wa_id=wa_id,
-        phone_display=_pretty_phone(wa_id),
-        raw_phone=raw_phone,
+            registry = load_staff_contact_registry(db, int(tenant_id))
+            phone_key = re.sub(r"\D", "", raw_phone)[-9:]
+            for rec in registry.records:
+                rec_key = re.sub(r"\D", "", rec.phone or "")[-9:]
+                if rec_key and rec_key == phone_key:
+                    if not is_usable_display_name(name):
+                        name = rec.lookup_name
+                    role = rec.role or role
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        build_staff_call_target,
     )
+
+    target = build_staff_call_target(
+        lookup_name=name,
+        phone=raw_phone,
+        role=role,
+    )
+    if target is None:
+        result.skipped_reason = "phone_normalize_failed"
+        return result
+
     result.extra_call_target = target
     result.fired = True
     result.source = source
+    if source == "reply" or _extract_phones(reply_text or ""):
+        result.strip_phones_from_reply = True
     if source == "reply":
         result.reason = "intent_plus_name_plus_phone_in_reply"
     else:
@@ -2063,7 +2119,7 @@ def apply_staff_contact_safety_net(
     )
     _already_sent = contact_already_sent(
         _contacts_sent,
-        name=display_name,
+        name=target.name,
         phone=wa_id,
     )
     log_contact_escalation(
@@ -2073,7 +2129,7 @@ def apply_staff_contact_safety_net(
         context=_store_arrival.context if _store_arrival else "-",
         name_source=name_source or "-",
         already_sent=_already_sent,
-        selected_contact=display_name,
+        selected_contact=target.name,
         contacts_sent_count=len(_contacts_sent),
         policy_allowed=_policy_allowed if _arrival_signal else None,
     )
@@ -3395,8 +3451,11 @@ def apply_clear_intent_fallback_net(
             ):
                 result.skipped_reason = "tracking_link_not_store_link"
                 return result
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[SAFETY_NET:store_link] tracking_link_suppression_failed err=%s",
+                exc,
+            )
 
     result.customer_intent = intent
     new_reply = _CLEAR_INTENT_REPLIES.get(intent)
