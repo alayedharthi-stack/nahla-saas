@@ -385,22 +385,43 @@ def extract_staff_chain_from_sections(
     return chain
 
 
+_GENERIC_ROLE_NAME_KEYS = frozenset({
+    _normalize_name_key(label)
+    for label in (
+        "بائع المعرض",
+        "البائع",
+        "بائع",
+        "موظف المعرض",
+        "خدمة العملاء",
+        "خدمه العملاء",
+        "دعم العملاء",
+        "المندوب",
+        "المحاسب",
+        "الموظف",
+    )
+})
+
+
+def _names_match_for_sent(entry_name: str, sent_name: str) -> bool:
+    en = _normalize_name_key(entry_name)
+    sn = _normalize_name_key(sent_name)
+    if not en or not sn:
+        return False
+    if en in _GENERIC_ROLE_NAME_KEYS or sn in _GENERIC_ROLE_NAME_KEYS:
+        return False
+    return en == sn or en in sn or sn in en
+
+
 def _entry_matches_sent(
     entry: StaffChainEntry,
     contacts_sent: Sequence[Dict[str, Any]],
 ) -> bool:
     ep = _normalize_phone_key(entry.phone)
-    en = _normalize_name_key(entry.lookup_name)
     for item in contacts_sent or ():
         sent_phone = _normalize_phone_key(str(item.get("phone") or ""))
-        sent_name = _normalize_name_key(str(item.get("name") or ""))
         if ep and sent_phone and ep == sent_phone:
             return True
-        if en and sent_name and (
-            en == sent_name
-            or en in sent_name
-            or sent_name in en
-        ):
+        if _names_match_for_sent(entry.lookup_name, str(item.get("name") or "")):
             return True
     return False
 

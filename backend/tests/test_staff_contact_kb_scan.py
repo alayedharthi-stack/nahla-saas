@@ -842,17 +842,11 @@ def test_reply_driven_trigger_arrival_flow(
     assert result.wa_id == "966541690226"
 
 
-def test_reply_driven_trigger_skipped_when_reply_has_digits(
+def test_reply_driven_trigger_converts_digits_to_vcard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the LLM already wrote the phone digits in its reply,
-    there is nothing to recover — the implicit reply-driven
-    trigger must NOT fire (otherwise we'd attach a duplicate
-    contact card to a turn that already shipped the number).
-
-    The customer message has no explicit trigger either, so the
-    expected outcome is a clean ``no_staff_intent`` skip and the
-    LLM's digits flow through to the customer untouched."""
+    """When the LLM wrote phone digits alongside a staff offer,
+    lift them into a contact card and strip from reply text."""
     from modules.ai.postprocess.safety_nets import apply_staff_contact_safety_net
 
     db = _install_stubs(
@@ -871,8 +865,10 @@ def test_reply_driven_trigger_skipped_when_reply_has_digits(
         detected_call_markers=0,
         db=db, tenant_id=33,
     )
-    assert result.fired is False
-    assert result.skipped_reason == "no_staff_intent"
+    assert result.fired is True
+    assert result.extra_call_target is not None
+    assert result.strip_phones_from_reply is True
+    assert result.wa_id == "966541690226"
 
 
 def test_reply_driven_trigger_no_misfire_on_unrelated_reply(

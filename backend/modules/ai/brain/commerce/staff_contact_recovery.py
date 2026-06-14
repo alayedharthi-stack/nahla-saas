@@ -152,11 +152,39 @@ def evaluate_staff_contact_recovery(
 
     if not verdict.enabled or not verdict.next_phone:
         turn = _conversation_turn(db, tenant_id=tenant_id, phone=phone)
-        if contacts_sent and verdict.reason == "chain_exhausted":
-            from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
-                MSG_NO_NEXT_ESCALATION,
-            )
+        from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+            MSG_NO_NEXT_ESCALATION,
+            build_staff_call_target_from_record,
+            find_next_unsent_registry_contact,
+            load_staff_contact_registry,
+        )
 
+        if verdict.reason in {"chain_exhausted", "empty_chain"}:
+            registry = load_staff_contact_registry(db, int(tenant_id or 0))
+            next_rec = find_next_unsent_registry_contact(registry, contacts_sent)
+            if next_rec is not None:
+                call_target = build_staff_call_target_from_record(next_rec)
+                if call_target is not None:
+                    logger.info(
+                        "[STAFF_CONTACT_RECOVERY] tenant=%s conversation_id=%s "
+                        "fired=true trigger=employee_not_responding "
+                        "reason=registry_unsent_fallback selected=%r",
+                        tenant_id,
+                        conversation_id if conversation_id is not None else "-",
+                        (call_target.name or "")[:48],
+                    )
+                    return StaffContactRecoveryDecision(
+                        reply_text=_build_recovery_reply_text(next_rec.lookup_name),
+                        call_target=call_target,
+                        deliver_contact=True,
+                        next_contact_name=call_target.name,
+                        next_contact_phone=next_rec.phone,
+                        reason="registry_unsent_fallback",
+                        trigger="employee_not_responding",
+                        conversation_turn=turn,
+                    )
+
+        if contacts_sent and verdict.reason == "chain_exhausted":
             logger.info(
                 "[STAFF_CONTACT_RECOVERY] tenant=%s conversation_id=%s "
                 "fired=true trigger=employee_not_responding reason=chain_exhausted "

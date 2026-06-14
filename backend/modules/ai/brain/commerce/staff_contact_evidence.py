@@ -155,11 +155,57 @@ class StaffContactRegistry:
             for token in rec.all_match_tokens():
                 if len(token) < 2:
                     continue
-                if token in norm:
+                if _token_present_in_text(norm, token):
                     score = len(token)
                     if best is None or score > best[0]:
                         best = (score, rec)
         return best[1] if best else None
+
+
+def _token_present_in_text(text_norm: str, token_norm: str) -> bool:
+    """True when token appears as its own word, not embedded in another."""
+    if not text_norm or not token_norm or token_norm not in text_norm:
+        return False
+    idx = 0
+    while True:
+        pos = text_norm.find(token_norm, idx)
+        if pos < 0:
+            return False
+        before = text_norm[pos - 1] if pos > 0 else " "
+        after_pos = pos + len(token_norm)
+        after = text_norm[after_pos] if after_pos < len(text_norm) else " "
+        if before.isspace() and after.isspace():
+            return True
+        idx = pos + 1
+
+
+def find_next_unsent_registry_contact(
+    registry: StaffContactRegistry,
+    contacts_sent: Sequence[Any],
+) -> Optional[StaffContactRecord]:
+    """Return the first registry contact not yet marked sent."""
+    from modules.ai.brain.commerce.staff_contact_fallback_v0 import (  # noqa: PLC0415
+        StaffChainEntry,
+        _entry_matches_sent,
+    )
+
+    ordered = sorted(
+        registry.non_owner_records(),
+        key=lambda r: (r.chain_index if r.chain_index >= 0 else 9999, r.lookup_name),
+    )
+    for rec in ordered:
+        entry = StaffChainEntry(
+            lookup_name=rec.lookup_name,
+            phone=rec.phone,
+            section_id=int(rec.section_id or 0),
+            kind="registry",
+            is_owner=rec.is_owner,
+            chain_index=rec.chain_index,
+            role=rec.role,
+        )
+        if not _entry_matches_sent(entry, contacts_sent):
+            return rec
+    return None
 
 
 def _chain_entry_to_record(
@@ -270,6 +316,11 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
         return StaffContactRequest(kind="generic_staff")
 
     if _CONTACT_ASK_RE.search(norm):
+        return StaffContactRequest(kind="named")
+
+    # Bare configured-name ping ("هشام") — short-circuit before brain/LLM.
+    words = norm.split()
+    if 1 <= len(words) <= 2 and len(norm) >= 2:
         return StaffContactRequest(kind="named")
 
     return StaffContactRequest(kind="none")
@@ -454,6 +505,7 @@ __all__ = [
     "build_staff_call_target_from_record",
     "classify_staff_contact_request",
     "compile_staff_contact_registry",
+    "find_next_unsent_registry_contact",
     "is_usable_display_name",
     "load_staff_contact_registry",
     "resolve_contact_display_name",
