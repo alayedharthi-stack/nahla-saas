@@ -1953,7 +1953,7 @@ def apply_staff_contact_safety_net(
                     len(name),
                 )
         except Exception as _arrival_ev_exc:  # noqa: BLE001
-            logger.debug(
+            logger.exception(
                 "safety_nets.staff | arrival_evidence failed tenant=%s err=%s",
                 tenant_id, _arrival_ev_exc,
             )

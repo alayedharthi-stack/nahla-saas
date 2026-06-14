@@ -7130,7 +7130,7 @@ async def _handle_merchant_message(
                                 _mi = _rules_match(text or "")
                                 if _mi is not None:
                                     _matched_intent = _mi.name
-                            except Exception:  # noqa: BLE001
+                            except Exception:  # noqa: silent-ok - optional intent match for brain-silent telemetry
                                 pass
                             try:
                                 _bs_dbg = (

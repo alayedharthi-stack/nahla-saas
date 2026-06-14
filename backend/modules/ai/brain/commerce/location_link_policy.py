@@ -70,8 +70,11 @@ def evaluate_location_link_policy(
             cls = classify_url(maps_url)
             if cls.button_title:
                 cta_label = cls.button_title
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[LOCATION_LINK_POLICY] cta_classify_failed tenant=%s err=%s",
+                tenant_id, exc,
+            )
         logger.info(
             "[LOCATION_LINK_POLICY] tenant=%s deliver=true source=%s use_cta=true",
             tenant_id, source or "-",
