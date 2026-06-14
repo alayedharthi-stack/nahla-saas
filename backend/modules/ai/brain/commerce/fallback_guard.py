@@ -389,7 +389,7 @@ def evaluate_hard_topic_shift(
                 new_topic="product_types_overview",
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[HARD_TOPIC_SHIFT] types_overview_gate_failed")
 
     if _INQUIRY_ABOUT_PRODUCT_RE.search(msg) and _PRODUCT_ENTITY_RE.search(msg):
         return HardTopicShiftVerdict(
