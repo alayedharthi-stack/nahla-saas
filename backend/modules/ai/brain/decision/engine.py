@@ -695,6 +695,20 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
+        # ── 0a.54 Types/options overview (beats stale browse continuation) ──
+        try:
+            from ..product_discovery_gate import try_types_overview_decision  # noqa: PLC0415
+
+            _types_dec = try_types_overview_decision(ctx)
+            if _types_dec is not None:
+                return _types_dec
+        except Exception as _types_exc:  # noqa: BLE001
+            logger.debug(
+                "[TYPES_OVERVIEW] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _types_exc,
+            )
+
         # ── 0a.55 Short transactional continuation (product focus) ─────────
         try:
             from ..commerce.conversational_priority import (  # noqa: PLC0415

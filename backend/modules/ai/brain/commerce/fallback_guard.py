@@ -376,6 +376,21 @@ def evaluate_hard_topic_shift(
             new_topic="product_availability",
         )
 
+    try:
+        from ..product_discovery_gate import (  # noqa: PLC0415
+            extract_types_overview_query,
+            has_types_overview_ask,
+        )
+
+        if has_types_overview_ask(msg) and extract_types_overview_query(msg):
+            return HardTopicShiftVerdict(
+                True,
+                reason="types_overview_ask",
+                new_topic="product_types_overview",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     if _INQUIRY_ABOUT_PRODUCT_RE.search(msg) and _PRODUCT_ENTITY_RE.search(msg):
         return HardTopicShiftVerdict(
             True,
