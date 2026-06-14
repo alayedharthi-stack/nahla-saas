@@ -7,6 +7,9 @@ When the customer asks to browse a specific category noun (e.g. honey / عسل),
 catalog results stay inside that category. Cream, oil, and other derivative
 forms are excluded unless the customer explicitly mentions them in the same turn.
 
+Operational evidence uses category + title (+ tags) only — never description
+copy that may mention honey while the SKU is cream/oil.
+
 Operational — deterministic token/evidence only; no LLM wording.
 """
 from __future__ import annotations
@@ -37,7 +40,7 @@ _BROWSE_LEAD_RE = re.compile(
 _GLOBAL_ONLY_RE = re.compile(
     r"(?:"
     r"^(?:وش|ايش|ايه|ما)\s+(?:عندكم|عندك|لديكم|لديك)\s*$|"
-    r"^(?:وش|ايش|ايه)\s+(?:المنتجات|المتوفر|الانواع|الأنواع)\s*$|"
+    r"^(?:وش|ايش|ايه|ما)\s+(?:المنتجات|المتوفر|الانواع|الأنواع)\s*$|"
     r"^(?:اعرض|وريني|ارسل|أرسل)\s+(?:كل\s+)?(?:المنتجات|المتوفر)\s*$|"
     r"^(?:what|show)\s+(?:do\s+you\s+)?have\s*$|"
     r"^(?:what|show)\s+is\s+available\s*$|"
@@ -65,6 +68,11 @@ _CROSS_FORM_MARKERS = frozenset({
     "كريم", "cream", "زيت", "oil", "lotion", "serum", "صابون", "soap",
     "shampoo", "شامبو", "balm", "مرهم", "ointment", "gel", "جل",
     "mask", "ماسك", "tonic", "تونيك",
+})
+
+# Shared hive/bee tokens must NOT satisfy a honey scope on their own.
+_HIVE_BLEED_TOKENS = frozenset({
+    "نحل", "النحل", "bee", "bees", "hive", "hives",
 })
 
 # Common Arabic broken-plural → singular hints (platform-wide, not merchant-specific).
@@ -175,45 +183,104 @@ def is_category_scoped_browse(
     source: str = "",
 ) -> bool:
     """True when this turn should keep catalog results inside one category."""
+    scope = extract_browse_category_scope(message, query)
+    if not scope:
+        return False
+
     src = str(source or "").strip().lower()
     if src in {"global_browse", "global_browse_recovery", "top_products"}:
-        if not extract_browse_category_scope(message, query):
-            return False
+        return True
 
     try:
         from .product_breadth_policy import global_availability_browse_requested  # noqa: PLC0415
 
-        if global_availability_browse_requested(message or "") and not extract_browse_category_scope(
-            message, query
-        ):
+        if global_availability_browse_requested(message or "") and not scope:
             return False
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] global browse check failed")
 
-    return bool(extract_browse_category_scope(message, query))
+    return True
 
 
-def _product_text_blob(product: Mapping[str, Any]) -> str:
+def _product_tags(product: Mapping[str, Any]) -> List[str]:
+    raw = product.get("tags")
+    if isinstance(raw, list):
+        return [str(t) for t in raw if t]
+    if isinstance(raw, str) and raw.strip():
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    meta = product.get("metadata")
+    if isinstance(meta, dict):
+        meta_tags = meta.get("tags")
+        if isinstance(meta_tags, list):
+            return [str(t) for t in meta_tags if t]
+    return []
+
+
+def _product_identity_blob(product: Mapping[str, Any]) -> str:
+    """Category + title + tags only — description must not widen scope."""
     parts = [
-        str(product.get("title") or ""),
         str(product.get("category") or ""),
-        str(product.get("description") or "")[:120],
+        str(product.get("title") or ""),
+        " ".join(_product_tags(product)),
     ]
     return _norm(" ".join(p for p in parts if p))
 
 
-def _product_matches_scope(product: Mapping[str, Any], scope: str) -> bool:
-    blob = _product_text_blob(product)
-    if not blob or not scope:
+def _text_has_scope_token(text: str, scope: str) -> bool:
+    if not text or not scope:
         return False
     variants = _scope_variants(scope)
-    blob_tokens = set(_tokens(blob))
+    tokens = set(_tokens(text))
     for variant in variants:
-        if variant in blob_tokens:
+        if variant in tokens:
             return True
-        if re.search(rf"(?<!\w){re.escape(variant)}(?!\w)", blob):
+        if re.search(rf"(?<!\w){re.escape(variant)}(?!\w)", text):
             return True
     return False
+
+
+def _hive_only_match(identity: str, scope: str) -> bool:
+    """True when identity only shares hive tokens, not the requested category."""
+    scope_norm = _canonical_scope_token(scope)
+    if scope_norm != "عسل":
+        return False
+    if _text_has_scope_token(identity, scope_norm):
+        return False
+    identity_tokens = set(_tokens(identity))
+    return bool(identity_tokens & _HIVE_BLEED_TOKENS)
+
+
+def _product_matches_scope(product: Mapping[str, Any], scope: str) -> bool:
+    category = _norm(str(product.get("category") or ""))
+    title = _norm(str(product.get("title") or ""))
+    tags_blob = _norm(" ".join(_product_tags(product)))
+    identity = _product_identity_blob(product)
+
+    if _hive_only_match(identity, scope):
+        return False
+
+    # Structured category field is the strongest operational signal.
+    if category and _text_has_scope_token(category, scope):
+        return True
+
+    if title and _text_has_scope_token(title, scope):
+        return True
+
+    if tags_blob and _text_has_scope_token(tags_blob, scope):
+        return True
+
+    return False
+
+
+def _identity_has_cross_form(product: Mapping[str, Any]) -> Optional[str]:
+    identity = _product_identity_blob(product)
+    for marker in _CROSS_FORM_MARKERS:
+        marker_norm = _norm(marker)
+        if marker_norm in _tokens(identity) or marker_norm in identity.split():
+            return marker_norm
+        if re.search(rf"(?<!\w){re.escape(marker_norm)}(?!\w)", identity):
+            return marker_norm
+    return None
 
 
 def _customer_mentioned_form(message: str, form_marker: str) -> bool:
@@ -231,16 +298,12 @@ def should_exclude_cross_category_product(
     message: str,
 ) -> bool:
     """Exclude when product is outside scope or an unrequested derivative form."""
+    cross_form = _identity_has_cross_form(product)
+    if cross_form and not _customer_mentioned_form(message, cross_form):
+        return True
+
     if _product_matches_scope(product, scope):
         return False
-
-    blob = _product_text_blob(product)
-    msg = message or ""
-
-    for marker in _CROSS_FORM_MARKERS:
-        marker_norm = _norm(marker)
-        if marker_norm in blob and not _customer_mentioned_form(msg, marker_norm):
-            return True
 
     return True
 
@@ -274,18 +337,40 @@ def filter_products_to_browse_category(
 
     if dropped:
         logger.info(
-            "[BROWSE_CATEGORY_GUARD] scoped tenant=? scope=%r in=%d out=%d dropped=%d preview=%r",
+            "[BROWSE_CATEGORY_GUARD] scope=%r in=%d out=%d dropped=%d source=%r preview=%r",
             scope,
             len(items),
             len(kept),
             dropped,
+            source,
             (message or "")[:80],
         )
     return kept
 
 
+def filter_products_for_browse_turn(
+    products: Sequence[Mapping[str, Any]],
+    *,
+    message: str = "",
+    query: str = "",
+    source: str = "",
+    last_browse_query: str = "",
+) -> List[Dict[str, Any]]:
+    """Shared entry for search, compose, pipeline, and replay paths."""
+    effective_query = str(query or last_browse_query or "").strip()
+    if not effective_query and not str(message or "").strip():
+        return [dict(p) for p in (products or []) if isinstance(p, Mapping)]
+    return filter_products_to_browse_category(
+        products,
+        message=message or "",
+        query=effective_query,
+        source=source,
+    )
+
+
 __all__ = [
     "extract_browse_category_scope",
+    "filter_products_for_browse_turn",
     "filter_products_to_browse_category",
     "is_category_scoped_browse",
     "should_exclude_cross_category_product",

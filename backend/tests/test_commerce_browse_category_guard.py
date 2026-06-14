@@ -15,11 +15,21 @@ from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: 
     extract_browse_category_scope,
     filter_products_to_browse_category,
     is_category_scoped_browse,
+    should_exclude_cross_category_product,
 )
 
 
-def _product(pid: int, title: str, *, category: str = "") -> dict:
-    return {"id": pid, "title": title, "category": category}
+def _product(
+    pid: int,
+    title: str,
+    *,
+    category: str = "",
+    description: str = "",
+) -> dict:
+    payload = {"id": pid, "title": title, "category": category}
+    if description:
+        payload["description"] = description
+    return payload
 
 
 # Generic catalog — category nouns are placeholders, not merchant SKUs.
@@ -91,7 +101,7 @@ class TestCategoryFilter:
     def test_derivative_form_kept_when_customer_asks_for_it(self) -> None:
         catalog = [
             _product(1, f"Pure {_ALPHA} line", category=_ALPHA),
-            _product(2, f"Therapeutic {_BETA} serum", category=_BETA),
+            _product(2, f"Therapeutic {_BETA} blend", category=_BETA),
         ]
         filtered = filter_products_to_browse_category(
             catalog,
@@ -111,6 +121,71 @@ class TestCategoryFilter:
 
     def test_empty_input_is_safe(self) -> None:
         assert filter_products_to_browse_category([], message=f"show {_ALPHA}") == []
+
+
+class TestSmokeRegression:
+    """Production-shaped leaks — description/hive bleed must not widen scope."""
+
+    _MSG = "وش عندكم عسل"
+
+    _CATALOG = [
+        _product(1, "عسل سدر", category="عسل"),
+        _product(
+            2,
+            "زيت سم النحل",
+            description="منتج طبيعي من العسل والنحل",
+        ),
+        _product(
+            3,
+            "كريم سم النحل",
+            description="مشتقات العسل الطبيعية",
+        ),
+    ]
+
+    def test_description_honey_copy_does_not_keep_oil_or_cream(self) -> None:
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message=self._MSG,
+            query="",
+            source="top_products",
+        )
+        assert [p["id"] for p in filtered] == [1]
+
+    def test_hive_title_without_honey_is_excluded(self) -> None:
+        assert should_exclude_cross_category_product(
+            _product(4, "سم النحل"),
+            scope="عسل",
+            message=self._MSG,
+        )
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "وش عندكم عسل",
+            "ابي عسل الموسم",
+            "اعرض الأعسال",
+        ],
+    )
+    def test_top_products_path_still_scopes_honey(self, message: str) -> None:
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message=message,
+            query="",
+            source="top_products",
+        )
+        assert [p["id"] for p in filtered] == [1]
+
+    def test_cream_browse_allows_cream(self) -> None:
+        catalog = [
+            _product(10, "كريم سم النحل"),
+            _product(11, "عسل سدر", category="عسل"),
+        ]
+        filtered = filter_products_to_browse_category(
+            catalog,
+            message="اعرض كريم",
+            query="كريم",
+        )
+        assert [p["id"] for p in filtered] == [10]
 
 
 class TestArabicBrowseSmoke:

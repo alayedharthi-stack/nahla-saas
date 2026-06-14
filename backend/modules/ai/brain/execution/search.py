@@ -62,26 +62,21 @@ class ProductSearchHandler:
             resolve_product_breadth_from_context,
         )
         from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-            filter_products_to_browse_category,
+            filter_products_for_browse_turn,
         )
         from ..product_discovery_gate import allows_search_top_products_fallback  # noqa: PLC0415
         breadth = resolve_product_breadth_from_context(ctx, decision)
         fetch_limit = breadth.search_fetch_limit
         source = str(decision.args.get("source") or "").strip().lower()
         state = getattr(ctx, "state", None)
-        scope_query = str(
-            decision.args.get("query")
-            or getattr(state, "last_browse_query", None)
-            or ctx.message
-            or ""
-        )
 
         def _apply_category_scope(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            return filter_products_to_browse_category(
+            return filter_products_for_browse_turn(
                 products,
                 message=ctx.message or "",
-                query=scope_query,
+                query=str(decision.args.get("query") or ""),
                 source=source,
+                last_browse_query=str(getattr(state, "last_browse_query", "") or ""),
             )
 
         def _format_result(
