@@ -8246,7 +8246,7 @@ async def _handle_merchant_message(
                     tenant_id, _setg_exc,
                 )
 
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _brain_active:
             try:
                 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
                     apply_product_availability_truth_guard,
@@ -8295,12 +8295,112 @@ async def _handle_merchant_message(
                         tenant_id=tenant_id,
                         conversation_id=getattr(convo, "id", None),
                     )
-                    if _pavg_result.replaced:
+                    _pavg_replaced = bool(_pavg_result.replaced)
+                    if _pavg_replaced:
                         reply = _pavg_result.reply
+                    try:
+                        from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
+                            apply_commerce_reply_humanizer,
+                            is_operational_availability_fact,
+                        )
+                        from modules.ai.brain.intent_priority.types import (  # noqa: PLC0415
+                            GOAL_PRODUCT_AVAILABILITY,
+                        )
+
+                        if _pavg_replaced or is_operational_availability_fact(reply or ""):
+                            _wh_product_title = ""
+                            try:
+                                _wh_focus = (_pavg_bs or {}).get("current_product_focus") or {}
+                                if isinstance(_wh_focus, dict):
+                                    _wh_product_title = str(
+                                        _wh_focus.get("title")
+                                        or _wh_focus.get("name")
+                                        or ""
+                                    ).strip()
+                            except Exception:  # noqa: BLE001
+                                _wh_product_title = ""
+                            _wh_intent = str(
+                                (inbound_metadata or {}).get("intent_name") or ""
+                            ).strip()
+                            _wh_goal = str(
+                                (inbound_metadata or {}).get("primary_customer_goal")
+                                or GOAL_PRODUCT_AVAILABILITY
+                            ).strip()
+                            _wh_crh = apply_commerce_reply_humanizer(
+                                reply or "",
+                                inbound_text=text or "",
+                                intent_name=_wh_intent,
+                                primary_customer_goal=_wh_goal,
+                                locale="ar",
+                                chosen_path=_pavg_path,
+                                product_title=_wh_product_title,
+                                tenant_id=tenant_id,
+                                conversation_id=getattr(convo, "id", None),
+                                post_guard_rewrite=_pavg_replaced,
+                            )
+                            if _wh_crh.replaced:
+                                reply = _wh_crh.reply
+                    except Exception as _wh_crh_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[COMMERCE_REPLY_HUMANIZER] webhook hook failed tenant=%s err=%s",
+                            tenant_id, _wh_crh_exc,
+                        )
             except Exception as _pavg_exc:  # noqa: BLE001
                 logger.debug(
                     "[PRODUCT_AVAILABILITY_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
                     tenant_id, _pavg_exc,
+                )
+
+        if reply and _brain_active and not _brain_handoff:
+            try:
+                from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
+                    apply_commerce_reply_humanizer,
+                    is_operational_availability_fact,
+                )
+                from modules.ai.brain.intent_priority.types import (  # noqa: PLC0415
+                    GOAL_PRODUCT_AVAILABILITY,
+                )
+
+                if is_operational_availability_fact(reply or ""):
+                    _wh_product_title = ""
+                    try:
+                        from core.order_flow import _load_brain_state as _wh_bs_load  # noqa: PLC0415
+
+                        _, _wh_bs = _wh_bs_load(db, tenant_id=tenant_id, phone=to)
+                        _wh_focus = (_wh_bs or {}).get("current_product_focus") or {}
+                        if isinstance(_wh_focus, dict):
+                            _wh_product_title = str(
+                                _wh_focus.get("title") or _wh_focus.get("name") or ""
+                            ).strip()
+                    except Exception:  # noqa: BLE001
+                        _wh_product_title = ""
+                    _wh_crh = apply_commerce_reply_humanizer(
+                        reply or "",
+                        inbound_text=text or "",
+                        intent_name=str(
+                            (inbound_metadata or {}).get("intent_name") or "ask_product"
+                        ),
+                        primary_customer_goal=str(
+                            (inbound_metadata or {}).get("primary_customer_goal")
+                            or GOAL_PRODUCT_AVAILABILITY
+                        ),
+                        locale="ar",
+                        chosen_path=str(
+                            (inbound_metadata or {}).get("deterministic_path")
+                            or _br_action
+                            or "llm"
+                        ),
+                        product_title=_wh_product_title,
+                        tenant_id=tenant_id,
+                        conversation_id=getattr(convo, "id", None),
+                        post_guard_rewrite=True,
+                    )
+                    if _wh_crh.replaced:
+                        reply = _wh_crh.reply
+            except Exception as _wh_br_crh_exc:  # noqa: BLE001
+                logger.debug(
+                    "[COMMERCE_REPLY_HUMANIZER] brain-path safety net failed tenant=%s err=%s",
+                    tenant_id, _wh_br_crh_exc,
                 )
 
         if (

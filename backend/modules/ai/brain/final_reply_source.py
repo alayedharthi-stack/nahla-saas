@@ -26,9 +26,9 @@ def resolve_final_source(
 ) -> str:
     if humanizer_changed:
         if guard_replaced.get("product_availability_truth_guard"):
-            return "humanizer_after_availability_guard"
+            return "style_layer_after_availability_guard"
         if guard_replaced.get("commerce_reply_quality_guard"):
-            return "humanizer_after_quality_guard"
+            return "style_layer_after_quality_guard"
         return "humanizer"
     if guard_replaced.get("product_availability_truth_guard"):
         return "availability_guard_operational"

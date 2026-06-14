@@ -252,7 +252,18 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-_WARM_OPENERS = ("أبشر", "أبشري", "تمام", "حاضر", "يا هلا")
+_WARM_OPENERS = ("أبشر", "أبشري", "تمام", "حاضر", "يا هلا", "أكيد", "تام", "أبدر")
+
+_OPERATIONAL_AVAILABILITY_FACT_RE = re.compile(
+    r"^(?:"
+    r"متوفر(?:\s+.+)+\.?"
+    r"|"
+    r"متوفر\s+بعدة\s+خيارات\.?"
+    r"|"
+    r".+\s+متوفر\.?"
+    r")$",
+    re.UNICODE | re.IGNORECASE,
+)
 
 _QMARK = r"[?\u061f]"
 
@@ -336,6 +347,26 @@ class CommerceReplyHumanizerResult:
     emoji_bucket: str = ""
     product_category: str = ""
     post_guard_rewrite_applied: bool = False
+    style_layer_applied: bool = False
+    operational_fact_detected: bool = False
+
+
+def is_operational_availability_fact(text: str) -> bool:
+    """
+    Single-line operational availability fact from truth/quality guards.
+
+    Styled customer replies (opener, emoji, follow-up line) must not match.
+    """
+    stripped = (text or "").strip()
+    if not stripped or "\n" in stripped:
+        return False
+    if _has_warm_opener(stripped):
+        return False
+    if _EMOJI_RE.search(stripped):
+        return False
+    if re.search(_QMARK, stripped):
+        return False
+    return bool(_OPERATIONAL_AVAILABILITY_FACT_RE.match(stripped))
 
 
 def detect_product_category(
@@ -828,7 +859,13 @@ def should_apply_commerce_humanizer(
     }:
         return False
     path = (chosen_path or "").strip().lower()
-    if path and not path.startswith("llm") and not post_guard_rewrite:
+    operational_fact = is_operational_availability_fact(reply)
+    if (
+        path
+        and not path.startswith("llm")
+        and not post_guard_rewrite
+        and not operational_fact
+    ):
         return False
     if _is_sensitive_turn(
         intent_name=intent_name,
@@ -897,7 +934,10 @@ def apply_commerce_reply_humanizer(
         emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
     )
 
-    if post_guard_rewrite:
+    operational_fact = is_operational_availability_fact(original)
+    needs_style_layer = post_guard_rewrite or operational_fact
+
+    if needs_style_layer:
         styled = compose_personality_overlay(
             operational_fact=original,
             style=style,
@@ -906,15 +946,18 @@ def apply_commerce_reply_humanizer(
             include_followup=True,
         )
         if styled and _facts_preserved(original, styled):
+            styled_emojis = bool(_EMOJI_RE.search(styled))
             return CommerceReplyHumanizerResult(
                 reply=styled,
                 replaced=styled != original,
                 warmed_tone=True,
-                added_emojis=bool(emojis),
+                added_emojis=styled_emojis,
                 style_signature=style.style_signature,
                 emoji_bucket=emoji_bucket,
                 product_category=category,
-                post_guard_rewrite_applied=True,
+                post_guard_rewrite_applied=post_guard_rewrite,
+                style_layer_applied=True,
+                operational_fact_detected=operational_fact,
             )
         return CommerceReplyHumanizerResult(
             reply=original,
@@ -924,6 +967,7 @@ def apply_commerce_reply_humanizer(
             style_signature=style.style_signature,
             emoji_bucket=emoji_bucket,
             product_category=category,
+            operational_fact_detected=operational_fact,
         )
 
     text = original
@@ -1049,6 +1093,7 @@ __all__ = [
     "GENERAL_EMOJI_BY_PURPOSE",
     "apply_commerce_reply_humanizer",
     "detect_product_category",
+    "is_operational_availability_fact",
     "pick_category_emojis_for_reply",
     "should_apply_commerce_humanizer",
     "variant_followup_for_product",

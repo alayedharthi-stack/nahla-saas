@@ -2163,6 +2163,8 @@ class MerchantBrain:
             result.data["humanizer_emoji_bucket"] = _crh.emoji_bucket
             result.data["humanizer_product_category"] = _crh.product_category
             result.data["post_guard_rewrite_applied"] = _crh.post_guard_rewrite_applied
+            result.data["style_layer_applied"] = _crh.style_layer_applied
+            result.data["operational_fact_detected"] = _crh.operational_fact_detected
         except Exception as _crh_exc:  # noqa: BLE001
             logger.warning(
                 "[COMMERCE_REPLY_HUMANIZER] pipeline hook failed tenant=%s err=%s",
