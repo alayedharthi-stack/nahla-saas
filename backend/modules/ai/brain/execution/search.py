@@ -61,10 +61,28 @@ class ProductSearchHandler:
             next_catalog_browse_batch,
             resolve_product_breadth_from_context,
         )
+        from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            filter_products_to_browse_category,
+        )
         from ..product_discovery_gate import allows_search_top_products_fallback  # noqa: PLC0415
         breadth = resolve_product_breadth_from_context(ctx, decision)
         fetch_limit = breadth.search_fetch_limit
         source = str(decision.args.get("source") or "").strip().lower()
+        state = getattr(ctx, "state", None)
+        scope_query = str(
+            decision.args.get("query")
+            or getattr(state, "last_browse_query", None)
+            or ctx.message
+            or ""
+        )
+
+        def _apply_category_scope(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return filter_products_to_browse_category(
+                products,
+                message=ctx.message or "",
+                query=scope_query,
+                source=source,
+            )
 
         def _format_result(
             products: List[Dict[str, Any]],
@@ -114,15 +132,14 @@ class ProductSearchHandler:
                     error="replay_products_inactive",
                     data={"message": "replay_products_inactive"},
                 )
-            products = _apply_affinity_boost(active_replay, ctx)
+            products = _apply_category_scope(_apply_affinity_boost(active_replay, ctx))
             return _format_result(products, query=str(decision.args.get("query") or ""))
 
         query = decision.args.get("query", ctx.message)
-        state = getattr(ctx, "state", None)
 
         # Progressive browse — next unseen slice, never repeat last turn.
         if source == "show_more":
-            pool = list(getattr(state, "catalog_browse_pool", None) or [])
+            pool = _apply_category_scope(list(getattr(state, "catalog_browse_pool", None) or []))
             offset = int(getattr(state, "catalog_browse_offset", 0) or 0)
             shown_keys = [
                 _product_key(p)
@@ -161,7 +178,7 @@ class ProductSearchHandler:
                             {"limit": max(fetch_limit, 12)},
                         )
                         refreshed_pool = list(runtime_result.payload.get("products") or [])
-                refreshed_pool = _apply_affinity_boost(refreshed_pool, ctx)
+                refreshed_pool = _apply_category_scope(_apply_affinity_boost(refreshed_pool, ctx))
                 seen = {
                     _product_key(p)
                     for p in (pool + list(getattr(state, "last_search_candidates", None) or []))
@@ -172,7 +189,7 @@ class ProductSearchHandler:
                     exclude_keys=list(seen),
                     limit=fetch_limit,
                 )
-            products = _apply_affinity_boost(batch, ctx)
+            products = _apply_category_scope(_apply_affinity_boost(batch, ctx))
             logger.info(
                 "[ORDER FLOW] show_more_batch | tenant=%s shown_before=%d "
                 "batch=%d next_offset=%d pool=%d",
@@ -257,7 +274,7 @@ class ProductSearchHandler:
                 )
 
             # Re-rank by customer affinity before formatting lines
-            products = _apply_affinity_boost(products, ctx)
+            products = _apply_category_scope(_apply_affinity_boost(products, ctx))
 
             return _format_result(
                 products,
