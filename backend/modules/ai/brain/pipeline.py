@@ -2127,6 +2127,39 @@ class MerchantBrain:
                 tenant_id, _crqg_exc,
             )
 
+        try:
+            from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
+                apply_commerce_reply_humanizer,
+            )
+
+            _reply_state = getattr(ctx, "reply_state", None)
+            _selected = getattr(_reply_state, "selected_product", None) or {}
+            _product_title = str(
+                _selected.get("title") or _selected.get("name") or ""
+            ).strip()
+            _crh = apply_commerce_reply_humanizer(
+                reply=reply or "",
+                inbound_text=message or "",
+                intent_name=str(getattr(intent, "name", "") or ""),
+                primary_customer_goal=str(
+                    getattr(_reply_state, "primary_customer_goal", "") or ""
+                ),
+                locale=str((profile or {}).get("preferred_language") or "ar"),
+                chosen_path=_chosen_path,
+                human_priority=bool(getattr(ctx, "human_priority", False)),
+                product_title=_product_title,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _crh.replaced:
+                reply = _crh.reply
+                _guard_replaced["commerce_reply_humanizer"] = True
+        except Exception as _crh_exc:  # noqa: BLE001
+            logger.warning(
+                "[COMMERCE_REPLY_HUMANIZER] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _crh_exc,
+            )
+
         # ── Persona ownership snapshot (measurement-only) ───────────────
         try:
             from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
