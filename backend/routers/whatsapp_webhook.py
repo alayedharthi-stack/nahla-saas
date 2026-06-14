@@ -7035,14 +7035,14 @@ async def _handle_merchant_message(
                                 tenant_id, to,
                                 float(getattr(_rule_intent, "confidence", 0.0) or 0.0),
                             )
-                    except Exception as _ho_guard_exc:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001
                         # Pure observability fallback — never raise out
                         # of the brain dispatch loop because we tried
                         # to be helpful.
-                        logger.debug(
-                            "[Merchant/Brain] handoff guard rule match failed "
-                            "tenant=%s err=%s",
-                            tenant_id, _ho_guard_exc,
+                        logger.exception(
+                            "[WHATSAPP_WEBHOOK] handoff_guard_rule_match_failed "
+                            "tenant=%s",
+                            tenant_id,
                         )
 
                 # ── No-silent-reply guard ─────────────────────────────────
@@ -8340,10 +8340,11 @@ async def _handle_merchant_message(
                             )
                             if _wh_crh.replaced:
                                 reply = _wh_crh.reply
-                    except Exception as _wh_crh_exc:  # noqa: BLE001
-                        logger.debug(
-                            "[COMMERCE_REPLY_HUMANIZER] webhook hook failed tenant=%s err=%s",
-                            tenant_id, _wh_crh_exc,
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "[WHATSAPP_WEBHOOK] commerce_reply_humanizer_hook_failed "
+                            "tenant=%s",
+                            tenant_id,
                         )
             except Exception as _pavg_exc:  # noqa: BLE001
                 logger.debug(

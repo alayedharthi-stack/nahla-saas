@@ -84,7 +84,7 @@ def log_final_reply_source(
         payload = {k: v for k, v in payload.items() if v is not None}
         _log.info("[FINAL_REPLY_SOURCE] %s", json.dumps(payload, ensure_ascii=False))
     except Exception:  # noqa: BLE001
-        pass
+        _log.exception("[FINAL_REPLY_SOURCE] tagging_failed")
 
 
 __all__ = ["log_final_reply_source", "reply_hash", "resolve_final_source"]
