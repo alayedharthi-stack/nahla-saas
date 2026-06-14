@@ -286,6 +286,34 @@ def _resolve_showroom_contact(
     return best
 
 
+@dataclass(frozen=True)
+class ShowroomContactEvidence:
+    """Resolved showroom contact from KB sections."""
+
+    lookup_name: str
+    phone: str
+    section_id: Optional[int] = None
+
+
+def resolve_showroom_contact_for_delivery(
+    sections: Sequence[Any],
+    *,
+    preferred_section_ids: Sequence[int] = (),
+) -> Optional[ShowroomContactEvidence]:
+    """Public wrapper for arrival delivery — returns phone + lookup label."""
+    contact = _resolve_showroom_contact(
+        sections,
+        preferred_section_ids=preferred_section_ids,
+    )
+    if contact is None or not contact.phone:
+        return None
+    return ShowroomContactEvidence(
+        lookup_name=contact.lookup_name,
+        phone=contact.phone,
+        section_id=contact.section_id,
+    )
+
+
 def compile_arrival_contact_policy_v0(
     sections: Optional[Sequence[Any]] = None,
     *,
@@ -388,7 +416,9 @@ def verdict_from_compiled_artifact(
 
 __all__ = [
     "ArrivalContactCompiledArtifact",
+    "ShowroomContactEvidence",
     "compile_arrival_contact_policy_v0",
     "log_operational_policy_compile",
+    "resolve_showroom_contact_for_delivery",
     "verdict_from_compiled_artifact",
 ]

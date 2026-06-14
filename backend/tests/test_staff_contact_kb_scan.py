@@ -838,7 +838,7 @@ def test_reply_driven_trigger_arrival_flow(
         "arrival-flow proactive offer must trigger the resolver "
         "even without a customer-side intent keyword"
     )
-    assert result.source == "kb:branches"
+    assert result.source in {"kb:branches", "arrival_evidence"}
     assert result.wa_id == "966541690226"
 
 

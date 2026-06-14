@@ -6429,10 +6429,27 @@ async def _handle_merchant_message(
         if _llp_decision is not None:
             _llp_reply = _llp_decision.reply_text
             try:
-                _llp_ok = await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=_llp_reply,
-                    _tenant_id=tenant_id, _db=db,
-                )
+                if (
+                    _llp_decision.maps_url
+                    and getattr(_llp_decision, "use_cta", False)
+                ):
+                    _llp_ok = await _send_cta_url(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_llp_reply or "موقعنا 📍",
+                        btn_label=(
+                            getattr(_llp_decision, "cta_button_label", "")
+                            or "موقع المتجر"
+                        ),
+                        btn_url=_llp_decision.maps_url,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                else:
+                    _llp_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=_llp_reply,
+                        _tenant_id=tenant_id, _db=db,
+                    )
                 StateManager.save_message(
                     db, to, _llp_reply, "outbound",
                     conversation_id=convo.id, tenant_id=tenant_id,
@@ -6441,6 +6458,10 @@ async def _handle_merchant_message(
                         "deterministic_path": "location_link_policy",
                         "location_link_policy_reason": _llp_decision.reason,
                         "location_maps_source": _llp_decision.source,
+                        "location_delivery_mode": (
+                            "cta_url" if getattr(_llp_decision, "use_cta", False)
+                            else "text"
+                        ),
                     },
                 )
             except Exception as _llp_send_exc:  # noqa: BLE001
@@ -6451,8 +6472,11 @@ async def _handle_merchant_message(
                 _llp_ok = False
             logger.info(
                 "[LOCATION_LINK_POLICY] short_circuit tenant=%s deliver=%s "
-                "text_ok=%s skip_brain=true",
-                tenant_id, bool(_llp_decision.maps_url), _llp_ok,
+                "mode=%s text_ok=%s skip_brain=true",
+                tenant_id,
+                bool(_llp_decision.maps_url),
+                "cta_url" if getattr(_llp_decision, "use_cta", False) else "text",
+                _llp_ok,
             )
             try:
                 _trace.fallback_source = "location_link_policy"
@@ -6462,6 +6486,143 @@ async def _handle_merchant_message(
                     _trace.mark_outbound_sent(
                         source=_TS.SOURCE_BRAIN,
                         length=len(_llp_reply or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            _sync_persona_observability()
+            return
+
+        # ── Arrival contact delivery (pre-brain) ─────────────────────────
+        # Showroom-first from compiled arrival_contact evidence — before LLM.
+        _acd_decision = None
+        try:
+            from modules.ai.brain.commerce.arrival_contact_delivery_policy import (  # noqa: PLC0415
+                evaluate_arrival_contact_delivery as _evaluate_arrival_contact_delivery,
+            )
+            _acd_decision = _evaluate_arrival_contact_delivery(
+                db,
+                tenant_id=tenant_id,
+                message=text or "",
+            )
+        except Exception as _acd_exc:  # noqa: BLE001
+            logger.warning(
+                "[ARRIVAL_CONTACT_DELIVERY] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _acd_exc,
+            )
+            _acd_decision = None
+
+        if _acd_decision is not None:
+            _persona_ownership.mark_bypass(
+                _POReason.STAFF_CONTACT_RECOVERY,
+                owner="arrival_contact_delivery",
+            )
+            from modules.ai.brain.commerce.arrival_contact_delivery_policy import (  # noqa: PLC0415
+                MSG_ARRIVAL_CONTACT_NOT_CONFIGURED,
+            )
+            from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+                MSG_CONTACT_CARD_FAILED,
+            )
+            _acd_reply = _acd_decision.reply_text
+            _acd_text_ok = False
+            _acd_contacts_ok = False
+            try:
+                if (
+                    _acd_decision.deliver_contact
+                    and _acd_decision.call_target is not None
+                ):
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _acd_build_contacts,
+                    )
+                    _acd_payload = _acd_build_contacts(
+                        [_acd_decision.call_target], to=to,
+                    )
+                    _acd_contacts_ok = await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_acd_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    if _acd_contacts_ok:
+                        try:
+                            from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                                persist_staff_contact_sent,
+                            )
+                            from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+                            _acd_conv, _acd_bs = _load_brain_state(
+                                db, tenant_id=tenant_id, phone=to,
+                            )
+                            persist_staff_contact_sent(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                name=(
+                                    getattr(_acd_decision.call_target, "name", "")
+                                    or _acd_decision.contact_lookup_name
+                                ),
+                                contact_phone=(
+                                    getattr(_acd_decision.call_target, "raw_phone", "")
+                                    or getattr(_acd_decision.call_target, "wa_id", "")
+                                    or _acd_decision.contact_phone
+                                ),
+                                turn=int((_acd_bs or {}).get("turn") or 0),
+                            )
+                        except Exception as _acd_persist_exc:  # noqa: BLE001
+                            logger.exception(
+                                "[ARRIVAL_CONTACT_DELIVERY] persist failed tenant=%s",
+                                tenant_id,
+                            )
+                        _acd_text_ok = await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_acd_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                    else:
+                        logger.warning(
+                            "[ARRIVAL_CONTACT_DELIVERY] vCard send failed tenant=%s",
+                            tenant_id,
+                        )
+                        _acd_reply = MSG_CONTACT_CARD_FAILED
+                        _acd_text_ok = await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_acd_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                else:
+                    _acd_text_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=_acd_reply,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                StateManager.save_message(
+                    db, to, _acd_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": "arrival_contact_delivery",
+                        "arrival_contact_delivery_reason": _acd_decision.reason,
+                        "arrival_contact_deliver": _acd_decision.deliver_contact,
+                        "arrival_vcard_sent": _acd_contacts_ok,
+                    },
+                )
+            except Exception as _acd_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[ARRIVAL_CONTACT_DELIVERY] send failed tenant=%s err=%s",
+                    tenant_id, _acd_send_exc,
+                )
+
+            logger.info(
+                "[ARRIVAL_CONTACT_DELIVERY] short_circuit tenant=%s deliver=%s "
+                "vCard_ok=%s skip_brain=true reason=%s",
+                tenant_id,
+                _acd_decision.deliver_contact and _acd_contacts_ok,
+                _acd_contacts_ok,
+                _acd_decision.reason,
+            )
+            try:
+                _trace.fallback_source = "arrival_contact_delivery"
+                _trace.response_goal = "arrival_contact"
+                _trace.intent = "store_arrival"
+                if _acd_text_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN,
+                        length=len(_acd_reply or ""),
                     )
             except Exception:  # noqa: BLE001
                 pass
@@ -6614,35 +6775,18 @@ async def _handle_merchant_message(
                 _POReason.STAFF_CONTACT_RECOVERY,
                 owner="staff_contact_recovery",
             )
+            from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+                MSG_CONTACT_CARD_FAILED,
+                MSG_NO_NEXT_ESCALATION,
+            )
             _scr_reply = _scr_decision.reply_text
-            try:
-                _scr_text_ok = await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=_scr_reply,
-                    _tenant_id=tenant_id, _db=db,
-                )
-                StateManager.save_message(
-                    db, to, _scr_reply, "outbound",
-                    conversation_id=convo.id, tenant_id=tenant_id,
-                    extra_metadata={
-                        **_persona_ownership.to_metadata(),
-                        "deterministic_path": "staff_contact_recovery",
-                        "staff_contact_recovery_trigger": _scr_decision.trigger,
-                        "staff_contact_recovery_reason": _scr_decision.reason,
-                    },
-                )
-            except Exception as _scr_send_exc:  # noqa: BLE001
-                logger.warning(
-                    "[STAFF_CONTACT_RECOVERY] text send failed tenant=%s err=%s",
-                    tenant_id, _scr_send_exc,
-                )
-                _scr_text_ok = False
-
+            _scr_text_ok = False
             _scr_contacts_ok = False
-            if (
-                _scr_decision.deliver_contact
-                and _scr_decision.call_target is not None
-            ):
-                try:
+            try:
+                if (
+                    _scr_decision.deliver_contact
+                    and _scr_decision.call_target is not None
+                ):
                     from services.call_resolver import (  # noqa: PLC0415
                         build_contacts_payload as _scr_build_contacts,
                     )
@@ -6686,11 +6830,42 @@ async def _handle_merchant_message(
                                 "[STAFF_CONTACT_RECOVERY] persist failed tenant=%s",
                                 tenant_id,
                             )
-                except Exception as _scr_card_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[STAFF_CONTACT_RECOVERY] vCard send failed tenant=%s err=%s",
-                        tenant_id, _scr_card_exc,
+                        _scr_text_ok = await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_scr_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                    else:
+                        logger.warning(
+                            "[STAFF_CONTACT_RECOVERY] vCard send failed tenant=%s",
+                            tenant_id,
+                        )
+                        _scr_reply = MSG_CONTACT_CARD_FAILED
+                        _scr_text_ok = await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_scr_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                else:
+                    _scr_text_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=_scr_reply,
+                        _tenant_id=tenant_id, _db=db,
                     )
+                StateManager.save_message(
+                    db, to, _scr_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": "staff_contact_recovery",
+                        "staff_contact_recovery_trigger": _scr_decision.trigger,
+                        "staff_contact_recovery_reason": _scr_decision.reason,
+                        "staff_recovery_vcard_sent": _scr_contacts_ok,
+                    },
+                )
+            except Exception as _scr_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[STAFF_CONTACT_RECOVERY] send failed tenant=%s err=%s",
+                    tenant_id, _scr_send_exc,
+                )
+                _scr_text_ok = False
 
             logger.info(
                 "[STAFF_CONTACT_RECOVERY] short_circuit tenant=%s to=%s "
@@ -6955,7 +7130,7 @@ async def _handle_merchant_message(
                                 _mi = _rules_match(text or "")
                                 if _mi is not None:
                                     _matched_intent = _mi.name
-                            except Exception:  # noqa: BLE001
+                            except Exception:  # noqa: silent-ok - optional intent match for brain-silent telemetry
                                 pass
                             try:
                                 _bs_dbg = (

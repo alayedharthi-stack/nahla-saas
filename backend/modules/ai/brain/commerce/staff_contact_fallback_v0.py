@@ -520,7 +520,7 @@ def resolve_staff_contact_fallback_v0(
             explicit_role="owner",
         )
 
-    if not showroom_chain:
+    if not chain:
         return StaffContactFallbackVerdict(
             enabled=False,
             trigger=trigger,
@@ -528,33 +528,60 @@ def resolve_staff_contact_fallback_v0(
             chain_len=len(chain),
         )
 
-    last_idx = _last_sent_chain_index(showroom_chain, contacts_sent)
-    for entry in showroom_chain:
-        if entry.chain_index <= last_idx:
-            continue
-        if _entry_matches_sent(entry, contacts_sent):
-            continue
+    from modules.ai.brain.commerce.staff_contact_escalation_chain import (  # noqa: PLC0415
+        classify_contact_tier,
+        find_last_sent_chain_entry,
+        log_escalation_chain_resolve,
+        resolve_next_tiered_contact,
+    )
+
+    last_entry = find_last_sent_chain_entry(chain, contacts_sent)
+    last_tier = classify_contact_tier(last_entry) if last_entry else ""
+    last_idx = last_entry.chain_index if last_entry else -1
+
+    next_entry = resolve_next_tiered_contact(
+        chain,
+        contacts_sent,
+        allow_admin=True,
+    )
+    if next_entry is not None:
+        log_escalation_chain_resolve(
+            tenant_id=tenant_id,
+            trigger=trigger,
+            last_tier=last_tier,
+            selected=next_entry.lookup_name,
+            phone=next_entry.phone,
+            reason="next_in_tier_chain",
+        )
         log_staff_contact_fallback_resolve(
             tenant_id=tenant_id,
             trigger=trigger,
-            selected=entry.lookup_name,
-            phone=entry.phone,
-            section_id=entry.section_id,
-            reason="next_in_chain",
-            chain_index=entry.chain_index,
+            selected=next_entry.lookup_name,
+            phone=next_entry.phone,
+            section_id=next_entry.section_id,
+            reason="next_in_tier_chain",
+            chain_index=next_entry.chain_index,
             last_sent_index=last_idx,
         )
         return StaffContactFallbackVerdict(
             enabled=True,
             trigger=trigger,
-            reason="next_in_chain",
-            next_lookup_name=entry.lookup_name,
-            next_phone=entry.phone,
-            section_id=entry.section_id,
+            reason="next_in_tier_chain",
+            next_lookup_name=next_entry.lookup_name,
+            next_phone=next_entry.phone,
+            section_id=next_entry.section_id,
             chain_len=len(chain),
             last_sent_index=last_idx,
         )
 
+    log_escalation_chain_resolve(
+        tenant_id=tenant_id,
+        trigger=trigger,
+        last_tier=last_tier,
+        selected="",
+        phone="",
+        reason="chain_exhausted",
+    )
     log_staff_contact_fallback_resolve(
         tenant_id=tenant_id,
         trigger=trigger,
