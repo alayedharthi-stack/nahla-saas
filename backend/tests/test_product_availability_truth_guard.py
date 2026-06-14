@@ -259,7 +259,8 @@ class TestGuardEnforceMode:
         assert result.replaced is True
         assert "معلومات متعارضة" not in result.reply
         assert customer_facing_availability_reply_is_clean(result.reply)
-        assert "وش الخيار" in result.reply or "وش الحجم" in result.reply
+        assert "بعدة خيارات" in result.reply
+        assert "أبشر" not in result.reply
         assert result.reply == build_friendly_availability_conflict_reply(
             result.evidence,
             availability_context=_ctx(

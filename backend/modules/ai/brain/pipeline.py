@@ -2150,6 +2150,7 @@ class MerchantBrain:
                 product_title=_product_title,
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
+                turn_id=getattr(new_state, "turn", None),
                 post_guard_rewrite=bool(
                     _guard_replaced.get("product_availability_truth_guard")
                     or _guard_replaced.get("commerce_reply_quality_guard")
@@ -2158,10 +2159,61 @@ class MerchantBrain:
             if _crh.replaced:
                 reply = _crh.reply
                 _guard_replaced["commerce_reply_humanizer"] = True
+            result.data["humanizer_style_signature"] = _crh.style_signature
+            result.data["humanizer_emoji_bucket"] = _crh.emoji_bucket
+            result.data["humanizer_product_category"] = _crh.product_category
+            result.data["post_guard_rewrite_applied"] = _crh.post_guard_rewrite_applied
         except Exception as _crh_exc:  # noqa: BLE001
             logger.warning(
                 "[COMMERCE_REPLY_HUMANIZER] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _crh_exc,
+            )
+            _crh = None
+
+        try:
+            from modules.ai.brain.final_reply_source import (  # noqa: PLC0415
+                log_final_reply_source,
+                resolve_final_source,
+            )
+
+            log_final_reply_source(
+                tenant_id=tenant_id,
+                intent=str(getattr(intent, "name", "") or ""),
+                chosen_path=_chosen_path,
+                final_source=resolve_final_source(
+                    chosen_path=_chosen_path,
+                    guard_replaced=_guard_replaced,
+                    humanizer_changed=bool(
+                        _guard_replaced.get("commerce_reply_humanizer")
+                    ),
+                ),
+                llm_model=_model_used,
+                llm_provider=str(result.data.get("llm_provider") or ""),
+                truth_guard_changed=bool(
+                    _guard_replaced.get("product_availability_truth_guard")
+                ),
+                quality_guard_changed=bool(
+                    _guard_replaced.get("commerce_reply_quality_guard")
+                ),
+                humanizer_changed=bool(
+                    _guard_replaced.get("commerce_reply_humanizer")
+                ),
+                post_guard_rewrite_applied=bool(
+                    result.data.get("post_guard_rewrite_applied")
+                ),
+                product_category=str(
+                    result.data.get("humanizer_product_category") or ""
+                ),
+                emoji_bucket=str(result.data.get("humanizer_emoji_bucket") or ""),
+                style_signature=str(
+                    result.data.get("humanizer_style_signature") or ""
+                ),
+                reply_text=reply or "",
+            )
+        except Exception as _frs_exc:  # noqa: BLE001
+            logger.warning(
+                "[FINAL_REPLY_SOURCE] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _frs_exc,
             )
 
         # ── Persona ownership snapshot (measurement-only) ───────────────

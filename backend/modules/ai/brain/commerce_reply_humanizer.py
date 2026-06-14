@@ -13,7 +13,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from modules.ai.brain.intent_priority.types import (
     GOAL_PRICE_INQUIRY,
@@ -332,6 +332,10 @@ class CommerceReplyHumanizerResult:
     replaced: bool
     warmed_tone: bool
     added_emojis: bool
+    style_signature: str = ""
+    emoji_bucket: str = ""
+    product_category: str = ""
+    post_guard_rewrite_applied: bool = False
 
 
 def detect_product_category(
@@ -351,41 +355,66 @@ def pick_category_emojis_for_reply(
     product_title: str = "",
     inbound_text: str = "",
     limit: int = 2,
+    tenant_id: Optional[int] = None,
+    conversation_id: Optional[int] = None,
+    turn_id: Optional[int] = None,
+    intent_name: str = "",
 ) -> str:
-    """Up to ``limit`` emojis from product category — never hardcoded per SKU."""
+    """Seeded emoji pick — varies by conversation, not fixed per category."""
+    from modules.ai.brain.commerce_style_compose import (  # noqa: PLC0415
+        pick_emojis_for_style,
+        resolve_style_bundle,
+    )
+
     category = detect_product_category(
         f"{product_title} {inbound_text}".strip(),
         product_title=product_title,
     )
-    pool = EMOJI_BY_PRODUCT_CATEGORY.get(category) or EMOJI_BY_PRODUCT_CATEGORY["general"]
-    picked: List[str] = []
-    for emoji in pool:
-        if emoji not in picked:
-            picked.append(emoji)
-        if len(picked) >= max(1, limit):
-            break
-    return "".join(picked)
+    style = resolve_style_bundle(
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        intent_name=intent_name,
+        category=category,
+    )
+    emojis, _ = pick_emojis_for_style(
+        category=category,
+        style=style,
+        emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
+    )
+    if limit == 1 and emojis:
+        found = _EMOJI_RE.findall(emojis)
+        return found[0] if found else emojis
+    return emojis
 
 
 def variant_followup_for_product(
     *,
     product_title: str = "",
     inbound_text: str = "",
+    tenant_id: Optional[int] = None,
+    conversation_id: Optional[int] = None,
+    turn_id: Optional[int] = None,
+    intent_name: str = "",
 ) -> str:
-    """Category-aware variant follow-up — size/model/types, not product-specific text."""
+    """Seeded compositional follow-up — not a single fixed sentence."""
+    from modules.ai.brain.commerce_style_compose import (  # noqa: PLC0415
+        compose_followup_line,
+        resolve_style_bundle,
+    )
+
     category = detect_product_category(
         f"{product_title} {inbound_text}".strip(),
         product_title=product_title,
     )
-    if category in {"dress", "clothes", "abaya", "shoes", "bags"}:
-        return "وش المقاس أو الموديل اللي يناسبك؟"
-    if category in {"mobile", "electronics", "computer", "accessories"}:
-        return "وش الموديل اللي تبحث عنه؟"
-    if category in {"stationery", "books"}:
-        return "تحب أرسل لك الأنواع؟"
-    if category in {"honey", "food", "coffee", "dates"}:
-        return "وش الحجم اللي يناسبك؟"
-    return "وش الخيار اللي يناسبك؟"
+    style = resolve_style_bundle(
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        intent_name=intent_name,
+        category=category,
+    )
+    return compose_followup_line(style)
 
 
 def _normalize_for_match(text: str) -> str:
@@ -567,10 +596,26 @@ def _pick_emojis(
     speed_context: Optional[str] = None,
     existing_count: int,
     max_total: int = 2,
+    style_seed: int = 0,
 ) -> List[str]:
     slots = max(0, max_total - existing_count)
     if slots <= 0:
         return []
+
+    if speed_context and speed_context in FAST_DELIVERY_EMOJI:
+        allow_air = _allow_airplane_emoji(
+            inbound_text=inbound_text,
+            reply=reply,
+            speed_context=speed_context,
+        )
+        speed_candidates = _filter_fast_delivery_emojis(
+            FAST_DELIVERY_EMOJI[speed_context],
+            allow_airplane=allow_air,
+            purpose=purpose,
+            speed_context=speed_context,
+        )
+        if speed_context == "fast_delivery" and allow_air and speed_candidates:
+            return speed_candidates[:slots]
 
     candidates: List[str] = []
     allow_air = False
@@ -611,7 +656,11 @@ def _pick_emojis(
 
     picked: List[str] = []
     seen: set[str] = set()
-    for emoji in candidates:
+    ordered = candidates
+    if style_seed and candidates:
+        offset = style_seed % len(candidates)
+        ordered = candidates[offset:] + candidates[:offset]
+    for emoji in ordered:
         if emoji in seen:
             continue
         seen.add(emoji)
@@ -680,7 +729,12 @@ def _maybe_add_delivery_opener(text: str, *, purpose: str) -> Tuple[str, bool]:
     return stripped, False
 
 
-def _maybe_add_abshar_opener(text: str, *, purpose: str) -> Tuple[str, bool]:
+def _maybe_add_style_opener(
+    text: str,
+    *,
+    style: Any,
+    purpose: str,
+) -> Tuple[str, bool]:
     stripped = (text or "").strip()
     if not stripped or _has_warm_opener(stripped):
         return stripped, False
@@ -688,8 +742,16 @@ def _maybe_add_abshar_opener(text: str, *, purpose: str) -> Tuple[str, bool]:
         return stripped, False
     if _UNAVAILABLE_RE.search(stripped):
         return stripped, False
+    if style.opening_style == "direct":
+        return stripped, False
+    from modules.ai.brain.commerce_style_compose import _OPENING_BY_STYLE  # noqa: PLC0415
+
+    openers = _OPENING_BY_STYLE.get(style.opening_style) or _OPENING_BY_STYLE["warm"]
+    opener = openers[style.seed % len(openers)].strip()
+    if not opener:
+        return stripped, False
     if stripped.startswith("نعم") or _POSITIVE_AVAILABILITY_RE.search(stripped):
-        return f"أبشر، {stripped.lstrip('،, ')}", True
+        return f"{opener}، {stripped.lstrip('،, ')}", True
     return stripped, False
 
 
@@ -789,6 +851,7 @@ def apply_commerce_reply_humanizer(
     product_title: str = "",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    turn_id: Optional[int] = None,
     post_guard_rewrite: bool = False,
 ) -> CommerceReplyHumanizerResult:
     original = (reply or "").strip()
@@ -809,12 +872,59 @@ def apply_commerce_reply_humanizer(
             added_emojis=False,
         )
 
+    from modules.ai.brain.commerce_style_compose import (  # noqa: PLC0415
+        compose_personality_overlay,
+        pick_emojis_for_style,
+        resolve_style_bundle,
+    )
+
     purpose = _resolve_purpose(
         intent_name=intent_name,
         primary_customer_goal=primary_customer_goal,
         reply=original,
     )
     category = detect_product_category(original, product_title=product_title)
+    style = resolve_style_bundle(
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        intent_name=intent_name,
+        category=category,
+    )
+    emojis, emoji_bucket = pick_emojis_for_style(
+        category=category,
+        style=style,
+        emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
+    )
+
+    if post_guard_rewrite:
+        styled = compose_personality_overlay(
+            operational_fact=original,
+            style=style,
+            category=category,
+            emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
+            include_followup=True,
+        )
+        if styled and _facts_preserved(original, styled):
+            return CommerceReplyHumanizerResult(
+                reply=styled,
+                replaced=styled != original,
+                warmed_tone=True,
+                added_emojis=bool(emojis),
+                style_signature=style.style_signature,
+                emoji_bucket=emoji_bucket,
+                product_category=category,
+                post_guard_rewrite_applied=True,
+            )
+        return CommerceReplyHumanizerResult(
+            reply=original,
+            replaced=False,
+            warmed_tone=False,
+            added_emojis=False,
+            style_signature=style.style_signature,
+            emoji_bucket=emoji_bucket,
+            product_category=category,
+        )
 
     text = original
     warmed_tone = False
@@ -850,24 +960,43 @@ def apply_commerce_reply_humanizer(
         warmed_tone = True
         text = with_opener
     elif purpose != "delivery":
-        with_abshar, did_abshar = _maybe_add_abshar_opener(text, purpose=purpose)
-        if did_abshar:
+        with_opener, did_opener = _maybe_add_style_opener(
+            text,
+            style=style,
+            purpose=purpose,
+        )
+        if did_opener:
             warmed_tone = True
-            text = with_abshar
+            text = with_opener
 
     existing_emoji_count = _count_emojis(text)
-    emojis = _pick_emojis(
-        intent_name=intent_name,
-        purpose=purpose,
-        product_category=category,
-        reply=text,
-        inbound_text=inbound_text,
-        speed_context=speed_context,
-        existing_count=existing_emoji_count,
-    )
+    if speed_context and speed_context in FAST_DELIVERY_EMOJI:
+        style_emojis = _pick_emojis(
+            intent_name=intent_name,
+            purpose=purpose,
+            product_category=category,
+            reply=text,
+            inbound_text=inbound_text,
+            speed_context=speed_context,
+            existing_count=existing_emoji_count,
+            style_seed=style.seed,
+        )
+    elif emojis:
+        style_emojis = _EMOJI_RE.findall(emojis)
+    else:
+        style_emojis = _pick_emojis(
+            intent_name=intent_name,
+            purpose=purpose,
+            product_category=category,
+            reply=text,
+            inbound_text=inbound_text,
+            speed_context=speed_context,
+            existing_count=existing_emoji_count,
+            style_seed=style.seed,
+        )
     added_emojis = False
-    if emojis:
-        candidate = _inject_emojis(text, emojis)
+    if style_emojis:
+        candidate = _inject_emojis(text, style_emojis)
         if _count_emojis(candidate) <= 2 and _facts_preserved(original, candidate):
             text = candidate
             added_emojis = True
@@ -906,6 +1035,9 @@ def apply_commerce_reply_humanizer(
         replaced=replaced,
         warmed_tone=warmed_tone,
         added_emojis=added_emojis,
+        style_signature=style.style_signature,
+        emoji_bucket=emoji_bucket,
+        product_category=category,
     )
 
 

@@ -318,35 +318,36 @@ def _product_label_for_reply(
     return _label_from_inbound_availability_ask(inbound_text)
 
 
-def build_friendly_availability_conflict_reply(
+def build_operational_availability_conflict_reply(
     evidence: ProductAvailabilityEvidenceResult,
     *,
     availability_context: Optional[Dict[str, Any]] = None,
     inbound_text: str = "",
 ) -> str:
     """
-    Customer-facing rewrite for availability conflict / variant ambiguity.
+    Operational-only rewrite for availability conflict / variant ambiguity.
 
-    Internal conflict_type remains in logs only — never echoed to the customer.
+    Personality (warmth, emoji, follow-up wording) is applied later by the
+    commerce style composer — never here (Nahla doctrine).
     """
-    from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
-        pick_category_emojis_for_reply,
-        variant_followup_for_product,
-    )
-
     label = _product_label_for_reply(evidence, availability_context, inbound_text)
-    emojis = pick_category_emojis_for_reply(
-        product_title=label,
-        inbound_text=inbound_text,
-    )
-    followup = variant_followup_for_product(
-        product_title=label,
-        inbound_text=inbound_text,
-    )
-    emoji_suffix = f" {emojis}" if emojis else ""
     if label:
-        return f"أبشر، {label} متوفر{emoji_suffix}\n{followup}"
-    return f"أبشر، المنتج متوفر عندنا{emoji_suffix}\n{followup}"
+        return f"متوفر {label} بعدة خيارات."
+    return "متوفر بعدة خيارات."
+
+
+def build_friendly_availability_conflict_reply(
+    evidence: ProductAvailabilityEvidenceResult,
+    *,
+    availability_context: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+) -> str:
+    """Backward-compatible alias — operational facts only."""
+    return build_operational_availability_conflict_reply(
+        evidence,
+        availability_context=availability_context,
+        inbound_text=inbound_text,
+    )
 
 
 def _rewrite_for_action(
@@ -358,26 +359,18 @@ def _rewrite_for_action(
 ) -> str:
     if action in ("rewrite_conflict", "rewrite_false_negative", "rewrite_false_positive"):
         if evidence is not None:
-            return build_friendly_availability_conflict_reply(
+            return build_operational_availability_conflict_reply(
                 evidence,
                 availability_context=availability_context,
                 inbound_text=inbound_text,
             )
-        from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
-            pick_category_emojis_for_reply,
-            variant_followup_for_product,
-        )
-
-        emojis = pick_category_emojis_for_reply(inbound_text=inbound_text)
-        followup = variant_followup_for_product(inbound_text=inbound_text)
-        emoji_suffix = f" {emojis}" if emojis else ""
-        return f"أبشر، عندنا أكثر من خيار{emoji_suffix}\n{followup}"
+        return "متوفر بعدة خيارات."
     if action == "rewrite_unknown":
         label = ""
         if evidence is not None:
             label = _product_label_for_reply(evidence, availability_context, inbound_text)
         if label:
-            return f"{label} له أكثر من خيار، أي حجم تقصد؟"
+            return f"متوفر {label} بعدة خيارات."
         return _UNKNOWN_REPLY_AR
     return ""
 

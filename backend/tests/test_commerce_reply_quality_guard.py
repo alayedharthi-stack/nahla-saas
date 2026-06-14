@@ -50,7 +50,7 @@ class TestForbiddenResidue:
 
     def test_asil_only_branding_gets_arabic_fallback(self) -> None:
         out = _guard("Powered by Nahla", inbound="عسل")
-        assert out == "أبشر، وش المنتج أو المقاس اللي تقصده؟"
+        assert out == "حدّد المنتج أو المقاس المطلوب."
 
     def test_arabic_inbound_never_returns_let_me_verify(self) -> None:
         raw = (
@@ -68,7 +68,7 @@ class TestForbiddenResidue:
             "Let me verify the current availability for you.",
             inbound="\u0647\u0644 \u0639\u0646\u062f\u0643\u0645 \u0639\u0633\u0644 \u0637\u0644\u062d\u061f",
         )
-        assert out == "\u0623\u0628\u0634\u0631\u060c \u0623\u062a\u062d\u0642\u0642 \u0644\u0643 \u0645\u0646 \u0627\u0644\u062a\u0648\u0641\u0631. \u0623\u064a \u062d\u062c\u0645 \u062a\u0642\u0635\u062f\u061f"
+        assert out == "التوفر قيد التحقق."
 
 
 class TestCommerceFriendlyArabic:
@@ -86,8 +86,7 @@ class TestCommerceFriendlyArabic:
         out = _guard(raw, inbound="\u0645\u0648\u0642\u0639\u064a \u0627\u0644\u0631\u064a\u0627\u0636 \u062d\u064a \u0627\u0644\u0646\u0631\u062c\u0633")
         assert "Let me" not in out
         assert "same-day" not in out.lower()
-        assert "\u0623\u0628\u0634\u0631" in out
-        assert "\u062a\u0648\u0635\u064a\u0644" in out
+        assert "توصيل" in out
 
 
 class TestPromptSlimContract:
