@@ -15,7 +15,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple
 _OPENING_BY_STYLE: Dict[str, Tuple[str, ...]] = {
     "warm": ("أبشر", "تمام", "حاضر", "يا هلا"),
     "direct": ("", "نعم"),
-    "helpful": ("أكيد", "تام", "أبدر"),
+    "helpful": ("أكيد", "تام", "حاضر"),
 }
 
 _FOLLOWUP_STYLE_BY_CATEGORY: Dict[str, Tuple[str, ...]] = {
@@ -65,6 +65,12 @@ _FOLLOWUP_SLOTS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
         ("كم", "وش"),
         ("الكمية", "العدد"),
         ("تحتاج؟", "تبغى؟"),
+    ),
+    "options_list": (
+        ("تحب", "تبغى"),
+        ("أرسل", "أعرض"),
+        ("الخيارات", "الأنواع", "المتوفر"),
+        ("لك؟", "الحين؟"),
     ),
 }
 
@@ -172,22 +178,45 @@ def compose_personality_overlay(
     category: str,
     emoji_pools: Mapping[str, Sequence[str]],
     include_followup: bool = True,
+    inbound_text: str = "",
 ) -> str:
     """Layer personality on operational facts — varies by style seed."""
+    from modules.ai.brain.commerce.commerce_followup_policy import (  # noqa: PLC0415
+        followup_style_for_request,
+    )
+
     fact = (operational_fact or "").strip()
     if not fact:
         return fact
 
-    openers = _OPENING_BY_STYLE.get(style.opening_style) or _OPENING_BY_STYLE["warm"]
-    opener = openers[style.seed % len(openers)].strip()
+    effective_style = style
+    effective_style = style
+    if include_followup and inbound_text.strip():
+        followup_kind = followup_style_for_request(
+            inbound_text=inbound_text,
+            category=category,
+            seeded_style=style.followup_style,
+        )
+        if followup_kind != style.followup_style:
+            effective_style = StyleBundle(
+                opening_style=style.opening_style,
+                followup_style=followup_kind,
+                emoji_style=style.emoji_style,
+                sentence_order=style.sentence_order,
+                seed=style.seed,
+                style_signature=f"{style.style_signature}|req:{followup_kind}",
+            )
+
+    openers = _OPENING_BY_STYLE.get(effective_style.opening_style) or _OPENING_BY_STYLE["warm"]
+    opener = openers[effective_style.seed % len(openers)].strip()
     emojis, _bucket = pick_emojis_for_style(
         category=category,
-        style=style,
+        style=effective_style,
         emoji_pools=emoji_pools,
     )
-    followup = compose_followup_line(style) if include_followup else ""
+    followup = compose_followup_line(effective_style) if include_followup else ""
 
-    if style.sentence_order == "assist_first" and followup:
+    if effective_style.sentence_order == "assist_first" and followup:
         lead = followup
         if opener:
             lead = f"{opener}، {followup[0].lower() + followup[1:]}" if followup else opener

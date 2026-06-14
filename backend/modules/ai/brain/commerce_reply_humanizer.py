@@ -252,7 +252,7 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-_WARM_OPENERS = ("أبشر", "أبشري", "تمام", "حاضر", "يا هلا", "أكيد", "تام", "أبدر")
+_WARM_OPENERS = ("أبشر", "أبشري", "تمام", "حاضر", "يا هلا", "أكيد", "تام")
 
 _OPERATIONAL_AVAILABILITY_FACT_RE = re.compile(
     r"^(?:"
@@ -944,6 +944,7 @@ def apply_commerce_reply_humanizer(
             category=category,
             emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
             include_followup=True,
+            inbound_text=inbound_text,
         )
         if styled and _facts_preserved(original, styled):
             styled_emojis = bool(_EMOJI_RE.search(styled))

@@ -124,6 +124,9 @@ class AIOrchestratorEngine:
         audit_context = self._audit_context_from_request(request_obj)
         router_meta = dict(request_obj.prompt_overrides.get("__model_router") or {})
         block_anthropic_fallback = bool(router_meta.get("block_anthropic_fallback"))
+        router_tier = str(router_meta.get("tier") or "").strip().lower()
+        if router_tier == "cheap":
+            block_anthropic_fallback = True
 
         for provider_name in provider_chain.providers:
             if block_anthropic_fallback and provider_name == "anthropic":

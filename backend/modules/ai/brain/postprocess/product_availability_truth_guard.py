@@ -251,13 +251,19 @@ def _customer_product_label(title: str) -> str:
 
 
 def _label_from_inbound_availability_ask(inbound_text: str) -> str:
+    from modules.ai.brain.commerce.product_label_hygiene import (  # noqa: PLC0415
+        is_non_product_label,
+        normalize_label_text,
+    )
+
     raw = (inbound_text or "").strip()
     if not raw:
         return ""
     cleaned = _INBOUND_AVAIL_PREFIX_RE.sub("", raw)
     cleaned = _INBOUND_AVAIL_SUFFIX_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip("؟? ")
-    if 2 <= len(cleaned) <= 40:
+    cleaned = normalize_label_text(cleaned)
+    if 2 <= len(cleaned) <= 40 and not is_non_product_label(cleaned):
         return cleaned
     return ""
 
@@ -288,6 +294,8 @@ def _product_label_for_reply(
     availability_context: Optional[Dict[str, Any]],
     inbound_text: str,
 ) -> str:
+    from modules.ai.brain.commerce.product_label_hygiene import sanitize_product_label  # noqa: PLC0415
+
     ctx = availability_context or {}
     catalog_by_id = {
         int(p["id"]): p
@@ -296,14 +304,17 @@ def _product_label_for_reply(
     }
 
     focus = ctx.get("focus_product") or {}
+    focus_title = ""
     if isinstance(focus, dict):
-        title = str(focus.get("title") or "").strip()
-        if title:
-            return _customer_product_label(title)
+        focus_title = sanitize_product_label(str(focus.get("title") or ""))
+        if focus_title:
+            return focus_title
 
     pid = evidence.entity.product_id
     if pid is not None and pid in catalog_by_id:
-        return _customer_product_label(str(catalog_by_id[pid].get("title") or ""))
+        title = sanitize_product_label(str(catalog_by_id[pid].get("title") or ""))
+        if title:
+            return title
 
     family_key = str(evidence.entity.family_key or "").strip()
     if family_key and not family_key.startswith("inbound:"):
@@ -312,10 +323,12 @@ def _product_label_for_reply(
             if str(p.get("family_key") or "") == family_key
         ]
         label = _label_from_family_members(members, inbound_text)
+        label = sanitize_product_label(label, fallback=focus_title)
         if label:
             return label
 
-    return _label_from_inbound_availability_ask(inbound_text)
+    inbound_label = _label_from_inbound_availability_ask(inbound_text)
+    return sanitize_product_label(inbound_label, fallback=focus_title)
 
 
 def build_operational_availability_conflict_reply(

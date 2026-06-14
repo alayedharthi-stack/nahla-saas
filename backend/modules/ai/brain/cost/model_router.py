@@ -40,6 +40,18 @@ _ROUTER_FLAG = "NAHLA_MODEL_ROUTER_ENABLED"
 _COMPOSE_CHEAP_INTENTS = _CHEAP_INTENTS | frozenset({
     "product_availability",
     "product_reference",
+    "pick_list_item",
+    "evaluate_price",
+})
+
+_HARD_STANDARD_REASONS = frozenset({
+    "standard_intent",
+    "handoff_or_escalation_intent",
+    "order_payment_dispute",
+    "handoff_action",
+    "human_priority",
+    "complaint_or_dispute",
+    "staff_contact_goal",
 })
 
 _COMPOSE_CHEAP_GOALS = frozenset({
@@ -62,6 +74,8 @@ _ROUTINE_DAILY_COMMERCE_INTENTS = _COMPOSE_CHEAP_INTENTS | frozenset({
     "browse",
     "discover_products",
     "need_based_product_advice",
+    "pick_list_item",
+    "evaluate_price",
 })
 
 _ROUTINE_DAILY_COMMERCE_GOALS = _COMPOSE_CHEAP_GOALS | frozenset({
@@ -122,7 +136,8 @@ def is_model_router_enabled() -> bool:
 
 
 def _cheap_chain_override() -> Tuple[str, ...]:
-    return ("openai_compatible", "anthropic", "gemini")
+    """Cheap tier never falls back to Anthropic (cost guard)."""
+    return _cheap_chain_no_anthropic()
 
 
 def _cheap_chain_no_anthropic() -> Tuple[str, ...]:
@@ -284,6 +299,19 @@ def resolve_compose_model_route(
         reply_state=reply_state,
         result_data=result_data,
     )
+    primary_goal = str(getattr(reply_state, "primary_customer_goal", "") or "")
+    routine = is_routine_daily_commerce_compose(
+        intent_name=intent_name,
+        primary_customer_goal=primary_goal,
+    )
+    if (
+        needs_standard
+        and routine
+        and std_reason not in _HARD_STANDARD_REASONS
+    ):
+        needs_standard = False
+        std_reason = ""
+
     if needs_standard:
         standard = _env_tier_default(TIER_STANDARD)
         return ComposeModelRoute(
@@ -296,13 +324,8 @@ def resolve_compose_model_route(
             provider_chain_override=_standard_chain_override(),
         )
 
-    primary_goal = str(getattr(reply_state, "primary_customer_goal", "") or "")
     if _compose_is_cheap_intent(intent_name, primary_customer_goal=primary_goal):
         cheap = _env_tier_default(TIER_CHEAP)
-        routine = is_routine_daily_commerce_compose(
-            intent_name=intent_name,
-            primary_customer_goal=primary_goal,
-        )
         return ComposeModelRoute(
             enforced=True,
             tier=TIER_CHEAP,
@@ -310,10 +333,8 @@ def resolve_compose_model_route(
             model=str(cheap.suggested_model or "gpt-4o-mini"),
             reason="commerce_cheap_first",
             provider_hint="openai_compatible",
-            provider_chain_override=(
-                _cheap_chain_no_anthropic() if routine else _cheap_chain_override()
-            ),
-            block_anthropic_fallback=routine,
+            provider_chain_override=_cheap_chain_no_anthropic(),
+            block_anthropic_fallback=True,
         )
 
     # Router enabled but no cheap match — stay on standard (never premium).
@@ -350,7 +371,11 @@ def should_block_anthropic_compose_result(
     route: ComposeModelRoute,
     provider_used: str,
 ) -> bool:
-    """True when a routine-commerce cheap route must reject an Anthropic reply."""
-    if not route.enforced or not route.block_anthropic_fallback:
+    """Block Anthropic replies for cheap / routine-commerce compose routes."""
+    if not route.enforced:
         return False
-    return str(provider_used or "").strip().lower() == "anthropic"
+    if str(provider_used or "").strip().lower() != "anthropic":
+        return False
+    if route.tier == TIER_CHEAP or route.block_anthropic_fallback:
+        return True
+    return False
