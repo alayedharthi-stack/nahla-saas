@@ -636,6 +636,9 @@ async def provider_send_message(
     payload: Dict[str, Any],
     prefer_platform: bool = False,
     timeout: float = 20,
+    allow_manual: bool = False,
+    blocked_path: str = "provider_send_message",
+    automation_guard: bool = True,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
     send_payload = dict(payload or {})
     raw_to = str(send_payload.get("to") or "").strip()
@@ -675,6 +678,52 @@ async def provider_send_message(
                 ),
             )
         send_payload["to"] = formatted_to
+
+        if automation_guard and db is not None and tenant_id:
+            try:
+                from core.automation_send_guard import (  # noqa: PLC0415
+                    evaluate_automation_send,
+                )
+
+                _msg_type = str(send_payload.get("type") or "text").strip().lower()
+                _block = evaluate_automation_send(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=formatted_to,
+                    message_type=_msg_type,
+                    blocked_path=blocked_path or operation,
+                    allow_manual=allow_manual,
+                )
+                if _block.block:
+                    return (
+                        {
+                            "error": {
+                                "code": "automation_blocked",
+                                "type": "AutomationBlocked",
+                                "message": (
+                                    "Outbound send blocked: conversation under "
+                                    "human supervision or AI disabled"
+                                ),
+                            },
+                            "_nahla_classification": "automation_blocked",
+                            "_nahla_block_reason": _block.reason,
+                        },
+                        WhatsAppTokenContext(
+                            token="",
+                            source="automation_guard",
+                            token_status="skipped",
+                            expires_at=None,
+                            oauth_session_status="",
+                            oauth_session_message=None,
+                        ),
+                    )
+            except Exception as _guard_exc:  # noqa: BLE001
+                logger.warning(
+                    "[AUTOMATION_BLOCKED] guard check failed (non-fatal) "
+                    "tenant_id=%s err=%s",
+                    tenant_id,
+                    _guard_exc,
+                )
 
     ctx = await get_token_for_operation(
         db,

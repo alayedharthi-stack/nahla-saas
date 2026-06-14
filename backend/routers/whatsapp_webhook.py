@@ -11883,6 +11883,8 @@ async def _post_wa(
     _tenant_id: Optional[int] = None,
     _store_name: str = "unknown",
     _db=None,
+    _allow_manual: bool = False,
+    _blocked_path: str = "post_wa",
 ) -> bool:
     # ── External-research leakage guard (May 2026) ────────────────
     # Final scrubber for the May 2026 DuckDuckGo-leak incident: if any
@@ -12084,6 +12086,8 @@ async def _post_wa(
                 payload=payload,
                 prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
                 timeout=15,
+                allow_manual=_allow_manual,
+                blocked_path=_blocked_path or "post_wa",
             )
             token_tail = ctx.token[-6:] if ctx.token and len(ctx.token) >= 6 else "EMPTY"
             logger.info(
@@ -12205,6 +12209,8 @@ async def _post_wa(
                                     and getattr(wa_conn, "connection_type", None) == "direct"
                                 ),
                                 timeout=15,
+                                allow_manual=_allow_manual,
+                                blocked_path=_blocked_path or "post_wa",
                             )
                             logger.info(
                                 "[SEND_DEBUG] retry-after-register | tenant=%s phone_id=%s "
@@ -12552,11 +12558,14 @@ async def _try_send_catalog_product(
 async def _send_whatsapp_message(
     phone_id: str, to: str, text: str,
     _tenant_id: Optional[int] = None, _store_name: str = "unknown", _db=None,
+    _allow_manual: bool = False,
+    _blocked_path: str = "send_whatsapp_message",
 ) -> bool:
     return await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "text",
         "text": {"body": text},
-    }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db)
+    }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db,
+       _allow_manual=_allow_manual, _blocked_path=_blocked_path)
 
 
 async def _send_interactive_reply(

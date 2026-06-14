@@ -1811,6 +1811,8 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
             text=body.message,
             _tenant_id=tenant_id,
             _db=db,
+            _allow_manual=True,
+            _blocked_path="manual_reply",
         )
     except Exception as send_exc:
         _log.error(
