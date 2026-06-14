@@ -717,16 +717,20 @@ def faq_owner_contact(
     store_url: str = "",
     **_: Any,
 ) -> str:
-    lines = ["هذه وسائل التواصل المتاحة:"]
+    from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        MSG_CS_NOT_CONFIGURED,
+    )
+
     if contact_phone:
-        lines.append(f"- واتساب / هاتف: {contact_phone}")
+        return f"تقدر تتواصل معنا على: {contact_phone}"
+    lines = []
     if contact_email:
-        lines.append(f"- البريد: {contact_email}")
+        lines.append(f"البريد: {contact_email}")
     if store_url:
-        lines.append(f"- رابط المتجر: {store_url}")
-    if len(lines) == 1:
-        lines.append("حالياً لا توجد وسيلة تواصل مباشرة محفوظة، لكن يمكنني مساعدتك هنا أو تحويل طلبك للفريق.")
-    return "\n".join(lines)
+        lines.append(f"رابط المتجر: {store_url}")
+    if lines:
+        return "\n".join(lines)
+    return MSG_CS_NOT_CONFIGURED
 
 
 # ── Coupon ────────────────────────────────────────────────────────────────────

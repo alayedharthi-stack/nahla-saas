@@ -526,9 +526,7 @@ _HANDOFF_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 # (Tenant 33 owner explicitly said the AI must NOT clown-tone or
 # escalate falsely) — we acknowledge receipt without promising any
 # automated transfer.
-_HANDOFF_NEUTRAL_TEXT = (
-    "تمام 🌷 وصلت رسالتك، وسأخبر فريق المتجر ليتواصل معك في أقرب وقت ممكن."
-)
+_HANDOFF_NEUTRAL_TEXT = "تمام 🌷 وصلت رسالتك."
 
 
 def contains_handoff_promise(text: str) -> Optional[str]:
@@ -741,7 +739,7 @@ _PROMISE_REPLACEMENTS: Dict[str, str] = {
     # conversational and offers an actionable next step instead.
     ASSET_LINK:     "لحظة وأجيب لك التفاصيل 🌷",
     ASSET_BARCODE:  "خبّرنا بالمبلغ وسنوضّح لك طريقة الدفع المناسبة 🌷",
-    ASSET_PHONE:    "أبشر 🌷 ما ظهر لي رقم البائع لحظتها — أقدر أوصلك بالموقع أو أساعدك بأي شيء ثاني تحتاجه.",
+    ASSET_PHONE:    "حالياً لا يوجد رقم تواصل مهيأ لإرساله.",
     ASSET_LOCATION: "أبشر 🌷 الموقع ما طلع لي مباشرة، أقدر أرسل لك تفاصيل الفرع أو أساعدك بطريقة ثانية.",
 }
 
