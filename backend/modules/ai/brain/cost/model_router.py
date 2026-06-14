@@ -92,6 +92,7 @@ class ComposeModelRoute:
     reason: str
     provider_hint: str
     provider_chain_override: Optional[Tuple[str, ...]] = None
+    block_anthropic_fallback: bool = False
 
     def to_audit_dict(self) -> Dict[str, Any]:
         return {
@@ -111,6 +112,8 @@ class ComposeModelRoute:
         }
         if self.provider_chain_override:
             payload["provider_chain_override"] = list(self.provider_chain_override)
+        if self.block_anthropic_fallback:
+            payload["block_anthropic_fallback"] = True
         return payload
 
 
@@ -120,6 +123,11 @@ def is_model_router_enabled() -> bool:
 
 def _cheap_chain_override() -> Tuple[str, ...]:
     return ("openai_compatible", "anthropic", "gemini")
+
+
+def _cheap_chain_no_anthropic() -> Tuple[str, ...]:
+    """Routine daily commerce — never fall back to Anthropic full-prompt calls."""
+    return ("openai_compatible", "gemini")
 
 
 def _standard_chain_override() -> Tuple[str, ...]:
@@ -291,6 +299,10 @@ def resolve_compose_model_route(
     primary_goal = str(getattr(reply_state, "primary_customer_goal", "") or "")
     if _compose_is_cheap_intent(intent_name, primary_customer_goal=primary_goal):
         cheap = _env_tier_default(TIER_CHEAP)
+        routine = is_routine_daily_commerce_compose(
+            intent_name=intent_name,
+            primary_customer_goal=primary_goal,
+        )
         return ComposeModelRoute(
             enforced=True,
             tier=TIER_CHEAP,
@@ -298,7 +310,10 @@ def resolve_compose_model_route(
             model=str(cheap.suggested_model or "gpt-4o-mini"),
             reason="commerce_cheap_first",
             provider_hint="openai_compatible",
-            provider_chain_override=_cheap_chain_override(),
+            provider_chain_override=(
+                _cheap_chain_no_anthropic() if routine else _cheap_chain_override()
+            ),
+            block_anthropic_fallback=routine,
         )
 
     # Router enabled but no cheap match — stay on standard (never premium).
@@ -328,3 +343,14 @@ def compose_route_skips_llm(
         social_category=social_category,
     )
     return suggestion.tier == TIER_NONE
+
+
+def should_block_anthropic_compose_result(
+    *,
+    route: ComposeModelRoute,
+    provider_used: str,
+) -> bool:
+    """True when a routine-commerce cheap route must reject an Anthropic reply."""
+    if not route.enforced or not route.block_anthropic_fallback:
+        return False
+    return str(provider_used or "").strip().lower() == "anthropic"

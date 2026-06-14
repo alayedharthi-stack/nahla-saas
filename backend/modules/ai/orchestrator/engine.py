@@ -122,8 +122,18 @@ class AIOrchestratorEngine:
         observer = ChainObserver(provider_chain.providers)
         request_obj = self._coerce_request(request)
         audit_context = self._audit_context_from_request(request_obj)
+        router_meta = dict(request_obj.prompt_overrides.get("__model_router") or {})
+        block_anthropic_fallback = bool(router_meta.get("block_anthropic_fallback"))
 
         for provider_name in provider_chain.providers:
+            if block_anthropic_fallback and provider_name == "anthropic":
+                logger.info(
+                    "[engine] provider_chain: skipping anthropic — "
+                    "blocked for routine commerce"
+                )
+                observer.record_skipped(provider_name, "blocked_routine_commerce")
+                continue
+
             provider = get_provider(provider_name)
 
             if provider is None:
@@ -203,6 +213,20 @@ class AIOrchestratorEngine:
                 provider_name,
             )
             observer.record_call(provider_name, _duration_ms, "empty_reply")
+
+        if block_anthropic_fallback:
+            logger.info(
+                "[engine] provider_chain: all providers exhausted — "
+                "anthropic fallback blocked for routine commerce"
+            )
+            observer.finalize(final_provider=None, fallback_used=False)
+            return {
+                "reply_text": "",
+                "provider": "",
+                "model": "",
+                "status": "blocked_anthropic_fallback",
+                "anthropic_fallback_blocked": True,
+            }
 
         # All chain providers exhausted — preserve existing fallback semantics
         logger.debug(

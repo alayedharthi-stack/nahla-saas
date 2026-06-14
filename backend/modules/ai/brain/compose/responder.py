@@ -1243,6 +1243,45 @@ class DefaultComposer:
 
             reply_text = (payload.reply_text or "").strip()
             if reply_text:
+                from ..cost.model_router import should_block_anthropic_compose_result  # noqa: PLC0415
+
+                if should_block_anthropic_compose_result(
+                    route=_compose_route,
+                    provider_used=str(payload.provider_used or ""),
+                ):
+                    log_model_router_decision(
+                        tenant_id=ctx.tenant_id,
+                        intent=_intent_name,
+                        selected_tier=_compose_route.tier,
+                        selected_provider=str(payload.provider_used or ""),
+                        selected_model=str(
+                            (payload.metadata or {}).get("model") or ""
+                        ),
+                        provider_hint=_provider_hint,
+                        fallback_used=True,
+                        reason_code="anthropic_blocked_routine_commerce",
+                        commerce_slim_applied=_slim_applied,
+                        prompt_chars=len(prompt),
+                        state_topic_shift=bool(_slim_meta.get("state_topic_shift")),
+                        checkout_relevant=bool(_slim_meta.get("checkout_relevant")),
+                        extra={
+                            "fallback_blocked_for_routine_commerce": True,
+                            "legacy_path_used": False,
+                        },
+                    )
+                    logger.warning(
+                        "[Composer._llm_compose] anthropic reply blocked for "
+                        "routine commerce | tenant=%s intent=%s",
+                        ctx.tenant_id,
+                        _intent_name,
+                    )
+                    return await self._thin_compose_retry(
+                        ctx,
+                        result,
+                        reply_state=reply_state,
+                        timeout_seconds=15,
+                    )
+
                 result.data["chosen_path"] = "llm"
                 result.data["llm_provider"] = payload.provider_used
                 result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
@@ -1382,6 +1421,34 @@ class DefaultComposer:
         )
         reply_text = (payload.reply_text or "").strip()
         if reply_text:
+            from ..cost.model_router import should_block_anthropic_compose_result  # noqa: PLC0415
+
+            if should_block_anthropic_compose_result(
+                route=route,
+                provider_used=str(payload.provider_used or ""),
+            ):
+                log_model_router_decision(
+                    tenant_id=ctx.tenant_id,
+                    intent=intent_name,
+                    selected_tier=route.tier,
+                    selected_provider=str(payload.provider_used or ""),
+                    selected_model=str((payload.metadata or {}).get("model") or ""),
+                    provider_hint=provider_hint,
+                    fallback_used=True,
+                    reason_code="anthropic_blocked_routine_commerce",
+                    commerce_slim_applied=slim_applied,
+                    prompt_chars=len(prompt),
+                    state_topic_shift=bool(slim_meta.get("state_topic_shift")),
+                    checkout_relevant=bool(slim_meta.get("checkout_relevant")),
+                    extra={
+                        "fallback_blocked_for_routine_commerce": True,
+                        "thin_retry_used": True,
+                        "legacy_path_used": False,
+                    },
+                )
+                result.data["chosen_path"] = "llm_fallback_failed"
+                return T.generic_fallback(variant=self._variant_idx(ctx))
+
             result.data["chosen_path"] = "llm_thin_retry"
             result.data["llm_provider"] = payload.provider_used
             result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
