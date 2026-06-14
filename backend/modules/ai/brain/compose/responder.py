@@ -346,9 +346,12 @@ class DefaultComposer:
             # WA quick-reply buttons are capped at 3 (platform limit).
             wa_buttons = []
             for i, p in enumerate(candidates[:3], 1):
+                from core.product_button_label import (  # noqa: PLC0415
+                    compact_whatsapp_product_button_title,
+                )
+
                 raw_title = str(p.get("title") or "")
-                price_str = f" {p['price']} ر" if p.get("price") else ""
-                title = (raw_title[:17] + price_str)[:20] if price_str else raw_title[:20]
+                title = compact_whatsapp_product_button_title(raw_title)
                 wa_buttons.append({
                     "type": "reply",
                     "reply": {"id": f"pick_{i}", "title": title or str(i)},
