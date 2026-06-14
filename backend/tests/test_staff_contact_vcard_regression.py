@@ -252,7 +252,7 @@ def test_bare_named_contact_sends_vcard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_call_resolver(monkeypatch)
-    staff = "موظف أ"
+    staff = "هيثم"
     db = _StubDB([_Section(id=2, kind="custom", body=f"{staff}: 0503333333")])
     decision = evaluate_staff_contact_policy(
         db, tenant_id=10, message=staff,

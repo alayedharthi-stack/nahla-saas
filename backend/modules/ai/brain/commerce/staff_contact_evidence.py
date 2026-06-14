@@ -288,6 +288,19 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
     if not raw:
         return StaffContactRequest(kind="none")
 
+    try:
+        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            should_defer_staff_contact_policy,
+        )
+
+        if should_defer_staff_contact_policy(raw):
+            return StaffContactRequest(kind="none")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_EVIDENCE] contact_route_policy_failed err=%s",
+            exc,
+        )
+
     norm = _norm(raw)
     if _PAYMENT_OR_NON_STAFF_RE.search(norm):
         return StaffContactRequest(kind="none")
@@ -318,9 +331,9 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
     if _CONTACT_ASK_RE.search(norm):
         return StaffContactRequest(kind="named")
 
-    # Bare configured-name ping ("هشام") — short-circuit before brain/LLM.
+    # Single-token bare configured name only ("هشام") — not generic phrases.
     words = norm.split()
-    if 1 <= len(words) <= 2 and len(norm) >= 2:
+    if len(words) == 1 and len(norm) >= 2:
         return StaffContactRequest(kind="named")
 
     return StaffContactRequest(kind="none")

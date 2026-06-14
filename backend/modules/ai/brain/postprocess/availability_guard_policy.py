@@ -7,9 +7,12 @@ Keeps operational rewrite decisions tenant-agnostic — no canned reply text.
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any, Optional
+
+logger = logging.getLogger("nahla.brain.availability_guard_policy")
 
 _BROWSE_ALTERNATIVES_PHRASES = (
     "وش غيرها",
@@ -71,8 +74,17 @@ def inbound_exempt_from_availability_rewrite(message: str) -> bool:
     if browse_alternatives_requested(raw):
         return True
     try:
-        from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
-            detect_solution_seeking_suppression,
+        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            is_arrival_or_visit_signal,
+            is_location_query,
+        )
+
+        if is_location_query(raw) or is_arrival_or_visit_signal(raw):
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[AVAILABILITY_GUARD] contact_route_policy_check_failed err=%s",
+            exc,
         )
 
         topic = detect_solution_seeking_suppression(raw, skip_recent_topic=True)

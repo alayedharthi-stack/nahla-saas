@@ -6407,6 +6407,67 @@ async def _handle_merchant_message(
                 _sync_persona_observability()
                 return
 
+        # ── Location link policy (pre-brain) ──────────────────────────────
+        # Physical location asks must never enter staff escalation policy.
+        _llp_decision = None
+        try:
+            from modules.ai.brain.commerce.location_link_policy import (  # noqa: PLC0415
+                evaluate_location_link_policy as _evaluate_location_link_policy,
+            )
+            _llp_decision = _evaluate_location_link_policy(
+                db,
+                tenant_id=tenant_id,
+                message=text or "",
+            )
+        except Exception as _llp_exc:  # noqa: BLE001
+            logger.warning(
+                "[LOCATION_LINK_POLICY] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _llp_exc,
+            )
+            _llp_decision = None
+
+        if _llp_decision is not None:
+            _llp_reply = _llp_decision.reply_text
+            try:
+                _llp_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=_llp_reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                StateManager.save_message(
+                    db, to, _llp_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": "location_link_policy",
+                        "location_link_policy_reason": _llp_decision.reason,
+                        "location_maps_source": _llp_decision.source,
+                    },
+                )
+            except Exception as _llp_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[LOCATION_LINK_POLICY] send failed tenant=%s err=%s",
+                    tenant_id, _llp_send_exc,
+                )
+                _llp_ok = False
+            logger.info(
+                "[LOCATION_LINK_POLICY] short_circuit tenant=%s deliver=%s "
+                "text_ok=%s skip_brain=true",
+                tenant_id, bool(_llp_decision.maps_url), _llp_ok,
+            )
+            try:
+                _trace.fallback_source = "location_link_policy"
+                _trace.response_goal = "store_location"
+                _trace.intent = "ask_location"
+                if _llp_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN,
+                        length=len(_llp_reply or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            _sync_persona_observability()
+            return
+
         # ── Staff contact policy (Phase A) ────────────────────────────────
         # Explicit CS / named contact asks — deterministic evidence only.
         _scp_decision = None
@@ -6901,9 +6962,12 @@ async def _handle_merchant_message(
                                     (convo.extra_metadata or {}).get("brain_state") or {}
                                 )
                                 _matched_action = str(_bs_dbg.get("last_action") or "")
-                            except Exception:  # noqa: BLE001
-                                pass
-                            _wamid_dbg = ""
+                            except Exception as _bs_dbg_exc:  # noqa: BLE001
+                                logger.debug(
+                                    "[BRAIN_SILENT_REPLY] brain_state_debug_read_failed err=%s",
+                                    _bs_dbg_exc,
+                                )
+                                _matched_action = ""
                             try:
                                 _wamid_dbg = str(
                                     ((value or {}).get("messages") or [{}])[0].get("id")
