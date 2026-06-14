@@ -897,7 +897,7 @@ def test_reply_driven_trigger_no_misfire_on_unrelated_reply(
         db=db, tenant_id=33,
     )
     assert result.fired is False
-    assert result.skipped_reason == "no_staff_intent"
+    assert result.skipped_reason in {"no_staff_intent", "commerce_deferred"}
 
 
 def test_staff_contact_graph_trace_emits_each_turn(

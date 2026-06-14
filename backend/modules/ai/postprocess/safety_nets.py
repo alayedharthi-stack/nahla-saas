@@ -1716,17 +1716,46 @@ def apply_staff_contact_safety_net(
             history=_history_list,
         )
         _contacts_sent = parse_staff_contacts_sent(staff_contacts_sent)
+        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            has_explicit_contact_intent,
+            is_explicit_arrival_intent,
+            should_defer_contact_policies_for_commerce,
+        )
     except Exception:  # noqa: BLE001
         _arrival_policy = None
         _store_arrival = None
         _employee_not_responding = None
         _location_branch_failure = None
         _contacts_sent = []
+        has_explicit_contact_intent = None  # type: ignore[assignment,misc]
+        is_explicit_arrival_intent = None  # type: ignore[assignment,misc]
+        should_defer_contact_policies_for_commerce = None  # type: ignore[assignment,misc]
+
+    if (
+        should_defer_contact_policies_for_commerce is not None
+        and should_defer_contact_policies_for_commerce(customer_msg or "")
+        and _employee_not_responding is None
+        and not (
+            has_explicit_contact_intent is not None
+            and has_explicit_contact_intent(customer_msg or "")
+        )
+    ):
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
+            "reason=commerce_deferred preview=%r",
+            int(tenant_id or 0),
+            (customer_msg or "")[:48],
+        )
+        result.skipped_reason = "commerce_deferred"
+        return result
 
     _policy_allowed = bool(
         _arrival_policy is not None and _arrival_policy.allowed
     )
-    _arrival_signal = _store_arrival is not None
+    _arrival_signal = bool(
+        is_explicit_arrival_intent is not None
+        and is_explicit_arrival_intent(customer_msg or "")
+    )
     _arrival_gated_intent = _arrival_signal and _policy_allowed
 
     if _location_branch_failure is not None:
@@ -1773,6 +1802,15 @@ def apply_staff_contact_safety_net(
     )
     reply_has_digits = bool(_extract_phones(reply_text or ""))
     reply_offer = bool(reply_offer_verb and reply_offer_name)
+    if (
+        reply_offer
+        and should_defer_contact_policies_for_commerce is not None
+        and should_defer_contact_policies_for_commerce(customer_msg or "")
+        and _employee_not_responding is None
+    ):
+        reply_offer = False
+        reply_offer_verb = ""
+        reply_offer_name = ""
     if not customer_intent:
         if not reply_offer:
             if _employee_not_responding is not None:

@@ -141,10 +141,14 @@ def evaluate_arrival_contact_delivery(
         return None
 
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
-        is_arrival_or_visit_signal,
+        is_explicit_arrival_intent,
+        should_defer_contact_policies_for_commerce,
     )
 
-    if not is_arrival_or_visit_signal(message or ""):
+    if should_defer_contact_policies_for_commerce(message or ""):
+        return None
+
+    if not is_explicit_arrival_intent(message or ""):
         return None
 
     evidence = resolve_arrival_contact_evidence(db, int(tenant_id or 0))

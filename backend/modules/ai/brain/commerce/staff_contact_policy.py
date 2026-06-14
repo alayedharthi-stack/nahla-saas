@@ -61,8 +61,16 @@ def evaluate_staff_contact_policy(
         resolve_staff_contact,
     )
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+        should_defer_contact_policies_for_commerce,
         staff_policy_applies_to_named_request,
     )
+
+    if should_defer_contact_policies_for_commerce(message or ""):
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=commerce_flow",
+            tenant_id,
+        )
+        return None
 
     request = classify_staff_contact_request(message or "")
     if request.kind in {"none", "arrival", "not_responding"}:
@@ -130,6 +138,8 @@ def evaluate_staff_contact_policy(
         "[STAFF_CONTACT_POLICY] tenant=%s kind=%s deliver=false reason=%s",
         tenant_id, request.kind, resolution.reason,
     )
+    if should_defer_contact_policies_for_commerce(message or ""):
+        return None
     return StaffContactPolicyDecision(
         reply_text=build_not_configured_reply(resolution),
         deliver_contact=False,
