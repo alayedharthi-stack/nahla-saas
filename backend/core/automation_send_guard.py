@@ -162,8 +162,8 @@ def should_block_automation_for_conversation(
     try:
         if conversation_handoff_active(db, convo):
             return AutomationBlockDecision(block=True, reason=REASON_HUMAN_TAKEOVER)
-    except Exception as exc:
-        logger.debug("[AUTOMATION_BLOCKED] handoff_active check failed: %s", exc)
+    except Exception:
+        logger.exception("[AUTOMATION_SEND_GUARD] handoff_active check failed")
 
     return AutomationBlockDecision(block=False)
 

@@ -50,7 +50,7 @@ def log_model_router_decision(
                     payload[key] = value
         payload = {k: v for k, v in payload.items() if v is not None}
         _log.info("[MODEL_ROUTER_DECISION] %s", json.dumps(payload, ensure_ascii=False))
-    except Exception:  # noqa: BLE001 — audit must never break compose
+    except Exception:  # noqa: silent-ok — audit must never break compose
         pass
 
 
