@@ -235,8 +235,8 @@ def test_not_responding_advances_only_with_prior_sent(
 ) -> None:
     _install_call_resolver(monkeypatch)
     sections = [
-        _Section(id=1, kind="custom", body="البائع الأول: 0506666666"),
-        _Section(id=2, kind="custom", body="البائع الثاني: 0507777777"),
+        _Section(id=1, kind="custom", body="بائع المعرض: 0506666666"),
+        _Section(id=2, kind="escalation_rules", body="خدمة العملاء: 0507777777"),
     ]
     db = _StubDB(sections)
     recovery = evaluate_staff_contact_recovery(
@@ -245,7 +245,7 @@ def test_not_responding_advances_only_with_prior_sent(
         phone="966500000001",
         message="ما يرد",
         contacts_sent_raw=[{
-            "name": "البائع الأول",
+            "name": "بائع المعرض",
             "phone": "966506666666",
             "turn": 1,
         }],

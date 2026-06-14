@@ -398,6 +398,9 @@ MSG_ESCALATION_NOT_CONFIGURED = (
 MSG_NO_NEXT_ESCALATION = (
     "حالياً لا يوجد رقم تصعيد إضافي مهيّأ لهذا المتجر."
 )
+MSG_CONTACT_CARD_FAILED = (
+    "تعذّر إرسال بطاقة التواصل حالياً. حاول مرة أخرى."
+)
 
 _ROLE_DISPLAY_LABELS: Dict[str, str] = {
     "customer_service": "خدمة العملاء",
@@ -508,6 +511,7 @@ __all__ = [
     "MSG_ESCALATION_NOT_CONFIGURED",
     "MSG_NAME_NOT_CONFIGURED",
     "MSG_NO_NEXT_ESCALATION",
+    "MSG_CONTACT_CARD_FAILED",
     "StaffContactRecord",
     "StaffContactRegistry",
     "StaffContactRequest",

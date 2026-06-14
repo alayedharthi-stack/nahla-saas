@@ -26,6 +26,8 @@ class LocationLinkPolicyDecision:
     maps_url: str = ""
     source: str = ""
     reason: str = ""
+    cta_button_label: str = ""
+    use_cta: bool = False
 
 
 def evaluate_location_link_policy(
@@ -60,15 +62,27 @@ def evaluate_location_link_policy(
 
     maps_url, source = _lookup_tenant_maps_url(db, int(tenant_id or 0))
     if maps_url:
+        cta_label = "موقع المتجر"
+        use_cta = True
+        try:
+            from core.wa_link_buttons import classify_url  # noqa: PLC0415
+
+            cls = classify_url(maps_url)
+            if cls.button_title:
+                cta_label = cls.button_title
+        except Exception:  # noqa: BLE001
+            pass
         logger.info(
-            "[LOCATION_LINK_POLICY] tenant=%s deliver=true source=%s",
+            "[LOCATION_LINK_POLICY] tenant=%s deliver=true source=%s use_cta=true",
             tenant_id, source or "-",
         )
         return LocationLinkPolicyDecision(
-            reply_text=_build_location_reply(maps_url),
+            reply_text="موقعنا 📍",
             maps_url=maps_url,
             source=source or "",
             reason="maps_url_configured",
+            cta_button_label=cta_label,
+            use_cta=use_cta,
         )
 
     logger.info(

@@ -1885,6 +1885,7 @@ def apply_staff_contact_safety_net(
     name = ""
     name_source = ""
     _fallback_prefill_phone = ""
+    _arrival_prefill_phone = ""
     _fallback_section_kind = ""
     _fallback_section_id = ""
     if _fallback_trigger:
@@ -1927,26 +1928,36 @@ def apply_staff_contact_safety_net(
                 tenant_id, _fb_exc,
             )
 
-    # When the trigger came from a reply-side offer, the offered
-    # name IS the resolver target — short-circuit the pool scan so
-    # we don't accidentally pick a different candidate that happens
-    # to also appear in history (e.g. an older question about
-    # "خالد"). When the trigger came from the customer side the
-    # canonical pool order applies.
-    if not name and reply_offer_name:
-        name, name_source = reply_offer_name, "reply_offer"
-    elif not name:
-        name, name_source = _find_staff_name_in_pool(
-            msg_norm, reply_norm,
-            history_bot_norm, history_customer_norm,
-            candidates=_alias_candidates,
-        )
-    if not name and db is not None and tenant_id:
-        _ev_name = _evidence_backed_name_from_message(
-            db, int(tenant_id), msg_norm,
-        )
-        if _ev_name:
-            name, name_source = _ev_name, "customer_msg_kb_backed"
+    # Arrival showroom evidence — must win over LLM reply_offer (CS names).
+    if (
+        not name
+        and _arrival_gated_intent
+        and not _fallback_trigger
+        and db is not None
+        and tenant_id
+    ):
+        try:
+            from modules.ai.brain.commerce.arrival_contact_delivery_policy import (  # noqa: PLC0415
+                resolve_arrival_contact_evidence,
+            )
+
+            _arrival_ev = resolve_arrival_contact_evidence(db, int(tenant_id))
+            if _arrival_ev is not None and _arrival_ev.phone:
+                name = _arrival_ev.lookup_name
+                name_source = "arrival_evidence"
+                _arrival_prefill_phone = _arrival_ev.phone
+                logger.info(
+                    "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=True "
+                    "source=arrival_evidence name_chars=%d",
+                    int(tenant_id or 0),
+                    len(name),
+                )
+        except Exception as _arrival_ev_exc:  # noqa: BLE001
+            logger.debug(
+                "safety_nets.staff | arrival_evidence failed tenant=%s err=%s",
+                tenant_id, _arrival_ev_exc,
+            )
+
     if (
         not name
         and _arrival_gated_intent
@@ -1967,6 +1978,32 @@ def apply_staff_contact_safety_net(
                 int(tenant_id or 0),
                 len(name),
             )
+
+    # Reply-side LLM offers must NOT override arrival showroom evidence.
+    if not name and reply_offer_name and not _arrival_gated_intent:
+        name, name_source = reply_offer_name, "reply_offer"
+    elif not name:
+        name, name_source = _find_staff_name_in_pool(
+            msg_norm, reply_norm,
+            history_bot_norm, history_customer_norm,
+            candidates=_alias_candidates,
+        )
+    if not name and db is not None and tenant_id:
+        _ev_name = _evidence_backed_name_from_message(
+            db, int(tenant_id), msg_norm,
+        )
+        if _ev_name:
+            name, name_source = _ev_name, "customer_msg_kb_backed"
+
+    if _arrival_gated_intent and not _fallback_trigger and not name:
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=name_lookup hit=False "
+            "source=arrival_gated reason=no_arrival_evidence",
+            int(tenant_id or 0),
+        )
+        result.skipped_reason = "arrival_no_evidence"
+        return result
+
     if not name:
         if _employee_not_responding is not None:
             log_contact_escalation(
@@ -1997,10 +2034,15 @@ def apply_staff_contact_safety_net(
     )
 
     # ── Layer 1: reply scan (canonical path) ────────────────────
-    raw_phone = _fallback_prefill_phone
+    raw_phone = _fallback_prefill_phone or _arrival_prefill_phone
     source = ""
     if raw_phone:
-        source = f"kb:{_fallback_section_kind}" if _fallback_section_kind else "fallback_v0"
+        if _fallback_section_kind:
+            source = f"kb:{_fallback_section_kind}"
+        elif _arrival_prefill_phone:
+            source = "arrival_evidence"
+        else:
+            source = "fallback_v0"
         logger.info(
             "[STAFF_CONTACT_RESOLVER] tenant_id=%s source=%s "
             "name_len=%d phone_match=%s section_id=%s",
