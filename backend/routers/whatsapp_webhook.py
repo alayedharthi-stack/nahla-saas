@@ -5472,6 +5472,29 @@ async def _handle_merchant_message(
         _do_create_session     = _ho_policy["do_create_session"]
         _do_pause_ai           = _ho_policy["do_pause_ai"]
 
+        _handoff_vcard_target = None
+        if (
+            not _is_owner_contact
+            and _ho_tier == _GENERIC_HANDOFF_TIER
+            and not _is_post_pay_mod
+        ):
+            try:
+                from modules.ai.brain.commerce.staff_contact_policy import (  # noqa: PLC0415
+                    evaluate_generic_handoff_contact_policy as _eval_gh_policy,
+                )
+                _gh_policy = _eval_gh_policy(
+                    db, tenant_id=tenant_id, message=text or "",
+                )
+                if _gh_policy is not None:
+                    _HANDOFF_ACK_TEXT = _gh_policy.reply_text
+                    if _gh_policy.deliver_contact:
+                        _handoff_vcard_target = _gh_policy.call_target
+            except Exception as _gh_pol_exc:  # noqa: BLE001
+                logger.debug(
+                    "[Merchant/HANDOFF_GUARD] generic contact policy failed: %s",
+                    _gh_pol_exc,
+                )
+
         logger.info(
             "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
             "to=%s text_snippet=%r owner_contact=%s tier=%s "
@@ -5542,6 +5565,24 @@ async def _handle_merchant_message(
                 text=_HANDOFF_ACK_TEXT,
                 _tenant_id=tenant_id, _db=db,
             )
+            if _handoff_vcard_target is not None and _staff_call_marker_enabled():
+                try:
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _ho_build_contacts,
+                    )
+                    _ho_payload = _ho_build_contacts(
+                        [_handoff_vcard_target], to=to,
+                    )
+                    await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_ho_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                except Exception as _ho_card_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Merchant/HANDOFF_GUARD] vCard send failed | tenant=%s err=%s",
+                        tenant_id, _ho_card_exc,
+                    )
             _trace.mark_outbound_sent(
                 source="pre_brain_handoff",
                 length=len(_HANDOFF_ACK_TEXT),
@@ -6366,6 +6407,126 @@ async def _handle_merchant_message(
                 _sync_persona_observability()
                 return
 
+        # ── Staff contact policy (Phase A) ────────────────────────────────
+        # Explicit CS / named contact asks — deterministic evidence only.
+        _scp_decision = None
+        try:
+            from modules.ai.brain.commerce.staff_contact_policy import (  # noqa: PLC0415
+                evaluate_staff_contact_policy as _evaluate_staff_contact_policy,
+            )
+            _scp_decision = _evaluate_staff_contact_policy(
+                db,
+                tenant_id=tenant_id,
+                message=text or "",
+            )
+        except Exception as _scp_exc:  # noqa: BLE001
+            logger.warning(
+                "[STAFF_CONTACT_POLICY] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _scp_exc,
+            )
+            _scp_decision = None
+
+        if _scp_decision is not None:
+            _persona_ownership.mark_bypass(
+                _POReason.STAFF_CONTACT_RECOVERY,
+                owner="staff_contact_policy",
+            )
+            _scp_reply = _scp_decision.reply_text
+            _scp_text_ok = False
+            try:
+                _scp_text_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=_scp_reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                StateManager.save_message(
+                    db, to, _scp_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": "staff_contact_policy",
+                        "staff_contact_policy_kind": _scp_decision.request_kind,
+                        "staff_contact_policy_reason": _scp_decision.reason,
+                        "staff_contact_evidence_source": _scp_decision.evidence_source,
+                    },
+                )
+            except Exception as _scp_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[STAFF_CONTACT_POLICY] text send failed tenant=%s err=%s",
+                    tenant_id, _scp_send_exc,
+                )
+
+            _scp_contacts_ok = False
+            if (
+                _scp_decision.deliver_contact
+                and _scp_decision.call_target is not None
+                and _staff_call_marker_enabled()
+            ):
+                try:
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _scp_build_contacts,
+                    )
+                    _scp_payload = _scp_build_contacts(
+                        [_scp_decision.call_target], to=to,
+                    )
+                    _scp_contacts_ok = await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_scp_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    if _scp_contacts_ok:
+                        try:
+                            from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                                persist_staff_contact_sent,
+                            )
+                            from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+                            _scp_conv, _scp_bs = _load_brain_state(
+                                db, tenant_id=tenant_id, phone=to,
+                            )
+                            persist_staff_contact_sent(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                name=getattr(_scp_decision.call_target, "name", "") or "",
+                                contact_phone=(
+                                    getattr(_scp_decision.call_target, "raw_phone", "")
+                                    or getattr(_scp_decision.call_target, "wa_id", "")
+                                ),
+                                turn=int((_scp_bs or {}).get("turn") or 0),
+                            )
+                        except Exception as _scp_persist_exc:  # noqa: BLE001
+                            logger.exception(
+                                "[STAFF_CONTACT_POLICY] persist failed tenant=%s",
+                                tenant_id,
+                            )
+                except Exception as _scp_card_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[STAFF_CONTACT_POLICY] vCard send failed tenant=%s err=%s",
+                        tenant_id, _scp_card_exc,
+                    )
+
+            logger.info(
+                "[STAFF_CONTACT_POLICY] short_circuit tenant=%s to=%s "
+                "kind=%s deliver=%s text_ok=%s contacts_ok=%s skip_brain=true",
+                tenant_id, to,
+                _scp_decision.request_kind,
+                _scp_decision.deliver_contact,
+                _scp_text_ok, _scp_contacts_ok,
+            )
+            try:
+                _trace.fallback_source = "staff_contact_policy"
+                _trace.response_goal = "staff_contact_evidence"
+                _trace.intent = _scp_decision.request_kind or "staff_contact"
+                if _scp_text_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN,
+                        length=len(_scp_reply or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            _sync_persona_observability()
+            return
+
         # ── Staff contact recovery (P1 Slice 2) ─────────────────────────────
         # «ما يرد» after a staff vCard was sent must advance the KB chain
         # deterministically — never fall through to LLM generic greeting reset.
@@ -6458,9 +6619,9 @@ async def _handle_merchant_message(
                                 }],
                             )
                         except Exception as _scr_persist_exc:  # noqa: BLE001
-                            logger.debug(
-                                "[STAFF_CONTACT_RECOVERY] persist failed tenant=%s err=%s",
-                                tenant_id, _scr_persist_exc,
+                            logger.exception(
+                                "[STAFF_CONTACT_RECOVERY] persist failed tenant=%s",
+                                tenant_id,
                             )
                 except Exception as _scr_card_exc:  # noqa: BLE001
                     logger.warning(
@@ -6746,8 +6907,8 @@ async def _handle_merchant_message(
                                     ((value or {}).get("messages") or [{}])[0].get("id")
                                     or ""
                                 )
-                            except Exception:  # noqa: BLE001
-                                pass
+                            except Exception:  # noqa: silent-ok — wamid id optional for debug log
+                                _wamid_dbg = ""
                             logger.error(
                                 "[BRAIN_SILENT_REPLY] tenant=%s phone=*%s "
                                 "inbound_text=%r matched_intent=%r "

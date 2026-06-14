@@ -581,44 +581,8 @@ _STAFF_INTENT_TRIGGERS: set = {
     "رقم",      # "ابي رقم أمين" / "ابي رقم الإدارة"
 }
 
-# Staff name candidates. The customer will reference one of these
-# when they want a contact card. The tenant-specific list lives
-# (for now) in the prompt KB; we hardcode the common Saudi staff
-# names + role nouns to catch the common requests. Adding here
-# is cheap.
-_STAFF_NAME_CANDIDATES: List[str] = [
-    "أمين", "امين",
-    "هشام",
-    "هيثم",
-    "أحمد", "احمد",
-    "محمد",
-    "سعد",
-    "خالد",
-    "عبدالله",
-    "عبدالعزيز",
-    "تركي",
-    "أبو هشام", "ابو هشام",
-    "الإدارة", "الادارة",
-    "المالك",
-    "صاحب المتجر",
-    "المسؤول",
-    "الموظف",
-    "المسؤولة",
-    # Role nouns the customer often substitutes for a name
-    # ("أبي رقم البائع" / "أبي أكلم المحاسب"). Free-text KB
-    # entries frequently use these labels next to the phone
-    # ("بائع المعرض - 05xxxxxxxx") so the KB scan can still
-    # resolve a contact even when the customer didn't say a
-    # personal name.
-    "البائع",
-    "بائع المعرض",
-    "المحاسب",
-    "الكاشير",
-    "المندوب",
-    "السائق",
-    "خدمة العملاء",
-    "الدعم",
-]
+# Staff alias tokens are loaded per-tenant from KB evidence — see
+# :func:`_staff_alias_candidates`.
 
 
 # KB-section kinds we sweep when the LLM omitted the phone but the
@@ -741,13 +705,220 @@ def _extract_phones(text: str) -> List[str]:
     return seen
 
 
-def _find_staff_name(customer_msg_norm: str) -> Optional[str]:
-    """Pick the longest staff-name candidate found in the
-    (already-normalised) customer message. Longest wins so
-    "أبو هشام" beats "هشام"."""
+def _kb_contact_labels_only(db: Any, tenant_id: int) -> List[str]:
+    """Full contact labels from KB ``label:phone`` lines (graph telemetry)."""
+    if db is None or not tenant_id:
+        return []
+    _label_re = re.compile(
+        r"^(.{2,48}?)\s*[:：\-–—]\s*(\+?\s*966?\s*5\d{8}|05\d{8}|5\d{8})\s*$",
+        re.MULTILINE | re.UNICODE,
+    )
+    labels: List[str] = []
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
+        rows = (
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
+            )
+            .limit(40)
+            .all()
+        )
+        for row in rows:
+            if _is_dashboard_suggestion_section(row):
+                continue
+            body = getattr(row, "body", "") or ""
+            for line in body.splitlines():
+                m = _label_re.match(line.strip())
+                if not m:
+                    continue
+                label = _normalise_for_match(m.group(1))
+                if label and label not in labels:
+                    labels.append(label)
+    except Exception:  # noqa: BLE001
+        return []
+    return labels
+
+
+def _kb_alias_tokens(db: Any, tenant_id: int) -> List[str]:
+    """Extract contact labels from KB ``label:phone`` lines."""
+    if db is None or not tenant_id:
+        return []
+    _label_re = re.compile(
+        r"^(.{2,48}?)\s*[:：\-–—]\s*(\+?\s*966?\s*5\d{8}|05\d{8}|5\d{8})\s*$",
+        re.MULTILINE | re.UNICODE,
+    )
+    tokens: List[str] = []
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
+        rows = (
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .limit(40)
+            .all()
+        )
+        for row in rows:
+            if _is_dashboard_suggestion_section(row):
+                continue
+            body = getattr(row, "body", "") or ""
+            for line in body.splitlines():
+                m = _label_re.match(line.strip())
+                if not m:
+                    continue
+                label = _normalise_for_match(m.group(1))
+                if label and label not in tokens:
+                    tokens.append(label)
+                for part in label.split():
+                    part_norm = _normalise_for_match(part)
+                    if len(part_norm) >= 2 and part_norm not in tokens:
+                        tokens.append(part_norm)
+            body_norm = _normalise_alif(body).lower()
+            for pat in _PHONE_REGEXES:
+                for m in pat.finditer(body):
+                    label = _extract_label_near_phone(body, m.start())
+                    if label:
+                        norm_label = _normalise_for_match(label)
+                        if norm_label and norm_label not in tokens:
+                            tokens.append(norm_label)
+    except Exception:  # noqa: BLE001
+        return []
+    tokens.sort(key=len, reverse=True)
+    return tokens
+
+
+def _extract_label_near_phone(body: str, phone_start: int) -> str:
+    line_start = body.rfind("\n", 0, phone_start) + 1
+    line_end = body.find("\n", phone_start)
+    if line_end < 0:
+        line_end = len(body)
+    line = body[line_start:line_end].strip()
+    _label_re = re.compile(
+        r"^(.{2,48}?)\s*[:：\-–—]\s*(\+?\s*966?\s*5\d{8}|05\d{8}|5\d{8})\s*$",
+    )
+    m = _label_re.match(line)
+    if m:
+        return m.group(1).strip()
+    window = body[max(0, phone_start - 48):phone_start]
+    window = re.sub(r"[\d+()\s\-]+$", "", window).strip()
+    if window:
+        parts = re.split(r"[:：\-–—]", window)
+        if parts:
+            return parts[-1].strip()
+    return ""
+
+
+def _staff_alias_candidates(db: Any, tenant_id: int) -> List[str]:
+    """Return longest-first alias tokens configured for this tenant."""
+    if db is None or not tenant_id:
+        return []
+    tokens: List[str] = []
+    try:
+        from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+            load_staff_contact_registry,
+        )
+
+        registry = load_staff_contact_registry(db, int(tenant_id))
+        for rec in registry.records:
+            if rec.is_owner:
+                continue
+            for token in rec.all_match_tokens():
+                if token not in tokens:
+                    tokens.append(token)
+    except Exception:  # noqa: BLE001
+        pass
+    for token in _kb_alias_tokens(db, tenant_id):
+        if token not in tokens:
+            tokens.append(token)
+    tokens.sort(key=len, reverse=True)
+    return tokens
+
+
+def _name_appears_in_kb_body(db: Any, tenant_id: int, name: str) -> bool:
+    if not name or db is None or not tenant_id:
+        return False
+    target = _normalise_alif(name).lower()
+    if not target:
+        return False
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
+        rows = (
+            apply_ai_visible_kb_query_filters(
+                db.query(MerchantKnowledgeSection)
+            )
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant_id,
+                MerchantKnowledgeSection.kind.in_(_STAFF_KB_FALLBACK_KINDS),
+            )
+            .limit(40)
+            .all()
+        )
+        for row in rows:
+            body = getattr(row, "body", "") or ""
+            if target in _normalise_alif(body).lower():
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _evidence_backed_name_from_message(
+    db: Any,
+    tenant_id: int,
+    msg_norm: str,
+) -> str:
+    """Extract a staff name from the inbound only when KB mentions it."""
+    if not msg_norm or db is None or not tenant_id:
+        return ""
+    patterns = (
+        r"رقم\s+([^\s]+)",
+        r"اكلم\s+([^\s]+)",
+        r"أكلم\s+([^\s]+)",
+        r"اتصل\s+([^\s]+)",
+        r"تواصل\s+مع\s+([^\s]+)",
+    )
+    for pat in patterns:
+        m = re.search(pat, msg_norm)
+        if not m:
+            continue
+        candidate = _normalise_for_match(m.group(1))
+        if len(candidate) < 2:
+            continue
+        if _name_appears_in_kb_body(db, tenant_id, candidate):
+            return candidate
+    return ""
+
+
+def _find_staff_name(
+    customer_msg_norm: str,
+    candidates: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Pick the longest configured alias found in the message."""
     if not customer_msg_norm:
         return None
-    hits = [n for n in _STAFF_NAME_CANDIDATES if n in customer_msg_norm]
+    pool = candidates or []
+    msg_fold = _normalise_alif(customer_msg_norm)
+    hits = [
+        n for n in pool
+        if n and _normalise_alif(n) in msg_fold
+    ]
     if not hits:
         return None
     hits.sort(key=len, reverse=True)
@@ -826,7 +997,10 @@ def _extract_recent_history_norms(
     return bot_norm, customer_norm
 
 
-def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
+def _find_staff_name_in_pool(
+    *texts: str,
+    candidates: Optional[List[str]] = None,
+) -> Tuple[str, str]:
     """Scan multiple already-normalised text candidates and return
     ``(name, source_label)`` for the first hit.
 
@@ -852,7 +1026,7 @@ def _find_staff_name_in_pool(*texts: str) -> Tuple[str, str]:
     for idx, text in enumerate(texts):
         if not text:
             continue
-        name = _find_staff_name(text)
+        name = _find_staff_name(text, candidates)
         if not name:
             continue
         label = labels[idx] if idx < len(labels) else f"pool_{idx}"
@@ -979,7 +1153,10 @@ def _scan_verb_name_pair(
     return "", ""
 
 
-def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
+def _reply_offers_staff_contact(
+    reply_text: str,
+    candidates: Optional[List[str]] = None,
+) -> Tuple[str, str]:
     """Detect a proactive staff-contact offer in the bot reply.
 
     Returns ``(verb, name)`` for the first match where one of the
@@ -1005,7 +1182,7 @@ def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
         return "", ""
     # Sort name candidates longest-first so "أبو هشام" beats "هشام"
     # and "بائع المعرض" beats "البائع".
-    candidates = sorted(_STAFF_NAME_CANDIDATES, key=len, reverse=True)
+    pool = sorted(candidates or [], key=len, reverse=True)
     # Direct contact verbs first — they carry the strongest semantic
     # weight ("تواصل مع X" is unambiguous) and the longer proximity
     # window beats suggestion verbs in the rare case the LLM stacks
@@ -1013,13 +1190,13 @@ def _reply_offers_staff_contact(reply_text: str) -> Tuple[str, str]:
     # logs `verb=تواصل مع` instead of `verb=جرب`.
     verb, name = _scan_verb_name_pair(
         rn, _REPLY_STAFF_CONTACT_VERBS,
-        _REPLY_STAFF_CONTACT_PROXIMITY, candidates,
+        _REPLY_STAFF_CONTACT_PROXIMITY, pool,
     )
     if verb and name:
         return verb, name
     return _scan_verb_name_pair(
         rn, _REPLY_STAFF_SUGGESTION_VERBS,
-        _REPLY_STAFF_SUGGESTION_PROXIMITY, candidates,
+        _REPLY_STAFF_SUGGESTION_PROXIMITY, pool,
     )
 
 
@@ -1091,7 +1268,8 @@ def _emit_staff_contact_graph_trace(
         phones = _extract_phones(body)
         if phones:
             sections_with_phone += 1
-        for cand in _STAFF_NAME_CANDIDATES:
+        alias_tokens = _kb_contact_labels_only(db, tenant_id)
+        for cand in alias_tokens:
             cand_norm = _normalise_alif(cand).lower()
             if cand_norm and cand_norm in body_norm:
                 pairs.append({
@@ -1468,6 +1646,8 @@ def apply_staff_contact_safety_net(
         result.skipped_reason = "empty_msg"
         return result
 
+    _alias_candidates = _staff_alias_candidates(db, int(tenant_id or 0))
+
     # Emit the structured contact-graph snapshot once per turn so
     # production triage can confirm "does the resolver see أمين's
     # number at all?" before debugging trigger gating. Cheap query,
@@ -1554,7 +1734,9 @@ def apply_staff_contact_safety_net(
     )
     customer_intent = explicit_customer_intent or _arrival_gated_intent
 
-    reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(reply_text or "")
+    reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(
+        reply_text or "", _alias_candidates,
+    )
     reply_has_digits = bool(_extract_phones(reply_text or ""))
     if not customer_intent:
         if not (reply_offer_verb and reply_offer_name) or reply_has_digits:
@@ -1713,7 +1895,14 @@ def apply_staff_contact_safety_net(
         name, name_source = _find_staff_name_in_pool(
             msg_norm, reply_norm,
             history_bot_norm, history_customer_norm,
+            candidates=_alias_candidates,
         )
+    if not name and db is not None and tenant_id:
+        _ev_name = _evidence_backed_name_from_message(
+            db, int(tenant_id), msg_norm,
+        )
+        if _ev_name:
+            name, name_source = _ev_name, "customer_msg_kb_backed"
     if (
         not name
         and _arrival_gated_intent
@@ -4647,8 +4836,11 @@ def apply_outbound_artifact_guard(
             if not _prv.allowed:
                 result.skipped_reason = f"payment_relevance_gate:{_prv.reason}"
                 return result
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[SAFETY_NET] payment_relevance_gate_failed err=%s",
+                exc,
+            )
 
     if expected == "none":
         result.skipped_reason = "no_artifact_intent"
@@ -4730,13 +4922,10 @@ def apply_outbound_artifact_guard(
         hist_bot_norm, hist_cust_norm = _extract_recent_history_norms(history)
         staff_name, _name_src = _find_staff_name_in_pool(
             norm_msg, norm_reply_for_name, hist_bot_norm, hist_cust_norm,
+            candidates=_staff_alias_candidates(db, tenant_id),
         )
         if not staff_name:
-            # Role-only ask ("رقم البائع"). Use the role label as
-            # the "name" so the rewrite still reads naturally. Search
-            # the same pool we used for proper names so a role label
-            # in the prior bot turn ("بائع المعرض") can carry forward.
-            for kw in _STAFF_ROLE_KEYWORDS:
+            for kw in _staff_alias_candidates(db, tenant_id):
                 if (
                     kw in norm_msg
                     or kw in norm_reply_for_name
@@ -4745,10 +4934,8 @@ def apply_outbound_artifact_guard(
                 ):
                     staff_name = kw
                     break
-        # Try the KB scan one more time; the upstream staff-net
-        # may not have run (e.g. CALL marker pipeline disabled).
         kb_phone, kb_kind, _kb_section = _lookup_staff_phone_in_kb(
-            db, tenant_id, staff_name or "أمين",
+            db, tenant_id, staff_name or "",
         )
         if kb_phone:
             label = staff_name or "الموظف"
