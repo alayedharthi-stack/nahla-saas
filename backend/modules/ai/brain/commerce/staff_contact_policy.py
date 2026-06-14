@@ -52,11 +52,16 @@ def evaluate_staff_contact_policy(
         return None
 
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        _CONTACT_ASK_RE,
+        _norm as _evidence_norm,
         build_deliver_reply_text,
         build_not_configured_reply,
         classify_staff_contact_request,
         load_staff_contact_registry,
         resolve_staff_contact,
+    )
+    from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+        staff_policy_applies_to_named_request,
     )
 
     request = classify_staff_contact_request(message or "")
@@ -66,7 +71,28 @@ def evaluate_staff_contact_policy(
     registry = load_staff_contact_registry(
         db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
     )
+    registry_match = registry.match_record_in_message(message or "") is not None
+    explicit_ask = bool(_CONTACT_ASK_RE.search(_evidence_norm(message or "")))
+
+    if request.kind == "named" and not staff_policy_applies_to_named_request(
+        message or "",
+        registry_match=registry_match,
+        explicit_contact_ask=explicit_ask,
+    ):
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s kind=named defer=true reason=not_staff_ask",
+            tenant_id,
+        )
+        return None
+
     resolution = resolve_staff_contact(registry, request, message=message or "")
+
+    if not resolution.found and resolution.reason == "no_named_intent":
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s kind=%s defer=true reason=no_named_intent",
+            tenant_id, request.kind,
+        )
+        return None
 
     if resolution.found and resolution.record is not None:
         target = _build_call_target(resolution.record)

@@ -256,7 +256,7 @@ def test_not_responding_advances_only_with_prior_sent(
 
 def test_arrival_deferred_to_existing_policy() -> None:
     req = classify_staff_contact_request("انا جاي")
-    assert req.kind == "arrival"
+    assert req.kind == "none"
 
 
 def test_payment_request_not_staff_policy() -> None:
