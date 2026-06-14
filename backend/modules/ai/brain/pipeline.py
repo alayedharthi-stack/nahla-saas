@@ -2063,6 +2063,32 @@ class MerchantBrain:
                 tenant_id, _pavg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
+                apply_commerce_reply_quality_guard,
+            )
+
+            _crqg = apply_commerce_reply_quality_guard(
+                reply=reply or "",
+                inbound_text=message or "",
+                intent_name=str(getattr(intent, "name", "") or ""),
+                primary_customer_goal=str(
+                    getattr(getattr(ctx, "reply_state", None), "primary_customer_goal", "")
+                    or ""
+                ),
+                locale=str((profile or {}).get("preferred_language") or "ar"),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _crqg.replaced:
+                reply = _crqg.reply
+                _guard_replaced["commerce_reply_quality_guard"] = True
+        except Exception as _crqg_exc:  # noqa: BLE001
+            logger.warning(
+                "[COMMERCE_REPLY_QUALITY_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _crqg_exc,
+            )
+
         # ── Persona ownership snapshot (measurement-only) ───────────────
         try:
             from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
