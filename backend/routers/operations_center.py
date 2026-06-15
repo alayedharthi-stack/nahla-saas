@@ -314,11 +314,12 @@ async def delete_branch(
     branch_id: int,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+):
     tenant_id = resolve_tenant_id(request)
     row = _get_branch(db, tenant_id, branch_id)
     db.delete(row)
     db.commit()
+    return None
 
 
 @router.post("/branches/{branch_id}/activate")
@@ -434,11 +435,12 @@ async def delete_contact(
     contact_id: int,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+):
     tenant_id = resolve_tenant_id(request)
     row = _get_contact(db, tenant_id, branch_id, contact_id)
     db.delete(row)
     db.commit()
+    return None
 
 
 @router.post("/branches/{branch_id}/contacts/{contact_id}/set-default-reception")
@@ -535,11 +537,12 @@ async def delete_escalation_step(
     step_id: int,
     request: Request,
     db: Session = Depends(get_db),
-) -> None:
+):
     tenant_id = resolve_tenant_id(request)
     row = _get_escalation_step(db, tenant_id, branch_id, step_id)
     db.delete(row)
     db.commit()
+    return None
 
 
 @router.post("/branches/{branch_id}/escalation-steps/reorder")
