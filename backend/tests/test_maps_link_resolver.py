@@ -666,3 +666,35 @@ def test_safety_net_replaces_redundant_prose_when_injecting_url(
     assert "لنبعث لك" not in result.new_reply
     assert "عطنا اسم الفرع" not in result.new_reply
     assert "https://maps.app.goo.gl/aledqr" in result.new_reply
+
+
+def test_build_location_reply_includes_branch_details() -> None:
+    from modules.ai.postprocess.safety_nets import _build_location_reply
+
+    text = _build_location_reply(
+        "https://maps.app.goo.gl/branch",
+        store_name="معرض آل عايد",
+        branch_name="معرض آل عايد للعسل البلدي",
+        city="الطائف",
+        district="الحلقة الغربية",
+        address="شارع العدل الواعظ، حي الحلقة الغربية",
+        has_branch_details=True,
+    )
+    assert "📍 هذا موقع معرض آل عايد للعسل البلدي" in text
+    assert "الفرع:" in text
+    assert "الطائف" in text
+    assert "العنوان:" in text
+    assert "اضغط الزر لفتح الموقع في خرائط Google." in text
+    assert "https://maps.app.goo.gl/branch" in text
+
+
+def test_build_location_reply_maps_only_fallback() -> None:
+    from modules.ai.postprocess.safety_nets import _build_location_reply
+
+    text = _build_location_reply(
+        "https://maps.app.goo.gl/only",
+        has_branch_details=False,
+    )
+    assert "📍 هذا موقعنا على خرائط Google" in text
+    assert "اضغط الزر لفتح الموقع." in text
+    assert "https://maps.app.goo.gl/only" in text

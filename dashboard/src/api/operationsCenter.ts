@@ -35,11 +35,22 @@ export interface BranchEscalationStep {
   id: number
   branch_id: number
   escalation_level: number
+  contact_id?: number | null
   display_name: string
   role: string
   phone_e164: string
   is_active: boolean
   sort_order: number
+}
+
+export interface EscalationLevel {
+  escalation_level: number
+  contact_ids: number[]
+  contacts: BranchContact[]
+}
+
+export type EscalationLevelInput = {
+  contact_ids: number[]
 }
 
 export type BranchInput = {
@@ -131,6 +142,39 @@ export const operationsCenterApi = {
     apiCall<BranchContact>(
       `/operations-center/branches/${branchId}/contacts/${contactId}/set-default-reception`,
       { method: 'POST' },
+    ),
+
+  listEscalationLevels: (branchId: number) =>
+    apiCall<{ levels: EscalationLevel[] }>(
+      `/operations-center/branches/${branchId}/escalation-levels`,
+    ),
+
+  createEscalationLevel: (branchId: number, body: EscalationLevelInput) =>
+    apiCall<EscalationLevel>(
+      `/operations-center/branches/${branchId}/escalation-levels`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  updateEscalationLevel: (
+    branchId: number,
+    level: number,
+    body: EscalationLevelInput,
+  ) =>
+    apiCall<EscalationLevel>(
+      `/operations-center/branches/${branchId}/escalation-levels/${level}`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+
+  deleteEscalationLevel: (branchId: number, level: number) =>
+    apiCall<void>(
+      `/operations-center/branches/${branchId}/escalation-levels/${level}`,
+      { method: 'DELETE' },
+    ),
+
+  reorderEscalationLevels: (branchId: number, orderedLevels: number[]) =>
+    apiCall<{ levels: EscalationLevel[] }>(
+      `/operations-center/branches/${branchId}/escalation-levels/reorder`,
+      { method: 'POST', body: JSON.stringify({ ordered_levels: orderedLevels }) },
     ),
 
   listEscalationSteps: (branchId: number) =>

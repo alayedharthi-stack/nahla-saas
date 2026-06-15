@@ -9,7 +9,7 @@ import ConfirmModal from '../components/ui/ConfirmModal'
 import BranchHoursEditor from '../components/operations/BranchHoursEditor'
 import ContactFormModal from '../components/operations/ContactFormModal'
 import EscalationChainPanel from '../components/operations/EscalationChainPanel'
-import EscalationStepFormModal from '../components/operations/EscalationStepFormModal'
+import EscalationLevelFormModal from '../components/operations/EscalationLevelFormModal'
 import {
   parseHoursJson,
   serializeHoursJson,
@@ -19,10 +19,10 @@ import type { EscalationChainType } from '../lib/escalationTypes'
 import {
   operationsCenterApi,
   type BranchContact,
-  type BranchEscalationStep,
   type BranchInput,
   type ContactInput,
-  type EscalationStepInput,
+  type EscalationLevel,
+  type EscalationLevelInput,
   type MerchantBranch,
 } from '../api/operationsCenter'
 
@@ -41,7 +41,7 @@ export default function OperationsCenterBranchDetail() {
   const [tab, setTab] = useState<TabId>('info')
   const [branch, setBranch] = useState<MerchantBranch | null>(null)
   const [contacts, setContacts] = useState<BranchContact[]>([])
-  const [steps, setSteps] = useState<BranchEscalationStep[]>([])
+  const [levels, setLevels] = useState<EscalationLevel[]>([])
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -55,28 +55,28 @@ export default function OperationsCenterBranchDetail() {
   const [contactError, setContactError] = useState('')
   const [deleteContactTarget, setDeleteContactTarget] = useState<BranchContact | null>(null)
   const [deleteContactLoading, setDeleteContactLoading] = useState(false)
-  const [deleteStepTarget, setDeleteStepTarget] = useState<BranchEscalationStep | null>(null)
-  const [deleteStepLoading, setDeleteStepLoading] = useState(false)
-  const [stepModalOpen, setStepModalOpen] = useState(false)
-  const [stepModalMode, setStepModalMode] = useState<'create' | 'edit'>('create')
-  const [editingStep, setEditingStep] = useState<BranchEscalationStep | null>(null)
-  const [stepSaving, setStepSaving] = useState(false)
+  const [deleteLevelTarget, setDeleteLevelTarget] = useState<EscalationLevel | null>(null)
+  const [deleteLevelLoading, setDeleteLevelLoading] = useState(false)
+  const [levelModalOpen, setLevelModalOpen] = useState(false)
+  const [levelModalMode, setLevelModalMode] = useState<'create' | 'edit'>('create')
+  const [editingLevel, setEditingLevel] = useState<EscalationLevel | null>(null)
+  const [levelSaving, setLevelSaving] = useState(false)
   const [stepError, setStepError] = useState('')
-  const [stepReordering, setStepReordering] = useState(false)
+  const [levelReordering, setLevelReordering] = useState(false)
   const [chainType, setChainType] = useState<EscalationChainType>('general')
 
   const load = useCallback(async () => {
     if (!id) return
     setError('')
     try {
-      const [b, c, s] = await Promise.all([
+      const [b, c, lv] = await Promise.all([
         operationsCenterApi.getBranch(id),
         operationsCenterApi.listContacts(id),
-        operationsCenterApi.listEscalationSteps(id),
+        operationsCenterApi.listEscalationLevels(id),
       ])
       setBranch(b)
       setContacts(c.contacts || [])
-      setSteps(s.steps || [])
+      setLevels(lv.levels || [])
       setInfoForm({
         name: b.name,
         city: b.city,
@@ -147,7 +147,12 @@ export default function OperationsCenterBranchDetail() {
       setDeleteContactTarget(null)
       await load()
     } catch (e: unknown) {
-      setContactError(e instanceof Error ? e.message : 'تعذّر حذف جهة التواصل')
+      const msg = e instanceof Error ? e.message : 'تعذّر حذف جهة التواصل'
+      setContactError(
+        msg.includes('contact_used_in_escalation')
+          ? 'لا يمكن حذف جهة التواصل — مُستخدمة في سلسلة التصعيد. احذفها من التصعيد أولاً.'
+          : msg,
+      )
     } finally {
       setDeleteContactLoading(false)
     }
@@ -163,65 +168,65 @@ export default function OperationsCenterBranchDetail() {
     }
   }
 
-  const openCreateStep = () => {
+  const openCreateLevel = () => {
     setStepError('')
-    setEditingStep(null)
-    setStepModalMode('create')
-    setStepModalOpen(true)
+    setEditingLevel(null)
+    setLevelModalMode('create')
+    setLevelModalOpen(true)
   }
 
-  const openEditStep = (step: BranchEscalationStep) => {
+  const openEditLevel = (level: EscalationLevel) => {
     setStepError('')
-    setEditingStep(step)
-    setStepModalMode('edit')
-    setStepModalOpen(true)
+    setEditingLevel(level)
+    setLevelModalMode('edit')
+    setLevelModalOpen(true)
   }
 
-  const saveStep = async (body: EscalationStepInput) => {
-    setStepSaving(true)
+  const saveLevel = async (body: EscalationLevelInput) => {
+    setLevelSaving(true)
     try {
-      if (stepModalMode === 'edit' && editingStep) {
-        await operationsCenterApi.updateEscalationStep(id, editingStep.id, body)
+      if (levelModalMode === 'edit' && editingLevel) {
+        await operationsCenterApi.updateEscalationLevel(id, editingLevel.escalation_level, body)
       } else {
-        await operationsCenterApi.createEscalationStep(id, body)
+        await operationsCenterApi.createEscalationLevel(id, body)
       }
       await load()
     } catch (e: unknown) {
       throw e
     } finally {
-      setStepSaving(false)
+      setLevelSaving(false)
     }
   }
 
-  const confirmDeleteStep = async () => {
-    if (!deleteStepTarget) return
-    setDeleteStepLoading(true)
+  const confirmDeleteLevel = async () => {
+    if (!deleteLevelTarget) return
+    setDeleteLevelLoading(true)
     setStepError('')
     try {
-      await operationsCenterApi.deleteEscalationStep(id, deleteStepTarget.id)
-      setDeleteStepTarget(null)
+      await operationsCenterApi.deleteEscalationLevel(id, deleteLevelTarget.escalation_level)
+      setDeleteLevelTarget(null)
       await load()
     } catch (e: unknown) {
       setStepError(e instanceof Error ? e.message : 'تعذّر حذف مستوى التصعيد')
     } finally {
-      setDeleteStepLoading(false)
+      setDeleteLevelLoading(false)
     }
   }
 
-  const moveStep = async (index: number, direction: -1 | 1) => {
+  const moveLevel = async (index: number, direction: -1 | 1) => {
     const target = index + direction
-    if (target < 0 || target >= steps.length) return
-    setStepReordering(true)
+    if (target < 0 || target >= levels.length) return
+    setLevelReordering(true)
     setStepError('')
     try {
-      const ids = steps.map(s => s.id)
-      ;[ids[index], ids[target]] = [ids[target], ids[index]]
-      await operationsCenterApi.reorderEscalationSteps(id, ids)
+      const ordered = levels.map(l => l.escalation_level)
+      ;[ordered[index], ordered[target]] = [ordered[target], ordered[index]]
+      await operationsCenterApi.reorderEscalationLevels(id, ordered)
       await load()
     } catch (e: unknown) {
       setStepError(e instanceof Error ? e.message : 'تعذّر إعادة ترتيب المستويات')
     } finally {
-      setStepReordering(false)
+      setLevelReordering(false)
     }
   }
 
@@ -424,47 +429,50 @@ export default function OperationsCenterBranchDetail() {
       {tab === 'escalation' && (
         <div className="max-w-3xl">
           <EscalationChainPanel
-            steps={steps}
+            levels={levels}
+            contacts={contacts}
             chainType={chainType}
             error={stepError}
-            reordering={stepReordering}
+            reordering={levelReordering}
             onChainTypeChange={setChainType}
-            onAdd={openCreateStep}
-            onEdit={openEditStep}
-            onDelete={(step) => {
+            onAdd={openCreateLevel}
+            onEdit={openEditLevel}
+            onDelete={(level) => {
               setStepError('')
-              setDeleteStepTarget(step)
+              setDeleteLevelTarget(level)
             }}
-            onMove={moveStep}
+            onMove={moveLevel}
           />
 
-          <EscalationStepFormModal
-            open={stepModalOpen}
-            mode={stepModalMode}
-            step={editingStep}
-            nextLevel={steps.length + 1}
-            saving={stepSaving}
+          <EscalationLevelFormModal
+            open={levelModalOpen}
+            mode={levelModalMode}
+            level={editingLevel?.escalation_level}
+            nextLevel={levels.length + 1}
+            contacts={contacts}
+            selectedContactIds={editingLevel?.contact_ids}
+            saving={levelSaving}
             onClose={() => {
-              if (!stepSaving) setStepModalOpen(false)
+              if (!levelSaving) setLevelModalOpen(false)
             }}
-            onSave={saveStep}
+            onSave={saveLevel}
           />
         </div>
       )}
 
       <ConfirmModal
-        open={!!deleteStepTarget}
+        open={!!deleteLevelTarget}
         title="حذف مستوى التصعيد"
         message={
-          deleteStepTarget
-            ? `هل تريد حذف مستوى «${deleteStepTarget.display_name}»؟`
+          deleteLevelTarget
+            ? `هل تريد حذف المستوى ${deleteLevelTarget.escalation_level}؟`
             : ''
         }
         confirmLabel="حذف"
         destructive
-        loading={deleteStepLoading}
-        onCancel={() => { if (!deleteStepLoading) setDeleteStepTarget(null) }}
-        onConfirm={confirmDeleteStep}
+        loading={deleteLevelLoading}
+        onCancel={() => { if (!deleteLevelLoading) setDeleteLevelTarget(null) }}
+        onConfirm={confirmDeleteLevel}
       />
     </div>
   )

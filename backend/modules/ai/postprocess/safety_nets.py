@@ -1961,7 +1961,7 @@ def apply_staff_contact_safety_net(
                     else "fallback_unresolved"
                 )
                 return result
-        except Exception as _fb_exc:  # noqa: BLE001
+        except Exception as _fb_exc:  # noqa: silent-ok - fallback_v0 must not block staff contact net
             logger.debug(
                 "safety_nets.staff | fallback_v0 failed tenant=%s err=%s",
                 tenant_id, _fb_exc,
@@ -3169,11 +3169,70 @@ _FALLBACK_NO_MAPS_URL_REPLY_AR = (
 )
 
 
-def _build_location_reply(maps_url: str) -> str:
-    """Canonical Arabic reply when we DO have a maps URL. Kept short
-    so WhatsApp renders the link as a tappable preview / lifts it
-    into a CTA button."""
-    return f"موقعنا 📍\n{maps_url}"
+def _lookup_tenant_store_name(db: Any, tenant_id: int) -> str:
+    if db is None or not tenant_id:
+        return ""
+    try:
+        from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415
+
+        profile = StoreKnowledgeLoader(db, int(tenant_id)).store_profile() or {}
+        for key in ("store_name", "name", "title"):
+            val = str(profile.get(key) or "").strip()
+            if val:
+                return val
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "safety_nets.maps_link | store_name lookup failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+    return ""
+
+
+def _build_location_reply(
+    maps_url: str,
+    *,
+    store_name: str = "",
+    branch_name: str = "",
+    city: str = "",
+    district: str = "",
+    address: str = "",
+    has_branch_details: bool = False,
+) -> str:
+    """Canonical Arabic reply when a maps URL is available.
+
+    When structured branch data exists, include branch context before
+    the URL so WhatsApp can still lift the URL into a CTA button.
+    """
+    header_name = (branch_name or store_name or "").strip()
+    lines: List[str] = []
+
+    if has_branch_details and header_name:
+        lines.append(f"📍 هذا موقع {header_name}")
+    elif header_name:
+        lines.append(f"📍 هذا موقع {header_name}")
+    else:
+        lines.append("📍 هذا موقعنا على خرائط Google")
+
+    if has_branch_details:
+        branch_loc_parts = [p for p in (city, district) if p]
+        if branch_name and branch_loc_parts:
+            lines.append(f"الفرع: {branch_name} – {' – '.join(branch_loc_parts)}")
+        elif branch_loc_parts:
+            lines.append(f"الفرع: {' – '.join(branch_loc_parts)}")
+        elif branch_name:
+            lines.append(f"الفرع: {branch_name}")
+
+        if address:
+            lines.append(f"العنوان: {address}")
+
+        lines.append("")
+        lines.append("اضغط الزر لفتح الموقع في خرائط Google.")
+    else:
+        lines.append("اضغط الزر لفتح الموقع.")
+
+    lines.append(maps_url)
+    return "\n".join(lines)
 
 
 def apply_location_safety_net(
@@ -3225,16 +3284,57 @@ def apply_location_safety_net(
     result.maps_url = maps_url
     result.source = source
 
+    branch_name = ""
+    city = ""
+    district = ""
+    address = ""
+    has_branch_details = False
+    store_name = _lookup_tenant_store_name(db, tenant_id)
+
+    if maps_url and source == "structured_branch":
+        try:
+            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                resolve_branch_for_message,
+                structured_branch_contacts_enabled,
+            )
+
+            if structured_branch_contacts_enabled():
+                branch = resolve_branch_for_message(
+                    db, tenant_id, customer_msg or "",
+                )
+                if branch is not None:
+                    branch_name = branch.name or ""
+                    city = branch.city or ""
+                    district = branch.district or ""
+                    address = branch.address or ""
+                    has_branch_details = bool(
+                        branch_name or city or district or address
+                    )
+        except Exception as exc:  # noqa: silent-ok - branch context is optional enrichment
+            logger.debug(
+                "safety_nets.maps_link | branch context lookup failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
+
     if maps_url:
+        location_block = _build_location_reply(
+            maps_url,
+            store_name=store_name,
+            branch_name=branch_name,
+            city=city,
+            district=district,
+            address=address,
+            has_branch_details=has_branch_details,
+        )
         if _looks_like_bare_location_intro(reply_text or ""):
-            result.new_reply = _build_location_reply(maps_url)
+            result.new_reply = location_block
         elif reply_text and reply_text.strip():
             sep = "\n" if reply_text.endswith("\n") else "\n\n"
-            result.new_reply = (
-                reply_text.rstrip() + sep + _build_location_reply(maps_url)
-            )
+            result.new_reply = reply_text.rstrip() + sep + location_block
         else:
-            result.new_reply = _build_location_reply(maps_url)
+            result.new_reply = location_block
         result.fired = True
         result.rewrote_reply = True
         result.reason = f"maps_url_injected:{source}"
