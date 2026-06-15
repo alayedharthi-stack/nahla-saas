@@ -247,6 +247,22 @@ def load_staff_contact_registry(
     *,
     store_contact_phone: str = "",
 ) -> StaffContactRegistry:
+    if db is not None and tenant_id:
+        try:
+            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                load_structured_staff_contact_registry,
+            )
+
+            structured = load_structured_staff_contact_registry(db, int(tenant_id))
+            if structured is not None and structured.records:
+                return structured
+        except Exception as exc:  # noqa: silent-ok - structured registry must not block KB compile
+            logger.debug(
+                "staff_contact_evidence | structured registry failed tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
+
     sections = load_staff_chain_sections(db, int(tenant_id or 0))
     phone = store_contact_phone
     if not phone and db is not None and tenant_id:

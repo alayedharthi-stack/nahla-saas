@@ -148,6 +148,7 @@ def evaluate_staff_contact_recovery(
         customer_msg=message or "",
         trigger="employee_not_responding",
         tenant_id=tenant_id,
+        db=db,
     )
 
     if not verdict.enabled or not verdict.next_phone:

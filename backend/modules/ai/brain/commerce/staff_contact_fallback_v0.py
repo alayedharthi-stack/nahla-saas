@@ -444,6 +444,7 @@ def resolve_staff_contact_fallback_v0(
     customer_msg: str,
     trigger: str,
     tenant_id: Any = None,
+    db: Any = None,
 ) -> StaffContactFallbackVerdict:
     """Pick the next KB chain contact after a staff-unavailable follow-up."""
     if not contacts_sent:
@@ -460,6 +461,28 @@ def resolve_staff_contact_fallback_v0(
         sections or (),
         role_graph=role_graph,
     )
+    if db is not None and tenant_id is not None:
+        try:
+            from modules.operations.branch_escalation_evidence import (  # noqa: PLC0415
+                load_structured_escalation_chain,
+            )
+            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                structured_branch_contacts_enabled,
+            )
+
+            if structured_branch_contacts_enabled():
+                structured = load_structured_escalation_chain(
+                    db, int(tenant_id), message=customer_msg or "",
+                )
+                if structured:
+                    chain = structured
+        except Exception as exc:  # noqa: silent-ok - structured chain load must not block KB fallback
+            logger.debug(
+                "staff_contact_fallback_v0 | structured chain load failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
     showroom_chain = [e for e in chain if not e.is_owner]
 
     log_staff_contact_fallback_policy(
@@ -532,17 +555,20 @@ def resolve_staff_contact_fallback_v0(
         classify_contact_tier,
         find_last_sent_chain_entry,
         log_escalation_chain_resolve,
-        resolve_next_tiered_contact,
+        resolve_next_escalation_contact,
     )
 
     last_entry = find_last_sent_chain_entry(chain, contacts_sent)
     last_tier = classify_contact_tier(last_entry) if last_entry else ""
     last_idx = last_entry.chain_index if last_entry else -1
 
-    next_entry = resolve_next_tiered_contact(
+    next_entry = resolve_next_escalation_contact(
+        db,
+        tenant_id,
         chain,
         contacts_sent,
         allow_admin=True,
+        message=customer_msg or "",
     )
     if next_entry is not None:
         log_escalation_chain_resolve(
