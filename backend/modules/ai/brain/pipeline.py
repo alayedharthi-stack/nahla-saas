@@ -513,6 +513,27 @@ class MerchantBrain:
             state=state_for_classify,
         )
 
+        # ── 1a-pre. Commerce conversation guard (P0 drift prevention) ─────
+        _commerce_prep = None
+        try:
+            from .commerce.commerce_conversation_guard import (  # noqa: PLC0415
+                prepare_commerce_inbound,
+            )
+
+            _commerce_prep = prepare_commerce_inbound(
+                message,
+                state=state_for_classify,
+                history=history,
+            )
+            if _commerce_prep.message_for_classification:
+                message = _commerce_prep.message_for_classification
+        except Exception as _ccg_exc:  # noqa: BLE001
+            logger.debug(
+                "[COMMERCE_CONVERSATION_GUARD] prep failed tenant=%s err=%s",
+                tenant_id, _ccg_exc,
+            )
+            _commerce_prep = None
+
         # ── 1a. Semantic turn interpreter (Phase 1) ─────────────────────
         # Context-aware repair for short/ambiguous replies BEFORE rigid
         # rule routing. Does not bypass guards — only improves meaning.
@@ -549,6 +570,12 @@ class MerchantBrain:
         intent: Intent = await self._classifier.classify(
             _classify_message, history, state_for_classify,
         )
+        if _commerce_prep is not None and _commerce_prep.intent_override:
+            intent = Intent(
+                name=_commerce_prep.intent_override,
+                confidence=0.94,
+                slots=dict(getattr(intent, "slots", None) or {}),
+            )
         if _semantic_interpretation is not None:
             try:
                 from .interpret.semantic_routing import apply_semantic_intent_override  # noqa: PLC0415

@@ -52,6 +52,9 @@ INTENT_ASK_OWNER_CONTACT = "ask_owner_contact"
 # silently swallow these messages and leave the customer with a generic
 # "هذه وسائل التواصل المتاحة" reply.
 INTENT_ASK_PAYMENT_INFO = "ask_payment_info"
+# Cash-on-delivery / pay-on-receipt inquiries — answered from tenant
+# payment policy evidence, not LLM invention.
+INTENT_ASK_COD = "ask_cash_on_delivery"
 INTENT_HESITATION       = "hesitation"
 INTENT_TALK_HUMAN       = "talk_to_human"
 # Follow-up when a previously suggested staff contact did not respond
@@ -472,6 +475,8 @@ class MerchantConversationState:
     # Each entry: {"name", "phone", "turn"}. Generic across merchants;
     # escalation-chain logic (Phase 2) derives ordering from KB/config.
     staff_contacts_sent: List[Dict[str, Any]] = field(default_factory=list)
+    # Active commerce funnel lock (category/product/variant/order stage).
+    commerce_session: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -526,6 +531,7 @@ class MerchantConversationState:
             "customer_gender_hint": self.customer_gender_hint,
             "customer_gender_confidence": self.customer_gender_confidence,
             "staff_contacts_sent": list(self.staff_contacts_sent or []),
+            "commerce_session": dict(self.commerce_session or {}),
         }
 
     @staticmethod
@@ -586,6 +592,7 @@ class MerchantConversationState:
                 d.get("customer_gender_confidence") or 0.0
             ),
             staff_contacts_sent=list(d.get("staff_contacts_sent") or []),
+            commerce_session=dict(d.get("commerce_session") or {}),
         )
 
 

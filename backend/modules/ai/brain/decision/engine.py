@@ -46,6 +46,7 @@ from .actions import (
     ACTION_PAYMENT_TRANSFER_PROMISE,
 )
 from ..types import (
+    INTENT_ASK_COD,
     INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_PAYMENT_INFO,
@@ -2044,6 +2045,16 @@ class DefaultDecisionEngine:
                 reason=(
                     "customer asked for the physical shop / Google Maps "
                     "location — defer to brain (location_delivery)"
+                ),
+            )
+
+        if intent.name == INTENT_ASK_COD:
+            return Decision(
+                action=ACTION_FAQ_REPLY,
+                args={"topic": "cash_on_delivery"},
+                reason=(
+                    "customer asked about cash on delivery — "
+                    "answer from tenant payment policy evidence"
                 ),
             )
 

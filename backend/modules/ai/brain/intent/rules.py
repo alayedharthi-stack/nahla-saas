@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from ..types import (
+    INTENT_ASK_COD,
     INTENT_ASK_LOCATION,
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
@@ -380,6 +381,23 @@ _register(RuleSet(
         r"^\s*(?:فلوس|مبلغ|تحويل|حوال(?:ه|ة))\s*[\?؟]?\s*$",
     ],
     confidence=0.95,
+))
+
+# ── Cash on delivery (COD) ───────────────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_ASK_COD,
+    patterns=[
+        r"(?:الدفع|ادفع|أ?دفع)\s+عند\s+الاستلام",
+        r"كاش\s+عند\s+(?:التسليم|الاستلام)",
+        r"أ?حاسب\s+عند\s+وصول",
+        r"أ?سلم\s+المبلغ\s+وقت\s+الاستلام",
+        r"تسليم\s+المبلغ\s+وقت\s+استلام",
+        r"هل\s+أ?دفع\s+عند\s+الاستلام",
+        r"مافي\s+إ?مكان(?:ية)?\s+تسليم\s+المبلغ\s+وقت\s+استلام",
+        r"\bcod\b",
+        r"cash\s+on\s+delivery",
+    ],
+    confidence=0.96,
 ))
 
 # ── Owner / support contact details ──────────────────────────────────────────
@@ -944,6 +962,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
     INTENT_ASK_PAYMENT_INFO,
+    INTENT_ASK_COD,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
     INTENT_ASK_LOCATION,
@@ -957,6 +976,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
 _PRIORITY_OVER_NEED_BASED: frozenset[str] = frozenset({
     INTENT_ASK_SHIPPING,
     INTENT_ASK_PAYMENT_INFO,
+    INTENT_ASK_COD,
     INTENT_PAY_NOW,
     INTENT_TRACK_ORDER,
     INTENT_TALK_HUMAN,
