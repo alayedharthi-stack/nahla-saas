@@ -1,0 +1,898 @@
+{
+  "generated_at": "2026-06-15T07:52:05.001280+00:00",
+  "branch": "feat/operations-center-pr-b-dashboard-wt",
+  "api_evidence": {
+    "GET /operations-center/branches": {
+      "method": "GET",
+      "path": "/operations-center/branches",
+      "request_body": null,
+      "status_code": 200,
+      "response": {
+        "branches": [
+          {
+            "id": 1,
+            "tenant_id": 99,
+            "name": "فرع الرياض",
+            "city": "الرياض",
+            "district": "العليا",
+            "address": "شارع تجريبي، العليا، الرياض",
+            "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+            "hours_json": {
+              "sat": "9-22",
+              "sun": "9-22"
+            },
+            "is_active": true,
+            "sort_order": 0,
+            "contact_count": 2,
+            "created_at": "2026-06-15T07:52:04.730610",
+            "updated_at": "2026-06-15T07:52:04.730610"
+          },
+          {
+            "id": 2,
+            "tenant_id": 99,
+            "name": "فرع جدة",
+            "city": "جدة",
+            "district": "الروضة",
+            "address": "شارع تجريبي، الروضة، جدة",
+            "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+            "hours_json": {
+              "sat": "9-22",
+              "sun": "9-22"
+            },
+            "is_active": true,
+            "sort_order": 0,
+            "contact_count": 2,
+            "created_at": "2026-06-15T07:52:04.743480",
+            "updated_at": "2026-06-15T07:52:04.743480"
+          },
+          {
+            "id": 3,
+            "tenant_id": 99,
+            "name": "فرع الطائف",
+            "city": "الطائف",
+            "district": "الشفا",
+            "address": "شارع تجريبي، الشفا، الطائف",
+            "maps_url": "https://maps.google.com/?q=taif-showroom",
+            "hours_json": {
+              "sat": "9-22",
+              "sun": "9-22"
+            },
+            "is_active": false,
+            "sort_order": 0,
+            "contact_count": 2,
+            "created_at": "2026-06-15T07:52:04.750216",
+            "updated_at": "2026-06-15T07:52:04.870998"
+          }
+        ]
+      }
+    },
+    "POST /operations-center/branches (sample)": {
+      "method": "POST",
+      "path": "/operations-center/branches",
+      "request_body": {
+        "name": "فرع الرياض",
+        "city": "الرياض",
+        "district": "العليا",
+        "address": "شارع تجريبي، العليا، الرياض",
+        "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+        "hours_json": {
+          "sat": "9-22",
+          "sun": "9-22"
+        },
+        "is_active": true,
+        "sort_order": 0
+      },
+      "status_code": 201,
+      "response": {
+        "id": 1,
+        "tenant_id": 99,
+        "name": "فرع الرياض",
+        "city": "الرياض",
+        "district": "العليا",
+        "address": "شارع تجريبي، العليا، الرياض",
+        "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+        "hours_json": {
+          "sat": "9-22",
+          "sun": "9-22"
+        },
+        "is_active": true,
+        "sort_order": 0,
+        "contact_count": 0,
+        "created_at": "2026-06-15T07:52:04.730610",
+        "updated_at": "2026-06-15T07:52:04.730610"
+      }
+    },
+    "POST /operations-center/branches/{id}/contacts (sample)": {
+      "method": "POST",
+      "path": "/operations-center/branches/1/contacts",
+      "request_body": {
+        "display_name": "استقبال الرياض",
+        "role": "reception",
+        "phone_e164": "0501111111",
+        "is_default_reception": true
+      },
+      "status_code": 201,
+      "response": {
+        "id": 1,
+        "branch_id": 1,
+        "display_name": "استقبال الرياض",
+        "role": "reception",
+        "phone_e164": "+966501111111",
+        "whatsapp_e164": "",
+        "is_active": true,
+        "is_default_reception": true,
+        "sort_order": 0
+      }
+    },
+    "POST /operations-center/branches/{id}/escalation-steps (sample)": {
+      "method": "POST",
+      "path": "/operations-center/branches/1/escalation-steps",
+      "request_body": {
+        "escalation_level": 1,
+        "display_name": "بائع الرياض",
+        "role": "showroom",
+        "phone_e164": "0504111111"
+      },
+      "status_code": 201,
+      "response": {
+        "id": 1,
+        "branch_id": 1,
+        "escalation_level": 1,
+        "display_name": "بائع الرياض",
+        "role": "showroom",
+        "phone_e164": "+966504111111",
+        "is_active": true,
+        "sort_order": 0
+      }
+    }
+  },
+  "multi_branch_validation": [
+    {
+      "branch": "فرع الرياض",
+      "city": "الرياض",
+      "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+      "is_active": true,
+      "default_reception": {
+        "id": 1,
+        "branch_id": 1,
+        "display_name": "استقبال الرياض",
+        "role": "reception",
+        "phone_e164": "+966501111111",
+        "whatsapp_e164": "",
+        "is_active": true,
+        "is_default_reception": true,
+        "sort_order": 0
+      },
+      "escalation_levels": [
+        {
+          "level": 1,
+          "name": "بائع الرياض",
+          "phone": "+966504111111"
+        },
+        {
+          "level": 2,
+          "name": "إدارة الرياض",
+          "phone": "+966504111112"
+        }
+      ]
+    },
+    {
+      "branch": "فرع جدة",
+      "city": "جدة",
+      "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+      "is_active": true,
+      "default_reception": {
+        "id": 3,
+        "branch_id": 2,
+        "display_name": "استقبال جدة",
+        "role": "reception",
+        "phone_e164": "+966502222221",
+        "whatsapp_e164": "",
+        "is_active": true,
+        "is_default_reception": true,
+        "sort_order": 0
+      },
+      "escalation_levels": [
+        {
+          "level": 1,
+          "name": "بائع جدة",
+          "phone": "+966504222221"
+        },
+        {
+          "level": 2,
+          "name": "CS جدة",
+          "phone": "+966504222222"
+        }
+      ]
+    },
+    {
+      "branch": "فرع الطائف",
+      "city": "الطائف",
+      "maps_url": "https://maps.google.com/?q=taif-showroom",
+      "is_active": false,
+      "default_reception": {
+        "id": 5,
+        "branch_id": 3,
+        "display_name": "استقبال الطائف",
+        "role": "reception",
+        "phone_e164": "+966503333331",
+        "whatsapp_e164": "",
+        "is_active": true,
+        "is_default_reception": true,
+        "sort_order": 0
+      },
+      "escalation_levels": [
+        {
+          "level": 1,
+          "name": "بائع الطائف",
+          "phone": "+966504333331"
+        },
+        {
+          "level": 2,
+          "name": "إدارة الطائف",
+          "phone": "+966504333332"
+        }
+      ]
+    }
+  ],
+  "runtime_isolation": {
+    "flag": "USE_STRUCTURED_BRANCH_CONTACTS=0",
+    "checks": [
+      {
+        "module": "branch_contact_evidence.structured_branch_contacts_enabled()",
+        "pass": true,
+        "value": false
+      },
+      {
+        "module": "location_link_policy / lookup_structured_maps_url",
+        "pass": true,
+        "structured_url": "",
+        "structured_source": "none",
+        "kb_path": "safety_nets._lookup_tenant_maps_url continues to snapshot/KB when flag OFF"
+      },
+      {
+        "module": "arrival_contact_delivery / resolve_reception_contact",
+        "pass": true,
+        "structured_reception": null,
+        "kb_path": "resolve_arrival_contact_evidence falls through to arrival_contact_compile_v0"
+      },
+      {
+        "module": "staff_contact_registry / load_structured_staff_contact_registry",
+        "pass": true,
+        "structured_registry": null
+      },
+      {
+        "module": "escalation_chain / load_structured_escalation_chain",
+        "pass": true,
+        "structured_chain_len": 0
+      },
+      {
+        "module": "staff_contact_registry KB fallback",
+        "pass": true,
+        "kb_phone": "966555555555"
+      },
+      {
+        "module": "arrival_contact_delivery resolve_arrival_contact_evidence",
+        "pass": true,
+        "evidence": null,
+        "note": "With empty KB compile, None is expected; structured_branch_reception must not appear when flag OFF"
+      }
+    ],
+    "all_pass": true
+  },
+  "migration": {
+    "0076_revision": "0076",
+    "0076_down_revision": "0074",
+    "0077_revision": "0077",
+    "0077_down_revision": "0076",
+    "chain": "0074 → 0076 (tables) → 0077 (is_default_reception column only)",
+    "conflict_check": "0077 only adds branch_contacts.is_default_reception; does not recreate 0076 tables",
+    "0076_head": "\"\"\"0076 — Operations Center: structured branches, contacts, escalation (PR-A).\n\nRevision ID: 0076\nRevises:    0074\n\nPlatform-wide structured configuration for branch locations, reception\ncontacts, and per-branch escalation ladders. Runtime reads these tables\nwhen USE_STRUCTURED_BRANCH_CONTACTS is enabled; KB parsers remain as\nfallback.\n\"\"\"\nfrom __future__ import annotations\n\nimport sqlalchemy as sa\nfrom alembic import op\n\n\nrevision = \"0076\"\ndown_revision = \"0074\"\nbranch_labels = None\ndepends_on = None",
+    "0077_full": "\"\"\"0077 — Default reception flag on branch contacts (PR-B).\n\nRevision ID: 0077\nRevises:    0076\n\"\"\"\nfrom __future__ import annotations\n\nimport sqlalchemy as sa\nfrom alembic import op\n\n\nrevision = \"0077\"\ndown_revision = \"0076\"\nbranch_labels = None\ndepends_on = None\n\n\ndef _has_column(bind, table: str, column: str) -> bool:\n    insp = sa.inspect(bind)\n    if table not in insp.get_table_names():\n        return False\n    return column in {c[\"name\"] for c in insp.get_columns(table)}\n\n\ndef upgrade() -> None:\n    bind = op.get_bind()\n    if not _has_column(bind, \"branch_contacts\", \"is_default_reception\"):\n        op.add_column(\n            \"branch_contacts\",\n            sa.Column(\n                \"is_default_reception\",\n                sa.Boolean(),\n                nullable=False,\n                server_default=sa.text(\"false\"),\n            ),\n        )\n\n\ndef downgrade() -> None:\n    bind = op.get_bind()\n    if _has_column(bind, \"branch_contacts\", \"is_default_reception\"):\n        op.drop_column(\"branch_contacts\", \"is_default_reception\")\n",
+    "BranchContact_model": "class BranchContact(Base):\n    \"\"\"Reception / branch staff contact — deterministic delivery only.\"\"\"\n\n    __tablename__ = \"branch_contacts\"\n    __table_args__ = (\n        Index(\"ix_branch_contacts_branch_active\", \"branch_id\", \"is_active\"),\n        Index(\"ix_branch_contacts_branch_sort\", \"branch_id\", \"sort_order\"),\n    )\n\n    id = Column(Integer, primary_key=True)\n    branch_id = Column(\n        Integer,\n        ForeignKey(\"merchant_branches.id\", ondelete=\"CASCADE\"),\n        nullable=False,\n    )\n    display_name = Column(String(255), nullable=False)\n    role = Column(String(128), nullable=True)\n    phone_e164 = Column(String(32), nullable=False)\n    whatsapp_e164 = Column(String(32), nullable=True)\n    is_active = Column(Boolean, nullable=False, default=True, server_default=\"true\")\n    is_default_reception = Column(\n        Boolean, nullable=False, default=False, server_default=\"false\",\n    )\n    sort_order = Column(Integer, nullable=False, default=0, server_default=\"0\")\n\n    branch = relationship(\"MerchantBranch\", back_populates=\"contacts\")"
+  },
+  "full_api_trace": {
+    "tenant_id": 99,
+    "calls": [
+      {
+        "method": "POST",
+        "path": "/operations-center/branches",
+        "request_body": {
+          "name": "فرع الرياض",
+          "city": "الرياض",
+          "district": "العليا",
+          "address": "شارع تجريبي، العليا، الرياض",
+          "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0
+        },
+        "status_code": 201,
+        "response": {
+          "id": 1,
+          "tenant_id": 99,
+          "name": "فرع الرياض",
+          "city": "الرياض",
+          "district": "العليا",
+          "address": "شارع تجريبي، العليا، الرياض",
+          "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0,
+          "contact_count": 0,
+          "created_at": "2026-06-15T07:52:04.730610",
+          "updated_at": "2026-06-15T07:52:04.730610"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches",
+        "request_body": {
+          "name": "فرع جدة",
+          "city": "جدة",
+          "district": "الروضة",
+          "address": "شارع تجريبي، الروضة، جدة",
+          "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0
+        },
+        "status_code": 201,
+        "response": {
+          "id": 2,
+          "tenant_id": 99,
+          "name": "فرع جدة",
+          "city": "جدة",
+          "district": "الروضة",
+          "address": "شارع تجريبي، الروضة، جدة",
+          "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0,
+          "contact_count": 0,
+          "created_at": "2026-06-15T07:52:04.743480",
+          "updated_at": "2026-06-15T07:52:04.743480"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches",
+        "request_body": {
+          "name": "فرع الطائف",
+          "city": "الطائف",
+          "district": "الشفا",
+          "address": "شارع تجريبي، الشفا، الطائف",
+          "maps_url": "https://maps.google.com/?q=taif-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0
+        },
+        "status_code": 201,
+        "response": {
+          "id": 3,
+          "tenant_id": 99,
+          "name": "فرع الطائف",
+          "city": "الطائف",
+          "district": "الشفا",
+          "address": "شارع تجريبي، الشفا، الطائف",
+          "maps_url": "https://maps.google.com/?q=taif-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": true,
+          "sort_order": 0,
+          "contact_count": 0,
+          "created_at": "2026-06-15T07:52:04.750216",
+          "updated_at": "2026-06-15T07:52:04.750216"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/1/contacts",
+        "request_body": {
+          "display_name": "استقبال الرياض",
+          "role": "reception",
+          "phone_e164": "0501111111",
+          "is_default_reception": true
+        },
+        "status_code": 201,
+        "response": {
+          "id": 1,
+          "branch_id": 1,
+          "display_name": "استقبال الرياض",
+          "role": "reception",
+          "phone_e164": "+966501111111",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/1/contacts/1/set-default-reception",
+        "request_body": null,
+        "status_code": 200,
+        "response": {
+          "id": 1,
+          "branch_id": 1,
+          "display_name": "استقبال الرياض",
+          "role": "reception",
+          "phone_e164": "+966501111111",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/1/contacts",
+        "request_body": {
+          "display_name": "مدير الرياض",
+          "role": "admin",
+          "phone_e164": "0501111112",
+          "is_default_reception": false
+        },
+        "status_code": 201,
+        "response": {
+          "id": 2,
+          "branch_id": 1,
+          "display_name": "مدير الرياض",
+          "role": "admin",
+          "phone_e164": "+966501111112",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": false,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/2/contacts",
+        "request_body": {
+          "display_name": "استقبال جدة",
+          "role": "reception",
+          "phone_e164": "0502222221",
+          "is_default_reception": true
+        },
+        "status_code": 201,
+        "response": {
+          "id": 3,
+          "branch_id": 2,
+          "display_name": "استقبال جدة",
+          "role": "reception",
+          "phone_e164": "+966502222221",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/2/contacts/3/set-default-reception",
+        "request_body": null,
+        "status_code": 200,
+        "response": {
+          "id": 3,
+          "branch_id": 2,
+          "display_name": "استقبال جدة",
+          "role": "reception",
+          "phone_e164": "+966502222221",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/2/contacts",
+        "request_body": {
+          "display_name": "بائع جدة",
+          "role": "showroom",
+          "phone_e164": "0502222222",
+          "is_default_reception": false
+        },
+        "status_code": 201,
+        "response": {
+          "id": 4,
+          "branch_id": 2,
+          "display_name": "بائع جدة",
+          "role": "showroom",
+          "phone_e164": "+966502222222",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": false,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/contacts",
+        "request_body": {
+          "display_name": "استقبال الطائف",
+          "role": "reception",
+          "phone_e164": "0503333331",
+          "is_default_reception": true
+        },
+        "status_code": 201,
+        "response": {
+          "id": 5,
+          "branch_id": 3,
+          "display_name": "استقبال الطائف",
+          "role": "reception",
+          "phone_e164": "+966503333331",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/contacts/5/set-default-reception",
+        "request_body": null,
+        "status_code": 200,
+        "response": {
+          "id": 5,
+          "branch_id": 3,
+          "display_name": "استقبال الطائف",
+          "role": "reception",
+          "phone_e164": "+966503333331",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/contacts",
+        "request_body": {
+          "display_name": "خدمة الطائف",
+          "role": "customer_service",
+          "phone_e164": "0503333332",
+          "is_default_reception": false
+        },
+        "status_code": 201,
+        "response": {
+          "id": 6,
+          "branch_id": 3,
+          "display_name": "خدمة الطائف",
+          "role": "customer_service",
+          "phone_e164": "+966503333332",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": false,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/1/escalation-steps",
+        "request_body": {
+          "escalation_level": 1,
+          "display_name": "بائع الرياض",
+          "role": "showroom",
+          "phone_e164": "0504111111"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 1,
+          "branch_id": 1,
+          "escalation_level": 1,
+          "display_name": "بائع الرياض",
+          "role": "showroom",
+          "phone_e164": "+966504111111",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/1/escalation-steps",
+        "request_body": {
+          "escalation_level": 2,
+          "display_name": "إدارة الرياض",
+          "role": "admin",
+          "phone_e164": "0504111112"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 2,
+          "branch_id": 1,
+          "escalation_level": 2,
+          "display_name": "إدارة الرياض",
+          "role": "admin",
+          "phone_e164": "+966504111112",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/2/escalation-steps",
+        "request_body": {
+          "escalation_level": 1,
+          "display_name": "بائع جدة",
+          "role": "showroom",
+          "phone_e164": "0504222221"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 3,
+          "branch_id": 2,
+          "escalation_level": 1,
+          "display_name": "بائع جدة",
+          "role": "showroom",
+          "phone_e164": "+966504222221",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/2/escalation-steps",
+        "request_body": {
+          "escalation_level": 2,
+          "display_name": "CS جدة",
+          "role": "customer_service",
+          "phone_e164": "0504222222"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 4,
+          "branch_id": 2,
+          "escalation_level": 2,
+          "display_name": "CS جدة",
+          "role": "customer_service",
+          "phone_e164": "+966504222222",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/escalation-steps",
+        "request_body": {
+          "escalation_level": 1,
+          "display_name": "بائع الطائف",
+          "role": "showroom",
+          "phone_e164": "0504333331"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 5,
+          "branch_id": 3,
+          "escalation_level": 1,
+          "display_name": "بائع الطائف",
+          "role": "showroom",
+          "phone_e164": "+966504333331",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/escalation-steps",
+        "request_body": {
+          "escalation_level": 2,
+          "display_name": "إدارة الطائف",
+          "role": "admin",
+          "phone_e164": "0504333332"
+        },
+        "status_code": 201,
+        "response": {
+          "id": 6,
+          "branch_id": 3,
+          "escalation_level": 2,
+          "display_name": "إدارة الطائف",
+          "role": "admin",
+          "phone_e164": "+966504333332",
+          "is_active": true,
+          "sort_order": 0
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/operations-center/branches/3/deactivate",
+        "request_body": null,
+        "status_code": 200,
+        "response": {
+          "id": 3,
+          "tenant_id": 99,
+          "name": "فرع الطائف",
+          "city": "الطائف",
+          "district": "الشفا",
+          "address": "شارع تجريبي، الشفا، الطائف",
+          "maps_url": "https://maps.google.com/?q=taif-showroom",
+          "hours_json": {
+            "sat": "9-22",
+            "sun": "9-22"
+          },
+          "is_active": false,
+          "sort_order": 0,
+          "contact_count": 0,
+          "created_at": "2026-06-15T07:52:04.750216",
+          "updated_at": "2026-06-15T07:52:04.870998"
+        }
+      },
+      {
+        "method": "GET",
+        "path": "/operations-center/branches",
+        "request_body": null,
+        "status_code": 200,
+        "response": {
+          "branches": [
+            {
+              "id": 1,
+              "tenant_id": 99,
+              "name": "فرع الرياض",
+              "city": "الرياض",
+              "district": "العليا",
+              "address": "شارع تجريبي، العليا، الرياض",
+              "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+              "hours_json": {
+                "sat": "9-22",
+                "sun": "9-22"
+              },
+              "is_active": true,
+              "sort_order": 0,
+              "contact_count": 2,
+              "created_at": "2026-06-15T07:52:04.730610",
+              "updated_at": "2026-06-15T07:52:04.730610"
+            },
+            {
+              "id": 2,
+              "tenant_id": 99,
+              "name": "فرع جدة",
+              "city": "جدة",
+              "district": "الروضة",
+              "address": "شارع تجريبي، الروضة، جدة",
+              "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+              "hours_json": {
+                "sat": "9-22",
+                "sun": "9-22"
+              },
+              "is_active": true,
+              "sort_order": 0,
+              "contact_count": 2,
+              "created_at": "2026-06-15T07:52:04.743480",
+              "updated_at": "2026-06-15T07:52:04.743480"
+            },
+            {
+              "id": 3,
+              "tenant_id": 99,
+              "name": "فرع الطائف",
+              "city": "الطائف",
+              "district": "الشفا",
+              "address": "شارع تجريبي، الشفا، الطائف",
+              "maps_url": "https://maps.google.com/?q=taif-showroom",
+              "hours_json": {
+                "sat": "9-22",
+                "sun": "9-22"
+              },
+              "is_active": false,
+              "sort_order": 0,
+              "contact_count": 2,
+              "created_at": "2026-06-15T07:52:04.750216",
+              "updated_at": "2026-06-15T07:52:04.870998"
+            }
+          ]
+        }
+      }
+    ],
+    "multi_branch_summary": [
+      {
+        "branch": "فرع الرياض",
+        "city": "الرياض",
+        "maps_url": "https://maps.google.com/?q=riyadh-showroom",
+        "is_active": true,
+        "default_reception": {
+          "id": 1,
+          "branch_id": 1,
+          "display_name": "استقبال الرياض",
+          "role": "reception",
+          "phone_e164": "+966501111111",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        },
+        "escalation_levels": [
+          {
+            "level": 1,
+            "name": "بائع الرياض",
+            "phone": "+966504111111"
+          },
+          {
+            "level": 2,
+            "name": "إدارة الرياض",
+            "phone": "+966504111112"
+          }
+        ]
+      },
+      {
+        "branch": "فرع جدة",
+        "city": "جدة",
+        "maps_url": "https://maps.google.com/?q=jeddah-showroom",
+        "is_active": true,
+        "default_reception": {
+          "id": 3,
+          "branch_id": 2,
+          "display_name": "استقبال جدة",
+          "role": "reception",
+          "phone_e164": "+966502222221",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        },
+        "escalation_levels": [
+          {
+            "level": 1,
+            "name": "بائع جدة",
+            "phone": "+966504222221"
+          },
+          {
+            "level": 2,
+            "name": "CS جدة",
+            "phone": "+966504222222"
+          }
+        ]
+      },
+      {
+        "branch": "فرع الطائف",
+        "city": "الطائف",
+        "maps_url": "https://maps.google.com/?q=taif-showroom",
+        "is_active": false,
+        "default_reception": {
+          "id": 5,
+          "branch_id": 3,
+          "display_name": "استقبال الطائف",
+          "role": "reception",
+          "phone_e164": "+966503333331",
+          "whatsapp_e164": "",
+          "is_active": true,
+          "is_default_reception": true,
+          "sort_order": 0
+        },
+        "escalation_levels": [
+          {
+            "level": 1,
+            "name": "بائع الطائف",
+            "phone": "+966504333331"
+          },
+          {
+            "level": 2,
+            "name": "إدارة الطائف",
+            "phone": "+966504333332"
+          }
+        ]
+      }
+    ],
+    "branch_ids": [
+      1,
+      2,
+      3
+    ]
+  }
+}

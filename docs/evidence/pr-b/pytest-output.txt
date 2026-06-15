@@ -1,0 +1,28 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.14, pytest-9.0.3, pluggy-1.6.0 -- C:\Users\STARS\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\STARS\Downloads\nahla-saas\.worktrees\pr-b
+configfile: pytest.ini
+plugins: anyio-4.12.1
+collecting ... collected 11 items
+
+tests\test_operations_center_api.py::test_normalize_phone_accepts_saudi_local PASSED [  9%]
+tests\test_operations_center_api.py::test_normalize_phone_rejects_garbage PASSED [ 18%]
+tests\test_operations_center_api.py::test_reorder_escalation_steps PASSED [ 27%]
+tests\test_operations_center_api.py::test_default_reception_column_on_contact PASSED [ 36%]
+tests\test_structured_branch_operations.py::test_lookup_structured_maps_url_returns_branch_maps PASSED [ 45%]
+tests\test_structured_branch_operations.py::test_resolve_reception_contact_prefers_showroom_role PASSED [ 54%]
+tests\test_structured_branch_operations.py::test_arrival_delivery_uses_structured_reception PASSED [ 63%]
+tests\test_structured_branch_operations.py::test_structured_escalation_advances_linearly PASSED [ 72%]
+tests\test_structured_branch_operations.py::test_maps_resolver_prefers_structured_when_flag_on PASSED [ 81%]
+tests\test_structured_branch_operations.py::test_structured_registry_named_lookup PASSED [ 90%]
+tests\test_structured_branch_operations.py::test_flag_off_falls_back_to_kb_registry PASSED [100%]
+
+============================== warnings summary ===============================
+backend/tests/test_operations_center_api.py::test_reorder_escalation_steps
+backend/tests/test_operations_center_api.py::test_default_reception_column_on_contact
+  C:\Users\STARS\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\sqlalchemy\sql\schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 11 passed, 2 warnings in 2.48s ========================
