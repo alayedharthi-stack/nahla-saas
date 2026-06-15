@@ -1,19 +1,21 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  ArrowRight, ChevronDown, ChevronUp, Pencil, Phone, Plus, Star, Trash2,
+  ArrowRight, Pencil, Phone, Plus, Star, Trash2,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import Badge from '../components/ui/Badge'
 import ConfirmModal from '../components/ui/ConfirmModal'
 import BranchHoursEditor from '../components/operations/BranchHoursEditor'
 import ContactFormModal from '../components/operations/ContactFormModal'
+import EscalationChainPanel from '../components/operations/EscalationChainPanel'
 import EscalationStepFormModal from '../components/operations/EscalationStepFormModal'
 import {
   parseHoursJson,
   serializeHoursJson,
   type DaySchedule,
 } from '../lib/branchHours'
+import type { EscalationChainType } from '../lib/escalationTypes'
 import {
   operationsCenterApi,
   type BranchContact,
@@ -56,8 +58,12 @@ export default function OperationsCenterBranchDetail() {
   const [deleteStepTarget, setDeleteStepTarget] = useState<BranchEscalationStep | null>(null)
   const [deleteStepLoading, setDeleteStepLoading] = useState(false)
   const [stepModalOpen, setStepModalOpen] = useState(false)
+  const [stepModalMode, setStepModalMode] = useState<'create' | 'edit'>('create')
+  const [editingStep, setEditingStep] = useState<BranchEscalationStep | null>(null)
   const [stepSaving, setStepSaving] = useState(false)
   const [stepError, setStepError] = useState('')
+  const [stepReordering, setStepReordering] = useState(false)
+  const [chainType, setChainType] = useState<EscalationChainType>('general')
 
   const load = useCallback(async () => {
     if (!id) return
@@ -159,13 +165,26 @@ export default function OperationsCenterBranchDetail() {
 
   const openCreateStep = () => {
     setStepError('')
+    setEditingStep(null)
+    setStepModalMode('create')
+    setStepModalOpen(true)
+  }
+
+  const openEditStep = (step: BranchEscalationStep) => {
+    setStepError('')
+    setEditingStep(step)
+    setStepModalMode('edit')
     setStepModalOpen(true)
   }
 
   const saveStep = async (body: EscalationStepInput) => {
     setStepSaving(true)
     try {
-      await operationsCenterApi.createEscalationStep(id, body)
+      if (stepModalMode === 'edit' && editingStep) {
+        await operationsCenterApi.updateEscalationStep(id, editingStep.id, body)
+      } else {
+        await operationsCenterApi.createEscalationStep(id, body)
+      }
       await load()
     } catch (e: unknown) {
       throw e
@@ -177,13 +196,13 @@ export default function OperationsCenterBranchDetail() {
   const confirmDeleteStep = async () => {
     if (!deleteStepTarget) return
     setDeleteStepLoading(true)
-    setError('')
+    setStepError('')
     try {
       await operationsCenterApi.deleteEscalationStep(id, deleteStepTarget.id)
       setDeleteStepTarget(null)
       await load()
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'تعذّر حذف مستوى التصعيد')
+      setStepError(e instanceof Error ? e.message : 'تعذّر حذف مستوى التصعيد')
     } finally {
       setDeleteStepLoading(false)
     }
@@ -192,10 +211,18 @@ export default function OperationsCenterBranchDetail() {
   const moveStep = async (index: number, direction: -1 | 1) => {
     const target = index + direction
     if (target < 0 || target >= steps.length) return
-    const ids = steps.map(s => s.id)
-    ;[ids[index], ids[target]] = [ids[target], ids[index]]
-    await operationsCenterApi.reorderEscalationSteps(id, ids)
-    await load()
+    setStepReordering(true)
+    setStepError('')
+    try {
+      const ids = steps.map(s => s.id)
+      ;[ids[index], ids[target]] = [ids[target], ids[index]]
+      await operationsCenterApi.reorderEscalationSteps(id, ids)
+      await load()
+    } catch (e: unknown) {
+      setStepError(e instanceof Error ? e.message : 'تعذّر إعادة ترتيب المستويات')
+    } finally {
+      setStepReordering(false)
+    }
   }
 
   if (!branch && !error) {
@@ -395,55 +422,26 @@ export default function OperationsCenterBranchDetail() {
       )}
 
       {tab === 'escalation' && (
-        <div className="space-y-4">
-          {stepError && (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              {stepError}
-            </div>
-          )}
-          <div className="flex justify-end">
-            <button type="button" className="btn-primary flex items-center gap-2" onClick={openCreateStep}>
-              <Plus className="w-4 h-4" />
-              إضافة مستوى
-            </button>
-          </div>
-          <div className="space-y-3">
-            {steps.length === 0 ? (
-              <div className="card p-8 text-center text-slate-500 text-sm">لا توجد مستويات تصعيد.</div>
-            ) : steps.map((step, index) => (
-              <div key={step.id} className="card p-4 flex items-center gap-4">
-                <div className="w-10 h-10 rounded-full bg-brand-50 text-brand-700 flex items-center justify-center font-bold text-sm">
-                  {step.escalation_level}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium text-slate-900">{step.display_name}</div>
-                  <div className="text-xs text-slate-500 flex items-center gap-2 mt-1">
-                    <Phone className="w-3 h-3" />
-                    <span dir="ltr">{step.phone_e164}</span>
-                    {step.role && <span>· {step.role}</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button type="button" className="p-1 rounded hover:bg-slate-100" onClick={() => moveStep(index, -1)} disabled={index === 0}>
-                    <ChevronUp className="w-4 h-4" />
-                  </button>
-                  <button type="button" className="p-1 rounded hover:bg-slate-100" onClick={() => moveStep(index, 1)} disabled={index === steps.length - 1}>
-                    <ChevronDown className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    className="p-1 rounded hover:bg-red-50 text-red-500"
-                    onClick={() => setDeleteStepTarget(step)}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+        <div className="max-w-3xl">
+          <EscalationChainPanel
+            steps={steps}
+            chainType={chainType}
+            error={stepError}
+            reordering={stepReordering}
+            onChainTypeChange={setChainType}
+            onAdd={openCreateStep}
+            onEdit={openEditStep}
+            onDelete={(step) => {
+              setStepError('')
+              setDeleteStepTarget(step)
+            }}
+            onMove={moveStep}
+          />
 
           <EscalationStepFormModal
             open={stepModalOpen}
+            mode={stepModalMode}
+            step={editingStep}
             nextLevel={steps.length + 1}
             saving={stepSaving}
             onClose={() => {
