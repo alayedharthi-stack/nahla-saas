@@ -344,35 +344,10 @@ def _detect_name(text: str, already_extracted: Dict[str, Any]) -> tuple[str, str
 
 
 def _clean_name_candidate(raw: str) -> str:
-    text = raw.strip()
-    if not text:
-        return ""
+    from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
 
-    # Reject if any non-name token appears prominently
-    tokens = [t for t in re.split(r"\s+", text) if t]
-    if not tokens or len(tokens) > 4:
-        return ""
-
-    # Build the rejection set with normalised forms so "ابغى" (with alef) and
-    # "ابغي" (after alef-maksura → yaa) both match the same blocklist entry.
-    blocklist = {_normalize_arabic(t) for t in _ARABIC_NON_NAME_TOKENS}
-
-    cleaned = []
-    for tok in tokens:
-        normalized = _normalize_arabic(tok)
-        if normalized in blocklist:
-            return ""
-        cleaned.append(tok)
-
-    candidate = " ".join(cleaned).strip()
-
-    # Must look like Arabic letters or simple Latin name — anything else
-    # (mixed digits, punctuation-heavy, emoji) is rejected.
-    if _ARABIC_LETTERS_RE.match(candidate):
-        return candidate
-    if _LATIN_NAME_RE.match(candidate):
-        return candidate
-    return ""
+    hit = validate_customer_name(raw)
+    return hit.cleaned if hit.valid else ""
 
 
 def _split_name(full_name: str) -> tuple[str, str]:

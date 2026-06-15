@@ -448,7 +448,17 @@ def _persist_customer_profile(
     if not db or not phone or not name:
         return
     try:
+        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
         from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+        if not validate_customer_name(name).valid:
+            logger.info(
+                "[CUSTOMER_PROFILE_UPDATED] skipped invalid name tenant=%s phone=%s value=%r",
+                tenant_id,
+                phone,
+                name[:80],
+            )
+            return
 
         svc = CustomerIntelligenceService(db, tenant_id)
         svc.upsert_customer_identity(

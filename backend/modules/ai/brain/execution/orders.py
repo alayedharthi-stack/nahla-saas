@@ -1541,8 +1541,42 @@ def _filter_missing_phone_if_known(
 
 
 def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None:
-    full_name = str(ctx.profile.get("name") or "").strip()
-    first, last = _split_name(full_name)
+    from core.customer_identity_resolver import (  # noqa: PLC0415
+        can_use_name_for_operations,
+        read_customer_identity,
+    )
+
+    profile_name = str(ctx.profile.get("name") or "").strip()
+    customer_row = getattr(ctx, "_customer_row", None)
+    if customer_row is None:
+        try:
+            db = getattr(ctx, "_db", None)
+            if db and ctx.customer_phone:
+                from models import Customer  # noqa: PLC0415
+                from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
+
+                e164 = normalize_to_e164(str(ctx.customer_phone))
+                customer_row = (
+                    db.query(Customer)
+                    .filter(
+                        Customer.tenant_id == ctx.tenant_id,
+                        Customer.normalized_phone == e164,
+                    )
+                    .first()
+                )
+        except Exception:  # noqa: BLE001
+            customer_row = None
+
+    official_profile_name = ""
+    if customer_row is not None and can_use_name_for_operations(customer_row):
+        official_profile_name = read_customer_identity(customer_row).customer_name
+    elif profile_name:
+        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+
+        if validate_customer_name(profile_name).valid:
+            official_profile_name = profile_name
+
+    first, last = _split_name(official_profile_name)
     if not prep.customer_first_name and first and not _looks_like_phone_name(first):
         prep.customer_first_name = first
     if not prep.customer_last_name and last:
@@ -1868,9 +1902,21 @@ def _split_name(full_name: str) -> tuple[str, str]:
 
 
 def _full_name(prep: OrderPreparationState, fallback: str) -> str:
+    from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+
     parts = [prep.customer_first_name.strip(), prep.customer_last_name.strip()]
     name = " ".join(part for part in parts if part)
-    return name or str(fallback or "عميل").strip() or "عميل"
+    prov = dict(getattr(prep, "identity_provenance", None) or {})
+    if name and validate_customer_name(name).valid:
+        if prov.get("customer_name") in {
+            "explicit_customer_statement",
+            "confirmation_yes",
+        } or prov.get("recipient_name") == "explicit_customer_statement":
+            return name
+    fb = str(fallback or "").strip()
+    if fb and validate_customer_name(fb).valid:
+        return fb
+    return "عميل"
 
 
 def _address_line(prep: OrderPreparationState) -> str:

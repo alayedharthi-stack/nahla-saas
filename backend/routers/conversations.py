@@ -828,6 +828,10 @@ async def list_conversations(
         n = _norm(phone)
         status = _status_for(phone, convo)
         raw_name = convo.customer.name if convo.customer and convo.customer.name else ""
+        if convo.customer:
+            from core.customer_identity_resolver import display_name_for_customer  # noqa: PLC0415
+
+            raw_name = display_name_for_customer(convo.customer, phone_fallback=phone)
         name_looks_like_phone = raw_name and raw_name.replace("+", "").replace("-", "").replace(" ", "").isdigit()
         name = "" if name_looks_like_phone else raw_name
 
@@ -1319,7 +1323,13 @@ async def list_conversations(
 
 
 @router.get("/messages/{customer_phone}")
-async def get_conversation_messages(customer_phone: str, request: Request, db: Session = Depends(get_db), limit: int = 100):
+async def get_conversation_messages(
+    customer_phone: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 30,
+    before_id: Optional[int] = None,
+):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
@@ -1360,12 +1370,18 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     if conv_ids:
         me_filter = or_(me_filter, MessageEvent.conversation_id.in_(conv_ids))
 
-    me_rows = (
+    me_query = (
         db.query(MessageEvent)
         .filter(
             MessageEvent.tenant_id.in_(tenant_ids),
             me_filter,
         )
+    )
+    if before_id is not None:
+        me_query = me_query.filter(MessageEvent.id < int(before_id))
+
+    me_rows = (
+        me_query
         .order_by(MessageEvent.created_at.desc())
         .limit(limit)
         .all()
@@ -1484,7 +1500,7 @@ async def get_conversation_messages(customer_phone: str, request: Request, db: S
     for m in messages:
         m.pop("_ts", None)
 
-    return {"messages": messages}
+    return {"messages": messages, "has_more": len(me_rows) >= limit}
 
 
 @router.get("/{conversation_id:int}/media-debug")
