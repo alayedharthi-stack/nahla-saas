@@ -142,7 +142,7 @@ def _product_is_available(product: Mapping[str, Any]) -> bool:
         from core.catalog import is_catalog_active  # noqa: PLC0415
 
         return bool(is_catalog_active(product))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — is_catalog_active optional; fall back to row stock fields
         pass
 
     orderable = product.get("orderable", product.get("can_checkout"))
