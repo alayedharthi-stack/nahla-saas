@@ -75,6 +75,20 @@ _PRICE_IN_TEXT_RE = re.compile(
 
 # Platform category families — not merchant SKUs.
 _HONEY_TOKENS = frozenset({"عسل", "اعسال", "honey"})
+_HONEY_SUBTYPE_HINTS = frozenset({"سدر", "طلح", "سمر", "برسيم", "sider", "talh"})
+_ORDER_VERB_TOKENS = frozenset({
+    "احتاج", "ابي", "ابغ", "اريد", "want", "need",
+})
+_PURE_NON_COMMERCE_RE = re.compile(
+    r"(?:"
+    r"^(?:مرحبا|مرحب(?:ة|اً)?|هلا|اهلا|أ?هلا|"
+    r"السلام\s+عليكم|سلام\s+عليكم|"
+    r"صباح\s+ال(?:خير|نور)|مساء\s+ال(?:خير|نور)|"
+    r"hello|hi|hey|good\s+(?:morning|evening)|"
+    r"كيف\s+حالك|شلونك|وش\s+اخبارك)\s*[.!?؟]*$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 _VENOM_DRIFT_MARKERS = frozenset({
     "سم", "كريم", "زيت", "venom", "cream", "oil", "خليه", "خلية", "طلع", "نخيل",
 })
@@ -247,11 +261,13 @@ def detect_ask_cod(text: str) -> bool:
 
 def _detect_honey_scope(text: str) -> Optional[str]:
     norm = _norm(text)
-    if norm and (set(_tokens(norm)) & _HONEY_TOKENS or "عسل" in norm):
+    if not norm:
+        return None
+    tokens = set(_tokens(norm))
+    if tokens & _HONEY_TOKENS or "عسل" in norm:
         return "عسل"
-    scope = extract_browse_category_scope(text)
-    if scope:
-        return scope
+    if tokens & _HONEY_SUBTYPE_HINTS or any(h in norm for h in _HONEY_SUBTYPE_HINTS):
+        return "عسل"
     return None
 
 
@@ -360,8 +376,7 @@ def detect_variant_order_selection(
         except (TypeError, ValueError):
             pass
 
-    order_verbs = ("احتاج", "ابي", "أبي", "ابغ", "أبغ", "اريد", "أريد", "بـ", "ب")
-    has_order_signal = bool(variant) or any(v in norm for v in order_verbs)
+    has_order_signal = bool(variant) or bool(set(_tokens(norm)) & _ORDER_VERB_TOKENS)
     if not has_order_signal:
         return {}
 
@@ -436,6 +451,15 @@ def prepare_commerce_inbound(
             quoted_bot_stripped=stripped,
             is_ask_cod=True,
             intent_override=INTENT_ASK_COD,
+            session=session,
+        )
+
+    if _PURE_NON_COMMERCE_RE.search(_norm(classify_text)):
+        return CommerceInboundPrep(
+            original_message=original,
+            customer_addition=classify_text,
+            message_for_classification=classify_text,
+            quoted_bot_stripped=stripped,
             session=session,
         )
 
