@@ -12077,6 +12077,7 @@ async def _post_wa(
     _db=None,
     _allow_manual: bool = False,
     _blocked_path: str = "post_wa",
+    _treat_dedup_as_success: bool = True,
 ) -> bool:
     # ── External-research leakage guard (May 2026) ────────────────
     # Final scrubber for the May 2026 DuckDuckGo-leak incident: if any
@@ -12258,6 +12259,8 @@ async def _post_wa(
                     _tenant_id, recipient,
                     (_dedup_res.wamid or "")[-6:] or None,
                 )
+                if not _treat_dedup_as_success:
+                    return False
                 return True
             # in_flight: another worker is mid-POST. Return False
             # without stamping to avoid racing the primary caller.
@@ -12804,8 +12807,14 @@ async def _send_contacts_message(
     phone_id: str, to: str, payload: Dict[str, Any],
     _tenant_id: Optional[int] = None, _db=None,
 ) -> bool:
+    # vCard paths must not treat dedup ``already_sent`` as a fresh
+    # provider POST — upstream uses this bool for ``vcard_ok`` evidence.
     return await _post_wa(
-        phone_id, payload, _tenant_id=_tenant_id, _db=_db
+        phone_id,
+        payload,
+        _tenant_id=_tenant_id,
+        _db=_db,
+        _treat_dedup_as_success=False,
     )
 
 
