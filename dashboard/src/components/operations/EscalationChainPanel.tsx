@@ -1,8 +1,7 @@
 import {
-  ArrowDown, ChevronDown, ChevronUp, Info, Pencil, Phone, Plus, Trash2,
+  ArrowDown, ChevronDown, ChevronUp, Info, Pencil, Phone, Plus, Trash2, Users,
 } from 'lucide-react'
-import Badge from '../ui/Badge'
-import type { BranchEscalationStep } from '../../api/operationsCenter'
+import type { BranchContact, EscalationLevel } from '../../api/operationsCenter'
 import {
   ESCALATION_CHAIN_TYPES,
   ESCALATION_EXAMPLE_LEVELS,
@@ -10,19 +9,21 @@ import {
 } from '../../lib/escalationTypes'
 
 interface EscalationChainPanelProps {
-  steps: BranchEscalationStep[]
+  levels: EscalationLevel[]
+  contacts: BranchContact[]
   chainType: EscalationChainType
   error?: string
   reordering?: boolean
   onChainTypeChange: (type: EscalationChainType) => void
   onAdd: () => void
-  onEdit: (step: BranchEscalationStep) => void
-  onDelete: (step: BranchEscalationStep) => void
+  onEdit: (level: EscalationLevel) => void
+  onDelete: (level: EscalationLevel) => void
   onMove: (index: number, direction: -1 | 1) => void
 }
 
 export default function EscalationChainPanel({
-  steps,
+  levels,
+  contacts,
   chainType,
   error,
   reordering = false,
@@ -32,15 +33,24 @@ export default function EscalationChainPanel({
   onDelete,
   onMove,
 }: EscalationChainPanelProps) {
+  const activeContactCount = contacts.filter(c => c.is_active).length
+
   return (
     <div className="space-y-5">
       <div className="rounded-xl border border-brand-100 bg-brand-50/60 px-4 py-3 flex gap-3">
         <Info className="w-5 h-5 text-brand-600 shrink-0 mt-0.5" />
         <p className="text-sm text-slate-700 leading-relaxed">
           عند طلب العميل التواصل مع الفرع أو عند عدم استجابة المستوى الحالي، ينتقل النظام
-          تلقائياً إلى المستوى التالي حسب ترتيب التصعيد أدناه.
+          تلقائياً إلى المستوى التالي حسب ترتيب التصعيد أدناه. الموظفون يُضافون في تبويب
+          «جهات التواصل» — هنا تختار من هم فقط.
         </p>
       </div>
+
+      {activeContactCount === 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          أضف جهات التواصل أولاً من التبويب المجاور، ثم ارجع لبناء سلسلة التصعيد.
+        </div>
+      )}
 
       <div className="card p-4 space-y-2">
         <label className="block text-sm font-medium text-slate-700">نوع التصعيد</label>
@@ -86,18 +96,23 @@ export default function EscalationChainPanel({
         <div>
           <h3 className="font-semibold text-slate-900">سلسلة التصعيد</h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            {steps.length === 0
+            {levels.length === 0
               ? 'ابدأ بإضافة المستوى الأول — يُتصل به العميل أولاً'
-              : `${steps.length} مستوى — يبدأ من المستوى 1 وينتقل للتالي عند الحاجة`}
+              : `${levels.length} مستوى — يبدأ من المستوى 1 وينتقل للتالي عند الحاجة`}
           </p>
         </div>
-        <button type="button" className="btn-primary flex items-center gap-2 shrink-0" onClick={onAdd}>
+        <button
+          type="button"
+          className="btn-primary flex items-center gap-2 shrink-0"
+          onClick={onAdd}
+          disabled={activeContactCount === 0}
+        >
           <Plus className="w-4 h-4" />
           إضافة مستوى
         </button>
       </div>
 
-      {steps.length === 0 ? (
+      {levels.length === 0 ? (
         <div className="space-y-4">
           <div className="card p-5 border-dashed border-slate-200 bg-slate-50/50">
             <p className="text-sm font-medium text-slate-700 mb-3">مثال على سلسلة تصعيد</p>
@@ -118,14 +133,14 @@ export default function EscalationChainPanel({
             </div>
           </div>
           <p className="text-center text-sm text-slate-500">
-            اضغط «إضافة مستوى» لبناء سلسلة التصعيد لهذا الفرع.
+            اضغط «إضافة مستوى» واختر من جهات التواصل الموجودة.
           </p>
         </div>
       ) : (
         <div className="relative space-y-0">
-          {steps.map((step, index) => (
-            <div key={step.id} className="relative flex gap-4 pb-6 last:pb-0">
-              {index < steps.length - 1 && (
+          {levels.map((level, index) => (
+            <div key={level.escalation_level} className="relative flex gap-4 pb-6 last:pb-0">
+              {index < levels.length - 1 && (
                 <div
                   className="absolute top-10 bottom-0 w-0.5 bg-brand-200"
                   style={{ right: '1.1875rem' }}
@@ -135,27 +150,33 @@ export default function EscalationChainPanel({
 
               <div className="relative z-10 shrink-0">
                 <div className="w-10 h-10 rounded-full bg-brand-600 text-white flex items-center justify-center font-bold text-sm shadow-sm">
-                  {step.escalation_level}
+                  {level.escalation_level}
                 </div>
               </div>
 
               <div className="flex-1 min-w-0 card p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-slate-900">{step.display_name}</span>
-                      <Badge label={`المستوى ${step.escalation_level}`} variant="slate" />
-                      {!step.is_active && (
-                        <Badge label="معطّل" variant="slate" />
-                      )}
+                  <div className="min-w-0 space-y-2 flex-1">
+                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                      <Users className="w-3.5 h-3.5" />
+                      <span>
+                        {level.contacts.length === 1
+                          ? 'موظف واحد'
+                          : `${level.contacts.length} موظفين`}
+                      </span>
                     </div>
-                    {step.role && (
-                      <p className="text-sm text-slate-600">{step.role}</p>
-                    )}
-                    <p className="text-sm text-slate-500 flex items-center gap-1.5 font-mono" dir="ltr">
-                      <Phone className="w-3.5 h-3.5 shrink-0" />
-                      {step.phone_e164}
-                    </p>
+                    {level.contacts.map(contact => (
+                      <div key={contact.id} className="border-r-2 border-brand-200 pr-3">
+                        <div className="font-semibold text-slate-900">{contact.display_name}</div>
+                        {contact.role && (
+                          <p className="text-sm text-slate-600">{contact.role}</p>
+                        )}
+                        <p className="text-sm text-slate-500 flex items-center gap-1.5 font-mono" dir="ltr">
+                          <Phone className="w-3.5 h-3.5 shrink-0" />
+                          {contact.phone_e164}
+                        </p>
+                      </div>
+                    ))}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1">
@@ -163,7 +184,7 @@ export default function EscalationChainPanel({
                       type="button"
                       className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100"
                       title="تعديل"
-                      onClick={() => onEdit(step)}
+                      onClick={() => onEdit(level)}
                     >
                       <Pencil className="w-3.5 h-3.5" />
                       تعديل
@@ -182,7 +203,7 @@ export default function EscalationChainPanel({
                       type="button"
                       className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40"
                       title="خفض مستوى"
-                      disabled={index === steps.length - 1 || reordering}
+                      disabled={index === levels.length - 1 || reordering}
                       onClick={() => onMove(index, 1)}
                     >
                       <ChevronDown className="w-3.5 h-3.5" />
@@ -192,7 +213,7 @@ export default function EscalationChainPanel({
                       type="button"
                       className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs text-red-600 hover:bg-red-50"
                       title="حذف"
-                      onClick={() => onDelete(step)}
+                      onClick={() => onDelete(level)}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       حذف
@@ -200,10 +221,10 @@ export default function EscalationChainPanel({
                   </div>
                 </div>
 
-                {index < steps.length - 1 && (
+                {index < levels.length - 1 && (
                   <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-1.5 text-xs text-brand-600">
                     <ArrowDown className="w-3.5 h-3.5" />
-                    <span>عند عدم الاستجابة → المستوى {steps[index + 1].escalation_level}</span>
+                    <span>عند عدم الاستجابة → المستوى {levels[index + 1].escalation_level}</span>
                   </div>
                 )}
               </div>

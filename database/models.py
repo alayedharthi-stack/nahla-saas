@@ -3416,7 +3416,13 @@ class BranchEscalationStep(Base):
     display_name = Column(String(255), nullable=False)
     role = Column(String(128), nullable=True)
     phone_e164 = Column(String(32), nullable=False)
+    contact_id = Column(
+        Integer,
+        ForeignKey("branch_contacts.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
 
     branch = relationship("MerchantBranch", back_populates="escalation_steps")
+    contact = relationship("BranchContact", foreign_keys=[contact_id])

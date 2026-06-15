@@ -77,6 +77,7 @@ class EscalationStepCreateIn(BaseModel):
     phone_e164: str = Field(min_length=5, max_length=32)
     is_active: bool = True
     sort_order: int = 0
+    contact_id: Optional[int] = None
 
 
 class EscalationStepPatchIn(BaseModel):
@@ -86,10 +87,19 @@ class EscalationStepPatchIn(BaseModel):
     phone_e164: Optional[str] = Field(None, min_length=5, max_length=32)
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
+    contact_id: Optional[int] = None
 
 
 class EscalationReorderIn(BaseModel):
     step_ids: List[int] = Field(min_length=1)
+
+
+class EscalationLevelUpsertIn(BaseModel):
+    contact_ids: List[int] = Field(min_length=1, max_length=20)
+
+
+class EscalationLevelReorderIn(BaseModel):
+    ordered_levels: List[int] = Field(min_length=1)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -207,12 +217,200 @@ def _serialize_escalation_step(row: BranchEscalationStep) -> Dict[str, Any]:
         "id": row.id,
         "branch_id": row.branch_id,
         "escalation_level": int(row.escalation_level or 1),
+        "contact_id": int(row.contact_id) if row.contact_id else None,
         "display_name": row.display_name,
         "role": row.role or "",
         "phone_e164": row.phone_e164,
         "is_active": bool(row.is_active),
         "sort_order": int(row.sort_order or 0),
     }
+
+
+def _load_escalation_rows(db: Session, branch_id: int) -> List[BranchEscalationStep]:
+    return (
+        db.query(BranchEscalationStep)
+        .filter(BranchEscalationStep.branch_id == branch_id)
+        .order_by(
+            BranchEscalationStep.escalation_level.asc(),
+            BranchEscalationStep.sort_order.asc(),
+            BranchEscalationStep.id.asc(),
+        )
+        .all()
+    )
+
+
+def _group_escalation_levels(
+    rows: List[BranchEscalationStep],
+) -> Dict[int, List[BranchEscalationStep]]:
+    grouped: Dict[int, List[BranchEscalationStep]] = {}
+    for row in rows:
+        level = int(row.escalation_level or 1)
+        grouped.setdefault(level, []).append(row)
+    return grouped
+
+
+def _resolve_contacts_for_level(
+    db: Session,
+    branch_id: int,
+    contact_ids: List[int],
+) -> List[BranchContact]:
+    unique_ids = list(dict.fromkeys(int(cid) for cid in contact_ids))
+    if not unique_ids:
+        raise HTTPException(status_code=422, detail="contact_ids_required")
+    rows = (
+        db.query(BranchContact)
+        .filter(
+            BranchContact.branch_id == branch_id,
+            BranchContact.id.in_(unique_ids),
+            BranchContact.is_active.is_(True),
+        )
+        .all()
+    )
+    by_id = {int(r.id): r for r in rows}
+    if set(by_id.keys()) != set(unique_ids):
+        raise HTTPException(status_code=422, detail="invalid_contact_ids")
+    return [by_id[cid] for cid in unique_ids]
+
+
+def _apply_contact_to_step(
+    step: BranchEscalationStep,
+    contact: BranchContact,
+    *,
+    sort_order: int,
+) -> None:
+    step.contact_id = contact.id
+    step.display_name = contact.display_name
+    step.role = contact.role
+    step.phone_e164 = contact.phone_e164
+    step.sort_order = sort_order
+    step.is_active = True
+
+
+def _replace_level_contacts(
+    db: Session,
+    branch_id: int,
+    level: int,
+    contacts: List[BranchContact],
+) -> None:
+    (
+        db.query(BranchEscalationStep)
+        .filter(
+            BranchEscalationStep.branch_id == branch_id,
+            BranchEscalationStep.escalation_level == level,
+        )
+        .delete(synchronize_session=False)
+    )
+    for idx, contact in enumerate(contacts):
+        row = BranchEscalationStep(
+            branch_id=branch_id,
+            escalation_level=level,
+        )
+        _apply_contact_to_step(row, contact, sort_order=idx)
+        db.add(row)
+
+
+def _next_escalation_level(db: Session, branch_id: int) -> int:
+    current = (
+        db.query(func.max(BranchEscalationStep.escalation_level))
+        .filter(BranchEscalationStep.branch_id == branch_id)
+        .scalar()
+    )
+    return int(current or 0) + 1
+
+
+def _renumber_escalation_levels(db: Session, branch_id: int) -> None:
+    rows = _load_escalation_rows(db, branch_id)
+    grouped = _group_escalation_levels(rows)
+    for new_level, old_level in enumerate(sorted(grouped.keys()), start=1):
+        for step in grouped[old_level]:
+            step.escalation_level = new_level
+
+
+def _serialize_escalation_levels(
+    db: Session,
+    branch_id: int,
+    rows: List[BranchEscalationStep],
+) -> List[Dict[str, Any]]:
+    grouped = _group_escalation_levels(rows)
+    contact_ids = {
+        int(r.contact_id)
+        for r in rows
+        if getattr(r, "contact_id", None)
+    }
+    contacts_by_id: Dict[int, BranchContact] = {}
+    if contact_ids:
+        for contact in (
+            db.query(BranchContact)
+            .filter(
+                BranchContact.branch_id == branch_id,
+                BranchContact.id.in_(contact_ids),
+            )
+            .all()
+        ):
+            contacts_by_id[int(contact.id)] = contact
+
+    levels: List[Dict[str, Any]] = []
+    for level_num in sorted(grouped.keys()):
+        steps = grouped[level_num]
+        contacts_payload: List[Dict[str, Any]] = []
+        ids: List[int] = []
+        for step in steps:
+            contact = contacts_by_id.get(int(step.contact_id or 0))
+            if contact is not None:
+                contacts_payload.append(_serialize_contact(contact))
+                ids.append(int(contact.id))
+            else:
+                contacts_payload.append({
+                    "id": step.contact_id or 0,
+                    "branch_id": branch_id,
+                    "display_name": step.display_name,
+                    "role": step.role or "",
+                    "phone_e164": step.phone_e164,
+                    "whatsapp_e164": "",
+                    "is_active": bool(step.is_active),
+                    "is_default_reception": False,
+                    "sort_order": int(step.sort_order or 0),
+                })
+                if step.contact_id:
+                    ids.append(int(step.contact_id))
+        levels.append({
+            "escalation_level": level_num,
+            "contact_ids": ids,
+            "contacts": contacts_payload,
+        })
+    return levels
+
+
+def _sync_escalation_steps_for_contact(db: Session, contact: BranchContact) -> None:
+    if not contact.id:
+        return
+    rows = (
+        db.query(BranchEscalationStep)
+        .filter(BranchEscalationStep.contact_id == contact.id)
+        .all()
+    )
+    for row in rows:
+        row.display_name = contact.display_name
+        row.role = contact.role
+        row.phone_e164 = contact.phone_e164
+
+
+def _ensure_contact_not_in_escalation(
+    db: Session,
+    branch_id: int,
+    contact_id: int,
+) -> None:
+    used = (
+        db.query(func.count(BranchEscalationStep.id))
+        .filter(
+            BranchEscalationStep.branch_id == branch_id,
+            BranchEscalationStep.contact_id == contact_id,
+        )
+        .scalar()
+        or 0
+    )
+    if used:
+        raise HTTPException(status_code=422, detail="contact_used_in_escalation")
 
 
 # ── Branches ──────────────────────────────────────────────────────────────────
@@ -426,6 +624,8 @@ async def update_contact(
         setattr(row, key, val)
     db.commit()
     db.refresh(row)
+    _sync_escalation_steps_for_contact(db, row)
+    db.commit()
     return _serialize_contact(row)
 
 
@@ -438,6 +638,7 @@ async def delete_contact(
 ):
     tenant_id = resolve_tenant_id(request)
     row = _get_contact(db, tenant_id, branch_id, contact_id)
+    _ensure_contact_not_in_escalation(db, branch_id, contact_id)
     db.delete(row)
     db.commit()
     return None
@@ -577,3 +778,111 @@ async def reorder_escalation_steps(
         .all()
     )
     return {"steps": [_serialize_escalation_step(r) for r in ordered]}
+
+
+# ── Escalation levels (contact-linked) ───────────────────────────────────────
+
+
+@router.get("/branches/{branch_id}/escalation-levels")
+async def list_escalation_levels(
+    branch_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    rows = _load_escalation_rows(db, branch_id)
+    return {"levels": _serialize_escalation_levels(db, branch_id, rows)}
+
+
+@router.post("/branches/{branch_id}/escalation-levels", status_code=201)
+async def create_escalation_level(
+    branch_id: int,
+    body: EscalationLevelUpsertIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    contacts = _resolve_contacts_for_level(db, branch_id, body.contact_ids)
+    level = _next_escalation_level(db, branch_id)
+    _replace_level_contacts(db, branch_id, level, contacts)
+    db.commit()
+    rows = _load_escalation_rows(db, branch_id)
+    levels = _serialize_escalation_levels(db, branch_id, rows)
+    created = next(l for l in levels if l["escalation_level"] == level)
+    return created
+
+
+@router.put("/branches/{branch_id}/escalation-levels/{level}")
+async def update_escalation_level(
+    branch_id: int,
+    level: int,
+    body: EscalationLevelUpsertIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    rows = _load_escalation_rows(db, branch_id)
+    grouped = _group_escalation_levels(rows)
+    if level not in grouped:
+        raise HTTPException(status_code=404, detail="escalation_level_not_found")
+    contacts = _resolve_contacts_for_level(db, branch_id, body.contact_ids)
+    _replace_level_contacts(db, branch_id, level, contacts)
+    db.commit()
+    rows = _load_escalation_rows(db, branch_id)
+    levels = _serialize_escalation_levels(db, branch_id, rows)
+    return next(l for l in levels if l["escalation_level"] == level)
+
+
+@router.delete("/branches/{branch_id}/escalation-levels/{level}", status_code=204)
+async def delete_escalation_level(
+    branch_id: int,
+    level: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    rows = _load_escalation_rows(db, branch_id)
+    grouped = _group_escalation_levels(rows)
+    if level not in grouped:
+        raise HTTPException(status_code=404, detail="escalation_level_not_found")
+    (
+        db.query(BranchEscalationStep)
+        .filter(
+            BranchEscalationStep.branch_id == branch_id,
+            BranchEscalationStep.escalation_level == level,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.flush()
+    _renumber_escalation_levels(db, branch_id)
+    db.commit()
+    return None
+
+
+@router.post("/branches/{branch_id}/escalation-levels/reorder")
+async def reorder_escalation_levels(
+    branch_id: int,
+    body: EscalationLevelReorderIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    rows = _load_escalation_rows(db, branch_id)
+    grouped = _group_escalation_levels(rows)
+    current_levels = sorted(grouped.keys())
+    if set(body.ordered_levels) != set(current_levels):
+        raise HTTPException(status_code=422, detail="reorder_levels_mismatch")
+    mapping = {
+        old_level: idx + 1
+        for idx, old_level in enumerate(body.ordered_levels)
+    }
+    for step in rows:
+        step.escalation_level = mapping[int(step.escalation_level)]
+    db.commit()
+    rows = _load_escalation_rows(db, branch_id)
+    return {"levels": _serialize_escalation_levels(db, branch_id, rows)}

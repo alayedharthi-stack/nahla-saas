@@ -124,3 +124,69 @@ def test_default_reception_column_on_contact(db_session) -> None:
     db.commit()
     row = db.query(BranchContact).first()
     assert bool(row.is_default_reception) is True
+
+
+def test_escalation_level_links_contacts(db_session) -> None:
+    db, tenant_id = db_session
+    branch = MerchantBranch(tenant_id=tenant_id, name="Main", is_active=True)
+    db.add(branch)
+    db.commit()
+    db.refresh(branch)
+
+    c1 = BranchContact(
+        branch_id=branch.id,
+        display_name="أمين",
+        role="showroom",
+        phone_e164="+966511111111",
+        is_active=True,
+    )
+    c2 = BranchContact(
+        branch_id=branch.id,
+        display_name="هشام",
+        role="customer_service",
+        phone_e164="+966522222222",
+        is_active=True,
+    )
+    db.add_all([c1, c2])
+    db.commit()
+    db.refresh(c1)
+    db.refresh(c2)
+
+    from unittest.mock import patch
+
+    from routers.operations_center import EscalationLevelUpsertIn, create_escalation_level
+
+    async def _run():
+        with patch("routers.operations_center.resolve_tenant_id", return_value=tenant_id):
+            return await create_escalation_level(
+                branch.id,
+                EscalationLevelUpsertIn(contact_ids=[c1.id]),
+                _FakeRequest(),
+                db,
+            )
+
+    level1 = asyncio.run(_run())
+    assert level1["escalation_level"] == 1
+    assert level1["contact_ids"] == [c1.id]
+    assert level1["contacts"][0]["display_name"] == "أمين"
+
+    async def _run_level2():
+        with patch("routers.operations_center.resolve_tenant_id", return_value=tenant_id):
+            return await create_escalation_level(
+                branch.id,
+                EscalationLevelUpsertIn(contact_ids=[c1.id, c2.id]),
+                _FakeRequest(),
+                db,
+            )
+
+    level2 = asyncio.run(_run_level2())
+    assert level2["escalation_level"] == 2
+    assert level2["contact_ids"] == [c1.id, c2.id]
+
+    steps = db.query(BranchEscalationStep).order_by(
+        BranchEscalationStep.escalation_level.asc(),
+        BranchEscalationStep.sort_order.asc(),
+    ).all()
+    assert len(steps) == 3
+    assert all(step.contact_id for step in steps)
+    assert steps[0].display_name == "أمين"
