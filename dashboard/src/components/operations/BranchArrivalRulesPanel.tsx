@@ -5,8 +5,9 @@ import {
   type ArrivalKeyword,
   type ArrivalKeywordInput,
   type MerchantBranch,
+  type TriggerPreviewAction,
   type TriggerPreviewResult,
-} from '../api/operationsCenter'
+} from '../../api/operationsCenter'
 
 const LOCATION_MODES = [
   { value: 'location_only', label: 'إرسال الموقع فقط' },
@@ -250,7 +251,7 @@ export default function BranchArrivalRulesPanel({ branchId, branch, onBranchUpda
         {preview && (
           <div className="text-sm bg-slate-50 border border-slate-100 rounded-lg p-3 space-y-1">
             <p>{preview.matched ? `تطابق: ${preview.matched_phrase} (${TRIGGER_LABELS[preview.trigger_type || ''] || preview.trigger_type})` : 'لا يوجد تطابق'}</p>
-            {(preview.actions || []).map((a, i) => (
+            {(preview.actions || []).map((a: TriggerPreviewAction, i: number) => (
               <p key={i} className="text-slate-600">
                 → {a.type === 'maps_cta' && 'يرسل الموقع'}
                 {a.type === 'reception_vcard' && `يرسل جهة الاستقبال: ${a.display_name || ''}`}
