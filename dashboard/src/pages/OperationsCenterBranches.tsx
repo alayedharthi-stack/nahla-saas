@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Building2, MapPin, Plus, Pencil, Trash2 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import Badge from '../components/ui/Badge'
+import ConfirmModal from '../components/ui/ConfirmModal'
 import { useLanguage } from '../i18n/context'
 import {
   operationsCenterApi,
@@ -30,6 +31,8 @@ export default function OperationsCenterBranches() {
   const [editing, setEditing] = useState<MerchantBranch | null>(null)
   const [form, setForm] = useState<BranchInput>(emptyBranch)
   const [saving, setSaving] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<MerchantBranch | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -84,13 +87,17 @@ export default function OperationsCenterBranches() {
     }
   }
 
-  const remove = async (branch: MerchantBranch) => {
-    if (!window.confirm(`حذف فرع «${branch.name}»؟`)) return
+  const confirmRemove = async () => {
+    if (!deleteTarget) return
+    setDeleteLoading(true)
     try {
-      await operationsCenterApi.deleteBranch(branch.id)
+      await operationsCenterApi.deleteBranch(deleteTarget.id)
+      setDeleteTarget(null)
       await load()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'تعذّر حذف الفرع')
+    } finally {
+      setDeleteLoading(false)
     }
   }
 
@@ -197,7 +204,7 @@ export default function OperationsCenterBranches() {
                           type="button"
                           className="p-1.5 rounded-lg hover:bg-red-50 text-red-500"
                           title="حذف"
-                          onClick={() => remove(branch)}
+                          onClick={() => setDeleteTarget(branch)}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -260,6 +267,17 @@ export default function OperationsCenterBranches() {
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={!!deleteTarget}
+        title="حذف الفرع"
+        message={deleteTarget ? `هل تريد حذف فرع «${deleteTarget.name}»؟` : ''}
+        confirmLabel="حذف"
+        destructive
+        loading={deleteLoading}
+        onCancel={() => { if (!deleteLoading) setDeleteTarget(null) }}
+        onConfirm={confirmRemove}
+      />
     </div>
   )
 }
