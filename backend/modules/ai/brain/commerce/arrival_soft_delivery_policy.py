@@ -43,7 +43,7 @@ def evaluate_arrival_soft_delivery(
             if cls.button_title:
                 cta_label = cls.button_title
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[ARRIVAL_SOFT] cta_classify_failed err=%s", exc)
+            logger.exception("[ARRIVAL_SOFT] cta_classify_failed err=%s", exc)
 
     return ArrivalSoftDeliveryDecision(
         reply_text=MSG_ARRIVAL_SOFT_WELCOME,
