@@ -10,6 +10,7 @@ import BranchHoursEditor from '../components/operations/BranchHoursEditor'
 import ContactFormModal from '../components/operations/ContactFormModal'
 import EscalationChainPanel from '../components/operations/EscalationChainPanel'
 import EscalationLevelFormModal from '../components/operations/EscalationLevelFormModal'
+import BranchArrivalRulesPanel from '../components/operations/BranchArrivalRulesPanel'
 import {
   parseHoursJson,
   serializeHoursJson,
@@ -26,12 +27,13 @@ import {
   type MerchantBranch,
 } from '../api/operationsCenter'
 
-type TabId = 'info' | 'contacts' | 'escalation'
+type TabId = 'info' | 'contacts' | 'escalation' | 'arrival-rules'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'info', label: 'بيانات الفرع' },
   { id: 'contacts', label: 'جهات التواصل' },
   { id: 'escalation', label: 'التصعيد' },
+  { id: 'arrival-rules', label: 'قواعد الموقع والوصول' },
 ]
 
 export default function OperationsCenterBranchDetail() {
@@ -456,6 +458,16 @@ export default function OperationsCenterBranchDetail() {
               if (!levelSaving) setLevelModalOpen(false)
             }}
             onSave={saveLevel}
+          />
+        </div>
+      )}
+
+      {tab === 'arrival-rules' && (
+        <div className="max-w-3xl">
+          <BranchArrivalRulesPanel
+            branchId={id}
+            branch={branch}
+            onBranchUpdated={load}
           />
         </div>
       )}

@@ -6407,6 +6407,157 @@ async def _handle_merchant_message(
                 _sync_persona_observability()
                 return
 
+        # ── Pre-brain customer message (caption-only for media) ───────────
+        _pre_brain_customer_msg = text or ""
+        try:
+            from modules.ai.media.routing_guard import (  # noqa: PLC0415
+                resolve_pre_brain_customer_message as _resolve_pre_brain_msg,
+            )
+            _pre_brain_customer_msg = _resolve_pre_brain_msg(
+                brain_text=text or "",
+                inbound_metadata=inbound_metadata,
+            )
+        except Exception as _pbr_exc:  # noqa: BLE001
+            logger.warning(
+                "[MEDIA_ROUTING_GUARD] resolve failed tenant=%s err=%s",
+                tenant_id, _pbr_exc,
+            )
+
+        # ── Branch trigger router (pre-brain, PR-C structured keywords) ───
+        _btr_decision = None
+        try:
+            from modules.ai.brain.commerce.branch_trigger_router import (  # noqa: PLC0415
+                evaluate_branch_trigger_routing as _evaluate_branch_trigger_routing,
+            )
+            _btr_decision = _evaluate_branch_trigger_routing(
+                db,
+                tenant_id=tenant_id,
+                message=_pre_brain_customer_msg,
+                customer_phone=to,
+            )
+        except Exception as _btr_exc:  # noqa: BLE001
+            logger.warning(
+                "[BRANCH_TRIGGER_ROUTER] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _btr_exc,
+            )
+            _btr_decision = None
+
+        if _btr_decision is not None:
+            _persona_ownership.mark_bypass(
+                _POReason.STAFF_CONTACT_RECOVERY,
+                owner="branch_trigger_router",
+            )
+            _btr_reply = _btr_decision.reply_text
+            _btr_ok = False
+            _btr_vcard_ok = False
+            try:
+                if _btr_decision.use_cta and _btr_decision.maps_url:
+                    _btr_ok = await _send_cta_url(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_btr_reply or "موقعنا 📍",
+                        btn_label=_btr_decision.cta_button_label or "موقع المتجر",
+                        btn_url=_btr_decision.maps_url,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                elif _btr_reply:
+                    _btr_ok = await _send_whatsapp_message(
+                        phone_id=phone_id, to=to, text=_btr_reply,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+
+                _btr_contact_target = None
+                if _btr_decision.deliver_contact and _btr_decision.call_target is not None:
+                    _btr_contact_target = _btr_decision.call_target
+                elif (
+                    _btr_decision.deliver_reception_after_maps
+                    and _btr_decision.reception_call_target is not None
+                ):
+                    _btr_contact_target = _btr_decision.reception_call_target
+
+                if _btr_contact_target is not None:
+                    from services.call_resolver import (  # noqa: PLC0415
+                        build_contacts_payload as _btr_build_contacts,
+                    )
+                    _btr_payload = _btr_build_contacts([_btr_contact_target], to=to)
+                    _btr_vcard_ok = await _send_contacts_message(
+                        phone_id=phone_id, to=to,
+                        payload=_btr_payload,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    if _btr_vcard_ok and _btr_decision.persist_contact:
+                        try:
+                            from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                                persist_staff_contact_sent,
+                            )
+                            from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+                            _btr_conv, _btr_bs = _load_brain_state(
+                                db, tenant_id=tenant_id, phone=to,
+                            )
+                            persist_staff_contact_sent(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                name=getattr(_btr_contact_target, "name", "") or "",
+                                contact_phone=(
+                                    getattr(_btr_contact_target, "raw_phone", "")
+                                    or getattr(_btr_contact_target, "wa_id", "")
+                                    or ""
+                                ),
+                                turn=int((_btr_bs or {}).get("turn") or 0),
+                            )
+                        except Exception as _btr_persist_exc:  # noqa: BLE001
+                            logger.exception(
+                                "[BRANCH_TRIGGER_ROUTER] persist failed tenant=%s",
+                                tenant_id,
+                            )
+                    _follow_up = ""
+                    if (
+                        _btr_decision.deliver_reception_after_maps
+                        and _btr_decision.reception_reply_text
+                    ):
+                        _follow_up = _btr_decision.reception_reply_text
+                    elif _btr_decision.deliver_contact and _btr_reply:
+                        _follow_up = _btr_reply
+                    if _follow_up and _btr_vcard_ok:
+                        await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_follow_up,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                        _btr_reply = _follow_up
+
+                StateManager.save_message(
+                    db, to, _btr_reply or "", "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": _btr_decision.metadata_path,
+                        "branch_trigger_type": _btr_decision.trigger_type,
+                        "branch_trigger_reason": _btr_decision.reason,
+                        "branch_trigger_phrase": _btr_decision.matched_phrase,
+                        "branch_id": _btr_decision.branch_id,
+                        "branch_vcard_sent": _btr_vcard_ok,
+                    },
+                )
+            except Exception as _btr_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[BRANCH_TRIGGER_ROUTER] send failed tenant=%s err=%s",
+                    tenant_id, _btr_send_exc,
+                )
+            logger.info(
+                "[BRANCH_TRIGGER_ROUTER] short_circuit tenant=%s trigger=%s "
+                "reason=%s ok=%s vcard_ok=%s skip_brain=true",
+                tenant_id,
+                _btr_decision.trigger_type,
+                _btr_decision.reason,
+                _btr_ok,
+                _btr_vcard_ok,
+            )
+            _sync_persona_observability()
+            return
+
         # ── Location link policy (pre-brain) ──────────────────────────────
         # Physical location asks must never enter staff escalation policy.
         _llp_decision = None
@@ -6417,7 +6568,7 @@ async def _handle_merchant_message(
             _llp_decision = _evaluate_location_link_policy(
                 db,
                 tenant_id=tenant_id,
-                message=text or "",
+                message=_pre_brain_customer_msg,
             )
         except Exception as _llp_exc:  # noqa: BLE001
             logger.warning(
@@ -6502,7 +6653,7 @@ async def _handle_merchant_message(
             _acd_decision = _evaluate_arrival_contact_delivery(
                 db,
                 tenant_id=tenant_id,
-                message=text or "",
+                message=_pre_brain_customer_msg,
             )
         except Exception as _acd_exc:  # noqa: BLE001
             logger.warning(

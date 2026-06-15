@@ -34,6 +34,7 @@ import {
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
 import { CategoryBadges, OperationalFactWarning } from './knowledge/aiSettingsHints'
+import { StructuredContactsCutoverBanner } from '../components/operations/StructuredContactsCutoverBanner'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -306,7 +307,8 @@ function AISettingsPanel() {
         <div className="px-5 py-4 border-b border-slate-100">
           <h2 className="text-sm font-semibold text-slate-900">قواعد التصعيد (نص حر — يُنقل لاحقاً لقاعدة المعرفة)</h2>
         </div>
-        <div className="p-5">
+        <div className="p-5 space-y-2">
+          <StructuredContactsCutoverBanner />
           <Field label="متى تحوّل للإنسان">
             <textarea
               className="input min-h-[80px] resize-y"
