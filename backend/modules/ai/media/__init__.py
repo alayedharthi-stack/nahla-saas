@@ -1,1 +1,1 @@
-from .normalizer import MediaNormalizationResult, normalize_whatsapp_inbound  # noqa: F401
+from .normalizer import MediaNormalizationResult, inbound_persist_body, normalize_whatsapp_inbound  # noqa: F401

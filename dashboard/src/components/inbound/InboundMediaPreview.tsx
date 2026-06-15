@@ -43,6 +43,7 @@ import { featureRealityApi } from '../../api/featureReality'
 import type {
   DashboardMessageMedia,
   DashboardMessageMediaAudio,
+  DashboardMessageMediaDocument,
   DashboardMessageMediaImage,
   DashboardMessageMediaVideo,
 } from '../../api/featureReality'
@@ -347,6 +348,196 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
   )
 }
 
+function formatByteSize(num: number | null | undefined): string {
+  if (!num || num <= 0) return ''
+  let size = num
+  for (const unit of ['B', 'KB', 'MB', 'GB'] as const) {
+    if (size < 1024 || unit === 'GB') {
+      return unit === 'B' ? `${size} ${unit}` : `${size.toFixed(1)} ${unit}`
+    }
+    size /= 1024
+  }
+  return ''
+}
+
+const PDF_KIND_LABEL_AR: Record<string, string> = {
+  payment_receipt: 'إيصال تحويل بنكي',
+  payment_pre_review: 'مراجعة قبل التحويل',
+  payment_pending_evidence: 'بيانات دفع',
+  invoice: 'فاتورة',
+  identity: 'وثيقة هوية',
+  shipping_label: 'بوليصة شحن',
+  catalog: 'كتالوج',
+  unknown: 'مستند',
+}
+
+/** Fetch PDF/document bytes with auth headers (not audio/image/video only). */
+function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlState & {
+  reload: () => void
+} {
+  const [reloadKey, setReloadKey] = useState(0)
+  const [state, setState] = useState<BlobUrlState>({
+    url: null, loading: !!storage_url, httpStatus: null, networkError: null,
+  })
+
+  useEffect(() => {
+    if (!storage_url) {
+      setState({ url: null, loading: false, httpStatus: null, networkError: null })
+      return
+    }
+    let cancelled = false
+    let createdUrl: string | null = null
+
+    const load = async () => {
+      setState({ url: null, loading: true, httpStatus: null, networkError: null })
+      try {
+        const token    = getToken()
+        const tenantId = getTenantId()
+        const base     = getApiBase()
+        const res = await fetch(`${base}${storage_url}`, {
+          mode: 'cors',
+          headers: {
+            ...(token    ? { Authorization: `Bearer ${token}` } : {}),
+            ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
+          },
+        })
+        if (!res.ok) {
+          if (!cancelled) {
+            setState({ url: null, loading: false, httpStatus: res.status, networkError: null })
+          }
+          return
+        }
+        const contentType = res.headers.get('content-type') || ''
+        if (!/^(application|binary)/.test(contentType) && !contentType.includes('pdf')) {
+          if (!cancelled) {
+            setState({
+              url: null,
+              loading: false,
+              httpStatus: null,
+              networkError: `unexpected_content_type:${contentType || 'unknown'}`,
+            })
+          }
+          return
+        }
+        const blob = await res.blob()
+        createdUrl = URL.createObjectURL(blob)
+        if (!cancelled) {
+          setState({ url: createdUrl, loading: false, httpStatus: null, networkError: null })
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setState({
+            url: null,
+            loading: false,
+            httpStatus: null,
+            networkError: e instanceof Error ? e.message : 'fetch_failed',
+          })
+        }
+      }
+    }
+    void load()
+
+    return () => {
+      cancelled = true
+      if (createdUrl) URL.revokeObjectURL(createdUrl)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reloadKey triggers refetch
+  }, [storage_url, reloadKey])
+
+  return { ...state, reload: () => setReloadKey(k => k + 1) }
+}
+
+function DocumentPreview({ media }: { media: DashboardMessageMediaDocument }) {
+  const { url, loading, httpStatus, networkError, reload } = useAuthedDocumentBlob(media.storage_url)
+  const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
+  const kindLabel = PDF_KIND_LABEL_AR[media.pdf_kind || ''] || PDF_KIND_LABEL_AR.unknown
+  const sizeLabel = formatByteSize(media.byte_size)
+  const filename = media.filename || 'مستند PDF'
+  const mime = media.mime_type || 'application/pdf'
+
+  return (
+    <div className="flex flex-col gap-1.5 max-w-full">
+      <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
+        <div className="flex items-start gap-3">
+          <div
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white text-lg border border-slate-100"
+            aria-hidden
+          >
+            📄
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium text-slate-800" title={filename}>
+              {filename}
+            </div>
+            <div className="mt-0.5 text-[11.5px] text-slate-500">
+              {kindLabel}
+              {sizeLabel ? ` · ${sizeLabel}` : ''}
+              {mime ? ` · ${mime}` : ''}
+            </div>
+            {media.summary && (
+              <div className="mt-2 text-[12px] leading-relaxed text-slate-600 line-clamp-3">
+                {media.summary}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {url ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center rounded-lg border border-brand-200 bg-white px-2.5 py-1 text-[12px] font-medium text-brand-700 hover:bg-brand-50"
+            >
+              فتح الملف
+            </a>
+            <a
+              href={url}
+              download={filename}
+              className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[12px] font-medium text-slate-700 hover:bg-slate-50"
+            >
+              تحميل
+            </a>
+          </div>
+        ) : loading ? (
+          <div className="mt-2 text-[12px] text-slate-500">جاري تحميل الملف…</div>
+        ) : downloadFailed && !media.storage_url ? (
+          <div className="mt-2 text-[12px] text-rose-600">
+            لم يصل الملف من واتساب أثناء الاستقبال.
+          </div>
+        ) : httpStatus ? (
+          <div className="mt-2 text-[12px] text-rose-600">
+            تعذر فتح الملف — {statusLabelAr(httpStatus)}
+          </div>
+        ) : networkError ? (
+          <div className="mt-2 text-[12px] text-rose-600">
+            تعذر فتح الملف — {networkError}
+          </div>
+        ) : (
+          <div className="mt-2 text-[12px] text-slate-500">
+            الملف غير متاح للعرض.
+            {' '}
+            <button
+              type="button"
+              className="text-brand-600 underline"
+              onClick={() => reload()}
+            >
+              إعادة المحاولة
+            </button>
+          </div>
+        )}
+      </div>
+
+      {media.caption && (
+        <div className="text-[12.5px] text-slate-600 whitespace-pre-wrap break-words">
+          {media.caption}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function VideoPreview({ media }: { media: DashboardMessageMediaVideo }) {
   const { url, loading, httpStatus, networkError } = useAuthedMediaBlob(media.storage_url)
   const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
@@ -407,5 +598,6 @@ export default function InboundMediaPreview({ media }: { media: DashboardMessage
   if (media.kind === 'audio') return <AudioPreview media={media} />
   if (media.kind === 'image') return <ImagePreview media={media} />
   if (media.kind === 'video') return <VideoPreview media={media} />
+  if (media.kind === 'document') return <DocumentPreview media={media} />
   return null
 }
