@@ -210,6 +210,7 @@ def resolve_next_escalation_contact(
             )
             from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
                 structured_branch_contacts_enabled,
+                tenant_has_structured_branch_data,
             )
 
             if structured_branch_contacts_enabled():
@@ -243,6 +244,16 @@ def resolve_next_escalation_contact(
                             reason="structured_chain_exhausted",
                         )
                         return None
+                if tenant_has_structured_branch_data(db, int(tenant_id)):
+                    log_escalation_chain_resolve(
+                        tenant_id=tenant_id,
+                        trigger="structured",
+                        last_tier="structured",
+                        selected="",
+                        phone="",
+                        reason="kb_fallback_blocked_structured_mode",
+                    )
+                    return None
         except Exception as exc:  # noqa: silent-ok - structured escalation must not block KB tier chain
             logger.debug(
                 "staff_contact_escalation_chain | structured resolve failed "

@@ -15,6 +15,9 @@ export interface MerchantBranch {
   is_active: boolean
   sort_order: number
   contact_count: number
+  location_response_mode?: string
+  arrival_response_mode?: string
+  location_instructions_text?: string
   created_at?: string | null
   updated_at?: string | null
 }
@@ -62,6 +65,43 @@ export type BranchInput = {
   hours_json?: Record<string, unknown> | null
   is_active?: boolean
   sort_order?: number
+  location_response_mode?: string
+  arrival_response_mode?: string
+  location_instructions_text?: string
+}
+
+export interface ArrivalKeyword {
+  id: number
+  branch_id: number
+  phrase: string
+  trigger_type: string
+  is_active: boolean
+  sort_order: number
+}
+
+export type ArrivalKeywordInput = {
+  phrase: string
+  trigger_type: string
+  is_active?: boolean
+  sort_order?: number
+}
+
+export type TriggerPreviewAction = {
+  type: string
+  maps_url?: string
+  display_name?: string
+  phone_e164?: string
+  body?: string
+  note?: string
+}
+
+export type TriggerPreviewResult = {
+  matched: boolean
+  branch_id?: number
+  trigger_type?: string
+  matched_phrase?: string
+  source?: string
+  actions?: TriggerPreviewAction[]
 }
 
 export type ContactInput = {
@@ -208,5 +248,38 @@ export const operationsCenterApi = {
     apiCall<{ steps: BranchEscalationStep[] }>(
       `/operations-center/branches/${branchId}/escalation-steps/reorder`,
       { method: 'POST', body: JSON.stringify({ step_ids: stepIds }) },
+    ),
+
+  listArrivalKeywords: (branchId: number) =>
+    apiCall<{ keywords: ArrivalKeyword[] }>(
+      `/operations-center/branches/${branchId}/arrival-keywords`,
+    ),
+
+  createArrivalKeyword: (branchId: number, body: ArrivalKeywordInput) =>
+    apiCall<ArrivalKeyword>(
+      `/operations-center/branches/${branchId}/arrival-keywords`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  updateArrivalKeyword: (
+    branchId: number,
+    keywordId: number,
+    body: Partial<ArrivalKeywordInput>,
+  ) =>
+    apiCall<ArrivalKeyword>(
+      `/operations-center/branches/${branchId}/arrival-keywords/${keywordId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  deleteArrivalKeyword: (branchId: number, keywordId: number) =>
+    apiCall<void>(
+      `/operations-center/branches/${branchId}/arrival-keywords/${keywordId}`,
+      { method: 'DELETE' },
+    ),
+
+  previewTrigger: (branchId: number, message: string) =>
+    apiCall<TriggerPreviewResult>(
+      `/operations-center/branches/${branchId}/preview-trigger`,
+      { method: 'POST', body: JSON.stringify({ message }) },
     ),
 }

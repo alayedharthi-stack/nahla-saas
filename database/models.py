@@ -3340,6 +3340,13 @@ class MerchantBranch(Base):
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     hours_json = Column(JSONB, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+    location_response_mode = Column(
+        String(32), nullable=False, default="location_only", server_default="location_only",
+    )
+    arrival_response_mode = Column(
+        String(32), nullable=False, default="reception_only", server_default="reception_only",
+    )
+    location_instructions_text = Column(Text, nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -3360,6 +3367,11 @@ class MerchantBranch(Base):
     )
     escalation_steps = relationship(
         "BranchEscalationStep",
+        back_populates="branch",
+        cascade="all, delete-orphan",
+    )
+    arrival_keywords = relationship(
+        "BranchArrivalKeyword",
         back_populates="branch",
         cascade="all, delete-orphan",
     )
@@ -3426,3 +3438,41 @@ class BranchEscalationStep(Base):
 
     branch = relationship("MerchantBranch", back_populates="escalation_steps")
     contact = relationship("BranchContact", foreign_keys=[contact_id])
+
+
+class BranchArrivalKeyword(Base):
+    """Per-branch arrival/location trigger phrases — deterministic routing (PR-C)."""
+
+    __tablename__ = "branch_arrival_keywords"
+    __table_args__ = (
+        Index(
+            "ix_branch_arrival_keywords_branch_active",
+            "branch_id",
+            "is_active",
+            "sort_order",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    branch_id = Column(
+        Integer,
+        ForeignKey("merchant_branches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phrase = Column(String(512), nullable=False)
+    trigger_type = Column(String(32), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    branch = relationship("MerchantBranch", back_populates="arrival_keywords")

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
-from models import BranchContact, BranchEscalationStep, MerchantBranch
+from models import BranchArrivalKeyword, BranchContact, BranchEscalationStep, MerchantBranch
 from utils.phone_utils import normalize_to_e164
 
 router = APIRouter(prefix="/operations-center", tags=["Operations Center"])
@@ -37,6 +37,9 @@ class BranchCreateIn(BaseModel):
     hours_json: Optional[Dict[str, Any]] = None
     is_active: bool = True
     sort_order: int = 0
+    location_response_mode: str = "location_only"
+    arrival_response_mode: str = "reception_only"
+    location_instructions_text: Optional[str] = None
 
 
 class BranchPatchIn(BaseModel):
@@ -48,6 +51,9 @@ class BranchPatchIn(BaseModel):
     hours_json: Optional[Dict[str, Any]] = None
     is_active: Optional[bool] = None
     sort_order: Optional[int] = None
+    location_response_mode: Optional[str] = None
+    arrival_response_mode: Optional[str] = None
+    location_instructions_text: Optional[str] = None
 
 
 class ContactCreateIn(BaseModel):
@@ -100,6 +106,24 @@ class EscalationLevelUpsertIn(BaseModel):
 
 class EscalationLevelReorderIn(BaseModel):
     ordered_levels: List[int] = Field(min_length=1)
+
+
+class ArrivalKeywordCreateIn(BaseModel):
+    phrase: str = Field(min_length=1, max_length=512)
+    trigger_type: str = Field(min_length=1, max_length=32)
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class ArrivalKeywordPatchIn(BaseModel):
+    phrase: Optional[str] = Field(None, min_length=1, max_length=512)
+    trigger_type: Optional[str] = Field(None, min_length=1, max_length=32)
+    is_active: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class TriggerPreviewIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2048)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -180,6 +204,42 @@ def _clear_default_reception(db: Session, branch_id: int, *, except_id: Optional
     q.update({BranchContact.is_default_reception: False}, synchronize_session=False)
 
 
+def _validate_location_mode(mode: str) -> str:
+    allowed = {"location_only", "location_plus_reception", "location_plus_instructions"}
+    key = (mode or "").strip()
+    if key not in allowed:
+        raise HTTPException(status_code=422, detail="invalid_location_response_mode")
+    return key
+
+
+def _validate_arrival_mode(mode: str) -> str:
+    allowed = {"reception_only", "location_and_reception", "ask_branch_first"}
+    key = (mode or "").strip()
+    if key not in allowed:
+        raise HTTPException(status_code=422, detail="invalid_arrival_response_mode")
+    return key
+
+
+def _validate_trigger_type(trigger_type: str) -> str:
+    from modules.operations.branch_arrival_keyword_evidence import VALID_TRIGGER_TYPES  # noqa: PLC0415
+
+    key = (trigger_type or "").strip()
+    if key not in VALID_TRIGGER_TYPES:
+        raise HTTPException(status_code=422, detail="invalid_trigger_type")
+    return key
+
+
+def _serialize_arrival_keyword(row: BranchArrivalKeyword) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "branch_id": row.branch_id,
+        "phrase": row.phrase,
+        "trigger_type": row.trigger_type,
+        "is_active": bool(row.is_active),
+        "sort_order": int(row.sort_order or 0),
+    }
+
+
 def _serialize_branch(row: MerchantBranch, *, contact_count: int = 0) -> Dict[str, Any]:
     return {
         "id": row.id,
@@ -192,6 +252,9 @@ def _serialize_branch(row: MerchantBranch, *, contact_count: int = 0) -> Dict[st
         "hours_json": row.hours_json,
         "is_active": bool(row.is_active),
         "sort_order": int(row.sort_order or 0),
+        "location_response_mode": getattr(row, "location_response_mode", "") or "location_only",
+        "arrival_response_mode": getattr(row, "arrival_response_mode", "") or "reception_only",
+        "location_instructions_text": getattr(row, "location_instructions_text", "") or "",
         "contact_count": int(contact_count),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -461,10 +524,18 @@ async def create_branch(
         hours_json=body.hours_json,
         is_active=body.is_active,
         sort_order=body.sort_order,
+        location_response_mode=_validate_location_mode(body.location_response_mode),
+        arrival_response_mode=_validate_arrival_mode(body.arrival_response_mode),
+        location_instructions_text=(body.location_instructions_text or "").strip() or None,
         created_at=now,
         updated_at=now,
     )
     db.add(row)
+    db.flush()
+    from modules.operations.branch_arrival_keyword_evidence import (  # noqa: PLC0415
+        seed_default_keywords_for_branch,
+    )
+    seed_default_keywords_for_branch(db, int(row.id))
     db.commit()
     db.refresh(row)
     return _serialize_branch(row)
@@ -499,6 +570,12 @@ async def update_branch(
     data = body.model_dump(exclude_unset=True)
     for key, val in data.items():
         if key in {"city", "district", "address", "maps_url"} and val is not None:
+            val = str(val).strip() or None
+        if key == "location_response_mode" and val is not None:
+            val = _validate_location_mode(str(val))
+        if key == "arrival_response_mode" and val is not None:
+            val = _validate_arrival_mode(str(val))
+        if key == "location_instructions_text" and val is not None:
             val = str(val).strip() or None
         setattr(row, key, val)
     row.updated_at = datetime.now(timezone.utc)
@@ -886,3 +963,145 @@ async def reorder_escalation_levels(
     db.commit()
     rows = _load_escalation_rows(db, branch_id)
     return {"levels": _serialize_escalation_levels(db, branch_id, rows)}
+
+
+@router.get("/branches/{branch_id}/arrival-keywords")
+async def list_arrival_keywords(
+    branch_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    rows = (
+        db.query(BranchArrivalKeyword)
+        .filter(BranchArrivalKeyword.branch_id == branch_id)
+        .order_by(
+            BranchArrivalKeyword.sort_order.asc(),
+            BranchArrivalKeyword.id.asc(),
+        )
+        .all()
+    )
+    return {"keywords": [_serialize_arrival_keyword(r) for r in rows]}
+
+
+@router.post("/branches/{branch_id}/arrival-keywords", status_code=201)
+async def create_arrival_keyword(
+    branch_id: int,
+    body: ArrivalKeywordCreateIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    now = datetime.now(timezone.utc)
+    row = BranchArrivalKeyword(
+        branch_id=branch_id,
+        phrase=body.phrase.strip(),
+        trigger_type=_validate_trigger_type(body.trigger_type),
+        is_active=body.is_active,
+        sort_order=body.sort_order,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _serialize_arrival_keyword(row)
+
+
+@router.patch("/branches/{branch_id}/arrival-keywords/{keyword_id}")
+async def update_arrival_keyword(
+    branch_id: int,
+    keyword_id: int,
+    body: ArrivalKeywordPatchIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    row = (
+        db.query(BranchArrivalKeyword)
+        .filter(
+            BranchArrivalKeyword.branch_id == branch_id,
+            BranchArrivalKeyword.id == keyword_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="arrival_keyword_not_found")
+    data = body.model_dump(exclude_unset=True)
+    for key, val in data.items():
+        if key == "phrase" and val is not None:
+            val = str(val).strip()
+        if key == "trigger_type" and val is not None:
+            val = _validate_trigger_type(str(val))
+        setattr(row, key, val)
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return _serialize_arrival_keyword(row)
+
+
+@router.delete("/branches/{branch_id}/arrival-keywords/{keyword_id}", status_code=204)
+async def delete_arrival_keyword(
+    branch_id: int,
+    keyword_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    row = (
+        db.query(BranchArrivalKeyword)
+        .filter(
+            BranchArrivalKeyword.branch_id == branch_id,
+            BranchArrivalKeyword.id == keyword_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="arrival_keyword_not_found")
+    db.delete(row)
+    db.commit()
+    return None
+
+
+@router.post("/branches/{branch_id}/arrival-keywords/seed-defaults")
+async def seed_arrival_keywords(
+    branch_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    from modules.operations.branch_arrival_keyword_evidence import (  # noqa: PLC0415
+        seed_default_keywords_for_branch,
+    )
+    count = seed_default_keywords_for_branch(db, branch_id)
+    db.commit()
+    rows = (
+        db.query(BranchArrivalKeyword)
+        .filter(BranchArrivalKeyword.branch_id == branch_id)
+        .order_by(
+            BranchArrivalKeyword.sort_order.asc(),
+            BranchArrivalKeyword.id.asc(),
+        )
+        .all()
+    )
+    return {"seeded": count, "keywords": [_serialize_arrival_keyword(r) for r in rows]}
+
+
+@router.post("/branches/{branch_id}/preview-trigger")
+async def preview_branch_trigger(
+    branch_id: int,
+    body: TriggerPreviewIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    _get_branch(db, tenant_id, branch_id)
+    from modules.operations.branch_arrival_keyword_evidence import (  # noqa: PLC0415
+        preview_trigger_actions,
+    )
+    return preview_trigger_actions(db, tenant_id, branch_id, body.message.strip())

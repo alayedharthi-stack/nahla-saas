@@ -18,10 +18,22 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
-from models import Base, BranchContact, BranchEscalationStep, MerchantBranch, Tenant  # noqa: E402
+from models import (  # noqa: E402
+    Base,
+    BranchArrivalKeyword,
+    BranchContact,
+    BranchEscalationStep,
+    MerchantBranch,
+    Tenant,
+)
 from routers.operations_center import (  # noqa: E402
+    ArrivalKeywordCreateIn,
     EscalationReorderIn,
+    TriggerPreviewIn,
     _normalize_phone_field,
+    create_arrival_keyword,
+    list_arrival_keywords,
+    preview_branch_trigger,
     reorder_escalation_steps,
 )
 
@@ -190,3 +202,77 @@ def test_escalation_level_links_contacts(db_session) -> None:
     assert len(steps) == 3
     assert all(step.contact_id for step in steps)
     assert steps[0].display_name == "أمين"
+
+
+def test_arrival_keyword_crud_and_preview(db_session) -> None:
+    db, tenant_id = db_session
+    branch = MerchantBranch(
+        tenant_id=tenant_id,
+        name="Main",
+        is_active=True,
+        maps_url="https://maps.google.com/?q=test",
+        location_response_mode="location_plus_reception",
+    )
+    db.add(branch)
+    db.commit()
+    db.refresh(branch)
+
+    c1 = BranchContact(
+        branch_id=branch.id,
+        display_name="استقبال",
+        role="reception",
+        phone_e164="+966511111111",
+        is_default_reception=True,
+        is_active=True,
+    )
+    db.add(c1)
+    db.commit()
+
+    from modules.operations.branch_arrival_keyword_evidence import (  # noqa: E402
+        seed_default_keywords_for_branch,
+    )
+    seed_default_keywords_for_branch(db, branch.id)
+    db.commit()
+
+    from unittest.mock import patch
+
+    async def _create_kw():
+        with patch("routers.operations_center.resolve_tenant_id", return_value=tenant_id):
+            return await create_arrival_keyword(
+                branch.id,
+                ArrivalKeywordCreateIn(phrase="الحوش", trigger_type="arrival_confirmed"),
+                _FakeRequest(),
+                db,
+            )
+
+    kw = asyncio.run(_create_kw())
+    assert kw["phrase"] == "الحوش"
+    assert kw["trigger_type"] == "arrival_confirmed"
+
+    async def _list_kw():
+        with patch("routers.operations_center.resolve_tenant_id", return_value=tenant_id):
+            return await list_arrival_keywords(branch.id, _FakeRequest(), db)
+
+    listed = asyncio.run(_list_kw())
+    assert len(listed["keywords"]) >= 2
+
+    async def _preview():
+        with patch("routers.operations_center.resolve_tenant_id", return_value=tenant_id):
+            return await preview_branch_trigger(
+                branch.id,
+                TriggerPreviewIn(message="وين موقعكم؟"),
+                _FakeRequest(),
+                db,
+            )
+
+    preview = asyncio.run(_preview())
+    assert preview["matched"] is True
+    assert preview["trigger_type"] == "location_request"
+    action_types = {a["type"] for a in preview["actions"]}
+    assert "maps_cta" in action_types
+    assert "reception_vcard" in action_types
+
+    row = db.query(BranchArrivalKeyword).filter(
+        BranchArrivalKeyword.phrase == "الحوش",
+    ).first()
+    assert row is not None

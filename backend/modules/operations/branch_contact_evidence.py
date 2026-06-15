@@ -261,6 +261,25 @@ def resolve_reception_contact(
     return contacts[0]
 
 
+def resolve_reception_for_branch_id(
+    db: Any,
+    branch_id: int,
+) -> Optional[BranchContactRecord]:
+    """Reception contact for a specific branch — dashboard preview (no flag gate)."""
+    if db is None or not branch_id:
+        return None
+    contacts = load_branch_contacts(db, int(branch_id))
+    if not contacts:
+        return None
+    for contact in contacts:
+        if contact.is_default_reception and contact.phone_e164:
+            return contact
+    for contact in contacts:
+        if _is_reception_role(contact.role):
+            return contact
+    return contacts[0]
+
+
 def tenant_has_structured_branch_data(db: Any, tenant_id: int) -> bool:
     """True when tenant has at least one active branch with contacts or maps."""
     branches = load_active_branches(db, int(tenant_id or 0))
@@ -338,6 +357,7 @@ __all__ = [
     "lookup_structured_maps_url",
     "resolve_branch_for_message",
     "resolve_reception_contact",
+    "resolve_reception_for_branch_id",
     "structured_branch_contacts_enabled",
     "tenant_has_structured_branch_data",
 ]

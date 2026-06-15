@@ -68,13 +68,14 @@ def resolve_arrival_contact_evidence(
     if db is None or not tenant_id:
         return None
 
-    try:
-        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
-            resolve_reception_contact,
-            structured_branch_contacts_enabled,
-        )
+    from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+        resolve_reception_contact,
+        structured_branch_contacts_enabled,
+        tenant_has_structured_branch_data,
+    )
 
-        if structured_branch_contacts_enabled():
+    if structured_branch_contacts_enabled():
+        try:
             structured = resolve_reception_contact(
                 db, int(tenant_id), message=message or "",
             )
@@ -87,11 +88,17 @@ def resolve_arrival_contact_evidence(
                     compile_reason="structured_branch_reception",
                     source_sections=(),
                 )
-    except Exception as exc:  # noqa: silent-ok - structured lookup must not block KB arrival compile
-        logger.debug(
-            "[ARRIVAL_CONTACT_DELIVERY] structured_lookup_failed tenant=%s err=%s",
-            tenant_id, exc,
-        )
+        except Exception as exc:  # noqa: silent-ok - structured lookup must not block KB block
+            logger.debug(
+                "[ARRIVAL_CONTACT_DELIVERY] structured_lookup_failed tenant=%s err=%s",
+                tenant_id, exc,
+            )
+        if tenant_has_structured_branch_data(db, int(tenant_id)):
+            logger.info(
+                "[ARRIVAL_CONTACT_DELIVERY] tenant=%s kb_fallback_blocked structured_mode",
+                tenant_id,
+            )
+            return None
 
     from modules.ai.brain.commerce.arrival_contact_policy import (  # noqa: PLC0415
         resolve_arrival_contact_policy,

@@ -251,11 +251,20 @@ def load_staff_contact_registry(
         try:
             from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
                 load_structured_staff_contact_registry,
+                structured_branch_contacts_enabled,
+                tenant_has_structured_branch_data,
             )
 
-            structured = load_structured_staff_contact_registry(db, int(tenant_id))
-            if structured is not None and structured.records:
-                return structured
+            if structured_branch_contacts_enabled():
+                structured = load_structured_staff_contact_registry(db, int(tenant_id))
+                if structured is not None and structured.records:
+                    return structured
+                if tenant_has_structured_branch_data(db, int(tenant_id)):
+                    logger.info(
+                        "staff_contact_evidence | tenant=%s kb_registry_blocked structured_mode",
+                        tenant_id,
+                    )
+                    return StaffContactRegistry(records=(), store_contact_phone="")
         except Exception as exc:  # noqa: silent-ok - structured registry must not block KB compile
             logger.debug(
                 "staff_contact_evidence | structured registry failed tenant=%s err=%s",
