@@ -95,6 +95,7 @@ SOURCE_LEGACY             = "legacy"              # legacy generate_ai_reply pat
 SOURCE_HANDOFF_ACK        = "handoff_ack"         # explicit customer handoff request
 SOURCE_PAUSED             = "paused"              # ai_pause_guard skipped this turn
 SOURCE_BILLING_DENIED     = "billing_access_denied"
+SOURCE_LAYER0             = "layer0"              # pre-brain Layer 0 router (no LLM)
 SOURCE_UNKNOWN            = "unknown"
 
 
@@ -103,7 +104,7 @@ _ALL_SOURCES = {
     SOURCE_BRAIN_EXCEPTION, SOURCE_OUTER_EXCEPTION,
     SOURCE_SUPPORT_ESCALATION, SOURCE_LEGACY_NO_KEY, SOURCE_LEGACY,
     SOURCE_HANDOFF_ACK, SOURCE_PAUSED, SOURCE_BILLING_DENIED,
-    SOURCE_UNKNOWN,
+    SOURCE_LAYER0, SOURCE_UNKNOWN,
 }
 
 

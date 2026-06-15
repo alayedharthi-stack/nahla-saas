@@ -26,6 +26,8 @@ from ..types import (
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
+    INTENT_ASK_WORKING_HOURS,
+    INTENT_FAREWELL,
     INTENT_GENERAL,
     INTENT_GREETING,
     INTENT_HESITATION,
@@ -268,6 +270,33 @@ _register(RuleSet(
         r"(do you (ship|deliver)|where (do|can) you (ship|deliver))",
     ],
     confidence=0.90,
+))
+
+# ── Working hours / open-closed (Layer 0) ────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_ASK_WORKING_HOURS,
+    patterns=[
+        r"(متى\s+دوام(?:كم|ك|نا)?|وقت\s+الدوام|أوقات\s+ال(?:عمل|دوام)|"
+        r"ساعات\s+(?:ال)?(?:عمل|دوام|الدعم))",
+        r"(متى\s+(?:تفتح|تفتحون|تقفل|تقفلون|يفتح|يفتحون|يقفل|يقفلون))",
+        r"(هل\s+(?:أ?نتم|انتم|المحل|المتجر)\s+(?:فاتح|مفتوح|مقفل|مسكر))",
+        r"(فاتح(?:ين)?\s+(?:ال(?:حين|آن|ان)|الآن|الان|اليوم))",
+        r"(working\s+hours|business\s+hours|opening\s+hours|when\s+do\s+you\s+open|"
+        r"are\s+you\s+open)",
+    ],
+    confidence=0.93,
+))
+
+# ── Farewell / polite close (Layer 0) ────────────────────────────────────────
+_register(RuleSet(
+    intent=INTENT_FAREWELL,
+    patterns=[
+        r"^(مع\s+السلام(?:ه|ة)|في\s+أ?مان\s+الله|ب(?:أ?)?مان\s+الله|"
+        r"إلى\s+اللقاء|الي\s+اللقاء|نشوف(?:كم|ك)?\s+على\s+خير|"
+        r"تصبح(?:ين)?\s+على\s+خير|اسعد\s+الله\s+مساء(?:ك|كم))[\s!?؟.]*$",
+        r"^(خلاص\s+شكر(?:ا|اً)|تمام\s+ك(?:ذا|ذ)|بس\s+ك(?:ذا|ذ)\s+شكر(?:ا|اً))[\s!?؟.]*$",
+    ],
+    confidence=0.94,
 ))
 
 # ── Store info / e-commerce link ─────────────────────────────────────────────

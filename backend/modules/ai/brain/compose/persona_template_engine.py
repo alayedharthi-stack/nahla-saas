@@ -58,6 +58,15 @@ PERSONA_GREETING_CHECKOUT_AWARE: tuple[str, ...] = (
     "ياهلا، نكمل خطوة الدفع؟ 😊",
 )
 
+PERSONA_FAREWELL_WARM: tuple[str, ...] = (
+    "في أمان الله 🤍",
+    "مع السلامة، الله يحفظك 🌷",
+    "نشوفك على خير 😊",
+    "إلى اللقاء 🌷",
+    "الله يوفقك 🤍",
+    "تصبح على خير 🌷",
+)
+
 # ── Warm social / thanks pools ───────────────────────────────────────────────
 
 # Religious thanks (جزاك الله خير …) — reply with dua, not «العفو».
@@ -309,6 +318,11 @@ def pick_persona_greeting(ctx: BrainContext, *, re_greet: bool = False) -> str:
         return pick_persona_variant(PERSONA_GREETING_ORDER_AWARE, ctx)
     pool = PERSONA_GREETING_REGREET if re_greet else PERSONA_GREETING_COLD
     return pick_persona_variant(pool, ctx)
+
+
+def pick_persona_farewell(ctx: BrainContext) -> str:
+    """Warm deterministic farewell for Layer 0 — no LLM."""
+    return pick_persona_variant(PERSONA_FAREWELL_WARM, ctx)
 
 
 def pick_persona_social_reply(

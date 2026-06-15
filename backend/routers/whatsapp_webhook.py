@@ -6017,8 +6017,13 @@ async def _handle_merchant_message(
                         )
                         try:
                             db.rollback()
-                        except Exception:
-                            pass
+                        except Exception as _rollback_exc:
+                            logger.exception(
+                                "[PAYMENT_INFO] rollback after stamp failure "
+                                "tenant=%s err=%s",
+                                tenant_id,
+                                _rollback_exc,
+                            )
                     return  # short-circuit — never run the brain for this turn
                 else:
                     logger.warning(
@@ -7058,6 +7063,65 @@ async def _handle_merchant_message(
             except Exception:  # noqa: BLE001
                 pass
             return
+
+        # ── Layer 0 Router (Phase A — zero LLM, pre-Brain) ────────────────
+        try:
+            from modules.ai.routing.layer0_router import (  # noqa: PLC0415
+                evaluate_layer0_route as _evaluate_layer0_route,
+                layer0_router_enabled as _layer0_enabled,
+            )
+            if _layer0_enabled():
+                _l0_decision = _evaluate_layer0_route(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    message=text or "",
+                    history=history,
+                    conversation_id=convo.id,
+                )
+                if _l0_decision is not None:
+                    _l0_reply = _l0_decision.reply_text
+                    _l0_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=_l0_reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    StateManager.save_message(
+                        db,
+                        to,
+                        _l0_reply,
+                        "outbound",
+                        conversation_id=convo.id,
+                        tenant_id=tenant_id,
+                        extra_metadata={
+                            **_persona_ownership.to_metadata(),
+                            "deterministic_path": f"layer0:{_l0_decision.matched}",
+                            "layer0_matched": _l0_decision.matched,
+                            "layer0_intent": _l0_decision.intent_name,
+                        },
+                    )
+                    try:
+                        _trace.intent = _l0_decision.intent_name or _l0_decision.matched
+                        _trace.response_goal = f"layer0_{_l0_decision.matched}"
+                        _trace.fallback_source = "layer0_router"
+                        if _l0_ok:
+                            _trace.mark_outbound_sent(
+                                source=_TS.SOURCE_LAYER0,
+                                length=len(_l0_reply or ""),
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _sync_persona_observability()
+                    return
+        except Exception as _l0_exc:  # noqa: BLE001
+            logger.warning(
+                "[LAYER0_ROUTER] pre-brain check failed tenant=%s err=%s — "
+                "falling through to Brain",
+                tenant_id,
+                _l0_exc,
+            )
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list

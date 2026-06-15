@@ -639,6 +639,30 @@ def faq_identity(
     return f"نعم 🌷 أنا مساعد {store} الذكي. تحت أمرك."
 
 
+MSG_STORE_LINK_NOT_CONFIGURED = (
+    "لم يتم ربط رابط المتجر الإلكتروني حالياً. "
+    "أرسل اسم المنتج الذي تبحث عنه وسنساعدك."
+)
+
+MSG_WORKING_HOURS_NOT_CONFIGURED = (
+    "لم يتم تحديد أوقات العمل حالياً، "
+    "ويمكنك إرسال استفسارك وسنرد عليك في أقرب وقت."
+)
+
+
+def faq_working_hours(
+    support_hours: str = "",
+    store_name: str = "",
+    **_: Any,
+) -> str:
+    """Deterministic working-hours reply for Layer 0."""
+    hours = (support_hours or "").strip()
+    if hours:
+        name = (store_name or "المتجر").strip()
+        return f"أوقات عمل {name}:\n{hours}"
+    return MSG_WORKING_HOURS_NOT_CONFIGURED
+
+
 def faq_store_info(
     store_name: str = "",
     store_url: str = "",
@@ -655,7 +679,7 @@ def faq_store_info(
         return f"هذا {name} 🌷\n{store_url}"
     if store_description:
         return f"هذا {name} 🌷\n{store_description}"
-    return f"هذا {name} 🌷"
+    return MSG_STORE_LINK_NOT_CONFIGURED
 
 
 def faq_location(
