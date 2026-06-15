@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'react'
 import type { BranchContact, EscalationLevelInput } from '../../api/operationsCenter'
 
+function normalizeContactId(id: number | string): number {
+  const n = Number(id)
+  return Number.isFinite(n) ? n : NaN
+}
+
+function normalizeContactIds(ids: number[] | undefined): number[] {
+  if (!Array.isArray(ids)) return []
+  return ids
+    .map(normalizeContactId)
+    .filter(id => Number.isFinite(id))
+}
+
 interface EscalationLevelFormModalProps {
   open: boolean
   mode: 'create' | 'edit'
@@ -19,7 +31,7 @@ export default function EscalationLevelFormModal({
   level,
   nextLevel,
   contacts,
-  selectedContactIds = [],
+  selectedContactIds,
   saving = false,
   onClose,
   onSave,
@@ -30,17 +42,23 @@ export default function EscalationLevelFormModal({
   const levelNum = mode === 'edit' && level ? level : nextLevel
   const activeContacts = contacts.filter(c => c.is_active)
 
+  // Seed selection only when the modal opens or the edit target changes.
+  // Do NOT depend on `selectedContactIds` by reference — the parent passes
+  // `undefined` in create mode and the default `= []` would be a new array
+  // every render, resetting picks immediately after each checkbox click.
   useEffect(() => {
     if (!open) return
     setError('')
-    setPicked([...selectedContactIds])
-  }, [open, selectedContactIds])
+    setPicked(normalizeContactIds(selectedContactIds))
+  }, [open, mode, levelNum])
 
   const toggle = (contactId: number) => {
+    const id = normalizeContactId(contactId)
+    if (!Number.isFinite(id)) return
     setPicked(prev =>
-      prev.includes(contactId)
-        ? prev.filter(id => id !== contactId)
-        : [...prev, contactId],
+      prev.includes(id)
+        ? prev.filter(x => x !== id)
+        : [...prev, id],
     )
   }
 
@@ -108,7 +126,8 @@ export default function EscalationLevelFormModal({
             <div className="space-y-2">
               <p className="text-sm font-medium text-slate-700">اختر الموظفين</p>
               {activeContacts.map(contact => {
-                const checked = picked.includes(contact.id)
+                const contactId = normalizeContactId(contact.id)
+                const checked = Number.isFinite(contactId) && picked.includes(contactId)
                 return (
                   <label
                     key={contact.id}
@@ -122,7 +141,7 @@ export default function EscalationLevelFormModal({
                       type="checkbox"
                       className="mt-1 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
                       checked={checked}
-                      onChange={() => toggle(contact.id)}
+                      onChange={() => toggle(contactId)}
                     />
                     <span className="min-w-0 flex-1">
                       <span className="block font-medium text-slate-900">{contact.display_name}</span>
@@ -153,7 +172,7 @@ export default function EscalationLevelFormModal({
           <button
             type="button"
             className="btn-primary"
-            disabled={saving || activeContacts.length === 0}
+            disabled={saving || activeContacts.length === 0 || picked.length === 0}
             onClick={save}
           >
             {saving ? 'جاري الحفظ…' : 'حفظ'}
