@@ -3385,6 +3385,9 @@ class BranchContact(Base):
     phone_e164 = Column(String(32), nullable=False)
     whatsapp_e164 = Column(String(32), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    is_default_reception = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
 
     branch = relationship("MerchantBranch", back_populates="contacts")

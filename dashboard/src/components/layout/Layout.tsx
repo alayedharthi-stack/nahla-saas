@@ -176,6 +176,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/whatsapp-connect':          tr => tr.pages.whatsappConnect,
   '/help/whatsapp-manual-setup': tr => ({ title: tr.nav.items.manualSetup, subtitle: '' }),
   '/knowledge-base':            tr => tr.pages.knowledgeBase,
+  '/operations-center':         tr => tr.pages.operationsCenter,
   '/ai-sales-logs':             tr => ({ title: tr.nav.items.salesAgent,   subtitle: '' }),
   '/handoff-queue':             tr => ({ title: tr.nav.items.handoffQueue, subtitle: '' }),
   '/admin':                     tr => tr.adminPages.dashboard,
@@ -197,7 +198,11 @@ export default function Layout() {
   const { t, dir } = useLanguage()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const metaSelector = PAGE_META[pathname] ?? ((_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
+  const metaSelector =
+    PAGE_META[pathname]
+    ?? (pathname.startsWith('/operations-center/branches/')
+      ? (tr: Translations) => tr.pages.operationsCenter
+      : (_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
   const meta = t(metaSelector)
 
   return (

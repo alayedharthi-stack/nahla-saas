@@ -32,6 +32,7 @@ const ar: Translations = {
       automations:      'التشغيل التلقائي',
       intelligence:     'نحلة الذكية',
       knowledgeBase:    'قاعدة المعرفة',
+      operationsCenter: 'الفروع والتواصل والتصعيد',
       analyticsAI:      'التحليلات وسجلات الذكاء',
       salesAgent:       'وكيل المبيعات',
       handoffQueue:     'طابور التحويل',
@@ -88,6 +89,10 @@ const ar: Translations = {
     smartAutomations: { title: 'الطيار الآلي',           subtitle: 'إدارة الأتمتة الذكية' },
     intelligence:     { title: 'نحلة الذكية',            subtitle: 'رؤى تنبؤية وتوصيات تسويقية مبنية على الذكاء الاصطناعي' },
     knowledgeBase:    { title: 'قاعدة المعرفة',          subtitle: 'كل ما تعرفه نحلة عن متجرك وسياساتك' },
+    operationsCenter: {
+      title:    'الفروع والتواصل والتصعيد',
+      subtitle: 'إدارة مواقع الفروع وأرقام التواصل وسلاسل التصعيد — بدون نصوص في قاعدة المعرفة',
+    },
     analytics:        { title: 'التحليلات والذكاء',      subtitle: 'الإيرادات والتحويل والمنتجات الأكثر مبيعاً' },
     integrations:     { title: 'التكاملات',              subtitle: 'ربط سلة وزد وواتساب بنحلة' },
     settings:         { title: 'الإعدادات',              subtitle: 'إعدادات المتجر وصلاحيات الذكاء الاصطناعي' },
