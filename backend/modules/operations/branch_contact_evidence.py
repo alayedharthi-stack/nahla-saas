@@ -86,6 +86,7 @@ class BranchContactRecord:
     phone_e164: str
     whatsapp_e164: str
     sort_order: int
+    is_default_reception: bool = False
 
 
 def _branch_from_row(row: Any) -> BranchRecord:
@@ -110,6 +111,7 @@ def _contact_from_row(row: Any) -> BranchContactRecord:
         phone_e164=str(row.phone_e164 or "").strip(),
         whatsapp_e164=str(row.whatsapp_e164 or "").strip(),
         sort_order=int(row.sort_order or 0),
+        is_default_reception=bool(getattr(row, "is_default_reception", False)),
     )
 
 
@@ -248,6 +250,10 @@ def resolve_reception_contact(
     contacts = load_branch_contacts(db, branch.id)
     if not contacts:
         return None
+
+    for contact in contacts:
+        if contact.is_default_reception and contact.phone_e164:
+            return contact
 
     for contact in contacts:
         if _is_reception_role(contact.role):

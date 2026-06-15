@@ -28,6 +28,7 @@ const en: Translations = {
       automations:      'Smart Automations',
       intelligence:     'Nahla Intelligence',
       knowledgeBase:    'Knowledge Base',
+      operationsCenter: 'Branches & Escalation',
       analyticsAI:      'Analytics & AI Logs',
       salesAgent:       'Sales Agent',
       handoffQueue:     'Handoff Queue',
@@ -84,6 +85,10 @@ const en: Translations = {
     smartAutomations: { title: 'Autopilot',            subtitle: 'Manage smart automations' },
     intelligence:     { title: 'Nahla Intelligence',   subtitle: 'Predictive insights and AI-driven marketing recommendations' },
     knowledgeBase:    { title: 'Knowledge Base',       subtitle: 'Everything Nahlah should know about your store and policies' },
+    operationsCenter: {
+      title:    'Branches, Contacts & Escalation',
+      subtitle: 'Manage branch locations, staff contacts, and escalation chains',
+    },
     analytics:        { title: 'Analytics & AI',       subtitle: 'Revenue, conversion & top products' },
     integrations:     { title: 'Integrations',         subtitle: 'Salla, Zid & WhatsApp API connections' },
     settings:         { title: 'Settings',             subtitle: 'Store settings, AI permissions & billing' },

@@ -19,6 +19,8 @@ import Templates from './pages/Templates'
 import SmartAutomations from './pages/SmartAutomations'
 import Intelligence from './pages/Intelligence'
 import KnowledgeBase from './pages/KnowledgeBase'
+import OperationsCenterBranches from './pages/OperationsCenterBranches'
+import OperationsCenterBranchDetail from './pages/OperationsCenterBranchDetail'
 import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
@@ -145,6 +147,8 @@ export default function App() {
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />
             <Route path="knowledge-base"     element={<KnowledgeBase />} />
+            <Route path="operations-center"  element={<OperationsCenterBranches />} />
+            <Route path="operations-center/branches/:branchId" element={<OperationsCenterBranchDetail />} />
             <Route path="integrations"       element={<Integrations />} />
             <Route path="analytics"          element={<Analytics />} />
             <Route path="settings"           element={<Settings />} />
