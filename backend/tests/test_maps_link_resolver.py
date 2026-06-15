@@ -198,6 +198,7 @@ def _install_resolver_stubs(
         tenant_id = _Col("tenant_id")
         kind = _Col("kind")
         is_active = _Col("is_active")
+        deleted_at = _Col("deleted_at")
         priority = _Col("priority")
         updated_at = _Col("updated_at")
 

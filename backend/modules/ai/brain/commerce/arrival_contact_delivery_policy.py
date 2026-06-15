@@ -62,10 +62,36 @@ def _build_arrival_reply_text(lookup_name: str) -> str:
 def resolve_arrival_contact_evidence(
     db: Any,
     tenant_id: int,
+    message: str = "",
 ) -> Optional[ArrivalContactEvidence]:
     """Return compiled showroom contact when policy + phone evidence exist."""
     if db is None or not tenant_id:
         return None
+
+    try:
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            resolve_reception_contact,
+            structured_branch_contacts_enabled,
+        )
+
+        if structured_branch_contacts_enabled():
+            structured = resolve_reception_contact(
+                db, int(tenant_id), message=message or "",
+            )
+            if structured is not None and structured.phone_e164:
+                return ArrivalContactEvidence(
+                    lookup_name=structured.display_name,
+                    phone=structured.phone_e164,
+                    section_id=structured.id,
+                    role=(structured.role or "showroom").strip().lower() or "showroom",
+                    compile_reason="structured_branch_reception",
+                    source_sections=(),
+                )
+    except Exception as exc:  # noqa: silent-ok - structured lookup must not block KB arrival compile
+        logger.debug(
+            "[ARRIVAL_CONTACT_DELIVERY] structured_lookup_failed tenant=%s err=%s",
+            tenant_id, exc,
+        )
 
     from modules.ai.brain.commerce.arrival_contact_policy import (  # noqa: PLC0415
         resolve_arrival_contact_policy,
@@ -151,7 +177,9 @@ def evaluate_arrival_contact_delivery(
     if not is_explicit_arrival_intent(message or ""):
         return None
 
-    evidence = resolve_arrival_contact_evidence(db, int(tenant_id or 0))
+    evidence = resolve_arrival_contact_evidence(
+        db, int(tenant_id or 0), message=message or "",
+    )
     if evidence is None or not evidence.phone:
         logger.info(
             "[ARRIVAL_CONTACT_DELIVERY] tenant=%s deliver=false reason=no_evidence",

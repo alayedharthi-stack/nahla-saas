@@ -101,6 +101,7 @@ class Tenant(Base):
     # Goal B — Store Knowledge Sync
     store_sync_jobs   = relationship('StoreSyncJob', back_populates='tenant')
     store_knowledge   = relationship('StoreKnowledgeSnapshot', back_populates='tenant', uselist=False)
+    merchant_branches = relationship('MerchantBranch', back_populates='tenant')
 
 class TenantSettings(Base):
     __tablename__ = 'tenant_settings'
@@ -3310,3 +3311,109 @@ class MerchantKnowledgeDraft(Base):
         nullable=True,
     )
     applied_op_ids = Column(JSONB, nullable=True)
+
+
+class MerchantBranch(Base):
+    """Structured branch location — Operations Center (PR-A).
+
+    Source of truth for maps URLs, reception contacts, and per-branch
+    escalation when ``USE_STRUCTURED_BRANCH_CONTACTS`` is enabled.
+    """
+
+    __tablename__ = "merchant_branches"
+    __table_args__ = (
+        Index("ix_merchant_branches_tenant_active", "tenant_id", "is_active"),
+        Index("ix_merchant_branches_tenant_sort", "tenant_id", "sort_order"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(
+        Integer,
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name = Column(String(255), nullable=False)
+    city = Column(String(128), nullable=True)
+    district = Column(String(128), nullable=True)
+    address = Column(Text, nullable=True)
+    maps_url = Column(String(2048), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    hours_json = Column(JSONB, nullable=True)
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant", back_populates="merchant_branches")
+    contacts = relationship(
+        "BranchContact",
+        back_populates="branch",
+        cascade="all, delete-orphan",
+    )
+    escalation_steps = relationship(
+        "BranchEscalationStep",
+        back_populates="branch",
+        cascade="all, delete-orphan",
+    )
+
+
+class BranchContact(Base):
+    """Reception / branch staff contact — deterministic delivery only."""
+
+    __tablename__ = "branch_contacts"
+    __table_args__ = (
+        Index("ix_branch_contacts_branch_active", "branch_id", "is_active"),
+        Index("ix_branch_contacts_branch_sort", "branch_id", "sort_order"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    branch_id = Column(
+        Integer,
+        ForeignKey("merchant_branches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    display_name = Column(String(255), nullable=False)
+    role = Column(String(128), nullable=True)
+    phone_e164 = Column(String(32), nullable=False)
+    whatsapp_e164 = Column(String(32), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+
+    branch = relationship("MerchantBranch", back_populates="contacts")
+
+
+class BranchEscalationStep(Base):
+    """Per-branch escalation ladder — level-ordered, no LLM."""
+
+    __tablename__ = "branch_escalation_steps"
+    __table_args__ = (
+        Index(
+            "ix_branch_escalation_steps_branch_level",
+            "branch_id",
+            "escalation_level",
+        ),
+        Index("ix_branch_escalation_steps_branch_sort", "branch_id", "sort_order"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    branch_id = Column(
+        Integer,
+        ForeignKey("merchant_branches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    escalation_level = Column(Integer, nullable=False, default=1, server_default="1")
+    display_name = Column(String(255), nullable=False)
+    role = Column(String(128), nullable=True)
+    phone_e164 = Column(String(32), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+
+    branch = relationship("MerchantBranch", back_populates="escalation_steps")

@@ -1939,6 +1939,7 @@ def apply_staff_contact_safety_net(
                 customer_msg=customer_msg or "",
                 trigger=_fallback_trigger,
                 tenant_id=tenant_id,
+                db=db,
             )
             if _fb.enabled and _fb.next_phone:
                 name = _fb.next_lookup_name
@@ -3037,7 +3038,7 @@ def _lookup_tenant_maps_url(db: Any, tenant_id: int) -> Tuple[str, str]:
          resolver was looking.
 
     Returns a ``(url, source)`` tuple where ``source`` ∈
-    ``{"snapshot", "store_settings", "kb:<kind>", "none"}``. Never
+    ``{"structured_branch", "snapshot", "store_settings", "kb:<kind>", "none"}``. Never
     raises; degrade to the next layer on any failure.
 
     Logs a single ``[MAPS_LINK_RESOLVER]`` INFO line per call so
@@ -3047,6 +3048,30 @@ def _lookup_tenant_maps_url(db: Any, tenant_id: int) -> Tuple[str, str]:
     if db is None or not tenant_id:
         return "", "none"
     tenant_id = int(tenant_id)
+
+    # ── 0) Structured branch maps (Operations Center PR-A) ───────────
+    try:
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            lookup_structured_maps_url,
+            structured_branch_contacts_enabled,
+        )
+
+        if structured_branch_contacts_enabled():
+            url, src, branch_id = lookup_structured_maps_url(
+                db, tenant_id, message="",
+            )
+            if url:
+                logger.info(
+                    "[MAPS_LINK_RESOLVER] tenant_id=%s source=%s "
+                    "branch_id=%s url_len=%d",
+                    tenant_id, src, branch_id or "-", len(url),
+                )
+                return url, src
+    except Exception as exc:  # noqa: silent-ok - structured maps lookup must not block legacy resolver chain
+        logger.debug(
+            "safety_nets.maps_link | structured branch lookup failed "
+            "tenant=%s err=%s", tenant_id, exc,
+        )
 
     # ── 1) Synced store profile (StoreKnowledgeSnapshot) ────────────
     try:

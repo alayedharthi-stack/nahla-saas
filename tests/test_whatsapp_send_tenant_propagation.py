@@ -126,7 +126,7 @@ def _patch_send(monkeypatch, *, response: dict | None = None,
     fake_resp = response or {"messages": [{"id": "wamid.X"}]}
 
     async def fake_provider(db, conn, *, tenant_id, operation, phone_id,
-                            payload, prefer_platform=False, timeout=15):
+                            payload, prefer_platform=False, timeout=15, **_kw):
         captured.append({
             "tenant_id":      tenant_id,
             "operation":      operation,
@@ -278,7 +278,7 @@ class TestAutoRegisterSelfHeal:
 
             async def fake_provider(db, conn, *, tenant_id, operation,
                                     phone_id, payload, prefer_platform=False,
-                                    timeout=15):
+                                    timeout=15, **_kw):
                 attempts["n"] += 1
                 calls.append({
                     "tenant_id": tenant_id,
@@ -347,7 +347,8 @@ class TestAutoRegisterSelfHeal:
             ctx = _CapturingCtx(source="platform", token="PLAT")
 
             async def always_fail(db, conn, *, tenant_id, operation, phone_id,
-                                  payload, prefer_platform=False, timeout=15):
+                                  payload, prefer_platform=False, timeout=15,
+                                  **_kw):
                 return ({
                     "error": {"code": 100, "error_subcode": 33,
                               "type": "GraphMethodException",

@@ -192,9 +192,76 @@ def log_escalation_chain_resolve(
         pass
 
 
+def resolve_next_escalation_contact(
+    db: Any,
+    tenant_id: Any,
+    kb_chain: Sequence[StaffChainEntry],
+    contacts_sent: Sequence[Dict[str, Any]],
+    *,
+    allow_admin: bool = True,
+    message: str = "",
+) -> Optional[StaffChainEntry]:
+    """Resolve next escalation contact — structured ladder first, then KB tiers."""
+    if db is not None and tenant_id is not None:
+        try:
+            from modules.operations.branch_escalation_evidence import (  # noqa: PLC0415
+                load_structured_escalation_chain,
+                resolve_next_structured_escalation,
+            )
+            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                structured_branch_contacts_enabled,
+            )
+
+            if structured_branch_contacts_enabled():
+                structured = load_structured_escalation_chain(
+                    db, int(tenant_id), message=message or "",
+                )
+                if structured:
+                    nxt = resolve_next_structured_escalation(
+                        structured,
+                        contacts_sent,
+                        allow_admin=allow_admin,
+                    )
+                    if nxt is not None:
+                        log_escalation_chain_resolve(
+                            tenant_id=tenant_id,
+                            trigger="structured",
+                            last_tier="structured",
+                            selected=nxt.lookup_name,
+                            phone=nxt.phone,
+                            reason="next_in_structured_chain",
+                        )
+                        return nxt
+                    last = find_last_sent_chain_entry(structured, contacts_sent)
+                    if last is not None:
+                        log_escalation_chain_resolve(
+                            tenant_id=tenant_id,
+                            trigger="structured",
+                            last_tier="structured",
+                            selected="",
+                            phone="",
+                            reason="structured_chain_exhausted",
+                        )
+                        return None
+        except Exception as exc:  # noqa: silent-ok - structured escalation must not block KB tier chain
+            logger.debug(
+                "staff_contact_escalation_chain | structured resolve failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
+
+    return resolve_next_tiered_contact(
+        kb_chain,
+        contacts_sent,
+        allow_admin=allow_admin,
+    )
+
+
 __all__ = [
     "classify_contact_tier",
     "find_last_sent_chain_entry",
+    "resolve_next_escalation_contact",
     "resolve_next_tiered_contact",
     "log_escalation_chain_resolve",
 ]
