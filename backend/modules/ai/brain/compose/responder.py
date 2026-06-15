@@ -217,6 +217,23 @@ class DefaultComposer:
                     ),
                     ctx,
                 )
+            if topic == "cash_on_delivery":
+                from ..commerce.cod_policy_evidence import (  # noqa: PLC0415
+                    build_cod_policy_reply,
+                    load_cod_policy_evidence,
+                )
+                from ..commerce.commerce_conversation_guard import (  # noqa: PLC0415
+                    load_commerce_session,
+                )
+
+                mc = getattr(ctx, "merchant_context", None) or {}
+                evidence = load_cod_policy_evidence(merchant_context=mc)
+                session = load_commerce_session(getattr(ctx, "state", None))
+                cod = build_cod_policy_reply(
+                    evidence,
+                    continue_order=bool(session.order_intent),
+                )
+                return self._with_follow_up(cod.reply_text, ctx)
             return T.generic_fallback(variant=self._variant_idx(ctx))
 
         # ── Search ─────────────────────────────────────────────────────────
