@@ -6013,8 +6013,13 @@ async def _handle_merchant_message(
                         )
                         try:
                             db.rollback()
-                        except Exception:
-                            pass
+                        except Exception as _rollback_exc:
+                            logger.exception(
+                                "[PAYMENT_INFO] rollback after stamp failure "
+                                "tenant=%s err=%s",
+                                tenant_id,
+                                _rollback_exc,
+                            )
                     return  # short-circuit — never run the brain for this turn
                 else:
                     logger.warning(

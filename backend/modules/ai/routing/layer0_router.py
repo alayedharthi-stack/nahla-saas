@@ -165,10 +165,10 @@ def _load_layer0_facts(db: Any, tenant_id: int) -> CommerceFacts:
             if assistant:
                 facts.assistant_name = assistant
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.exception(
             "[LAYER0_ROUTER] facts load skipped tenant=%s err=%s",
             tenant_id,
-            type(exc).__name__,
+            exc,
         )
     return facts
 
