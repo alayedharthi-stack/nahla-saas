@@ -45,6 +45,15 @@ def _build_media_block(
         return None
 
     if src == "document":
+        from modules.ai.media.document_display import (  # noqa: PLC0415
+            safe_document_summary_for_display,
+        )
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            safe_payment_hints_for_display,
+        )
+        _doc_summary = safe_document_summary_for_display(
+            ni.get("pdf_text_preview"),
+        )
         return {
             "kind":              "document",
             "message_event_id":  message_event_id,
@@ -55,7 +64,11 @@ def _build_media_block(
             "download_status":   ni.get("document_download_status"),
             "pdf_kind":          ni.get("pdf_kind"),
             "pdf_text_status":   ni.get("pdf_text_status"),
-            "summary":           ni.get("pdf_text_preview"),
+            "summary":           _doc_summary,
+            "payment_evidence_hints": safe_payment_hints_for_display(
+                ni.get("payment_evidence_hints"),
+            ),
+            "payment_evidence_status": ni.get("payment_evidence_status"),
             "caption":           ni.get("caption"),
             "error":             ni.get("document_error"),
         }
@@ -123,16 +136,27 @@ def _build_media_block(
         and v_error in ("vision_not_configured", "stt_not_configured")
     ):
         v_status = "stale_skipped"
+    from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+        safe_payment_hints_for_display,
+    )
+    _image_kind = str(ni.get("image_kind") or "")
+    _is_payment_image = _image_kind.startswith("payment_")
+    _vision_description = None if _is_payment_image else ni.get("vision_text")
     return {
         "kind":              "image",
         "message_event_id":  message_event_id,
         "storage_url":       ni.get("storage_url"),
         "mime_type":         ni.get("mime_type"),
-        "description":       ni.get("vision_text"),
+        "description":       _vision_description,
+        "image_kind":        ni.get("image_kind"),
         "vision_status":     v_status,
         "download_status":   ni.get("image_download_status"),
         "ai_used":           bool(ni.get("ai_used_image") or False),
         "caption":           ni.get("caption"),
+        "payment_evidence_hints": safe_payment_hints_for_display(
+            ni.get("payment_evidence_hints"),
+        ),
+        "payment_evidence_status": ni.get("payment_evidence_status"),
         "error":             ni.get("vision_error"),
     }
 

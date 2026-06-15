@@ -718,6 +718,30 @@ def _build_document_display_body(
     return " ".join(parts)
 
 
+_IMAGE_KIND_LABEL_AR = {
+    "payment_receipt":          "إيصال تحويل (صورة)",
+    "payment_pre_review":       "مراجعة تحويل (صورة)",
+    "payment_pending_evidence": "بيانات دفع (صورة)",
+    "map_screenshot":           "لقطة خرائط",
+}
+
+
+def _build_image_display_body(
+    *,
+    caption: str = "",
+    image_kind: str = "",
+) -> str:
+    """Short merchant-facing line for image rows — no vision/OCR dump."""
+    label = _IMAGE_KIND_LABEL_AR.get(image_kind or "") or "صورة"
+    parts = [f"📎 {label}"]
+    if caption:
+        cap = caption.strip()
+        if len(cap) > 100:
+            cap = cap[:100] + "…"
+        parts.append(f"«{cap}»")
+    return " ".join(parts)
+
+
 # ── Public entry point ──────────────────────────────────────────────
 
 
@@ -2252,9 +2276,29 @@ async def _process_image(
         order_context=order_context,
     )
 
+    display_body = _build_image_display_body(
+        caption=caption,
+        image_kind=str(base_meta.get("image_kind") or ""),
+    )
+    base_meta["display_body"] = display_body
+    try:
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            attach_payment_evidence_hints,
+        )
+        attach_payment_evidence_hints(
+            base_meta,
+            internal_text=vision_text or "",
+        )
+    except Exception as _pe_hint_exc:  # noqa: BLE001
+        logger.exception(
+            "[PAYMENT_EVIDENCE_HINTS] image attach failed tenant=%s media_id=%s",
+            tenant_id, media_id,
+        )
+
     return MediaNormalizationResult(
         normalized_type="image",
         text=combined,
+        display_body=display_body,
         metadata=base_meta,
         should_process=True,
     )
@@ -2829,6 +2873,19 @@ async def _process_document(
         byte_size=base_meta.get("byte_size"),
     )
     base_meta["display_body"] = display_body
+    try:
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            attach_payment_evidence_hints,
+        )
+        attach_payment_evidence_hints(
+            base_meta,
+            internal_text=extracted_text or "",
+        )
+    except Exception as _pe_hint_exc:  # noqa: BLE001
+        logger.exception(
+            "[PAYMENT_EVIDENCE_HINTS] document attach failed tenant=%s media_id=%s",
+            tenant_id, media_id,
+        )
 
     return MediaNormalizationResult(
         normalized_type="document",

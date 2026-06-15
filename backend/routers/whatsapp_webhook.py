@@ -6413,7 +6413,23 @@ async def _handle_merchant_message(
 
         # ── Location link policy (pre-brain) ──────────────────────────────
         # Physical location asks must never enter staff escalation policy.
+        # Media inbounds (PDF/image/audio/video) must not use brain/OCR
+        # text — only the customer's caption counts as current intent.
         _llp_decision = None
+        _pre_brain_customer_msg = text or ""
+        try:
+            from modules.ai.media.routing_guard import (  # noqa: PLC0415
+                resolve_pre_brain_customer_message as _resolve_pre_brain_msg,
+            )
+            _pre_brain_customer_msg = _resolve_pre_brain_msg(
+                brain_text=text or "",
+                inbound_metadata=inbound_metadata,
+            )
+        except Exception as _pbr_exc:  # noqa: BLE001
+            logger.warning(
+                "[MEDIA_ROUTING_GUARD] resolve failed tenant=%s err=%s",
+                tenant_id, _pbr_exc,
+            )
         try:
             from modules.ai.brain.commerce.location_link_policy import (  # noqa: PLC0415
                 evaluate_location_link_policy as _evaluate_location_link_policy,
@@ -6421,7 +6437,7 @@ async def _handle_merchant_message(
             _llp_decision = _evaluate_location_link_policy(
                 db,
                 tenant_id=tenant_id,
-                message=text or "",
+                message=_pre_brain_customer_msg,
             )
         except Exception as _llp_exc:  # noqa: BLE001
             logger.warning(
@@ -6506,7 +6522,7 @@ async def _handle_merchant_message(
             _acd_decision = _evaluate_arrival_contact_delivery(
                 db,
                 tenant_id=tenant_id,
-                message=text or "",
+                message=_pre_brain_customer_msg,
             )
         except Exception as _acd_exc:  # noqa: BLE001
             logger.warning(
