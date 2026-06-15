@@ -649,18 +649,97 @@ class MediaNormalizationResult:
       * ``fallback_reply_ar`` — when set, the webhook sends THIS
         instead of running the brain. Used for media we received
         successfully but couldn't extract text from.
+      * ``text`` — brain-facing combined text (may embed PDF/OCR
+        extraction for internal analysis). NEVER persist this to
+        ``MessageEvent.body`` when ``display_body`` is set.
+      * ``display_body`` — merchant/customer-safe label for
+        ``MessageEvent.body`` and the conversation drawer. For PDFs
+        this is a short file-card line; extraction lives only in
+        ``metadata.pdf_text_full``.
       * ``metadata`` — full structured payload that gets stamped onto
         ``MessageEvent.extra_metadata.normalized_inbound`` for the
         media-debug endpoint and the conversation drawer player.
     """
     normalized_type: str = "unsupported"
     text: str = ""
+    display_body: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     should_process: bool = False
     # NEW: explicit fallback reply for the "we got the media but
     # couldn't extract usable text" branch. None means "no special
     # handling needed — the dispatcher behaves as before".
     fallback_reply_ar: Optional[str] = None
+
+
+def inbound_persist_body(result: MediaNormalizationResult) -> str:
+    """Return the body safe to persist on ``MessageEvent`` rows.
+
+    Brain pipeline continues to use ``result.text``; dashboard and
+    merchant inbox use ``display_body`` when the normalizer set it.
+    """
+    display = (result.display_body or "").strip()
+    if display:
+        return display
+    return (result.text or "").strip()
+
+
+def _format_byte_size(num: int) -> str:
+    if num <= 0:
+        return ""
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
+def _build_document_display_body(
+    *,
+    filename: str,
+    label_ar: str,
+    caption: str = "",
+    byte_size: Optional[int] = None,
+) -> str:
+    """Short merchant-facing line for PDF/document rows — no extraction."""
+    name = (filename or "").strip() or "مستند PDF"
+    parts = [f"📎 {name}", f"({label_ar})"]
+    if byte_size and byte_size > 0:
+        sized = _format_byte_size(int(byte_size))
+        if sized:
+            parts.append(f"— {sized}")
+    if caption:
+        cap = caption.strip()
+        if len(cap) > 100:
+            cap = cap[:100] + "…"
+        parts.append(f"«{cap}»")
+    return " ".join(parts)
+
+
+_IMAGE_KIND_LABEL_AR = {
+    "payment_receipt":          "إيصال تحويل (صورة)",
+    "payment_pre_review":       "مراجعة تحويل (صورة)",
+    "payment_pending_evidence": "بيانات دفع (صورة)",
+    "map_screenshot":           "لقطة خرائط",
+}
+
+
+def _build_image_display_body(
+    *,
+    caption: str = "",
+    image_kind: str = "",
+) -> str:
+    """Short merchant-facing line for image rows — no vision/OCR dump."""
+    label = _IMAGE_KIND_LABEL_AR.get(image_kind or "") or "صورة"
+    parts = [f"📎 {label}"]
+    if caption:
+        cap = caption.strip()
+        if len(cap) > 100:
+            cap = cap[:100] + "…"
+        parts.append(f"«{cap}»")
+    return " ".join(parts)
 
 
 # ── Public entry point ──────────────────────────────────────────────
@@ -2197,9 +2276,29 @@ async def _process_image(
         order_context=order_context,
     )
 
+    display_body = _build_image_display_body(
+        caption=caption,
+        image_kind=str(base_meta.get("image_kind") or ""),
+    )
+    base_meta["display_body"] = display_body
+    try:
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            attach_payment_evidence_hints,
+        )
+        attach_payment_evidence_hints(
+            base_meta,
+            internal_text=vision_text or "",
+        )
+    except Exception as _pe_hint_exc:  # noqa: BLE001
+        logger.exception(
+            "[PAYMENT_EVIDENCE_HINTS] image attach failed tenant=%s media_id=%s",
+            tenant_id, media_id,
+        )
+
     return MediaNormalizationResult(
         normalized_type="image",
         text=combined,
+        display_body=display_body,
         metadata=base_meta,
         should_process=True,
     )
@@ -2767,9 +2866,31 @@ async def _process_document(
         order_context=order_context,
     )
 
+    display_body = _build_document_display_body(
+        filename=filename,
+        label_ar=label_ar,
+        caption=caption,
+        byte_size=base_meta.get("byte_size"),
+    )
+    base_meta["display_body"] = display_body
+    try:
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            attach_payment_evidence_hints,
+        )
+        attach_payment_evidence_hints(
+            base_meta,
+            internal_text=extracted_text or "",
+        )
+    except Exception as _pe_hint_exc:  # noqa: BLE001
+        logger.exception(
+            "[PAYMENT_EVIDENCE_HINTS] document attach failed tenant=%s media_id=%s",
+            tenant_id, media_id,
+        )
+
     return MediaNormalizationResult(
         normalized_type="document",
         text=combined,
+        display_body=display_body,
         metadata=base_meta,
         should_process=True,
     )
@@ -2790,16 +2911,25 @@ def _document_with_fallback(
     if caption:
         text_bits.append(f"تعليق العميل: {caption}")
     combined = "\n".join(text_bits)
+    display_body = _build_document_display_body(
+        filename=filename,
+        label_ar="مستند",
+        caption=caption,
+        byte_size=base_meta.get("byte_size"),
+    )
+    base_meta["display_body"] = display_body
     if combined and (filename or caption):
         return MediaNormalizationResult(
             normalized_type="document",
             text=combined,
+            display_body=display_body,
             metadata=base_meta,
             should_process=True,
         )
     return MediaNormalizationResult(
         normalized_type="document",
         text="",
+        display_body=display_body,
         metadata=base_meta,
         should_process=False,
         fallback_reply_ar=DOCUMENT_FALLBACK_REPLY_AR,

@@ -309,16 +309,29 @@ export interface DashboardMessageMediaAudio {
   error: string | null
 }
 
+export interface PaymentEvidenceHintsDisplay {
+  payment_evidence_status?: string | null
+  bank_name?: string | null
+  amount?: string | null
+  transfer_date?: string | null
+  reference_number?: string | null
+  sender_name?: string | null
+  iban_masked?: string | null
+}
+
 export interface DashboardMessageMediaImage {
   kind: 'image'
   message_event_id: number
   storage_url: string | null
   mime_type: string | null
   description: string | null
+  image_kind?: string | null
   vision_status: string | null
   download_status: string | null
   ai_used: boolean
   caption: string | null
+  payment_evidence_hints?: PaymentEvidenceHintsDisplay | null
+  payment_evidence_status?: string | null
   error: string | null
 }
 
@@ -336,10 +349,29 @@ export interface DashboardMessageMediaVideo {
   error: string | null
 }
 
+export interface DashboardMessageMediaDocument {
+  kind: 'document'
+  message_event_id: number
+  storage_url: string | null
+  mime_type: string | null
+  filename: string | null
+  byte_size: number | null
+  download_status: string | null
+  pdf_kind: string | null
+  pdf_text_status: string | null
+  /** Short safe preview only — never raw OCR */
+  summary: string | null
+  payment_evidence_hints?: PaymentEvidenceHintsDisplay | null
+  payment_evidence_status?: string | null
+  caption: string | null
+  error: string | null
+}
+
 export type DashboardMessageMedia =
   | DashboardMessageMediaAudio
   | DashboardMessageMediaImage
   | DashboardMessageMediaVideo
+  | DashboardMessageMediaDocument
 
 // ── Outbound send status (Meta / 360dialog wire-layer outcome) ──────
 // Surfaced per outbound MessageEvent so the UI can tell the merchant
