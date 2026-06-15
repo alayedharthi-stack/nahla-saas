@@ -139,6 +139,47 @@ class DedupResult:
     reason: str
 
 
+def _canonicalize_contacts_for_signature(contacts: Any) -> list:
+    """Stable, order-independent view of WhatsApp ``contacts`` cards."""
+    canon_list: list = []
+    if not isinstance(contacts, list):
+        return canon_list
+    for contact in contacts:
+        if not isinstance(contact, dict):
+            continue
+        name = contact.get("name") or {}
+        if not isinstance(name, dict):
+            name = {}
+        formatted = str(name.get("formatted_name") or "").strip()
+        first = str(name.get("first_name") or "").strip()
+        display_name = formatted or first
+        phones_raw = contact.get("phones") or []
+        phones: list = []
+        if isinstance(phones_raw, list):
+            for phone_entry in phones_raw:
+                if not isinstance(phone_entry, dict):
+                    continue
+                wa_id = re.sub(r"\D", "", str(phone_entry.get("wa_id") or ""))
+                phone = re.sub(r"\D", "", str(phone_entry.get("phone") or ""))
+                phones.append({
+                    "wa_id": wa_id,
+                    "phone": phone or wa_id,
+                })
+        phones.sort(key=lambda p: (p.get("wa_id") or "", p.get("phone") or ""))
+        canon_list.append({
+            "name": display_name,
+            "phones": phones,
+        })
+    canon_list.sort(
+        key=lambda c: (
+            ((c.get("phones") or [{}])[0].get("wa_id") or ""),
+            ((c.get("phones") or [{}])[0].get("phone") or ""),
+            c.get("name") or "",
+        ),
+    )
+    return canon_list
+
+
 def _phone_suffix(phone: str) -> str:
     """Last 9 digits — same shape as ``stamp_outbound_send_status``
     uses for its JSONB suffix match. Cheap normalisation that
@@ -159,6 +200,7 @@ def _payload_signature(payload: Dict[str, Any]) -> str:
         * ``template.name`` + ``template.language.code`` +
           flattened parameter values
         * ``interactive.body.text`` + button labels
+        * ``contacts[]`` — wa_id, phone, display name (sorted)
     """
     try:
         canon: Dict[str, Any] = {"type": payload.get("type")}
@@ -200,6 +242,10 @@ def _payload_signature(payload: Dict[str, Any]) -> str:
                 rb = b.get("reply") or {}
                 btns.append(f"{rb.get('id')}:{rb.get('title')}")
             canon["btns"] = btns
+        elif t == "contacts":
+            contacts = payload.get("contacts") or []
+            canon["contacts"] = _canonicalize_contacts_for_signature(contacts)
+            canon["count"] = len(canon["contacts"])
 
         raw = json.dumps(canon, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
