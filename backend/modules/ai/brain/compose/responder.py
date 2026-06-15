@@ -348,6 +348,7 @@ class DefaultComposer:
                 last_browse_query=str(
                     getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""
                 ),
+                state=getattr(ctx, "state", None),
             )
 
             if not safe_products:

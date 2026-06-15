@@ -1748,10 +1748,16 @@ class DefaultDecisionEngine:
         ):
             try:
                 from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-                    extract_browse_category_scope,
+                    active_category_from_state,
+                    resolve_browse_category_scope,
                 )
 
-                _category_scope = extract_browse_category_scope(ctx.message or "", "")
+                _category_scope = resolve_browse_category_scope(
+                    ctx.message or "",
+                    "",
+                    active_category=active_category_from_state(state),
+                    source="top_products",
+                )
             except Exception:  # noqa: BLE001
                 _category_scope = ""
             if _category_scope:
