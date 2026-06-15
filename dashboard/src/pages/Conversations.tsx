@@ -15,11 +15,20 @@ import EditCustomerNameModal from '../components/conversations/EditCustomerNameM
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 import { useDashboardPoll } from '../lib/dashboardPolling'
+import {
+  loadConversationListCache,
+  loadConversationMessagesCache,
+  mergeMessagesPreserveOrder,
+  saveConversationListCache,
+  saveConversationMessagesCache,
+} from '../lib/conversationsCache'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD, resolveOutboundSendError } from '../i18n/uiOnly'
 
 const LIST_PAGE_LIMIT = 60
-const LIST_POLL_MS = 32_000
+const LIST_POLL_MS = 5_000
+const MESSAGE_PAGE_LIMIT = 30
+const MESSAGE_POLL_MS = 4_000
 
 function logConversationsUiFetch(meta: {
   endpoint: string
@@ -118,7 +127,13 @@ export default function Conversations() {
   const [selected, setSelected]     = useState<Conversation | null>(null)
   const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'paid' | 'unsubscribed' | 'closed'>('all')
   const [reply, setReply]           = useState('')
-  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    const cached = loadConversationListCache(getTenantId())
+    return cached.map((row) => ({ ...row, messages: [] as DashboardMessage[] }))
+  })
+  const [listBootstrapping, setListBootstrapping] = useState(
+    () => loadConversationListCache(getTenantId()).length === 0,
+  )
   const [searchQuery, setSearchQuery] = useState('')
   const [actionToast, setActionToast] = useState<string | null>(null)
   const [actionErrorToast, setActionErrorToast] = useState<string | null>(null)
@@ -155,6 +170,9 @@ export default function Conversations() {
   const [hasMoreServer, setHasMoreServer]      = useState(false)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [loadingMore, setLoadingMore]           = useState(false)
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false)
+  const [hasMoreMessages, setHasMoreMessages] = useState(false)
+  const messagesScrollRef = useRef<HTMLDivElement>(null)
 
   const phonesMatch = (a?: string | null, b?: string | null) => {
     const norm = (p?: string | null) =>
@@ -232,7 +250,12 @@ export default function Conversations() {
       const rows = Array.isArray(page.conversations) ? page.conversations : []
       nextSliceOffsetRef.current = rows.length
       setHasMoreServer(Boolean(page.has_more))
-      setConversations((prev) => mergeHeadPreserveTailServerOrder(rows, prev))
+      setConversations((prev) => {
+        const merged = mergeHeadPreserveTailServerOrder(rows, prev)
+        saveConversationListCache(getTenantId(), merged)
+        return merged
+      })
+      setListBootstrapping(false)
       setSelected((prevSel) => {
         if (!prevSel) return prevSel
         const hit = rows.find((c: DashboardConversation) => prevSel.phone === c.phone)
@@ -296,7 +319,12 @@ export default function Conversations() {
       }
 
       const rowsSnap = rows
-      setConversations((prev) => mergeRowsKeepMessages(rowsSnap, prev))
+      setConversations((prev) => {
+        const merged = mergeRowsKeepMessages(rowsSnap, prev)
+        saveConversationListCache(getTenantId(), merged)
+        return merged
+      })
+      setListBootstrapping(false)
 
       setSelected((prevSel) => {
         if (!requestedPhone) {
@@ -389,28 +417,113 @@ export default function Conversations() {
     }
   }
 
-  const loadMessagesForOpenChat = async (phone: string) => {
-    msgsCtrlRef.current?.abort()
-    const ac = new AbortController()
-    msgsCtrlRef.current = ac
+  const loadMessagesForOpenChat = async (
+    phone: string,
+    opts?: { silent?: boolean; signal?: AbortSignal },
+  ) => {
+    if (!opts?.silent) {
+      const cached = loadConversationMessagesCache(getTenantId(), phone)
+      if (cached?.messages?.length) {
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.phone === phone ? { ...c, messages: cached.messages } : c,
+          ),
+        )
+        setSelected((prevSel) =>
+          prevSel && prevSel.phone === phone
+            ? { ...prevSel, messages: cached.messages }
+            : prevSel,
+        )
+        setHasMoreMessages(Boolean(cached.hasMore))
+      }
+    }
+
+    let signal: AbortSignal
+    if (opts?.signal) {
+      signal = opts.signal
+    } else {
+      msgsCtrlRef.current?.abort()
+      const ac = new AbortController()
+      msgsCtrlRef.current = ac
+      signal = ac.signal
+    }
     const t0 = performance.now()
-    setLoadingMessages(true)
+    if (!opts?.silent) setLoadingMessages(true)
     try {
-      const { messages } = await featureRealityApi.conversationMessages(phone, {
-        signal: ac.signal,
-        limit: 150,
+      const { messages, has_more } = await featureRealityApi.conversationMessages(phone, {
+        signal,
+        limit: MESSAGE_PAGE_LIMIT,
       })
+      setHasMoreMessages(Boolean(has_more))
+      let mergedForCache = messages
       setConversations((prev) =>
-        prev.map((c) => (c.phone === phone ? { ...c, messages } : c)),
+        prev.map((c) => {
+          if (c.phone !== phone) return c
+          const merged = opts?.silent && c.messages.length
+            ? mergeMessagesPreserveOrder(c.messages, messages)
+            : messages
+          mergedForCache = merged
+          return { ...c, messages: merged }
+        }),
       )
-      setSelected((prevSel) =>
-        prevSel && prevSel.phone === phone ? { ...prevSel, messages } : prevSel,
-      )
+      setSelected((prevSel) => {
+        if (!prevSel || prevSel.phone !== phone) return prevSel
+        const merged = opts?.silent && prevSel.messages.length
+          ? mergeMessagesPreserveOrder(prevSel.messages, messages)
+          : messages
+        mergedForCache = merged
+        return { ...prevSel, messages: merged }
+      })
+      saveConversationMessagesCache(getTenantId(), phone, mergedForCache, has_more)
     } catch (err: unknown) {
-      if (ac.signal.aborted) return
+      if (signal.aborted) return
       logFetchFail(`/conversations/messages/${encodeURIComponent(phone)}`, t0, err, phone)
     } finally {
-      if (!ac.signal.aborted) setLoadingMessages(false)
+      if (!signal.aborted && !opts?.silent) setLoadingMessages(false)
+    }
+  }
+
+  const loadOlderMessages = async (phone: string) => {
+    const current = selected?.phone === phone ? selected.messages : conversations.find((c) => c.phone === phone)?.messages
+    if (!current?.length || loadingOlderMessages || !hasMoreMessages) return
+    const oldestId = Number(current[0]?.id)
+    if (!Number.isFinite(oldestId)) return
+
+    setLoadingOlderMessages(true)
+    const scrollEl = messagesScrollRef.current
+    const prevHeight = scrollEl?.scrollHeight ?? 0
+    try {
+      const { messages: older, has_more } = await featureRealityApi.conversationMessages(phone, {
+        limit: MESSAGE_PAGE_LIMIT,
+        beforeId: oldestId,
+      })
+      if (!older.length) {
+        setHasMoreMessages(false)
+        return
+      }
+      const merged = mergeMessagesPreserveOrder(older, current)
+      setHasMoreMessages(Boolean(has_more))
+      setConversations((prev) =>
+        prev.map((c) => (c.phone === phone ? { ...c, messages: merged } : c)),
+      )
+      setSelected((prevSel) =>
+        prevSel && prevSel.phone === phone ? { ...prevSel, messages: merged } : prevSel,
+      )
+      saveConversationMessagesCache(getTenantId(), phone, merged, has_more)
+      requestAnimationFrame(() => {
+        if (scrollEl) {
+          scrollEl.scrollTop = scrollEl.scrollHeight - prevHeight
+        }
+      })
+    } catch (err: unknown) {
+      logFetchFail(
+        `/conversations/messages/${encodeURIComponent(phone)}?before_id=${oldestId}`,
+        performance.now(),
+        err,
+        phone,
+      )
+    } finally {
+      setLoadingOlderMessages(false)
     }
   }
 
@@ -421,6 +534,17 @@ export default function Conversations() {
     run: async (signal) => {
       if (listBusyRef.current) return
       await reloadFirstPagePreserveTail({ silent: true, signal })
+    },
+  })
+
+  useDashboardPoll({
+    pollKey: selected ? `GET:/conversations/messages/${selected.phone}` : 'GET:/conversations/messages/_idle',
+    intervalMs: MESSAGE_POLL_MS,
+    enabled: Boolean(selected?.phone),
+    leading: false,
+    run: async (signal) => {
+      if (!selected?.phone) return
+      await loadMessagesForOpenChat(selected.phone, { silent: true, signal })
     },
   })
 
@@ -475,7 +599,12 @@ export default function Conversations() {
   }
 
   const selectConversation = (c: Conversation) => {
-    setSelected(c)
+    const cached = loadConversationMessagesCache(getTenantId(), c.phone)
+    const withMessages = cached?.messages?.length
+      ? { ...c, messages: cached.messages }
+      : c
+    setSelected(withMessages)
+    setHasMoreMessages(Boolean(cached?.hasMore))
     setMobileView('chat')
     loadMessagesForOpenChat(c.phone)
     // Zero the unread badge locally the moment we open the
@@ -1013,13 +1142,26 @@ export default function Conversations() {
 
         {/* Conversation list */}
         <ul className="flex-1 overflow-y-auto divide-y divide-slate-100">
-          {sortedFiltered.length === 0 && (
+          {listBootstrapping && sortedFiltered.length === 0 && (
+            <>
+              {Array.from({ length: 8 }).map((_, i) => (
+                <li key={`sk-${i}`} className="flex items-start gap-3 px-4 py-3.5 animate-pulse">
+                  <div className="w-11 h-11 rounded-full bg-slate-200 shrink-0" />
+                  <div className="flex-1 space-y-2 pt-1">
+                    <div className="h-3.5 bg-slate-200 rounded w-2/5" />
+                    <div className="h-3 bg-slate-100 rounded w-4/5" />
+                  </div>
+                </li>
+              ))}
+            </>
+          )}
+          {!listBootstrapping && sortedFiltered.length === 0 && (
             <li className="py-20 text-center">
               <Bot className="w-10 h-10 text-slate-200 mx-auto mb-3" />
               <p className="text-sm text-slate-400">{cp.emptyList}</p>
             </li>
           )}
-          {sortedFiltered.map((c) => {
+          {sortedFiltered.length > 0 && sortedFiltered.map((c) => {
             // ``awaitingAgent`` is the single source of truth for the
             // "row needs human attention RIGHT NOW" visual treatment
             // (red unread badge, subtle red row tint, red end-border,
@@ -1451,13 +1593,29 @@ export default function Conversations() {
 
             {/* Messages area */}
             <div
+              ref={messagesScrollRef}
               className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
               style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                if (el.scrollTop <= 48 && selected && hasMoreMessages && !loadingOlderMessages) {
+                  void loadOlderMessages(selected.phone)
+                }
+              }}
             >
+              {loadingOlderMessages && (
+                <div className="flex items-center justify-center py-2 gap-2 text-xs text-slate-400">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-500" />
+                  {cp.loadingMore}
+                </div>
+              )}
               {loadingMessages && selected.messages.length === 0 && (
-                <div className="flex items-center justify-center py-10 gap-2 text-xs text-slate-400">
-                  <Loader2 className="w-4 h-4 animate-spin text-brand-500" />
-                  {cp.loadingMessages}
+                <div className="space-y-3 px-2 py-4 animate-pulse">
+                  {[false, true, false, true].map((out, i) => (
+                    <div key={`msg-sk-${i}`} className={`flex ${out ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`h-10 rounded-2xl bg-slate-200/80 ${out ? 'w-2/5' : 'w-1/2'}`} />
+                    </div>
+                  ))}
                 </div>
               )}
               {!loadingMessages && selected.messages.length === 0 && (

@@ -506,10 +506,11 @@ export const featureRealityApi = {
   },
   conversationMessages(
     phone: string,
-    opts?: { signal?: AbortSignal; limit?: number },
-  ): Promise<{ messages: DashboardMessage[] }> {
+    opts?: { signal?: AbortSignal; limit?: number; beforeId?: number },
+  ): Promise<{ messages: DashboardMessage[]; has_more?: boolean }> {
     const q = new URLSearchParams()
     if (opts?.limit != null) q.set('limit', String(opts.limit))
+    if (opts?.beforeId != null) q.set('before_id', String(opts.beforeId))
     const qs = q.toString()
     const suffix = qs ? `?${qs}` : ''
     return apiCall(

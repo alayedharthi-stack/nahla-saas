@@ -684,7 +684,7 @@ class CustomerIntelligenceService:
                 tenant_id           = self.tenant_id,
                 phone               = raw_phone_display,
                 normalized_phone    = e164,
-                name                = clean_name or None,
+                name                = None,
                 email               = clean_email,
                 extra_metadata      = metadata or None,
                 salla_customer_id   = str(external_id).strip() if external_id else None,
@@ -694,6 +694,17 @@ class CustomerIntelligenceService:
             )
             self.db.add(customer)
             self.db.flush()
+            if clean_name:
+                from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                platform = str((metadata or {}).get("store_platform") or "").strip() or None
+                apply_customer_name(
+                    customer,
+                    clean_name,
+                    source=source,
+                    platform=platform,
+                    explicit_customer_entry=(source or "") == "ai_detected_name",
+                )
             logger.debug(
                 "[CIS] customer CREATED | tenant=%s e164=%s salla_id=%s channel=%s",
                 self.tenant_id, e164, external_id, channel,
@@ -707,92 +718,24 @@ class CustomerIntelligenceService:
                 # Always keep normalized_phone up-to-date (E.164)
                 customer.normalized_phone = e164
 
-            # Name update: respect source trust hierarchy.
-            # Low-trust sources (WhatsApp aliases, widgets) must not overwrite
-            # authoritative names already on file from the store or orders.
+            # Name update: evidence-based resolver — trust hierarchy +
+            # validator gate. Low-trust WhatsApp profile hints stay
+            # proposed; verified store names never lose to chat filler.
             if clean_name:
-                _override_flag = bool(
-                    (customer.extra_metadata or {}).get("manual_name_override")
-                )
-                _cleared_flag = bool(
-                    (customer.extra_metadata or {}).get("manual_name_cleared")
-                )
-                _current_name = (customer.name or "").strip()
-                # ── Manual-name-override short-circuit ────────────
-                # The merchant explicitly curated this name via the
-                # inline pencil in the customers table (or the
-                # card editor). NO upstream source — Salla, Zid,
-                # WhatsApp profile, widget — gets to overwrite it.
-                # This is intentionally stricter than the trust
-                # hierarchy: merchant intent beats every automated
-                # signal. See routers/customers.update_customer
-                # for where the flag is stamped.
-                #
-                # EXCEPTION (May 2026): when the merchant CLEARED
-                # the name (override=True, cleared=True, name=NULL),
-                # we still allow a HIGH-TRUST update — specifically
-                # an AI-detected name from the conversation
-                # ("اسمي محمد"). Keeping the row at the static
-                # fallback "عميلنا الغالي" forever is worse than
-                # adopting the name the customer just volunteered.
-                # Low-trust sources (whatsapp profile, widget) remain
-                # blocked even on cleared rows so a stray profile-
-                # name update doesn't re-fill a row the merchant
-                # deliberately emptied.
-                if (
-                    _override_flag
-                    and _current_name
-                ):
-                    logger.debug(
-                        "[CIS] name NOT updated (manual override, non-empty) "
-                        "| tenant=%s id=%s new_source=%s",
-                        self.tenant_id, customer.id, source,
-                    )
-                elif (
-                    _override_flag
-                    and _cleared_flag
-                    and not _current_name
-                    and (source or "").lower() not in {
-                        "ai_detected_name",
+                from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                platform = str((metadata or {}).get("store_platform") or "").strip() or None
+                apply_customer_name(
+                    customer,
+                    clean_name,
+                    source=source,
+                    platform=platform,
+                    explicit_customer_entry=(source or "") == "ai_detected_name",
+                    force_merchant=(source or "") in {
                         "merchant_correction",
-                        "store_sync",
-                        "salla",
-                        "zid",
-                        "order",
-                    }
-                ):
-                    # Cleared row + low-trust source → still block.
-                    # The customer can refill it later by saying
-                    # their name in chat (source="ai_detected_name").
-                    logger.debug(
-                        "[CIS] name NOT updated (cleared by merchant, "
-                        "low-trust source) | tenant=%s id=%s "
-                        "new_source=%s",
-                        self.tenant_id, customer.id, source,
-                    )
-                else:
-                    existing_name_source = (
-                        (customer.extra_metadata or {}).get("name_source")
-                        or customer.acquisition_channel
-                    )
-                    if _should_update_name(
-                        existing_name=customer.name,
-                        existing_source=existing_name_source,
-                        new_name=clean_name,
-                        new_source=source,
-                    ):
-                        customer.name = clean_name
-                        # Track which source set the current name so future
-                        # updates can make the same trust comparison.
-                        metadata["name_source"] = source or ""
-                    else:
-                        logger.debug(
-                            "[CIS] name NOT updated (trust: %s=%d >= existing %s=%d) "
-                            "| tenant=%s id=%s",
-                            source, _name_trust_level(source),
-                            existing_name_source, _name_trust_level(existing_name_source),
-                            self.tenant_id, customer.id,
-                        )
+                        "manual",
+                    },
+                )
 
             if clean_email:
                 customer.email = clean_email

@@ -3223,7 +3223,7 @@ async def _dispatch_message(
                 _lead_meta["wa_profile_name"] = contact_name
             _lead = CustomerIntelligenceService(db, resolved_tenant_id).upsert_lead_customer(
                 phone=normalized_sender,
-                name=contact_name or normalized_sender,
+                name=contact_name or None,
                 source="whatsapp_inbound",
                 extra_metadata=_lead_meta,
                 commit=True,
@@ -5747,40 +5747,48 @@ async def _handle_merchant_message(
 
         _name_hit = extract_high_confidence_name(text)
         if _name_hit:
-            try:
-                _name_svc = _NameCIS(db, tenant_id)
-                _name_cust = _name_svc.upsert_customer_identity(
-                    phone=to,
-                    name=_name_hit.value,
-                    source="ai_detected_name",
-                )
-                # If the row was previously CLEARED by the merchant
-                # we now flip ``manual_name_cleared`` back to false
-                # because we successfully refilled it. The override
-                # flag stays true so future low-trust sources (CSV
-                # imports, WhatsApp profile syncs) still cannot touch
-                # this name.
-                if _name_cust is not None:
-                    _meta = dict(_name_cust.extra_metadata or {})
-                    if _meta.get("manual_name_cleared"):
-                        _meta["manual_name_cleared"] = False
-                        from datetime import timezone as _tz_name  # noqa: PLC0415
-                        _meta["manual_name_refilled_by_ai_at"] = (
-                            datetime.now(_tz_name.utc).isoformat()
-                        )
-                        _name_cust.extra_metadata = _meta
-                        db.add(_name_cust)
-                db.flush()
+            from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+
+            if not validate_customer_name(_name_hit.value).valid:
                 logger.info(
-                    "[NAME_EXTRACTOR] adopted | tenant=%s phone=%s "
-                    "pattern=%s name=%r",
-                    tenant_id, to, _name_hit.pattern, _name_hit.value,
+                    "[NAME_EXTRACTOR] rejected by validator | tenant=%s phone=%s name=%r",
+                    tenant_id, to, _name_hit.value,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[NAME_EXTRACTOR] adopt failed | tenant=%s phone=%s err=%s",
-                    tenant_id, to, exc,
-                )
+            else:
+                try:
+                    _name_svc = _NameCIS(db, tenant_id)
+                    _name_cust = _name_svc.upsert_customer_identity(
+                        phone=to,
+                        name=_name_hit.value,
+                        source="ai_detected_name",
+                    )
+                    # If the row was previously CLEARED by the merchant
+                    # we now flip ``manual_name_cleared`` back to false
+                    # because we successfully refilled it. The override
+                    # flag stays true so future low-trust sources (CSV
+                    # imports, WhatsApp profile syncs) still cannot touch
+                    # this name.
+                    if _name_cust is not None:
+                        _meta = dict(_name_cust.extra_metadata or {})
+                        if _meta.get("manual_name_cleared"):
+                            _meta["manual_name_cleared"] = False
+                            from datetime import timezone as _tz_name  # noqa: PLC0415
+                            _meta["manual_name_refilled_by_ai_at"] = (
+                                datetime.now(_tz_name.utc).isoformat()
+                            )
+                            _name_cust.extra_metadata = _meta
+                            db.add(_name_cust)
+                    db.flush()
+                    logger.info(
+                        "[NAME_EXTRACTOR] adopted | tenant=%s phone=%s "
+                        "pattern=%s name=%r",
+                        tenant_id, to, _name_hit.pattern, _name_hit.value,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[NAME_EXTRACTOR] adopt failed | tenant=%s phone=%s err=%s",
+                        tenant_id, to, exc,
+                    )
     except Exception as exc:  # noqa: BLE001
         logger.debug("[NAME_EXTRACTOR] skipped (init err): %s", exc)
 
