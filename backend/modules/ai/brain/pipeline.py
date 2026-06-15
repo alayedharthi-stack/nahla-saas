@@ -1324,6 +1324,7 @@ class MerchantBrain:
                 ),
                 source=str((decision.args or {}).get("source") or "").strip().lower(),
                 last_browse_query=str(getattr(new_state, "last_browse_query", "") or ""),
+                state=new_state,
             )
             if result.data.get("products"):
                 result.data["products"] = list(_search_products)
@@ -1777,6 +1778,7 @@ class MerchantBrain:
                     ),
                     source=_src,
                     last_browse_query=str(getattr(new_state, "last_browse_query", "") or ""),
+                    state=new_state,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("[BROWSE_CATEGORY_GUARD] browse_pool filter failed")
@@ -2152,6 +2154,26 @@ class MerchantBrain:
             logger.warning(
                 "[COMMERCE_REPLY_QUALITY_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _crqg_exc,
+            )
+
+        try:
+            from modules.ai.brain.postprocess.saudi_dialect_guard import (  # noqa: PLC0415
+                apply_saudi_dialect_guard,
+            )
+
+            _sdg = apply_saudi_dialect_guard(
+                reply or "",
+                locale=str((profile or {}).get("preferred_language") or "ar"),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _sdg.replaced:
+                reply = _sdg.reply
+                _guard_replaced["saudi_dialect_guard"] = True
+        except Exception as _sdg_exc:  # noqa: BLE001
+            logger.warning(
+                "[SAUDI_DIALECT_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _sdg_exc,
             )
 
         try:

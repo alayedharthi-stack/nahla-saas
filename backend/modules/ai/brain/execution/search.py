@@ -77,6 +77,7 @@ class ProductSearchHandler:
                 query=str(decision.args.get("query") or ""),
                 source=source,
                 last_browse_query=str(getattr(state, "last_browse_query", "") or ""),
+                state=state,
             )
 
         def _format_result(

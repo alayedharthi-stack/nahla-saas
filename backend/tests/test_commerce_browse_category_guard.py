@@ -13,8 +13,10 @@ if _backend not in sys.path:
 
 from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: E402
     extract_browse_category_scope,
+    filter_products_for_browse_turn,
     filter_products_to_browse_category,
     is_category_scoped_browse,
+    resolve_browse_category_scope,
     should_exclude_cross_category_product,
 )
 
@@ -250,3 +252,38 @@ class TestHoneyCategoryShapes:
         assert ids == {20, 21}
         assert 22 not in ids
         assert 23 not in ids
+
+
+class TestHoneySessionLockedBrowse:
+    """Generic options browse inherits locked honey session (P0-B)."""
+
+    _CATALOG = [
+        _product(1, "عسل طلح"),
+        _product(2, "كريم سم النحل"),
+        _product(3, "زيت سم النحل"),
+    ]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "وش الخيارات؟",
+            "وين الخيارات",
+            "وش المتوفر",
+        ],
+    )
+    def test_generic_options_respects_active_honey_category(self, message: str) -> None:
+        assert resolve_browse_category_scope(
+            message,
+            active_category="عسل",
+            source="top_products",
+        ) == "عسل"
+        filtered = filter_products_for_browse_turn(
+            self._CATALOG,
+            message=message,
+            source="top_products",
+            active_category="عسل",
+        )
+        assert [p["id"] for p in filtered] == [1]
+
+    def test_honey_subtype_without_explicit_honey_word(self) -> None:
+        assert resolve_browse_category_scope("ابي طلح") == "عسل"

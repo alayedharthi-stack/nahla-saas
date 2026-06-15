@@ -60,6 +60,7 @@ _SCOPE_STOPWORDS = frozenset({
     "what", "do", "you", "have", "is", "are", "me", "us", "list",
     "collection", "options", "option", "items", "item", "line", "lines",
     "season", "seasonal", "batch", "inventory", "stock",
+    "خيارات", "الخيارات", "وين", "where",
     "؟", "?", ".", "!", ",",
 })
 
@@ -73,6 +74,37 @@ _CROSS_FORM_MARKERS = frozenset({
 # Shared hive/bee tokens must NOT satisfy a honey scope on their own.
 _HIVE_BLEED_TOKENS = frozenset({
     "نحل", "النحل", "bee", "bees", "hive", "hives",
+})
+
+# Honey subtype nouns — browsing these implies honey, not bee-venom derivatives.
+_HONEY_SUBTYPE_SCOPE_HINTS = frozenset({
+    "سدر", "طلح", "سمر", "برسيم", "ضهيان", "شوك", "شوكة", "زهر", "مراعي", "مجرى",
+    "sidr", "sider", "talh", "samr", "sumr", "clover", "dahyan", "marai",
+})
+
+# Generic options/availability browse — inherits locked session category.
+_GENERIC_CATEGORY_BROWSE_RE = re.compile(
+    r"(?:"
+    r"^(?:وش|ايش|ايه|ما|وين|where)\s+(?:ال)?(?:خيارات|الخيارات|متوفر|المتوفر|"
+    r"الانواع|الأنواع|options?)\s*[؟?!.]?$|"
+    r"^(?:اعرض|وريني|ارسل|أرسل|show|list)\s+(?:ال)?(?:خيارات|الخيارات|options?)\s*[؟?!.]?$|"
+    r"^(?:what|show)\s+(?:are\s+)?(?:the\s+)?options\s*[?!.]?$|"
+    r"^(?:what|show)\s+(?:do\s+you\s+)?have\s*$|"
+    r"^(?:what|show)\s+is\s+available\s*$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SESSION_SCOPED_SOURCES = frozenset({
+    "top_products",
+    "top_products_numeric_fallback",
+    "top_products_replay_fallback",
+    "top_products_start_order",
+    "global_browse",
+    "global_browse_recovery",
+    "show_more",
+    "replay",
+    "category_browse",
 })
 
 # Common Arabic broken-plural → singular hints (platform-wide, not merchant-specific).
@@ -135,6 +167,56 @@ def _scope_variants(scope: str) -> frozenset[str]:
     return frozenset(v for v in variants if v)
 
 
+def is_generic_category_browse(message: str, query: str = "") -> bool:
+    blob = _norm(f"{message or ''} {query or ''}")
+    if not blob:
+        return False
+    return bool(_GENERIC_CATEGORY_BROWSE_RE.search(blob))
+
+
+def active_category_from_state(state: Any) -> str:
+    raw = getattr(state, "commerce_session", None) if state is not None else None
+    if isinstance(raw, Mapping):
+        return str(raw.get("active_category") or "").strip()
+    if isinstance(raw, dict):
+        return str(raw.get("active_category") or "").strip()
+    return ""
+
+
+def resolve_browse_category_scope(
+    message: str,
+    query: str = "",
+    *,
+    active_category: str = "",
+    source: str = "",
+) -> Optional[str]:
+    """Resolve category scope from message, query, or locked session context."""
+    scope = extract_browse_category_scope(message, query)
+    if scope:
+        scope_norm = _canonical_scope_token(scope)
+        if scope_norm in _HONEY_SUBTYPE_SCOPE_HINTS or scope_norm == "عسل":
+            return "عسل"
+        return scope
+
+    msg_norm = _norm(message or "")
+    msg_tokens = set(_tokens(msg_norm))
+    if msg_tokens & _HONEY_SUBTYPE_SCOPE_HINTS or any(
+        hint in msg_norm for hint in _HONEY_SUBTYPE_SCOPE_HINTS
+    ):
+        return "عسل"
+
+    locked = _canonical_scope_token(active_category or "")
+    if locked != "عسل":
+        return None
+
+    src = str(source or "").strip().lower()
+    if is_generic_category_browse(message, query):
+        return "عسل"
+    if src in _SESSION_SCOPED_SOURCES:
+        return "عسل"
+    return None
+
+
 def extract_browse_category_scope(
     message: str,
     query: str = "",
@@ -181,14 +263,22 @@ def is_category_scoped_browse(
     query: str = "",
     *,
     source: str = "",
+    active_category: str = "",
 ) -> bool:
     """True when this turn should keep catalog results inside one category."""
-    scope = extract_browse_category_scope(message, query)
+    scope = resolve_browse_category_scope(
+        message,
+        query,
+        active_category=active_category,
+        source=source,
+    )
     if not scope:
         return False
 
     src = str(source or "").strip().lower()
     if src in {"global_browse", "global_browse_recovery", "top_products"}:
+        return True
+    if _canonical_scope_token(active_category or "") == "عسل":
         return True
 
     try:
@@ -314,16 +404,27 @@ def filter_products_to_browse_category(
     message: str,
     query: str = "",
     source: str = "",
+    active_category: str = "",
 ) -> List[Dict[str, Any]]:
     """Keep only in-scope products for category-scoped browse turns."""
     items = [dict(p) for p in (products or []) if isinstance(p, Mapping)]
     if not items:
         return items
 
-    if not is_category_scoped_browse(message, query, source=source):
+    if not is_category_scoped_browse(
+        message,
+        query,
+        source=source,
+        active_category=active_category,
+    ):
         return items
 
-    scope = extract_browse_category_scope(message, query)
+    scope = resolve_browse_category_scope(
+        message,
+        query,
+        active_category=active_category,
+        source=source,
+    )
     if not scope:
         return items
 
@@ -355,23 +456,49 @@ def filter_products_for_browse_turn(
     query: str = "",
     source: str = "",
     last_browse_query: str = "",
+    active_category: str = "",
+    state: Any = None,
 ) -> List[Dict[str, Any]]:
     """Shared entry for search, compose, pipeline, and replay paths."""
+    locked_category = str(active_category or active_category_from_state(state) or "").strip()
     effective_query = str(query or last_browse_query or "").strip()
-    if not effective_query and not str(message or "").strip():
+    if (
+        not effective_query
+        and not str(message or "").strip()
+        and not locked_category
+    ):
         return [dict(p) for p in (products or []) if isinstance(p, Mapping)]
-    return filter_products_to_browse_category(
+
+    scoped = filter_products_to_browse_category(
         products,
         message=message or "",
         query=effective_query,
         source=source,
+        active_category=locked_category,
     )
+
+    try:
+        from .honey_browse_strategy import apply_honey_browse_strategy  # noqa: PLC0415
+
+        return apply_honey_browse_strategy(
+            scoped,
+            message=message or "",
+            query=effective_query,
+            active_category=locked_category,
+            source=source,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[BROWSE_CATEGORY_GUARD] honey browse strategy failed")
+        return scoped
 
 
 __all__ = [
+    "active_category_from_state",
     "extract_browse_category_scope",
     "filter_products_for_browse_turn",
     "filter_products_to_browse_category",
     "is_category_scoped_browse",
+    "is_generic_category_browse",
+    "resolve_browse_category_scope",
     "should_exclude_cross_category_product",
 ]
