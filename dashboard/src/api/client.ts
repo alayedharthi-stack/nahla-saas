@@ -220,5 +220,13 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
     throw buildApiError(body, `API error ${res.status}`)
   }
 
-  return res.json() as Promise<T>
+  if (res.status === 204 || res.status === 205) {
+    return undefined as T
+  }
+
+  const text = await res.text()
+  if (!text.trim()) {
+    return undefined as T
+  }
+  return JSON.parse(text) as T
 }

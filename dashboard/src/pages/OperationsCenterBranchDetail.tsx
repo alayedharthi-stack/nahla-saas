@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  ArrowRight, Building2, ChevronDown, ChevronUp, Phone, Plus, Star, Trash2,
+  ArrowRight, ChevronDown, ChevronUp, Pencil, Phone, Plus, Star, Trash2,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import Badge from '../components/ui/Badge'
+import ConfirmModal from '../components/ui/ConfirmModal'
+import BranchHoursEditor from '../components/operations/BranchHoursEditor'
+import ContactFormModal from '../components/operations/ContactFormModal'
+import EscalationStepFormModal from '../components/operations/EscalationStepFormModal'
+import {
+  parseHoursJson,
+  serializeHoursJson,
+  type DaySchedule,
+} from '../lib/branchHours'
 import {
   operationsCenterApi,
   type BranchContact,
@@ -35,7 +44,20 @@ export default function OperationsCenterBranchDetail() {
   const [saving, setSaving] = useState(false)
 
   const [infoForm, setInfoForm] = useState<BranchInput>({ name: '' })
-  const [hoursText, setHoursText] = useState('')
+  const [hoursSchedule, setHoursSchedule] = useState<DaySchedule[]>([])
+
+  const [contactModalOpen, setContactModalOpen] = useState(false)
+  const [contactModalMode, setContactModalMode] = useState<'create' | 'edit'>('create')
+  const [editingContact, setEditingContact] = useState<BranchContact | null>(null)
+  const [contactSaving, setContactSaving] = useState(false)
+  const [contactError, setContactError] = useState('')
+  const [deleteContactTarget, setDeleteContactTarget] = useState<BranchContact | null>(null)
+  const [deleteContactLoading, setDeleteContactLoading] = useState(false)
+  const [deleteStepTarget, setDeleteStepTarget] = useState<BranchEscalationStep | null>(null)
+  const [deleteStepLoading, setDeleteStepLoading] = useState(false)
+  const [stepModalOpen, setStepModalOpen] = useState(false)
+  const [stepSaving, setStepSaving] = useState(false)
+  const [stepError, setStepError] = useState('')
 
   const load = useCallback(async () => {
     if (!id) return
@@ -58,7 +80,7 @@ export default function OperationsCenterBranchDetail() {
         is_active: b.is_active,
         sort_order: b.sort_order,
       })
-      setHoursText(b.hours_json ? JSON.stringify(b.hours_json, null, 2) : '')
+      setHoursSchedule(parseHoursJson(b.hours_json))
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'تعذّر تحميل الفرع')
     }
@@ -70,12 +92,7 @@ export default function OperationsCenterBranchDetail() {
     if (!id) return
     setSaving(true)
     try {
-      let hours_json: Record<string, unknown> | null | undefined
-      if (hoursText.trim()) {
-        hours_json = JSON.parse(hoursText) as Record<string, unknown>
-      } else {
-        hours_json = null
-      }
+      const hours_json = serializeHoursJson(hoursSchedule)
       await operationsCenterApi.updateBranch(id, { ...infoForm, hours_json })
       await load()
     } catch (e: unknown) {
@@ -85,29 +102,91 @@ export default function OperationsCenterBranchDetail() {
     }
   }
 
-  const addContact = async () => {
-    const display_name = window.prompt('اسم الموظف')?.trim()
-    const phone_e164 = window.prompt('رقم الجوال')?.trim()
-    if (!display_name || !phone_e164) return
-    const role = window.prompt('الدور (مثل: showroom / reception)')?.trim() || ''
-    const body: ContactInput = { display_name, phone_e164, role }
-    await operationsCenterApi.createContact(id, body)
-    await load()
+  const openCreateContact = () => {
+    setContactError('')
+    setEditingContact(null)
+    setContactModalMode('create')
+    setContactModalOpen(true)
   }
 
-  const addStep = async () => {
-    const display_name = window.prompt('اسم جهة التصعيد')?.trim()
-    const phone_e164 = window.prompt('رقم الجوال')?.trim()
-    if (!display_name || !phone_e164) return
-    const level = steps.length + 1
-    const body: EscalationStepInput = {
-      escalation_level: level,
-      display_name,
-      phone_e164,
-      role: window.prompt('الدور')?.trim() || '',
+  const openEditContact = (contact: BranchContact) => {
+    setContactError('')
+    setEditingContact(contact)
+    setContactModalMode('edit')
+    setContactModalOpen(true)
+  }
+
+  const saveContact = async (body: ContactInput) => {
+    setContactSaving(true)
+    try {
+      if (contactModalMode === 'edit' && editingContact) {
+        await operationsCenterApi.updateContact(id, editingContact.id, body)
+      } else {
+        await operationsCenterApi.createContact(id, body)
+      }
+      await load()
+    } catch (e: unknown) {
+      throw e
+    } finally {
+      setContactSaving(false)
     }
-    await operationsCenterApi.createEscalationStep(id, body)
-    await load()
+  }
+
+  const confirmDeleteContact = async () => {
+    if (!deleteContactTarget) return
+    setDeleteContactLoading(true)
+    setContactError('')
+    try {
+      await operationsCenterApi.deleteContact(id, deleteContactTarget.id)
+      setDeleteContactTarget(null)
+      await load()
+    } catch (e: unknown) {
+      setContactError(e instanceof Error ? e.message : 'تعذّر حذف جهة التواصل')
+    } finally {
+      setDeleteContactLoading(false)
+    }
+  }
+
+  const setDefaultReception = async (contactId: number) => {
+    setContactError('')
+    try {
+      await operationsCenterApi.setDefaultReception(id, contactId)
+      await load()
+    } catch (e: unknown) {
+      setContactError(e instanceof Error ? e.message : 'تعذّر تعيين الاستقبال الافتراضي')
+    }
+  }
+
+  const openCreateStep = () => {
+    setStepError('')
+    setStepModalOpen(true)
+  }
+
+  const saveStep = async (body: EscalationStepInput) => {
+    setStepSaving(true)
+    try {
+      await operationsCenterApi.createEscalationStep(id, body)
+      await load()
+    } catch (e: unknown) {
+      throw e
+    } finally {
+      setStepSaving(false)
+    }
+  }
+
+  const confirmDeleteStep = async () => {
+    if (!deleteStepTarget) return
+    setDeleteStepLoading(true)
+    setError('')
+    try {
+      await operationsCenterApi.deleteEscalationStep(id, deleteStepTarget.id)
+      setDeleteStepTarget(null)
+      await load()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'تعذّر حذف مستوى التصعيد')
+    } finally {
+      setDeleteStepLoading(false)
+    }
   }
 
   const moveStep = async (index: number, direction: -1 | 1) => {
@@ -166,7 +245,7 @@ export default function OperationsCenterBranchDetail() {
       </div>
 
       {tab === 'info' && (
-        <div className="card p-5 space-y-4 max-w-2xl">
+        <div className="card p-5 space-y-4 max-w-3xl">
           <label className="block text-sm">
             <span className="text-slate-600 mb-1 block">اسم الفرع</span>
             <input className="input w-full" value={infoForm.name} onChange={e => setInfoForm({ ...infoForm, name: e.target.value })} />
@@ -189,10 +268,10 @@ export default function OperationsCenterBranchDetail() {
             <span className="text-slate-600 mb-1 block">رابط Google Maps</span>
             <input className="input w-full" dir="ltr" value={infoForm.maps_url || ''} onChange={e => setInfoForm({ ...infoForm, maps_url: e.target.value })} />
           </label>
-          <label className="block text-sm">
-            <span className="text-slate-600 mb-1 block">ساعات العمل (JSON)</span>
-            <textarea className="input w-full min-h-[100px] font-mono text-xs" dir="ltr" value={hoursText} onChange={e => setHoursText(e.target.value)} placeholder='{"sat":"9-22"}' />
-          </label>
+          <div className="block text-sm">
+            <span className="text-slate-600 mb-2 block">ساعات العمل</span>
+            <BranchHoursEditor value={hoursSchedule} onChange={setHoursSchedule} />
+          </div>
           <button type="button" className="btn-primary" disabled={saving} onClick={saveInfo}>
             {saving ? 'جاري الحفظ…' : 'حفظ بيانات الفرع'}
           </button>
@@ -201,8 +280,13 @@ export default function OperationsCenterBranchDetail() {
 
       {tab === 'contacts' && (
         <div className="space-y-4">
+          {contactError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {contactError}
+            </div>
+          )}
           <div className="flex justify-end">
-            <button type="button" className="btn-primary flex items-center gap-2" onClick={addContact}>
+            <button type="button" className="btn-primary flex items-center gap-2" onClick={openCreateContact}>
               <Plus className="w-4 h-4" />
               إضافة جهة تواصل
             </button>
@@ -218,8 +302,9 @@ export default function OperationsCenterBranchDetail() {
                     <th className="text-right p-3">الدور</th>
                     <th className="text-right p-3">الرقم</th>
                     <th className="text-right p-3">واتساب</th>
+                    <th className="text-right p-3">الحالة</th>
                     <th className="text-right p-3">استقبال</th>
-                    <th className="text-right p-3" />
+                    <th className="text-right p-3">إجراءات</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -230,16 +315,19 @@ export default function OperationsCenterBranchDetail() {
                       <td className="p-3 font-mono text-xs" dir="ltr">{c.phone_e164}</td>
                       <td className="p-3 font-mono text-xs" dir="ltr">{c.whatsapp_e164 || '—'}</td>
                       <td className="p-3">
+                        <Badge
+                          label={c.is_active ? 'نشط' : 'معطّل'}
+                          variant={c.is_active ? 'green' : 'slate'}
+                        />
+                      </td>
+                      <td className="p-3">
                         {c.is_default_reception ? (
                           <Badge label="افتراضي" variant="green" />
                         ) : (
                           <button
                             type="button"
                             className="text-xs text-brand-600 hover:underline inline-flex items-center gap-1"
-                            onClick={async () => {
-                              await operationsCenterApi.setDefaultReception(id, c.id)
-                              await load()
-                            }}
+                            onClick={() => setDefaultReception(c.id)}
                           >
                             <Star className="w-3 h-3" />
                             تعيين
@@ -247,17 +335,27 @@ export default function OperationsCenterBranchDetail() {
                         )}
                       </td>
                       <td className="p-3">
-                        <button
-                          type="button"
-                          className="text-red-500 hover:bg-red-50 p-1 rounded"
-                          onClick={async () => {
-                            if (!window.confirm('حذف جهة التواصل؟')) return
-                            await operationsCenterApi.deleteContact(id, c.id)
-                            await load()
-                          }}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500"
+                            title="تعديل"
+                            onClick={() => openEditContact(c)}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            className="p-1.5 rounded-lg hover:bg-red-50 text-red-500"
+                            title="حذف"
+                            onClick={() => {
+                              setContactError('')
+                              setDeleteContactTarget(c)
+                            }}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -265,13 +363,46 @@ export default function OperationsCenterBranchDetail() {
               </table>
             )}
           </div>
+
+          <ContactFormModal
+            open={contactModalOpen}
+            mode={contactModalMode}
+            contact={editingContact}
+            saving={contactSaving}
+            onClose={() => {
+              if (!contactSaving) setContactModalOpen(false)
+            }}
+            onSave={saveContact}
+          />
+
+          <ConfirmModal
+            open={!!deleteContactTarget}
+            title="حذف جهة التواصل"
+            message={
+              deleteContactTarget
+                ? `هل تريد حذف «${deleteContactTarget.display_name}»؟ لا يمكن التراجع عن هذا الإجراء.`
+                : ''
+            }
+            confirmLabel="حذف"
+            destructive
+            loading={deleteContactLoading}
+            onCancel={() => {
+              if (!deleteContactLoading) setDeleteContactTarget(null)
+            }}
+            onConfirm={confirmDeleteContact}
+          />
         </div>
       )}
 
       {tab === 'escalation' && (
         <div className="space-y-4">
+          {stepError && (
+            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {stepError}
+            </div>
+          )}
           <div className="flex justify-end">
-            <button type="button" className="btn-primary flex items-center gap-2" onClick={addStep}>
+            <button type="button" className="btn-primary flex items-center gap-2" onClick={openCreateStep}>
               <Plus className="w-4 h-4" />
               إضافة مستوى
             </button>
@@ -302,11 +433,7 @@ export default function OperationsCenterBranchDetail() {
                   <button
                     type="button"
                     className="p-1 rounded hover:bg-red-50 text-red-500"
-                    onClick={async () => {
-                      if (!window.confirm('حذف مستوى التصعيد؟')) return
-                      await operationsCenterApi.deleteEscalationStep(id, step.id)
-                      await load()
-                    }}
+                    onClick={() => setDeleteStepTarget(step)}
                   >
                     <Trash2 className="w-4 h-4" />
                   </button>
@@ -314,8 +441,33 @@ export default function OperationsCenterBranchDetail() {
               </div>
             ))}
           </div>
+
+          <EscalationStepFormModal
+            open={stepModalOpen}
+            nextLevel={steps.length + 1}
+            saving={stepSaving}
+            onClose={() => {
+              if (!stepSaving) setStepModalOpen(false)
+            }}
+            onSave={saveStep}
+          />
         </div>
       )}
+
+      <ConfirmModal
+        open={!!deleteStepTarget}
+        title="حذف مستوى التصعيد"
+        message={
+          deleteStepTarget
+            ? `هل تريد حذف مستوى «${deleteStepTarget.display_name}»؟`
+            : ''
+        }
+        confirmLabel="حذف"
+        destructive
+        loading={deleteStepLoading}
+        onCancel={() => { if (!deleteStepLoading) setDeleteStepTarget(null) }}
+        onConfirm={confirmDeleteStep}
+      />
     </div>
   )
 }
