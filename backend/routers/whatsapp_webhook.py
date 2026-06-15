@@ -10106,9 +10106,9 @@ async def _handle_merchant_message(
                         len(_orig_media_guard or ""), len(reply or ""),
                     )
             except Exception as _mdg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[MEDIA_DISPLAY_GUARD] failed tenant=%s: %s",
-                    tenant_id, _mdg_exc,
+                logger.exception(
+                    "[MEDIA_DISPLAY_GUARD] failed tenant=%s",
+                    tenant_id,
                 )
 
         if reply:
