@@ -91,7 +91,7 @@ from session import SessionLocal
 from sqlalchemy import text
 from core.nahla_knowledge import build_nahla_system_prompt
 from core.wa_usage import track_conversation
-from modules.ai.media.normalizer import normalize_whatsapp_inbound
+from modules.ai.media.normalizer import inbound_persist_body, normalize_whatsapp_inbound
 from modules.ai.orchestrator.adapter import generate_ai_reply
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
@@ -3946,6 +3946,7 @@ async def _dispatch_message(
             return
 
         text = normalized_inbound.text.strip()
+        persist_body = inbound_persist_body(normalized_inbound)
         # ── Media-without-text fallback ─────────────────────────────
         # The normalizer detected an audio/image/video/document but
         # couldn't extract any usable text (Whisper failed, vision
@@ -4286,7 +4287,7 @@ async def _dispatch_message(
                         db,
                         phone=sender,
                         direction="inbound",
-                        body=text or "[payment_claim]",
+                        body=persist_body or "[payment_claim]",
                         event_type="whatsapp_message",
                         conversation_id=_w203_conv_id_pc,
                         tenant_id=resolved_tenant_id,
@@ -4425,7 +4426,7 @@ async def _dispatch_message(
                         db,
                         phone=sender,
                         direction="inbound",
-                        body=text or "[إيصال تحويل]",
+                        body=persist_body or "[إيصال تحويل]",
                         event_type=(
                             "whatsapp_document"
                             if normalized_inbound.normalized_type == "document"
@@ -4566,7 +4567,7 @@ async def _dispatch_message(
                         db,
                         phone=sender,
                         direction="inbound",
-                        body=text or "[لقطة خرائط]",
+                        body=persist_body or "[لقطة خرائط]",
                         event_type="whatsapp_image",
                         conversation_id=_w203_conv_id_mp,
                         tenant_id=resolved_tenant_id,
@@ -4704,7 +4705,7 @@ async def _dispatch_message(
                         db,
                         phone=sender,
                         direction="inbound",
-                        body=text or "[إثبات دفع غير مؤكد]",
+                        body=persist_body or "[إثبات دفع غير مؤكد]",
                         event_type=(
                             "whatsapp_document"
                             if normalized_inbound.normalized_type == "document"
@@ -4780,6 +4781,7 @@ async def _dispatch_message(
                 phone_id=used_pid, to=sender, text=text,
                 tenant_id=resolved_tenant_id, db=db,
                 inbound_metadata=normalized_inbound.metadata,
+                inbound_persist_body=persist_body,
                 wa_message_ts=_wa_msg_ts,
                 wa_msg_id=msg_id or None,
             )
@@ -4954,7 +4956,7 @@ async def _dispatch_message(
                                              _tenant_id=effective_tenant_id, _db=db)
 
         # ── ⑨ Persist messages + state ────────────────────────────────────────
-        StateManager.save_message(db, sender, text,          "inbound",  tenant_id=effective_tenant_id)
+        StateManager.save_message(db, sender, persist_body,          "inbound",  tenant_id=effective_tenant_id)
         if response_text:
             StateManager.save_message(db, sender, response_text, "outbound", tenant_id=effective_tenant_id)
         StateManager.save(db, state, tenant_id=effective_tenant_id)
@@ -5253,6 +5255,7 @@ async def _handle_merchant_message(
     tenant_id: int,
     db,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    inbound_persist_body: Optional[str] = None,
     wa_message_ts: Optional[datetime] = None,
     wa_msg_id: Optional[str] = None,
 ) -> None:
@@ -5831,8 +5834,9 @@ async def _handle_merchant_message(
             _live_in_meta["wa_message_id"] = wa_msg_id
         if wa_message_ts:
             _live_in_meta["whatsapp_timestamp"] = wa_message_ts.isoformat()
+        _inbound_body = (inbound_persist_body or text or "").strip()
         StateManager.save_message(
-            db, to, text, "inbound",
+            db, to, _inbound_body, "inbound",
             conversation_id=convo.id,
             tenant_id=tenant_id,
             extra_metadata=_live_in_meta,
@@ -10085,6 +10089,26 @@ async def _handle_merchant_message(
                 logger.warning(
                     "[MARKER_SCRUB] failed tenant=%s err=%s",
                     tenant_id, _scrub_exc,
+                )
+
+        if reply:
+            try:
+                from modules.ai.media.display_guard import (  # noqa: PLC0415
+                    apply_media_display_outbound_guard as _media_display_guard,
+                )
+                _orig_media_guard = reply
+                reply, _media_guard_scrubbed = _media_display_guard(reply or "")
+                if _media_guard_scrubbed:
+                    logger.info(
+                        "[MEDIA_DISPLAY_GUARD] tenant=%s conversation_id=%s "
+                        "scrubbed=true orig_len=%d new_len=%d",
+                        tenant_id, getattr(convo, "id", None),
+                        len(_orig_media_guard or ""), len(reply or ""),
+                    )
+            except Exception as _mdg_exc:  # noqa: BLE001
+                logger.debug(
+                    "[MEDIA_DISPLAY_GUARD] failed tenant=%s: %s",
+                    tenant_id, _mdg_exc,
                 )
 
         if reply:

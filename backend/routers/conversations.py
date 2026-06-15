@@ -41,8 +41,24 @@ def _build_media_block(
 ) -> Optional[Dict[str, Any]]:
     ni = (meta or {}).get("normalized_inbound") or {}
     src = str(ni.get("source_type") or "").lower()
-    if src not in {"audio", "image", "video"}:
+    if src not in {"audio", "image", "video", "document"}:
         return None
+
+    if src == "document":
+        return {
+            "kind":              "document",
+            "message_event_id":  message_event_id,
+            "storage_url":       ni.get("storage_url"),
+            "mime_type":         ni.get("mime_type"),
+            "filename":          ni.get("filename"),
+            "byte_size":         ni.get("byte_size"),
+            "download_status":   ni.get("document_download_status"),
+            "pdf_kind":          ni.get("pdf_kind"),
+            "pdf_text_status":   ni.get("pdf_text_status"),
+            "summary":           ni.get("pdf_text_preview"),
+            "caption":           ni.get("caption"),
+            "error":             ni.get("document_error"),
+        }
 
     if src == "video":
         return {
