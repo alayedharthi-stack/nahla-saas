@@ -47,6 +47,12 @@ import type {
   DashboardMessageMediaImage,
   DashboardMessageMediaVideo,
 } from '../../api/featureReality'
+import {
+  DOCUMENT_CARD_FALLBACK_AR,
+  IMAGE_CARD_FALLBACK_AR,
+  isPaymentMediaKind,
+  paymentHintLines,
+} from '../../utils/paymentHintsDisplay'
 
 interface BlobUrlState {
   url: string | null
@@ -271,9 +277,34 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
   )
 }
 
+function PaymentHintsBlock({
+  hints,
+}: {
+  hints: ReturnType<typeof paymentHintLines>
+}) {
+  if (!hints.length) return null
+  return (
+    <div className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/60 px-2.5 py-1.5 text-[12px] text-slate-700">
+      <span className="mb-1 block text-[11px] font-medium text-emerald-800">
+        بيانات الدفع المستخرجة
+      </span>
+      <ul className="space-y-0.5">
+        {hints.map(({ label, value }) => (
+          <li key={label}>
+            <span className="text-slate-500">{label}: </span>
+            <span className="font-medium">{value}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
   const { url, loading, httpStatus, networkError, reload } = useAuthedMediaBlob(media.storage_url)
-  const visionOk = media.vision_status === 'ok' && !!media.description
+  const isPaymentImage = isPaymentMediaKind(media.image_kind)
+  const hintLines = paymentHintLines(media.payment_evidence_hints)
+  const visionOk = !isPaymentImage && media.vision_status === 'ok' && !!media.description
   const downloadFailed = (media.download_status || '').toLowerCase() === 'failed'
 
   return (
@@ -323,7 +354,16 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
         </div>
       )}
 
-      {!visionOk && (
+      {isPaymentImage && (
+        <>
+          <PaymentHintsBlock hints={hintLines} />
+          {!hintLines.length && (
+            <div className="text-[12px] text-slate-500">{IMAGE_CARD_FALLBACK_AR}</div>
+          )}
+        </>
+      )}
+
+      {!visionOk && !isPaymentImage && (
         <div className="text-[11.5px] text-amber-700 bg-amber-50/60 border border-amber-100 rounded-lg px-2.5 py-1">
           {media.vision_status === 'failed' && 'تعذر استخراج وصف للصورة تلقائياً.'}
           {media.vision_status === 'skipped' && 'ميزة وصف الصور غير مفعّلة على الخادم (OPENAI_API_KEY مفقود).'}
@@ -454,6 +494,8 @@ function DocumentPreview({ media }: { media: DashboardMessageMediaDocument }) {
   const sizeLabel = formatByteSize(media.byte_size)
   const filename = media.filename || 'مستند PDF'
   const mime = media.mime_type || 'application/pdf'
+  const hintLines = paymentHintLines(media.payment_evidence_hints)
+  const isPaymentDoc = isPaymentMediaKind(media.pdf_kind)
 
   return (
     <div className="flex flex-col gap-1.5 max-w-full">
@@ -477,6 +519,21 @@ function DocumentPreview({ media }: { media: DashboardMessageMediaDocument }) {
             {media.summary && (
               <div className="mt-2 text-[12px] leading-relaxed text-slate-600 line-clamp-3">
                 {media.summary}
+              </div>
+            )}
+            {!media.summary && isPaymentDoc && (
+              <>
+                <PaymentHintsBlock hints={hintLines} />
+                {!hintLines.length && (
+                  <div className="mt-2 text-[12px] text-slate-500">
+                    {DOCUMENT_CARD_FALLBACK_AR}
+                  </div>
+                )}
+              </>
+            )}
+            {!media.summary && !isPaymentDoc && (
+              <div className="mt-2 text-[12px] text-slate-500">
+                {DOCUMENT_CARD_FALLBACK_AR}
               </div>
             )}
           </div>
