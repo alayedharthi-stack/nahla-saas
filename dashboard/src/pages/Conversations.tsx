@@ -4,7 +4,7 @@ import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil,
+  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil, ChevronDown,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
@@ -13,6 +13,16 @@ import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 import EditCustomerNameModal from '../components/conversations/EditCustomerNameModal'
 import CampaignExcludeControl from '../components/customers/CampaignExcludeControl'
+import ConversationFiltersMobileMenu from '../components/conversations/ConversationFiltersMobileMenu'
+import {
+  CONVERSATION_FILTER_KEYS,
+  conversationFilterActiveClass,
+  conversationFilterCount,
+  conversationFilterCountClass,
+  conversationFilterIcon,
+  conversationFilterInactiveClass,
+  type ConversationFilter,
+} from '../components/conversations/conversationFilterConfig'
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 import { useDashboardPoll } from '../lib/dashboardPolling'
@@ -56,9 +66,7 @@ interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
 }
 
-type ConversationFilter =
-  | 'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked'
-  | 'paid' | 'unsubscribed' | 'campaign_excluded' | 'closed'
+const SCROLL_NEAR_BOTTOM_PX = 80
 
 function _normalizePhoneDigits(phone: string): string {
   return (phone || '').replace(/\D/g, '')
@@ -148,12 +156,18 @@ export default function Conversations() {
   const [endingSupervision, setEndingSupervision] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
+  const [mobileFilterMenuOpen, setMobileFilterMenuOpen] = useState(false)
 
   // mobile: 'list' = show list panel, 'chat' = show chat panel
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef    = useRef<HTMLTextAreaElement>(null)
+  const isNearBottomRef = useRef(true)
+  const prevMessageCountRef = useRef(0)
+  const prevLastMessageIdRef = useRef<number | string | null>(null)
+  const selectedPhoneForScrollRef = useRef<string | null>(null)
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
 
   const listCtrlRef         = useRef<AbortController | null>(null)
   const msgsCtrlRef         = useRef<AbortController | null>(null)
@@ -589,9 +603,62 @@ export default function Conversations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter])
 
-  // Auto-scroll to bottom when messages change
+  const isScrollNearBottom = (el: HTMLElement) =>
+    el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_PX
+
+  const scrollMessagesToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    const el = messagesScrollRef.current
+    if (el) {
+      el.scrollTo({ top: el.scrollHeight, behavior })
+    } else {
+      messagesEndRef.current?.scrollIntoView({ behavior })
+    }
+    isNearBottomRef.current = true
+    setShowScrollToBottom(false)
+  }
+
+  // Scroll to bottom once when opening a conversation.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!selected) return
+    const phoneChanged = selectedPhoneForScrollRef.current !== selected.phone
+    if (!phoneChanged) return
+    selectedPhoneForScrollRef.current = selected.phone
+    isNearBottomRef.current = true
+    setShowScrollToBottom(false)
+    prevMessageCountRef.current = 0
+    prevLastMessageIdRef.current = null
+    requestAnimationFrame(() => scrollMessagesToBottom('auto'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.phone])
+
+  // Auto-scroll only when a new message arrives at the bottom and the user is near it.
+  useEffect(() => {
+    if (!selected?.messages) return
+    const msgs = selected.messages
+    const count = msgs.length
+    const lastId = msgs[count - 1]?.id ?? null
+    const prevCount = prevMessageCountRef.current
+    const prevLastId = prevLastMessageIdRef.current
+
+    prevMessageCountRef.current = count
+    prevLastMessageIdRef.current = lastId
+
+    if (count === 0) return
+
+    if (prevCount === 0 && count > 0) {
+      requestAnimationFrame(() => scrollMessagesToBottom('auto'))
+      return
+    }
+
+    const appendedAtEnd = lastId != null && lastId !== prevLastId && count >= prevCount
+    if (!appendedAtEnd) return
+
+    if (isNearBottomRef.current) {
+      requestAnimationFrame(() => scrollMessagesToBottom('smooth'))
+    } else {
+      setShowScrollToBottom(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.messages])
 
   // Auto-resize textarea
@@ -641,6 +708,8 @@ export default function Conversations() {
       }
       await loadMessagesForOpenChat(selected.phone)
       await reloadFirstPagePreserveTail({ silent: true })
+      isNearBottomRef.current = true
+      scrollMessagesToBottom('smooth')
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.sendReplyFailed)
     }
@@ -960,6 +1029,18 @@ export default function Conversations() {
   const _isCampaignExcluded = (c: DashboardConversation) =>
     !!c.marketingOptOutManual
 
+  const filterHelpers = useMemo(() => ({
+    isHumanResponding: _isHumanResponding,
+    isAwaitingAgent: _isAwaitingAgent,
+    isAIPausedOnly: _isAIPausedOnly,
+    isBlocked: _isBlocked,
+    isPaid: _isPaid,
+    isUnsubscribed: _isUnsubscribed,
+    isCampaignExcluded: _isCampaignExcluded,
+    isClosed: _isClosed,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [conversations])
+
   const filtered = conversations.filter(c => {
     let matchFilter = false
     if (filter === 'all') matchFilter = true
@@ -1043,64 +1124,46 @@ export default function Conversations() {
           </div>
         </div>
 
-        {/* Filter tabs */}
-        <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'paid', 'unsubscribed', 'campaign_excluded', 'closed'] as const).map((f) => {
-            const count = f === 'all' ? 0
-              : f === 'active' ? conversations.filter(c => c.windowOpen === true && !_isUnsubscribed(c)).length
-              : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
-              : f === 'agent_req' ? conversations.filter(c => _isAwaitingAgent(c)).length
-              : f === 'paused' ? conversations.filter(c => _isAIPausedOnly(c)).length
-              : f === 'blocked' ? conversations.filter(c => _isBlocked(c)).length
-              : f === 'paid' ? conversations.filter(c => _isPaid(c)).length
-              : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
-              : f === 'campaign_excluded' ? conversations.filter(c => _isCampaignExcluded(c)).length
-              : conversations.filter(c => _isClosed(c)).length
+        {/* Filter tabs — mobile: bottom sheet; desktop: horizontal chips */}
+        <div className="px-3 py-2 bg-white border-b border-slate-100 md:hidden">
+          <ConversationFiltersMobileMenu
+            dir={dir}
+            open={mobileFilterMenuOpen}
+            onOpenChange={setMobileFilterMenuOpen}
+            activeFilter={filter}
+            filterLabels={filterLabels}
+            conversations={conversations}
+            helpers={filterHelpers}
+            menuButtonLabel={cp.mobileFilters.menuButtonLabel}
+            sheetTitle={cp.mobileFilters.sheetTitle}
+            onSelect={setFilter}
+          />
+        </div>
 
-            const activeClass =
-              f === 'agent_req'    ? 'bg-red-500 text-white shadow-sm' :
-              f === 'paused'       ? 'bg-amber-500 text-white shadow-sm' :
-              f === 'blocked'      ? 'bg-rose-600 text-white shadow-sm' :
-              f === 'paid'         ? 'bg-sky-500 text-white shadow-sm' :
-              f === 'unsubscribed' ? 'bg-slate-600 text-white shadow-sm' :
-              f === 'campaign_excluded' ? 'bg-violet-600 text-white shadow-sm' :
-              'bg-brand-500 text-white shadow-sm'
-
-            const inactiveClass =
-              f === 'agent_req' && count > 0    ? 'text-red-600 bg-red-50 hover:bg-red-100' :
-              f === 'paused' && count > 0       ? 'text-amber-700 bg-amber-50 hover:bg-amber-100' :
-              f === 'blocked' && count > 0      ? 'text-rose-700 bg-rose-50 hover:bg-rose-100' :
-              f === 'paid' && count > 0         ? 'text-sky-700 bg-sky-50 hover:bg-sky-100' :
-              f === 'unsubscribed' && count > 0 ? 'text-slate-600 bg-slate-100 hover:bg-slate-200' :
-              f === 'campaign_excluded' && count > 0 ? 'text-violet-700 bg-violet-50 hover:bg-violet-100' :
-              'text-slate-500 hover:bg-slate-100'
-
-            const countClass =
-              filter === f ? 'text-white/70' :
-              f === 'agent_req' ? 'text-red-400' :
-              f === 'paused' ? 'text-amber-500' :
-              f === 'blocked' ? 'text-rose-500' :
-              f === 'paid' ? 'text-sky-500' :
-              f === 'unsubscribed' ? 'text-slate-500' :
-              f === 'campaign_excluded' ? 'text-violet-500' :
-              'text-slate-400'
+        <div
+          className="hidden md:flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto"
+          style={{ scrollbarWidth: 'thin' }}
+        >
+          {CONVERSATION_FILTER_KEYS.map((f) => {
+            const count = conversationFilterCount(f, conversations, filterHelpers)
+            const isActive = filter === f
 
             return (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
-                  filter === f ? activeClass : inactiveClass
+                  isActive
+                    ? conversationFilterActiveClass(f)
+                    : conversationFilterInactiveClass(f, count)
                 }`}
               >
-                {f === 'unsubscribed' && <BellOff className="inline w-3 h-3 me-1 opacity-70" />}
-                {f === 'paused' && <Pause className="inline w-3 h-3 me-1 opacity-70" />}
-                {f === 'blocked' && <Ban className="inline w-3 h-3 me-1 opacity-70" />}
-                {f === 'paid' && <PackageCheck className="inline w-3 h-3 me-1 opacity-70" />}
-                {f === 'campaign_excluded' && <Megaphone className="inline w-3 h-3 me-1 opacity-70" />}
+                {conversationFilterIcon(f)}
                 {filterLabels[f]}
                 {f !== 'all' && count > 0 && (
-                  <span className={`ms-1 ${countClass}`}>{count}</span>
+                  <span className={`ms-1 ${conversationFilterCountClass(f, isActive)}`}>
+                    {count}
+                  </span>
                 )}
               </button>
             )
@@ -1299,11 +1362,11 @@ export default function Conversations() {
         ) : (
           <>
             {/* Chat header */}
-            <div className="flex items-center gap-2 px-3 md:px-5 py-3 border-b border-slate-100 bg-white shadow-sm">
+            <div className="flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm shrink-0 min-w-0">
               {/* Back button — mobile only */}
               <button
                 onClick={goBackToList}
-                className="md:hidden -ms-1 p-2 rounded-full hover:bg-slate-100 text-slate-600 active:bg-slate-200 transition-colors"
+                className="md:hidden -ms-1 p-2 rounded-full hover:bg-slate-100 text-slate-600 active:bg-slate-200 transition-colors shrink-0"
                 aria-label={cp.actions.back}
               >
                 <BackIcon className="w-5 h-5" />
@@ -1317,7 +1380,7 @@ export default function Conversations() {
               </div>
 
               {/* Name + phone — click to edit customer name */}
-              <div className="flex-1 min-w-0 group">
+              <div className="flex-1 min-w-0 overflow-hidden group">
                 <button
                   type="button"
                   onClick={openEditCustomerName}
@@ -1331,13 +1394,13 @@ export default function Conversations() {
                   </p>
                   <Pencil
                     aria-hidden="true"
-                    className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block"
                   />
                 </button>
                 {conversationHasDisplayName(selected, phonesMatch) && (
                   <p className="text-xs text-slate-400 flex items-center gap-1 truncate px-1">
                     <Phone className="w-3 h-3 shrink-0" />
-                    {selected.phone}
+                    <span className="truncate">{selected.phone}</span>
                   </p>
                 )}
               </div>
@@ -1352,21 +1415,23 @@ export default function Conversations() {
                   const intelligenceOff = humanTakeover || !!selected.aiPaused
                   return intelligenceOff ? (
                     <button
-                      className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                      className="flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-2 md:px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
                       onClick={resumeIntelligenceForSelected}
                       title={cp.actions.resumeAI}
+                      aria-label={cp.actions.resumeAI}
                     >
                       <Play className="w-3.5 h-3.5" />
-                      {cp.actions.resumeAI}
+                      <span className="hidden sm:inline">{cp.actions.resumeAI}</span>
                     </button>
                   ) : (
                     <button
-                      className="flex items-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                      className="flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-2 md:px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
                       onClick={pauseIntelligenceForSelected}
                       title={cp.actions.pauseAI}
+                      aria-label={cp.actions.pauseAI}
                     >
                       <Pause className="w-3.5 h-3.5" />
-                      {cp.actions.pauseAI}
+                      <span className="hidden sm:inline">{cp.actions.pauseAI}</span>
                     </button>
                   )
                 })()}
@@ -1549,17 +1614,21 @@ export default function Conversations() {
             )}
 
             {/* Messages area */}
-            <div
-              ref={messagesScrollRef}
-              className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
-              style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
-              onScroll={(e) => {
-                const el = e.currentTarget
-                if (el.scrollTop <= 48 && selected && hasMoreMessages && !loadingOlderMessages) {
-                  void loadOlderMessages(selected.phone)
-                }
-              }}
-            >
+            <div className="relative flex-1 min-h-0 flex flex-col">
+              <div
+                ref={messagesScrollRef}
+                className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
+                style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
+                onScroll={(e) => {
+                  const el = e.currentTarget
+                  const nearBottom = isScrollNearBottom(el)
+                  isNearBottomRef.current = nearBottom
+                  if (nearBottom) setShowScrollToBottom(false)
+                  if (el.scrollTop <= 48 && selected && hasMoreMessages && !loadingOlderMessages) {
+                    void loadOlderMessages(selected.phone)
+                  }
+                }}
+              >
               {loadingOlderMessages && (
                 <div className="flex items-center justify-center py-2 gap-2 text-xs text-slate-400">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-500" />
@@ -1884,6 +1953,19 @@ export default function Conversations() {
                 )
               })}
               <div ref={messagesEndRef} />
+              </div>
+
+              {showScrollToBottom && (
+                <button
+                  type="button"
+                  onClick={() => scrollMessagesToBottom('smooth')}
+                  className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-4 py-2 rounded-full bg-white border border-slate-200 shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100"
+                  aria-label={cp.scrollToBottom}
+                >
+                  {cp.scrollToBottom}
+                  <ChevronDown className="w-4 h-4" />
+                </button>
+              )}
             </div>
 
             {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}
