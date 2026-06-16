@@ -392,6 +392,10 @@ def scan_abandoned_order_drafts(
             _store_meta = {"store_name": _st.get("store_name") or ""}
         except Exception:  # noqa: silent-ok — store_name optional for template fallback
             pass
+
+        payload: Dict[str, Any] = {
+            "source":                "automation_emitters",
+            "order_id":              order.id,
             "order_internal_id":     order.id,
             "order_number":          order.external_order_number or order.external_id,
             "external_order_number": order.external_order_number,
