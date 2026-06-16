@@ -944,7 +944,7 @@ def maybe_handle_payment_evidence_inbound(
                     apply_resolution_to_metadata,
                 )
                 apply_resolution_to_metadata(md, _resolver)
-            except Exception:
+            except Exception:  # noqa: silent-ok — optional payment receipt metadata; keep order flow running
                 pass
             # Fall through to tenant-account verification / active-order
             # promotion gates — mismatch must return None there.
@@ -1488,7 +1488,7 @@ def apply_state_patch(
         )
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: silent-ok — rollback best-effort after apply_state_patch failure
             pass
         return False
 
