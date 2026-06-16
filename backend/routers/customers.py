@@ -60,6 +60,8 @@ from services.manual_segments import (
     list_manual_segments_for_customer,
     remove_manual_segment,
     set_marketing_opt_out_manual,
+    is_marketing_opted_out_from_meta,
+    marketing_opt_out_manual_sql_truthy,
     set_test_recipient,
 )
 from services.customer_intelligence import (
@@ -335,7 +337,7 @@ def _serialize_customer(
     source, source_label = _resolve_customer_source(cust)
     is_unsubscribed:        bool = bool(meta.get("is_unsubscribed"))
     pending_unsubscribe:    bool = bool(meta.get("pending_unsubscribe"))
-    marketing_opt_out_manual: bool = bool(meta.get("marketing_opt_out_manual"))
+    marketing_opt_out_manual: bool = is_marketing_opted_out_from_meta(meta)
     is_campaign_test_recipient: bool = bool(meta.get("is_campaign_test_recipient"))
     manual_name_override:   bool = bool(meta.get("manual_name_override"))
     manual_name_cleared:    bool = bool(meta.get("manual_name_cleared"))
@@ -619,16 +621,7 @@ async def list_customers(
     # Stored on Customer.extra_metadata so we use the same JSON-cast
     # pattern as the unsubscribed segment for cross-dialect support.
     if marketing_opt_out is not None:
-        from sqlalchemy import String, cast, func, or_  # noqa: PLC0415
-        is_opted = cast(
-            func.coalesce(
-                Customer.extra_metadata["marketing_opt_out_manual"].astext
-                if hasattr(Customer.extra_metadata, "astext")
-                else func.json_extract(Customer.extra_metadata, "$.marketing_opt_out_manual"),
-                "false",
-            ),
-            String,
-        ).in_(["true", "1"])
+        is_opted = marketing_opt_out_manual_sql_truthy()
         q = q.filter(is_opted) if marketing_opt_out else q.filter(~is_opted)
 
     if test_recipient is not None:
@@ -1783,7 +1776,7 @@ async def update_marketing_preferences(
     meta = cust.extra_metadata or {}
     return {
         "customer_id": customer_id,
-        "marketing_opt_out_manual":     bool(meta.get("marketing_opt_out_manual")),
+        "marketing_opt_out_manual":     is_marketing_opted_out_from_meta(meta),
         "marketing_opt_out_manual_at":  meta.get("marketing_opt_out_manual_at"),
         "is_campaign_test_recipient":   bool(meta.get("is_campaign_test_recipient")),
         "campaign_test_recipient_at":   meta.get("campaign_test_recipient_at"),

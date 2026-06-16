@@ -1249,7 +1249,14 @@ export default function Customers() {
           onSelect={setSegmentKey}
           campaignExcludedActive={marketingOptOutFilter === 'out'}
           onToggleCampaignExcluded={() => {
-            setMarketingOptOutFilter((prev) => (prev === 'out' ? 'all' : 'out'))
+            setMarketingOptOutFilter((prev) => {
+              const next = prev === 'out' ? 'all' : 'out'
+              if (next === 'out') {
+                setSegmentKey('all')
+                setManualSegmentKey('')
+              }
+              return next
+            })
             setPage(1)
           }}
           campaignExcludedLabel={cu.filters.marketingOut}

@@ -314,6 +314,8 @@ export interface DashboardConversation {
   // filter + the green CheckCheck-style badge. ``null`` when the
   // customer has never uploaded an accepted receipt.
   lastPaymentConfirmedAt?: string | null
+  /** Linked Customer.id when the conversation row has customer_id set. */
+  customerId?: number | null
   /** Manual merchant opt-out from marketing campaigns only. */
   marketingOptOutManual?: boolean
 }

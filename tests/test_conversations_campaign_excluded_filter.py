@@ -160,3 +160,50 @@ class TestCampaignExcludedFilter:
         row = result["conversations"][0]
         assert row["marketingOptOutManual"] is True
         assert row["aiPaused"] is False
+
+    def test_payload_includes_customer_id(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust, _ = _seed_conversation(
+            db, t.id, "+966500000030", marketing_opt_out=False,
+        )
+
+        result = _call_list(db, t.id, filter="all")
+        row = next(c for c in result["conversations"] if c["phone"] == "+966500000030")
+        assert row["customerId"] == cust.id
+
+    def test_filter_includes_legacy_marketing_opt_out_key(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust = Customer(
+            tenant_id=t.id,
+            phone="+966500000040",
+            normalized_phone="+966500000040",
+            name="Legacy",
+            extra_metadata={"marketing_opt_out": True},
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=cust.id,
+            status="active",
+            extra_metadata={"customer_phone": "+966500000040", "phone": "+966500000040"},
+        )
+        db.add(convo)
+        db.commit()
+        db.add(MessageEvent(
+            conversation_id=convo.id,
+            tenant_id=t.id,
+            direction="outbound",
+            body="hi",
+            event_type="whatsapp",
+            created_at=datetime.utcnow(),
+        ))
+        db.commit()
+
+        result = _call_list(db, t.id, filter="campaign_excluded")
+        phones = [c["phone"] for c in result["conversations"]]
+        assert phones == ["+966500000040"]
+        assert result["conversations"][0]["marketingOptOutManual"] is True

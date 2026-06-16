@@ -22,6 +22,10 @@ from core.wa_usage import has_open_service_window
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import Conversation, ConversationLog, ConversationTrace, Customer, HandoffSession, MessageEvent, WhatsAppConnection
+from services.manual_segments import (
+    is_marketing_opted_out,
+    marketing_opt_out_manual_sql_truthy,
+)
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -662,8 +666,7 @@ async def list_conversations(
     def _customer_marketing_opt_out(convo: Optional[Conversation]) -> bool:
         if convo is None or convo.customer is None:
             return False
-        meta = convo.customer.extra_metadata or {}
-        return bool(meta.get("marketing_opt_out_manual"))
+        return is_marketing_opted_out(convo.customer)
 
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
         n = _norm(phone)
@@ -806,20 +809,9 @@ async def list_conversations(
         # signal — not every active conversation.
         extra_clauses.append(Conversation.last_payment_confirmed_at.isnot(None))
     elif filter_slug == "campaign_excluded":
-        from sqlalchemy import String, cast, func  # noqa: PLC0415
-
-        is_opted = cast(
-            func.coalesce(
-                Customer.extra_metadata["marketing_opt_out_manual"].astext
-                if hasattr(Customer.extra_metadata, "astext")
-                else func.json_extract(
-                    Customer.extra_metadata, "$.marketing_opt_out_manual",
-                ),
-                "false",
-            ),
-            String,
-        ).in_(["true", "1"])
-        extra_clauses.append(Conversation.customer.has(is_opted))
+        extra_clauses.append(
+            Conversation.customer.has(marketing_opt_out_manual_sql_truthy())
+        )
     # ``all`` / ``active`` / ``unsubscribed`` → no SQL narrowing.
 
     convo_rows_q = (
@@ -929,6 +921,7 @@ async def list_conversations(
         display_name = name or phone
         phone_info[phone] = {
             "id": str(convo.id),
+            "customerId": getattr(convo, "customer_id", None),
             "customer": display_name,
             "phone": phone,
             "lastMsg": "",
