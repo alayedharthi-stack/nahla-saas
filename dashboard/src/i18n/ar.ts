@@ -440,11 +440,15 @@ const ar: Translations = {
     },
     tabs: {
       all:         'الكل',
-      needsAction: 'يحتاج متابعة',
+      needsAction: 'يحتاج إجراء',
+      missingLocation: 'ناقص موقع',
       store:       'من المتجر',
       whatsapp:    'من واتساب',
-      pending:     'بانتظار الدفع',
+      pendingPayment: 'بانتظار الدفع',
+      paymentSubmitted: 'دفع مرسل',
       paid:        'مدفوع',
+      abandoned:   'متروك',
+      completed:   'مكتمل',
       cancelled:   'ملغي',
     },
     table: {

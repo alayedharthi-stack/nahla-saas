@@ -460,10 +460,14 @@ export interface Translations {
     tabs: {
       all: string
       needsAction: string
+      missingLocation: string
       store: string
       whatsapp: string
-      pending: string
+      pendingPayment: string
+      paymentSubmitted: string
       paid: string
+      abandoned: string
+      completed: string
       cancelled: string
     }
     table: {

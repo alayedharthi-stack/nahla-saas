@@ -21,8 +21,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -83,16 +84,17 @@ STATUS_LABELS_AR: Dict[str, str] = {
 }
 
 RAW_STATUS_LABELS_AR: Dict[str, str] = {
-    "draft":                 "مسودة",
-    "pending_customer_info": "بانتظار بيانات العميل",
+    "draft":                 "مسودة طلب",
+    "pending_customer_info": "ناقص بيانات",
     "pending_payment":       "بانتظار الدفع",
-    "payment_submitted":     "دفع مُرسَل — بانتظار التحقق",
+    "payment_submitted":     "دفع مرسل — يحتاج تحقق",
     "cod_pending":           "دفع عند الاستلام",
     "paid":                  "مدفوع",
     "processing":            "قيد التجهيز",
     "ready_to_ship":         "جاهز للشحن",
     "shipped":               "تم الشحن",
     "delivered":             "تم التسليم",
+    "completed":             "مكتمل",
     "cancelled":             "ملغي",
     "abandoned":             "متروك",
 }
@@ -423,6 +425,8 @@ def _compute_needs_action(
     is_vip_customer: bool,
     has_open_conv: bool,
     is_ai_created: bool,
+    order: Optional[Order] = None,
+    parsed_raw_status: str = "",
 ) -> List[Dict[str, str]]:
     """
     Build the list of "needs action" reasons for an order. Each reason is a
@@ -436,7 +440,19 @@ def _compute_needs_action(
     """
     reasons: List[Dict[str, str]] = []
 
-    if status == "pending":
+    # WhatsApp lifecycle — operational chips from persisted state.
+    if source_key == "whatsapp" and order is not None:
+        from core.wa_order_dashboard import compute_wa_needs_action  # noqa: PLC0415
+
+        _, wa_items = compute_wa_needs_action(order)
+        for item in wa_items:
+            reasons.append({
+                "key":   item["key"],
+                "label": item["label"],
+                "level": item["level"],
+            })
+
+    elif status == "pending":
         reasons.append({
             "key":   "awaiting_payment",
             "label": "بانتظار الدفع",
@@ -465,7 +481,12 @@ def _compute_needs_action(
 
     # Whatsapp-originated, AI-created order with no follow-up conversation
     # opened means the merchant should at least confirm with the customer.
-    if source_key == "whatsapp" and is_ai_created and not has_open_conv:
+    if (
+        source_key == "whatsapp"
+        and is_ai_created
+        and not has_open_conv
+        and parsed_raw_status not in ("abandoned", "cancelled", "completed", "paid")
+    ):
         reasons.append({
             "key":   "whatsapp_unfollowed",
             "label": "طلب من واتساب بدون متابعة",
@@ -540,6 +561,41 @@ def _build_timeline(order: Order, *, has_open_conv: bool, source_label: str) -> 
                 "label": "أرسل العميل إثبات الدفع — بانتظار التحقق",
                 "at":    str(pt_event.get("at") or ""),
                 "icon":  "bell",
+            })
+
+    if meta.get("address_received_at") or meta.get("delivery_address_received_at"):
+        events.append({
+            "key":   "address_received",
+            "label": "استُلم موقع/عنوان التوصيل من العميل",
+            "at":    str(meta.get("address_received_at") or meta.get("delivery_address_received_at") or ""),
+            "icon":  "package",
+        })
+
+    for st_event in (meta.get("status_timeline") or []):
+        if not isinstance(st_event, dict):
+            continue
+        to_status = str(st_event.get("to") or "").strip().lower()
+        at = str(st_event.get("at") or "")
+        if to_status == "pending_payment":
+            events.append({
+                "key":   "pending_payment",
+                "label": "انتقل الطلب إلى بانتظار الدفع",
+                "at":    at,
+                "icon":  "bell",
+            })
+        elif to_status == "payment_submitted":
+            events.append({
+                "key":   "payment_submitted",
+                "label": "أرسل العميل إثبات الدفع — بانتظار التحقق",
+                "at":    at,
+                "icon":  "bell",
+            })
+        elif to_status == "paid":
+            events.append({
+                "key":   "payment_confirmed",
+                "label": "تم تأكيد الدفع",
+                "at":    at,
+                "icon":  "refresh",
             })
 
     if has_open_conv:
@@ -645,7 +701,10 @@ def _serialise_order(
                 "name":         name,
                 "quantity":     qty,
                 "variant_id":   str(item.get("variant_id") or "") or None,
+                "variant_label": str(item.get("variant_label") or item.get("size") or "").strip() or None,
+                "edition":      str(item.get("edition") or item.get("production") or "").strip() or None,
                 "unit_price":   unit_price_f,
+                "line_total":   round(unit_price_f * qty, 2) if unit_price_f is not None else None,
                 "image_url":    item.get("image_url") or item.get("image") or None,
             })
 
@@ -661,6 +720,8 @@ def _serialise_order(
     is_vip_customer = bool(vip_phones    and phone and _is_vip(vip_phones, phone))
     has_open_conv   = bool(unread_phones and phone and _has_open_conversation(unread_phones, phone))
 
+    parsed_raw = _parse_corrupt_status(raw_status).strip().lower()
+
     needs_action = _compute_needs_action(
         status=status,
         source_key=source_key,
@@ -668,6 +729,8 @@ def _serialise_order(
         is_vip_customer=is_vip_customer,
         has_open_conv=has_open_conv,
         is_ai_created=is_ai_created,
+        order=order,
+        parsed_raw_status=parsed_raw,
     )
 
     from core.merchant_payment_confirmation import (  # noqa: PLC0415
@@ -677,13 +740,35 @@ def _serialise_order(
         PAYMENT_METHOD_LABELS_AR,
         build_merchant_payment_alerts,
     )
+    from core.wa_order_dashboard import (  # noqa: PLC0415
+        BANK_TRANSFER_VERIFY_BANNER,
+        build_action_chips,
+        build_city_line,
+        build_delivery_location_display,
+        build_list_summary,
+        compute_wa_needs_action,
+        resolve_address_status_label_ar,
+        resolve_lifecycle_filter_key,
+        resolve_payment_status_label_ar,
+        resolve_payment_verification_label_ar,
+        resolve_wa_status_label_ar,
+    )
 
-    parsed_raw = _parse_corrupt_status(raw_status).strip().lower()
     payment_alerts = build_merchant_payment_alerts(
         raw_status=parsed_raw,
         meta=order_meta,
     )
+    if (
+        payment_alerts
+        and payment_alerts[0].get("key") == "bank_transfer_verify_before_ship"
+    ):
+        payment_alerts[0]["label"] = BANK_TRANSFER_VERIFY_BANNER
+        payment_alerts[0]["message"] = BANK_TRANSFER_VERIFY_BANNER
+
+    existing_keys = {r["key"] for r in needs_action}
     for alert in payment_alerts:
+        if alert["key"] in existing_keys:
+            continue
         needs_action.append({
             "key":   alert["key"],
             "label": alert.get("label") or alert.get("message", ""),
@@ -694,6 +779,25 @@ def _serialise_order(
     payment_method_label = (
         PAYMENT_METHOD_LABELS_AR.get(payment_method, payment_method)
         if payment_method else None
+    )
+
+    status_label_ar = resolve_wa_status_label_ar(parsed_raw, order=order)
+    address_status_label_ar = resolve_address_status_label_ar(order)
+    payment_status_label_ar = resolve_payment_status_label_ar(order_meta)
+    payment_verification_label_ar = resolve_payment_verification_label_ar(order_meta)
+    action_chips = build_action_chips(order) if source_key == "whatsapp" else []
+    wa_needs_action_flag, _ = (
+        compute_wa_needs_action(order) if source_key == "whatsapp" else (bool(needs_action), needs_action)
+    )
+    lifecycle_filter = resolve_lifecycle_filter_key(order)
+    city_line = build_city_line(order)
+    list_summary = build_list_summary(
+        customer_name=display_name,
+        items_text="، ".join(item_titles) if item_titles else "—",
+        amount_text=_format_total(amount_value, order.total),
+        city_line=city_line,
+        payment_label=payment_status_label_ar or status_label_ar,
+        address_label=address_status_label_ar,
     )
 
     payload: Dict[str, Any] = {
@@ -712,21 +816,35 @@ def _serialise_order(
         "amount":        _format_total(amount_value, order.total),
         "amount_sar":    round(amount_value, 2),
         "status":        status,
-        "status_label":  RAW_STATUS_LABELS_AR.get(parsed_raw) or STATUS_LABELS_AR.get(status, status),
+        "status_label":  status_label_ar or RAW_STATUS_LABELS_AR.get(parsed_raw) or STATUS_LABELS_AR.get(status, status),
+        "status_label_ar": status_label_ar,
         "raw_status":    _parse_corrupt_status(raw_status),
-        "raw_status_label": RAW_STATUS_LABELS_AR.get(parsed_raw, parsed_raw or raw_status),
+        "raw_status_label": status_label_ar or RAW_STATUS_LABELS_AR.get(parsed_raw, parsed_raw or raw_status),
         "source":        source_key,
         "source_label":  source_label,
         "paymentLink":   order.checkout_url,
         "createdAt":     created_at.isoformat(),
+        "updated_at":    str(order_meta.get("status_changed_at") or order_meta.get("updated_at") or created_at.isoformat()),
         "is_ai_created": is_ai_created,
         "is_vip":        is_vip_customer,
         "has_open_conversation": has_open_conv,
         "needs_action":  needs_action,
+        "needs_action_flag": wa_needs_action_flag or bool(needs_action),
+        "action_chips":  action_chips,
+        "lifecycle_filter": lifecycle_filter,
+        "city_line":     city_line,
+        "list_summary":  list_summary,
+        "address_status_label_ar": address_status_label_ar,
         "payment_method": payment_method,
         "payment_method_label": payment_method_label,
+        "payment_method_label_ar": payment_method_label,
         "payment_status": order_meta.get("payment_status"),
+        "payment_status_label_ar": payment_status_label_ar,
         "payment_confirmed": bool(order_meta.get("payment_confirmed")),
+        "payment_verification_status": order_meta.get("payment_verification_status"),
+        "payment_verification_label_ar": payment_verification_label_ar,
+        "payment_verified_at": order_meta.get("payment_verified_at"),
+        "payment_verified_by": order_meta.get("payment_verified_by"),
         "merchant_payment_alert": payment_alerts[0] if payment_alerts else None,
         "merchant_payment_alerts": payment_alerts,
         "can_confirm_bank_transfer": can_show_confirm_bank_transfer_button(order),
@@ -743,6 +861,8 @@ def _serialise_order(
             "postal_code":     customer_info.get("postal_code"),
             "address":         customer_info.get("address"),
         }
+        payload["delivery_location"] = build_delivery_location_display(order)
+        payload["address_status_label_ar"] = address_status_label_ar
         store_url = _build_store_url(source_key, order.external_id, order.external_order_number)
         whatsapp_url = f"https://wa.me/{phone.lstrip('+').replace(' ', '').replace('-', '')}" if phone else None
         conversation_url = f"/conversations?phone={phone}" if phone else None
@@ -782,18 +902,103 @@ def _serialise_order(
     return payload
 
 
+def _apply_lifecycle_db_filter(query, lifecycle_filter: Optional[str]):
+    """
+    Narrow the SQL query for status-backed lifecycle tabs.
+    ``needs_action`` and ``missing_location`` use a wider fetch + Python refine.
+    """
+    from core.wa_order_dashboard import (  # noqa: PLC0415
+        LIFECYCLE_FILTER_ABANDONED,
+        LIFECYCLE_FILTER_CANCELLED,
+        LIFECYCLE_FILTER_COMPLETED,
+        LIFECYCLE_FILTER_MISSING_LOCATION,
+        LIFECYCLE_FILTER_NEEDS_ACTION,
+        LIFECYCLE_FILTER_PAID,
+        LIFECYCLE_FILTER_PAYMENT_SUBMITTED,
+        LIFECYCLE_FILTER_PENDING_PAYMENT,
+    )
+
+    filt = (lifecycle_filter or "").strip().lower()
+    if not filt or filt == "all":
+        return query
+
+    if filt == LIFECYCLE_FILTER_PENDING_PAYMENT:
+        return query.filter(Order.status == "pending_payment")
+
+    if filt == LIFECYCLE_FILTER_PAYMENT_SUBMITTED:
+        return query.filter(Order.status == "payment_submitted")
+
+    if filt == LIFECYCLE_FILTER_PAID:
+        return query.filter(
+            or_(
+                Order.status == "paid",
+                Order.extra_metadata["payment_confirmed"].astext == "true",
+            )
+        )
+
+    if filt == LIFECYCLE_FILTER_ABANDONED:
+        return query.filter(
+            or_(Order.status == "abandoned", Order.is_abandoned.is_(True))
+        )
+
+    if filt == LIFECYCLE_FILTER_COMPLETED:
+        return query.filter(Order.status.in_(("completed", "complete")))
+
+    if filt == LIFECYCLE_FILTER_CANCELLED:
+        return query.filter(Order.status.in_(("cancelled", "canceled")))
+
+    if filt == LIFECYCLE_FILTER_MISSING_LOCATION:
+        return query.filter(Order.status == "pending_customer_info")
+
+    if filt == LIFECYCLE_FILTER_NEEDS_ACTION:
+        return query.filter(
+            Order.status.in_(
+                (
+                    "draft",
+                    "pending_customer_info",
+                    "pending_payment",
+                    "payment_submitted",
+                    "paid",
+                )
+            )
+        )
+
+    return query
+
+
 @router.get("")
-async def list_orders(request: Request, db: Session = Depends(get_db)):
+async def list_orders(
+    request: Request,
+    db: Session = Depends(get_db),
+    lifecycle_filter: Optional[str] = Query(None, alias="lifecycle_filter"),
+    source: Optional[str] = Query(None),
+):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    rows = (
-        db.query(Order)
-        .filter(Order.tenant_id == tenant_id)
-        .order_by(Order.id.desc())
-        .limit(200)
-        .all()
+    from core.wa_order_dashboard import (  # noqa: PLC0415
+        LIFECYCLE_FILTER_MISSING_LOCATION,
+        LIFECYCLE_FILTER_NEEDS_ACTION,
+        order_matches_lifecycle_filter,
     )
+
+    q = db.query(Order).filter(Order.tenant_id == tenant_id)
+    if source:
+        src = source.strip().lower()
+        if src == "whatsapp":
+            q = q.filter(Order.source == "whatsapp")
+        elif src in SOURCE_LABELS_AR:
+            q = q.filter(Order.source == src)
+
+    q = _apply_lifecycle_db_filter(q, lifecycle_filter)
+    rows = q.order_by(Order.id.desc()).limit(400).all()
+
+    filt = (lifecycle_filter or "").strip().lower()
+    if filt in (LIFECYCLE_FILTER_NEEDS_ACTION, LIFECYCLE_FILTER_MISSING_LOCATION):
+        rows = [r for r in rows if order_matches_lifecycle_filter(r, filt)]
+        rows = rows[:200]
+    elif len(rows) > 200:
+        rows = rows[:200]
 
     customer_lookup = _build_customer_lookup(db, tenant_id)
     vip_phones      = _build_vip_phone_set(db, tenant_id)

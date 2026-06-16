@@ -436,11 +436,15 @@ const en: Translations = {
     },
     tabs: {
       all:         'All',
-      needsAction: 'Needs follow-up',
+      needsAction: 'Needs action',
+      missingLocation: 'Missing location',
       store:       'From Store',
       whatsapp:    'From WhatsApp',
-      pending:     'Pending payment',
+      pendingPayment: 'Awaiting payment',
+      paymentSubmitted: 'Payment submitted',
       paid:        'Paid',
+      abandoned:   'Abandoned',
+      completed:   'Completed',
       cancelled:   'Cancelled',
     },
     table: {

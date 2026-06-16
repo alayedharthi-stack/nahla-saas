@@ -200,4 +200,4 @@ class TestOrdersApiSerialization:
             for a in payload["needs_action"]
         )
         assert payload["payment_method_label"] == "تحويل بنكي"
-        assert payload["raw_status_label"] == "دفع مُرسَل — بانتظار التحقق"
+        assert payload["raw_status_label"] == "دفع مرسل — يحتاج تحقق"
