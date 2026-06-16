@@ -34,6 +34,8 @@ export interface CustomersPageLabels {
     unsubscribedNoticeTitle: string
     unsubscribedNoticeBody: string
     unsubscribedHint: string
+    campaignExcludedNoticeTitle: string
+    campaignExcludedNoticeBody: string
   }
   searchPlaceholder: string
   filters: {
@@ -273,6 +275,8 @@ export const customersPageEn: CustomersPageLabels = {
     unsubscribedNoticeTitle: 'These customers unsubscribed from communications',
     unsubscribedNoticeBody: 'Automatically excluded from all campaigns, autopilot, and AI.',
     unsubscribedHint: 'To win them back, reach out personally. They return automatically when they send any message.',
+    campaignExcludedNoticeTitle: 'Manually excluded from marketing campaigns',
+    campaignExcludedNoticeBody: 'These customers will not receive marketing campaigns. AI and automated replies continue normally.',
   },
   searchPlaceholder: 'Search by name or phone…',
   filters: {
@@ -283,7 +287,7 @@ export const customersPageEn: CustomersPageLabels = {
     marketingTitle: 'Filter by manual marketing exclusion',
     marketingAll: 'All customers',
     marketingIn: 'Eligible for campaigns',
-    marketingOut: 'Manually excluded',
+    marketingOut: 'Excluded from campaigns',
   },
   table: {
     name: 'Name',
@@ -526,6 +530,8 @@ export const customersPageAr: CustomersPageLabels = {
     unsubscribedNoticeTitle: 'هؤلاء العملاء ألغوا الاشتراك في التواصل',
     unsubscribedNoticeBody: 'مستثنون تلقائياً من جميع الحملات والطيار الآلي والذكاء الاصطناعي.',
     unsubscribedHint: 'لاستعادتهم، تواصل معهم شخصياً. يعودون تلقائياً عند إرسال أي رسالة.',
+    campaignExcludedNoticeTitle: 'مستبعدون يدوياً من الحملات التسويقية',
+    campaignExcludedNoticeBody: 'لن يستقبل هؤلاء العملاء حملات تسويقية. الذكاء والردود الآلية تستمر بشكل طبيعي.',
   },
   searchPlaceholder: 'بحث بالاسم أو رقم الهاتف...',
   filters: {
@@ -536,7 +542,7 @@ export const customersPageAr: CustomersPageLabels = {
     marketingTitle: 'فلترة حسب الاستبعاد التسويقي اليدوي',
     marketingAll: 'كل العملاء',
     marketingIn: 'المؤهلون للحملات',
-    marketingOut: 'المستبعدون يدوياً',
+    marketingOut: 'مستبعدون من الحملات',
   },
   table: {
     name: 'الاسم',

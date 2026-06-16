@@ -1466,17 +1466,17 @@ def apply_state_patch(
         except Exception:
             pass
         # ── Paid-order signal ────────────────────────────────────────
-        # When the patch promotes the order into the "receipt confirmed"
-        # branch, stamp the dedicated column the conversations listing
-        # uses for the ``paid`` filter. We update on the actual
-        # transition (False → True) so a redundant patch doesn't push
-        # the timestamp forward and falsely re-promote the row.
-        if state_patch.get("payment_receipt_received") is True:
+        # Stamp the dedicated column only when payment is explicitly
+        # confirmed — not when the customer merely submitted a receipt
+        # (``payment_receipt_received`` → payment_submitted path).
+        _payment_confirmed = (
+            state_patch.get("payment_confirmed") is True
+            or state_patch.get("verified_by_staff") is True
+            or state_patch.get("payment_verified") is True
+        )
+        if _payment_confirmed:
             try:
-                if (
-                    state_patch.get("payment_confirmed") is True
-                    and getattr(conv, "last_payment_confirmed_at", None) is None
-                ):
+                if getattr(conv, "last_payment_confirmed_at", None) is None:
                     conv.last_payment_confirmed_at = datetime.now(timezone.utc)
             except Exception:
                 pass
