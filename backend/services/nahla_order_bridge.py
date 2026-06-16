@@ -28,6 +28,7 @@ _PAID_STATUSES = frozenset({
 _SYNC_FIELDS = (
     "product_id",
     "quantity",
+    "line_items_fingerprint",
     "stage",
     "order_status",
     "awaiting_payment_receipt",
@@ -127,12 +128,44 @@ def _is_paid(order: Any) -> bool:
     return str(getattr(order, "status", "") or "").lower() in _PAID_STATUSES
 
 
+def _has_selected_product(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+) -> bool:
+    for container in (order_prep, brain_state):
+        if not isinstance(container, dict):
+            continue
+        for key in ("line_items", "cart_items", "items"):
+            raw = container.get(key)
+            if isinstance(raw, list) and raw:
+                return True
+    product_id = str(order_prep.get("product_id") or "").strip()
+    if product_id:
+        return True
+    focus = brain_state.get("current_product_focus") or {}
+    return isinstance(focus, dict) and bool(focus.get("id") or focus.get("title"))
+
+
 def _draft_eligible(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
 ) -> Tuple[bool, str]:
-    if bool(order_prep.get("payment_receipt_received")):
-        return False, "paid_path"
+    from core.wa_order_lifecycle import has_payment_submission  # noqa: PLC0415
+
+    if has_payment_submission(order_prep):
+        return True, "payment_submission_path"
+
+    if order_prep.get("cart_deltas"):
+        return True, "cart_deltas"
+
+    if isinstance(order_prep.get("line_items"), list):
+        return True, "explicit_line_items"
+
+    if isinstance(order_prep.get("cart_items"), list) and order_prep.get("cart_items"):
+        return True, "cart_items"
+
+    if isinstance(brain_state.get("cart_items"), list) and brain_state.get("cart_items"):
+        return True, "brain_cart_items"
 
     product_id = str(order_prep.get("product_id") or "").strip()
     stage = str(brain_state.get("stage") or "")
@@ -140,14 +173,16 @@ def _draft_eligible(
     order_status = str(order_prep.get("order_status") or "")
 
     if awaiting or order_status in ("awaiting_payment", "awaiting_receipt"):
-        if product_id:
-            return True, "awaiting_payment_receipt+product_id"
+        if product_id or _has_selected_product(order_prep, brain_state):
+            return True, "awaiting_payment_receipt+product"
         return False, "awaiting_payment_no_product"
 
-    if stage in ("ordering", "deciding", "checkout") and product_id:
+    if _has_selected_product(order_prep, brain_state):
+        if stage in ("ordering", "deciding", "checkout", ""):
+            return True, "product_selected"
         focus = brain_state.get("current_product_focus") or {}
-        if isinstance(focus, dict) and focus.get("title") and focus.get("price") is not None:
-            return True, "product_id+stage_ordering"
+        if isinstance(focus, dict) and focus.get("title"):
+            return True, "product_focus"
 
     return False, "not_in_funnel"
 
@@ -156,7 +191,11 @@ def _scope_ok(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
 ) -> Tuple[bool, str]:
-    if bool(order_prep.get("payment_receipt_received")):
+    from core.wa_order_lifecycle import has_payment_submission, is_payment_verified  # noqa: PLC0415
+
+    if has_payment_submission(order_prep):
+        return True, "payment_submission"
+    if is_payment_verified(order_prep):
         return True, "paid_promotion"
     if str(brain_state.get("checkout_url") or "").strip():
         return False, "salla_checkout_active"
@@ -168,10 +207,12 @@ def _build_sync_snapshot(
     brain_state: Dict[str, Any],
     *,
     lifecycle: str,
+    line_items_fingerprint: str = "",
 ) -> Dict[str, Any]:
     return {
         "product_id":               str(order_prep.get("product_id") or ""),
         "quantity":                 order_prep.get("quantity") or 1,
+        "line_items_fingerprint":   line_items_fingerprint,
         "stage":                    str(brain_state.get("stage") or ""),
         "order_status":             str(order_prep.get("order_status") or ""),
         "awaiting_payment_receipt": bool(order_prep.get("awaiting_payment_receipt")),
@@ -431,17 +472,38 @@ def _resolve_order_amount(
         if amt is not None:
             return amt, False, "product_focus_price"
 
-    for item in line_items:
-        unit = _parse_amount(item.get("unit_price") or item.get("price"))
-        qty = item.get("quantity") or 1
-        try:
-            qty_n = max(int(qty), 1)
-        except (TypeError, ValueError):
-            qty_n = 1
-        if unit is not None:
-            return round(unit * qty_n, 2), False, "line_items"
+    from core.wa_cart_line_items import cart_total_amount  # noqa: PLC0415
+
+    cart_total = cart_total_amount(line_items)
+    if cart_total is not None:
+        return cart_total, False, "line_items"
 
     return None, not is_paid_path, "unknown"
+
+
+def _enrich_line_item_titles(
+    *,
+    db: Any,
+    tenant_id: int,
+    items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    enriched: List[Dict[str, Any]] = []
+    for raw in items:
+        item = dict(raw)
+        name = str(item.get("product_name") or item.get("title") or "").strip()
+        if name and name != "منتج":
+            enriched.append(item)
+            continue
+        looked_up = _lookup_catalog_product_title(
+            db, tenant_id, item.get("product_id") or item.get("catalog_id"),
+        )
+        if looked_up:
+            item["product_name"] = looked_up
+            item["title"] = looked_up
+            item["name"] = looked_up
+            item["display_name"] = looked_up
+        enriched.append(item)
+    return enriched
 
 
 def _build_line_items(
@@ -451,37 +513,28 @@ def _build_line_items(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
     existing_meta: Optional[Dict[str, Any]] = None,
-) -> Tuple[List[Dict[str, Any]], str]:
-    focus = brain_state.get("current_product_focus") or {}
-    if not isinstance(focus, dict):
-        focus = {}
-    product_name = _resolve_product_title(
-        db=db,
-        tenant_id=tenant_id,
+    existing_line_items: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], str, List[Dict[str, Any]]]:
+    from core.wa_cart_line_items import (  # noqa: PLC0415
+        build_line_items_from_order_prep,
+    )
+
+    items, primary_title, cart_events = build_line_items_from_order_prep(
         order_prep=order_prep,
         brain_state=brain_state,
         existing_meta=existing_meta,
+        existing_line_items=existing_line_items,
     )
-    qty_raw = order_prep.get("quantity") or 1
-    try:
-        quantity = max(int(qty_raw), 1)
-    except (TypeError, ValueError):
-        quantity = 1
-    unit_price = _parse_amount(
-        focus.get("price") or order_prep.get("total_price") or order_prep.get("price")
-    )
-    product_id = focus.get("id") or order_prep.get("product_id")
-    item: Dict[str, Any] = {
-        "product_name": product_name,
-        "title":          product_name,
-        "name":           product_name,
-        "quantity":       quantity,
-        "product_id":     product_id,
-    }
-    if unit_price is not None:
-        item["unit_price"] = unit_price
-        item["price"] = unit_price
-    return [item], product_name
+    items = _enrich_line_item_titles(db=db, tenant_id=tenant_id, items=items)
+    if not primary_title or primary_title == "منتج":
+        primary_title = _resolve_product_title(
+            db=db,
+            tenant_id=tenant_id,
+            order_prep=order_prep,
+            brain_state=brain_state,
+            existing_meta=existing_meta,
+        )
+    return items, primary_title, cart_events
 
 
 def _lookup_catalog_product_title(
@@ -636,10 +689,7 @@ def _resolve_customer_name(
     return None
 
 
-def _customer_payload(
-    conversation: Any,
-    order_prep: Dict[str, Any],
-) -> Tuple[Optional[str], Dict[str, Any]]:
+def _conversation_phone(conversation: Any, order_prep: Dict[str, Any]) -> Optional[str]:
     customer = getattr(conversation, "customer", None)
     phone = None
     if customer is not None:
@@ -649,6 +699,42 @@ def _customer_payload(
         phone = conv_meta.get("phone")
     if not phone:
         phone = order_prep.get("customer_phone")
+    return str(phone).strip() if phone else None
+
+
+def _append_status_timeline(
+    meta: Dict[str, Any],
+    *,
+    from_status: str,
+    to_status: str,
+    reason: str,
+    now_iso: str,
+) -> None:
+    if from_status == to_status:
+        return
+    timeline = list(meta.get("status_timeline") or [])
+    timeline.append({
+        "from": from_status or "none",
+        "to":   to_status,
+        "at":   now_iso,
+        "reason": reason,
+    })
+    meta["status_timeline"] = timeline[-50:]
+
+
+def _append_cart_timeline(meta: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+    if not events:
+        return
+    timeline = list(meta.get("cart_timeline") or [])
+    timeline.extend(events)
+    meta["cart_timeline"] = timeline[-100:]
+
+
+def _customer_payload(
+    conversation: Any,
+    order_prep: Dict[str, Any],
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    phone = _conversation_phone(conversation, order_prep)
 
     display_name = _resolve_customer_name(conversation, order_prep)
     if not display_name:
@@ -765,11 +851,20 @@ def sync_nahla_wa_order(
         return None
 
     external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
-    is_paid_path = bool(order_prep.get("payment_receipt_received"))
+    from core.wa_order_lifecycle import (  # noqa: PLC0415
+        has_payment_submission,
+        is_payment_verified,
+    )
+
+    is_payment_submitted_path = has_payment_submission(order_prep)
+    is_paid_path = is_payment_submitted_path and (
+        is_payment_verified(order_prep)
+        or bool(order_prep.get("payment_verified"))
+    )
     eligibility_reason = "n/a"
 
-    if is_paid_path:
-        eligibility_reason = "paid_promotion"
+    if is_payment_submitted_path:
+        eligibility_reason = "payment_submitted_path" if not is_paid_path else "paid_promotion"
     else:
         if not _draft_bridge_enabled(tenant_id):
             _log_bridge(
@@ -810,7 +905,18 @@ def sync_nahla_wa_order(
             return None
 
     lifecycle = "paid" if is_paid_path else "whatsapp_draft"
-    curr_snap = _build_sync_snapshot(order_prep, brain_state, lifecycle=lifecycle)
+    wa_phone = _conversation_phone(conversation, order_prep)
+    from core.wa_order_lifecycle import (  # noqa: PLC0415
+        ADDRESS_REQUIRED_TYPE,
+        STATUS_DRAFT,
+        compute_wa_missing_fields,
+        has_accepted_delivery_address,
+        resolve_wa_order_status,
+    )
+    from core.wa_cart_line_items import (  # noqa: PLC0415
+        format_cart_summary_ar,
+        line_items_fingerprint,
+    )
 
     try:
         from models import Order  # noqa: PLC0415
@@ -838,7 +944,60 @@ def sync_nahla_wa_order(
             )
             return None
 
-        prev_snap = (existing.extra_metadata or {}).get("last_sync_snapshot") if existing else None
+        existing_meta = dict(existing.extra_metadata or {}) if existing is not None else {}
+        raw_existing_items = getattr(existing, "line_items", None) if existing is not None else None
+        existing_line_items = list(raw_existing_items or []) if existing is not None else None
+        line_items, product_title, cart_events = _build_line_items(
+            db=db,
+            tenant_id=tenant_id,
+            order_prep=order_prep,
+            brain_state=brain_state,
+            existing_meta=existing_meta,
+            existing_line_items=existing_line_items,
+        )
+
+        resolved_status, missing_fields, delivery_address_status = resolve_wa_order_status(
+            order_prep,
+            brain_state,
+            whatsapp_phone=wa_phone,
+            payment_verified=is_paid_path,
+            line_items=line_items,
+        )
+        if resolved_status is None and not is_payment_submitted_path:
+            if existing is None:
+                _log_bridge(
+                    external_id=external_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    action="skip",
+                    reason="no_product_selected",
+                    eligibility_reason=eligibility_reason,
+                    skip_reason="no_product_selected",
+                    trigger=trigger,
+                )
+                return None
+            resolved_status = STATUS_DRAFT
+            missing_fields = compute_wa_missing_fields(
+                order_prep,
+                brain_state=brain_state,
+                whatsapp_phone=wa_phone,
+                line_items=line_items,
+            )
+            delivery_address_status = (
+                "accepted"
+                if has_accepted_delivery_address(order_prep)
+                else "required"
+            )
+
+        items_fp = line_items_fingerprint(line_items)
+        curr_snap = _build_sync_snapshot(
+            order_prep,
+            brain_state,
+            lifecycle=lifecycle,
+            line_items_fingerprint=items_fp,
+        )
+
+        prev_snap = existing_meta.get("last_sync_snapshot") if existing else None
         sync_ok, sync_reason, bridge_action = _resolve_sync_action(
             existing=existing,
             is_paid_path=is_paid_path,
@@ -863,14 +1022,6 @@ def sync_nahla_wa_order(
             return existing
 
         receipt_metadata = dict(order_prep.get("payment_receipt_metadata") or {})
-        existing_meta = dict(existing.extra_metadata or {}) if existing is not None else {}
-        line_items, product_title = _build_line_items(
-            db=db,
-            tenant_id=tenant_id,
-            order_prep=order_prep,
-            brain_state=brain_state,
-            existing_meta=existing_meta,
-        )
         amount, needs_review, amount_source = _resolve_order_amount(
             db=db,
             tenant_id=tenant_id,
@@ -879,7 +1030,7 @@ def sync_nahla_wa_order(
             brain_state=brain_state,
             receipt_metadata=receipt_metadata,
             line_items=line_items,
-            is_paid_path=is_paid_path,
+            is_paid_path=is_paid_path or is_payment_submitted_path,
         )
         total_str = _format_total_sar(amount)
         customer_name, customer_info = _customer_payload(conversation, order_prep)
@@ -893,7 +1044,17 @@ def sync_nahla_wa_order(
         )
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        target_status = "paid" if is_paid_path else "pending_payment"
+        from core.order_payment_policy import (  # noqa: PLC0415
+            enrich_order_payment_metadata,
+            guard_wa_target_status,
+        )
+
+        target_status = resolved_status or ("paid" if is_paid_path else "draft")
+        target_status = guard_wa_target_status(
+            target_status,
+            order_prep,
+            existing_meta if existing is not None else {},
+        )
         base_meta = _base_metadata(
             conversation_id=int(conversation_id),
             lifecycle=lifecycle,
@@ -909,9 +1070,48 @@ def sync_nahla_wa_order(
             now_iso=now_iso,
         )
         base_meta["last_sync_snapshot"] = curr_snap
+        base_meta["missing_fields"] = missing_fields
+        base_meta["delivery_address_status"] = delivery_address_status
+        base_meta["address_required_type"] = ADDRESS_REQUIRED_TYPE
+        if wa_phone:
+            base_meta["customer_phone_source"] = "whatsapp_conversation"
+        base_meta["counts_in_revenue"] = target_status == "paid"
+        cart_summary = format_cart_summary_ar(line_items)
+        if cart_summary:
+            base_meta["cart_summary_ar"] = cart_summary
+        _append_cart_timeline(base_meta, cart_events)
+        if is_payment_submitted_path:
+            from core.wa_payment_submission import build_payment_submission_order_metadata  # noqa: PLC0415
+
+            submission_type = str(
+                order_prep.get("payment_submission_type")
+                or ("receipt" if order_prep.get("payment_receipt_received") else "text_claim")
+            )
+            base_meta.update(build_payment_submission_order_metadata(
+                submission_type=submission_type,
+                trigger=trigger,
+            ))
+            base_meta["payment_confirmed"] = bool(is_paid_path)
+            if is_paid_path:
+                base_meta["payment_verification_status"] = "confirmed"
+
+        base_meta = enrich_order_payment_metadata(
+            base_meta,
+            order_prep=order_prep,
+            target_status=target_status,
+        )
 
         if existing is not None:
             meta = dict(existing.extra_metadata or {})
+            prev_status = str(existing.status or "")
+            base_meta["status_timeline"] = list(meta.get("status_timeline") or [])
+            _append_status_timeline(
+                base_meta,
+                from_status=prev_status,
+                to_status=target_status,
+                reason=sync_reason,
+                now_iso=now_iso,
+            )
             if _is_paid(existing) and not is_paid_path:
                 _log_bridge(
                     external_id=external_id,
@@ -934,7 +1134,7 @@ def sync_nahla_wa_order(
                 existing.total = total_str
             if is_paid_path and total_str:
                 meta["needs_amount_review"] = False
-            existing.line_items = line_items or existing.line_items
+            existing.line_items = line_items
             if customer_name:
                 existing.customer_name = customer_name
             if customer_info:
@@ -956,6 +1156,13 @@ def sync_nahla_wa_order(
             )
             return existing
 
+        _append_status_timeline(
+            base_meta,
+            from_status="none",
+            to_status=target_status,
+            reason=sync_reason,
+            now_iso=now_iso,
+        )
         order = Order(
             tenant_id             = tenant_id,
             external_id           = external_id,
@@ -1005,15 +1212,25 @@ def upsert_nahla_paid_order(
     brain_state: Dict[str, Any],
     order_prep: Dict[str, Any],
 ) -> Optional[Any]:
-    """Phase 1 entry — confirmed receipt → paid order."""
-    if not bool(order_prep.get("payment_receipt_received")):
+    """Explicit verified payment → ``paid`` (staff/system confirmation only)."""
+    from core.wa_order_lifecycle import has_payment_submission  # noqa: PLC0415
+
+    if not (
+        bool(order_prep.get("payment_confirmed"))
+        or bool(order_prep.get("verified_by_staff"))
+        or bool(order_prep.get("payment_verified"))
+    ):
         return None
+    if not has_payment_submission(order_prep) and not order_prep.get("payment_receipt_received"):
+        return None
+    enriched = dict(order_prep)
+    enriched.setdefault("payment_confirmed", True)
     return sync_nahla_wa_order(
         db,
         tenant_id=tenant_id,
         conversation=conversation,
         brain_state=brain_state,
-        order_prep=order_prep,
+        order_prep=enriched,
         trigger="paid_upsert",
     )
 

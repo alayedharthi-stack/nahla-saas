@@ -34,6 +34,13 @@ export interface OrderNeedsAction {
   level: NeedsActionLevel
 }
 
+export interface MerchantPaymentAlert {
+  key: string
+  level: NeedsActionLevel
+  label: string
+  message?: string
+}
+
 export interface DashboardOrder {
   // The platform's human-visible order number (e.g. "#1585297702"). The
   // backend now sets `id` to this value so existing key/search code
@@ -51,9 +58,17 @@ export interface DashboardOrder {
   amount_sar: number
   status: 'paid' | 'pending' | 'failed' | 'cancelled'
   status_label?: string
+  raw_status?: string
+  raw_status_label?: string
   source: OrderSourceKey
   source_label: string
   paymentLink?: string
+  payment_method?: string | null
+  payment_method_label?: string | null
+  payment_status?: string | null
+  payment_confirmed?: boolean
+  merchant_payment_alert?: MerchantPaymentAlert | null
+  merchant_payment_alerts?: MerchantPaymentAlert[]
   createdAt: string
   is_ai_created?: boolean
   is_vip?: boolean

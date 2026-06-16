@@ -264,6 +264,24 @@ export default function OrderDetail() {
         </div>
       )}
 
+      {/* Payment verification alert (bank transfer / COD) */}
+      {order.merchant_payment_alert && (
+        <div
+          className={`px-4 py-3 rounded-lg border text-xs leading-relaxed ${
+            order.merchant_payment_alert.level === 'red'
+              ? 'bg-red-50 border-red-300 text-red-800'
+              : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${
+              order.merchant_payment_alert.level === 'red' ? 'text-red-600' : 'text-blue-600'
+            }`} />
+            <p>{order.merchant_payment_alert.label || order.merchant_payment_alert.message}</p>
+          </div>
+        </div>
+      )}
+
       {/* Needs-action banner */}
       {needsAction.length > 0 && (
         <div className="card p-4 border-l-4 border-l-amber-400">
@@ -421,7 +439,10 @@ export default function OrderDetail() {
             <div className="flex justify-between"><span className="text-slate-500">المبلغ</span><span className="text-slate-800 font-semibold">{order.amount}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">الحالة</span><span><Badge label={order.status_label || order.status} variant={statusCls} dot /></span></div>
             <div className="flex justify-between"><span className="text-slate-500">المصدر</span><span className="text-slate-800">{sourceLabel}</span></div>
-            {order.payment_method && (
+            {order.payment_method_label && (
+              <div className="flex justify-between"><span className="text-slate-500">طريقة الدفع</span><span className="text-slate-800">{order.payment_method_label}</span></div>
+            )}
+            {!order.payment_method_label && order.payment_method && (
               <div className="flex justify-between"><span className="text-slate-500">طريقة الدفع</span><span className="text-slate-800">{order.payment_method}</span></div>
             )}
             <div className="flex justify-between"><span className="text-slate-500">التاريخ</span><span className="text-slate-800">{formatDateTime(order.createdAt)}</span></div>

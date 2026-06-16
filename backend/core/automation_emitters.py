@@ -175,6 +175,21 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
             )
             continue
 
+        try:
+            from core.wa_order_lifecycle import is_wa_automation_payment_eligible  # noqa: PLC0415
+
+            if not is_wa_automation_payment_eligible(
+                str(order.status or ""),
+                dict(order.extra_metadata or {}),
+            ):
+                logger.debug(
+                    "[Emitter:unpaid] tenant=%s order=%s skipped — wa lifecycle not payment-eligible",
+                    tenant_id, order.id,
+                )
+                continue
+        except Exception:
+            pass
+
         created_at = _read_order_created_at(order)
         if created_at is None:
             logger.debug(
