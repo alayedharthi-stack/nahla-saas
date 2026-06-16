@@ -957,10 +957,9 @@ class MerchantBrain:
                     extra={"intent": getattr(intent, "name", "") or ""},
                 )
             except Exception as _rel_exc:  # noqa: BLE001
-                logger.debug(
-                    "[CX] relational layer compute failed (non-fatal) "
-                    "tenant=%s err=%s",
-                    tenant_id, _rel_exc,
+                logger.exception(
+                    "[CX] relational layer compute failed (non-fatal) tenant=%s",
+                    tenant_id,
                 )
 
         if merchant_context and not _pre_commerce_shortcut:
