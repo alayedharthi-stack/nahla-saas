@@ -18,6 +18,7 @@ import {
   CheckSquare,
   Square,
   BellOff,
+  Megaphone,
   Tag,
   Beaker,
   Plus,
@@ -151,7 +152,7 @@ export default function Customers() {
   // merchant can combine "auto VIP" with "manually tagged unsubscribed"
   // (or "no manual tag at all" via the special 'none' value).
   const [manualSegmentKey, setManualSegmentKey] = useState<string>('')
-  const [marketingOptOutFilter, setMarketingOptOutFilter] = useState<'all' | 'in' | 'out'>('all')
+  const [marketingOptOutFilter, setMarketingOptOutFilter] = useState<'all' | 'out'>('all')
   const [segments, setSegments] = useState<CustomerSegmentMeta[]>([])
   const [segmentsLoading, setSegmentsLoading] = useState(true)
   const [loading, setLoading] = useState(true)
@@ -402,9 +403,7 @@ export default function Customers() {
         customersApi.list({
           search, page, perPage: 50, segment: segmentKey,
           manualSegment: manualSegmentKey || undefined,
-          marketingOptOut: marketingOptOutFilter === 'all'
-            ? undefined
-            : marketingOptOutFilter === 'out',
+          marketingOptOut: marketingOptOutFilter === 'out' ? true : undefined,
         }),
         customersApi.metrics(),
       ])
@@ -1248,6 +1247,12 @@ export default function Customers() {
           loading={segmentsLoading}
           active={segmentKey}
           onSelect={setSegmentKey}
+          campaignExcludedActive={marketingOptOutFilter === 'out'}
+          onToggleCampaignExcluded={() => {
+            setMarketingOptOutFilter((prev) => (prev === 'out' ? 'all' : 'out'))
+            setPage(1)
+          }}
+          campaignExcludedLabel={cu.filters.marketingOut}
         />
       </div>
 
@@ -1285,22 +1290,6 @@ export default function Customers() {
                 {cu.filters.manualOnly.replace('{label}', segmentDisplayLabel(s, lang))}
               </option>
             ))}
-          </select>
-        </div>
-
-        {/* Marketing opt-out filter */}
-        <div className="relative">
-          <Filter className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-          <select
-            value={marketingOptOutFilter}
-            onChange={(e) => setMarketingOptOutFilter(e.target.value as 'all' | 'in' | 'out')}
-            dir={dir}
-            className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
-            title={cu.filters.marketingTitle}
-          >
-            <option value="all">{cu.filters.marketingAll}</option>
-            <option value="in">{cu.filters.marketingIn}</option>
-            <option value="out">{cu.filters.marketingOut}</option>
           </select>
         </div>
 
@@ -3036,9 +3025,15 @@ interface SegmentChipsProps {
   loading: boolean
   active: string
   onSelect: (key: string) => void
+  campaignExcludedActive: boolean
+  onToggleCampaignExcluded: () => void
+  campaignExcludedLabel: string
 }
 
-function SegmentChips({ cu, lang, locale, segments, loading, active, onSelect }: SegmentChipsProps) {
+function SegmentChips({
+  cu, lang, locale, segments, loading, active, onSelect,
+  campaignExcludedActive, onToggleCampaignExcluded, campaignExcludedLabel,
+}: SegmentChipsProps) {
   const [openInfo, setOpenInfo] = useState<string | null>(null)
 
   if (loading) {
@@ -3054,63 +3049,86 @@ function SegmentChips({ cu, lang, locale, segments, loading, active, onSelect }:
 
   const activeSeg = segments.find(s => s.key === active) ?? null
   const popoverSeg = openInfo ? segments.find(s => s.key === openInfo) : null
+  const segmentsBeforeUnsub = segments.filter(s => s.key !== 'unsubscribed')
+  const unsubscribedSeg = segments.find(s => s.key === 'unsubscribed')
+
+  const renderSegmentChip = (seg: CustomerSegmentMeta) => {
+    const isActive = active === seg.key
+    const segLabel = segmentDisplayLabel(seg, lang)
+    return (
+      <div key={seg.key} className="relative shrink-0">
+        <button
+          onClick={() => onSelect(seg.key)}
+          title={seg.description_ar}
+          className={
+            'inline-flex items-center gap-2 ps-3.5 pe-2 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
+            (seg.key === 'unsubscribed'
+              ? (isActive
+                  ? 'bg-red-500 text-white border-red-500 shadow-sm'
+                  : 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100 hover:border-red-300')
+              : (isActive
+                  ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300'))
+          }
+        >
+          {seg.key === 'unsubscribed' && <BellOff className="w-3 h-3 shrink-0" />}
+          <span>{segLabel}</span>
+          <span
+            className={
+              'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
+              (seg.key === 'unsubscribed'
+                ? (isActive ? 'bg-white/20 text-white' : 'bg-red-100 text-red-600')
+                : (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'))
+            }
+          >
+            {seg.customer_count.toLocaleString(locale)}
+          </span>
+          <button
+            type="button"
+            aria-label={cu.segments.segmentInfoAria.replace('{label}', segLabel)}
+            onClick={(e) => {
+              e.stopPropagation()
+              setOpenInfo(openInfo === seg.key ? null : seg.key)
+            }}
+            className={
+              'ms-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full transition-colors ' +
+              (isActive
+                ? 'text-white/80 hover:bg-white/15'
+                : (seg.key === 'unsubscribed'
+                    ? 'text-red-400 hover:bg-red-100 hover:text-red-600'
+                    : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'))
+            }
+          >
+            <Info className="w-3.5 h-3.5" />
+          </button>
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 overflow-x-auto pb-1 -mb-1">
-        {segments.map(seg => {
-          const isActive = active === seg.key
-          const segLabel = segmentDisplayLabel(seg, lang)
-          return (
-            <div key={seg.key} className="relative shrink-0">
-              <button
-                onClick={() => onSelect(seg.key)}
-                title={seg.description_ar}
-                className={
-                  'inline-flex items-center gap-2 ps-3.5 pe-2 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
-                  (seg.key === 'unsubscribed'
-                    ? (isActive
-                        ? 'bg-red-500 text-white border-red-500 shadow-sm'
-                        : 'bg-red-50 text-red-600 border-red-200 hover:bg-red-100 hover:border-red-300')
-                    : (isActive
-                        ? 'bg-brand-500 text-white border-brand-500 shadow-sm'
-                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300'))
-                }
-              >
-                {seg.key === 'unsubscribed' && <BellOff className="w-3 h-3 shrink-0" />}
-                <span>{segLabel}</span>
-                <span
-                  className={
-                    'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
-                    (seg.key === 'unsubscribed'
-                      ? (isActive ? 'bg-white/20 text-white' : 'bg-red-100 text-red-600')
-                      : (isActive ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'))
-                  }
-                >
-                  {seg.customer_count.toLocaleString(locale)}
-                </span>
-                <button
-                  type="button"
-                  aria-label={cu.segments.segmentInfoAria.replace('{label}', segLabel)}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setOpenInfo(openInfo === seg.key ? null : seg.key)
-                  }}
-                  className={
-                    'ms-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full transition-colors ' +
-                    (isActive
-                      ? 'text-white/80 hover:bg-white/15'
-                      : (seg.key === 'unsubscribed'
-                          ? 'text-red-400 hover:bg-red-100 hover:text-red-600'
-                          : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'))
-                  }
-                >
-                  <Info className="w-3.5 h-3.5" />
-                </button>
-              </button>
-            </div>
-          )
-        })}
+        {segmentsBeforeUnsub.map(renderSegmentChip)}
+
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            onClick={onToggleCampaignExcluded}
+            title={cu.segments.campaignExcludedNoticeBody}
+            className={
+              'inline-flex items-center gap-2 ps-3.5 pe-3 py-1.5 rounded-full text-xs font-medium transition-colors border ' +
+              (campaignExcludedActive
+                ? 'bg-violet-600 text-white border-violet-600 shadow-sm'
+                : 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100 hover:border-violet-300')
+            }
+          >
+            <Megaphone className="w-3 h-3 shrink-0" />
+            <span>{campaignExcludedLabel}</span>
+          </button>
+        </div>
+
+        {unsubscribedSeg && renderSegmentChip(unsubscribedSeg)}
       </div>
 
       {popoverSeg && (
@@ -3158,6 +3176,16 @@ function SegmentChips({ cu, lang, locale, segments, loading, active, onSelect }:
             <p className="text-slate-500 mt-1">
               {cu.segments.unsubscribedHint}
             </p>
+          </div>
+        </div>
+      )}
+
+      {campaignExcludedActive && (
+        <div className="flex items-start gap-2 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2.5 text-xs text-violet-800">
+          <Megaphone className="w-4 h-4 mt-0.5 shrink-0 text-violet-500" />
+          <div className="space-y-0.5">
+            <p className="font-semibold">{cu.segments.campaignExcludedNoticeTitle}</p>
+            <p className="text-violet-700">{cu.segments.campaignExcludedNoticeBody}</p>
           </div>
         </div>
       )}
