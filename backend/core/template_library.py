@@ -255,8 +255,6 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
     },
 
-    },
-
     # ── 5b) WhatsApp abandoned draft order reminder (PR-5) ───────────────
     "abandoned_order_draft": {
         "automation_type": "abandoned_order_draft",
