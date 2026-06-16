@@ -10,9 +10,10 @@ the storefront snippet, and the customer-intelligence pipeline write
 signal that says "this cart has now been abandoned for 6 hours" or "this
 COD order has not been confirmed yet". Those need a periodic scanner.
 
-This module provides five such scanners:
+This module provides six such scanners:
 
   • `scan_unpaid_orders`              → recovery engine (online payment)
+  • `scan_abandoned_order_drafts`    → recovery engine (WhatsApp draft orders)
   • `scan_abandoned_cart_followups`   → recovery engine (cart stages 2 + 3)
   • `scan_cod_confirmations`          → recovery engine (COD reminder + cancel)
   • `scan_predictive_reorders`        → growth engine
@@ -30,9 +31,10 @@ Conflict prevention between sweepers
 ────────────────────────────────────
 Each sweeper operates on a disjoint set of records:
 
-  • `scan_unpaid_orders`             — Order.status in {pending,
-    payment_pending, awaiting_payment, draft, new}. NEVER includes
-    `pending_confirmation` (that is the COD half).
+  • `scan_unpaid_orders`             — platform pending-payment orders (not Nahla WA).
+  • `scan_abandoned_order_drafts`    — Nahla WhatsApp draft / address / payment
+    reminders only (`created_via=nahla_order_bridge`). Never touches Salla/Zid
+    abandoned carts (`is_abandoned=True` or `cart-*` external ids).
   • `scan_cod_confirmations`         — Order.status == "pending_confirmation"
     only. NEVER touches the unpaid bucket.
   • `scan_abandoned_cart_followups`  — re-emits AutomationEvents on the
@@ -52,6 +54,8 @@ Idempotency strategy
 Each emitter uses the cheapest persistent marker for its domain:
 
   • Unpaid orders mark per-step progress in `Order.extra_metadata.unpaid_reminders`.
+  • WhatsApp draft reminders mark per-kind progress in
+    `Order.extra_metadata.wa_abandoned_draft_reminders`.
   • Predictive reorder uses the existing `PredictiveReorderEstimate.notified`
     boolean.
   • Calendar / salary use a per-tenant log inside
@@ -175,6 +179,14 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
             )
             continue
 
+        from core.wa_abandoned_order_draft import is_nahla_wa_order  # noqa: PLC0415
+        if is_nahla_wa_order(order):
+            logger.debug(
+                "[Emitter:unpaid] tenant=%s order=%s skipped — Nahla WA order (draft sweeper owns reminders)",
+                tenant_id, order.id,
+            )
+            continue
+
         try:
             from core.wa_order_lifecycle import is_wa_automation_payment_eligible  # noqa: PLC0415
 
@@ -273,6 +285,142 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
         db.commit()
         logger.info(
             "[Emitter] tenant=%s unpaid_orders emitted=%d", tenant_id, emitted,
+        )
+    return emitted
+
+
+# ── WhatsApp abandoned draft orders (PR-5) ───────────────────────────────────
+
+def scan_abandoned_order_drafts(
+    db: Session, tenant_id: int, *, now: Optional[datetime] = None,
+) -> int:
+    """
+    Emit ``WA_ORDER_DRAFT_REMINDER_DUE`` for stale Nahla WhatsApp draft orders.
+
+    Reminder kinds (one emit per kind per order, after ``delay_minutes``):
+      • ``complete_order`` — ``draft`` with line items
+      • ``address``        — ``pending_customer_info`` without accepted address
+      • ``payment``        — ``pending_payment`` with accepted address
+
+    Never emits for ``payment_submitted``, ``paid``, or terminal statuses.
+    Sends flow through automation engine → ``send_governor`` (never direct).
+    """
+    from models import Order, SmartAutomation  # noqa: PLC0415
+    from core.automation_send_guard import should_block_automation_for_conversation  # noqa: PLC0415
+    from core.wa_abandoned_order_draft import (  # noqa: PLC0415
+        is_nahla_wa_order,
+        reminder_already_sent,
+        resolve_wa_abandoned_draft_reminder,
+        stamp_reminder_emitted,
+    )
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+    autos: List[Any] = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "abandoned_order_draft",
+            SmartAutomation.enabled.is_(True),
+        )
+        .all()
+    )
+    if not autos:
+        return 0
+
+    auto = autos[0]
+    config: Dict[str, Any] = auto.config or {}
+    delay_minutes = int(config.get("delay_minutes") or 120)
+    if delay_minutes < 1:
+        delay_minutes = 120
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+            Order.is_abandoned.isnot(True),
+            Order.source == "whatsapp",
+        )
+        .all()
+    )
+    if not orders:
+        return 0
+
+    emitted = 0
+    for order in orders:
+        if not is_nahla_wa_order(order):
+            continue
+
+        plan = resolve_wa_abandoned_draft_reminder(order)
+        if plan is None:
+            continue
+        if reminder_already_sent(order, reminder_kind=plan.reminder_kind):
+            continue
+
+        anchor = _read_order_created_at(order)
+        if anchor is None:
+            continue
+        if anchor.tzinfo is not None:
+            anchor = anchor.astimezone(timezone.utc).replace(tzinfo=None)
+        if (now - anchor) < timedelta(minutes=delay_minutes):
+            continue
+
+        customer = _resolve_order_customer(db, tenant_id, order)
+        if customer is None:
+            continue
+
+        phone = str(getattr(customer, "phone", "") or "")
+        block = should_block_automation_for_conversation(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=phone,
+            blocked_path="automation_emitters.abandoned_order_draft",
+        )
+        if block.block:
+            logger.info(
+                "[Emitter:wa_draft] tenant=%s order=%s skipped — supervision=%s",
+                tenant_id, order.id, block.reason,
+            )
+            continue
+
+        _store_meta: Dict[str, Any] = {}
+        try:
+            from core.settings_utils import get_or_create_settings, merge_defaults, DEFAULT_STORE  # noqa: PLC0415
+            _st = merge_defaults(
+                get_or_create_settings(db, tenant_id).store_settings, DEFAULT_STORE
+            )
+            _store_meta = {"store_name": _st.get("store_name") or ""}
+        except Exception:  # noqa: silent-ok — store_name optional for template fallback
+            pass
+
+        payload: Dict[str, Any] = {
+            "source":                "automation_emitters",
+            "order_id":              order.id,
+            "order_internal_id":     order.id,
+            "order_number":          order.external_order_number or order.external_id,
+            "external_order_number": order.external_order_number,
+            "reminder_kind":         plan.reminder_kind,
+            "order_status":          plan.order_status,
+            "total":                 str(order.total or ""),
+            **_store_meta,
+        }
+        emit_automation_event(
+            db,
+            tenant_id=tenant_id,
+            event_type=AutomationTrigger.WA_ORDER_DRAFT_REMINDER_DUE.value,
+            customer_id=customer.id,
+            payload=payload,
+            commit=False,
+        )
+        order.extra_metadata = stamp_reminder_emitted(
+            order, reminder_kind=plan.reminder_kind, now=now.replace(tzinfo=timezone.utc),
+        )
+        emitted += 1
+
+    if emitted:
+        db.commit()
+        logger.info(
+            "[Emitter] tenant=%s abandoned_order_drafts emitted=%d", tenant_id, emitted,
         )
     return emitted
 
@@ -678,7 +826,7 @@ def scan_cod_confirmations(
                     get_or_create_settings(db, tenant_id).store_settings, DEFAULT_STORE
                 )
                 _cod_store_meta = {"store_name": _cod_st.get("store_name") or ""}
-            except Exception:
+            except Exception:  # noqa: silent-ok — store_name optional for template fallback
                 pass
 
             payload: Dict[str, Any] = {
@@ -1163,6 +1311,7 @@ async def run_automation_emitters_scheduler() -> None:
                 for tenant in tenants:
                     try:
                         scan_unpaid_orders(db, tenant.id)
+                        scan_abandoned_order_drafts(db, tenant.id)
                         scan_abandoned_cart_followups(db, tenant.id)
                         scan_cod_confirmations(db, tenant.id)
                         scan_predictive_reorders(db, tenant.id)

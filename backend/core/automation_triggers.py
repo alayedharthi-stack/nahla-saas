@@ -58,6 +58,8 @@ class AutomationTrigger(str, Enum):
     # — the two sweepers operate on disjoint status sets and never
     # collide on the same order.
     ORDER_COD_PENDING      = "order_cod_pending"
+    # Recovery engine: stale Nahla WhatsApp draft / address / payment nudge.
+    WA_ORDER_DRAFT_REMINDER_DUE = "wa_order_draft_reminder_due"
     # Order lifecycle WhatsApp notices (confirmation, shipping, delivery, COD…).
     # No emitter fans into this trigger yet — the row exists for dashboard + readiness;
     # real sends use events like ``order_shipped`` / dedicated flows. Kept stable for UI/sync.
@@ -78,6 +80,7 @@ AUTOMATION_TYPE_TO_TRIGGER: Dict[str, AutomationTrigger] = {
     "seasonal_offer":        AutomationTrigger.SEASONAL_EVENT_DUE,
     "salary_payday_offer":   AutomationTrigger.SALARY_PAYDAY_DUE,
     "cod_confirmation":      AutomationTrigger.ORDER_COD_PENDING,
+    "abandoned_order_draft": AutomationTrigger.WA_ORDER_DRAFT_REMINDER_DUE,
     "order_notifications":   AutomationTrigger.ORDER_NOTIFICATIONS,
 }
 

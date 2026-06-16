@@ -255,6 +255,49 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
     },
 
+    # ── 5b) WhatsApp abandoned draft order reminder (PR-5) ───────────────
+    "abandoned_order_draft": {
+        "automation_type": "abandoned_order_draft",
+        "trigger_event":   "wa_order_draft_reminder_due",
+        "category":        "UTILITY",
+        "languages": {
+            "ar": {
+                "template_name": "wa_abandoned_order_draft_ar",
+                "body_slots":    ["customer_name", "store_name"],
+                "slots":         ["customer_name", "store_name"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "مرحباً {{1}} 👋\n\n"
+                            "لديك طلب مبدئي في {{2}} لم يكتمل بعد.\n"
+                            "أكمل الطلب من المحادثة وسنساعدك خطوة بخطوة 🌟"
+                        ),
+                        "example": {"body_text": [["أحمد", "متجر الأناقة"]]},
+                    },
+                    {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
+                ],
+            },
+            "en": {
+                "template_name": "wa_abandoned_order_draft_en",
+                "body_slots":    ["customer_name", "store_name"],
+                "slots":         ["customer_name", "store_name"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "You have an incomplete draft order at {{2}}.\n"
+                            "Reply here to continue — we'll help you step by step 🌟"
+                        ),
+                        "example": {"body_text": [["Ahmed", "Elegance Store"]]},
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                ],
+            },
+        },
+    },
+
     # ── 5) Unpaid order reminder (recovery engine) ──────────────────────
     #
     # Triggered by `automation_emitters.scan_unpaid_orders` for orders that
