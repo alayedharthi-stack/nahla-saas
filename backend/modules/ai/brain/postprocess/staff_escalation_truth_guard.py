@@ -188,7 +188,11 @@ def apply_staff_escalation_truth_guard(
                 resolve_order_tracking_guard_reply,
             )
 
-            if is_order_tracking_follow_up(inbound_text):
+            if is_order_tracking_follow_up(
+                inbound_text,
+                state=state,
+                history=history,
+            ):
                 tracking_reply = resolve_order_tracking_guard_reply(
                     state=state,
                     history=history,

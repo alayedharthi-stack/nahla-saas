@@ -756,7 +756,12 @@ class DefaultDecisionEngine:
             )
 
             if (
-                is_order_tracking_follow_up(ctx.message or "")
+                is_order_tracking_follow_up(
+                    ctx.message or "",
+                    state=getattr(ctx, "state", None),
+                    history=getattr(ctx, "history", None),
+                    commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                )
                 and intent.name != INTENT_TRACK_ORDER
             ):
                 logger.info(

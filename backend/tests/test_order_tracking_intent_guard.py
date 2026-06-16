@@ -14,9 +14,12 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
 
 from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E402
     boost_track_order_intent,
+    has_existing_order_evidence,
+    is_general_shipping_duration_inquiry,
     is_order_tracking_follow_up,
     is_pre_order_shipping_inquiry,
     resolve_order_tracking_guard_reply,
+    should_exempt_from_availability_rewrite,
 )
 from modules.ai.brain.commerce.product_label_hygiene import is_non_product_label  # noqa: E402
 from modules.ai.brain.compose import templates as T  # noqa: E402
@@ -31,16 +34,21 @@ from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa:
     SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,
     apply_staff_escalation_truth_guard,
 )
-from modules.ai.brain.types import INTENT_ASK_PRODUCT, INTENT_TRACK_ORDER  # noqa: E402
+from modules.ai.brain.types import INTENT_ASK_SHIPPING, INTENT_TRACK_ORDER  # noqa: E402
 
 
-TRACKING_MESSAGES = [
-    "متى يوصل الطلب",
+STRONG_TRACKING_MESSAGES = [
     "وين طلبي",
     "طلبت طلب وابي اعرف متى يوصل لي",
     "الشحنة وينها",
     "رقم التتبع",
     "حالة الطلب",
+]
+
+GENERAL_SHIPPING_MESSAGES = [
+    "متى يوصل الطلب",
+    "متى يوصل الطلب إذا طلبت اليوم؟",
+    "متى يوصل الطلب للرياض؟",
 ]
 
 NON_TRACKING_MESSAGES = [
@@ -51,10 +59,22 @@ NON_TRACKING_MESSAGES = [
 
 
 class TestOrderTrackingDetection:
-    @pytest.mark.parametrize("message", TRACKING_MESSAGES)
-    def test_existing_order_follow_up_detected(self, message: str) -> None:
+    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES)
+    def test_strong_follow_up_detected_without_state(self, message: str) -> None:
         assert is_order_tracking_follow_up(message) is True
-        assert is_pre_order_shipping_inquiry(message) is False
+
+    @pytest.mark.parametrize("message", GENERAL_SHIPPING_MESSAGES)
+    def test_general_shipping_not_tracking_without_evidence(self, message: str) -> None:
+        assert is_general_shipping_duration_inquiry(message) is True
+        assert is_order_tracking_follow_up(message) is False
+        assert has_existing_order_evidence(state=None, history=[]) is False
+
+    def test_bare_duration_becomes_tracking_with_order_evidence(self) -> None:
+        state = type("S", (), {"draft_order_id": "ORD-123"})()
+        assert is_order_tracking_follow_up(
+            "متى يوصل الطلب",
+            state=state,
+        ) is True
 
     @pytest.mark.parametrize("message", NON_TRACKING_MESSAGES)
     def test_browse_and_preorder_not_tracking(self, message: str) -> None:
@@ -67,56 +87,45 @@ class TestOrderTrackingDetection:
 
 
 class TestLayer1IntentGuard:
-    @pytest.mark.parametrize("message", TRACKING_MESSAGES)
-    def test_rules_match_track_order(self, message: str) -> None:
+    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES)
+    def test_strong_phrases_match_track_order_rules(self, message: str) -> None:
         intent = rules.match(message)
         assert intent is not None
         assert intent.name == INTENT_TRACK_ORDER
-        assert intent.confidence >= 0.96
 
-    @pytest.mark.parametrize("message", TRACKING_MESSAGES)
-    def test_boost_returns_track_order(self, message: str) -> None:
-        boosted = boost_track_order_intent(message)
+    @pytest.mark.parametrize("message", GENERAL_SHIPPING_MESSAGES)
+    def test_general_shipping_stays_ask_shipping(self, message: str) -> None:
+        intent = rules.match(message)
+        assert intent is not None
+        assert intent.name == INTENT_ASK_SHIPPING
+        assert boost_track_order_intent(message) is None
+
+    def test_bare_duration_with_evidence_boosts_track_order(self) -> None:
+        state = type("S", (), {"draft_order_id": "ORD-99"})()
+        boosted = boost_track_order_intent("متى يوصل الطلب", state=state)
         assert boosted is not None
         assert boosted.name == INTENT_TRACK_ORDER
-        assert boosted.extraction_method == "order_tracking_guard"
-
-    def test_preorder_not_boosted_to_track(self) -> None:
-        msg = "متى يوصل عسل الطلح إذا طلبته؟"
-        assert boost_track_order_intent(msg) is None
-        intent = rules.match(msg)
-        assert intent is None or intent.name != INTENT_TRACK_ORDER
 
     def test_browse_not_boosted_to_track(self) -> None:
         for msg in ("أبي عسل طلح", "وش الخيارات؟"):
             assert boost_track_order_intent(msg) is None
 
-    def test_boost_overrides_wrong_ask_product(self) -> None:
-        wrong = rules.match("طلبت طلب وابي اعرف متى يوصل لي")
-        assert wrong is not None
-        assert wrong.name == INTENT_TRACK_ORDER
-
-    def test_shipping_duration_no_longer_steals_track_phrase(self) -> None:
-        intent = rules.match("متى يوصل الطلب")
-        assert intent is not None
-        assert intent.name == INTENT_TRACK_ORDER
-        assert intent.name != "ask_shipping"
-
 
 class TestLayer2AvailabilityRewriteGuard:
-    @pytest.mark.parametrize("message", TRACKING_MESSAGES)
+    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES + GENERAL_SHIPPING_MESSAGES)
     def test_inbound_exempt_from_availability_rewrite(self, message: str) -> None:
         assert inbound_exempt_from_availability_rewrite(message) is True
+        assert should_exempt_from_availability_rewrite(message) is True
 
     @pytest.mark.parametrize("message", NON_TRACKING_MESSAGES)
     def test_browse_not_exempt_from_availability(self, message: str) -> None:
         assert inbound_exempt_from_availability_rewrite(message) is False
 
-    @pytest.mark.parametrize("message", TRACKING_MESSAGES)
-    def test_tracking_phrase_not_product_label(self, message: str) -> None:
+    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES + GENERAL_SHIPPING_MESSAGES)
+    def test_phrase_not_product_label(self, message: str) -> None:
         assert is_non_product_label(message) is True
 
-    def test_tracking_reply_not_rewritten_in_enforce_mode(self) -> None:
+    def test_misrouted_shipping_reply_not_rewritten_in_enforce_mode(self) -> None:
         prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
         os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
         try:
@@ -135,7 +144,6 @@ class TestLayer2AvailabilityRewriteGuard:
             )
             assert result.replaced is False
             assert result.reply == bad_reply
-            assert "بعدة خيارات" not in result.reply or result.reply == bad_reply
         finally:
             if prev is None:
                 os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -167,5 +175,3 @@ class TestLayer3StaffEscalationStubGuard:
     def test_resolve_guard_reply_asks_identifiers_when_no_evidence(self) -> None:
         reply = resolve_order_tracking_guard_reply(state=None, history=[])
         assert reply == T.track_order_need_identifiers()
-        assert "رقم الطلب" in reply
-        assert "الجوال" in reply

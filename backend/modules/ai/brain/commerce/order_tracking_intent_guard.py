@@ -53,13 +53,23 @@ _PURE_BROWSE_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# General shipping-duration asks — stay ask_shipping unless order evidence exists.
+_GENERAL_SHIPPING_DURATION_RE = re.compile(
+    r"(?:"
+    r"^متي\s+(?:يوصل|توصل|يجي)\s+الطلب(?:\s*[\?؟!.]*)?$|"
+    r"^متي\s+(?:يوصل|توصل|يجي)\s+الطلب(?:يه)?(?:\s*[\?؟!.]*)?$|"
+    r"متي\s+(?:يوصل|توصل|يجي)\s+الطلب(?:يه)?\s+(?:"
+    r"اذا|إذا|لو|عاده|عادة|غالبا|غالباً|عاده|"
+    r"لل(?:رياض|جده|جدة|دمام|طائف|مدين|مكه|احساء)|"
+    r"بعد\s+(?:ال)?(?:طلب|طلبيه)|اليوم|الحين|الان|الآن"
+    r")"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Strong existing-order follow-up markers in the message itself.
 _EXPLICIT_TRACKING_PHRASES_RAW = (
-    "متى يوصل الطلب",
-    "متى توصل الطلب",
-    "متى يجي الطلب",
-    "متى توصل الطلبية",
     "وين طلبي",
-    "وين الطلب",
     "فين طلبي",
     "حالة الطلب",
     "رقم التتبع",
@@ -75,10 +85,20 @@ _EXPLICIT_TRACKING_PHRASES_RAW = (
 )
 _EXPLICIT_TRACKING_PHRASES = tuple(_norm_ar(p) for p in _EXPLICIT_TRACKING_PHRASES_RAW)
 
+_EXISTING_ORDER_MESSAGE_RE = re.compile(
+    r"(?:"
+    r"طلبي|طلبيتي|شحنتي|"
+    r"عندي\s+طلب|"
+    r"طلبت\s+(?:قبل|امس|البارح|الاحد|يوم|اسبوع|اسبوعين)|"
+    r"سويت\s*طلب|عملت\s*طلب|قدمت\s*طلب"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _ORDER_ANCHOR_RE = re.compile(
     r"(?:"
-    r"طلبي|طلبيتي|شحنتي|الشحنه|الشحنة|الطلب(?:يه)?|رقم\s*الطلب|"
-    r"رقم\s*التتبع|رابط\s*التتبع|التتبع|tracking"
+    r"طلبي|طلبيتي|شحنتي|الشحنه|الشحنة|"
+    r"رقم\s*الطلب|رقم\s*التتبع|رابط\s*التتبع|التتبع|tracking"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -124,6 +144,57 @@ _CATALOG_PRODUCT_HINT_RE = re.compile(
 )
 
 
+def is_general_shipping_duration_inquiry(message: str) -> bool:
+    """Policy shipping timing — e.g. bare «متى يوصل الطلب» without order context."""
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    return bool(_GENERAL_SHIPPING_DURATION_RE.search(norm))
+
+
+def has_existing_order_evidence(
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """True when persisted/session evidence shows the customer has an active order."""
+    try:
+        from core.order_creation_evidence import (  # noqa: PLC0415
+            recent_outbound_claims_order_creating,
+            resolve_order_creation_evidence,
+        )
+
+        evidence = resolve_order_creation_evidence(state=state)
+        if evidence.can_claim_created() or evidence.can_claim_creating():
+            return True
+        if recent_outbound_claims_order_creating(history):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence scan is best-effort
+        pass
+
+    if state is not None:
+        if str(getattr(state, "draft_order_id", "") or "").strip():
+            return True
+        op = getattr(state, "order_prep", None)
+        if op is not None:
+            if str(getattr(op, "salla_order_id", "") or "").strip():
+                return True
+            if str(getattr(op, "order_status", "") or "").strip():
+                return True
+            if getattr(op, "payment_receipt_received", False):
+                return True
+
+    bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
+    ctx_obj = bundle.get("active_order_context") or {}
+    if isinstance(ctx_obj, dict) and any(
+        str(ctx_obj.get(k) or "").strip()
+        for k in ("order_id", "salla_order_id", "reference", "tracking_number")
+    ):
+        return True
+    return False
+
+
 def is_pre_order_shipping_inquiry(message: str) -> bool:
     """Hypothetical shipping timing — e.g. «متى يوصل عسل الطلح إذا طلبته؟»."""
     norm = _norm_ar(message)
@@ -141,10 +212,16 @@ def is_pre_order_shipping_inquiry(message: str) -> bool:
     return False
 
 
-def is_order_tracking_follow_up(message: str) -> bool:
+def is_order_tracking_follow_up(
+    message: str,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
     """
     True when the customer is asking about an existing order/shipment,
-    not browsing catalog or asking pre-order shipping policy.
+    not browsing catalog or asking general shipping policy.
     """
     raw = (message or "").strip()
     if not raw:
@@ -154,7 +231,19 @@ def is_order_tracking_follow_up(message: str) -> bool:
     norm = _norm_ar(raw)
     if _PURE_BROWSE_RE.search(norm):
         return False
+
+    order_evidence = has_existing_order_evidence(
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    )
+
+    if is_general_shipping_duration_inquiry(raw):
+        return order_evidence
+
     if any(phrase in norm for phrase in _EXPLICIT_TRACKING_PHRASES):
+        return True
+    if _EXISTING_ORDER_MESSAGE_RE.search(norm):
         return True
     if _PAST_ORDER_TRACKING_RE.search(norm):
         return True
@@ -165,12 +254,42 @@ def is_order_tracking_follow_up(message: str) -> bool:
     return False
 
 
+def should_exempt_from_availability_rewrite(
+    message: str,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """
+    Block availability rewrites for order follow-ups and general shipping
+    duration asks (misrouted catalog path protection).
+    """
+    if is_order_tracking_follow_up(
+        message,
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        return True
+    return is_general_shipping_duration_inquiry(message)
+
+
 def boost_track_order_intent(
     message: str,
     rule_intent: Optional[Intent] = None,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
 ) -> Optional[Intent]:
     """Return a high-confidence track_order intent when guard fires."""
-    if not is_order_tracking_follow_up(message):
+    if not is_order_tracking_follow_up(
+        message,
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
         return None
     if rule_intent and rule_intent.name == INTENT_TRACK_ORDER:
         return rule_intent
@@ -203,7 +322,10 @@ def resolve_order_tracking_guard_reply(
 
 __all__ = [
     "boost_track_order_intent",
+    "has_existing_order_evidence",
+    "is_general_shipping_duration_inquiry",
     "is_order_tracking_follow_up",
     "is_pre_order_shipping_inquiry",
     "resolve_order_tracking_guard_reply",
+    "should_exempt_from_availability_rewrite",
 ]

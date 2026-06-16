@@ -61,7 +61,12 @@ class DefaultIntentClassifier:
             from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
                 boost_track_order_intent,
             )
-            _tracking_boost = boost_track_order_intent(message, rule_intent)
+            _tracking_boost = boost_track_order_intent(
+                message,
+                rule_intent,
+                state=state,
+                history=history,
+            )
             if _tracking_boost is not None:
                 logger.info(
                     "[Classifier] order_tracking_guard → track_order | preview=%r",
@@ -181,7 +186,12 @@ class DefaultIntentClassifier:
             from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
                 boost_track_order_intent,
             )
-            _tracking_boost = boost_track_order_intent(message, rule_intent)
+            _tracking_boost = boost_track_order_intent(
+                message,
+                rule_intent,
+                state=state,
+                history=history,
+            )
             if _tracking_boost is not None:
                 resolved_name = _tracking_boost.name
                 resolved_conf = max(resolved_conf, _tracking_boost.confidence)

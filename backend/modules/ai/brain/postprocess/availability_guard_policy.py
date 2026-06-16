@@ -75,10 +75,10 @@ def inbound_exempt_from_availability_rewrite(message: str) -> bool:
         return True
     try:
         from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
-            is_order_tracking_follow_up,
+            should_exempt_from_availability_rewrite,
         )
 
-        if is_order_tracking_follow_up(raw):
+        if should_exempt_from_availability_rewrite(raw):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at guard boundary
         pass
