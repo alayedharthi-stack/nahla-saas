@@ -782,6 +782,25 @@ class DefaultDecisionEngine:
                 _otg_exc,
             )
 
+        # ── 0a.565 Identity / collaboration guard (Jun 2026) ─────────────
+        # Self-intro or collaboration inbounds must not assume purchase intent.
+        try:
+            from ..commerce.identity_collaboration_guard import (  # noqa: PLC0415
+                try_identity_collaboration_decision,
+            )
+
+            _id_collab_dec = try_identity_collaboration_decision(
+                ctx, route="decision_engine",
+            )
+            if _id_collab_dec is not None:
+                return _id_collab_dec
+        except Exception as _id_collab_exc:  # noqa: BLE001  # noqa: silent-ok — guard must not block decide
+            logger.debug(
+                "[IDENTITY_COLLABORATION_GUARD] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _id_collab_exc,
+            )
+
         # ── 0a.57 Absence of positive commerce signal (Jun 2026) ─────────
         # When classifiers miss and no commerce/fulfillment signal is
         # present, route to generative non-sales compose — not the default

@@ -71,6 +71,17 @@ _GENERIC_STAFF_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_ROLE_STAFF_RE = re.compile(
+    r"(?:"
+    r"(?:ابي|ابغى|أبي|أبغى|بدي|اريد|أريد)\s*"
+    r"(?:اكلم|اتكلم|أكلم|أتكلم|اتواصل|أتواصل)\s*(?:مع\s+)?(?:ال)?"
+    r"(?:بائع(?:\s*المعرض)?|موظف|خدمة\s*العملاء|دعم(?:\s*العملاء)?|مسؤول|مدير)"
+    r"|(?:اكلم|أكلم|اتواصل|أتواصل|اتكلم|أتكلم)\s+(?:مع\s+)?(?:ال)?"
+    r"(?:بائع(?:\s*المعرض)?|موظف|خدمة\s*العملاء|دعم(?:\s*العملاء)?|مسؤول|مدير)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 def _norm(text: str) -> str:
     if not text:
@@ -313,6 +324,17 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
     if not raw:
         return StaffContactRequest(kind="none")
 
+    from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
+        is_generic_store_contact_phrase,
+        is_thanks_with_contact_phrase,
+    )
+
+    if is_thanks_with_contact_phrase(raw):
+        return StaffContactRequest(kind="none")
+
+    if is_generic_store_contact_phrase(raw):
+        return StaffContactRequest(kind="general_channel")
+
     try:
         from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
             has_explicit_contact_intent,
@@ -357,13 +379,22 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
     if _GENERIC_STAFF_RE.search(norm):
         return StaffContactRequest(kind="generic_staff")
 
+    if _ROLE_STAFF_RE.search(norm):
+        return StaffContactRequest(kind="generic_staff")
+
+    from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
+        extract_staff_name_candidate,
+    )
+
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
         has_explicit_contact_intent,
     )
 
     if _CONTACT_ASK_RE.search(norm):
         if has_explicit_contact_intent(raw):
-            return StaffContactRequest(kind="named")
+            if extract_staff_name_candidate(raw):
+                return StaffContactRequest(kind="named")
+            return StaffContactRequest(kind="none")
         return StaffContactRequest(kind="none")
 
     # Single-token bare configured name only ("هشام") — not generic phrases.
@@ -390,7 +421,7 @@ def resolve_staff_contact(
 ) -> StaffContactResolution:
     """Resolve configured contact evidence for a classified request."""
     kind = request.kind
-    if kind in {"none", "arrival", "not_responding"}:
+    if kind in {"none", "arrival", "not_responding", "general_channel"}:
         return StaffContactResolution(found=False, reason=f"defer_{kind}")
 
     if kind == "customer_service":
@@ -409,7 +440,12 @@ def resolve_staff_contact(
         rec = registry.match_record_in_message(message)
         if rec:
             return StaffContactResolution(found=True, record=rec, reason="named_match")
-        if _CONTACT_ASK_RE.search(_norm(message)):
+        from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
+            extract_staff_name_candidate,
+        )
+
+        candidate = extract_staff_name_candidate(message)
+        if candidate and _CONTACT_ASK_RE.search(_norm(message)):
             return StaffContactResolution(
                 found=False,
                 reason="name_not_configured",

@@ -76,6 +76,22 @@ def evaluate_staff_contact_policy(
     if request.kind in {"none", "arrival", "not_responding"}:
         return None
 
+    if request.kind == "general_channel":
+        from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
+            general_contact_reply_for_message,
+        )
+
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s kind=general_channel deliver=false",
+            tenant_id,
+        )
+        return StaffContactPolicyDecision(
+            reply_text=general_contact_reply_for_message(message or ""),
+            deliver_contact=False,
+            reason="generic_store_contact",
+            request_kind="general_channel",
+        )
+
     registry = load_staff_contact_registry(
         db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
     )
@@ -138,6 +154,8 @@ def evaluate_staff_contact_policy(
         "[STAFF_CONTACT_POLICY] tenant=%s kind=%s deliver=false reason=%s",
         tenant_id, request.kind, resolution.reason,
     )
+    if resolution.reason in {"no_named_intent", "name_not_configured"} and not resolution.unknown_name:
+        return None
     if should_defer_contact_policies_for_commerce(message or ""):
         return None
     return StaffContactPolicyDecision(
