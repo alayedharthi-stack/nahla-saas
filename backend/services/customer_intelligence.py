@@ -734,11 +734,15 @@ class CustomerIntelligenceService:
                     force_merchant=(source or "") in {
                         "merchant_correction",
                         "manual",
+                        "manual_admin",
                     },
                 )
 
             if clean_email:
                 customer.email = clean_email
+            from core.customer_identity_resolver import merge_identity_metadata  # noqa: PLC0415
+
+            metadata = merge_identity_metadata(metadata, customer)
             customer.extra_metadata = metadata or None
             if external_id and not customer.salla_customer_id:
                 customer.salla_customer_id = str(external_id).strip()
