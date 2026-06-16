@@ -15,7 +15,7 @@ Behaviour summary
     in the KB, the receipt handler must verify the OCR's IBAN /
     beneficiary against those accounts BEFORE flipping
     ``payment_receipt_received=True`` /
-    ``order_status='under_review'``.
+    ``order_status='payment_submitted'``.
 
   * On a mismatch, the handler must return ``None`` so the brain
     composes its own natural reply (no hardcoded copy).
@@ -117,7 +117,7 @@ def test_no_tenant_accounts_falls_back_to_legacy(monkeypatch):
     )
     assert result is not None
     assert result["state_patch"]["payment_receipt_received"] is True
-    assert result["state_patch"]["order_status"] == "under_review"
+    assert result["state_patch"]["order_status"] == "payment_submitted"
 
 
 # ── 2. Matching IBAN → flip allowed ────────────────────────────────
