@@ -263,7 +263,12 @@ def _label_from_inbound_availability_ask(inbound_text: str) -> str:
     cleaned = _INBOUND_AVAIL_SUFFIX_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip("؟? ")
     cleaned = normalize_label_text(cleaned)
-    if 2 <= len(cleaned) <= 40 and not is_non_product_label(cleaned):
+    word_count = len([w for w in cleaned.split() if w])
+    if (
+        2 <= len(cleaned) <= 40
+        and word_count <= 5
+        and not is_non_product_label(cleaned)
+    ):
         return cleaned
     return ""
 
