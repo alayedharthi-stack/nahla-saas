@@ -930,33 +930,25 @@ def maybe_handle_payment_evidence_inbound(
             filename=str(md.get("filename") or ""),
             legacy_pe_status=str(pe_status or ""),
         )
-        if _resolver.payment_state == PAYMENT_REVIEW_REQUIRED and _resolver.reply_ar:
+        if _resolver.payment_state == PAYMENT_REVIEW_REQUIRED:
+            # Resolution metadata only — never treat mismatch as an
+            # active-order promotion or payment-state flip.
             logger.info(
                 "[PAYMENT_EVIDENCE] resolver=review_required tenant=%s "
-                "phone=*%s reason=%s",
+                "phone=*%s reason=%s (no state flip)",
                 tenant_id, (phone[-4:] if phone else ""),
                 _resolver.reason,
             )
-            receipt_meta = {
-                "kind": md.get("pdf_kind") or md.get("image_kind"),
-                "received_at": datetime.now(timezone.utc).isoformat(),
-                **_receipt_text_fields(md),
-                **_resolver.to_metadata_patch(),
-            }
-            return {
-                "reply_text":  _resolver.reply_ar,
-                "summary":     summary,
-                "state_patch": _compose_payment_state_patch(
-                    db=db,
-                    tenant_id=tenant_id,
-                    phone=phone,
-                    conversation=_conv,
-                    summary=summary,
-                    payment_state=_resolver.payment_state,
-                    receipt_metadata=receipt_meta,
-                ),
-            }
-        if _resolver.payment_state in (
+            try:
+                from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+                    apply_resolution_to_metadata,
+                )
+                apply_resolution_to_metadata(md, _resolver)
+            except Exception:
+                pass
+            # Fall through to tenant-account verification / active-order
+            # promotion gates — mismatch must return None there.
+        elif _resolver.payment_state in (
             PAYMENT_RECEIVED,
             PAYMENT_EVIDENCE_RECEIVED,
         ):
