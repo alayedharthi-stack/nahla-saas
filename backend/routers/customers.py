@@ -324,7 +324,14 @@ def _serialize_customer(
     manual_segments: Optional[List[str]] = None,
     segment_sources: Optional[Dict[str, Dict[str, bool]]] = None,
 ) -> Dict[str, Any]:
+    from core.customer_identity_resolver import (  # noqa: PLC0415
+        display_name_for_customer,
+        read_customer_identity,
+    )
+
     meta = cust.extra_metadata or {}
+    identity = read_customer_identity(cust)
+    display_name = display_name_for_customer(cust, phone_fallback=cust.phone or "")
     source, source_label = _resolve_customer_source(cust)
     is_unsubscribed:        bool = bool(meta.get("is_unsubscribed"))
     pending_unsubscribe:    bool = bool(meta.get("pending_unsubscribe"))
@@ -346,6 +353,10 @@ def _serialize_customer(
     result: Dict[str, Any] = {
         "id": cust.id,
         "name": cust.name or "",
+        "display_name": display_name,
+        "customer_name_status": identity.customer_name_status,
+        "customer_name_source": identity.customer_name_source,
+        "proposed_name": identity.proposed_name,
         "phone": cust.phone or "",
         "email": cust.email or "",
         "source": source,
@@ -1049,15 +1060,28 @@ async def update_customer(
     name_cleared = False
     _name_field_sent = "name" in getattr(body, "model_fields_set", set())
     if _name_field_sent:
-        # The validator already trimmed + collapsed whitespace and
-        # may have turned ``""`` into ``""`` (still empty). Treat
-        # any falsy value as "clear".
         new_value: Optional[str] = body.name if (body.name or "").strip() else None
-        if new_value != (cust.name or None):
-            cust.name = new_value
-            name_changed = True
+        previous_name = cust.name or None
         if new_value is None:
+            cust.name = None
+            name_changed = previous_name is not None
             name_cleared = True
+            meta = dict(cust.extra_metadata or {})
+            meta["customer_name_status"] = "missing"
+            meta["customer_name_source"] = "manual_admin"
+            meta["name_source"] = "manual_admin"
+            meta.pop("proposed_name", None)
+            cust.extra_metadata = meta
+        else:
+            from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+            apply_customer_name(
+                cust,
+                new_value,
+                source="manual_admin",
+                force_merchant=True,
+            )
+            name_changed = (cust.name or None) != previous_name
     if body.email is not None:
         cust.email = body.email
 
@@ -1086,10 +1110,9 @@ async def update_customer(
             meta["manual_name_override"]  = True
             meta["manual_name_cleared"]   = bool(name_cleared)
             meta["manual_name_edited_at"] = datetime.now(timezone.utc).isoformat()
-            # Preserve the previous name for one-step "undo" + audit
-            # diffability. Cap to one snapshot — we don't keep history.
-            if name_changed:
-                meta["manual_name_previous"] = (cust.name or "")
+            meta["manual_name_source"] = "manual_admin"
+            if name_changed and not name_cleared:
+                meta["manual_name_previous"] = previous_name or ""
             cust.extra_metadata = meta
             try:
                 from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
@@ -1116,10 +1139,13 @@ async def update_customer(
         emit_event=True,
     )
     db.refresh(cust)
+    from core.customer_identity_resolver import display_name_for_customer  # noqa: PLC0415
+
     return {
         "updated":               True,
         "id":                    cust.id,
         "name":                  cust.name or "",
+        "display_name":          display_name_for_customer(cust, phone_fallback=cust.phone or ""),
         "phone":                 cust.phone or "",
         "email":                 cust.email or "",
         "manual_name_override":  bool(

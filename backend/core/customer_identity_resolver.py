@@ -41,12 +41,32 @@ SOURCE_SHOPIFY_ORDER = "shopify_order"
 SOURCE_WHATSAPP_PROFILE = "whatsapp_profile"
 SOURCE_CUSTOMER_MESSAGE = "customer_message"
 SOURCE_MERCHANT = "merchant_correction"
+SOURCE_MANUAL_ADMIN = "manual_admin"
+
+# Keys written by apply_customer_name / manual PATCH — must survive CIS metadata merges.
+IDENTITY_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "customer_name_source",
+        "customer_name_status",
+        "customer_name_confidence",
+        "customer_name_updated_at",
+        "proposed_name",
+        "name_source",
+        "customer_name_rejected_reason",
+        "manual_name_override",
+        "manual_name_cleared",
+        "manual_name_edited_at",
+        "manual_name_previous",
+        "manual_name_source",
+    }
+)
 
 _SOURCE_TRUST: Dict[str, int] = {
     SOURCE_SALLA_ORDER: 100,
     SOURCE_ZID_ORDER: 100,
     SOURCE_SHOPIFY_ORDER: 100,
     SOURCE_MERCHANT: 90,
+    SOURCE_MANUAL_ADMIN: 95,
     SOURCE_CUSTOMER_MESSAGE: 80,
     SOURCE_WHATSAPP_PROFILE: 10,
     # Legacy aliases mapped at runtime
@@ -79,6 +99,7 @@ _LEGACY_SOURCE_MAP: Dict[str, Tuple[str, str, float]] = {
     "ai_detected_name": (SOURCE_CUSTOMER_MESSAGE, STATUS_CUSTOMER_ENTERED, 0.85),
     "merchant_correction": (SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.95),
     "manual": (SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.9),
+    "manual_admin": (SOURCE_MANUAL_ADMIN, STATUS_CUSTOMER_ENTERED, 0.98),
 }
 
 
@@ -134,6 +155,8 @@ def normalize_identity_source(
         return SOURCE_CUSTOMER_MESSAGE, STATUS_CUSTOMER_ENTERED, 0.85
     if src == SOURCE_MERCHANT:
         return SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.95
+    if src == SOURCE_MANUAL_ADMIN:
+        return SOURCE_MANUAL_ADMIN, STATUS_CUSTOMER_ENTERED, 0.98
 
     return src or SOURCE_WHATSAPP_PROFILE, STATUS_PROPOSED, 0.3
 
@@ -187,6 +210,27 @@ def display_name_for_customer(customer: Any, *, phone_fallback: str = "") -> str
     return phone_fallback
 
 
+def merge_identity_metadata(
+    target: Dict[str, Any],
+    customer: Any,
+) -> Dict[str, Any]:
+    """Preserve resolver + manual-override keys when CIS merges inbound metadata."""
+    src = _meta(customer)
+    for key in IDENTITY_METADATA_KEYS:
+        if key in src:
+            target[key] = src[key]
+    return target
+
+
+def is_manual_name_locked(customer: Any) -> bool:
+    meta = _meta(customer)
+    if not bool(meta.get("manual_name_override")):
+        return False
+    if bool(meta.get("manual_name_cleared")):
+        return False
+    return bool(str(getattr(customer, "name", None) or "").strip())
+
+
 def can_use_name_for_operations(customer: Any) -> bool:
     snap = read_customer_identity(customer)
     return is_official_name_status(snap.customer_name_status) and bool(snap.customer_name)
@@ -232,9 +276,14 @@ def apply_customer_name(
     )
 
     if force_merchant:
-        canon_source = SOURCE_MERCHANT
+        src_norm = (source or "").strip().lower()
+        if src_norm == SOURCE_MANUAL_ADMIN:
+            canon_source = SOURCE_MANUAL_ADMIN
+            base_conf = 0.98
+        else:
+            canon_source = SOURCE_MERCHANT
+            base_conf = 0.95
         canon_status = STATUS_CUSTOMER_ENTERED
-        base_conf = 0.95
 
     existing_snap = read_customer_identity(customer)
     existing_status = existing_snap.customer_name_status
@@ -264,6 +313,12 @@ def apply_customer_name(
     cleaned = validation.cleaned
     confidence = max(base_conf, validation.confidence)
     if canon_status == STATUS_PROPOSED:
+        if override_flag and not force_merchant:
+            logger.debug(
+                "[CUSTOMER_IDENTITY] blocked proposed by manual_name_override id=%s",
+                getattr(customer, "id", None),
+            )
+            return False
         meta["proposed_name"] = cleaned
         meta["customer_name_source"] = canon_source
         meta["customer_name_status"] = STATUS_PROPOSED
@@ -317,6 +372,10 @@ def apply_customer_name(
     meta["customer_name_updated_at"] = _utcnow_iso()
     meta["name_source"] = source or canon_source
     meta.pop("customer_name_rejected_reason", None)
+    if force_merchant:
+        meta["manual_name_override"] = True
+        meta["manual_name_cleared"] = False
+        meta["manual_name_source"] = source or canon_source
     if cleared_flag and canon_status == STATUS_CUSTOMER_ENTERED:
         meta["manual_name_cleared"] = False
     customer.extra_metadata = meta

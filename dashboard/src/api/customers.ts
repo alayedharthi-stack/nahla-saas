@@ -11,6 +11,11 @@ export interface CustomerRfmScores {
 export interface CustomerRecord {
   id: number
   name: string
+  /** Unified display label — matches conversations list (includes proposed WA profile). */
+  display_name?: string
+  customer_name_status?: string
+  customer_name_source?: string
+  proposed_name?: string
   phone: string
   email: string
   source: string
