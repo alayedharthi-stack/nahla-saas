@@ -246,6 +246,15 @@ class DraftOrderHandler:
 
         _seed_checkout_state(prep, ctx)
 
+        from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noqa: PLC0415
+
+        maybe_apply_cart_message(
+            state=ctx.state,
+            prep=prep,
+            message=ctx.message,
+            product_info=product_info,
+        )
+
         # ── Consume any address signals stashed BEFORE a product was
         # picked. The customer e.g. typed "TAPA7401" while still
         # browsing; we saved it on `state.pending_*` and now that they
