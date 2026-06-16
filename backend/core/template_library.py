@@ -278,6 +278,23 @@ DEFAULT_AUTOMATION_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     {"type": "FOOTER", "text": "🐝 نحلة — مساعد متجرك"},
                 ],
             },
+            "en": {
+                "template_name": "wa_abandoned_order_draft_en",
+                "body_slots":    ["customer_name", "store_name"],
+                "slots":         ["customer_name", "store_name"],
+                "components": [
+                    {
+                        "type": "BODY",
+                        "text": (
+                            "Hi {{1}} 👋\n\n"
+                            "You have an incomplete draft order at {{2}}.\n"
+                            "Reply here to continue — we'll help you step by step 🌟"
+                        ),
+                        "example": {"body_text": [["Ahmed", "Elegance Store"]]},
+                    },
+                    {"type": "FOOTER", "text": "🐝 Nahla — your store assistant"},
+                ],
+            },
         },
     },
 
