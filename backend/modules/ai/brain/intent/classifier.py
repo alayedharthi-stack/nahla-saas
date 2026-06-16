@@ -57,6 +57,25 @@ class DefaultIntentClassifier:
         # ── Layer 1: rules ─────────────────────────────────────────────────
         rule_intent = rules.match(message)
 
+        try:
+            from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                boost_track_order_intent,
+            )
+            _tracking_boost = boost_track_order_intent(
+                message,
+                rule_intent,
+                state=state,
+                history=history,
+            )
+            if _tracking_boost is not None:
+                logger.info(
+                    "[Classifier] order_tracking_guard → track_order | preview=%r",
+                    (message or "")[:60],
+                )
+                return _tracking_boost
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — guard must not block classify
+            pass
+
         in_order_flow = (
             state is not None
             and getattr(state, "stage", None) in _ORDERING_STAGES
@@ -162,6 +181,23 @@ class DefaultIntentClassifier:
 
         # Remove empty string values from slots
         clean_slots = {k: v for k, v in slots.items() if v not in ("", {}, None)}
+
+        try:
+            from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                boost_track_order_intent,
+            )
+            _tracking_boost = boost_track_order_intent(
+                message,
+                rule_intent,
+                state=state,
+                history=history,
+            )
+            if _tracking_boost is not None:
+                resolved_name = _tracking_boost.name
+                resolved_conf = max(resolved_conf, _tracking_boost.confidence)
+                method = "order_tracking_guard"
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — guard must not block classify
+            pass
 
         intent = Intent(
             name=resolved_name,
