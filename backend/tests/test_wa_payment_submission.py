@@ -248,6 +248,10 @@ class TestPrepPatch:
         assert patch["payment_submission_received"] is True
         assert patch["payment_confirmed"] is False
         assert patch["order_status"] == "payment_submitted"
+        assert patch.get("payment_submission_at")
+        from datetime import datetime
+        submitted_at = datetime.fromisoformat(patch["payment_submission_at"])
+        assert submitted_at.tzinfo is not None
 
     def test_missing_fields_never_include_phone(self) -> None:
         from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415

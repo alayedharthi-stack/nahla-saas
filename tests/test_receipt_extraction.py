@@ -734,6 +734,7 @@ def test_receipt_inbound_byte_identical_with_extraction_flag_on(
     def _strip_timestamps(sp: Dict[str, Any]) -> Dict[str, Any]:
         sp = dict(sp)
         sp.pop("payment_receipt_at", None)
+        sp.pop("payment_submission_at", None)
         meta = dict(sp.get("payment_receipt_metadata") or {})
         meta.pop("received_at", None)
         if meta:
