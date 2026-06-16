@@ -173,7 +173,7 @@ _CATALOG_PRODUCT_HINT_RE = re.compile(
 _POST_ORDER_SHIPPING_BRAIN_DEFER_RE = re.compile(
     r"(?:"
     r"(?:اي|ايه|أي|which)\s*(?:فرع|branch)|"
-    r"(?:سمسا|smsa|aramex|ارامكس|ارامex|\bdhl\b)|"
+    r"(?:سمسا|smsa|aramex|ارامكس|\bdhl\b)|"
     r"(?:ارسل|أرسل|رسل|شحن|شحنت).{0,30}(?:فرع|branch|شركة|carrier)|"
     r"(?:فرع|branch).{0,20}(?:سمسا|smsa|aramex|ارامكس)|"
     r"بكم\s*(?:ال)?(?:شحن|توصيل)|"
