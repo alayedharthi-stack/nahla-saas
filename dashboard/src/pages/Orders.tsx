@@ -30,13 +30,28 @@ const emptyData: OrdersDashboard = {
 const TAB_KEYS = [
   'all',
   'needs_action',
+  'missing_location',
+  'pending_payment',
+  'payment_submitted',
+  'paid',
+  'abandoned',
+  'completed',
+  'cancelled',
   'store',
   'whatsapp',
-  'pending',
-  'paid',
-  'cancelled',
 ] as const
 type TabKey = typeof TAB_KEYS[number]
+
+const TAB_TO_FILTER: Partial<Record<TabKey, string>> = {
+  needs_action: 'needs_action',
+  missing_location: 'missing_location',
+  pending_payment: 'pending_payment',
+  payment_submitted: 'payment_submitted',
+  paid: 'paid',
+  abandoned: 'abandoned',
+  completed: 'completed',
+  cancelled: 'cancelled',
+}
 
 const NEEDS_ACTION_CHIP: Record<NeedsActionLevel, string> = {
   amber:  'bg-amber-50  text-amber-700  border-amber-200',
@@ -66,17 +81,22 @@ export default function Orders() {
   const [tab, setTab] = useState<TabKey>('all')
   const [search, setSearch] = useState('')
   const [data, setData] = useState<OrdersDashboard>(emptyData)
+  const [loading, setLoading] = useState(true)
   const { t, lang, dir } = useLanguage()
   const op = t(tr => tr.ordersPage)
 
   const tabs = useMemo(() => ([
-    { key: 'all' as TabKey,          label: op.tabs.all },
-    { key: 'needs_action' as TabKey, label: op.tabs.needsAction },
-    { key: 'store' as TabKey,        label: op.tabs.store },
-    { key: 'whatsapp' as TabKey,     label: op.tabs.whatsapp },
-    { key: 'pending' as TabKey,       label: op.tabs.pending },
-    { key: 'paid' as TabKey,         label: op.tabs.paid },
-    { key: 'cancelled' as TabKey,    label: op.tabs.cancelled },
+    { key: 'all' as TabKey,               label: op.tabs.all },
+    { key: 'needs_action' as TabKey,      label: op.tabs.needsAction },
+    { key: 'missing_location' as TabKey,  label: op.tabs.missingLocation },
+    { key: 'pending_payment' as TabKey,   label: op.tabs.pendingPayment },
+    { key: 'payment_submitted' as TabKey,  label: op.tabs.paymentSubmitted },
+    { key: 'paid' as TabKey,              label: op.tabs.paid },
+    { key: 'abandoned' as TabKey,         label: op.tabs.abandoned },
+    { key: 'completed' as TabKey,          label: op.tabs.completed },
+    { key: 'cancelled' as TabKey,         label: op.tabs.cancelled },
+    { key: 'store' as TabKey,             label: op.tabs.store },
+    { key: 'whatsapp' as TabKey,          label: op.tabs.whatsapp },
   ]), [op])
 
   const tableHeaders = useMemo(() => [
@@ -97,18 +117,17 @@ export default function Orders() {
   const locale = lang === 'ar' ? 'ar-SA' : 'en-US'
 
   useEffect(() => {
-    featureRealityApi.orders()
+    setLoading(true)
+    const lifecycle = TAB_TO_FILTER[tab]
+    const source = tab === 'whatsapp' ? 'whatsapp' : undefined
+    featureRealityApi.orders({ lifecycle_filter: lifecycle, source })
       .then(setData)
       .catch(() => setData(emptyData))
-  }, [])
+      .finally(() => setLoading(false))
+  }, [tab])
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
-    if (tab === 'needs_action' && (o.needs_action?.length ?? 0) === 0)      return false
-    if (tab === 'whatsapp'     && o.source !== 'whatsapp')                  return false
-    if (tab === 'store'        && (o.source === 'whatsapp' || o.source === 'manual')) return false
-    if (tab === 'pending'      && o.status !== 'pending')                   return false
-    if (tab === 'paid'         && o.status !== 'paid')                      return false
-    if (tab === 'cancelled'    && o.status !== 'cancelled')                 return false
+    if (tab === 'store' && (o.source === 'whatsapp' || o.source === 'manual')) return false
     const needle = search.toLowerCase()
     if (needle) {
       const haystack = [
@@ -117,6 +136,8 @@ export default function Orders() {
         o.customer,
         o.customer_name,
         o.phone,
+        o.list_summary ?? '',
+        o.city_line ?? '',
         o.external_id ?? '',
       ].join(' ').toLowerCase()
       if (!haystack.includes(needle)) return false
@@ -201,6 +222,9 @@ export default function Orders() {
         </div>
 
         <div dir={dir} className="overflow-x-auto">
+          {loading ? (
+            <div className="py-12 text-center text-sm text-slate-400">جاري التحميل…</div>
+          ) : (
           <table className="w-full text-sm" dir={dir}>
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50/60">
@@ -214,6 +238,8 @@ export default function Orders() {
             <tbody>
               {filtered.map((o: DashboardOrder) => {
                 const SourceIcon = sourceIcon(o.source)
+                const chips = o.action_chips?.length ? o.action_chips : o.needs_action
+                const displayStatus = o.status_label_ar || o.raw_status_label || o.status_label || statusLabel(o.status as OrderStatus)
                 return (
                   <tr key={o.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
                     <td className="px-5 py-3.5">
@@ -225,10 +251,10 @@ export default function Orders() {
                           <Bot className="w-3 h-3" />
                         </span>
                       )}
-                      {(o.needs_action?.length ?? 0) > 0 && (
+                      {(chips?.length ?? 0) > 0 && (
                         <span
-                          className={`inline-flex items-center gap-0.5 ms-1 px-1.5 py-0.5 rounded border text-[10px] font-medium ${NEEDS_ACTION_CHIP[o.needs_action![0].level]}`}
-                          title={op.badges.needsAction}
+                          className={`inline-flex items-center gap-0.5 ms-1 px-1.5 py-0.5 rounded border text-[10px] font-medium ${NEEDS_ACTION_CHIP[chips![0].level]}`}
+                          title={chips![0].label}
                         >
                           <AlertTriangle className="w-2.5 h-2.5" />
                         </span>
@@ -244,7 +270,13 @@ export default function Orders() {
                       {o.amount_sar != null ? `${Number(o.amount_sar).toLocaleString(locale)} ${op.currency}` : '—'}
                     </td>
                     <td className="px-5 py-3.5">
-                      <Badge variant={statusVariant(o.status as OrderStatus)} label={o.raw_status_label || o.status_label || statusLabel(o.status as OrderStatus)} />
+                      <Badge variant={statusVariant(o.status as OrderStatus)} label={displayStatus} />
+                      {o.payment_status_label_ar && (
+                        <p className="text-[10px] text-slate-500 mt-1">{o.payment_status_label_ar}</p>
+                      )}
+                      {o.address_status_label_ar && o.address_status_label_ar !== '—' && (
+                        <p className="text-[10px] text-slate-500">{o.address_status_label_ar}</p>
+                      )}
                     </td>
                     <td className="px-5 py-3.5">
                       <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-medium ${SOURCE_BADGE_CLASS[o.source]}`}>
@@ -252,11 +284,14 @@ export default function Orders() {
                         {sourceLabel(o.source)}
                       </span>
                     </td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[180px] truncate">
-                      {o.items || '—'}
+                    <td className="px-5 py-3.5 text-xs text-slate-600 max-w-[220px]">
+                      <p className="truncate">{o.items || '—'}</p>
+                      {o.city_line && o.city_line !== '—' && (
+                        <p className="text-[10px] text-slate-400 truncate mt-0.5">{o.city_line}</p>
+                      )}
                     </td>
                     <td className="px-5 py-3.5 text-xs text-slate-500 whitespace-nowrap">
-                      {o.createdAt ? formatDate(o.createdAt) : '—'}
+                      {o.updated_at ? formatDate(o.updated_at) : o.createdAt ? formatDate(o.createdAt) : '—'}
                     </td>
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2">
@@ -281,7 +316,8 @@ export default function Orders() {
               })}
             </tbody>
           </table>
-          {filtered.length === 0 && (
+          )}
+          {!loading && filtered.length === 0 && (
             <div className="py-12 text-center text-sm text-slate-400">{op.empty}</div>
           )}
         </div>

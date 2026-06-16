@@ -32,6 +32,26 @@ export interface OrderNeedsAction {
   key: string
   label: string
   level: NeedsActionLevel
+  detail?: string
+}
+
+export interface OrderActionChip {
+  key: string
+  label: string
+  level: NeedsActionLevel
+  detail?: string
+}
+
+export interface DeliveryLocationDisplay {
+  type: 'whatsapp_location' | 'maps_url' | 'apple_maps' | 'short_national_address'
+  type_label_ar?: string
+  latitude?: number | string
+  longitude?: number | string
+  location_name?: string | null
+  address_text?: string | null
+  url?: string
+  open_url?: string | null
+  short_address_code?: string | null
 }
 
 export interface MerchantPaymentAlert {
@@ -58,15 +78,29 @@ export interface DashboardOrder {
   amount_sar: number
   status: 'paid' | 'pending' | 'failed' | 'cancelled'
   status_label?: string
+  status_label_ar?: string
   raw_status?: string
   raw_status_label?: string
+  lifecycle_filter?: string
+  list_summary?: string
+  city_line?: string
+  address_status_label_ar?: string
+  updated_at?: string
+  needs_action_flag?: boolean
+  action_chips?: OrderActionChip[]
   source: OrderSourceKey
   source_label: string
   paymentLink?: string
   payment_method?: string | null
   payment_method_label?: string | null
+  payment_method_label_ar?: string | null
   payment_status?: string | null
+  payment_status_label_ar?: string | null
   payment_confirmed?: boolean
+  payment_verification_status?: string | null
+  payment_verification_label_ar?: string | null
+  payment_verified_at?: string | null
+  payment_verified_by?: string | null
   merchant_payment_alert?: MerchantPaymentAlert | null
   merchant_payment_alerts?: MerchantPaymentAlert[]
   can_confirm_bank_transfer?: boolean
@@ -83,7 +117,10 @@ export interface OrderDetailLineItem {
   name: string
   quantity: number
   variant_id?: string | null
+  variant_label?: string | null
+  edition?: string | null
   unit_price?: number | null
+  line_total?: number | null
   image_url?: string | null
 }
 
@@ -113,6 +150,7 @@ export interface OrderTimelineEvent {
 export interface OrderDetail extends DashboardOrder {
   line_items: OrderDetailLineItem[]
   customer_address: OrderDetailAddress
+  delivery_location?: DeliveryLocationDisplay | null
   links: OrderDetailLinks
   payment_method?: string | null
   notes?: string | null
@@ -460,8 +498,12 @@ export const featureRealityApi = {
   analytics(): Promise<AnalyticsDashboard> {
     return apiCall('/analytics/dashboard')
   },
-  orders(): Promise<OrdersDashboard> {
-    return apiCall('/orders')
+  orders(params: { lifecycle_filter?: string; source?: string } = {}): Promise<OrdersDashboard> {
+    const qs = new URLSearchParams()
+    if (params.lifecycle_filter) qs.set('lifecycle_filter', params.lifecycle_filter)
+    if (params.source) qs.set('source', params.source)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return apiCall(`/orders${suffix}`)
   },
   orderDetail(orderId: string | number): Promise<{ order: OrderDetail }> {
     return apiCall(`/orders/${encodeURIComponent(String(orderId))}`)
