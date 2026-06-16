@@ -51,11 +51,10 @@ def is_non_product_label(text: str) -> bool:
         return True
     try:
         from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
-            is_order_tracking_follow_up,
-            is_general_shipping_duration_inquiry,
+            is_shipping_tracking_non_product_label,
         )
 
-        if is_order_tracking_follow_up(norm) or is_general_shipping_duration_inquiry(norm):
+        if is_shipping_tracking_non_product_label(text):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at label boundary
         pass

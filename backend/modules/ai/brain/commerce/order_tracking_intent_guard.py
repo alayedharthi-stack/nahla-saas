@@ -67,7 +67,32 @@ _GENERAL_SHIPPING_DURATION_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
-# Strong existing-order follow-up markers in the message itself.
+# Layer 2 — phrases that must NEVER become catalog product labels.
+# Independent of intent routing (ask_shipping vs track_order).
+_SHIPPING_TRACKING_NON_PRODUCT_PHRASES_RAW = (
+    "متى يوصل الطلب",
+    "متى توصل الطلب",
+    "متى يجي الطلب",
+    "متى توصل الطلبية",
+    "وين طلبي",
+    "فين طلبي",
+    "حالة الطلب",
+    "رقم التتبع",
+    "رابط التتبع",
+    "الشحنة وينها",
+    "وين الشحنة",
+    "فين الشحنة",
+    "تتبع الطلب",
+    "order status",
+    "tracking number",
+    "track my order",
+    "where is my order",
+)
+_SHIPPING_TRACKING_NON_PRODUCT_PHRASES = tuple(
+    _norm_ar(p) for p in _SHIPPING_TRACKING_NON_PRODUCT_PHRASES_RAW
+)
+
+# Strong existing-order follow-up markers — Layer 1 track_order routing.
 _EXPLICIT_TRACKING_PHRASES_RAW = (
     "وين طلبي",
     "فين طلبي",
@@ -150,6 +175,30 @@ def is_general_shipping_duration_inquiry(message: str) -> bool:
     if not norm:
         return False
     return bool(_GENERAL_SHIPPING_DURATION_RE.search(norm))
+
+
+def is_shipping_tracking_non_product_label(message: str) -> bool:
+    """
+    Layer 2 core — shipping/tracking inbound must never become a product label.
+
+    Applies regardless of upstream intent (ask_shipping, ask_product, etc.).
+    """
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    if any(phrase in norm for phrase in _SHIPPING_TRACKING_NON_PRODUCT_PHRASES):
+        return True
+    if is_general_shipping_duration_inquiry(message):
+        return True
+    if _ORDER_ANCHOR_RE.search(norm) and _STATUS_QUESTION_RE.search(norm):
+        return True
+    if _EXISTING_ORDER_MESSAGE_RE.search(norm):
+        return True
+    if _PAST_ORDER_TRACKING_RE.search(norm):
+        return True
+    if _PLACED_ORDER_DELIVERY_RE.search(norm):
+        return True
+    return False
 
 
 def has_existing_order_evidence(
@@ -262,17 +311,13 @@ def should_exempt_from_availability_rewrite(
     commerce_bundle: Optional[dict] = None,
 ) -> bool:
     """
-    Block availability rewrites for order follow-ups and general shipping
-    duration asks (misrouted catalog path protection).
+    Block availability rewrites for shipping/tracking inbound.
+
+    Layer 2 is independent of track_order routing — even ask_shipping turns
+    must not produce «متوفر متى يوصل الطلب بعدة خيارات».
     """
-    if is_order_tracking_follow_up(
-        message,
-        state=state,
-        history=history,
-        commerce_bundle=commerce_bundle,
-    ):
-        return True
-    return is_general_shipping_duration_inquiry(message)
+    _ = (state, history, commerce_bundle)  # reserved for future contextual exempt
+    return is_shipping_tracking_non_product_label(message)
 
 
 def boost_track_order_intent(
@@ -326,6 +371,7 @@ __all__ = [
     "is_general_shipping_duration_inquiry",
     "is_order_tracking_follow_up",
     "is_pre_order_shipping_inquiry",
+    "is_shipping_tracking_non_product_label",
     "resolve_order_tracking_guard_reply",
     "should_exempt_from_availability_rewrite",
 ]

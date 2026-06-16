@@ -18,6 +18,7 @@ from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E40
     is_general_shipping_duration_inquiry,
     is_order_tracking_follow_up,
     is_pre_order_shipping_inquiry,
+    is_shipping_tracking_non_product_label,
     resolve_order_tracking_guard_reply,
     should_exempt_from_availability_rewrite,
 )
@@ -111,8 +112,63 @@ class TestLayer1IntentGuard:
             assert boost_track_order_intent(msg) is None
 
 
+SHIPPING_TRACKING_NON_PRODUCT_MESSAGES = STRONG_TRACKING_MESSAGES + GENERAL_SHIPPING_MESSAGES + [
+    "\u0637\u0644\u0628\u062a \u0642\u0628\u0644 \u064a\u0648\u0645\u064a\u0646 \u0648\u064a\u0646 \u0635\u0627\u0631",
+    "\u0639\u0646\u062f\u064a \u0637\u0644\u0628 \u0648\u064a\u0646\u0647",
+]
+
+
+class TestLayer2NonProductLabelCore:
+    """Layer 2 is independent of track_order routing."""
+
+    @pytest.mark.parametrize("message", SHIPPING_TRACKING_NON_PRODUCT_MESSAGES)
+    def test_always_non_product_label(self, message: str) -> None:
+        assert is_shipping_tracking_non_product_label(message) is True
+        assert is_non_product_label(message) is True
+
+    @pytest.mark.parametrize("message", GENERAL_SHIPPING_MESSAGES)
+    def test_general_shipping_exempt_but_not_track_without_evidence(
+        self, message: str,
+    ) -> None:
+        assert should_exempt_from_availability_rewrite(message) is True
+        assert is_order_tracking_follow_up(message) is False
+
+    def test_bare_duration_never_becomes_inbound_product_label(self) -> None:
+        from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
+            _label_from_inbound_availability_ask,
+        )
+
+        assert _label_from_inbound_availability_ask("متى يوصل الطلب") == ""
+
+    def test_incident_reply_not_rewritten_to_availability_canned(self) -> None:
+        prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        try:
+            incident_reply = "متوفر متى يوصل الطلب بعدة خيارات 🛒"
+            result = apply_product_availability_truth_guard(
+                reply=incident_reply,
+                availability_context={
+                    "catalog_skus": [],
+                    "focus_product": None,
+                    "recommended_product_ids": [],
+                    "kb_signals": [],
+                    "kb_links": [],
+                },
+                inbound_text="متى يوصل الطلب",
+                tenant_id=1,
+            )
+            assert result.replaced is False
+            assert "بعدة خيارات" in result.reply or result.reply == incident_reply
+            assert "وش نوع تبيه" not in result.reply
+        finally:
+            if prev is None:
+                os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+            else:
+                os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev
+
+
 class TestLayer2AvailabilityRewriteGuard:
-    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES + GENERAL_SHIPPING_MESSAGES)
+    @pytest.mark.parametrize("message", SHIPPING_TRACKING_NON_PRODUCT_MESSAGES)
     def test_inbound_exempt_from_availability_rewrite(self, message: str) -> None:
         assert inbound_exempt_from_availability_rewrite(message) is True
         assert should_exempt_from_availability_rewrite(message) is True
@@ -121,7 +177,7 @@ class TestLayer2AvailabilityRewriteGuard:
     def test_browse_not_exempt_from_availability(self, message: str) -> None:
         assert inbound_exempt_from_availability_rewrite(message) is False
 
-    @pytest.mark.parametrize("message", STRONG_TRACKING_MESSAGES + GENERAL_SHIPPING_MESSAGES)
+    @pytest.mark.parametrize("message", SHIPPING_TRACKING_NON_PRODUCT_MESSAGES)
     def test_phrase_not_product_label(self, message: str) -> None:
         assert is_non_product_label(message) is True
 
