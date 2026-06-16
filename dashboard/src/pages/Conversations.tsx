@@ -12,6 +12,7 @@ import { customersApi } from '../api/customers'
 import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 import EditCustomerNameModal from '../components/conversations/EditCustomerNameModal'
+import CampaignExcludeControl from '../components/customers/CampaignExcludeControl'
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
 import { useDashboardPoll } from '../lib/dashboardPolling'
@@ -55,6 +56,10 @@ interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
 }
 
+type ConversationFilter =
+  | 'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked'
+  | 'paid' | 'unsubscribed' | 'campaign_excluded' | 'closed'
+
 function _normalizePhoneDigits(phone: string): string {
   return (phone || '').replace(/\D/g, '')
 }
@@ -96,6 +101,7 @@ export default function Conversations() {
     blocked:      cp.filters.blocked,
     paid:         cp.filters.paid,
     unsubscribed: cp.filters.unsubscribed,
+    campaign_excluded: cp.filters.campaignExcluded,
     closed:       cp.filters.closed,
   }), [cp])
 
@@ -125,7 +131,7 @@ export default function Conversations() {
   const requestedPhone = searchParams.get('phone')?.trim() || null
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
-  const [filter, setFilter]         = useState<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'paid' | 'unsubscribed' | 'closed'>('all')
+  const [filter, setFilter]         = useState<ConversationFilter>('all')
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     const cached = loadConversationListCache(getTenantId())
@@ -141,8 +147,6 @@ export default function Conversations() {
   const [editNameSaving, setEditNameSaving] = useState(false)
   const [endingSupervision, setEndingSupervision] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
-  const [campaignExcludeConfirm, setCampaignExcludeConfirm] = useState(false)
-  const [excludingFromCampaigns, setExcludingFromCampaigns] = useState(false)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
 
   // mobile: 'list' = show list panel, 'chat' = show chat panel
@@ -164,7 +168,7 @@ export default function Conversations() {
   // the new tab would render the wrong slice. Server-side SQL
   // narrowing depends on this — that's the post-pagination fix for
   // "بعض الفلاتر تأثرت بعد إصلاحات SQL".
-  const filterRef = useRef<'all' | 'active' | 'human' | 'agent_req' | 'paused' | 'blocked' | 'paid' | 'unsubscribed' | 'closed'>('all')
+  const filterRef = useRef<ConversationFilter>('all')
 
   const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
   const [hasMoreServer, setHasMoreServer]      = useState(false)
@@ -800,7 +804,6 @@ export default function Conversations() {
 
   useEffect(() => {
     setHeaderMenuOpen(false)
-    setCampaignExcludeConfirm(false)
   }, [selected?.phone])
 
   useEffect(() => {
@@ -814,26 +817,6 @@ export default function Conversations() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [headerMenuOpen])
 
-  const confirmExcludeFromCampaigns = async () => {
-    if (!selected) return
-    setExcludingFromCampaigns(true)
-    try {
-      const customerId = await _resolveCustomerIdByPhone(selected.phone)
-      if (!customerId) {
-        throw new Error(cp.errors.customerNotFound)
-      }
-      await customersApi.updateMarketingPreferences(customerId, {
-        marketing_opt_out_manual: true,
-      })
-      setCampaignExcludeConfirm(false)
-      setHeaderMenuOpen(false)
-      setActionToast(cp.toasts.excludedFromCampaigns)
-    } catch (e) {
-      alert(e instanceof Error ? e.message : cp.errors.excludeFailed)
-    } finally {
-      setExcludingFromCampaigns(false)
-    }
-  }
 
   const endHumanSupervisionForSelected = async () => {
     if (!selected) return
@@ -970,6 +953,9 @@ export default function Conversations() {
   const _isClosed = (c: DashboardConversation) =>
     c.status === 'closed' || c.windowOpen === false
 
+  const _isCampaignExcluded = (c: DashboardConversation) =>
+    !!c.marketingOptOutManual
+
   const filtered = conversations.filter(c => {
     let matchFilter = false
     if (filter === 'all') matchFilter = true
@@ -980,6 +966,7 @@ export default function Conversations() {
     else if (filter === 'blocked') matchFilter = _isBlocked(c)
     else if (filter === 'paid') matchFilter = _isPaid(c)
     else if (filter === 'unsubscribed') matchFilter = _isUnsubscribed(c)
+    else if (filter === 'campaign_excluded') matchFilter = _isCampaignExcluded(c)
     else if (filter === 'closed') matchFilter = _isClosed(c)
     const matchSearch = !searchQuery || c.customer.includes(searchQuery) || c.phone.includes(searchQuery)
     return matchFilter && matchSearch
@@ -1054,7 +1041,7 @@ export default function Conversations() {
 
         {/* Filter tabs */}
         <div className="flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'paid', 'unsubscribed', 'closed'] as const).map((f) => {
+          {(['all', 'active', 'human', 'agent_req', 'paused', 'blocked', 'paid', 'unsubscribed', 'campaign_excluded', 'closed'] as const).map((f) => {
             const count = f === 'all' ? 0
               : f === 'active' ? conversations.filter(c => c.windowOpen === true && !_isUnsubscribed(c)).length
               : f === 'human' ? conversations.filter(c => _isHumanResponding(c)).length
@@ -1063,6 +1050,7 @@ export default function Conversations() {
               : f === 'blocked' ? conversations.filter(c => _isBlocked(c)).length
               : f === 'paid' ? conversations.filter(c => _isPaid(c)).length
               : f === 'unsubscribed' ? conversations.filter(c => _isUnsubscribed(c)).length
+              : f === 'campaign_excluded' ? conversations.filter(c => _isCampaignExcluded(c)).length
               : conversations.filter(c => _isClosed(c)).length
 
             const activeClass =
@@ -1071,6 +1059,7 @@ export default function Conversations() {
               f === 'blocked'      ? 'bg-rose-600 text-white shadow-sm' :
               f === 'paid'         ? 'bg-sky-500 text-white shadow-sm' :
               f === 'unsubscribed' ? 'bg-slate-600 text-white shadow-sm' :
+              f === 'campaign_excluded' ? 'bg-violet-600 text-white shadow-sm' :
               'bg-brand-500 text-white shadow-sm'
 
             const inactiveClass =
@@ -1079,6 +1068,7 @@ export default function Conversations() {
               f === 'blocked' && count > 0      ? 'text-rose-700 bg-rose-50 hover:bg-rose-100' :
               f === 'paid' && count > 0         ? 'text-sky-700 bg-sky-50 hover:bg-sky-100' :
               f === 'unsubscribed' && count > 0 ? 'text-slate-600 bg-slate-100 hover:bg-slate-200' :
+              f === 'campaign_excluded' && count > 0 ? 'text-violet-700 bg-violet-50 hover:bg-violet-100' :
               'text-slate-500 hover:bg-slate-100'
 
             const countClass =
@@ -1088,6 +1078,7 @@ export default function Conversations() {
               f === 'blocked' ? 'text-rose-500' :
               f === 'paid' ? 'text-sky-500' :
               f === 'unsubscribed' ? 'text-slate-500' :
+              f === 'campaign_excluded' ? 'text-violet-500' :
               'text-slate-400'
 
             return (
@@ -1102,6 +1093,7 @@ export default function Conversations() {
                 {f === 'paused' && <Pause className="inline w-3 h-3 me-1 opacity-70" />}
                 {f === 'blocked' && <Ban className="inline w-3 h-3 me-1 opacity-70" />}
                 {f === 'paid' && <PackageCheck className="inline w-3 h-3 me-1 opacity-70" />}
+                {f === 'campaign_excluded' && <Megaphone className="inline w-3 h-3 me-1 opacity-70" />}
                 {filterLabels[f]}
                 {f !== 'all' && count > 0 && (
                   <span className={`ms-1 ${countClass}`}>{count}</span>
@@ -1427,17 +1419,23 @@ export default function Conversations() {
                             {cp.actions.endSupervision}
                           </button>
                         )}
-                        <button
-                          type="button"
-                          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
-                          onClick={() => {
-                            setHeaderMenuOpen(false)
-                            setCampaignExcludeConfirm(true)
+                        <CampaignExcludeControl
+                          phone={selected.phone}
+                          optedOut={!!selected.marketingOptOutManual}
+                          customerLabel={selected.customer || selected.phone}
+                          variant="menu"
+                          onMenuClose={() => setHeaderMenuOpen(false)}
+                          onSuccess={(nextOptedOut) => {
+                            _optimisticUpdate(selected.phone, {
+                              marketingOptOutManual: nextOptedOut,
+                            })
+                            setActionToast(
+                              nextOptedOut
+                                ? cp.toasts.excludedFromCampaigns
+                                : cp.toasts.reEnabledFromCampaigns,
+                            )
                           }}
-                        >
-                          <Megaphone className="w-4 h-4 text-violet-500" />
-                          {cp.actions.excludeCampaigns}
-                        </button>
+                        />
                         {!_isBlocked(selected) && (
                           <>
                             <div className="my-1 border-t border-slate-100" />
@@ -1470,53 +1468,6 @@ export default function Conversations() {
                   <strong>{cp.banners.humanSupervision}</strong>
                   {selected.takenOverBy && <> — <strong>{selected.takenOverBy}</strong></>}
                 </span>
-              </div>
-            )}
-
-            {campaignExcludeConfirm && (
-              <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
-                onClick={() => { if (!excludingFromCampaigns) setCampaignExcludeConfirm(false) }}
-              >
-                <div
-                  className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4"
-                  dir={dir}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-violet-100 rounded-xl flex items-center justify-center shrink-0">
-                      <Megaphone className="w-5 h-5 text-violet-600" />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="text-base font-semibold text-slate-900">{cp.banners.excludeModalTitle}</h3>
-                      <p className="text-xs text-slate-500 mt-0.5 truncate">{selected.customer}</p>
-                    </div>
-                  </div>
-
-                  <p className="text-sm text-slate-600 leading-relaxed">
-                    {cp.banners.excludeModalBody}
-                  </p>
-
-                  <div className="flex gap-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setCampaignExcludeConfirm(false)}
-                      disabled={excludingFromCampaigns}
-                      className="flex-1 btn-secondary text-sm"
-                    >
-                      {cp.actions.cancel}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void confirmExcludeFromCampaigns() }}
-                      disabled={excludingFromCampaigns}
-                      className="flex-1 inline-flex items-center justify-center gap-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {excludingFromCampaigns ? <Clock className="w-4 h-4 animate-spin" /> : <Megaphone className="w-4 h-4" />}
-                      {excludingFromCampaigns ? cp.actions.excluding : cp.actions.exclude}
-                    </button>
-                  </div>
-                </div>
               </div>
             )}
 

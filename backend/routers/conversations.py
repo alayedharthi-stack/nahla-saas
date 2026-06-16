@@ -547,6 +547,9 @@ async def list_conversations(
                                       explicitly set.
       - ``paused``                  → ``ai_paused=True`` AND not human-takeover.
       - ``blocked``                 → phone in the tenant blocklist.
+      - ``paid``                    → confirmed payment receipt on row.
+      - ``campaign_excluded``       → customer has manual marketing
+                                      opt-out (``marketing_opt_out_manual``).
       - ``active`` / ``unsubscribed`` / ``all`` → no SQL narrowing; the
                                       client filter is enough (cheap to do
                                       because the SQL cap already trims the
@@ -581,7 +584,7 @@ async def list_conversations(
     _allowed_filters = {
         "all", "active", "human", "agent_req",
         "paused", "blocked", "unsubscribed", "closed",
-        "paid",
+        "paid", "campaign_excluded",
     }
     filter_slug = (filter or "all").strip().lower()
     if filter_slug not in _allowed_filters:
@@ -655,6 +658,12 @@ async def list_conversations(
         if getattr(convo, "taken_over_at", None) is not None:
             return True
         return False
+
+    def _customer_marketing_opt_out(convo: Optional[Conversation]) -> bool:
+        if convo is None or convo.customer is None:
+            return False
+        meta = convo.customer.extra_metadata or {}
+        return bool(meta.get("marketing_opt_out_manual"))
 
     def _status_for(phone: str, convo: Optional[Conversation]) -> str:
         n = _norm(phone)
@@ -796,6 +805,21 @@ async def list_conversations(
         # out so the merchant only sees rows with a real confirmation
         # signal — not every active conversation.
         extra_clauses.append(Conversation.last_payment_confirmed_at.isnot(None))
+    elif filter_slug == "campaign_excluded":
+        from sqlalchemy import String, cast, func  # noqa: PLC0415
+
+        is_opted = cast(
+            func.coalesce(
+                Customer.extra_metadata["marketing_opt_out_manual"].astext
+                if hasattr(Customer.extra_metadata, "astext")
+                else func.json_extract(
+                    Customer.extra_metadata, "$.marketing_opt_out_manual",
+                ),
+                "false",
+            ),
+            String,
+        ).in_(["true", "1"])
+        extra_clauses.append(Conversation.customer.has(is_opted))
     # ``all`` / ``active`` / ``unsubscribed`` → no SQL narrowing.
 
     convo_rows_q = (
@@ -879,6 +903,8 @@ async def list_conversations(
             ):
                 prev["isBlocked"] = True
                 prev["isAI"] = False
+            if _customer_marketing_opt_out(convo):
+                prev["marketingOptOutManual"] = True
             prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
             if name and not prev_has_name:
                 phone_info.pop(existing_key)
@@ -936,6 +962,7 @@ async def list_conversations(
                 convo.last_payment_confirmed_at.isoformat()
                 if getattr(convo, "last_payment_confirmed_at", None) else None
             ),
+            "marketingOptOutManual": _customer_marketing_opt_out(convo),
             "_conv_id": convo.id,
         }
         norm_to_key[n] = phone
@@ -1253,13 +1280,18 @@ async def list_conversations(
                 continue
             is_unsub = bool(meta.get("is_unsubscribed"))
             is_pending = _is_pending_active(meta)
-            if not is_unsub and not is_pending:
+            is_mkt_opt_out = bool(meta.get("marketing_opt_out_manual"))
+            if not is_unsub and not is_pending and not is_mkt_opt_out:
                 continue
             c_norm = _norm(cust.normalized_phone or cust.phone or "")
             matching_key = norm_to_key.get(c_norm)
             if matching_key and matching_key in phone_info:
-                phone_info[matching_key]["isUnsubscribed"] = is_unsub
-                phone_info[matching_key]["pendingUnsubscribe"] = is_pending
+                if is_unsub:
+                    phone_info[matching_key]["isUnsubscribed"] = is_unsub
+                if is_pending:
+                    phone_info[matching_key]["pendingUnsubscribe"] = is_pending
+                if is_mkt_opt_out:
+                    phone_info[matching_key]["marketingOptOutManual"] = True
 
     # ── 6. Fallback: if last message is within 24h, mark window open ────────
     _24h_ago = (datetime.utcnow() - timedelta(hours=24)).isoformat()

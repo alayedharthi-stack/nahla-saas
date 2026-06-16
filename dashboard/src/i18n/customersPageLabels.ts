@@ -283,7 +283,7 @@ export const customersPageEn: CustomersPageLabels = {
     marketingTitle: 'Filter by manual marketing exclusion',
     marketingAll: 'All customers',
     marketingIn: 'Eligible for campaigns',
-    marketingOut: 'Manually excluded',
+    marketingOut: 'Excluded from campaigns',
   },
   table: {
     name: 'Name',
@@ -536,7 +536,7 @@ export const customersPageAr: CustomersPageLabels = {
     marketingTitle: 'فلترة حسب الاستبعاد التسويقي اليدوي',
     marketingAll: 'كل العملاء',
     marketingIn: 'المؤهلون للحملات',
-    marketingOut: 'المستبعدون يدوياً',
+    marketingOut: 'مستبعدون من الحملات',
   },
   table: {
     name: 'الاسم',

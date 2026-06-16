@@ -520,6 +520,7 @@ export interface Translations {
       blocked: string
       paid: string
       unsubscribed: string
+      campaignExcluded: string
       closed: string
     }
     badges: {
@@ -548,6 +549,9 @@ export interface Translations {
       takeOver: string
       endSupervision: string
       excludeCampaigns: string
+      excludedFromCampaigns: string
+      removeExclusion: string
+      removeExclusionShort: string
       blockNumber: string
       sendTemplate: string
       back: string
@@ -555,6 +559,8 @@ export interface Translations {
       cancel: string
       exclude: string
       excluding: string
+      reEnable: string
+      reEnabling: string
     }
     banners: {
       humanSupervision: string
@@ -563,6 +569,8 @@ export interface Translations {
       pendingUnsub: string
       excludeModalTitle: string
       excludeModalBody: string
+      reEnableModalTitle: string
+      reEnableModalBody: string
     }
     pauseReasons: {
       manual: string
@@ -597,6 +605,7 @@ export interface Translations {
     }
     toasts: {
       excludedFromCampaigns: string
+      reEnabledFromCampaigns: string
       resumedToAI: string
     }
     editCustomerName: {
