@@ -690,6 +690,47 @@ def maybe_handle_payment_claim(
     # flag ``payment_claim_unverified=True`` so the brain prompt can
     # see the situation and compose its own natural reply.
     if _payment_text_claim_brain_driven_enabled():
+        # Wave 1 W1.2 — receipt-verdict telemetry (observation only).
+        _verdict_telemetry_on = False
+        try:
+            from core.receipt_verdict import (  # noqa: PLC0415
+                compute_receipt_verdict,
+                is_receipt_verdict_telemetry_enabled,
+                log_receipt_verdict,
+            )
+            if is_receipt_verdict_telemetry_enabled():
+                _verdict_telemetry_on = True
+                _rv = compute_receipt_verdict(
+                    payment_understanding=None,
+                    payment_evidence_status=None,
+                    has_attached_media=bool(has_attached_media),
+                    has_text_only_claim=True,
+                )
+                log_receipt_verdict(
+                    tenant_id=tenant_id, phone=phone,
+                    source="text_claim_brain_driven",
+                    verdict=_rv,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — verdict telemetry must not block text-claim path
+            pass
+
+        if _verdict_telemetry_on:
+            # Verdict mode is observation-only: emit telemetry + optional
+            # brain advisory stamp, but do not short-circuit with a
+            # caller-visible state_patch (brain owns the turn).
+            try:
+                _stamp_text_claim_unverified_state(
+                    db, tenant_id=tenant_id, phone=phone,
+                    inbound_text=inbound_text,
+                )
+            except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — advisory stamp is best-effort
+                logger.debug(
+                    "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
+                    "tenant=%s err=%s",
+                    tenant_id, _stamp_exc,
+                )
+            return None
+
         # No prior receipt-shaped evidence — politely ask for proof
         # without falsely confirming payment or flipping order state.
         reply_text = compose_payment_claim_ack(
