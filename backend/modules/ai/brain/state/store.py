@@ -570,8 +570,12 @@ class DefaultStateStore:
             # on what to fill next, not yet finalising. Both mean the funnel
             # is committed; only checkout supersedes ordering downstream.
             s.stage = STAGE_ORDERING
-            if decision.args.get("product"):
-                s.current_product_focus = decision.args["product"]
+            _product = decision.args.get("product") or {}
+            if _product:
+                s.current_product_focus = _product
+                _ext_id = str(_product.get("external_id") or "").strip()
+                if _ext_id:
+                    s.order_prep.product_id = _ext_id
 
         elif action == ACTION_SEND_PAYMENT_LINK:
             s.stage = STAGE_CHECKOUT

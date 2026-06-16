@@ -41,6 +41,19 @@ _EXPLICIT_ARRIVAL_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Customer deferral to the bot/agent — NOT a staff-contact request.
+# e.g. «أروح أصلي وأتواصل معاك», «أكلمك بعدين», «أرجع لك».
+_CUSTOMER_DEFER_TO_AGENT_RE = re.compile(
+    r"(?:"
+    r"(?:اتواصل|تواصل|اكلم|أكلم|اتكلم|أتكلم|كلم)\s*مع(?:ك|اك|كم|كن|كِ|ال)?(?:ك|اك|كم)?"
+    r"|(?:ارجع|أرجع|برجع|بارجع|ارجعلك|أرجعلك)\s*(?:لك|ليك|لكم|لي)?"
+    r"|(?:اكلم|أكلم|اتكلم|أتكلم)(?:ك|ك\s)?(?:بعدين|لاحق|later)?"
+    r"|(?:بعدين|later)\s*(?:ارسل|أرسل|ارسلك|أرسلك)"
+    r"|(?:^|\s)(?:أروح|اروح|بروح|رايح|رايحة)\s*(?:أصلي|اصلي|اسوي|اسوي|أصل|اص)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
 _EXPLICIT_CONTACT_INTENT_RE = re.compile(
     r"(?:"
     r"رقم|جوال|هاتف|تليفون|موبايل|"
@@ -137,10 +150,20 @@ def is_explicit_arrival_intent(message: str) -> bool:
     return bool(_EXPLICIT_ARRIVAL_RE.search(norm))
 
 
+def is_customer_defer_or_return_later(message: str) -> bool:
+    """True when the customer defers the conversation — not asking for staff."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    return bool(_CUSTOMER_DEFER_TO_AGENT_RE.search(_norm(raw)))
+
+
 def has_explicit_contact_intent(message: str) -> bool:
     """True when the customer clearly asks for staff contact / phone."""
     raw = (message or "").strip()
     if not raw:
+        return False
+    if is_customer_defer_or_return_later(raw):
         return False
     norm = _norm(raw)
     if is_contact_pronoun_followup(raw):
@@ -246,6 +269,8 @@ def should_defer_staff_contact_policy(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return True
+    if is_customer_defer_or_return_later(raw):
+        return True
     if should_defer_contact_policies_for_commerce(raw):
         return True
     if is_location_query(raw):
@@ -281,6 +306,7 @@ MSG_LOCATION_NOT_CONFIGURED = (
 
 __all__ = [
     "MSG_LOCATION_NOT_CONFIGURED",
+    "is_customer_defer_or_return_later",
     "has_explicit_contact_intent",
     "is_arrival_or_visit_signal",
     "is_commerce_or_product_flow_message",

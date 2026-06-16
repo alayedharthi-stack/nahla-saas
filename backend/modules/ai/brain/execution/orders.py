@@ -897,6 +897,27 @@ class DraftOrderHandler:
                 args["options"] = opts_payload
             return args
 
+        # ── Hard guard: never POST /orders without address evidence (SA) ─────
+        if _is_saudi_customer(ctx.customer_phone) and not _has_sa_checkout_address(prep):
+            prep.missing_fields = ["address_location"]
+            logger.info(
+                "[ORDER FLOW] blocking create_order: missing address evidence | "
+                "tenant=%s product=%s city=%r address_line=%r",
+                ctx.tenant_id, external_id, prep.city,
+                (prep.address_line or "")[:80],
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "product": product_info,
+                    "needs_collection": True,
+                    "missing_fields": ["address_location"],
+                    "question": _checkout_question("address_location", is_sa=True),
+                    "is_first_ask": False,
+                    "order_prep": prep.to_dict(),
+                },
+            )
+
         runtime_result = await runtime.execute(
             "create_draft_order", _build_order_args(_options_payload),
         )
@@ -1811,15 +1832,12 @@ def _has_structured_address(prep: OrderPreparationState) -> bool:
 
 
 def _has_sa_checkout_address(prep: OrderPreparationState) -> bool:
-    """SA flow: short code OR maps URL is enough; structured address still
-    counts as a complete answer if the customer happened to send it."""
-    return bool(
-        prep.short_address_code
-        or prep.google_maps_url
-        or (prep.latitude is not None and prep.longitude is not None)
-        or _has_structured_address(prep)
-        or prep.address_line
+    """SA flow: short code, maps URL, coords, or validated shippable address."""
+    from modules.ai.brain.commerce.address_evidence_gate import (  # noqa: PLC0415
+        has_sa_address_evidence,
     )
+
+    return has_sa_address_evidence(prep)
 
 
 def _has_intl_address(prep: OrderPreparationState) -> bool:
@@ -1838,8 +1856,8 @@ def _checkout_question(field_name: str, *, is_sa: bool = True) -> str:
             "customer_last_name": "وما اسم العائلة كما يظهر في عنوان التسليم؟",
             "city": "ما المدينة التي سيصلها الطلب؟",
             "address_location": (
-                "أرسل الرمز الوطني المختصر للعقار، أو رابط موقعك من Google Maps "
-                "وسأجهّز الطلب فوراً."
+                "أرسل رابط الموقع من Google Maps أو الرمز المختصر للعنوان الوطني "
+                "عشان نكمل الطلب بدقة."
             ),
         }
     else:
@@ -1963,8 +1981,8 @@ _MISSING_FIELD_PROMPTS_AR: Dict[str, str] = {
     "customer_phone":      "أرسل رقم جوال للتواصل عند التوصيل (مثال: 0555xxxxxx).",
     "city":                "في أي مدينة سنوصل لك الطلب؟",
     "address_location":    (
-        "أرسل عنوان التوصيل: يمكن الرمز الوطني (مثل TAPA7401) "
-        "أو رابط الموقع من خرائط Google."
+        "أرسل رابط الموقع من Google Maps أو الرمز المختصر للعنوان الوطني "
+        "عشان نكمل الطلب بدقة."
     ),
     "payment_method":      (
         "كيف تفضّل الدفع؟ \n• الدفع عند الاستلام\n• تحويل بنكي\n"
