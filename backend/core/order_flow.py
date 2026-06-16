@@ -1432,10 +1432,14 @@ def maybe_handle_wa_address_inbound(
         return None
 
     line_items = list(op.get("line_items") or bs.get("cart_items") or [])
+    from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
+
+    payment_methods = load_merchant_payment_methods(db, tenant_id)
     reply_text = compose_address_reply(
         order_prep=op,
         brain_state=bs,
         line_items=line_items,
+        payment_methods=payment_methods,
     )
     state_patch = {
         **address_patch,
@@ -1448,6 +1452,84 @@ def maybe_handle_wa_address_inbound(
         (phone or "")[-4:],
         inbound_normalized_type,
         address_patch.get("delivery_address_type"),
+    )
+    return {
+        "reply_text":  reply_text,
+        "summary":     summary,
+        "state_patch": state_patch,
+    }
+
+
+def maybe_handle_payment_method_selection_inbound(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    inbound_text: str,
+) -> Optional[Dict[str, Any]]:
+    """Validate and persist customer payment method choice for WA checkout."""
+    from core.merchant_payment_methods import (  # noqa: PLC0415
+        build_payment_method_state_patch,
+        load_merchant_payment_methods,
+        resolve_indexed_choice,
+        validate_payment_method_choice,
+    )
+    from core.order_payment_policy import (  # noqa: PLC0415
+        PAYMENT_METHOD_BANK_TRANSFER,
+        PAYMENT_METHOD_CASH_ON_DELIVERY,
+        PAYMENT_METHOD_MOYASAR,
+    )
+    from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
+
+    text = str(inbound_text or "").strip()
+    if not text or len(text) > 120:
+        return None
+
+    methods = load_merchant_payment_methods(db, tenant_id)
+    chosen = resolve_indexed_choice(text, methods)
+    if not chosen:
+        return None
+
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    if _conv is None:
+        return None
+
+    op = dict(bs.get("order_prep") or bs.get("order_preparation") or {})
+    summary = _focus_summary(bs)
+    line_items = list(op.get("line_items") or bs.get("cart_items") or [])
+    missing = compute_wa_missing_fields(op, brain_state=bs, line_items=line_items)
+    if missing:
+        return None
+
+    rejection = validate_payment_method_choice(chosen, methods)
+    if rejection:
+        return {
+            "reply_text":  rejection,
+            "summary":     summary,
+            "state_patch": {},
+        }
+
+    state_patch = build_payment_method_state_patch(chosen)
+    if chosen == PAYMENT_METHOD_BANK_TRANSFER:
+        reply_text = (
+            "تم اختيار التحويل البنكي ✅\n"
+            "بعد التحويل، أرسلي صورة الإيصال أو إثبات الدفع."
+        )
+    elif chosen == PAYMENT_METHOD_CASH_ON_DELIVERY:
+        reply_text = "تم اختيار الدفع عند الاستلام ✅"
+    elif chosen == PAYMENT_METHOD_MOYASAR:
+        reply_text = (
+            "تم اختيار الدفع الإلكتروني ✅\n"
+            "سنرسل لك رابط الدفع قريباً."
+        )
+    else:
+        reply_text = "تم تسجيل طريقة الدفع ✅"
+
+    logger.info(
+        "[ORDER_FLOW_STATE] payment_method short-circuit tenant=%s phone=*%s method=%s",
+        tenant_id,
+        (phone or "")[-4:],
+        chosen,
     )
     return {
         "reply_text":  reply_text,

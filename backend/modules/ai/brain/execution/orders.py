@@ -1994,17 +1994,46 @@ _MISSING_FIELD_PROMPTS_AR: Dict[str, str] = {
         "عشان نكمل الطلب بدقة."
     ),
     "payment_method":      (
-        "كيف تفضّل الدفع؟ \n• الدفع عند الاستلام\n• تحويل بنكي\n"
-        "اكتب اختيارك."
+        "كيف تفضّل الدفع؟ اكتب اختيارك من الطرق المتاحة في المتجر."
     ),
 }
 
 
-def _ask_for_missing_field(missing: List[str]) -> str:
-    """Return the Arabic prompt for the FIRST missing field.  Designed for
-    the single-question UX used by the WhatsApp order flow — never asks for
-    more than one slot at a time."""
+def _ask_for_missing_field(
+    missing: List[str],
+    *,
+    merchant_context: Optional[Dict[str, Any]] = None,
+    tenant_id: Optional[int] = None,
+    db: Any = None,
+) -> str:
+    """Return the Arabic prompt for the FIRST missing field."""
     for slot in (missing or []):
+        if slot == "payment_method":
+            try:
+                from core.merchant_payment_methods import (  # noqa: PLC0415
+                    build_payment_method_prompt_ar,
+                    load_merchant_payment_methods,
+                    resolve_merchant_payment_methods,
+                )
+                mc = merchant_context or {}
+                ai = mc.get("ai_settings") if isinstance(mc.get("ai_settings"), dict) else {}
+                if db is not None and tenant_id is not None:
+                    methods = load_merchant_payment_methods(db, tenant_id)
+                else:
+                    methods = resolve_merchant_payment_methods(
+                        ai_settings=ai or mc,
+                        extra_metadata=mc.get("extra_metadata") if isinstance(
+                            mc.get("extra_metadata"), dict
+                        ) else {},
+                        moyasar_cfg=mc.get("moyasar") if isinstance(mc.get("moyasar"), dict) else {},
+                    )
+                return build_payment_method_prompt_ar(methods)
+            except Exception:  # noqa: silent-ok — degrade to static slot prompt
+                logger.debug(
+                    "[ORDER] payment_method prompt fallback tenant=%s",
+                    tenant_id,
+                    exc_info=True,
+                )
         prompt = _MISSING_FIELD_PROMPTS_AR.get(slot)
         if prompt:
             return prompt
