@@ -283,6 +283,8 @@ export interface DashboardConversation {
   // filter + the green CheckCheck-style badge. ``null`` when the
   // customer has never uploaded an accepted receipt.
   lastPaymentConfirmedAt?: string | null
+  /** Manual merchant opt-out from marketing campaigns only. */
+  marketingOptOutManual?: boolean
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'

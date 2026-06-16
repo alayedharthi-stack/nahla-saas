@@ -23,14 +23,12 @@ import {
   Plus,
   Minus,
   RotateCcw,
-  ShieldOff,
   Filter,
   Sparkles,
   ShieldCheck,
   Loader2,
   Save,
   SkipForward,
-  UserMinus,
   Check,
   Pencil,
 } from 'lucide-react'
@@ -38,6 +36,7 @@ import Badge from '../components/ui/Badge'
 import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import ToggleSwitch from '../components/ui/ToggleSwitch'
+import CampaignExcludeControl from '../components/customers/CampaignExcludeControl'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { paginationChevrons } from '../lib/paginationIcons'
@@ -854,57 +853,6 @@ export default function Customers() {
       return next
     })
     queueCleanupAutosave()
-  }
-
-  // Inline "exclude from marketing campaigns" toggle.
-  //
-  // What this does: flips ``Customer.extra_metadata.marketing_opt_out_manual``
-  // for ONE row server-side, then optimistically reflects the new
-  // state in the modal's local items array so the badge updates
-  // without a full preview refetch.
-  //
-  // What this is NOT (three distinct buckets, by design):
-  //   * NOT a customer-driven unsubscribe (the customer sending STOP).
-  //   * NOT a Quality Engine auto-suppression (repeated quality_risk
-  //     failures).
-  // Each lives in a separate column / table server-side; conflating
-  // them in the UI here would mislead the merchant about WHY a row
-  // is excluded. The backend distinction is locked down in
-  // ``/customers/name-cleanup/marketing-opt-out`` + the test suite.
-  const toggleCleanupRowOptedOut = async (customerId: number, optedOut: boolean) => {
-    try {
-      await customersApi.nameCleanupMarketingOptOut({
-        customer_ids: [customerId],
-        opted_out: optedOut,
-      })
-      // Optimistic update of the local item — keeps the UI snappy
-      // without a full preview round-trip. The next manual
-      // "إعادة الفحص" will canonicalise from the server anyway.
-      setNameCleanupItems(prev =>
-        prev.map(it =>
-          it.customer_id === customerId
-            ? { ...it, marketing_opt_out_manual: optedOut }
-            : it,
-        ),
-      )
-      // If the merchant opted them OUT, also de-select the row so
-      // a subsequent "Apply selected" doesn't accidentally rename
-      // them — opt-out is a strong signal that the row is no
-      // longer interesting for the cleanup workflow.
-      if (optedOut) {
-        setNameCleanupSelected(prev => {
-          if (!prev.has(customerId)) return prev
-          const next = new Set(prev)
-          next.delete(customerId)
-          return next
-        })
-      }
-    } catch (err: any) {
-      const msg = err?.detail || err?.message || cu.nameCleanup.actionFailed
-      setNameCleanupError(
-        typeof msg === 'string' ? msg : JSON.stringify(msg),
-      )
-    }
   }
 
   // Explicit "save now" — used by the "حفظ ومتابعة لاحقاً" button.
@@ -2256,48 +2204,29 @@ export default function Customers() {
                                   <Trash2 className="w-3 h-3" />
                                   {cu.nameCleanup.clearEntireName}
                                 </button>
-                                {/*
-                                 * Inline marketing opt-out. The button
-                                 * toggles ``marketing_opt_out_manual`` on
-                                 * the customer record — distinct from
-                                 * the cleanup pipeline (we never delete
-                                 * the customer, the conversation, or
-                                 * any inbound history). The dispatcher
-                                 * honours the flag in its pre-send
-                                 * filter; inbound messages still arrive
-                                 * normally.
-                                 */}
-                                <button
-                                  type="button"
-                                  onClick={stopAnd(() =>
-                                    toggleCleanupRowOptedOut(
-                                      it.customer_id,
-                                      !it.marketing_opt_out_manual,
+                                <CampaignExcludeControl
+                                  customerId={it.customer_id}
+                                  optedOut={!!it.marketing_opt_out_manual}
+                                  customerLabel={it.current_name || it.phone || String(it.customer_id)}
+                                  variant="inline-chip"
+                                  onSuccess={(nextOptedOut) => {
+                                    setNameCleanupItems(prev =>
+                                      prev.map(row =>
+                                        row.customer_id === it.customer_id
+                                          ? { ...row, marketing_opt_out_manual: nextOptedOut }
+                                          : row,
+                                      ),
                                     )
-                                  )}
-                                  className={
-                                    // Slightly stronger visual weight than
-                                    // the other inline actions — this is
-                                    // the only one with a permanent
-                                    // side-effect on the customer's
-                                    // marketing eligibility, so it earns
-                                    // a more saturated chip.
-                                    'text-[11px] font-medium inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
-                                    (it.marketing_opt_out_manual
-                                      ? 'border-purple-400 bg-purple-100 text-purple-800 hover:bg-purple-200'
-                                      : 'border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100')
-                                  }
-                                  title={
-                                    it.marketing_opt_out_manual
-                                      ? cu.nameCleanup.reEnableMarketing
-                                      : cu.nameCleanup.excludeFromCampaigns
-                                  }
-                                >
-                                  <UserMinus className="w-3 h-3" />
-                                  {it.marketing_opt_out_manual
-                                    ? cu.nameCleanup.reEnableMarketingShort
-                                    : cu.nameCleanup.excludeShort}
-                                </button>
+                                    if (nextOptedOut) {
+                                      setNameCleanupSelected(prev => {
+                                        if (!prev.has(it.customer_id)) return prev
+                                        const next = new Set(prev)
+                                        next.delete(it.customer_id)
+                                        return next
+                                      })
+                                    }
+                                  }}
+                                />
                               </div>
                             </div>
                           </div>
@@ -2854,26 +2783,6 @@ function ManualSegmentsSection({
     }
   }
 
-  const handleToggleOptOut = async () => {
-    setBusy('__opt__')
-    setError('')
-    try {
-      const res = await customersApi.updateMarketingPreferences(customer.id, {
-        marketing_opt_out_manual: !optedOut,
-      })
-      await onChange({
-        ...customer,
-        marketing_opt_out_manual: res.marketing_opt_out_manual,
-        marketing_opt_out_manual_at: res.marketing_opt_out_manual_at,
-      })
-      onRequireListReload?.()
-    } catch (err: any) {
-      setError(err?.detail || err?.message || cu.manualSegments.updatePrefFailed)
-    } finally {
-      setBusy(null)
-    }
-  }
-
   const handleToggleTest = async () => {
     setBusy('__test__')
     setError('')
@@ -3059,29 +2968,30 @@ function ManualSegmentsSection({
         </p>
       )}
 
-      {/* Marketing opt-out (manual exclusion) */}
-      <div className="border-t border-slate-100 pt-3 space-y-2">
-        <label className="flex items-start gap-2.5 cursor-pointer select-none">
-          <ToggleSwitch
-            checked={optedOut}
-            disabled={busy === '__opt__'}
-            onClick={handleToggleOptOut}
-            activeClass="bg-red-500"
-            inactiveClass="bg-slate-200"
-          />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-slate-800 flex items-center gap-1">
-              <ShieldOff className="w-3.5 h-3.5 text-slate-400" />
-              {cu.manualSegments.optOutTitle}
-            </p>
-            <p className="text-[11px] text-slate-500 leading-snug">
-              {cu.manualSegments.optOutBody}
-            </p>
-          </div>
-        </label>
+      {/* Marketing opt-out — same control as conversations inbox */}
+      <div className="border-t border-slate-100 pt-3">
+        <CampaignExcludeControl
+          customerId={customer.id}
+          phone={customer.phone}
+          optedOut={optedOut}
+          customerLabel={customer.name || customer.phone || String(customer.id)}
+          variant="button"
+          onSuccess={async (nextOptedOut) => {
+            await onChange({
+              ...customer,
+              marketing_opt_out_manual: nextOptedOut,
+              marketing_opt_out_manual_at: nextOptedOut
+                ? new Date().toISOString()
+                : null,
+            })
+            onRequireListReload?.()
+          }}
+        />
+      </div>
 
-        {/* Quick "add to campaign test list" — internal flag, no
-            merchant-visible tag is created. */}
+      {/* Quick "add to campaign test list" — internal flag, no
+          merchant-visible tag is created. */}
+      <div className="border-t border-slate-100 pt-3 space-y-2">
         <label className="flex items-start gap-2.5 cursor-pointer select-none">
           <ToggleSwitch
             checked={isTestRecipient}

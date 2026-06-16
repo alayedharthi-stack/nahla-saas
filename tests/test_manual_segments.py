@@ -964,6 +964,38 @@ class TestCustomersListEndpointContract:
         result = self._call_list(engine, tenant_id, manual_segment="")
         assert result["total"] == 3
 
+    def test_marketing_opt_out_filter_returns_only_excluded(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        excluded = _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        excluded_id = excluded.id
+        _seed_customer(db, t.id, "+966500000002")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=True)
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == excluded_id
+        assert result["customers"][0]["marketing_opt_out_manual"] is True
+
+    def test_marketing_opt_out_filter_excludes_opted_in(self):
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        eligible = _seed_customer(db, t.id, "+966500000002")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=False)
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == eligible.id
+
     def _call_delete(self, engine, tenant_id: int, customer_id: int, segment_key: str):
         """Direct in-process call to ``remove_customer_segment``."""
         import asyncio
