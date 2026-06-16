@@ -703,11 +703,14 @@ def _base_metadata(
     }
     if is_paid_path:
         meta["payment_confirmed_at"] = confirmed_at
-        meta["payment_receipt_metadata"] = receipt_metadata
         meta["created_at"] = confirmed_at
     else:
         meta["draft_created_at"] = now_iso
         meta["counts_in_revenue"] = False
+    if receipt_metadata:
+        meta["payment_receipt_metadata"] = receipt_metadata
+        if not is_paid_path:
+            meta["payment_evidence_on_draft"] = True
     if customer_name:
         meta["customer_name"] = customer_name
     if product_title and product_title != "منتج":
