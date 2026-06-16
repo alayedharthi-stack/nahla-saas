@@ -169,6 +169,11 @@ def test_incomplete_order_stays_pending_customer_info_after_location() -> None:
 
 
 def test_compose_reply_complete_vs_incomplete() -> None:
+    from core.merchant_payment_methods import resolve_merchant_payment_methods  # noqa: PLC0415
+
+    bank_only = resolve_merchant_payment_methods(
+        extra_metadata={"payment_methods": {"bank_transfer_enabled": True, "cash_on_delivery_enabled": False}},
+    )
     complete_prep = {
         **build_whatsapp_location_patch({"latitude": 24.7, "longitude": 46.6}),
         "customer_first_name": "A",
@@ -176,9 +181,14 @@ def test_compose_reply_complete_vs_incomplete() -> None:
         "city": "Riyadh",
         "line_items": [{"product_name": "x", "quantity": 1}],
     }
-    assert "طريقة الدفع" in compose_address_reply(
-        order_prep=complete_prep, brain_state={}, line_items=complete_prep["line_items"],
+    reply = compose_address_reply(
+        order_prep=complete_prep,
+        brain_state={},
+        line_items=complete_prep["line_items"],
+        payment_methods=bank_only,
     )
+    assert "طريقة الدفع" in reply
+    assert "تحويل بنكي" in reply
     incomplete = build_whatsapp_location_patch({"latitude": 24.7, "longitude": 46.6})
     assert "المنتج" in compose_address_reply(
         order_prep=incomplete, brain_state={},

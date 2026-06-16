@@ -112,23 +112,15 @@ def compose_address_reply(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
     line_items: Optional[list] = None,
+    payment_methods: Optional[Any] = None,
 ) -> str:
-    from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
+    from core.wa_checkout_reply import compose_address_reply as _compose  # noqa: PLC0415
 
-    missing = compute_wa_missing_fields(
-        order_prep,
-        brain_state=brain_state or {},
+    return _compose(
+        order_prep=order_prep,
+        brain_state=brain_state,
         line_items=line_items,
-    )
-    product_incomplete = "product" in missing
-    if not product_incomplete and "delivery_address" not in missing:
-        return (
-            "وصل الموقع، تم تسجيل العنوان ✅\n"
-            "باقي تختار طريقة الدفع: تحويل بنكي أو دفع عند الاستلام إذا متاح."
-        )
-    return (
-        "وصل الموقع، تم تسجيل العنوان ✅\n"
-        "باقي تحدد المنتج أو الكمية عشان نكمل الطلب."
+        payment_methods=payment_methods,
     )
 
 

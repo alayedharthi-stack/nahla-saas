@@ -595,6 +595,11 @@ export interface Translations {
     replyPlaceholder: string
     aiHandlingHint: string
     unsubscribedFilterHint: string
+    mobileFilters: {
+      sheetTitle: string
+      menuButtonLabel: string
+    }
+    scrollToBottom: string
     errors: {
       refreshFailed: string
       loadMoreFailed: string
