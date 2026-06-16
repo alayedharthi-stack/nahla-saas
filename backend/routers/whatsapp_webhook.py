@@ -3825,6 +3825,57 @@ async def _dispatch_message(
                     )
             return
 
+        # ── WhatsApp location pin → order address ingestion (PR-6) ──
+        if (
+            normalized_inbound.normalized_type == "location"
+            and not _is_platform_tenant(db, resolved_tenant_id)
+        ):
+            try:
+                from core.order_flow import (  # noqa: PLC0415
+                    apply_state_patch,
+                    maybe_handle_wa_address_inbound,
+                )
+                _loc_decision = maybe_handle_wa_address_inbound(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender or "",
+                    inbound_normalized_type="location",
+                    inbound_metadata=normalized_inbound.metadata or {},
+                )
+            except Exception as _loc_exc:  # noqa: BLE001
+                logger.warning(
+                    "[ORDER_FLOW_STATE] location short-circuit failed "
+                    "tenant=%s phone=%s err=%s",
+                    resolved_tenant_id, sender, _loc_exc,
+                )
+                _loc_decision = None
+            if _loc_decision is not None:
+                try:
+                    apply_state_patch(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender or "",
+                        state_patch=_loc_decision["state_patch"],
+                    )
+                except Exception as _loc_patch_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] location state_patch failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _loc_patch_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {"body": _loc_decision["reply_text"]},
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
         # ── INBOUND_MEDIA_TRACE (mandatory pre-ignore audit line) ──
         # Per the May 2026 spec: emit ONE structured trace line for
         # every inbound media payload BEFORE the type allow-list
@@ -4166,10 +4217,34 @@ async def _dispatch_message(
             #     receipt / under-review state.
             # On any failure we silently fall through to the brain.
             _payment_claim_decision = None
+            _address_decision = None
             if (
                 _receipt_decision is None
                 and _evidence_decision is None
                 and _map_image_decision is None
+            ):
+                try:
+                    from core.order_flow import maybe_handle_wa_address_inbound  # noqa: PLC0415
+                    _address_decision = maybe_handle_wa_address_inbound(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_normalized_type=normalized_inbound.normalized_type,
+                        inbound_metadata=normalized_inbound.metadata or {},
+                        inbound_text=text or "",
+                    )
+                except Exception as _addr_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] address text short-circuit failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _addr_exc,
+                    )
+                    _address_decision = None
+            if (
+                _receipt_decision is None
+                and _evidence_decision is None
+                and _map_image_decision is None
+                and _address_decision is None
             ):
                 try:
                     from core.payment_intent import (  # noqa: PLC0415
@@ -4612,6 +4687,33 @@ async def _dispatch_message(
                         "text": {
                             "body": _map_image_decision["reply_text"],
                         },
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
+            if _address_decision is not None:
+                try:
+                    apply_state_patch(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        state_patch=_address_decision["state_patch"],
+                    )
+                except Exception as _addr_patch_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] address text state_patch failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _addr_patch_exc,
+                    )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {"body": _address_decision["reply_text"]},
                     },
                     _tenant_id=resolved_tenant_id,
                     _db=db,

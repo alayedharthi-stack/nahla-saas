@@ -1377,6 +1377,85 @@ def maybe_handle_map_image_inbound(
     }
 
 
+def maybe_handle_wa_address_inbound(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    inbound_normalized_type: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Ingest WhatsApp location pins or accepted map URLs into order_prep.
+
+    Never handles payment receipts or payment claims. Returns the standard
+    short-circuit dict or ``None`` when the inbound is not address data.
+    """
+    from core.wa_address_ingestion import (  # noqa: PLC0415
+        compose_address_reply,
+        is_accepted_maps_url,
+        resolve_address_state_patch,
+    )
+
+    if inbound_normalized_type == "location":
+        pass
+    elif inbound_normalized_type == "text" and is_accepted_maps_url(inbound_text):
+        pass
+    else:
+        return None
+
+    address_patch = resolve_address_state_patch(
+        inbound_normalized_type=inbound_normalized_type,
+        inbound_metadata=inbound_metadata,
+        inbound_text=inbound_text,
+    )
+    if not address_patch:
+        return None
+
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    if _conv is None:
+        return None
+
+    op = dict(bs.get("order_prep") or bs.get("order_preparation") or {})
+    summary = _focus_summary(bs)
+    has_active = bool(
+        summary.get("selected_product")
+        or op.get("line_items")
+        or bs.get("cart_items")
+    )
+    if not has_active:
+        logger.info(
+            "[ORDER_FLOW_STATE] address inbound ignored — no active order "
+            "tenant=%s phone=*%s type=%s",
+            tenant_id, (phone or "")[-4:], inbound_normalized_type,
+        )
+        return None
+
+    line_items = list(op.get("line_items") or bs.get("cart_items") or [])
+    reply_text = compose_address_reply(
+        order_prep=op,
+        brain_state=bs,
+        line_items=line_items,
+    )
+    state_patch = {
+        **address_patch,
+        "awaiting_location_text": False,
+    }
+    logger.info(
+        "[ORDER_FLOW_STATE] address short-circuit fired tenant=%s phone=*%s "
+        "type=%s address_type=%s",
+        tenant_id,
+        (phone or "")[-4:],
+        inbound_normalized_type,
+        address_patch.get("delivery_address_type"),
+    )
+    return {
+        "reply_text":  reply_text,
+        "summary":     summary,
+        "state_patch": state_patch,
+    }
+
+
 def _name_field_looks_like_phone(text: str) -> bool:
     digits = str(text or "").lstrip("+").replace(" ", "").replace("-", "")
     return bool(digits) and digits.isdigit() and len(digits) >= 7

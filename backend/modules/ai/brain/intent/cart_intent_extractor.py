@@ -30,7 +30,8 @@ _PRODUCT_KEYWORDS = {
 _VARIANT_PATTERNS = [
     (re.compile(r"(?:نصف|نص)\s*(?:كilo|كيلو|ك)", re.I), "500g"),
     (re.compile(r"(?:ربع)\s*(?:كilo|كيلو|ك)?", re.I), "250g"),
-    (re.compile(r"(?:كilo|كيلو|1\s*kg|1\s*كilo)\b", re.I), "1kg"),
+    (re.compile(r"^(?:كilo|كيلo|كيلو|1\s*kg)$", re.I), "1kg"),
+    (re.compile(r"(?:كilo|كيلo|كيلو|1\s*kg|1\s*كilo)\b", re.I), "1kg"),
     (re.compile(r"\b500\s*g\b", re.I), "500g"),
     (re.compile(r"\b250\s*g\b", re.I), "250g"),
 ]
@@ -78,6 +79,13 @@ _AR_NUM_WORDS = {
     "اربع": 4, "أربع": 4, "اربعة": 4,
 }
 
+_KILO_ONLY_RE = re.compile(
+    r"^(?:كilo|كيلo|كيلو|1\s*kg|1\s*كilo|ك\s*ilo)\s*$",
+    re.I,
+)
+_EDITION_ONLY_RE = re.compile(r"^(?:ال)?جديد(?:\s|$)?$", re.I)
+_QTY_TWO_RE = re.compile(r"^(?:حبتين|اثنين|2\s*(?:حبة|حبات)?)\s*$", re.I)
+
 _ARABIC_NON_CART_TOKENS = {
     "مرحبا", "اهلا", "أهلا", "السلام", "سلام", "شكرا", "شكراً",
     "نعم", "لا", "تمام", "اوكي",
@@ -108,6 +116,13 @@ def _parse_variant(text: str) -> str:
 
 def _resolve_product_name(text: str) -> str:
     norm = _norm(text)
+    if "عسل" in norm:
+        if "سمر" in norm and "حجاز" in norm:
+            return "عسل سمر الحجاز"
+        if "سمر" in norm:
+            return "عسل سمر"
+        if "طلح" in norm or "نجد" in norm:
+            return "عسل طلح"
     for key, name in _PRODUCT_KEYWORDS.items():
         if key in norm:
             return name
@@ -281,4 +296,74 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     return intents
 
 
-__all__ = ["extract_cart_intents"]
+def _active_cart_item(cart_items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not cart_items:
+        return None
+    return cart_items[-1]
+
+
+def _match_for_item(item: Dict[str, Any]) -> Dict[str, str]:
+    name = str(item.get("product_name") or item.get("title") or "")
+    needle = name.replace("عسل ", "").strip() or name
+    match: Dict[str, str] = {"product_name_contains": needle}
+    variant = str(item.get("variant") or "").strip()
+    if variant:
+        match["variant"] = variant
+    return match
+
+
+def extract_cart_intents_with_context(
+    message: str,
+    *,
+    cart_items: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Context-aware cart intents — stabilizes repeated ``كيلo`` / edition picks.
+
+    When the cart already has a product+variant, a lone ``كيلo`` confirms
+    ``quantity=1`` instead of re-opening variant selection.
+    """
+    if not message or not str(message).strip():
+        return []
+
+    text = str(message).strip()
+    norm = _norm(text)
+    cart = list(cart_items or [])
+    active = _active_cart_item(cart)
+
+    if _EDITION_ONLY_RE.match(norm) and active:
+        return [{
+            "action": "update_edition",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "edition": "إنتاج 1447 / الجديد",
+        }]
+
+    if _KILO_ONLY_RE.match(norm) and active:
+        variant = str(active.get("variant") or "").strip()
+        if variant:
+            return [{
+                "action": "update_quantity",
+                "product_name": active.get("product_name") or "",
+                "match": _match_for_item(active),
+                "quantity": 1,
+            }]
+        return [{
+            "action": "update_variant",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "new_variant": "1kg",
+        }]
+
+    if _QTY_TWO_RE.match(norm) and active:
+        return [{
+            "action": "update_quantity",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "quantity": 2,
+        }]
+
+    return extract_cart_intents(message)
+
+
+__all__ = ["extract_cart_intents", "extract_cart_intents_with_context"]

@@ -54,11 +54,29 @@ def _prep_str(order_prep: Dict[str, Any], key: str) -> str:
 
 
 def has_accepted_delivery_address(order_prep: Dict[str, Any]) -> bool:
-    """True only for Google Maps URL or Saudi national short address code."""
+    """True for Google/Apple Maps URL, national short code, or WA location pin."""
     if _prep_str(order_prep, "short_address_code"):
         return True
     if _prep_str(order_prep, "google_maps_url"):
         return True
+    if _prep_str(order_prep, "delivery_address_url"):
+        return True
+    lat = order_prep.get("latitude") or order_prep.get("delivery_location_lat")
+    lng = order_prep.get("longitude") or order_prep.get("delivery_location_lng")
+    if lat is not None and lng is not None:
+        try:
+            float(lat)
+            float(lng)
+            return True
+        except (TypeError, ValueError):
+            pass
+    if _prep_str(order_prep, "delivery_address_status") == "accepted":
+        return bool(
+            _prep_str(order_prep, "delivery_location_lat")
+            and _prep_str(order_prep, "delivery_location_lng")
+            or _prep_str(order_prep, "google_maps_url")
+            or _prep_str(order_prep, "delivery_address_url")
+        )
     return False
 
 

@@ -73,6 +73,13 @@ def _intent_to_delta(intent: Dict[str, Any], *, cart: List[Dict[str, Any]]) -> O
     if action == "clear_cart":
         return {"op": "clear"}
 
+    if action == "update_edition":
+        return {
+            "op": "update_edition",
+            "match": match or {},
+            "edition": intent.get("edition") or "الجديد",
+        }
+
     return None
 
 
@@ -117,6 +124,19 @@ def apply_cart_intents_to_state(
         if delta.get("op") == "clear":
             cart = []
             deltas.append(delta)
+            continue
+        if delta.get("op") == "update_edition":
+            edition = str(delta.get("edition") or "الجديد")
+            needle = str((delta.get("match") or {}).get("product_name_contains") or "")
+            for row in cart:
+                name = str(row.get("product_name") or "")
+                if needle and needle not in name:
+                    continue
+                row["edition"] = edition
+                row["notes"] = edition
+                break
+            deltas.append(delta)
+            events_total.append({"type": "edition_updated", "edition": edition})
             continue
         if delta.get("op") == "add" and isinstance(delta.get("item"), dict):
             item = dict(delta["item"])
@@ -172,6 +192,11 @@ def apply_cart_intents_to_state(
                 prep.product_id = str(last.get("product_id") or prep.product_id or "")
             if hasattr(prep, "quantity"):
                 prep.quantity = int(last.get("quantity") or 1)
+            if str(last.get("variant") or "").strip():
+                if hasattr(prep, "awaiting_variant_choice"):
+                    prep.awaiting_variant_choice = False
+                if hasattr(state, "awaiting_variant_choice"):
+                    state.awaiting_variant_choice = False
 
         logger.info(
             "[CART_STATE] applied intents=%d cart_size=%d deltas=%d",
@@ -188,9 +213,14 @@ def maybe_apply_cart_message(
     message: str,
     product_info: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], bool]:
-    from modules.ai.brain.intent.cart_intent_extractor import extract_cart_intents  # noqa: PLC0415
+    from modules.ai.brain.intent.cart_intent_extractor import (  # noqa: PLC0415
+        extract_cart_intents_with_context,
+    )
 
-    intents = extract_cart_intents(message)
+    cart = list(getattr(state, "cart_items", None) or [])
+    if not cart and hasattr(prep, "line_items"):
+        cart = list(getattr(prep, "line_items", None) or [])
+    intents = extract_cart_intents_with_context(message, cart_items=cart)
     if not intents:
         return list(getattr(state, "cart_items", None) or []), [], False
     return apply_cart_intents_to_state(
