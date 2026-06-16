@@ -69,6 +69,8 @@ export interface DashboardOrder {
   payment_confirmed?: boolean
   merchant_payment_alert?: MerchantPaymentAlert | null
   merchant_payment_alerts?: MerchantPaymentAlert[]
+  can_confirm_bank_transfer?: boolean
+  merchant_post_confirm_notice?: string | null
   createdAt: string
   is_ai_created?: boolean
   is_vip?: boolean
@@ -125,6 +127,20 @@ export interface PaymentReminderResult {
   message: string
   conversation_url: string
   sent_at?: string
+}
+
+export interface ConfirmPaymentResult {
+  ok: boolean
+  result: {
+    idempotent?: boolean
+    order_id?: number
+    status: string
+    payment_confirmed: boolean
+    payment_status?: string
+    address_accepted?: boolean
+    merchant_notice?: string | null
+  }
+  order: OrderDetail
 }
 
 export interface OrdersDashboard {
@@ -298,6 +314,8 @@ export interface DashboardConversation {
   // filter + the green CheckCheck-style badge. ``null`` when the
   // customer has never uploaded an accepted receipt.
   lastPaymentConfirmedAt?: string | null
+  /** Manual merchant opt-out from marketing campaigns only. */
+  marketingOptOutManual?: boolean
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
@@ -453,6 +471,11 @@ export const featureRealityApi = {
     return apiCall(`/orders/${encodeURIComponent(String(orderId))}/send-payment-reminder`, {
       method: 'POST',
       body: JSON.stringify(body),
+    })
+  },
+  confirmOrderPayment(orderId: string | number): Promise<ConfirmPaymentResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/confirm-payment`, {
+      method: 'POST',
     })
   },
   coupons(): Promise<CouponsDashboard> {
