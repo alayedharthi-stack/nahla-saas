@@ -244,7 +244,7 @@ export default function Orders() {
                       {o.amount_sar != null ? `${Number(o.amount_sar).toLocaleString(locale)} ${op.currency}` : '—'}
                     </td>
                     <td className="px-5 py-3.5">
-                      <Badge variant={statusVariant(o.status as OrderStatus)} label={statusLabel(o.status as OrderStatus)} />
+                      <Badge variant={statusVariant(o.status as OrderStatus)} label={o.raw_status_label || o.status_label || statusLabel(o.status as OrderStatus)} />
                     </td>
                     <td className="px-5 py-3.5">
                       <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border text-[10px] font-medium ${SOURCE_BADGE_CLASS[o.source]}`}>

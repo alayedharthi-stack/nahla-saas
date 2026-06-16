@@ -53,7 +53,9 @@ PAID_STATUSES = frozenset({
 PENDING_STATUSES = frozenset({
     "pending",
     "pending_payment", "payment_pending", "awaiting_payment",
+    "payment_submitted",
     "pending_confirmation", "awaiting_confirmation",
+    "cod_pending",
     "under_review", "in_review",
     "in_progress", "processing",
     "preparing", "in_preparation",
@@ -78,6 +80,21 @@ STATUS_LABELS_AR: Dict[str, str] = {
     "pending":   "قيد المعالجة",
     "failed":    "فشل الدفع",
     "cancelled": "ملغي",
+}
+
+RAW_STATUS_LABELS_AR: Dict[str, str] = {
+    "draft":                 "مسودة",
+    "pending_customer_info": "بانتظار بيانات العميل",
+    "pending_payment":       "بانتظار الدفع",
+    "payment_submitted":     "دفع مُرسَل — بانتظار التحقق",
+    "cod_pending":           "دفع عند الاستلام",
+    "paid":                  "مدفوع",
+    "processing":            "قيد التجهيز",
+    "ready_to_ship":         "جاهز للشحن",
+    "shipped":               "تم الشحن",
+    "delivered":             "تم التسليم",
+    "cancelled":             "ملغي",
+    "abandoned":             "متروك",
 }
 
 # Origin platform → Arabic label for the "المصدر" column.
@@ -506,6 +523,25 @@ def _build_timeline(order: Order, *, has_open_conv: bool, source_label: str) -> 
             "icon":  "refresh",
         })
 
+    for pt_event in (meta.get("payment_timeline") or []):
+        if not isinstance(pt_event, dict):
+            continue
+        ev_key = str(pt_event.get("event") or "")
+        if ev_key == "payment_confirmed":
+            events.append({
+                "key":   "payment_confirmed",
+                "label": "تم تأكيد وصول التحويل البنكي من التاجر",
+                "at":    str(pt_event.get("verified_at") or ""),
+                "icon":  "refresh",
+            })
+        elif ev_key == "payment_submitted":
+            events.append({
+                "key":   "payment_submitted",
+                "label": "أرسل العميل إثبات الدفع — بانتظار التحقق",
+                "at":    str(pt_event.get("at") or ""),
+                "icon":  "bell",
+            })
+
     if has_open_conv:
         events.append({
             "key":   "conversation_open",
@@ -634,6 +670,32 @@ def _serialise_order(
         is_ai_created=is_ai_created,
     )
 
+    from core.merchant_payment_confirmation import (  # noqa: PLC0415
+        can_show_confirm_bank_transfer_button,
+    )
+    from core.order_payment_policy import (  # noqa: PLC0415
+        PAYMENT_METHOD_LABELS_AR,
+        build_merchant_payment_alerts,
+    )
+
+    parsed_raw = _parse_corrupt_status(raw_status).strip().lower()
+    payment_alerts = build_merchant_payment_alerts(
+        raw_status=parsed_raw,
+        meta=order_meta,
+    )
+    for alert in payment_alerts:
+        needs_action.append({
+            "key":   alert["key"],
+            "label": alert.get("label") or alert.get("message", ""),
+            "level": alert["level"],
+        })
+
+    payment_method = str(order_meta.get("payment_method") or "").strip().lower() or None
+    payment_method_label = (
+        PAYMENT_METHOD_LABELS_AR.get(payment_method, payment_method)
+        if payment_method else None
+    )
+
     payload: Dict[str, Any] = {
         # `id` is kept as the human-visible order number so existing
         # frontend key/search/filter code shows the platform reference
@@ -650,8 +712,9 @@ def _serialise_order(
         "amount":        _format_total(amount_value, order.total),
         "amount_sar":    round(amount_value, 2),
         "status":        status,
-        "status_label":  STATUS_LABELS_AR.get(status, status),
+        "status_label":  RAW_STATUS_LABELS_AR.get(parsed_raw) or STATUS_LABELS_AR.get(status, status),
         "raw_status":    _parse_corrupt_status(raw_status),
+        "raw_status_label": RAW_STATUS_LABELS_AR.get(parsed_raw, parsed_raw or raw_status),
         "source":        source_key,
         "source_label":  source_label,
         "paymentLink":   order.checkout_url,
@@ -660,6 +723,14 @@ def _serialise_order(
         "is_vip":        is_vip_customer,
         "has_open_conversation": has_open_conv,
         "needs_action":  needs_action,
+        "payment_method": payment_method,
+        "payment_method_label": payment_method_label,
+        "payment_status": order_meta.get("payment_status"),
+        "payment_confirmed": bool(order_meta.get("payment_confirmed")),
+        "merchant_payment_alert": payment_alerts[0] if payment_alerts else None,
+        "merchant_payment_alerts": payment_alerts,
+        "can_confirm_bank_transfer": can_show_confirm_bank_transfer_button(order),
+        "merchant_post_confirm_notice": order_meta.get("merchant_post_confirm_notice"),
     }
 
     if detailed:
@@ -681,8 +752,15 @@ def _serialise_order(
             "whatsapp":     whatsapp_url,
             "conversation": conversation_url,
         }
-        payload["payment_method"] = (order.extra_metadata or {}).get("payment_method")
-        payload["notes"]          = (order.extra_metadata or {}).get("notes")
+        payload["payment_method"] = payment_method
+        payload["payment_method_label"] = payment_method_label
+        payload["payment_status"] = order_meta.get("payment_status")
+        payload["payment_confirmed"] = bool(order_meta.get("payment_confirmed"))
+        payload["merchant_payment_alert"] = payment_alerts[0] if payment_alerts else None
+        payload["merchant_payment_alerts"] = payment_alerts
+        payload["can_confirm_bank_transfer"] = can_show_confirm_bank_transfer_button(order)
+        payload["merchant_post_confirm_notice"] = order_meta.get("merchant_post_confirm_notice")
+        payload["notes"]          = order_meta.get("notes")
         payload["timeline"]       = _build_timeline(
             order, has_open_conv=has_open_conv, source_label=source_label,
         )
@@ -992,3 +1070,72 @@ async def send_payment_reminder(
         "conversation_url": conversation_url,
         "sent_at":          sent_at,
     }
+
+
+# ── Merchant bank-transfer confirmation (PR-2B) ─────────────────────────────
+
+@router.post("/{order_id}/confirm-payment")
+async def confirm_order_payment(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Merchant confirms bank-transfer funds after manual verification.
+
+    Only ``payment_submitted`` + ``bank_transfer`` + ``payment_confirmed=false``.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    from core.merchant_payment_confirmation import (  # noqa: PLC0415
+        apply_merchant_payment_confirmation,
+        can_merchant_confirm_bank_transfer,
+    )
+
+    allowed, reason = can_merchant_confirm_bank_transfer(order)
+    if not allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=reason,
+        )
+
+    verified_by = str(
+        request.headers.get("X-Staff-User")
+        or request.headers.get("X-Merchant-User")
+        or f"tenant:{tenant_id}"
+    )
+
+    try:
+        result = apply_merchant_payment_confirmation(
+            order,
+            verified_by=verified_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
+
+    return {
+        "ok":     True,
+        "result": result,
+        "order":  _serialise_order(
+            order,
+            customer_lookup=customer_lookup,
+            now=datetime.now(timezone.utc),
+            detailed=True,
+            vip_phones=vip_phones,
+            unread_phones=unread_phones,
+        ),
+    }
+

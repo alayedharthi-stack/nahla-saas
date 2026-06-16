@@ -227,6 +227,9 @@ class OrderPreparationState:
     payment_claim_unverified:    bool = False
     payment_claim_unverified_at: str = ""
     payment_claim_text_preview:  str = ""
+    # PR-4 — multi-item WhatsApp cart mirror (consumed by nahla_order_bridge).
+    line_items: List[Dict[str, Any]] = field(default_factory=list)
+    cart_deltas: List[Dict[str, Any]] = field(default_factory=list)
     # ── Variant choice gate (migration 0064 — Phase 3) ───────────────────
     # When the resolver returns a parent with 2+ in-stock variants, the
     # responder ships ``ask_product_variants`` instead of the product
@@ -287,6 +290,8 @@ class OrderPreparationState:
             "payment_claim_unverified":    self.payment_claim_unverified,
             "payment_claim_unverified_at": self.payment_claim_unverified_at,
             "payment_claim_text_preview":  self.payment_claim_text_preview,
+            "line_items": list(self.line_items or []),
+            "cart_deltas": list(self.cart_deltas or []),
             "awaiting_variant_choice":  self.awaiting_variant_choice,
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
@@ -345,6 +350,8 @@ class OrderPreparationState:
             payment_claim_unverified=bool(raw.get("payment_claim_unverified", False)),
             payment_claim_unverified_at=str(raw.get("payment_claim_unverified_at", "") or ""),
             payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),
+            line_items=list(raw.get("line_items") or []),
+            cart_deltas=list(raw.get("cart_deltas") or []),
             awaiting_variant_choice=bool(raw.get("awaiting_variant_choice", False)),
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),

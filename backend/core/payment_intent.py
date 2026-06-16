@@ -618,6 +618,8 @@ def maybe_handle_payment_claim(
 
     try:
         from core.order_flow import _focus_summary, _load_brain_state  # noqa: PLC0415
+        from core.wa_order_linking import find_linkable_wa_order  # noqa: PLC0415
+
         _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
         s = _focus_summary(bs)
     except Exception as exc:  # noqa: BLE001
@@ -641,16 +643,51 @@ def maybe_handle_payment_claim(
         or receipt_received
         or order_status in active_statuses
     )
-    if not has_active_context:
-        # No order in flight → let the brain handle it; the customer
-        # might be asking a question that just happens to share
-        # vocabulary with payment confirmations.
-        logger.info(
-            "[PAYMENT_INTENT] skip — no active order context "
-            "tenant=%s phone=*%s text=%r",
-            tenant_id, (phone or "")[-4:], (inbound_text or "")[:40],
+    linkable_order = None
+    try:
+        linkable_order = find_linkable_wa_order(
+            db,
+            tenant_id=int(tenant_id),
+            conversation=_conv,
+            phone_candidates=(phone,),
         )
-        return None
+        if linkable_order is not None:
+            has_active_context = True
+    except Exception:
+        pass
+
+    if not has_active_context:
+        try:
+            from core.wa_payment_submission import (  # noqa: PLC0415
+                MSG_WA_PAYMENT_UNLINKED,
+                apply_wa_payment_submission,
+            )
+            _unlink = apply_wa_payment_submission(
+                db,
+                tenant_id=int(tenant_id),
+                phone=phone,
+                submission_type="text_claim",
+                conversation=_conv,
+                trigger="text_claim_no_order",
+            )
+            logger.info(
+                "[PAYMENT_INTENT] unlinked text claim tenant=%s phone=*%s text=%r",
+                tenant_id, (phone or "")[-4:], (inbound_text or "")[:40],
+            )
+            return {
+                "reply_text":  _unlink.get("reply_text") or MSG_WA_PAYMENT_UNLINKED,
+                "state_patch": {
+                    "payment_claim_at": _utcnow_iso(),
+                    "payment_resolution_state": "PAYMENT_UNLINKED",
+                },
+            }
+        except Exception:
+            logger.info(
+                "[PAYMENT_INTENT] skip — no active order context "
+                "tenant=%s phone=*%s text=%r",
+                tenant_id, (phone or "")[-4:], (inbound_text or "")[:40],
+            )
+            return None
 
     # ── Receipt-override promotion (May 2026 hotfix) ─────────────────
     # When the customer's previous inbound was a PDF / image that we
@@ -679,6 +716,23 @@ def maybe_handle_payment_claim(
             _override_promotion.get("_prior_pe_status"),
         )
         return _override_promotion
+
+    try:
+        from core.wa_payment_submission import apply_wa_payment_submission  # noqa: PLC0415
+
+        apply_wa_payment_submission(
+            db,
+            tenant_id=int(tenant_id),
+            phone=phone,
+            submission_type="text_claim",
+            conversation=_conv,
+            trigger="text_claim",
+        )
+    except Exception as _wa_exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_INTENT] wa payment submission sync failed tenant=%s err=%s",
+            tenant_id, _wa_exc,
+        )
 
     # ── Brain-driven text-claim policy (May 2026 #48) ────────────────
     # No prior receipt-shaped evidence to promote, no real media this
@@ -750,10 +804,9 @@ def maybe_handle_payment_claim(
             if isinstance(_stamp, dict):
                 state_patch.update(_stamp)
         except Exception as _stamp_exc:  # noqa: BLE001
-            logger.debug(
-                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
-                "tenant=%s err=%s",
-                tenant_id, _stamp_exc,
+            logger.exception(
+                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) tenant=%s",
+                tenant_id,
             )
         logger.info(
             "[PAYMENT_INTENT] short_circuit=text_claim_receipt_request "

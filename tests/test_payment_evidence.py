@@ -784,7 +784,7 @@ class TestOrderFlowReceiptGate:
         assert "إيصال" in decision["reply_text"] or "وصل" in decision["reply_text"]
         sp = decision["state_patch"]
         assert sp.get("payment_receipt_received") is True
-        assert sp.get("order_status") == "under_review"
+        assert sp.get("order_status") == "payment_submitted"
 
     def test_pre_transfer_review_does_not_fire_ack(self, monkeypatch):
         from core.order_flow import maybe_handle_receipt_inbound
@@ -882,7 +882,7 @@ class TestOrderFlowReceiptGate:
         sp = decision["state_patch"]
         assert sp.get("payment_receipt_received") is True
         assert sp.get("awaiting_payment_receipt") is False
-        assert sp.get("order_status") == "under_review"
+        assert sp.get("order_status") == "payment_submitted"
         # Reply should be the receipt ACK, NOT the "send me the
         # final receipt" soft reply.
         assert "مراجعة قبل التحويل" not in decision["reply_text"]

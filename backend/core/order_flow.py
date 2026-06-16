@@ -594,10 +594,18 @@ def _compose_payment_state_patch(
 
     if payment_state == PAYMENT_RECEIVED and (has_active or awaiting):
         patch.update({
-            "awaiting_payment_receipt": False,
-            "payment_receipt_received": True,
-            "payment_receipt_at":       now_iso,
-            "order_status":             "under_review",
+            "payment_method":              "bank_transfer",
+            "payment_status":              "pending_verification",
+            "awaiting_payment_receipt":    False,
+            "payment_receipt_received":    True,
+            "payment_receipt_at":          now_iso,
+            "payment_confirmed":           False,
+            "payment_verification_status": "pending",
+            "payment_submission_received": True,
+            "payment_submission_at":       now_iso,
+            "payment_submission_type":     "receipt",
+            "payment_submission_source":   "whatsapp",
+            "order_status":                "payment_submitted",
         })
     elif payment_state == PAYMENT_EVIDENCE_RECEIVED and (has_active or awaiting):
         patch.update({
@@ -838,10 +846,16 @@ def maybe_handle_receipt_inbound(
         pass
 
     state_patch.update({
-        "awaiting_payment_receipt": False,
-        "payment_receipt_received": True,
-        "payment_receipt_at":       datetime.now(timezone.utc).isoformat(),
-        "order_status":             "under_review",
+        "awaiting_payment_receipt":    False,
+        "payment_receipt_received":    True,
+        "payment_receipt_at":          datetime.now(timezone.utc).isoformat(),
+        "payment_confirmed":           False,
+        "payment_verification_status": "pending",
+        "payment_submission_received": True,
+        "payment_submission_at":       datetime.now(timezone.utc).isoformat(),
+        "payment_submission_type":     "receipt",
+        "payment_submission_source":   "whatsapp",
+        "order_status":                "payment_submitted",
     })
 
     reply_text = _compose_receipt_ack(summary)
@@ -1184,10 +1198,16 @@ def maybe_handle_payment_evidence_inbound(
             summary.get("selected_product"),
         )
         confirmed_patch: Dict[str, Any] = {
-            "awaiting_payment_receipt": False,
-            "payment_receipt_received": True,
-            "payment_receipt_at":       datetime.now(timezone.utc).isoformat(),
-            "order_status":             "under_review",
+            "awaiting_payment_receipt":    False,
+            "payment_receipt_received":    True,
+            "payment_receipt_at":          datetime.now(timezone.utc).isoformat(),
+            "payment_confirmed":           False,
+            "payment_verification_status": "pending",
+            "payment_submission_received": True,
+            "payment_submission_at":       datetime.now(timezone.utc).isoformat(),
+            "payment_submission_type":     "receipt",
+            "payment_submission_source":   "whatsapp",
+            "order_status":                "payment_submitted",
             "payment_receipt_metadata": {
                 "kind":            kind or "payment_receipt",
                 "promoted_from":   pe_status or "evidence_active_order",
@@ -1446,12 +1466,15 @@ def apply_state_patch(
         except Exception:
             pass
         # ── Paid-order signal ────────────────────────────────────────
-        # When the patch promotes the order into the "receipt confirmed"
-        # branch, stamp the dedicated column the conversations listing
-        # uses for the ``paid`` filter. We update on the actual
-        # transition (False → True) so a redundant patch doesn't push
-        # the timestamp forward and falsely re-promote the row.
-        if state_patch.get("payment_receipt_received") is True:
+        # Stamp the dedicated column only when payment is explicitly
+        # confirmed — not when the customer merely submitted a receipt
+        # (``payment_receipt_received`` → payment_submitted path).
+        _payment_confirmed = (
+            state_patch.get("payment_confirmed") is True
+            or state_patch.get("verified_by_staff") is True
+            or state_patch.get("payment_verified") is True
+        )
+        if _payment_confirmed:
             try:
                 if getattr(conv, "last_payment_confirmed_at", None) is None:
                     conv.last_payment_confirmed_at = datetime.now(timezone.utc)

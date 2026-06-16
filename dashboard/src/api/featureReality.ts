@@ -34,6 +34,13 @@ export interface OrderNeedsAction {
   level: NeedsActionLevel
 }
 
+export interface MerchantPaymentAlert {
+  key: string
+  level: NeedsActionLevel
+  label: string
+  message?: string
+}
+
 export interface DashboardOrder {
   // The platform's human-visible order number (e.g. "#1585297702"). The
   // backend now sets `id` to this value so existing key/search code
@@ -51,9 +58,19 @@ export interface DashboardOrder {
   amount_sar: number
   status: 'paid' | 'pending' | 'failed' | 'cancelled'
   status_label?: string
+  raw_status?: string
+  raw_status_label?: string
   source: OrderSourceKey
   source_label: string
   paymentLink?: string
+  payment_method?: string | null
+  payment_method_label?: string | null
+  payment_status?: string | null
+  payment_confirmed?: boolean
+  merchant_payment_alert?: MerchantPaymentAlert | null
+  merchant_payment_alerts?: MerchantPaymentAlert[]
+  can_confirm_bank_transfer?: boolean
+  merchant_post_confirm_notice?: string | null
   createdAt: string
   is_ai_created?: boolean
   is_vip?: boolean
@@ -110,6 +127,20 @@ export interface PaymentReminderResult {
   message: string
   conversation_url: string
   sent_at?: string
+}
+
+export interface ConfirmPaymentResult {
+  ok: boolean
+  result: {
+    idempotent?: boolean
+    order_id?: number
+    status: string
+    payment_confirmed: boolean
+    payment_status?: string
+    address_accepted?: boolean
+    merchant_notice?: string | null
+  }
+  order: OrderDetail
 }
 
 export interface OrdersDashboard {
@@ -440,6 +471,11 @@ export const featureRealityApi = {
     return apiCall(`/orders/${encodeURIComponent(String(orderId))}/send-payment-reminder`, {
       method: 'POST',
       body: JSON.stringify(body),
+    })
+  },
+  confirmOrderPayment(orderId: string | number): Promise<ConfirmPaymentResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/confirm-payment`, {
+      method: 'POST',
     })
   },
   coupons(): Promise<CouponsDashboard> {

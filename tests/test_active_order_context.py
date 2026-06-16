@@ -70,7 +70,7 @@ class TestPersistActiveOrderContext:
             "current_product_focus": {"title": "عسل طلح 1kg", "external_id": "ext-1"},
         }
         order_prep = {
-            "order_status": "under_review",
+            "order_status": "payment_submitted",
             "payment_receipt_received": True,
             "quantity": 1,
         }
@@ -78,15 +78,15 @@ class TestPersistActiveOrderContext:
             meta,
             brain_state=brain_state,
             order_prep=order_prep,
-            state_patch={"payment_receipt_received": True, "order_status": "under_review"},
+            state_patch={"payment_receipt_received": True, "order_status": "payment_submitted"},
         )
 
         bundle = load_commerce_bundle(meta)
         ctx = bundle["active_order_context"]
         assert bundle["active_order_id"] == "262511443"
         assert ctx["order_id"] == "262511443"
-        assert ctx["order_status"] == "pending_review"
-        assert ctx["raw_order_status"] == "under_review"
+        assert ctx["order_status"] == "payment_submitted"
+        assert ctx["raw_order_status"] == "payment_submitted"
         assert ctx["shipping_status"] == "not_shipped"
         assert ctx["tracking_url"] is None
         assert ctx["product_summary"] == "عسل طلح 1kg"
@@ -112,7 +112,7 @@ class TestPersistActiveOrderContext:
             "recent_order_ids": ["111"],
         }
         brain_state = {"draft_order_id": "222"}
-        order_prep = {"order_status": "under_review", "payment_receipt_received": True}
+        order_prep = {"order_status": "payment_submitted", "payment_receipt_received": True}
         persist_active_order_context(
             meta,
             brain_state=brain_state,
@@ -129,7 +129,7 @@ class TestPersistActiveOrderContext:
         maybe_persist_from_patch(
             meta,
             brain_state={"draft_order_id": "99", "current_product_focus": {"title": "X"}},
-            order_prep={"order_status": "under_review", "payment_receipt_received": True},
+            order_prep={"order_status": "payment_submitted", "payment_receipt_received": True},
             state_patch={"payment_receipt_received": True},
         )
         assert meta["brain_state"]["stage"] == "ordering"

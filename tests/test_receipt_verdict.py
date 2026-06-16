@@ -675,16 +675,17 @@ def test_receipt_inbound_byte_identical_with_telemetry_on(
     )
 
     # Both runs must produce the same return shape — telemetry
-    # never touches the decision. ``payment_receipt_at`` is set
-    # to ``datetime.now(...)`` inside the handler, so we exclude
-    # only that timestamp from the equality check; every other
-    # state-affecting field MUST match.
+    # never touches the decision. ``payment_receipt_at`` /
+    # ``payment_submission_at`` are set to ``datetime.now(...)``
+    # inside the handler, so we exclude those timestamps from the
+    # equality check; every other state-affecting field MUST match.
     assert out_off is not None and out_on is not None
     assert out_off["reply_text"] == out_on["reply_text"]
 
     def _strip_timestamps(sp: Dict[str, Any]) -> Dict[str, Any]:
         sp = dict(sp)
         sp.pop("payment_receipt_at", None)
+        sp.pop("payment_submission_at", None)
         meta = dict(sp.get("payment_receipt_metadata") or {})
         meta.pop("received_at", None)
         if meta:
