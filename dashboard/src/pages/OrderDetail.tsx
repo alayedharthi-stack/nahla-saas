@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Bell,
   Bot,
+  CheckCircle2,
   Crown,
   ExternalLink,
   Link as LinkIcon,
@@ -96,6 +97,9 @@ export default function OrderDetail() {
   const [loading, setLoading] = useState(true)
   const [reminderBusy, setReminderBusy] = useState(false)
   const [reminderToast, setReminderToast] = useState<{ ok: boolean; text: string } | null>(null)
+  const [confirmBusy, setConfirmBusy] = useState(false)
+  const [confirmDialogOpen, setConfirmDialogOpen] = useState(false)
+  const [confirmToast, setConfirmToast] = useState<{ ok: boolean; text: string } | null>(null)
 
   const reload = (): Promise<void> => {
     if (!orderId) return Promise.resolve()
@@ -143,6 +147,33 @@ export default function OrderDetail() {
       })
     } finally {
       setReminderBusy(false)
+    }
+  }
+
+  const handleConfirmPayment = async () => {
+    if (!order || confirmBusy) return
+    setConfirmBusy(true)
+    setConfirmToast(null)
+    try {
+      const res = await featureRealityApi.confirmOrderPayment(order.internal_id || order.id)
+      setConfirmDialogOpen(false)
+      const notice = res.result.merchant_notice
+      setConfirmToast({
+        ok: true,
+        text: notice
+          ? notice
+          : res.result.idempotent
+            ? 'الدفع مؤكد مسبقاً ✅'
+            : 'تم تأكيد وصول التحويل البنكي ✅',
+      })
+      setOrder(res.order)
+    } catch (e) {
+      setConfirmToast({
+        ok: false,
+        text: e instanceof Error ? e.message : 'تعذّر تأكيد الدفع',
+      })
+    } finally {
+      setConfirmBusy(false)
     }
   }
 
@@ -273,11 +304,74 @@ export default function OrderDetail() {
               : 'bg-blue-50 border-blue-200 text-blue-800'
           }`}
         >
-          <div className="flex items-start gap-2">
-            <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${
-              order.merchant_payment_alert.level === 'red' ? 'text-red-600' : 'text-blue-600'
-            }`} />
-            <p>{order.merchant_payment_alert.label || order.merchant_payment_alert.message}</p>
+          <div className="flex flex-wrap items-start gap-3 justify-between">
+            <div className="flex items-start gap-2 flex-1 min-w-0">
+              <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${
+                order.merchant_payment_alert.level === 'red' ? 'text-red-600' : 'text-blue-600'
+              }`} />
+              <p>{order.merchant_payment_alert.label || order.merchant_payment_alert.message}</p>
+            </div>
+            {order.can_confirm_bank_transfer && (
+              <button
+                type="button"
+                onClick={() => setConfirmDialogOpen(true)}
+                disabled={confirmBusy}
+                className="btn-primary text-xs shrink-0 whitespace-nowrap"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                تأكيد وصول التحويل
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {order.merchant_post_confirm_notice && (
+        <div className="px-4 py-3 rounded-lg border border-amber-300 bg-amber-50 text-xs text-amber-900 leading-relaxed">
+          {order.merchant_post_confirm_notice}
+        </div>
+      )}
+
+      {confirmToast && (
+        <div
+          className={`px-4 py-2.5 rounded-lg border text-xs ${
+            confirmToast.ok
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          {confirmToast.text}
+        </div>
+      )}
+
+      {confirmDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+          <div className="card max-w-md w-full p-5 space-y-4" role="dialog" aria-modal="true">
+            <h2 className="text-sm font-semibold text-slate-900">تأكيد وصول التحويل</h2>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              هل تأكدت من وصول مبلغ التحويل البنكي فعلياً في الحساب؟
+            </p>
+            <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 leading-relaxed">
+              لا تعتمد على الإيصال وحده — تحقق من حسابك البنكي قبل التأكيد.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                className="btn-secondary text-xs"
+                disabled={confirmBusy}
+                onClick={() => setConfirmDialogOpen(false)}
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                className="btn-primary text-xs"
+                disabled={confirmBusy}
+                onClick={handleConfirmPayment}
+              >
+                {confirmBusy ? 'جاري التأكيد…' : 'نعم، تأكدت من وصول المبلغ'}
+              </button>
+            </div>
           </div>
         </div>
       )}
