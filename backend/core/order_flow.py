@@ -559,8 +559,52 @@ def _receipt_text_fields(inbound_metadata: Dict[str, Any]) -> Dict[str, Any]:
         "pdf_text_full":            md.get("pdf_text_full"),
         "caption":                  md.get("caption"),
         "confirmed_payment_amount": md.get("confirmed_payment_amount") or md.get("amount"),
+        "receipt_data":             md.get("receipt_data"),
     }
     return {k: v for k, v in fields.items() if v not in (None, "")}
+
+
+def _compose_payment_state_patch(
+    *,
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    conversation: Any,
+    summary: Dict[str, Any],
+    payment_state: str,
+    receipt_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build order_prep patch for payment evidence / receipt confirmation."""
+    from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+        PAYMENT_EVIDENCE_RECEIVED,
+        PAYMENT_RECEIVED,
+    )
+    from core.payment_media_metadata import enrich_payment_receipt_metadata  # noqa: PLC0415
+
+    enriched = enrich_payment_receipt_metadata(
+        receipt_metadata,
+        tenant_id=tenant_id,
+        phone=phone,
+        conversation=conversation,
+    )
+    patch: Dict[str, Any] = {"payment_receipt_metadata": enriched}
+    has_active = bool(summary.get("selected_product"))
+    awaiting = bool(summary.get("awaiting_payment_receipt"))
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if payment_state == PAYMENT_RECEIVED and (has_active or awaiting):
+        patch.update({
+            "awaiting_payment_receipt": False,
+            "payment_receipt_received": True,
+            "payment_receipt_at":       now_iso,
+            "order_status":             "under_review",
+        })
+    elif payment_state == PAYMENT_EVIDENCE_RECEIVED and (has_active or awaiting):
+        patch.update({
+            "payment_evidence_received": True,
+            "payment_evidence_at":       now_iso,
+        })
+    return patch
 
 
 def maybe_handle_receipt_inbound(
@@ -767,10 +811,6 @@ def maybe_handle_receipt_inbound(
     )
 
     state_patch: Dict[str, Any] = {
-        "awaiting_payment_receipt": False,
-        "payment_receipt_received": True,
-        "payment_receipt_at":       datetime.now(timezone.utc).isoformat(),
-        "order_status":             "under_review",
         "payment_receipt_metadata": {
             "kind":             kind,
             "confidence":       (inbound_metadata or {}).get("pdf_kind_confidence")
@@ -785,6 +825,24 @@ def maybe_handle_receipt_inbound(
             **_receipt_text_fields(inbound_metadata or {}),
         },
     }
+    try:
+        from core.payment_media_metadata import enrich_payment_receipt_metadata  # noqa: PLC0415
+
+        state_patch["payment_receipt_metadata"] = enrich_payment_receipt_metadata(
+            state_patch["payment_receipt_metadata"],
+            tenant_id=tenant_id,
+            phone=phone,
+            conversation=_conv,
+        )
+    except Exception:
+        pass
+
+    state_patch.update({
+        "awaiting_payment_receipt": False,
+        "payment_receipt_received": True,
+        "payment_receipt_at":       datetime.now(timezone.utc).isoformat(),
+        "order_status":             "under_review",
+    })
 
     reply_text = _compose_receipt_ack(summary)
 
@@ -848,6 +906,98 @@ def maybe_handle_payment_evidence_inbound(
 
     _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
     summary = _focus_summary(bs)
+
+    # ── Bank transfer receipt resolver (P0) ─────────────────────────
+    # Do NOT treat a completed Rajhi receipt (amount + beneficiary +
+    # merchant account match) as a pre-transfer review screen just
+    # because OCR also captured ``تأكيد التحويل``.
+    try:
+        from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+            PAYMENT_EVIDENCE_RECEIVED,
+            PAYMENT_PENDING_CONFIRMATION,
+            PAYMENT_RECEIVED,
+            PAYMENT_REVIEW_REQUIRED,
+            resolve_bank_transfer_receipt,
+        )
+        from core.payment_media_metadata import payment_text_blob  # noqa: PLC0415
+        from core.tenant_payment_accounts import load_tenant_payment_accounts  # noqa: PLC0415
+
+        _resolver_accounts = load_tenant_payment_accounts(db, tenant_id=tenant_id)
+        _resolver_blob = payment_text_blob(md)
+        _resolver = resolve_bank_transfer_receipt(
+            _resolver_blob,
+            tenant_accounts=_resolver_accounts,
+            filename=str(md.get("filename") or ""),
+            legacy_pe_status=str(pe_status or ""),
+        )
+        if _resolver.payment_state == PAYMENT_REVIEW_REQUIRED:
+            # Resolution metadata only — never treat mismatch as an
+            # active-order promotion or payment-state flip.
+            logger.info(
+                "[PAYMENT_EVIDENCE] resolver=review_required tenant=%s "
+                "phone=*%s reason=%s (no state flip)",
+                tenant_id, (phone[-4:] if phone else ""),
+                _resolver.reason,
+            )
+            try:
+                from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+                    apply_resolution_to_metadata,
+                )
+                apply_resolution_to_metadata(md, _resolver)
+            except Exception:  # noqa: silent-ok — optional payment receipt metadata; keep order flow running
+                pass
+            # Fall through to tenant-account verification / active-order
+            # promotion gates — mismatch must return None there.
+        elif _resolver.payment_state in (
+            PAYMENT_RECEIVED,
+            PAYMENT_EVIDENCE_RECEIVED,
+        ):
+            kind = md.get("pdf_kind") or md.get("image_kind")
+            reply_text = _resolver.reply_ar or _compose_receipt_ack(summary)
+            logger.info(
+                "[PAYMENT_EVIDENCE] resolver=promoted tenant=%s phone=*%s "
+                "state=%s reason=%s product=%r",
+                tenant_id, (phone[-4:] if phone else ""),
+                _resolver.payment_state, _resolver.reason,
+                summary.get("selected_product"),
+            )
+            receipt_meta = {
+                "kind":            kind or "payment_receipt",
+                "promoted_from":   pe_status or "resolver",
+                "promoted_at":     datetime.now(timezone.utc).isoformat(),
+                "wa_message_id":   md.get("wa_message_id"),
+                "filename":        md.get("filename"),
+                "mime_type":       md.get("mime_type"),
+                "storage_url":     md.get("storage_url"),
+                "storage_sha256":  md.get("storage_sha256"),
+                "received_at":     datetime.now(timezone.utc).isoformat(),
+                **_receipt_text_fields(md),
+                **_resolver.to_metadata_patch(),
+            }
+            return {
+                "reply_text":  reply_text,
+                "summary":     summary,
+                "state_patch": _compose_payment_state_patch(
+                    db=db,
+                    tenant_id=tenant_id,
+                    phone=phone,
+                    conversation=_conv,
+                    summary=summary,
+                    payment_state=_resolver.payment_state,
+                    receipt_metadata=receipt_meta,
+                ),
+            }
+        if _resolver.payment_state != PAYMENT_PENDING_CONFIRMATION:
+            logger.debug(
+                "[PAYMENT_EVIDENCE] resolver=no_short_circuit tenant=%s "
+                "state=%s reason=%s",
+                tenant_id, _resolver.payment_state, _resolver.reason,
+            )
+    except Exception as _res_exc:  # noqa: BLE001  # noqa: silent-ok — fall through to legacy promotion
+        logger.debug(
+            "[PAYMENT_EVIDENCE] bank receipt resolver skipped tenant=%s err=%s",
+            tenant_id, _res_exc,
+        )
     awaiting = bool(summary.get("awaiting_payment_receipt"))
     has_active_order = bool(summary.get("selected_product"))
 
@@ -1033,7 +1183,6 @@ def maybe_handle_payment_evidence_inbound(
             pe_status, md.get("payment_evidence_reason"),
             summary.get("selected_product"),
         )
-        from datetime import datetime, timezone  # noqa: PLC0415
         confirmed_patch: Dict[str, Any] = {
             "awaiting_payment_receipt": False,
             "payment_receipt_received": True,
@@ -1339,7 +1488,7 @@ def apply_state_patch(
         )
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: silent-ok — rollback best-effort after apply_state_patch failure
             pass
         return False
 
@@ -1401,7 +1550,7 @@ def mark_awaiting_receipt(
                     _PAYMENT_CONTRADICTION_GUARD_RECENT_RECEIPT_WINDOW_SECS,
                 )
                 return False
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — guard failure must not block flip
             # Defensive: never let the guard's own failure mode
             # block the legitimate flip. The legacy code path runs
             # below.
@@ -1534,7 +1683,7 @@ def context_aware_dedup_fallback(
                                 intent_hint=_verdict.current_intent_hint,
                             )
                             _payment_resume = False
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — payment resume probe best-effort
                         pass
 
             if _payment_resume:

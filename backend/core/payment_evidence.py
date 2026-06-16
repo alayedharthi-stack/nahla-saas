@@ -788,6 +788,32 @@ def classify_payment_evidence(
             "signals": signals,
         }
 
+    # ── Completed bank receipt override (P0) ────────────────────────
+    # Rajhi / AlAhli final receipts often contain passive headers like
+    # ``تأكيد التحويل`` that also appear on pre-transfer screens.
+    # When amount + beneficiary/IBAN + bank are present WITHOUT a
+    # tap-to-transfer imperative, treat as completed — not pre-review.
+    try:
+        from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+            extract_bank_receipt_fields,
+        )
+
+        _ext = extract_bank_receipt_fields(text, filename=filename)
+        if (
+            _ext.amount
+            and (_ext.beneficiary_name or iban_present)
+            and _ext.bank_name
+            and not _ext.has_pre_review_imperative
+            and _ext.receipt_type == "final_receipt"
+        ):
+            return {
+                "status":  PAYMENT_EVIDENCE_CONFIRMED,
+                "reason":  "bank_receipt_final_fields",
+                "signals": {**signals, "bank_receipt_resolver": True},
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
     # Pre-review demotion is conditional. A bank-generated PDF named
     # "Transaction-Receipt.pdf" frequently contains the section
     # header "تأكيد التحويل" even though the transfer is complete —
@@ -980,7 +1006,7 @@ def log_payment_evidence_verdict(
             bool(sig.get("weak_success_present")),
             extra or {},
         )
-    except Exception:
+    except Exception:  # noqa: silent-ok — telemetry must not block payment classify
         pass
 
 

@@ -690,29 +690,8 @@ def maybe_handle_payment_claim(
     # flag ``payment_claim_unverified=True`` so the brain prompt can
     # see the situation and compose its own natural reply.
     if _payment_text_claim_brain_driven_enabled():
-        try:
-            patch = _stamp_text_claim_unverified_state(
-                db, tenant_id=tenant_id, phone=phone,
-                inbound_text=inbound_text,
-            )
-            logger.info(
-                "[PAYMENT_INTENT] brain_driven=text_claim "
-                "tenant=%s phone=*%s patch_keys=%s "
-                "selected_product=%r awaiting_receipt=%s "
-                "receipt_received=%s order_status=%r",
-                tenant_id, (phone or "")[-4:],
-                sorted(list((patch or {}).keys())),
-                selected_product, awaiting_receipt, receipt_received,
-                order_status,
-            )
-        except Exception as _stamp_exc:  # noqa: BLE001
-            logger.debug(
-                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
-                "tenant=%s err=%s",
-                tenant_id, _stamp_exc,
-            )
-        # Wave 1 W1.2 — receipt-verdict telemetry for the text-claim
-        # path. Observation only; default OFF; never raises.
+        # Wave 1 W1.2 — receipt-verdict telemetry (observation only).
+        _verdict_telemetry_on = False
         try:
             from core.receipt_verdict import (  # noqa: PLC0415
                 compute_receipt_verdict,
@@ -720,6 +699,7 @@ def maybe_handle_payment_claim(
                 log_receipt_verdict,
             )
             if is_receipt_verdict_telemetry_enabled():
+                _verdict_telemetry_on = True
                 _rv = compute_receipt_verdict(
                     payment_understanding=None,
                     payment_evidence_status=None,
@@ -731,9 +711,60 @@ def maybe_handle_payment_claim(
                     source="text_claim_brain_driven",
                     verdict=_rv,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — verdict telemetry must not block text-claim path
             pass
-        return None
+
+        if _verdict_telemetry_on:
+            # Verdict mode is observation-only: emit telemetry + optional
+            # brain advisory stamp, but do not short-circuit with a
+            # caller-visible state_patch (brain owns the turn).
+            try:
+                _stamp_text_claim_unverified_state(
+                    db, tenant_id=tenant_id, phone=phone,
+                    inbound_text=inbound_text,
+                )
+            except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — advisory stamp is best-effort
+                logger.debug(
+                    "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
+                    "tenant=%s err=%s",
+                    tenant_id, _stamp_exc,
+                )
+            return None
+
+        # No prior receipt-shaped evidence — politely ask for proof
+        # without falsely confirming payment or flipping order state.
+        reply_text = compose_payment_claim_ack(
+            selected_product=selected_product,
+            awaiting_receipt=awaiting_receipt,
+            receipt_received=receipt_received,
+        )
+        state_patch: Dict[str, Any] = {
+            "payment_claim_at": _utcnow_iso(),
+            "payment_resolution_state": "PAYMENT_PENDING_EVIDENCE",
+        }
+        try:
+            _stamp = _stamp_text_claim_unverified_state(
+                db, tenant_id=tenant_id, phone=phone,
+                inbound_text=inbound_text,
+            )
+            if isinstance(_stamp, dict):
+                state_patch.update(_stamp)
+        except Exception as _stamp_exc:  # noqa: BLE001
+            logger.debug(
+                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
+                "tenant=%s err=%s",
+                tenant_id, _stamp_exc,
+            )
+        logger.info(
+            "[PAYMENT_INTENT] short_circuit=text_claim_receipt_request "
+            "tenant=%s phone=*%s selected_product=%r awaiting_receipt=%s",
+            tenant_id, (phone or "")[-4:],
+            selected_product, awaiting_receipt,
+        )
+        return {
+            "reply_text":  reply_text,
+            "state_patch": state_patch,
+        }
 
     reply_text = compose_payment_claim_ack(
         selected_product=selected_product,
@@ -960,7 +991,11 @@ def _maybe_promote_prior_evidence(
 
     target = None
     for ev in events or []:
-        md = getattr(ev, "extra_metadata", None) or {}
+        from core.payment_media_metadata import flatten_inbound_payment_metadata  # noqa: PLC0415
+
+        md = flatten_inbound_payment_metadata(
+            getattr(ev, "extra_metadata", None) or {},
+        )
         if not isinstance(md, dict):
             continue
         pe_status = md.get("payment_evidence_status") or ""
@@ -975,6 +1010,47 @@ def _maybe_promote_prior_evidence(
         return None
     ev, md, pe_status, kind = target
 
+    try:
+        from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+            PAYMENT_RECEIVED,
+            PAYMENT_REVIEW_REQUIRED,
+            compose_payment_received_reply,
+            resolve_bank_transfer_receipt,
+        )
+        from core.payment_evidence import PAYMENT_EVIDENCE_CONFIRMED  # noqa: PLC0415
+        from core.payment_media_metadata import payment_text_blob  # noqa: PLC0415
+        from core.tenant_payment_accounts import load_tenant_payment_accounts  # noqa: PLC0415
+
+        _accounts = load_tenant_payment_accounts(db, tenant_id=tenant_id)
+        _blob = payment_text_blob(md)
+        _resolution = resolve_bank_transfer_receipt(
+            _blob,
+            tenant_accounts=_accounts,
+            filename=str(md.get("filename") or ""),
+            customer_confirmation=True,
+            legacy_pe_status=str(pe_status or ""),
+        )
+        if _resolution.payment_state == PAYMENT_REVIEW_REQUIRED:
+            return None
+        if _resolution.payment_state != PAYMENT_RECEIVED:
+            # Customer correction on a prior receipt-shaped inbound is
+            # Evidence + Confirmation even when the stored MessageEvent
+            # row has thin OCR (filename/kind only).
+            _resolution.payment_state = PAYMENT_RECEIVED
+            _resolution.payment_evidence_status = PAYMENT_EVIDENCE_CONFIRMED
+            _resolution.reason = "customer_correction_prior_receipt_artifact"
+            _resolution.customer_confirmation_boost = True
+            _resolution.reply_ar = compose_payment_received_reply(
+                _resolution.extraction.amount,
+            ) if _resolution.extraction.amount else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[PAYMENT_INTENT] evidence-override resolver failed "
+            "tenant=%s phone=*%s err=%s",
+            tenant_id, (phone or "")[-4:], exc,
+        )
+        return None
+
     # Build a receipt-confirmed state_patch mirroring
     # ``maybe_handle_receipt_inbound`` so downstream consumers (paid
     # filter, receipt analytics) treat it identically. The previous
@@ -982,30 +1058,51 @@ def _maybe_promote_prior_evidence(
     # ``payment_receipt_metadata`` so support can deep-link the
     # original PDF/image even though it was promoted by a text reply.
     try:
-        from core.order_flow import _receipt_text_fields  # noqa: PLC0415
+        from core.order_flow import (  # noqa: PLC0415
+            _compose_payment_state_patch,
+            _receipt_text_fields,
+        )
+
         receipt_text = _receipt_text_fields(md)
     except Exception:  # noqa: BLE001
         receipt_text = {}
 
-    state_patch: Dict[str, Any] = {
-        "awaiting_payment_receipt": False,
-        "payment_receipt_received": True,
-        "payment_receipt_at":       _utcnow_iso(),
-        "order_status":             "under_review",
-        "payment_receipt_metadata": {
-            "kind":            kind or "payment_receipt",
-            "promoted_from":   pe_status or "evidence_override",
-            "promoted_at":     _utcnow_iso(),
-            "wa_message_id":   md.get("wa_message_id"),
-            "filename":        md.get("filename"),
-            "mime_type":       md.get("mime_type"),
-            "storage_url":     md.get("storage_url"),
-            "storage_sha256":  md.get("storage_sha256"),
-            "original_received_at": getattr(ev, "created_at", None) and
-                                    ev.created_at.isoformat(),
-            **receipt_text,
-        },
+    receipt_meta = {
+        "kind":            kind or "payment_receipt",
+        "promoted_from":   pe_status or "evidence_override",
+        "promoted_at":     _utcnow_iso(),
+        "wa_message_id":   md.get("wa_message_id"),
+        "filename":        md.get("filename"),
+        "mime_type":       md.get("mime_type"),
+        "storage_url":     md.get("storage_url"),
+        "storage_sha256":  md.get("storage_sha256"),
+        "original_received_at": getattr(ev, "created_at", None) and
+                                ev.created_at.isoformat(),
+        **receipt_text,
     }
+    if _resolution is not None:
+        receipt_meta.update(_resolution.to_metadata_patch())
+
+    try:
+        from core.order_flow import _load_brain_state  # noqa: PLC0415
+        _conv, _ = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+        state_patch = _compose_payment_state_patch(
+            db=db,
+            tenant_id=tenant_id,
+            phone=phone,
+            conversation=_conv,
+            summary=selected_summary or {},
+            payment_state=_resolution.payment_state,
+            receipt_metadata=receipt_meta,
+        )
+    except Exception:
+        state_patch = {
+            "awaiting_payment_receipt": False,
+            "payment_receipt_received": True,
+            "payment_receipt_at":       _utcnow_iso(),
+            "order_status":             "under_review",
+            "payment_receipt_metadata": receipt_meta,
+        }
 
     # Reply: use the dedicated receipt-ACK composer when available
     # (mirrors ``maybe_handle_receipt_inbound``'s wording), falling
@@ -1016,7 +1113,11 @@ def _maybe_promote_prior_evidence(
     selected_product = s.get("selected_product")
     try:
         from core.order_flow import _compose_receipt_ack  # noqa: PLC0415
-        reply_text = _compose_receipt_ack(s)
+
+        if _resolution and _resolution.reply_ar:
+            reply_text = _resolution.reply_ar
+        else:
+            reply_text = _compose_receipt_ack(s)
     except Exception as _ack_exc:  # noqa: BLE001
         logger.debug(
             "[PAYMENT_INTENT] receipt-ack import failed tenant=%s err=%s",

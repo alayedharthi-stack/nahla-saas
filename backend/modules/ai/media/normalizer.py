@@ -2116,6 +2116,48 @@ async def _process_image(
             ]
         # NOT_PAYMENT → leave image_kind unset; vision_text alone
         # flows to the brain as a generic image description.
+
+        # ── Tenant-aware bank receipt resolver (P0) ─────────────────
+        try:
+            from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+                PAYMENT_EVIDENCE_RECEIVED,
+                PAYMENT_RECEIVED,
+                apply_resolution_to_metadata,
+                resolve_bank_transfer_receipt,
+            )
+            from core.tenant_payment_accounts import (  # noqa: PLC0415
+                load_tenant_payment_accounts,
+            )
+
+            _tenant_accounts = load_tenant_payment_accounts(
+                db, tenant_id=tenant_id,
+            )
+            _resolution = resolve_bank_transfer_receipt(
+                _ev_blob,
+                tenant_accounts=_tenant_accounts,
+                legacy_pe_status=str(_ev.get("status") or ""),
+            )
+            apply_resolution_to_metadata(base_meta, _resolution)
+            if _resolution.payment_state == PAYMENT_RECEIVED:
+                base_meta["payment_evidence_status"] = _resolution.payment_evidence_status
+                base_meta["image_kind"] = "payment_receipt"
+                base_meta["image_kind_confidence"] = (
+                    base_meta.get("payment_evidence_confidence") or "high"
+                )
+                base_meta["image_kind_reasons"] = [
+                    "bank_receipt_resolver_" + str(_resolution.reason),
+                ]
+            elif _resolution.payment_state == PAYMENT_EVIDENCE_RECEIVED:
+                base_meta["payment_evidence_status"] = _resolution.payment_evidence_status
+                if base_meta.get("image_kind") == "payment_pre_review":
+                    base_meta["image_kind"] = "payment_pending_evidence"
+                    base_meta["image_kind_confidence"] = "medium"
+        except Exception as _br_exc:  # noqa: BLE001  # noqa: silent-ok — media classify proceeds without resolver
+            logger.debug(
+                "[PAYMENT_EVIDENCE] bank receipt resolver failed "
+                "tenant=%s media_id=%s err=%s",
+                tenant_id, media_id, _br_exc,
+            )
     except Exception as _pe_exc:  # noqa: BLE001
         logger.debug(
             "[PAYMENT_EVIDENCE] image classification failed "
@@ -2191,7 +2233,7 @@ async def _process_image(
                 base_meta["image_kind_reasons"]    = [
                     "map_marker:" + _map_hits[0],
                 ]
-        except Exception as _mp_exc:  # noqa: BLE001
+        except Exception as _mp_exc:  # noqa: BLE001  # noqa: silent-ok — map classify best-effort
             logger.debug(
                 "[MAP_DETECT] image map-marker scan failed "
                 "tenant=%s media_id=%s err=%s",
@@ -2751,6 +2793,50 @@ async def _process_document(
             base_meta["pdf_kind_reasons"]    = (
                 list(base_meta.get("pdf_kind_reasons") or [])
                 + ["payment_evidence_needs_confirmation"]
+            )
+
+        # ── Tenant-aware bank receipt resolver (P0) ─────────────────
+        try:
+            from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+                PAYMENT_EVIDENCE_RECEIVED,
+                PAYMENT_RECEIVED,
+                apply_resolution_to_metadata,
+                resolve_bank_transfer_receipt,
+            )
+            from core.tenant_payment_accounts import (  # noqa: PLC0415
+                load_tenant_payment_accounts,
+            )
+
+            _tenant_accounts = load_tenant_payment_accounts(
+                db, tenant_id=tenant_id,
+            )
+            _resolution = resolve_bank_transfer_receipt(
+                _ev_blob,
+                tenant_accounts=_tenant_accounts,
+                filename=filename or None,
+                legacy_pe_status=str(_ev.get("status") or ""),
+            )
+            apply_resolution_to_metadata(base_meta, _resolution)
+            if _resolution.payment_state == PAYMENT_RECEIVED:
+                base_meta["payment_evidence_status"] = _resolution.payment_evidence_status
+                base_meta["pdf_kind"] = "payment_receipt"
+                base_meta["pdf_kind_confidence"] = (
+                    base_meta.get("payment_evidence_confidence") or "high"
+                )
+                base_meta["pdf_kind_reasons"] = (
+                    list(base_meta.get("pdf_kind_reasons") or [])
+                    + ["bank_receipt_resolver_" + str(_resolution.reason)]
+                )
+            elif _resolution.payment_state == PAYMENT_EVIDENCE_RECEIVED:
+                base_meta["payment_evidence_status"] = _resolution.payment_evidence_status
+                if base_meta.get("pdf_kind") == "payment_pre_review":
+                    base_meta["pdf_kind"] = "payment_pending_evidence"
+                    base_meta["pdf_kind_confidence"] = "medium"
+        except Exception as _br_exc:  # noqa: BLE001  # noqa: silent-ok — media classify proceeds without resolver
+            logger.debug(
+                "[PAYMENT_EVIDENCE] bank receipt resolver failed "
+                "tenant=%s media_id=%s err=%s",
+                tenant_id, media_id, _br_exc,
             )
     except Exception as _pe_exc:  # noqa: BLE001
         logger.debug(

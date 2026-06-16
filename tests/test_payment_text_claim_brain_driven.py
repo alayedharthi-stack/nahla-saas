@@ -8,12 +8,11 @@ These tests pin the new behaviour of
 ``core.payment_intent.rewrite_generic_reply_for_payment_context``:
 
     Mere mention of a transfer ("حولت" / "تم التحويل" / "حولت لك")
-    in plain text does NOT short-circuit the brain with a hardcoded
-    ACK and does NOT flip ``awaiting_payment_receipt=True`` /
-    ``order_status='awaiting_receipt'``. Instead the helper stamps
-    the lightweight understanding flag ``payment_claim_unverified``
-    on brain state and returns ``None`` so the brain composes its
-    own organic reply.
+    in plain text without nearby receipt evidence does NOT flip
+    ``payment_receipt_received`` or ``order_status``. When no prior
+    receipt-shaped media exists to promote, the helper returns a
+    polite deterministic request for the receipt image/PDF and
+    stamps ``payment_claim_unverified`` on brain state.
 
 The new behaviour is governed by the env flag
 ``PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED`` (default "1"). The
@@ -24,8 +23,9 @@ sets the flag to "0" — covered by existing regression tests in
 
 Coverage map
 ────────────
-1. Default flag is on (no env var) → text-only claim returns None.
-2. Default flag is on → no hardcoded ACK reply leaks out.
+1. Default flag is on (no env var) → text-only claim returns a
+   polite receipt request (not None).
+2. Default flag is on → no false ``payment_receipt_received`` flip.
 3. Default flag is on → brain state gets the
    ``payment_claim_unverified=True`` stamp + timestamp.
 4. Default flag is on → ``awaiting_payment_receipt`` /
@@ -93,22 +93,18 @@ def _ensure_default_flag(monkeypatch):
     monkeypatch.delenv("PAYMENT_TEXT_CLAIM_BRAIN_DRIVEN_ENABLED", raising=False)
 
 
-# ── 1. Returns None for text-only claim ────────────────────────────
+# ── 1. Returns polite receipt request for text-only claim ────────
 
 
-def test_text_only_claim_returns_none_under_default_flag(monkeypatch):
-    """Headline regression: 'حولت' / 'تم التحويل' must NOT short-
-    circuit the brain. The new default behaviour is to return None
-    so the brain replies naturally."""
+def test_text_only_claim_returns_polite_receipt_request(monkeypatch):
+    """Headline regression: 'تم التحويل' without a nearby receipt
+    must ask for proof politely — without falsely confirming payment."""
     from core import payment_intent as pi
 
-    # Stub the post-shipment gate so the helper actually reaches
-    # the policy branch.
     monkeypatch.setattr(
         pi, "is_post_shipment_delivery_confirmation",
         lambda *_a, **_k: False,
     )
-    # Stub the brain-state load so the active-context gate passes.
     monkeypatch.setattr(
         "core.order_flow._load_brain_state",
         lambda *_a, **_k: (
@@ -119,12 +115,10 @@ def test_text_only_claim_returns_none_under_default_flag(monkeypatch):
             },
         ),
     )
-    # Suppress the receipt-override branch — no prior PDF.
     monkeypatch.setattr(
         pi, "_maybe_promote_prior_evidence",
         lambda **_k: None,
     )
-    # Capture any state patch the helper attempts to apply.
     captured: Dict[str, Any] = {}
     monkeypatch.setattr(
         "core.order_flow.apply_state_patch",
@@ -138,10 +132,10 @@ def test_text_only_claim_returns_none_under_default_flag(monkeypatch):
         inbound_text="تم التحويل",
         has_attached_media=False,
     )
-    assert result is None, (
-        "text-only payment claim must NOT short-circuit the brain "
-        "under the new default policy"
-    )
+    assert result is not None
+    assert "reply_text" in result
+    assert "إيصال" in result["reply_text"] or "PDF" in result["reply_text"]
+    assert result["state_patch"].get("payment_receipt_received") is not True
 
 
 # ── 2. No hardcoded ACK leaks out ──────────────────────────────────
@@ -186,7 +180,8 @@ def test_no_hardcoded_ack_for_text_only_claims(monkeypatch, inbound):
         inbound_text=inbound,
         has_attached_media=False,
     )
-    assert result is None
+    assert result is not None
+    assert result["state_patch"].get("payment_receipt_received") is not True
 
 
 # ── 3. Stamp records the unverified flag ───────────────────────────
@@ -235,8 +230,8 @@ def test_text_only_claim_stamps_unverified_flag(monkeypatch):
         inbound_text="حولت لك المبلغ",
         has_attached_media=False,
     )
-    assert result is None
-    patch = captured.get("patch") or {}
+    assert result is not None
+    patch = captured.get("patch") or result.get("state_patch") or {}
     assert patch.get("payment_claim_unverified") is True
     assert "payment_claim_unverified_at" in patch
     # The merchant directive: state must not lie.
