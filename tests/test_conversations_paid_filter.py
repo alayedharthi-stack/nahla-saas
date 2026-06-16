@@ -2,9 +2,10 @@
 ─────────────────────────────────
 Coverage for the "طلبات مدفوعة" inbox filter:
 
-  * ``Conversation.last_payment_confirmed_at`` is stamped when the
-    payment evidence is confirmed (``apply_state_patch`` with
-    ``payment_receipt_received=True``).
+  * ``Conversation.last_payment_confirmed_at`` is stamped only when
+    payment is explicitly confirmed (``payment_confirmed`` /
+    ``verified_by_staff`` / ``payment_verified``) — not when the
+    customer merely submits a receipt.
   * ``GET /conversations?filter=paid`` only returns conversations
     that have a non-NULL ``last_payment_confirmed_at`` and the rows
     are ordered most-recent-first.
@@ -176,13 +177,11 @@ class TestPaidFilter:
 
 
 class TestApplyStatePatchStampsLastPaymentConfirmedAt:
-    """The receipt short-circuit goes through ``apply_state_patch``
-    with ``payment_receipt_received=True``. This MUST stamp the
-    dedicated ``last_payment_confirmed_at`` column so the paid filter
-    surfaces the conversation. We exercise the helper directly so
-    the contract is pinned without needing the full webhook stack."""
+    """``apply_state_patch`` must stamp ``last_payment_confirmed_at``
+    only on explicit payment confirmation — receipt submission alone
+    (``payment_submitted``) must not surface in the paid filter."""
 
-    def test_apply_state_patch_stamps_column_on_receipt_confirmed(self):
+    def test_receipt_received_without_confirmation_does_not_stamp(self):
         from core.order_flow import apply_state_patch
         db, _ = _make_db()
         t = _seed_tenant(db)
@@ -196,23 +195,58 @@ class TestApplyStatePatchStampsLastPaymentConfirmedAt:
             state_patch={
                 "awaiting_payment_receipt": False,
                 "payment_receipt_received": True,
-                "order_status": "under_review",
+                "payment_confirmed": False,
+                "order_status": "payment_submitted",
+            },
+        )
+        assert ok is True
+        db.refresh(convo)
+        assert convo.last_payment_confirmed_at is None, (
+            "receipt submission alone must NOT stamp "
+            "Conversation.last_payment_confirmed_at"
+        )
+
+    def test_explicit_payment_confirmation_stamps_column(self):
+        from core.order_flow import apply_state_patch
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        _, convo = _seed_conversation(db, t.id, "+966500000031", paid_at=None)
+        assert convo.last_payment_confirmed_at is None
+
+        ok = apply_state_patch(
+            db,
+            tenant_id=t.id,
+            phone="+966500000031",
+            state_patch={
+                "payment_receipt_received": True,
+                "payment_confirmed": True,
+                "order_status": "paid",
             },
         )
         assert ok is True
         db.refresh(convo)
         assert convo.last_payment_confirmed_at is not None, (
-            "apply_state_patch with payment_receipt_received=True must "
-            "stamp Conversation.last_payment_confirmed_at so the paid "
-            "filter can find the row"
+            "apply_state_patch with payment_confirmed=True must stamp "
+            "Conversation.last_payment_confirmed_at so the paid filter "
+            "can find the row"
         )
 
+    def test_payment_confirmed_alone_stamps_column(self):
+        from core.order_flow import apply_state_patch
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        _, convo = _seed_conversation(db, t.id, "+966500000032", paid_at=None)
+
+        apply_state_patch(
+            db, tenant_id=t.id, phone="+966500000032",
+            state_patch={"payment_confirmed": True},
+        )
+        db.refresh(convo)
+        assert convo.last_payment_confirmed_at is not None
+
     def test_apply_state_patch_does_not_overwrite_existing_timestamp(self):
-        """Idempotency: a redundant patch (same state on a row that
-        already has a stamp) must NOT push the timestamp forward.
-        Otherwise the 'newest first' ordering would shift around on
-        every patch and the merchant's mental model of "this is when
-        the receipt landed" would break."""
+        """Idempotency: a redundant confirmation patch on a row that
+        already has a stamp must NOT push the timestamp forward."""
         from core.order_flow import apply_state_patch
         db, _ = _make_db()
         t = _seed_tenant(db)
@@ -222,23 +256,21 @@ class TestApplyStatePatchStampsLastPaymentConfirmedAt:
         )
         apply_state_patch(
             db, tenant_id=t.id, phone="+966500000040",
-            state_patch={"payment_receipt_received": True},
+            state_patch={
+                "payment_receipt_received": True,
+                "payment_confirmed": True,
+            },
         )
         db.refresh(convo)
-        # SQLite drops tzinfo on round-trip; compare the wall-clock
-        # value so the assertion exercises the idempotency contract
-        # (no forward shift) rather than the storage layer's quirks.
         stored = convo.last_payment_confirmed_at
         if stored is not None and stored.tzinfo is None:
             stored = stored.replace(tzinfo=timezone.utc)
         assert stored == original
 
-    def test_apply_state_patch_without_receipt_flag_does_not_stamp(self):
-        """A patch that doesn't carry ``payment_receipt_received=True``
-        (e.g. setting ``awaiting_payment_receipt=True`` after the bot
-        ASKED for a receipt) must leave the column untouched —
-        otherwise asking for a receipt would falsely mark the order
-        as paid."""
+    def test_apply_state_patch_without_confirmation_does_not_stamp(self):
+        """A patch that only asks for a receipt must leave the column
+        untouched — otherwise asking for a receipt would falsely mark
+        the order as paid."""
         from core.order_flow import apply_state_patch
         db, _ = _make_db()
         t = _seed_tenant(db)
