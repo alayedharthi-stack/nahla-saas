@@ -49,6 +49,15 @@ def is_non_product_label(text: str) -> bool:
         return True
     if _NON_PRODUCT_LABEL_RE.search(norm):
         return True
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            is_order_tracking_follow_up,
+        )
+
+        if is_order_tracking_follow_up(norm):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at label boundary
+        pass
     # Bare "خيارات" / "options" with optional leading send verb residue.
     stripped = _SEND_OPTIONS_LEADING_RE.sub("", norm).strip()
     if stripped in {

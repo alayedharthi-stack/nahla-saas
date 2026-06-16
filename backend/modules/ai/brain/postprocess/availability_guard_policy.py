@@ -74,6 +74,15 @@ def inbound_exempt_from_availability_rewrite(message: str) -> bool:
     if browse_alternatives_requested(raw):
         return True
     try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            is_order_tracking_follow_up,
+        )
+
+        if is_order_tracking_follow_up(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at guard boundary
+        pass
+    try:
         from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
             is_arrival_or_visit_signal,
             is_location_query,

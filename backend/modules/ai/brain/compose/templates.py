@@ -591,6 +591,12 @@ def no_orders(**_: Any) -> str:
     return "لم أجد أي طلبات مسجّلة لرقمك. هل تريد إنشاء طلب جديد؟"
 
 
+def track_order_need_identifiers(**_: Any) -> str:
+    return (
+        "أبشري، أتحقق لك 🌷 أرسلي رقم الطلب أو رقم الجوال المستخدم في الطلب."
+    )
+
+
 def order_creation_in_progress(
     product: Dict[str, Any] | None = None,
     reference: str = "",

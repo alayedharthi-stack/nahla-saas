@@ -118,12 +118,15 @@ def log_staff_escalation_truth_guard(
 def apply_staff_escalation_truth_guard(
     *,
     reply: str,
+    inbound_text: str = "",
     inbound_metadata: Optional[Dict[str, Any]] = None,
     conversation_flags: Optional[Dict[str, Any]] = None,
     chosen_path: str = "",
     brain_handoff: bool = False,
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    state: Any = None,
+    history: Optional[list] = None,
 ) -> StaffEscalationTruthGuardResult:
     try:
         original = str(reply or "")
@@ -179,6 +182,30 @@ def apply_staff_escalation_truth_guard(
             notification_present=evidence.notification_present,
             staff_escalation_claim_blocked=True,
         )
+        try:
+            from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                is_order_tracking_follow_up,
+                resolve_order_tracking_guard_reply,
+            )
+
+            if is_order_tracking_follow_up(inbound_text):
+                tracking_reply = resolve_order_tracking_guard_reply(
+                    state=state,
+                    history=history,
+                )
+                return StaffEscalationTruthGuardResult(
+                    reply=tracking_reply,
+                    action="blocked_false_escalation_order_tracking",
+                    replaced=True,
+                    reason="order_tracking_guard_stub_replacement",
+                    evidence=evidence,
+                    staff_escalation_claim_blocked=True,
+                )
+        except Exception as _otg_exc:  # noqa: BLE001  # noqa: silent-ok — fallback to generic stub
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] order_tracking_guard failed err=%s",
+                _otg_exc,
+            )
         return StaffEscalationTruthGuardResult(
             reply=SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,
             action="blocked_false_escalation",

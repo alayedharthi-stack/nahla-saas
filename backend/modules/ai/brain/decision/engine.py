@@ -749,6 +749,34 @@ class DefaultDecisionEngine:
                 _oc_exc,
             )
 
+        # ── 0a.62 Existing-order tracking guard (Phase 2) ─────────────────
+        try:
+            from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                is_order_tracking_follow_up,
+            )
+
+            if (
+                is_order_tracking_follow_up(ctx.message or "")
+                and intent.name != INTENT_TRACK_ORDER
+            ):
+                logger.info(
+                    "[ORDER_TRACKING_GUARD] override intent=%s → track_order preview=%r",
+                    intent.name,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_TRACK_ORDER,
+                    args={"order_id": (intent.slots or {}).get("order_id", "")},
+                    reason="order_tracking_guard — existing-order follow-up",
+                    confidence=0.97,
+                )
+        except Exception as _otg_exc:  # noqa: BLE001  # noqa: silent-ok — guard must not block decide
+            logger.debug(
+                "[ORDER_TRACKING_GUARD] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _otg_exc,
+            )
+
         # ── 0a.57 Absence of positive commerce signal (Jun 2026) ─────────
         # When classifiers miss and no commerce/fulfillment signal is
         # present, route to generative non-sales compose — not the default
