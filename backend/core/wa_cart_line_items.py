@@ -110,6 +110,10 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
                 item[price_key] = raw.get(price_key)
     if raw.get("confidence") is not None:
         item["confidence"] = raw.get("confidence")
+    edition = str(raw.get("edition") or raw.get("notes") or "").strip()
+    if edition:
+        item["edition"] = edition
+        item["notes"] = edition
     return item
 
 

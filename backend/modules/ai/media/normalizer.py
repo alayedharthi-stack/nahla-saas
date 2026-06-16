@@ -876,6 +876,23 @@ async def normalize_whatsapp_inbound(
             context=message.get("context") or {},
         )
 
+    if msg_type == "location":
+        loc = dict(message.get("location") or {})
+        label = str(loc.get("address") or loc.get("name") or "").strip()
+        return MediaNormalizationResult(
+            normalized_type="location",
+            text=label,
+            metadata={
+                "source_type":   "location",
+                "location":      loc,
+                "wa_timestamp":  ts_raw,
+                "wa_message_id": wa_msg_id or None,
+            },
+            should_process=bool(
+                loc.get("latitude") is not None and loc.get("longitude") is not None
+            ),
+        )
+
     return MediaNormalizationResult(
         normalized_type=msg_type or "unsupported",
         metadata={
