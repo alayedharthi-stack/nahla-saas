@@ -752,11 +752,11 @@ class DefaultDecisionEngine:
         # ── 0a.62 Existing-order tracking guard (Phase 2) ─────────────────
         try:
             from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
-                is_order_tracking_follow_up,
+                is_explicit_order_tracking_request,
             )
 
             if (
-                is_order_tracking_follow_up(
+                is_explicit_order_tracking_request(
                     ctx.message or "",
                     state=getattr(ctx, "state", None),
                     history=getattr(ctx, "history", None),

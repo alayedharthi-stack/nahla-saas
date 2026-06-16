@@ -101,11 +101,22 @@ class TestLayer1IntentGuard:
         assert intent.name == INTENT_ASK_SHIPPING
         assert boost_track_order_intent(message) is None
 
-    def test_bare_duration_with_evidence_boosts_track_order(self) -> None:
+    def test_bare_duration_with_evidence_does_not_boost_track_order(self) -> None:
         state = type("S", (), {"draft_order_id": "ORD-99"})()
-        boosted = boost_track_order_intent("متى يوصل الطلب", state=state)
-        assert boosted is not None
-        assert boosted.name == INTENT_TRACK_ORDER
+        assert boost_track_order_intent("متى يوصل الطلب", state=state) is None
+
+    def test_paid_order_carrier_question_not_explicit_tracking(self) -> None:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            is_explicit_order_tracking_request,
+            is_post_order_shipping_brain_defer,
+        )
+
+        msg = "اي فرع ارسلتو طلبي في سمسا"
+        op = type("OP", (), {"payment_receipt_received": True})()
+        state = type("S", (), {"order_prep": op})()
+        assert is_post_order_shipping_brain_defer(msg) is True
+        assert is_explicit_order_tracking_request(msg, state=state) is False
+        assert is_shipping_tracking_non_product_label(msg) is True
 
     def test_browse_not_boosted_to_track(self) -> None:
         for msg in ("أبي عسل طلح", "وش الخيارات؟"):

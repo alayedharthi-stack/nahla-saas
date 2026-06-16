@@ -169,6 +169,21 @@ _CATALOG_PRODUCT_HINT_RE = re.compile(
 )
 
 
+# Post-order shipping policy / carrier questions — defer to brain (ACTION_LLM_REPLY).
+_POST_ORDER_SHIPPING_BRAIN_DEFER_RE = re.compile(
+    r"(?:"
+    r"(?:اي|ايه|أي|which)\s*(?:فرع|branch)|"
+    r"(?:سمسا|smsa|aramex|ارامكس|ارامex|\bdhl\b)|"
+    r"(?:ارسل|أرسل|رسل|شحن|شحنت).{0,30}(?:فرع|branch|شركة|carrier)|"
+    r"(?:فرع|branch).{0,20}(?:سمسا|smsa|aramex|ارامكس)|"
+    r"بكم\s*(?:ال)?(?:شحن|توصيل)|"
+    r"(?:مدة|كم\s+يوم).{0,15}(?:ال)?(?:شحن|توصيل)|"
+    r"(?:وش|كيف|شلون).{0,15}(?:ال)?(?:شحن|توصيل|توصل)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
 def is_general_shipping_duration_inquiry(message: str) -> bool:
     """Policy shipping timing — e.g. bare «متى يوصل الطلب» without order context."""
     norm = _norm_ar(message or "")
@@ -303,6 +318,41 @@ def is_order_tracking_follow_up(
     return False
 
 
+def is_post_order_shipping_brain_defer(message: str) -> bool:
+    """Paid/post-order shipping policy questions — brain path, not ACTION_TRACK_ORDER."""
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    return bool(_POST_ORDER_SHIPPING_BRAIN_DEFER_RE.search(norm))
+
+
+def is_explicit_order_tracking_request(
+    message: str,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """
+    Layer 1 routing — only explicit tracking follow-ups become track_order.
+
+    Excludes general shipping duration and post-order carrier/policy asks that
+    the decision engine defers to ACTION_LLM_REPLY with order context.
+    """
+    if not is_order_tracking_follow_up(
+        message,
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        return False
+    if is_general_shipping_duration_inquiry(message):
+        return False
+    if is_post_order_shipping_brain_defer(message):
+        return False
+    return True
+
+
 def should_exempt_from_availability_rewrite(
     message: str,
     *,
@@ -329,7 +379,7 @@ def boost_track_order_intent(
     commerce_bundle: Optional[dict] = None,
 ) -> Optional[Intent]:
     """Return a high-confidence track_order intent when guard fires."""
-    if not is_order_tracking_follow_up(
+    if not is_explicit_order_tracking_request(
         message,
         state=state,
         history=history,
@@ -368,8 +418,10 @@ def resolve_order_tracking_guard_reply(
 __all__ = [
     "boost_track_order_intent",
     "has_existing_order_evidence",
+    "is_explicit_order_tracking_request",
     "is_general_shipping_duration_inquiry",
     "is_order_tracking_follow_up",
+    "is_post_order_shipping_brain_defer",
     "is_pre_order_shipping_inquiry",
     "is_shipping_tracking_non_product_label",
     "resolve_order_tracking_guard_reply",
