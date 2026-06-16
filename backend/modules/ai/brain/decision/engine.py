@@ -2744,6 +2744,21 @@ class DefaultDecisionEngine:
                         ),
                         confidence=0.88,
                     )
+                if _prep_product_id:
+                    _minimal_product = {"external_id": _prep_product_id}
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={
+                            "product": _minimal_product,
+                            "forced_product": _minimal_product,
+                            "source": "order_prep_product_id_only",
+                        },
+                        reason=(
+                            "ordering_stage_safety_net: focus lost but "
+                            f"order_prep.product_id={_prep_product_id!r} preserved"
+                        ),
+                        confidence=0.85,
+                    )
                 # Even without a candidate match, the customer is mid-funnel.
                 # Let the LLM compose a "we still have your details — which
                 # product was it again?" reply WITH order_prep state visible,
@@ -2767,7 +2782,11 @@ class DefaultDecisionEngine:
                 )
             # Product focus was lost (unsyncable product cleared it) and
             # NO order progress exists → fall back to searching.
-            if not state.current_product_focus and facts.has_products:
+            if (
+                not state.current_product_focus
+                and not _prep_product_id
+                and facts.has_products
+            ):
                 if _product_discovery_blocked():
                     _fb = _fulfillment_locked_fallback()
                     if _fb is not None:
