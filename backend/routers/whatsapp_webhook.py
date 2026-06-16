@@ -2061,7 +2061,7 @@ async def _handle_360dialog_body(
                     except Exception as exc:  # noqa: BLE001
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — rollback best-effort after status branch failure
                             pass
                         logger.exception(
                             "[Webhook360] status branch failed isolated "
@@ -5325,6 +5325,133 @@ async def _handle_merchant_message(
 
     def _sync_persona_observability() -> None:
         _sync_po_trace(_trace, _persona_ownership)
+
+    # ── Structured admin / L3 direct contact (Operations Center) ────────
+    # Must run BEFORE generic handoff so «أبي الإدارة» delivers configured
+    # admin contacts instead of owner_vague clarifier or Brain/KB refusal.
+    try:
+        from modules.operations.structured_admin_contact_policy import (  # noqa: PLC0415
+            evaluate_structured_admin_contact_policy as _eval_structured_admin,
+        )
+        _sac_decision = _eval_structured_admin(
+            db,
+            tenant_id=tenant_id,
+            message=text or "",
+        )
+    except Exception as _sac_exc:  # noqa: BLE001
+        logger.warning(
+            "[STRUCTURED_ADMIN_REQUEST] pre-brain check failed tenant=%s err=%s",
+            tenant_id, _sac_exc,
+        )
+        _sac_decision = None
+
+    if _sac_decision is not None:
+        _persona_ownership.mark_bypass(
+            _POReason.STAFF_CONTACT_RECOVERY,
+            owner="structured_admin_contact",
+        )
+        _sac_reply = _sac_decision.reply_text
+        _sac_text_ok = False
+        _sac_convo = None
+        try:
+            from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+            _sac_convo = _get_or_create_conversation(db, tenant_id, to)
+        except Exception as _sac_conv_exc:  # noqa: BLE001
+            logger.warning(
+                "[STRUCTURED_ADMIN_REQUEST] conversation lookup failed tenant=%s err=%s",
+                tenant_id, _sac_conv_exc,
+            )
+        try:
+            _sac_text_ok = await _send_whatsapp_message(
+                phone_id=phone_id, to=to, text=_sac_reply,
+                _tenant_id=tenant_id, _db=db,
+            )
+            if _sac_convo is not None:
+                StateManager.save_message(
+                    db, to, _sac_reply, "outbound",
+                    conversation_id=_sac_convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": "structured_admin_contact",
+                        "structured_admin_reason": _sac_decision.reason,
+                        "structured_admin_branch_id": _sac_decision.branch_id,
+                        "structured_admin_level": _sac_decision.escalation_level,
+                        "structured_admin_deliver": _sac_decision.deliver_contact,
+                    },
+                )
+        except Exception as _sac_send_exc:  # noqa: BLE001
+            logger.warning(
+                "[STRUCTURED_ADMIN_REQUEST] text send failed tenant=%s err=%s",
+                tenant_id, _sac_send_exc,
+            )
+
+        _sac_contacts_ok = False
+        if _sac_decision.deliver_contact and _sac_decision.call_targets:
+            try:
+                from services.call_resolver import build_contacts_payload  # noqa: PLC0415
+                _sac_payload = build_contacts_payload(
+                    list(_sac_decision.call_targets), to=to,
+                )
+                _sac_contacts_ok = await _send_contacts_message(
+                    phone_id=phone_id, to=to,
+                    payload=_sac_payload,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                if _sac_contacts_ok:
+                    try:
+                        from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+                            persist_staff_contact_sent,
+                        )
+                        from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+                        _sac_conv2, _sac_bs = _load_brain_state(
+                            db, tenant_id=tenant_id, phone=to,
+                        )
+                        _sac_turn = int((_sac_bs or {}).get("turn") or 0)
+                        for _sac_target in _sac_decision.call_targets:
+                            persist_staff_contact_sent(
+                                db,
+                                tenant_id=tenant_id,
+                                phone=to,
+                                name=getattr(_sac_target, "name", "") or "",
+                                contact_phone=(
+                                    getattr(_sac_target, "raw_phone", "")
+                                    or getattr(_sac_target, "wa_id", "")
+                                ),
+                                turn=_sac_turn,
+                            )
+                    except Exception as _sac_persist_exc:  # noqa: BLE001
+                        logger.exception(
+                            "[STRUCTURED_ADMIN_REQUEST] persist failed tenant=%s",
+                            tenant_id,
+                        )
+            except Exception as _sac_card_exc:  # noqa: BLE001
+                logger.warning(
+                    "[STRUCTURED_ADMIN_REQUEST] vCard send failed tenant=%s err=%s",
+                    tenant_id, _sac_card_exc,
+                )
+
+        logger.info(
+            "[STRUCTURED_ADMIN_REQUEST] short_circuit tenant=%s to=%s "
+            "deliver=%s text_ok=%s contacts_ok=%s skip_brain=true reason=%s",
+            tenant_id, to,
+            _sac_decision.deliver_contact,
+            _sac_text_ok, _sac_contacts_ok,
+            _sac_decision.reason,
+        )
+        try:
+            _trace.fallback_source = "structured_admin_contact"
+            _trace.response_goal = "structured_admin_contact"
+            _trace.intent = "structured_admin_contact"
+            if _sac_text_ok:
+                _trace.mark_outbound_sent(
+                    source=_TS.SOURCE_BRAIN,
+                    length=len(_sac_reply or ""),
+                )
+        except Exception:  # noqa: silent-ok — trace stamp must not block admin contact delivery
+            pass
+        _sync_persona_observability()
+        return
 
     # ── PRE-BRAIN HANDOFF GUARD (May 2026 critical hotfix) ─────────
     # Production regression: a customer typing "أبي أتكلم مع أحد"

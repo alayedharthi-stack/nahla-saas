@@ -409,7 +409,7 @@ def _names_match_for_sent(entry_name: str, sent_name: str) -> bool:
         return False
     if en in _GENERIC_ROLE_NAME_KEYS or sn in _GENERIC_ROLE_NAME_KEYS:
         return False
-    return en == sn or en in sn or sn in en
+    return en == sn
 
 
 def _entry_matches_sent(
