@@ -99,14 +99,14 @@ def record_unlinked_payment_claim(
         conversation.extra_metadata = meta
         try:
             flag_modified(conversation, "extra_metadata")
-        except Exception:
+        except Exception:  # noqa: silent-ok — SQLAlchemy optional when metadata unchanged
             pass
         db.add(conversation)
         db.commit()
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[WA_PAYMENT_SUBMISSION] unlinked claim persist failed tenant=%s: %s",
-            tenant_id, exc,
+        logger.exception(
+            "[WA_PAYMENT_SUBMISSION] unlinked claim persist failed tenant=%s",
+            tenant_id,
         )
 
 

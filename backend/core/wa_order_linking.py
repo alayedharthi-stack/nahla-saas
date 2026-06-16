@@ -169,9 +169,9 @@ def find_linkable_wa_order(
         if linkable:
             return linkable[0]
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[WA_ORDER_LINKING] lookup failed tenant=%s err=%s",
-            tenant_id, exc,
+        logger.exception(
+            "[WA_ORDER_LINKING] lookup failed tenant=%s",
+            tenant_id,
         )
     return None
 

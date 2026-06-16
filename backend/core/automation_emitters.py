@@ -1174,7 +1174,7 @@ async def run_automation_emitters_scheduler() -> None:
                         )
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — rollback best-effort after logged tenant failure
                             pass
             finally:
                 db.close()

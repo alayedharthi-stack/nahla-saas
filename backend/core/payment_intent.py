@@ -804,10 +804,9 @@ def maybe_handle_payment_claim(
             if isinstance(_stamp, dict):
                 state_patch.update(_stamp)
         except Exception as _stamp_exc:  # noqa: BLE001
-            logger.debug(
-                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) "
-                "tenant=%s err=%s",
-                tenant_id, _stamp_exc,
+            logger.exception(
+                "[PAYMENT_INTENT] text-claim stamp failed (non-fatal) tenant=%s",
+                tenant_id,
             )
         logger.info(
             "[PAYMENT_INTENT] short_circuit=text_claim_receipt_request "
