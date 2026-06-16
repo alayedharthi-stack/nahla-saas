@@ -187,7 +187,7 @@ def test_payment_evidence_override_promotes_prior_receipt(
     sp = result["state_patch"]
     assert sp["payment_receipt_received"] is True
     assert sp["awaiting_payment_receipt"] is False
-    assert sp["order_status"] == "under_review"
+    assert sp["order_status"] == "payment_submitted"
     assert "promoted_from" in sp["payment_receipt_metadata"]
     assert sp["payment_receipt_metadata"]["promoted_from"] in (
         "pre_transfer_review", "needs_confirmation",
@@ -414,7 +414,7 @@ def test_payment_evidence_active_order_promotes_to_confirmed(
     sp = decision["state_patch"]
     assert sp.get("payment_receipt_received") is True
     assert sp.get("awaiting_payment_receipt") is False
-    assert sp.get("order_status") == "under_review"
+    assert sp.get("order_status") == "payment_submitted"
     # Reply should be the receipt ACK (with the address interview
     # because the test summary has no name / address fields set).
     assert "وصلنا" in decision["reply_text"] or "إيصال" in decision["reply_text"]
