@@ -47,7 +47,7 @@ _CUSTOMER_DEFER_TO_AGENT_RE = re.compile(
     r"(?:"
     r"(?:اتواصل|تواصل|اكلم|أكلم|اتكلم|أتكلم|كلم)\s*مع(?:ك|اك|كم|كن|كِ|ال)?(?:ك|اك|كم)?"
     r"|(?:ارجع|أرجع|برجع|بارجع|ارجعلك|أرجعلك)\s*(?:لك|ليك|لكم|لي)?"
-    r"|(?:اكلم|أكلم|اتكلم|أتكلم)(?:ك|ك\s)?(?:بعدين|لاحق|later)?"
+    r"|(?:اكلم|أكلم|اتكلم|أتكلم)(?:ك|كم|كن)(?:\s|$|[،,.!?]|(?:بعدين|لاحق|later))"
     r"|(?:بعدين|later)\s*(?:ارسل|أرسل|ارسلك|أرسلك)"
     r"|(?:^|\s)(?:أروح|اروح|بروح|رايح|رايحة)\s*(?:أصلي|اصلي|اسوي|اسوي|أصل|اص)"
     r")",
@@ -155,7 +155,11 @@ def is_customer_defer_or_return_later(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
-    return bool(_CUSTOMER_DEFER_TO_AGENT_RE.search(_norm(raw)))
+    norm = _norm(raw)
+    if re.search(r"^(?:كيف|how)\s", norm, flags=re.UNICODE | re.IGNORECASE):
+        if re.search(r"(?:تواصل|اتواصل|اكلم|أكلم|كلم)", norm, flags=re.UNICODE | re.IGNORECASE):
+            return False
+    return bool(_CUSTOMER_DEFER_TO_AGENT_RE.search(norm))
 
 
 def has_explicit_contact_intent(message: str) -> bool:

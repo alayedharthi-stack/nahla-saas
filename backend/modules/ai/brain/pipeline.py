@@ -2960,6 +2960,16 @@ def _compose_base_response_goal(
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "identity_collaboration"
+    ):
+        from .commerce.identity_collaboration_guard import (  # noqa: PLC0415
+            compose_identity_collaboration_goal,
+        )
+
+        return compose_identity_collaboration_goal()
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "persona_social"
     ):
         from .persona_expression import compose_persona_social_goal  # noqa: PLC0415
