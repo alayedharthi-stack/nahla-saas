@@ -996,6 +996,106 @@ class TestCustomersListEndpointContract:
         assert result["total"] == 1
         assert result["customers"][0]["id"] == eligible.id
 
+    def test_marketing_opt_out_filter_three_way_split(self):
+        """True / false / missing key — only the opted-out row matches."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        excluded = _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        excluded_id = excluded.id
+        _seed_customer(
+            db, t.id, "+966500000002",
+            extra={META_KEY_OPT_OUT: False},
+        )
+        _seed_customer(db, t.id, "+966500000003")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=True)
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == excluded_id
+
+    def test_marketing_opt_out_filter_reads_legacy_key_without_mutation(self):
+        """Legacy ``marketing_opt_out`` rows stay visible; data is not rewritten."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        legacy = _seed_customer(
+            db, t.id, "+966500000001",
+            extra={"marketing_opt_out": True},
+        )
+        legacy_id = legacy.id
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=True)
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == legacy_id
+        assert result["customers"][0]["marketing_opt_out_manual"] is True
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        refreshed = db2.query(Customer).filter_by(id=legacy_id).one()
+        meta = refreshed.extra_metadata or {}
+        assert meta.get("marketing_opt_out") is True
+        assert META_KEY_OPT_OUT not in meta
+        db2.close()
+
+    def _call_patch_marketing_prefs(
+        self, engine, tenant_id: int, customer_id: int, *, opted_out: bool,
+    ):
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        try:
+            return asyncio.run(
+                customers_router.update_marketing_preferences(
+                    customer_id=customer_id,
+                    body=customers_router.MarketingPrefsPatchIn(
+                        marketing_opt_out_manual=opted_out,
+                    ),
+                    request=_FakeReq(),
+                    db=db,
+                )
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_patch_marketing_preferences_writes_canonical_field(self):
+        """Same endpoint used by Conversations + Customers drawer."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        res = self._call_patch_marketing_prefs(
+            engine, tenant_id, customer_id, opted_out=True,
+        )
+        assert res["marketing_opt_out_manual"] is True
+
+        Session = sessionmaker(bind=engine)
+        db2 = Session()
+        refreshed = db2.query(Customer).filter_by(id=customer_id).one()
+        assert (refreshed.extra_metadata or {})[META_KEY_OPT_OUT] is True
+        db2.close()
+
     def _call_delete(self, engine, tenant_id: int, customer_id: int, segment_key: str):
         """Direct in-process call to ``remove_customer_segment``."""
         import asyncio

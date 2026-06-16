@@ -654,8 +654,12 @@ export default function Conversations() {
   }
 
   const _optimisticUpdate = (phone: string, patch: Partial<DashboardConversation>) => {
-    setConversations(prev => prev.map(c => c.phone === phone ? { ...c, ...patch } : c))
-    setSelected(prev => prev && prev.phone === phone ? { ...prev, ...patch } : prev)
+    setConversations(prev =>
+      prev.map(c => (phonesMatch(c.phone, phone) ? { ...c, ...patch } : c)),
+    )
+    setSelected(prev =>
+      prev && phonesMatch(prev.phone, phone) ? { ...prev, ...patch } : prev,
+    )
   }
 
   const _applyCustomerNameByPhone = (phone: string, newName: string) => {
@@ -1420,6 +1424,7 @@ export default function Conversations() {
                           </button>
                         )}
                         <CampaignExcludeControl
+                          customerId={selected.customerId ?? undefined}
                           phone={selected.phone}
                           optedOut={!!selected.marketingOptOutManual}
                           customerLabel={selected.customer || selected.phone}
@@ -1434,6 +1439,7 @@ export default function Conversations() {
                                 ? cp.toasts.excludedFromCampaigns
                                 : cp.toasts.reEnabledFromCampaigns,
                             )
+                            void reloadFirstPagePreserveTail({ silent: true })
                           }}
                         />
                         {!_isBlocked(selected) && (

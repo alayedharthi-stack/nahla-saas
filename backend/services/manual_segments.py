@@ -769,6 +769,54 @@ META_KEY_OPT_OUT_AT       = "marketing_opt_out_manual_at"
 META_KEY_TEST_RECIPIENT   = "is_campaign_test_recipient"
 META_KEY_TEST_AT          = "campaign_test_recipient_at"
 
+# Legacy keys — read-only compatibility; writes always use META_KEY_OPT_OUT.
+LEGACY_MARKETING_OPT_OUT_KEYS: tuple[str, ...] = (
+    "marketing_opt_out",
+    "campaign_opt_out",
+    "campaigns_excluded",
+    "excluded_from_campaigns",
+    "do_not_campaign",
+)
+
+
+def _meta_flag_truthy(val: object) -> bool:
+    """Interpret a JSON metadata flag without mutating stored values."""
+    if val is True:
+        return True
+    if val in (1, "1"):
+        return True
+    if isinstance(val, str) and val.strip().lower() in ("true", "yes", "on"):
+        return True
+    return False
+
+
+def is_marketing_opted_out_from_meta(meta: Optional[Dict[str, Any]]) -> bool:
+    """Read-only: canonical + legacy manual campaign-exclusion flags."""
+    data = meta or {}
+    if _meta_flag_truthy(data.get(META_KEY_OPT_OUT)):
+        return True
+    return any(_meta_flag_truthy(data.get(key)) for key in LEGACY_MARKETING_OPT_OUT_KEYS)
+
+
+def marketing_opt_out_manual_sql_truthy():
+    """SQLAlchemy expression — ``True`` when customer is manually excluded.
+
+    Matches boolean JSON ``true``, string ``"true"`` / ``"1"``, and legacy
+    keys. Does not rewrite ``extra_metadata``."""
+    from sqlalchemy import String, cast, func, or_  # noqa: PLC0415
+
+    def _path_truthy(path_key: str):
+        raw = func.coalesce(
+            Customer.extra_metadata[path_key].astext
+            if hasattr(Customer.extra_metadata, "astext")
+            else func.json_extract(Customer.extra_metadata, f"$.{path_key}"),
+            "false",
+        )
+        return cast(raw, String).in_(["true", "1", "True", "TRUE", "yes", "Yes"])
+
+    keys = (META_KEY_OPT_OUT,) + LEGACY_MARKETING_OPT_OUT_KEYS
+    return or_(*(_path_truthy(k) for k in keys))
+
 
 def _get_customer(db: Session, tenant_id: int, customer_id: int) -> Customer:
     cust = (
@@ -848,8 +896,7 @@ def set_test_recipient(
 def is_marketing_opted_out(customer: Customer) -> bool:
     """Read-only convenience for hot paths (snapshot loop). Tolerates
     a missing ``extra_metadata`` (legacy rows have ``None`` here)."""
-    meta = customer.extra_metadata or {}
-    return bool(meta.get(META_KEY_OPT_OUT))
+    return is_marketing_opted_out_from_meta(customer.extra_metadata)
 
 
 def is_test_recipient(customer: Customer) -> bool:
@@ -891,8 +938,11 @@ __all__ = [
     "add_manual_segment",
     "assert_known_segment",
     "customer_ids_with_manual_segment",
+    "LEGACY_MARKETING_OPT_OUT_KEYS",
     "is_marketing_opted_out",
+    "is_marketing_opted_out_from_meta",
     "is_test_recipient",
+    "marketing_opt_out_manual_sql_truthy",
     "list_manual_segments_bulk",
     "list_manual_segments_for_customer",
     "remove_manual_segment",

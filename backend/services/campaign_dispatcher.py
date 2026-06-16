@@ -765,6 +765,8 @@ def _snapshot_recipients(
         bulk = list_manual_segments_bulk(db, tenant_id, [c.id for c in customers])
         manual_segments_by_id = {cid: set(keys) for cid, keys in bulk.items()}
 
+    from services.manual_segments import is_marketing_opted_out  # noqa: PLC0415
+
     # ── Delivery Quality Intelligence Layer (May 2026) ──
     # Bulk-load the set of currently-suppressed phones for this
     # tenant. One query instead of one per recipient. We tolerate
@@ -873,7 +875,7 @@ def _snapshot_recipients(
         # Distinct from `is_unsubscribed` (customer-driven). We log it
         # under skipped_manual_exclusion so the campaign report tells
         # the merchant exactly why the row was excluded.
-        if meta.get("marketing_opt_out_manual"):
+        if is_marketing_opted_out(cust):
             new_rows.append(CampaignSendLog(
                 tenant_id=tenant_id,
                 campaign_id=campaign_id,
