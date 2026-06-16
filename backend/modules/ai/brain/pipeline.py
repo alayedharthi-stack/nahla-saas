@@ -1253,6 +1253,19 @@ class MerchantBrain:
                 new_state.pending_google_maps_url = ""
                 new_state.pending_city = ""
 
+        try:
+            from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noqa: PLC0415
+
+            if message and new_state.stage in ("ordering", "deciding", "checkout", ""):
+                maybe_apply_cart_message(
+                    state=new_state,
+                    prep=new_state.order_prep,
+                    message=message,
+                    product_info=new_state.current_product_focus,
+                )
+        except Exception as _cart_exc:  # noqa: BLE001
+            logger.debug("[CART_STATE] pipeline hook skipped: %s", _cart_exc)
+
         # Persist address signals captured BEFORE a product was picked
         # (e.g. customer typed "TAPA7401" while still browsing). The
         # next-turn DraftOrderHandler consumes these values without
