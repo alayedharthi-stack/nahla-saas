@@ -971,11 +971,12 @@ def _maybe_promote_prior_evidence(
 
     try:
         from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
-            PAYMENT_EVIDENCE_RECEIVED,
             PAYMENT_RECEIVED,
+            PAYMENT_REVIEW_REQUIRED,
             compose_payment_received_reply,
             resolve_bank_transfer_receipt,
         )
+        from core.payment_evidence import PAYMENT_EVIDENCE_CONFIRMED  # noqa: PLC0415
         from core.payment_media_metadata import payment_text_blob  # noqa: PLC0415
         from core.tenant_payment_accounts import load_tenant_payment_accounts  # noqa: PLC0415
 
@@ -988,8 +989,19 @@ def _maybe_promote_prior_evidence(
             customer_confirmation=True,
             legacy_pe_status=str(pe_status or ""),
         )
-        if _resolution.payment_state != PAYMENT_RECEIVED:
+        if _resolution.payment_state == PAYMENT_REVIEW_REQUIRED:
             return None
+        if _resolution.payment_state != PAYMENT_RECEIVED:
+            # Customer correction on a prior receipt-shaped inbound is
+            # Evidence + Confirmation even when the stored MessageEvent
+            # row has thin OCR (filename/kind only).
+            _resolution.payment_state = PAYMENT_RECEIVED
+            _resolution.payment_evidence_status = PAYMENT_EVIDENCE_CONFIRMED
+            _resolution.reason = "customer_correction_prior_receipt_artifact"
+            _resolution.customer_confirmation_boost = True
+            _resolution.reply_ar = compose_payment_received_reply(
+                _resolution.extraction.amount,
+            ) if _resolution.extraction.amount else None
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "[PAYMENT_INTENT] evidence-override resolver failed "
