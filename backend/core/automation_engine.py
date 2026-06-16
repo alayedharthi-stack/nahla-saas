@@ -2140,6 +2140,7 @@ _AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
     "cart_abandoned":          "cart_recovery",
     "abandoned_cart":          "cart_recovery",
     "unpaid_order_reminder":   "payment_reminder",   # fix: was missing → svc_key=None bypassed smart resolver
+    "abandoned_order_draft":   "wa_draft_reminder",
     "cod_confirmation":        "cod_confirmation",
     "order_confirmation":      "order_confirmation",
     "shipping_update":         "shipping_update",

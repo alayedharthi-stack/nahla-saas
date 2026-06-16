@@ -37,6 +37,7 @@ ENGINE_BY_TYPE: Dict[str, str] = {
     "abandoned_cart":        "recovery",
     "customer_winback":      "recovery",
     "unpaid_order_reminder": "recovery",
+    "abandoned_order_draft": "recovery",
     "cod_confirmation":      "recovery",
     "vip_upgrade":           "growth",
     "predictive_reorder":    "growth",
@@ -271,6 +272,23 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             ],
             "stop_on_payment": True,
             "stop_on_reply":   True,
+        },
+    },
+    {
+        "automation_type": "abandoned_order_draft",
+        "engine":          "recovery",
+        "trigger_event":   AutomationTrigger.WA_ORDER_DRAFT_REMINDER_DUE.value,
+        "name":            "تذكير طلبات واتساب المتروكة",
+        "enabled":         False,
+        "config": {
+            # PR-5 — Nahla WhatsApp draft-order reminders only.
+            # Sweeper: `automation_emitters.scan_abandoned_order_drafts`.
+            # One reminder per kind per order; sends via send_governor.
+            "language":          "ar",
+            "template_name":     "wa_abandoned_order_draft_ar",
+            "template_name_en":  "wa_abandoned_order_draft_en",
+            "delay_minutes":     120,
+            "stop_on_reply":     True,
         },
     },
     {

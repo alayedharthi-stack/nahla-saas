@@ -117,6 +117,7 @@ _PRIORITY: Dict[str, int] = {
     "cod_confirmation":      Priority.HIGH,
     "unpaid_order_reminder": Priority.HIGH,
     "abandoned_cart":        Priority.HIGH,
+    "abandoned_order_draft": Priority.HIGH,
 
     # MEDIUM — تنبيهات مفيدة
     "back_in_stock":         Priority.MEDIUM,
@@ -140,6 +141,7 @@ def _priority(automation_type: str) -> int:
 _COOLDOWN_HOURS: Dict[str, float] = {
     "abandoned_cart":        24,
     "unpaid_order_reminder": 24,
+    "abandoned_order_draft": 24,
     "cod_confirmation":      6,      # يعتمد على طلب بعينه — أقصر
     "back_in_stock":         48,
     "predictive_reorder":    168,    # 7 أيام
@@ -247,6 +249,7 @@ def _arabic_label(reason_code: str, automation_type: str, blocked_by_type: Optio
         _TYPE_NAMES: Dict[str, str] = {
             "abandoned_cart":        "السلة المتروكة 🛒",
             "unpaid_order_reminder": "الطلب غير المدفوع 💳",
+            "abandoned_order_draft": "طلب واتساب المتروك 📋",
             "cod_confirmation":      "تأكيد الدفع عند الاستلام 💰",
             "back_in_stock":         "عودة المنتج للمخزون 📦",
             "predictive_reorder":    "تذكير إعادة الطلب 🔄",
