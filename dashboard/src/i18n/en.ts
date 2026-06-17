@@ -576,6 +576,7 @@ const en: Translations = {
       menuButtonLabel: 'Close conversation filters',
     },
     scrollToBottom: 'Jump to latest messages',
+    aiPausedBadge: 'AI paused',
     errors: {
       refreshFailed: 'Could not refresh conversations temporarily — we will retry automatically.',
       loadMoreFailed: 'Could not load more temporarily — try again in a few seconds.',

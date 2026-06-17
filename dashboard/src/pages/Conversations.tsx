@@ -35,6 +35,8 @@ import {
 } from '../lib/conversationsCache'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD, resolveOutboundSendError } from '../i18n/uiOnly'
+import { useMobileChatFullscreen } from '../context/MobileChatFullscreenContext'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 
 const LIST_PAGE_LIMIT = 60
 const LIST_POLL_MS = 5_000
@@ -157,6 +159,11 @@ export default function Conversations() {
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
   const [mobileFilterMenuOpen, setMobileFilterMenuOpen] = useState(false)
+  const [aiPausedPopoverOpen, setAiPausedPopoverOpen] = useState(false)
+  const aiPausedPopoverRef = useRef<HTMLDivElement | null>(null)
+
+  const isMobileViewport = useMediaQuery('(max-width: 767px)')
+  const { setActive: setMobileChatFullscreen } = useMobileChatFullscreen()
 
   // mobile: 'list' = show list panel, 'chat' = show chat panel
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
@@ -639,6 +646,32 @@ export default function Conversations() {
     if (mobileView === 'chat') setMobileFilterMenuOpen(false)
   }, [mobileView])
 
+  const isMobileChatOpen = isMobileViewport && mobileView === 'chat' && !!selected
+
+  // Fullscreen mobile chat: hide Nahla app chrome via layout context.
+  useEffect(() => {
+    setMobileChatFullscreen(isMobileChatOpen)
+    return () => setMobileChatFullscreen(false)
+  }, [isMobileChatOpen, setMobileChatFullscreen])
+
+  // Prevent page scroll bleed-through on iOS while chat is fullscreen.
+  useEffect(() => {
+    if (!isMobileChatOpen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [isMobileChatOpen])
+
+  useEffect(() => {
+    if (!aiPausedPopoverOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (aiPausedPopoverRef.current?.contains(e.target as Node)) return
+      setAiPausedPopoverOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [aiPausedPopoverOpen])
+
   // Scroll to bottom once when opening a conversation.
   useEffect(() => {
     if (!selected) return
@@ -715,6 +748,7 @@ export default function Conversations() {
   }
 
   const goBackToList = () => {
+    setAiPausedPopoverOpen(false)
     setMobileView('list')
   }
 
@@ -1106,15 +1140,18 @@ export default function Conversations() {
   // ─────────────────────────────────────────────────────────────────────────────
   const BackIcon = isRTL ? ArrowRight : ArrowLeft
 
+  const showAiPausedBadge = !!selected?.aiPaused
+    && !(selected.needsHuman || selected.handoffActive || selected.status === 'human')
+
   return (
     <div
       dir={dir}
-      className="
-      -m-3 md:-m-6
-      flex overflow-hidden
-      h-[calc(100dvh-3.5rem)] md:h-[calc(100dvh-4rem)]
-      bg-white md:rounded-xl md:shadow-sm md:border md:border-slate-200
-    ">
+      className={
+        isMobileChatOpen
+          ? 'fixed inset-0 z-50 flex flex-col overflow-hidden bg-white pt-safe-top pb-safe-bottom'
+          : '-m-3 md:-m-6 flex overflow-hidden h-[calc(100dvh-3.5rem)] md:h-[calc(100dvh-4rem)] bg-white md:rounded-xl md:shadow-sm md:border md:border-slate-200'
+      }
+    >
 
       {/* ── PANEL 1: Conversation list ─────────────────────────────────────── */}
       <div className={`
@@ -1371,8 +1408,9 @@ export default function Conversations() {
 
       {/* ── PANEL 2: Chat view ────────────────────────────────────────────────── */}
       <div className={`
-        flex-1 flex flex-col
-        ${mobileView === 'list' ? 'hidden md:flex' : 'flex'}
+        flex flex-col min-h-0 bg-white
+        md:flex-1
+        ${mobileView === 'list' ? 'hidden md:flex' : 'flex flex-1'}
       `}>
         {!selected ? (
           /* Empty state — desktop only */
@@ -1387,8 +1425,8 @@ export default function Conversations() {
           </div>
         ) : (
           <>
-            {/* Chat header — sticky on mobile like WhatsApp */}
-            <div className="sticky top-0 z-20 flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm shrink-0 min-w-0">
+            {/* Chat header — fixed row; messages scroll independently below */}
+            <div className="shrink-0 z-10 flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm min-w-0">
               {/* Back → conversation list (mobile only) */}
               <button
                 onClick={goBackToList}
@@ -1405,7 +1443,7 @@ export default function Conversations() {
                 {initials(selected.customer)}
               </div>
 
-              {/* Name + phone */}
+              {/* Name + phone + mobile AI-paused badge */}
               <div className="flex-1 min-w-0 overflow-hidden">
                 <button
                   type="button"
@@ -1431,6 +1469,46 @@ export default function Conversations() {
                     <span className="truncate">{selected.phone}</span>
                   </span>
                 </button>
+
+                {showAiPausedBadge && (
+                  <div className="relative md:hidden px-1 mt-0.5" ref={aiPausedPopoverRef}>
+                    <button
+                      type="button"
+                      onClick={() => setAiPausedPopoverOpen((open) => !open)}
+                      className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200"
+                      aria-expanded={aiPausedPopoverOpen}
+                    >
+                      <Pause className="w-3 h-3 shrink-0" />
+                      {cp.aiPausedBadge}
+                    </button>
+                    {aiPausedPopoverOpen && (
+                      <div
+                        className="absolute start-0 top-full mt-1.5 z-30 w-[min(18rem,calc(100vw-2rem))] rounded-xl border border-amber-200 bg-white shadow-lg p-3 text-xs text-amber-900"
+                        dir={dir}
+                      >
+                        <p className="leading-relaxed">
+                          <strong>{cp.banners.aiPaused}</strong>
+                          {selected.aiPausedReason && (
+                            <> — <strong>{pauseReasonLabel(selected.aiPausedReason)}</strong></>
+                          )}
+                        </p>
+                        {!_isBlocked(selected) && (
+                          <button
+                            type="button"
+                            className="mt-2.5 w-full flex items-center justify-center gap-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 py-2 font-medium"
+                            onClick={() => {
+                              setAiPausedPopoverOpen(false)
+                              void resumeIntelligenceForSelected()
+                            }}
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            {cp.actions.resumeAI}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Desktop: pause/resume + menu. Mobile: menu only (AI toggle in reply bar). */}
@@ -1558,10 +1636,9 @@ export default function Conversations() {
               </div>
             </div>
 
-            {/* Human-takeover banner — shown above the AI-paused banner so
-                the merchant always sees the takeover state explicitly. */}
+            {/* Human-takeover banner — desktop only on mobile chat (header covers state) */}
             {(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (
-              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-sm text-blue-700">
+              <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-blue-50 border-b border-blue-200 text-sm text-blue-700 shrink-0">
                 <UserCheck className="w-4 h-4 shrink-0 text-blue-500" />
                 <span>
                   <strong>{cp.banners.humanSupervision}</strong>
@@ -1571,7 +1648,7 @@ export default function Conversations() {
             )}
 
             {actionToast && (
-              <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-sm text-emerald-800">
+              <div className="hidden md:flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-b border-emerald-200 text-sm text-emerald-800 shrink-0">
                 <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
                 <span className="flex-1">{actionToast}</span>
                 <button
@@ -1586,7 +1663,7 @@ export default function Conversations() {
             )}
 
             {actionErrorToast && (
-              <div className="flex items-center gap-2 px-4 py-2.5 bg-rose-50 border-b border-rose-200 text-sm text-rose-800">
+              <div className="hidden md:flex items-center gap-2 px-4 py-2.5 bg-rose-50 border-b border-rose-200 text-sm text-rose-800 shrink-0">
                 <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
                 <span className="flex-1">{actionErrorToast}</span>
                 <button
@@ -1610,10 +1687,9 @@ export default function Conversations() {
               dir={dir}
             />
 
-            {/* AI paused banner (manual pause path only — takeover has its
-                own banner above). */}
+            {/* AI paused banner — desktop only; mobile uses header badge */}
             {selected.aiPaused && !(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (
-              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
+              <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700 shrink-0">
                 <Pause className="w-4 h-4 shrink-0 text-amber-500" />
                 <span>
                   <strong>{cp.banners.aiPaused}</strong>
@@ -1627,15 +1703,15 @@ export default function Conversations() {
               </div>
             )}
 
-            {/* Unsubscribe banner */}
+            {/* Unsubscribe banner — desktop only in chat to save mobile space */}
             {selected.isUnsubscribed && (
-              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-sm text-slate-600">
+              <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-slate-100 border-b border-slate-200 text-sm text-slate-600 shrink-0">
                 <BellOff className="w-4 h-4 shrink-0 text-slate-500" />
                 <span>{cp.banners.unsubscribed}</span>
               </div>
             )}
             {!selected.isUnsubscribed && selected.pendingUnsubscribe && (
-              <div className="flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700">
+              <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700 shrink-0">
                 <BellOff className="w-4 h-4 shrink-0 text-amber-500" />
                 <span>{cp.banners.pendingUnsub}</span>
               </div>
@@ -1985,8 +2061,10 @@ export default function Conversations() {
               </div>
             </div>
 
+            {/* Composer — pinned bottom on mobile */}
+            <div className="shrink-0 bg-white border-t border-slate-100 pb-safe-bottom">
             {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}
-            <div className="sm:hidden flex items-center gap-2 px-3 py-2 bg-white border-t border-slate-100">
+            <div className="sm:hidden flex items-center gap-2 px-3 py-2">
               {!_isBlocked(selected) &&
                 (() => {
                   const humanTakeover =
@@ -2023,7 +2101,7 @@ export default function Conversations() {
             </div>
 
             {/* Reply input */}
-            <div className="px-3 md:px-5 py-2 md:py-3 bg-white border-t border-slate-100">
+            <div className="px-3 md:px-5 py-2 md:py-3">
               <div className="flex items-end gap-2">
                 <textarea
                   ref={textareaRef}
@@ -2062,6 +2140,7 @@ export default function Conversations() {
                   {cp.aiHandlingHint}
                 </p>
               )}
+            </div>
             </div>
           </>
         )}
