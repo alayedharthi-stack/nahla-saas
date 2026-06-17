@@ -631,6 +631,15 @@ export default function Billing() {
                 </p>
               </div>
             )}
+            {(lifecycle === 'trial_expired' || lifecycle === 'paid_expired')
+              && (status.expired_since_days ?? 0) > 0 && (
+              <div>
+                <p className="text-xs text-slate-500">منذ انتهاء الاشتراك</p>
+                <p className="font-medium text-slate-700">
+                  {status.expired_since_days} {status.expired_since_days === 1 ? 'يوم' : 'أيام'}
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -743,7 +752,9 @@ export default function Billing() {
             <p className="text-sm font-bold">
               {warningLevel === 'expired'
                 ? (lifecycle === 'paid_expired'
-                    ? `انتهى اشتراكك في باقة ${planDisplayName}`
+                    ? `انتهى اشتراكك${(status.expired_since_days ?? 0) > 0
+                        ? ` منذ ${status.expired_since_days} ${status.expired_since_days === 1 ? 'يوم' : 'أيام'}`
+                        : ''} — جدّد الاشتراك لاستمرار الردود الذكية والحملات والأتمتة`
                     : lifecycle === 'trial_expired'
                       ? 'انتهت تجربتك المجانية'
                       : lifecycleHeadline)

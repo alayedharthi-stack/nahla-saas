@@ -351,6 +351,18 @@ async def dispatch_campaign(
         campaign_id, tenant_id, campaign.template_id, campaign.audience_type,
     )
 
+    from core.billing import has_billing_access  # noqa: PLC0415
+    if not has_billing_access(db, tenant_id):
+        err = "billing_access_denied"
+        logger.info(
+            "[campaign_dispatcher] campaign=%d tenant=%d: outbound blocked (billing_access_denied)",
+            campaign_id, tenant_id,
+        )
+        campaign.status = "failed"
+        _persist_dispatch_result(campaign, 0, 0, 0, [err])
+        db.commit()
+        return _empty_result(error=err)
+
     template = _load_template(db, campaign)
     if not template:
         err = "لم يتم العثور على القالب أو لم تتم الموافقة عليه"

@@ -44,6 +44,7 @@ export interface BillingStatus {
   headline_ar?:            string
   plan_name?:              string | null
   days_remaining?:         number
+  expired_since_days?:     number
   is_trial:                boolean
   trial_pending_whatsapp?: boolean
   trial_days_remaining:    number

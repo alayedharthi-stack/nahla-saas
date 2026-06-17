@@ -491,3 +491,320 @@ class TestExpiredPlanRenewalCheckout:
         assert raw_active is not None
         effective = get_tenant_subscription(db, t.id)
         assert not (effective and effective.plan_id == plan.id)
+
+
+class TestBillingLifecycleMatrix:
+    """Platform-wide billing matrix — every case applies to any merchant, not one tenant."""
+
+    def test_case1_new_merchant_no_whatsapp(self, db):
+        t = _tenant(db)
+        db.commit()
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        audit = audit_tenant_subscription(db, t.id)
+        assert lifecycle["lifecycle_status"] == "trial_pending_whatsapp"
+        assert t.trial_started_at is None
+        assert t.trial_ends_at is None
+        assert lifecycle["ai_auto_replies_allowed"] is False
+        assert lifecycle["manual_replies_allowed"] is True
+        assert audit["dashboard_access_allowed"] is True
+        assert audit["campaigns_automations_allowed"] is False
+
+    def test_case2_whatsapp_connect_starts_trial_once(self, db):
+        t = _tenant(db)
+        db.commit()
+        at = datetime.now(timezone.utc) - timedelta(days=2)
+        assert start_trial_on_whatsapp_connect(db, t.id, connected_at=at) is True
+        db.refresh(t)
+        first_start = t.trial_started_at
+        first_end = t.trial_ends_at
+        assert start_trial_on_whatsapp_connect(db, t.id, connected_at=datetime.now(timezone.utc)) is False
+        db.refresh(t)
+        assert t.trial_started_at == first_start
+        assert t.trial_ends_at == first_end
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "trial_active"
+        assert lifecycle["ai_auto_replies_allowed"] is True
+
+    def test_case3_trial_expired_no_payment(self, db):
+        t = _tenant(db)
+        now = datetime.now(timezone.utc)
+        _wa_conn(db, t.id, connected_days_ago=20)
+        t.trial_started_at = (now - timedelta(days=20)).replace(tzinfo=None)
+        t.trial_ends_at = (now - timedelta(days=6)).replace(tzinfo=None)
+        t.subscription_status = TRIAL_STATUS_EXPIRED
+        db.commit()
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "trial_expired"
+        assert lifecycle["ai_auto_replies_allowed"] is False
+        payload = build_billing_status_payload(
+            db, t.id, t, active_sub=None,
+            conversations_used=0,
+            usage_data={"conversations_limit": 1000, "usage_pct": 0, "exceeded": False},
+            integration_fee_sar=59,
+        )
+        assert payload["campaigns_automations_allowed"] is False
+        assert payload["manual_replies_allowed"] is True
+
+    def test_case4_paid_subscription_active(self, db):
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=10)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+            extra_metadata={"name_ar": "النمو"},
+        )
+        db.add(plan)
+        db.flush()
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=18)).replace(tzinfo=None),
+            ends_at=(now + timedelta(days=12)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=18)).isoformat()},
+        )
+        db.add(sub)
+        db.commit()
+        active = get_tenant_subscription(db, t.id)
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=active)
+        assert lifecycle["lifecycle_status"] == "paid_active"
+        assert lifecycle["subscription_started_at"] is not None
+        assert lifecycle["subscription_ends_at"] is not None
+        assert lifecycle["days_remaining"] >= 11
+        assert lifecycle["ai_auto_replies_allowed"] is True
+        payload = build_billing_status_payload(
+            db, t.id, t, active_sub=active,
+            conversations_used=0,
+            usage_data={"conversations_limit": 1000, "usage_pct": 0, "exceeded": False},
+            integration_fee_sar=59,
+        )
+        assert payload["campaigns_automations_allowed"] is True
+
+    def test_case5_paid_subscription_expired(self, db):
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=40)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat()},
+        )
+        db.add(sub)
+        db.commit()
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "paid_expired"
+        assert lifecycle["subscription_expired"] is True
+        assert lifecycle["ai_auto_replies_allowed"] is False
+        assert lifecycle["manual_replies_allowed"] is True
+        assert lifecycle["expired_since_days"] >= 5
+
+    def test_case6_raw_active_status_not_trusted_without_ends_at(self, db):
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=40)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=10)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=40)).isoformat()},
+        )
+        db.add(sub)
+        db.commit()
+        assert sub.status == "active"
+        assert get_tenant_subscription(db, t.id) is None
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "paid_expired"
+
+    def test_case7_renew_same_expired_plan_not_already_active(self, db):
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        db.add(BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+        ))
+        db.commit()
+        effective = get_tenant_subscription(db, t.id)
+        assert effective is None
+
+    def test_case8_different_plan_checkout_not_blocked_by_expired_growth(self, db):
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        growth = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        starter = BillingPlan(
+            tenant_id=None, slug="starter", name="Starter", description="",
+            currency="SAR", price_sar=399, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add_all([growth, starter])
+        db.flush()
+        db.add(BillingSubscription(
+            tenant_id=t.id,
+            plan_id=growth.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat()},
+        ))
+        db.commit()
+        assert get_tenant_subscription(db, t.id) is None
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["plan_slug"] == "growth"
+        assert lifecycle["lifecycle_status"] == "paid_expired"
+
+    def test_case9_direct_moyasar_merchant_renewal(self, db):
+        t = _tenant(db)
+        db.commit()
+        lifecycle = {
+            "payment_provider": "moyasar",
+            "has_paid_subscription_history": True,
+            "ai_auto_replies_allowed": False,
+        }
+        info = resolve_billing_renewal_info(db, t.id, lifecycle)
+        assert info["is_salla_managed"] is False
+        assert info["renewal_method"] == "direct_checkout"
+        assert info["billing_channel"] == "moyasar"
+
+    def test_case10_salla_managed_merchant_renewal(self, db):
+        t = _tenant(db)
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-99",
+            config={"billing_status": "active", "salla_subscription_id": "sub_99"},
+            enabled=True,
+        ))
+        db.commit()
+        info = resolve_billing_renewal_info(db, t.id, {"payment_provider": "unknown"})
+        assert info["is_salla_managed"] is True
+        assert info["renewal_method"] == "salla_app"
+        assert info["can_renew_directly"] is False
+
+    def test_case11_customer_message_after_expiry_is_silent(self):
+        from pathlib import Path
+        webhook = Path(BACKEND_DIR) / "routers" / "whatsapp_webhook.py"
+        pipeline = Path(BACKEND_DIR) / "modules" / "ai" / "brain" / "pipeline.py"
+        wbody = webhook.read_text(encoding="utf-8")
+        pbody = pipeline.read_text(encoding="utf-8")
+        assert "billing_access_denied" in wbody
+        assert "outbound suppressed" in wbody.lower()
+        assert "billing_access_denied" in pbody
+        assert "التجربة المنتهية" not in wbody
+
+    def test_case12_merchant_dashboard_after_expiry(self, db):
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=40)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        db.add(BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat()},
+        ))
+        db.commit()
+        audit = audit_tenant_subscription(db, t.id)
+        payload = build_billing_status_payload(
+            db, t.id, t, active_sub=None,
+            conversations_used=3,
+            usage_data={"conversations_limit": 1000, "usage_pct": 0.3, "exceeded": False},
+            integration_fee_sar=59,
+        )
+        assert audit["dashboard_access_allowed"] is True
+        assert audit["manual_replies_allowed"] is True
+        assert audit["ai_auto_replies_allowed"] is False
+        assert payload["lifecycle_status"] == "paid_expired"
+        assert payload["subscription_ends_at"] is not None
+        assert payload["payment_history"] is not None
+
+    def test_warning_levels_for_active_paid_subscription(self, db):
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        for days_left, expected in ((7, "7d"), (3, "3d"), (1, "1d")):
+            db.query(BillingSubscription).filter(
+                BillingSubscription.tenant_id == t.id,
+            ).delete()
+            db.add(BillingSubscription(
+                tenant_id=t.id,
+                plan_id=plan.id,
+                status="active",
+                started_at=(now - timedelta(days=30 - days_left)).replace(tzinfo=None),
+                ends_at=(now + timedelta(days=days_left)).replace(tzinfo=None),
+            ))
+            db.commit()
+            active = get_tenant_subscription(db, t.id)
+            lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=active)
+            assert lifecycle["lifecycle_status"] == "paid_active"
+            assert lifecycle["warning_level"] == expected
+
+    def test_audit_includes_required_operator_fields(self, db):
+        t = _tenant(db)
+        db.commit()
+        audit = audit_tenant_subscription(db, t.id)
+        for key in (
+            "tenant_id", "store_name", "billing_channel", "lifecycle_status",
+            "trial_started_at", "trial_ends_at", "subscription_started_at",
+            "subscription_ends_at", "days_remaining", "expired_since_days",
+            "latest_payment_date", "latest_payment_amount", "payment_history",
+            "ai_auto_replies_allowed", "campaigns_automations_allowed",
+            "manual_replies_allowed", "dashboard_access_allowed",
+        ):
+            assert key in audit, f"missing audit field: {key}"
