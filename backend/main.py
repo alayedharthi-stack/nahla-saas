@@ -907,6 +907,8 @@ async def on_startup() -> None:
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS alert_80_sent BOOLEAN NOT NULL DEFAULT false",
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS alert_100_sent BOOLEAN NOT NULL DEFAULT false",
                 "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+                "ALTER TABLE whatsapp_usage ADD COLUMN IF NOT EXISTS subscription_id INTEGER REFERENCES billing_subscriptions(id)",
+                "CREATE INDEX IF NOT EXISTS ix_whatsapp_usage_tenant_subscription ON whatsapp_usage (tenant_id, subscription_id)",
                 # old column: set default so INSERT without it doesn't violate NOT NULL
                 "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used SET DEFAULT 0",
                 "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used DROP NOT NULL",

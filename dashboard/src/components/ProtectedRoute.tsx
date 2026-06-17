@@ -1,10 +1,12 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
 import {
+  bootstrapAuthSession,
   getApiBase,
   getRole,
   getTenantId,
   getToken,
+  installSessionRefreshLoop,
   isAuthenticated,
   isImpersonating,
   isPlatformStaffRole,
@@ -22,12 +24,8 @@ import type { ReactNode } from 'react'
  */
 const OWNER_ALLOWED_PREFIXES = [
   '/admin',
-  '/merchants',          // owner-side tenant directory
+  '/merchants',
   '/system-status',
-  // ▸ Account-level security surface (Phase 2A Sprint 1) — TOTP enrol /
-  //   disable + recovery codes. This is a personal-account page (it acts
-  //   on the *owner's* own user_id, never on a merchant's), so it must
-  //   stay reachable when the owner is NOT impersonating any tenant.
   '/settings/security',
 ] as const
 
@@ -39,8 +37,28 @@ function isOwnerAllowedPath(pathname: string): boolean {
 
 export default function ProtectedRoute({ children }: { children: ReactNode }) {
   const location = useLocation()
+  const [bootState, setBootState] = useState<'loading' | 'ok' | 'denied'>('loading')
 
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (!isAuthenticated() || !getToken()) {
+        if (!cancelled) setBootState('denied')
+        return
+      }
+      const ok = await bootstrapAuthSession()
+      if (!cancelled) setBootState(ok ? 'ok' : 'denied')
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (bootState !== 'ok') return
+    return installSessionRefreshLoop()
+  }, [bootState])
+
+  useEffect(() => {
+    if (bootState !== 'ok') return
     // eslint-disable-next-line no-console
     console.info('[auth] session bootstrap', {
       pathname: location.pathname,
@@ -48,12 +66,18 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
       tenantId: getTenantId(),
       apiBase:  getApiBase(),
     })
-  }, [location.pathname])
+  }, [bootState, location.pathname])
 
-  // Both conditions must be true: the auth flag AND a non-empty JWT token.
-  // A missing token means the session is from the pre-JWT era — force re-login.
-  if (!isAuthenticated() || !getToken()) {
-    logout() // clear any stale flags
+  if (bootState === 'loading') {
+    return (
+      <div className="min-h-dvh flex items-center justify-center bg-slate-50 text-slate-500 text-sm">
+        جارٍ استعادة الجلسة…
+      </div>
+    )
+  }
+
+  if (bootState === 'denied') {
+    logout()
     return <Navigate to="/landing" replace />
   }
 
@@ -62,16 +86,10 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
   const wantsAdmin  =
     location.pathname === '/admin' || location.pathname.startsWith('/admin/')
 
-  // Merchants must never reach the admin surface.
   if (wantsAdmin && !isOwner) {
     return <Navigate to="/overview" replace />
   }
 
-  // Tenant-isolation guard:
-  // Platform owners that are NOT actively impersonating a merchant must stay
-  // inside owner-scoped routes. This prevents the owner-token-with-tenant_id=1
-  // class of leaks where merchant pages render the demo tenant's data inside
-  // the owner UI.
   if (isOwner && !isImpersonating() && !isOwnerAllowedPath(location.pathname)) {
     return <Navigate to="/admin" replace />
   }

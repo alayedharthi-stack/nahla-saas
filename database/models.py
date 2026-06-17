@@ -2248,9 +2248,12 @@ class WhatsAppUsage(Base):
     id                          = Column(Integer, primary_key=True)
     tenant_id                   = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
 
-    # Calendar period — unique per (tenant, year, month) enforced by DB index
+    # Calendar period — unique per (tenant, year, month) enforced by DB index.
+    # When ``subscription_id`` is set, usage is scoped to that billing period
+    # instead of the calendar month (see core.wa_usage._usage_period_context).
     year                        = Column(Integer, nullable=False)
     month                       = Column(Integer, nullable=False)
+    subscription_id             = Column(Integer, ForeignKey('billing_subscriptions.id'), nullable=True, index=True)
 
     # Counters split by Meta category
     service_conversations_used  = Column(Integer, default=0, nullable=False)

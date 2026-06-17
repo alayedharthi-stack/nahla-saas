@@ -106,7 +106,7 @@ function SupportAccessWarningBanner() {
   if (!access?.enabled || dismissed) return null
 
   return (
-    <div dir="rtl" className="w-full bg-red-700 text-white sticky top-0 z-40 shadow-lg">
+    <div dir="rtl" className="w-full bg-red-700 text-white shadow-lg">
       {/* Main row */}
       <div className="flex items-center justify-between px-4 py-2.5 gap-3">
         {/* Left: message + countdown */}
@@ -225,7 +225,7 @@ function LayoutShell() {
        */}
       <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-0 h-dvh max-h-dvh overflow-hidden">
         {!mobileChatFullscreen && (
-          <>
+          <div className="sticky top-0 z-30 shrink-0 bg-white dark:bg-slate-900">
             <Header
               title={meta.title}
               subtitle={meta.subtitle}
@@ -234,7 +234,7 @@ function LayoutShell() {
             <ImpersonationBanner />
             <SupportAccessWarningBanner />
             <TrialBanner />
-          </>
+          </div>
         )}
         <main
           dir={dir}

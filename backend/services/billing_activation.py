@@ -306,6 +306,23 @@ def activate_subscription_from_moyasar_invoice(
         billing_payment_id, source,
     )
 
+    try:
+        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+        usage = get_usage_this_month(db, sub.tenant_id)
+        logger.info(
+            "[activation] usage period tenant=%s sub=%s mode=%s used=%s limit=%s period=%s→%s lifetime=%s",
+            sub.tenant_id,
+            sub.id,
+            usage.get("period_mode"),
+            usage.get("conversations_used"),
+            usage.get("conversations_limit"),
+            usage.get("period_started_at"),
+            usage.get("period_ends_at"),
+            usage.get("lifetime_conversations_used"),
+        )
+    except Exception as exc:
+        logger.warning("[activation] usage-period snapshot failed tenant=%s: %s", sub.tenant_id, exc)
+
     # ── Best-effort merchant receipt notifications ─────────────────────
     # Notification failures must NEVER block the activation rollback.
     try:

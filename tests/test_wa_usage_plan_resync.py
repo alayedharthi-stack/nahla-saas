@@ -198,26 +198,27 @@ class TestUsageLimitResync:
         )
         db.add(stale); db.commit()
 
-        # Phase 2: merchant upgrades to Growth.
-        _activate(db, tenant, growth_plan)
+        # Phase 2: merchant upgrades to Growth — new billing period.
+        sub = _activate(db, tenant, growth_plan)
 
-        # Phase 3: any read of the usage row must now reflect the new ceiling.
-        row = _get_or_create_usage(db, tenant.id, now.year, now.month)
+        # Phase 3: paid period gets a fresh counter keyed by subscription_id.
+        row = _get_or_create_usage(db, tenant.id)
+        assert row.subscription_id == sub.id
         assert row.conversations_limit == 15000
-        # And alert flags should be cleared so the new ceiling triggers
-        # fresh warnings if needed.
         assert row.alert_80_sent is False
         assert row.alert_100_sent is False
-        # Used-counters are preserved.
-        assert row.service_conversations_used == 96
+        assert row.service_conversations_used == 0
 
     def test_downgrade_keeps_alert_flags(self, db, tenant, starter_plan):
         # Reverse case — merchant downgrades. We should NOT clear the
         # alert flags, otherwise they'd get spammed with old "you
         # exceeded the limit" warnings against the lower ceiling.
         now = datetime.now(timezone.utc)
+        sub = _activate(db, tenant, starter_plan)
         existing = WhatsAppUsage(
-            tenant_id=tenant.id, year=now.year, month=now.month,
+            tenant_id=tenant.id,
+            subscription_id=sub.id,
+            year=now.year, month=now.month,
             service_conversations_used=8000,
             marketing_conversations_used=0,
             conversations_limit=15000,      # was on Growth
@@ -226,9 +227,7 @@ class TestUsageLimitResync:
         )
         db.add(existing); db.commit()
 
-        # Now active plan is Starter (5,000).
-        _activate(db, tenant, starter_plan)
-        row = _get_or_create_usage(db, tenant.id, now.year, now.month)
+        row = _get_or_create_usage(db, tenant.id)
         assert row.conversations_limit == 5000
         # Flags preserved.
         assert row.alert_80_sent is True
@@ -236,10 +235,12 @@ class TestUsageLimitResync:
     def test_no_change_when_limit_already_matches(
         self, db, tenant, growth_plan,
     ):
-        _activate(db, tenant, growth_plan)
+        sub = _activate(db, tenant, growth_plan)
         now = datetime.now(timezone.utc)
         existing = WhatsAppUsage(
-            tenant_id=tenant.id, year=now.year, month=now.month,
+            tenant_id=tenant.id,
+            subscription_id=sub.id,
+            year=now.year, month=now.month,
             service_conversations_used=10,
             marketing_conversations_used=5,
             conversations_limit=15000,      # already correct
@@ -248,7 +249,7 @@ class TestUsageLimitResync:
         )
         db.add(existing); db.commit()
 
-        row = _get_or_create_usage(db, tenant.id, now.year, now.month)
+        row = _get_or_create_usage(db, tenant.id)
         assert row.conversations_limit == 15000
         # Counters untouched.
         assert row.service_conversations_used == 10
@@ -264,11 +265,13 @@ class TestGetUsageThisMonth:
     def test_growth_active_shows_15000_limit(
         self, db, tenant, growth_plan,
     ):
-        _activate(db, tenant, growth_plan)
-        # Pre-existing trial row that needs re-sync.
+        sub = _activate(db, tenant, growth_plan)
+        # Pre-existing subscription-period row that needs limit re-sync.
         now = datetime.now(timezone.utc)
         db.add(WhatsAppUsage(
-            tenant_id=tenant.id, year=now.year, month=now.month,
+            tenant_id=tenant.id,
+            subscription_id=sub.id,
+            year=now.year, month=now.month,
             service_conversations_used=96,
             marketing_conversations_used=0,
             conversations_limit=100,
@@ -294,10 +297,12 @@ class TestGetUsageThisMonth:
     def test_scale_unlimited_renders_unlimited_true(
         self, db, tenant, scale_plan,
     ):
-        _activate(db, tenant, scale_plan)
+        sub = _activate(db, tenant, scale_plan)
         now = datetime.now(timezone.utc)
         db.add(WhatsAppUsage(
-            tenant_id=tenant.id, year=now.year, month=now.month,
+            tenant_id=tenant.id,
+            subscription_id=sub.id,
+            year=now.year, month=now.month,
             service_conversations_used=50000,
             marketing_conversations_used=0,
             conversations_limit=100,        # stale
@@ -322,10 +327,12 @@ class TestGetUsageThisMonth:
 
     def test_growth_at_warning_threshold(self, db, tenant, growth_plan):
         # Sanity: the warning thresholds still work against the new ceiling.
-        _activate(db, tenant, growth_plan)
+        sub = _activate(db, tenant, growth_plan)
         now = datetime.now(timezone.utc)
         db.add(WhatsAppUsage(
-            tenant_id=tenant.id, year=now.year, month=now.month,
+            tenant_id=tenant.id,
+            subscription_id=sub.id,
+            year=now.year, month=now.month,
             service_conversations_used=14000,   # ~93% of 15000
             marketing_conversations_used=0,
             conversations_limit=100,            # stale; will be re-synced

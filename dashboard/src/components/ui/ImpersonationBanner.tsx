@@ -29,7 +29,7 @@ export default function ImpersonationBanner() {
   return (
     <div
       dir="rtl"
-      className="w-full bg-red-600 text-white text-sm z-50 sticky top-0"
+      className="w-full bg-red-600 text-white text-sm"
     >
       {/* Pulsing dot + main content */}
       <div className="flex items-center justify-between px-4 py-2.5 gap-3">

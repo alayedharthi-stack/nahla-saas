@@ -526,6 +526,82 @@ export function isAuthenticated(): boolean {
   return localStorage.getItem(AUTH_KEY) === '1'
 }
 
+/** Milliseconds since epoch when the current JWT expires, or null. */
+export function getTokenExpiryMs(): number | null {
+  const exp = _decodeJwtPayload(getToken()).exp
+  return typeof exp === 'number' ? exp * 1000 : null
+}
+
+/** Proactively refresh when fewer than this many ms remain before exp. */
+const SESSION_REFRESH_SKEW_MS = 24 * 3600_000
+
+/**
+ * Exchange the current session JWT for a fresh one (rolling session).
+ * Returns true when a new token was persisted.
+ */
+export async function refreshSession(): Promise<boolean> {
+  const token = getToken()
+  if (!token || !isAuthenticated()) return false
+
+  const controller = new AbortController()
+  const timeoutId  = setTimeout(() => controller.abort(), 15_000)
+  try {
+    const res = await fetch(`${getApiBase()}/auth/session/refresh`, {
+      method:      'POST',
+      headers:     { Authorization: `Bearer ${token}` },
+      cache:       'no-store',
+      credentials: 'omit',
+      signal:      controller.signal,
+    })
+    if (!res.ok) return false
+    const data = await res.json() as {
+      access_token?: string
+      role?:         string
+      tenant_id?:    number
+      user_id?:      number
+    }
+    if (!data.access_token) return false
+    _persistSession(data.access_token, {
+      role:      data.role,
+      tenant_id: data.tenant_id,
+      user_id:   data.user_id,
+    })
+    return true
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+/**
+ * Restore / extend a merchant session on PWA open or tab focus.
+ * Returns false only when re-login is genuinely required.
+ */
+export async function bootstrapAuthSession(): Promise<boolean> {
+  if (!isAuthenticated() || !getToken()) return false
+
+  const expMs = getTokenExpiryMs()
+  const now   = Date.now()
+  if (expMs && expMs > now + SESSION_REFRESH_SKEW_MS) return true
+
+  return refreshSession()
+}
+
+/** Refresh on visibility + every 12h while the dashboard stays open. */
+export function installSessionRefreshLoop(): () => void {
+  const tick = () => { void bootstrapAuthSession() }
+  const onVis = () => {
+    if (document.visibilityState === 'visible') tick()
+  }
+  document.addEventListener('visibilitychange', onVis)
+  const id = window.setInterval(tick, 12 * 3600_000)
+  return () => {
+    document.removeEventListener('visibilitychange', onVis)
+    window.clearInterval(id)
+  }
+}
+
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? ''
 }
