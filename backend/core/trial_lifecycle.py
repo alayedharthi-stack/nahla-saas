@@ -712,6 +712,12 @@ def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
 
     raw_sub = active_sub or latest_paid
 
+    try:
+        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
+        usage_snapshot = get_usage_this_month(db, tenant_id)
+    except Exception:
+        usage_snapshot = {}
+
     return {
         "tenant_id": tenant_id,
         "found": True,
@@ -748,6 +754,12 @@ def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
         "dashboard_access_allowed": True,
         "is_salla_managed": renewal.get("is_salla_managed"),
         "renewal_method": renewal.get("renewal_method"),
+        "usage_period_mode": usage_snapshot.get("period_mode"),
+        "period_started_at": usage_snapshot.get("period_started_at"),
+        "period_ends_at": usage_snapshot.get("period_ends_at"),
+        "conversations_used_this_period": usage_snapshot.get("conversations_used"),
+        "conversations_limit_this_period": usage_snapshot.get("conversations_limit"),
+        "lifetime_conversations_used": usage_snapshot.get("lifetime_conversations_used"),
     }
 
 

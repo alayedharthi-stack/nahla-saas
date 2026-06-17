@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import RootRedirect from './components/RootRedirect'
 import { isPlatformOwner } from './auth'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
@@ -81,8 +82,8 @@ export default function App() {
     <LanguageProvider>
       <BrowserRouter>
         <Routes>
-          {/* Root → landing page */}
-          <Route index element={<Navigate to="/landing" replace />} />
+          {/* Root — PWA start_url; restore session before routing */}
+          <Route index element={<RootRedirect />} />
 
           {/* Public — marketing */}
           <Route path="/landing"              element={<Landing />} />

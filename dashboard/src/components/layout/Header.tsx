@@ -364,25 +364,25 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
       : `Current theme: ${themeMode === 'light' ? 'light' : themeMode === 'dark' ? 'dark' : 'system'} — click to toggle`
 
   return (
-    <header className="h-14 md:h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-3 md:px-6 sticky top-0 z-20 pt-safe-top">
-
+    <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 pt-safe-top shrink-0">
+      <div className="h-14 md:h-16 flex items-center justify-between gap-2 px-3 md:px-6 min-w-0">
       {/* Left side */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 min-w-0 flex-1">
         <button
-          className="lg:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-300 transition-colors"
+          className="lg:hidden shrink-0 w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-300 transition-colors"
           onClick={onMenuClick}
           aria-label="فتح القائمة"
         >
           <Menu className="w-5 h-5" />
         </button>
-        <div>
-          <h1 className="text-base font-semibold text-slate-900 dark:text-slate-100 leading-none">{title}</h1>
-          {subtitle && <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{subtitle}</p>}
+        <div className="min-w-0 flex-1">
+          <h1 className="text-base font-semibold text-slate-900 dark:text-slate-100 leading-none truncate">{title}</h1>
+          {subtitle && <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5 truncate hidden sm:block">{subtitle}</p>}
         </div>
       </div>
 
       {/* Right-side actions */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1 sm:gap-2 shrink-0">
 
         {impersonating && (
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg text-xs font-medium text-amber-700 dark:text-amber-300">
@@ -680,6 +680,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
           )}
         </div>
 
+      </div>
       </div>
     </header>
   )

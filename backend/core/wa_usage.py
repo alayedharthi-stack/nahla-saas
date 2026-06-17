@@ -176,99 +176,148 @@ def _get_plan_limit(db: Session, tenant_id: int) -> int:
     return int(val)
 
 
+def _get_active_subscription(db: Session, tenant_id: int):
+    """Return the tenant's active, non-expired paid subscription (if any)."""
+    from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+    return get_tenant_subscription(db, tenant_id)
+
+
+def _usage_period_context(db: Session, tenant_id: int) -> dict:
+    """
+    Resolve whether usage is scoped to the active billing period or the
+    calendar month (trial / no paid sub).
+    """
+    sub = _get_active_subscription(db, tenant_id)
+    if sub is not None:
+        return {
+            "mode":              "subscription",
+            "subscription_id":   int(sub.id),
+            "period_started_at": sub.started_at,
+            "period_ends_at":    sub.ends_at,
+        }
+    now = _utcnow()
+    return {
+        "mode":  "calendar",
+        "year":  now.year,
+        "month": now.month,
+    }
+
+
 def _get_or_create_usage(
     db: Session,
     tenant_id: int,
-    year: int,
-    month: int,
+    ctx: Optional[dict] = None,
 ) -> "WhatsAppUsage":  # noqa: F821
-    """Return the WhatsAppUsage row for (tenant, year, month), creating
-    it on first access and **re-syncing its plan limit on every read**.
-
-    Re-sync rationale:
-        ``conversations_limit`` is denormalised onto the row so the
-        enforcement path can read a single column without joining
-        BillingPlan on the hot path. The original implementation only
-        wrote that column at row-creation time. Result: a tenant whose
-        row was created during the trial (limit=100) and who later
-        activated Growth would still be enforced against 100 — and the
-        Overview / Billing UIs would render ``96/100, ‫اقتربت من الحد‬``
-        even though the active plan is Growth (15,000). Tenant 33 hit
-        exactly this. Fixing only ``get_entitlements`` was not enough
-        because ``get_usage_this_month`` reads from this stored column,
-        not from entitlements.
-
-    Re-sync rules:
-      * If the current plan limit differs from the stored value, update
-        the row and reset the alert flags (the merchant just got a
-        bigger plan; old "you hit 80%" alerts are no longer relevant).
-      * If the merchant DOWNGRADED (active plan limit is *lower* than
-        stored), we still update — but we keep the alert flags so they
-        don't get spammed with "you're over limit" duplicates.
-      * Tenants on no plan / cancelled fall back to ``TRIAL_LIMIT``;
-        that's the same as the original behaviour, just made explicit.
-    """
+    """Return the WhatsAppUsage row for the current billing/calendar period."""
     from models import WhatsAppUsage  # noqa: PLC0415
 
-    row = (
-        db.query(WhatsAppUsage)
-        .filter(
-            WhatsAppUsage.tenant_id == tenant_id,
-            WhatsAppUsage.year      == year,
-            WhatsAppUsage.month     == month,
-        )
-        .first()
-    )
-    if row is None:
-        limit = _get_plan_limit(db, tenant_id)
-        row   = WhatsAppUsage(
-            tenant_id                    = tenant_id,
-            year                         = year,
-            month                        = month,
-            service_conversations_used   = 0,
-            marketing_conversations_used = 0,
-            conversations_limit          = limit,
-            alert_80_sent                = False,
-            alert_100_sent               = False,
-        )
-        db.add(row)
-        try:
-            db.flush()
-            logger.info(
-                "[WaUsage] Created usage row | tenant=%s %04d-%02d limit=%s",
-                tenant_id, year, month, limit,
-            )
-        except Exception as exc:
-            db.rollback()
-            logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
-            raise
-        return row
+    if ctx is None:
+        ctx = _usage_period_context(db, tenant_id)
 
-    # ── Re-sync against current plan ───────────────────────────────────
+    now = _utcnow()
+
+    if ctx.get("mode") == "subscription":
+        sub_id = int(ctx["subscription_id"])
+        row = (
+            db.query(WhatsAppUsage)
+            .filter(
+                WhatsAppUsage.tenant_id       == tenant_id,
+                WhatsAppUsage.subscription_id == sub_id,
+            )
+            .first()
+        )
+        if row is None:
+            limit = _get_plan_limit(db, tenant_id)
+            row   = WhatsAppUsage(
+                tenant_id                    = tenant_id,
+                subscription_id              = sub_id,
+                year                         = now.year,
+                month                        = now.month,
+                service_conversations_used   = 0,
+                marketing_conversations_used = 0,
+                conversations_limit          = limit,
+                alert_80_sent                = False,
+                alert_100_sent               = False,
+            )
+            db.add(row)
+            try:
+                db.flush()
+                logger.info(
+                    "[WaUsage] Created subscription-period usage row | tenant=%s sub=%s limit=%s",
+                    tenant_id, sub_id, limit,
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
+                raise
+    else:
+        year, month = int(ctx["year"]), int(ctx["month"])
+        row = (
+            db.query(WhatsAppUsage)
+            .filter(
+                WhatsAppUsage.tenant_id       == tenant_id,
+                WhatsAppUsage.year            == year,
+                WhatsAppUsage.month           == month,
+                WhatsAppUsage.subscription_id.is_(None),
+            )
+            .first()
+        )
+        if row is None:
+            limit = _get_plan_limit(db, tenant_id)
+            row   = WhatsAppUsage(
+                tenant_id                    = tenant_id,
+                subscription_id              = None,
+                year                         = year,
+                month                        = month,
+                service_conversations_used   = 0,
+                marketing_conversations_used = 0,
+                conversations_limit          = limit,
+                alert_80_sent                = False,
+                alert_100_sent               = False,
+            )
+            db.add(row)
+            try:
+                db.flush()
+                logger.info(
+                    "[WaUsage] Created usage row | tenant=%s %04d-%02d limit=%s",
+                    tenant_id, year, month, limit,
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
+                raise
+
     current_limit = _get_plan_limit(db, tenant_id)
     if int(row.conversations_limit or 0) != int(current_limit):
         previous = int(row.conversations_limit or 0)
         row.conversations_limit = current_limit
-        # Plan went UP → user just upgraded; clear alert flags so the
-        # 70%/90% warnings can re-fire against the new ceiling. Plan
-        # going DOWN keeps the flags (merchant already saw the warning).
         if current_limit > previous:
             row.alert_80_sent  = False
             row.alert_100_sent = False
         try:
             db.flush()
             logger.info(
-                "[WaUsage] Re-synced limit | tenant=%s %04d-%02d "
-                "old=%s new=%s used=%s reset_alerts=%s",
-                tenant_id, year, month, previous, current_limit,
-                int(row.service_conversations_used or 0)
-                + int(row.marketing_conversations_used or 0),
-                current_limit > previous,
+                "[WaUsage] Re-synced limit | tenant=%s mode=%s old=%s new=%s",
+                tenant_id, ctx.get("mode"), previous, current_limit,
             )
         except Exception as exc:
             db.rollback()
             logger.warning("[WaUsage] limit re-sync flush failed: %s", exc)
     return row
+
+
+def get_lifetime_conversations(db: Session, tenant_id: int) -> int:
+    """Total billable conversation windows opened since tenant onboarding."""
+    from models import ConversationLog  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+
+    return int(
+        db.query(func.count(ConversationLog.id))
+        .filter(ConversationLog.tenant_id == tenant_id)
+        .scalar()
+        or 0
+    )
 
 
 # ── Core: race-safe 24-h window check ────────────────────────────────────────
@@ -396,9 +445,9 @@ def track_conversation(
     """
     now        = _utcnow()
     now_naive  = _naive(now)
-    year, month = now.year, now.month
+    ctx        = _usage_period_context(db, tenant_id)
 
-    usage = _get_or_create_usage(db, tenant_id, year, month)
+    usage = _get_or_create_usage(db, tenant_id, ctx)
 
     is_new = _open_new_window(db, tenant_id, customer_phone, category, source, now_naive)
 
@@ -480,7 +529,8 @@ def check_limit(
         Pass "service" for replies to inbound customer messages.
     """
     now   = _utcnow()
-    usage = _get_or_create_usage(db, tenant_id, now.year, now.month)
+    ctx   = _usage_period_context(db, tenant_id)
+    usage = _get_or_create_usage(db, tenant_id, ctx)
 
     used  = usage.service_conversations_used + usage.marketing_conversations_used
     limit = usage.conversations_limit
@@ -554,9 +604,10 @@ META_TIER_LABEL = {
 
 
 def get_usage_this_month(db: Session, tenant_id: int) -> dict:
-    """Return a dict safe to serialise as an API response."""
+    """Return current-period usage — safe to serialise as an API response."""
     now   = _utcnow()
-    usage = _get_or_create_usage(db, tenant_id, now.year, now.month)
+    ctx   = _usage_period_context(db, tenant_id)
+    usage = _get_or_create_usage(db, tenant_id, ctx)
 
     svc   = usage.service_conversations_used
     mkt   = usage.marketing_conversations_used
@@ -572,6 +623,28 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
     )
 
     meta_tier = _get_meta_tier(db, tenant_id)
+    lifetime  = get_lifetime_conversations(db, tenant_id)
+
+    period_started_at = ctx.get("period_started_at")
+    period_ends_at    = ctx.get("period_ends_at")
+    if ctx.get("mode") == "calendar":
+        period_started_at = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        if now.month == 12:
+            period_ends_at = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            period_ends_at = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+
+    def _iso(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+
+    reset_label = "01/2/2026"
+    if period_ends_at is not None:
+        end_naive = period_ends_at if period_ends_at.tzinfo else period_ends_at.replace(tzinfo=timezone.utc)
+        reset_label = end_naive.strftime("%d/%m/%Y")
 
     return {
         "service_conversations_used":   svc,
@@ -588,7 +661,12 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
         "unlimited":                    is_unlimited,
         "month":                        now.month,
         "year":                         now.year,
-        "reset_date":                   f"01/{now.month + 1 if now.month < 12 else 1}/{now.year if now.month < 12 else now.year + 1}",
+        "reset_date":                   reset_label,
+        "period_mode":                  ctx.get("mode"),
+        "period_started_at":            _iso(period_started_at),
+        "period_ends_at":               _iso(period_ends_at),
+        "subscription_id":              ctx.get("subscription_id"),
+        "lifetime_conversations_used":  lifetime,
         "alert_80_sent":                usage.alert_80_sent,
         "alert_100_sent":               usage.alert_100_sent,
         **meta_tier,
@@ -731,7 +809,7 @@ def reset_all_monthly_usage(db: Session) -> int:
     for row in prior:
         if row.tenant_id not in seen:
             seen.add(row.tenant_id)
-            _get_or_create_usage(db, row.tenant_id, year, month)
+            _get_or_create_usage(db, row.tenant_id)
             count += 1
 
     db.commit()

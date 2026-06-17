@@ -79,9 +79,13 @@ if (not _jwt_secret_env) or _jwt_secret_env.lower() in _FORBIDDEN_JWT_SECRETS:
 # boots, but warn loudly that all sessions die on restart.
 JWT_SECRET    = _jwt_secret_env or _safe_token_hex(32)
 JWT_ALGORITHM = "HS256"
-# Phase 1A: tightened from 168h (7 days) to 24h. Refresh-token rotation
-# arrives in Phase 2 and will let us drop access tokens to 15 minutes.
-JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "24"))
+# Merchant dashboard sessions: 7-day access tokens with rolling refresh
+# via POST /auth/session/refresh (grace window below). Short enough to
+# limit stolen-token blast radius; long enough for daily PWA use when
+# combined with proactive refresh on app open / visibility.
+JWT_EXPIRE_H  = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
+# Accept recently-expired session JWTs for rolling refresh (PWA reopen).
+JWT_REFRESH_GRACE_DAYS = int(os.environ.get("JWT_REFRESH_GRACE_DAYS", "30"))
 
 # ── Registration gate ──────────────────────────────────────────────────────────
 REQUIRE_INVITE  = os.environ.get("REQUIRE_INVITE", "true").lower() != "false"

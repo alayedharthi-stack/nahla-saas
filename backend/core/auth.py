@@ -18,6 +18,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from core.config import (
     JWT_ALGORITHM,
     JWT_EXPIRE_H,
+    JWT_REFRESH_GRACE_DAYS,
     JWT_SECRET,
     INVITE_EXPIRE_H,
 )
@@ -206,6 +207,42 @@ def create_reset_token(email: str) -> str:
         "exp":  datetime.now(timezone.utc) + timedelta(hours=1),
     }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_token_for_refresh(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Decode a merchant session JWT for rolling refresh.
+
+    Unlike ``decode_token``, accepts tokens that expired within
+    ``JWT_REFRESH_GRACE_DAYS`` so a PWA reopened after a short absence
+    can restore the session without forcing re-login. Signature and
+    revocation are still enforced.
+    """
+    if not JWT_AVAILABLE:
+        return None
+    try:
+        payload = _jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={"verify_exp": False},
+        )
+    except JWTError:
+        return None
+
+    token_type = payload.get("type")
+    if token_type in ("password_reset", "verify_email", "invite"):
+        return None
+
+    exp = payload.get("exp")
+    if isinstance(exp, (int, float)):
+        exp_dt = datetime.fromtimestamp(int(exp), tz=timezone.utc)
+        if datetime.now(timezone.utc) - exp_dt > timedelta(days=JWT_REFRESH_GRACE_DAYS):
+            return None
+
+    if is_jti_revoked(payload.get("jti")):
+        return None
+    return payload
 
 
 def decode_token(token: str) -> Optional[Dict[str, Any]]:

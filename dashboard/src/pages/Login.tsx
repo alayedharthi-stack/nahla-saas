@@ -4,7 +4,7 @@ import { Eye, EyeOff, AlertCircle, Loader2, ArrowRight } from 'lucide-react'
 import {
   loginDetailed, getDefaultRoute, pingAuth,
   getApiBase, hasRuntimeApiBaseOverride, setApiBaseOverride, clearServiceWorkersAndCaches,
-  verifyTwoFactorLogin,
+  verifyTwoFactorLogin, bootstrapAuthSession, isAuthenticated, getToken,
 } from '../auth'
 import { useLanguage } from '../i18n/context'
 import LegalFooter from '../components/LegalFooter'
@@ -79,6 +79,17 @@ export default function Login() {
   const [ping,     setPing]     = useState<PingState | null>(null)
   const [pinging,  setPinging]  = useState(false)
   const [swStatus, setSwStatus] = useState<string>('')
+
+  // Already logged in (PWA reopen / bookmark) → skip login form.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (!isAuthenticated() || !getToken()) return
+      const ok = await bootstrapAuthSession()
+      if (!cancelled && ok) navigate(getDefaultRoute(), { replace: true })
+    })()
+    return () => { cancelled = true }
+  }, [navigate])
 
   const runPing = async () => {
     setPinging(true)

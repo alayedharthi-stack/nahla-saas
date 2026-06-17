@@ -49,6 +49,7 @@ from core.auth import (
     create_token,
     create_verify_token,
     decode_token,
+    decode_token_for_refresh,
     get_current_user,
     hash_password,
     verify_password,
@@ -616,6 +617,67 @@ async def auth_me_full(
         "tenant_mismatch": (
             db_user is not None and db_user.tenant_id != tenant_id
         ),
+    }
+
+
+@router.post("/auth/session/refresh")
+async def auth_session_refresh(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Rolling session refresh for the merchant dashboard / PWA.
+
+    Accepts the current (possibly recently-expired) session JWT and
+    returns a fresh access_token when the signature is valid, the token
+    is not revoked, and the user account is still active.
+    """
+    auth_header = request.headers.get("Authorization") or ""
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail={"code": "missing_token", "message": "Authentication required"})
+
+    payload = decode_token_for_refresh(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Invalid or expired token"})
+
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Invalid token subject"})
+
+    db_user = db.query(User).filter(User.email == email).first()
+    if not db_user or not db_user.is_active:
+        raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Account inactive"})
+
+    tenant_id = int(payload.get("tenant_id") or db_user.tenant_id or 0)
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail={"code": "no_tenant_claim", "message": "Missing tenant scope"})
+
+    if db_user.tenant_id != tenant_id:
+        raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Tenant scope mismatch"})
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Tenant not found"})
+
+    role = str(payload.get("role") or db_user.role or "merchant")
+    fresh = create_token(
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=int(db_user.id),
+        extra_claims={
+            k: payload[k]
+            for k in ("impersonation", "actor_sub", "actor_user_id", "session_version")
+            if k in payload
+        } or None,
+    )
+    return {
+        "access_token": fresh,
+        "role":         role,
+        "tenant_id":    tenant_id,
+        "user_id":      db_user.id,
+        "email":        email,
     }
 
 
