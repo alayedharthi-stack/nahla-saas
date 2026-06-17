@@ -2104,6 +2104,8 @@ class MerchantBrain:
                 tenant_id, _setg_exc,
             )
 
+        _availability_ctx: Optional[Dict[str, Any]] = None
+
         try:
             from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
                 apply_product_availability_truth_guard,
@@ -2118,7 +2120,7 @@ class MerchantBrain:
                     _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
                     if isinstance(_rid, int):
                         _pavg_rec_ids.append(_rid)
-                _pavg_ctx = build_availability_context(
+                _availability_ctx = build_availability_context(
                     db,
                     tenant_id,
                     focus_product=getattr(new_state, "current_product_focus", None),
@@ -2126,7 +2128,7 @@ class MerchantBrain:
                 )
                 _pavg = apply_product_availability_truth_guard(
                     reply=reply or "",
-                    availability_context=_pavg_ctx,
+                    availability_context=_availability_ctx,
                     inbound_text=message or "",
                     chosen_path=_chosen_path,
                     tenant_id=tenant_id,
@@ -2143,6 +2145,51 @@ class MerchantBrain:
             logger.warning(
                 "[PRODUCT_AVAILABILITY_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _pavg_exc,
+            )
+
+        try:
+            from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+                apply_product_claim_grounding_guard,
+                product_claim_grounding_guard_mode,
+            )
+            if product_claim_grounding_guard_mode() != "off":
+                if _availability_ctx is None:
+                    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+                        build_availability_context,
+                    )
+                    _pcgg_rec_ids: list = []
+                    for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                        _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                        if isinstance(_rid, int):
+                            _pcgg_rec_ids.append(_rid)
+                    _availability_ctx = build_availability_context(
+                        db,
+                        tenant_id,
+                        focus_product=getattr(new_state, "current_product_focus", None),
+                        recommended_product_ids=_pcgg_rec_ids,
+                    )
+                _pcgg = apply_product_claim_grounding_guard(
+                    reply=reply or "",
+                    db=db,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    availability_context=_availability_ctx,
+                    executor_products=list(result.data.get("products") or []),
+                    chosen_path=_chosen_path,
+                    history=history,
+                )
+                if _pcgg.replaced:
+                    reply = _pcgg.reply
+                    _guard_replaced["product_claim_grounding_guard"] = True
+                if _pcgg.blocked_claims:
+                    result.data["product_claim_blocked"] = True
+                    result.data["product_claim_blocked_kinds"] = list(_pcgg.blocked_claims)
+                    if _pcgg.reason:
+                        result.data["product_claim_guard_reason"] = _pcgg.reason
+        except Exception as _pcgg_exc:  # noqa: BLE001
+            logger.warning(
+                "[PRODUCT_CLAIM_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _pcgg_exc,
             )
 
         try:
