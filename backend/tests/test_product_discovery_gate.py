@@ -265,7 +265,7 @@ class TestPriceAskReplayValidation:
 
 
 class TestInquiryRoutingSplit:
-    """Broad category inquiry must not immediately ACTION_SEARCH_PRODUCTS."""
+    """Broad category inquiry must route to catalog-grounded search."""
 
     def _ctx(self, message: str, *, intent_name: str = "ask_product") -> BrainContext:
         return BrainContext(
@@ -277,18 +277,18 @@ class TestInquiryRoutingSplit:
             facts=CommerceFacts(has_products=True, orderable=True),
         )
 
-    def test_broad_inquiry_honey_routes_llm(self):
+    def test_broad_inquiry_honey_routes_catalog_search(self):
         msg = "أبغى الاستفسار عن العسل"
         decision = DefaultDecisionEngine().decide(self._ctx(msg))
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == "category_discovery"
-        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("source") == "category_browse"
+        assert decision.action != ACTION_LLM_REPLY
 
-    def test_broad_inquiry_perfume_types_routes_llm(self):
+    def test_broad_inquiry_perfume_types_routes_catalog_search(self):
         msg = "أبغى أعرف أنواع العطور"
         decision = DefaultDecisionEngine().decide(self._ctx(msg))
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == "category_discovery"
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("source") == "category_browse"
 
     def test_broad_inquiry_cross_vertical(self):
         for msg in (
@@ -298,8 +298,8 @@ class TestInquiryRoutingSplit:
             "أبغى الاستفسار عن القهوة",
         ):
             decision = DefaultDecisionEngine().decide(self._ctx(msg))
-            assert decision.action == ACTION_LLM_REPLY, msg
-            assert decision.args.get("topic") == "category_discovery", msg
+            assert decision.action == ACTION_SEARCH_PRODUCTS, msg
+            assert decision.args.get("source") == "category_browse", msg
 
     def test_specific_product_name_still_searches(self):
         msg = "عسل سدر طيب"
@@ -351,7 +351,7 @@ class TestInquiryRoutingSplit:
             self._ctx("أبغى الاستفسار عن العسل"), query="العسل",
         )
         assert inquiry_class == INQUIRY_CLASS_BROAD
-        assert route == "category_discovery"
+        assert route == "search"
 
 
 class TestTypesOverviewFollowUp:
@@ -388,10 +388,10 @@ class TestTypesOverviewFollowUp:
             ctx, query="\u0633\u0645\u0631",
         )
         assert inquiry_class == INQUIRY_CLASS_BROAD
-        assert route == "category_discovery"
+        assert route == "search"
 
-    def test_types_ask_after_availability_routes_category_discovery(self):
-        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+    def test_types_ask_after_availability_routes_catalog_search(self):
+        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         from modules.ai.brain.types import BrainContext, CommerceFacts, Intent, MerchantConversationState
 
@@ -410,7 +410,6 @@ class TestTypesOverviewFollowUp:
             facts=CommerceFacts(has_products=True, orderable=True),
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == "category_discovery"
-        assert decision.args.get("inquiry_kind") == "types_overview"
-        assert decision.args.get("category_hint") == "\u0633\u0645\u0631"
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("source") == "category_browse"
+        assert decision.args.get("query") == "\u0633\u0645\u0631"

@@ -123,6 +123,13 @@ class TestProductOrderingPrompt:
         out = resolve_product_clarify_question(ctx, LEGACY_ROBOTIC_PRODUCT_PROMPT)
         assert out != LEGACY_ROBOTIC_PRODUCT_PROMPT
 
+    def test_honey_order_without_catalog_never_invents_types(self):
+        ctx = _ctx("أبي عسل", intent_name=INTENT_START_ORDER)
+        prompt = build_product_ordering_prompt(ctx)
+        assert "طلح نجد" not in prompt
+        assert "سمر الحجاز" not in prompt
+        assert "خليني أتأكد" in prompt or "ما ظهرت" in prompt
+
 
 class TestConversationContextReset:
     def _state_with_prep(self, **kwargs) -> MerchantConversationState:

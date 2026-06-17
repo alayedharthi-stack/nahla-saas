@@ -2258,6 +2258,46 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: PLC0415
+                apply_catalog_product_grounding_guard,
+                catalog_product_grounding_guard_mode,
+            )
+            if catalog_product_grounding_guard_mode() != "off":
+                _cpgg_category = str((decision.args or {}).get("category_hint") or "").strip()
+                if not _cpgg_category:
+                    from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+                        extract_inquiry_product_query,
+                        extract_types_overview_query,
+                    )
+                    _cpgg_category = (
+                        extract_types_overview_query(message or "")
+                        or extract_inquiry_product_query(message or "")
+                    )
+                _cpgg = apply_catalog_product_grounding_guard(
+                    reply=reply or "",
+                    inbound_text=message or "",
+                    category_hint=_cpgg_category,
+                    availability_context=_availability_ctx,
+                    executor_products=list(result.data.get("products") or []),
+                    chosen_path=_chosen_path,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                if _cpgg.replaced:
+                    reply = _cpgg.reply
+                    _guard_replaced["catalog_product_grounding_guard"] = True
+                if _cpgg.ungrounded_mentions:
+                    result.data["catalog_product_grounding_blocked"] = True
+                    result.data["ungrounded_product_mentions"] = list(_cpgg.ungrounded_mentions)
+                    if _cpgg.reason:
+                        result.data["catalog_product_grounding_reason"] = _cpgg.reason
+        except Exception as _cpgg_exc:  # noqa: BLE001
+            logger.warning(
+                "[CATALOG_PRODUCT_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _cpgg_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
                 apply_commerce_reply_quality_guard,
             )
@@ -3170,7 +3210,11 @@ def _compose_base_response_goal(
         _base = (
             f"category_discovery — العميل يستفسر عن {_label} في وضع اكتشاف "
             "(Disclosure Ladder — خطوة 1). "
-            "اذكر أسماء/أنواع متوفرة فقط (حتى 5) **بدون أسعار** في هذه الرسالة، "
+            "اذكر أسماء/أنواع متوفرة فقط من الكتالوج المزامن أو نتائج البحث "
+            "(حتى 5) **بدون أسعار** في هذه الرسالة — "
+            "ممنوع اختراع أسماء منتجات من المعرفة العامة أو نصوص KB القديمة. "
+            "إذا لم تظهر منتجات موثقة في السياق، قل بوضوح أنك لا تستطيع تأكيد "
+            "الأنواع الآن ولا تذكر أمثلة عامة. "
             "ثم سؤال توجيه واحد (تفضيل/استخدام/جنس/حجم) — "
             "ممنوع قائمة مرقمة بأسعار أو بطاقات منتجات متعددة. "
             "ممنوع اقتراح منتجات لا علاقة لها بالفئة المطلوبة."
@@ -3179,7 +3223,7 @@ def _compose_base_response_goal(
             return (
                 f"{_base} "
                 f"هذا سؤال صريح عن **أنواع/variants** ضمن {_label} — "
-                "اذكر الأنواع/الخيارات المتوفرة بالاسم أولاً (حتى 5). "
+                "اذكر الأنواع/الخيارات المتوفرة بالاسم من الكتالوج فقط (حتى 5). "
                 "ممنوع الاكتفاء بسؤال الأسعار أو الأحجام بدون listing الأنواع. "
                 "بعد ذكر الأنواع فقط، سؤال توجيه واحد للأسعار/الأحجام إن لزم."
             )

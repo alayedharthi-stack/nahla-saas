@@ -294,7 +294,7 @@ def classify_product_inquiry_route(
     types_subject = extract_types_overview_query(msg) or _strip_category_noun(q) or q
     if has_types_overview_ask(msg, q) and types_subject and is_generic_category_noun(types_subject):
         if not _SKU_SPECIFICITY_RE.search(msg):
-            return INQUIRY_CLASS_BROAD, "category_discovery"
+            return INQUIRY_CLASS_BROAD, "search"
 
     if _has_prior_browse_context(ctx):
         return INQUIRY_CLASS_SPECIFIC, "search"
@@ -324,7 +324,7 @@ def classify_product_inquiry_route(
     generic = is_generic_category_noun(q)
 
     if inquiry_turn and generic and not _SKU_SPECIFICITY_RE.search(msg):
-        return INQUIRY_CLASS_BROAD, "category_discovery"
+        return INQUIRY_CLASS_BROAD, "search"
 
     if soft_browse and generic:
         return INQUIRY_CLASS_BROWSE, "clarify"
@@ -342,27 +342,20 @@ def try_broad_category_inquiry_decision(
     inquiry_class: str = "",
     route: str = "",
 ) -> Optional[Decision]:
-    """Route broad category inquiry to discovery LLM — not catalog search."""
+    """Route broad category inquiry to catalog-grounded browse search."""
     if not inquiry_class:
         inquiry_class, route = classify_product_inquiry_route(ctx, query=query)
-    if inquiry_class != INQUIRY_CLASS_BROAD or route != "category_discovery":
+    if inquiry_class != INQUIRY_CLASS_BROAD or route != "search":
         return None
 
     category_hint = _strip_category_noun(query)
-    inquiry_kind = (
-        "types_overview"
-        if has_types_overview_ask(ctx.message or "", query)
-        else "category_browse"
-    )
     return Decision(
-        action=ACTION_LLM_REPLY,
+        action=ACTION_SEARCH_PRODUCTS,
         args={
-            "topic": "category_discovery",
-            "category_hint": category_hint,
-            "response_goal": "category_discovery",
-            "inquiry_kind": inquiry_kind,
+            "query": category_hint or query,
+            "source": "category_browse",
         },
-        reason="broad category inquiry — discovery LLM, not catalog search",
+        reason="broad category inquiry — catalog-grounded browse search",
         confidence=0.88,
     )
 
