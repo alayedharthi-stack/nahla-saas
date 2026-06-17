@@ -17,10 +17,30 @@ export interface BillingPlan {
   }
 }
 
+export interface BillingPaymentHistoryRow {
+  paid_at:    string | null
+  plan_name:  string
+  amount_sar: number
+  status:     string
+  gateway:    string
+}
+
+export type BillingLifecycleStatus =
+  | 'trial_pending_whatsapp'
+  | 'trial_active'
+  | 'trial_expired'
+  | 'paid_active'
+  | 'paid_expired'
+
 export interface BillingStatus {
   has_subscription:        boolean
   plan:                    BillingPlan | null
-  status:                  'active' | 'none' | 'cancelled' | 'trial' | 'trial_pending_whatsapp' | 'trial_active' | 'trial_expired' | 'expired' | 'pending_payment' | 'payment_failed'
+  status:                  BillingLifecycleStatus | 'active' | 'none' | 'cancelled' | 'trial' | 'pending_payment' | 'payment_failed' | 'expired'
+  lifecycle_status?:       BillingLifecycleStatus
+  lifecycle_status_label_ar?: string
+  headline_ar?:            string
+  plan_name?:              string | null
+  days_remaining?:         number
   is_trial:                boolean
   trial_pending_whatsapp?: boolean
   trial_days_remaining:    number
@@ -32,6 +52,14 @@ export interface BillingStatus {
   subscription_expired?:   boolean
   status_reason_ar?:       string
   warning_level?:          'none' | '7d' | '3d' | '1d' | 'expired'
+  has_paid_subscription_history?: boolean
+  last_payment_at?:        string | null
+  last_payment_amount?:    number
+  payment_provider?:       string
+  payment_history?:        BillingPaymentHistoryRow[]
+  ai_auto_replies_allowed?: boolean
+  manual_replies_allowed?: boolean
+  whatsapp_connected?:     boolean
   conversations_used:      number
   conversations_limit:     number     // -1 = unlimited
   usage_pct?:              number

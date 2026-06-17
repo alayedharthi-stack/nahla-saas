@@ -2,7 +2,7 @@
 """Audit tenant subscription/trial state (operator tool).
 
 Usage:
-    DATABASE_URL=postgresql://... python backend/scripts/audit_tenant_subscription.py --tenant 33
+    DATABASE_URL=postgresql://... python backend/scripts/audit_tenant_subscription.py --tenant TENANT_ID
 """
 from __future__ import annotations
 

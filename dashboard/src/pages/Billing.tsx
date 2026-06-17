@@ -83,6 +83,18 @@ function usagePercent(used: number, limit: number) {
   return Math.min(100, Math.round((used / limit) * 100))
 }
 
+function fmtDate(iso?: string | null) {
+  if (!iso) return '—'
+  return iso.slice(0, 10)
+}
+
+function paymentProviderLabel(provider?: string) {
+  if (!provider || provider === 'unknown') return 'غير معروف'
+  if (provider === 'moyasar') return 'Moyasar'
+  if (provider === 'manual') return 'يدوي'
+  return provider
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PLAN_ICONS: Record<string, React.ReactNode> = {
@@ -121,10 +133,9 @@ function PlanCard({
   const isOtherLoading = checkingOut !== null && checkingOut !== plan.slug
   const hasDiscount = plan.launch_price_sar < plan.price_sar
 
-  const isPaidActive = billingStatus?.has_subscription
-    && billingStatus.status === 'active'
+  const isPaidActive = billingStatus?.lifecycle_status === 'paid_active'
     && billingStatus.plan?.slug === plan.slug
-  const isTrialPlan = billingStatus?.is_trial && !billingStatus.has_subscription
+  const isTrialPlan = billingStatus?.lifecycle_status === 'trial_active'
   const isHighlighted = isPaidActive
 
   return (
@@ -475,15 +486,22 @@ export default function Billing() {
     status?.conversations_limit ?? 0,
   )
 
+  const lifecycle = status?.lifecycle_status ?? (
+    status?.trial_pending_whatsapp ? 'trial_pending_whatsapp'
+    : status?.is_trial ? 'trial_active'
+    : status?.subscription_expired ? 'paid_expired'
+    : status?.trial_expired ? 'trial_expired'
+    : status?.has_subscription ? 'paid_active'
+    : 'trial_expired'
+  )
+
   const daysRemainingLabel = (() => {
-    if (status?.trial_pending_whatsapp) return '—'
-    if (status?.has_subscription && status.subscription_ends_at) {
-      const end = new Date(status.subscription_ends_at)
-      const diff = Math.ceil((end.getTime() - Date.now()) / 86400000)
-      return diff > 0 ? String(diff) : '٠'
+    if (lifecycle === 'trial_pending_whatsapp') return '—'
+    if (status?.days_remaining != null && status.days_remaining > 0) {
+      return String(status.days_remaining)
     }
-    if (status?.is_trial) return String(status.trial_days_remaining)
-    if (status?.trial_expired || status?.subscription_expired) return '٠'
+    if (lifecycle === 'trial_active') return String(status?.trial_days_remaining ?? 0)
+    if (lifecycle === 'trial_expired' || lifecycle === 'paid_expired') return '٠'
     return '—'
   })()
 
@@ -494,6 +512,9 @@ export default function Billing() {
     : warningLevel === '1d'    ? 'bg-red-50 border-red-200 text-red-800'
     : warningLevel === '3d'    ? 'bg-amber-50 border-amber-200 text-amber-900'
     : 'bg-amber-50 border-amber-200 text-amber-900'
+
+  const lifecycleHeadline = status?.headline_ar || status?.status_reason_ar || '—'
+  const planDisplayName = status?.plan_name || status?.plan?.name_ar || '—'
 
   return (
     <div className="space-y-6 mx-auto px-5 py-10" style={{maxWidth: '1100px'}} dir="rtl">
@@ -543,32 +564,43 @@ export default function Billing() {
       {status && (
         <div className="card p-5 space-y-3">
           <h2 className="text-sm font-bold text-slate-900">حالة الاشتراك</h2>
+          <p className="text-sm font-semibold text-slate-800 leading-relaxed">{lifecycleHeadline}</p>
           <div className="grid sm:grid-cols-2 gap-3 text-sm">
             <div>
               <p className="text-xs text-slate-500">الحالة</p>
-              <p className="font-semibold text-slate-800">{status.status_reason_ar || '—'}</p>
+              <p className="font-semibold text-slate-800">
+                {status.lifecycle_status_label_ar || status.status_reason_ar || '—'}
+              </p>
             </div>
             <div>
               <p className="text-xs text-slate-500">الأيام المتبقية</p>
               <p className="font-semibold text-slate-800">{daysRemainingLabel}</p>
             </div>
-            {(status.trial_started_at || status.subscription_started_at) && (
+            {lifecycle === 'paid_active' && status.subscription_started_at && (
               <div>
-                <p className="text-xs text-slate-500">تاريخ البدء</p>
-                <p className="font-medium text-slate-700">
-                  {status.has_subscription
-                    ? (status.subscription_started_at?.slice(0, 10) ?? '—')
-                    : (status.trial_started_at?.slice(0, 10) ?? '—')}
-                </p>
+                <p className="text-xs text-slate-500">بدأ الاشتراك</p>
+                <p className="font-medium text-slate-700">{fmtDate(status.subscription_started_at)}</p>
               </div>
             )}
-            {(status.trial_ends_at || status.subscription_ends_at) && (
+            {lifecycle === 'paid_active' && status.subscription_ends_at && (
+              <div>
+                <p className="text-xs text-slate-500">ينتهي الاشتراك</p>
+                <p className="font-medium text-slate-700">{fmtDate(status.subscription_ends_at)}</p>
+              </div>
+            )}
+            {lifecycle === 'trial_active' && status.trial_ends_at && (
+              <div>
+                <p className="text-xs text-slate-500">تنتهي التجربة</p>
+                <p className="font-medium text-slate-700">{fmtDate(status.trial_ends_at)}</p>
+              </div>
+            )}
+            {(lifecycle === 'trial_expired' || lifecycle === 'paid_expired') && (
               <div>
                 <p className="text-xs text-slate-500">تاريخ الانتهاء</p>
                 <p className="font-medium text-slate-700">
-                  {status.has_subscription
-                    ? (status.subscription_ends_at?.slice(0, 10) ?? '—')
-                    : (status.trial_ends_at?.slice(0, 10) ?? '—')}
+                  {lifecycle === 'paid_expired'
+                    ? fmtDate(status.subscription_ends_at)
+                    : fmtDate(status.trial_ends_at)}
                 </p>
               </div>
             )}
@@ -576,8 +608,91 @@ export default function Billing() {
         </div>
       )}
 
+      {/* Subscription details */}
+      {status && (
+        <div className="card p-5 space-y-4">
+          <h2 className="text-sm font-bold text-slate-900">تفاصيل الاشتراك</h2>
+          <div className="grid sm:grid-cols-2 gap-3 text-sm">
+            <div>
+              <p className="text-xs text-slate-500">الخطة الحالية / آخر خطة</p>
+              <p className="font-medium text-slate-800">{planDisplayName}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">حالة الاشتراك</p>
+              <p className="font-medium text-slate-800">
+                {status.lifecycle_status_label_ar || '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">تاريخ بداية التجربة</p>
+              <p className="font-medium text-slate-700">{fmtDate(status.trial_started_at)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">تاريخ نهاية التجربة</p>
+              <p className="font-medium text-slate-700">{fmtDate(status.trial_ends_at)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">تاريخ بداية الاشتراك المدفوع</p>
+              <p className="font-medium text-slate-700">{fmtDate(status.subscription_started_at)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">تاريخ نهاية الاشتراك المدفوع</p>
+              <p className="font-medium text-slate-700">{fmtDate(status.subscription_ends_at)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">آخر دفعة</p>
+              <p className="font-medium text-slate-700">{fmtDate(status.last_payment_at)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">مبلغ آخر دفعة</p>
+              <p className="font-medium text-slate-700">
+                {status.last_payment_amount
+                  ? `${status.last_payment_amount.toLocaleString('ar-SA')} ر.س`
+                  : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">طريقة الدفع</p>
+              <p className="font-medium text-slate-700">{paymentProviderLabel(status.payment_provider)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">ربط واتساب</p>
+              <p className="font-medium text-slate-700">
+                {status.whatsapp_connected ? 'متصل' : 'غير متصل'}
+              </p>
+            </div>
+          </div>
+
+          {status.payment_history && status.payment_history.length > 0 && (
+            <div className="pt-2 border-t border-slate-100">
+              <h3 className="text-xs font-bold text-slate-700 mb-2">سجل الدفعات</h3>
+              <div className="space-y-2">
+                {status.payment_history.map((row, i) => (
+                  <div
+                    key={i}
+                    className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2"
+                  >
+                    <span className="font-medium">{fmtDate(row.paid_at)}</span>
+                    <span>—</span>
+                    <span>{row.plan_name}</span>
+                    <span>—</span>
+                    <span>{row.amount_sar.toLocaleString('ar-SA')} ر.س</span>
+                    <span>—</span>
+                    <span className={
+                      row.status === 'paid' ? 'text-emerald-600 font-semibold' : 'text-amber-600'
+                    }>
+                      {row.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Trial not started — WhatsApp not connected */}
-      {status?.trial_pending_whatsapp && (
+      {lifecycle === 'trial_pending_whatsapp' && (
         <div className="flex items-start gap-3 bg-sky-50 border-2 border-sky-200 rounded-xl p-4">
           <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
           <div>
@@ -603,16 +718,18 @@ export default function Billing() {
           <div>
             <p className="text-sm font-bold">
               {warningLevel === 'expired'
-                ? (status?.subscription_expired ? 'انتهى اشتراكك المدفوع' : 'انتهت فترة التجربة المجانية')
+                ? (lifecycle === 'paid_expired'
+                    ? `انتهى اشتراكك في باقة ${planDisplayName}`
+                    : lifecycle === 'trial_expired'
+                      ? 'انتهت تجربتك المجانية'
+                      : lifecycleHeadline)
                 : warningLevel === '1d'
                   ? 'يتبقى يوم واحد على انتهاء اشتراكك'
                   : warningLevel === '3d'
                     ? 'يتبقى 3 أيام على انتهاء اشتراكك'
                     : 'يتبقى 7 أيام على انتهاء اشتراكك'}
             </p>
-            <p className="text-xs mt-1 opacity-90">
-              {status?.status_reason_ar}
-            </p>
+            <p className="text-xs mt-1 opacity-90">{lifecycleHeadline}</p>
           </div>
         </div>
       )}
@@ -655,7 +772,7 @@ export default function Billing() {
       </div>
 
       {/* Trial status card — shown only during trial */}
-      {status?.is_trial && (
+      {lifecycle === 'trial_active' && (
         <div className="rounded-xl border-2 border-brand-300 bg-brand-50 p-4 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <Clock className="w-5 h-5 text-brand-500 shrink-0" />
@@ -686,14 +803,48 @@ export default function Billing() {
         </div>
       )}
 
-      {/* Trial expired warning */}
-      {status?.trial_expired && (
+      {/* Paid subscription active */}
+      {lifecycle === 'paid_active' && (
+        <div className="flex items-start gap-3 bg-emerald-50 border-2 border-emerald-200 rounded-xl p-4">
+          <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-emerald-900">
+              اشتراكك في باقة {planDisplayName} نشط
+            </p>
+            <p className="text-xs text-emerald-800 mt-1">
+              بدأ الاشتراك بتاريخ: {fmtDate(status?.subscription_started_at)} ·
+              ينتهي بتاريخ: {fmtDate(status?.subscription_ends_at)} ·
+              الأيام المتبقية: {daysRemainingLabel}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Trial expired — no paid subscription */}
+      {lifecycle === 'trial_expired' && (
         <div className="flex items-start gap-3 bg-red-50 border-2 border-red-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <div>
-            <p className="text-sm font-bold text-red-800">انتهت فترة التجربة المجانية</p>
+            <p className="text-sm font-bold text-red-800">
+              انتهت تجربتك المجانية بتاريخ: {fmtDate(status?.trial_ends_at)}
+            </p>
             <p className="text-xs text-red-700 mt-1">
-              ميزات الطيار الآلي والردود التلقائية موقوفة مؤقتاً. اختر خطة لإعادة تشغيل موظف المبيعات الذكي.
+              اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Paid subscription expired */}
+      {lifecycle === 'paid_expired' && (
+        <div className="flex items-start gap-3 bg-orange-50 border-2 border-orange-300 rounded-xl p-4">
+          <AlertCircle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-orange-900">
+              انتهى اشتراكك في باقة {planDisplayName} بتاريخ: {fmtDate(status?.subscription_ends_at)}
+            </p>
+            <p className="text-xs text-orange-800 mt-1">
+              يرجى التجديد لاستمرار الردود الذكية وموظف المبيعات الذكي.
             </p>
           </div>
         </div>
@@ -767,27 +918,27 @@ export default function Billing() {
         {/* Active plan */}
         <div className="card p-5">
           <p className="text-xs text-slate-500 mb-1">الخطة الحالية</p>
-          {status?.has_subscription ? (
+          {lifecycle === 'paid_active' ? (
             <>
-              <p className="text-lg font-bold text-slate-900">{status.plan?.name_ar}</p>
+              <p className="text-lg font-bold text-slate-900">{status?.plan?.name_ar}</p>
               <div className="flex items-baseline gap-1 mt-1">
                 <span className="text-2xl font-black text-brand-600">
-                  {status.current_price_sar.toLocaleString('ar-SA')}
+                  {(status?.current_price_sar ?? 0).toLocaleString('ar-SA')}
                 </span>
                 <span className="text-xs text-slate-500">ر.س/شهر</span>
               </div>
-              {status.launch_discount_active && (
+              {status?.launch_discount_active && (
                 <span className="inline-flex items-center gap-1 mt-2 text-[11px] bg-amber-50 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-full">
                   <Tag className="w-3 h-3" /> خصم الإطلاق فعّال
                 </span>
               )}
             </>
-          ) : status?.trial_pending_whatsapp ? (
+          ) : lifecycle === 'trial_pending_whatsapp' ? (
             <>
               <p className="text-base font-semibold text-sky-600">في انتظار ربط واتساب</p>
               <p className="text-xs text-slate-400 mt-1">التجربة المجانية تبدأ بعد الربط</p>
             </>
-          ) : status?.is_trial ? (
+          ) : lifecycle === 'trial_active' ? (
             <>
               <p className="text-base font-semibold text-brand-600">تجربة مجانية</p>
               <div className="flex items-baseline gap-1 mt-1">
@@ -799,6 +950,16 @@ export default function Billing() {
               <span className="inline-flex items-center gap-1 mt-2 text-[11px] bg-brand-50 border border-brand-200 text-brand-700 px-2 py-0.5 rounded-full">
                 <Clock className="w-3 h-3" /> مجاني لمدة 14 يوم
               </span>
+            </>
+          ) : lifecycle === 'paid_expired' ? (
+            <>
+              <p className="text-base font-semibold text-orange-700">{planDisplayName}</p>
+              <p className="text-xs text-orange-600 mt-1">اشتراك منتهي — يرجى التجديد</p>
+            </>
+          ) : lifecycle === 'trial_expired' ? (
+            <>
+              <p className="text-base font-semibold text-red-600">التجربة منتهية</p>
+              <p className="text-xs text-slate-400 mt-1">اختر خطة لتفعيل الطيار الآلي</p>
             </>
           ) : (
             <>
@@ -820,7 +981,7 @@ export default function Billing() {
             من {fmt(status?.conversations_limit ?? 0)}
             {status?.conversations_limit !== -1 ? ' محادثة' : ' (غير محدود)'}
           </p>
-          {status?.has_subscription && status.conversations_limit !== -1 && (
+          {lifecycle === 'paid_active' && status.conversations_limit !== -1 && (
             <div className="mt-3">
               <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                 <div
@@ -848,8 +1009,8 @@ export default function Billing() {
         </div>
       </div>
 
-      {/* No subscription alert — only shown after trial ends */}
-      {!status?.has_subscription && !status?.is_trial && (
+      {/* No subscription alert — trial expired without payment */}
+      {lifecycle === 'trial_expired' && (
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
           <div>
@@ -862,8 +1023,21 @@ export default function Billing() {
         </div>
       )}
 
+      {/* Paid subscription expired — renewal nudge */}
+      {lifecycle === 'paid_expired' && (
+        <div className="flex items-start gap-3 bg-orange-50 border border-orange-200 rounded-xl p-4">
+          <AlertCircle className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-semibold text-orange-800">اشتراكك المدفوع منتهٍ</p>
+            <p className="text-xs text-orange-700 mt-0.5">
+              الردود الذكية والطيار الآلي والحملات محجوبة حتى تجدد الاشتراك.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Upgrade nudge */}
-      {status?.has_subscription && status.plan?.slug !== 'scale' && (
+      {lifecycle === 'paid_active' && status.plan?.slug !== 'scale' && (
         <div className="flex items-center gap-3 bg-brand-50 border border-brand-100 rounded-xl p-4">
           <ArrowUp className="w-5 h-5 text-brand-500 shrink-0" />
           <p className="text-sm text-brand-800">
