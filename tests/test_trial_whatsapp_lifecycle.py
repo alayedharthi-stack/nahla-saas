@@ -445,3 +445,49 @@ class TestSilentBillingOutbound:
         body = src.read_text(encoding="utf-8")
         assert "trial expired fallback" not in body.lower()
         assert "outbound suppressed" in body.lower()
+
+
+class TestExpiredPlanRenewalCheckout:
+    def test_expired_growth_subscription_allows_renewal_checkout(self, db):
+        """Expired rows with status=active must not block same-plan Moyasar checkout."""
+        from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        t = _tenant(db, name="Growth Store")
+        _wa_conn(db, t.id, connected_days_ago=40)
+        db.flush()
+
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+            extra_metadata={"name_ar": "النمو"},
+        )
+        db.add(plan)
+        db.flush()
+
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat()},
+        )
+        db.add(sub)
+        db.commit()
+
+        assert get_tenant_subscription(db, t.id) is None
+
+        raw_active = (
+            db.query(BillingSubscription)
+            .filter(
+                BillingSubscription.tenant_id == t.id,
+                BillingSubscription.status == "active",
+                BillingSubscription.plan_id == plan.id,
+            )
+            .first()
+        )
+        assert raw_active is not None
+        effective = get_tenant_subscription(db, t.id)
+        assert not (effective and effective.plan_id == plan.id)

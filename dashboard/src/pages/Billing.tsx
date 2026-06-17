@@ -135,6 +135,12 @@ function PlanCard({
 
   const isPaidActive = billingStatus?.lifecycle_status === 'paid_active'
     && billingStatus.plan?.slug === plan.slug
+  const isCurrentPlan = billingStatus?.plan?.slug === plan.slug
+    || billingStatus?.plan_name === plan.name_ar
+  const isRenewal = isCurrentPlan && (
+    billingStatus?.lifecycle_status === 'paid_expired'
+    || billingStatus?.lifecycle_status === 'trial_expired'
+  )
   const isTrialPlan = billingStatus?.lifecycle_status === 'trial_active'
   const isHighlighted = isPaidActive
 
@@ -285,7 +291,9 @@ function PlanCard({
             >
               {isLoading
                 ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ التوجيه للدفع...</>
-                : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
+                : isRenewal
+                  ? <><ExternalLink className="w-4 h-4" /> جدّد الاشتراك — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>
+                  : <><ExternalLink className="w-4 h-4" /> ادفع الآن — {plan.launch_price_sar.toLocaleString('ar-SA')} ر.س</>}
             </button>
 
             {/* Manual fallback — always visible so the merchant is never stuck */}
@@ -418,6 +426,13 @@ export default function Billing() {
         // Real Moyasar payment — redirect to hosted payment page
         console.info('[Billing] redirecting to payment gateway:', res.checkout_url)
         window.location.href = res.checkout_url
+        return
+      }
+
+      if ((res as { already_active?: boolean }).already_active) {
+        setCheckoutMsg('اشتراكك في هذه الباقة نشط بالفعل.')
+        await load()
+        setCheckingOut(null)
         return
       }
 
