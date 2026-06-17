@@ -484,15 +484,19 @@ export default function Billing() {
 
   if (!status) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
+      <div className="card p-8 max-w-md mx-auto flex flex-col items-center gap-3 text-center">
+        <AlertCircle className="w-8 h-8 text-red-400" />
+        <p className="text-sm text-slate-700">تعذّر تحميل بيانات الاشتراك</p>
+        <button onClick={load} className="btn-secondary text-sm flex items-center gap-2">
+          <RefreshCw className="w-4 h-4" /> إعادة المحاولة
+        </button>
       </div>
     )
   }
 
   const pct = usagePercent(
-    status.conversations_used ?? 0,
-    status.conversations_limit ?? 0,
+    status.conversations_used,
+    status.conversations_limit,
   )
 
   const lifecycle = status.lifecycle_status ?? (
@@ -509,7 +513,7 @@ export default function Billing() {
     if (status.days_remaining != null && status.days_remaining > 0) {
       return String(status.days_remaining)
     }
-    if (lifecycle === 'trial_active') return String(status.trial_days_remaining ?? 0)
+    if (lifecycle === 'trial_active') return String(status.trial_days_remaining)
     if (lifecycle === 'trial_expired' || lifecycle === 'paid_expired') return '٠'
     return '—'
   })()
@@ -570,8 +574,7 @@ export default function Billing() {
       )}
 
       {/* Subscription lifecycle summary */}
-      {status && (
-        <div className="card p-5 space-y-3">
+      <div className="card p-5 space-y-3">
           <h2 className="text-sm font-bold text-slate-900">حالة الاشتراك</h2>
           <p className="text-sm font-semibold text-slate-800 leading-relaxed">{lifecycleHeadline}</p>
           <div className="grid sm:grid-cols-2 gap-3 text-sm">
@@ -615,11 +618,9 @@ export default function Billing() {
             )}
           </div>
         </div>
-      )}
 
       {/* Subscription details */}
-      {status && (
-        <div className="card p-5 space-y-4">
+      <div className="card p-5 space-y-4">
           <h2 className="text-sm font-bold text-slate-900">تفاصيل الاشتراك</h2>
           <div className="grid sm:grid-cols-2 gap-3 text-sm">
             <div>
@@ -698,7 +699,6 @@ export default function Billing() {
             </div>
           )}
         </div>
-      )}
 
       {/* Trial not started — WhatsApp not connected */}
       {lifecycle === 'trial_pending_whatsapp' && (
@@ -821,8 +821,8 @@ export default function Billing() {
               اشتراكك في باقة {planDisplayName} نشط
             </p>
             <p className="text-xs text-emerald-800 mt-1">
-              بدأ الاشتراك بتاريخ: {fmtDate(status?.subscription_started_at)} ·
-              ينتهي بتاريخ: {fmtDate(status?.subscription_ends_at)} ·
+              بدأ الاشتراك بتاريخ: {fmtDate(status.subscription_started_at)} ·
+              ينتهي بتاريخ: {fmtDate(status.subscription_ends_at)} ·
               الأيام المتبقية: {daysRemainingLabel}
             </p>
           </div>
@@ -835,7 +835,7 @@ export default function Billing() {
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-bold text-red-800">
-              انتهت تجربتك المجانية بتاريخ: {fmtDate(status?.trial_ends_at)}
+              انتهت تجربتك المجانية بتاريخ: {fmtDate(status.trial_ends_at)}
             </p>
             <p className="text-xs text-red-700 mt-1">
               اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي.
@@ -850,7 +850,7 @@ export default function Billing() {
           <AlertCircle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-bold text-orange-900">
-              انتهى اشتراكك في باقة {planDisplayName} بتاريخ: {fmtDate(status?.subscription_ends_at)}
+              انتهى اشتراكك في باقة {planDisplayName} بتاريخ: {fmtDate(status.subscription_ends_at)}
             </p>
             <p className="text-xs text-orange-800 mt-1">
               يرجى التجديد لاستمرار الردود الذكية وموظف المبيعات الذكي.
@@ -929,14 +929,14 @@ export default function Billing() {
           <p className="text-xs text-slate-500 mb-1">الخطة الحالية</p>
           {lifecycle === 'paid_active' ? (
             <>
-              <p className="text-lg font-bold text-slate-900">{status?.plan?.name_ar}</p>
+              <p className="text-lg font-bold text-slate-900">{status.plan?.name_ar}</p>
               <div className="flex items-baseline gap-1 mt-1">
                 <span className="text-2xl font-black text-brand-600">
-                  {(status?.current_price_sar ?? 0).toLocaleString('ar-SA')}
+                  {status.current_price_sar.toLocaleString('ar-SA')}
                 </span>
                 <span className="text-xs text-slate-500">ر.س/شهر</span>
               </div>
-              {status?.launch_discount_active && (
+              {status.launch_discount_active && (
                 <span className="inline-flex items-center gap-1 mt-2 text-[11px] bg-amber-50 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-full">
                   <Tag className="w-3 h-3" /> خصم الإطلاق فعّال
                 </span>
@@ -984,11 +984,11 @@ export default function Billing() {
             <MessageSquare className="w-3.5 h-3.5" /> المحادثات
           </p>
           <p className="text-2xl font-black text-slate-900">
-            {(status?.conversations_used ?? 0).toLocaleString('ar-SA')}
+            {(status.conversations_used).toLocaleString('ar-SA')}
           </p>
           <p className="text-xs text-slate-400 mt-0.5">
-            من {fmt(status?.conversations_limit ?? 0)}
-            {status?.conversations_limit !== -1 ? ' محادثة' : ' (غير محدود)'}
+            من {fmt(status.conversations_limit)}
+            {status.conversations_limit !== -1 ? ' محادثة' : ' (غير محدود)'}
           </p>
           {lifecycle === 'paid_active' && status.conversations_limit !== -1 && (
             <div className="mt-3">
