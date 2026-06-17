@@ -240,6 +240,7 @@ def select_arabic_commerce_fallback(
     intent_name: str = "",
     primary_customer_goal: str = "",
     inbound_text: str = "",
+    conversation_objective: str = "",
 ) -> Tuple[str, str]:
     try:
         from modules.ai.brain.intent.education_context_classifier import (  # noqa: PLC0415
@@ -270,8 +271,33 @@ def select_arabic_commerce_fallback(
         or intent in {"ask_product", "solution_seeking_commerce", "product_availability"}
     ):
         return _FALLBACK_PRODUCT_UNRESOLVED_AR, "product_unresolved"
-    if goal == GOAL_PRODUCT_AVAILABILITY or intent in _COMMERCE_INTENTS:
+
+    try:
+        from modules.ai.brain.intent.conversation_objective_guard import (  # noqa: PLC0415
+            should_block_availability_fallback,
+        )
+
+        if should_block_availability_fallback(
+            inbound_text=inbound_text,
+            intent_name=intent_name,
+            primary_customer_goal=primary_customer_goal,
+            conversation_objective=conversation_objective,
+        ):
+            norm = _normalize_for_match(inbound_text)
+            if norm.startswith("السلام") or "سلام عليكم" in norm:
+                return _FALLBACK_GREETING_AR, "greeting"
+            return _FALLBACK_SOCIAL_AR, "social"
+    except Exception:  # noqa: silent-ok — objective gate must not break fallback
+        pass
+
+    if (
+        goal == GOAL_PRODUCT_AVAILABILITY
+        or intent in _COMMERCE_INTENTS
+    ) and _AVAILABILITY_INBOUND_RE.search(inbound_text or ""):
         return _FALLBACK_AVAILABILITY_AR, "availability"
+    norm = _normalize_for_match(inbound_text)
+    if norm.startswith("السلام") or "سلام عليكم" in norm:
+        return _FALLBACK_GREETING_AR, "greeting"
     return _FALLBACK_SOCIAL_AR, "social"
 
 
@@ -285,6 +311,7 @@ def apply_commerce_reply_quality_guard(
     inbound_text: str = "",
     intent_name: str = "",
     primary_customer_goal: str = "",
+    conversation_objective: str = "",
     locale: str = "ar",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
@@ -295,6 +322,7 @@ def apply_commerce_reply_quality_guard(
             intent_name=intent_name,
             primary_customer_goal=primary_customer_goal,
             inbound_text=inbound_text,
+            conversation_objective=conversation_objective,
         )
         return CommerceReplyQualityGuardResult(
             reply=fallback,
@@ -335,6 +363,7 @@ def apply_commerce_reply_quality_guard(
             intent_name=intent_name,
             primary_customer_goal=primary_customer_goal,
             inbound_text=inbound_text,
+            conversation_objective=conversation_objective,
         )
         used_fallback = True
 

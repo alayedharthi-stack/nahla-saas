@@ -34,6 +34,7 @@ GOAL_PAYMENT_INQUIRY = "payment_inquiry"
 GOAL_SOCIAL_ONLY = "social_only"
 GOAL_GREETING_ONLY = "greeting_only"
 GOAL_GENERAL = "general"
+GOAL_PRODUCT_ORIGIN_VERIFICATION = "product_origin_verification"
 
 # Commercial elements outrank social openers.
 _COMMERCIAL_ELEMENT_TYPES = frozenset({
@@ -168,6 +169,7 @@ __all__ = [
     "GOAL_SOCIAL_ONLY",
     "GOAL_GREETING_ONLY",
     "GOAL_GENERAL",
+    "GOAL_PRODUCT_ORIGIN_VERIFICATION",
     "_COMMERCIAL_ELEMENT_TYPES",
     "_SOCIAL_ELEMENT_TYPES",
     "_ELEMENT_PRIORITY_WEIGHT",

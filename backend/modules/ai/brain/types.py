@@ -463,6 +463,12 @@ class MerchantConversationState:
     #   "explain_product"         → expand on current_product_focus
     # Cleared automatically the next turn the bot DOESN'T ask a yes/no.
     pending_confirmation: str = ""
+    # Multi-turn conversation objective (product-origin verification, …).
+    # Short TTL — cleared on explicit purchase intent or topic shift.
+    active_conversation_objective: str = ""
+    objective_started_turn: int = 0
+    objective_last_reinforced_turn: int = 0
+    objective_evidence: Dict[str, Any] = field(default_factory=dict)
     # Last outbound CTA URL surfaced to the customer + how many turns ago.
     # Used by the repetition guard to avoid sending the same link twice in
     # a row. Updated by the responder after each successful outbound.
@@ -533,6 +539,10 @@ class MerchantConversationState:
             "awaiting_option_confirmation": self.awaiting_option_confirmation,
             "last_platform_topic": self.last_platform_topic,
             "pending_confirmation": self.pending_confirmation,
+            "active_conversation_objective": self.active_conversation_objective,
+            "objective_started_turn": self.objective_started_turn,
+            "objective_last_reinforced_turn": self.objective_last_reinforced_turn,
+            "objective_evidence": dict(self.objective_evidence or {}),
             "last_link_sent": self.last_link_sent,
             "last_link_sent_turn": self.last_link_sent_turn,
             "customer_gender_hint": self.customer_gender_hint,
@@ -592,6 +602,14 @@ class MerchantConversationState:
             awaiting_option_confirmation=bool(d.get("awaiting_option_confirmation", False)),
             last_platform_topic=str(d.get("last_platform_topic", "") or ""),
             pending_confirmation=str(d.get("pending_confirmation", "") or ""),
+            active_conversation_objective=str(
+                d.get("active_conversation_objective", "") or ""
+            ),
+            objective_started_turn=int(d.get("objective_started_turn") or 0),
+            objective_last_reinforced_turn=int(
+                d.get("objective_last_reinforced_turn") or 0
+            ),
+            objective_evidence=dict(d.get("objective_evidence") or {}),
             last_link_sent=str(d.get("last_link_sent", "") or ""),
             last_link_sent_turn=int(d.get("last_link_sent_turn") or 0),
             customer_gender_hint=str(d.get("customer_gender_hint", "") or ""),
