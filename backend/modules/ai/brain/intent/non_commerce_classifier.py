@@ -51,10 +51,18 @@ NON_COMMERCE_IMAGE_TAG = (
 NON_COMMERCE_VIDEO_TAG = (
     "[تصنيف الوسائط: محتوى اجتماعي/ديني — بدون نية شراء]"
 )
+NON_COMMERCE_STICKER_TAG = (
+    "[تصنيف الستيكر: محتوى اجتماعي — بدون نية شراء]"
+)
+NON_COMMERCE_STICKER_EXPRESSIVE_TAG = (
+    "[تصنيف الستيكر: ملصق تعبيري — بدون نية شراء]"
+)
 
 _NON_COMMERCE_TAGS = (
     NON_COMMERCE_IMAGE_TAG,
     NON_COMMERCE_VIDEO_TAG,
+    NON_COMMERCE_STICKER_TAG,
+    NON_COMMERCE_STICKER_EXPRESSIVE_TAG,
     "[تصنيف الصورة: محتوى اجتماعي",
     "[تصنيف الوسائط: محتوى اجتماعي",
 )
@@ -175,6 +183,7 @@ _NC_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 _MEDIA_ORIGIN_MARKERS = (
     "[وصف الصورة", "[وصف الصورة المرسلة]", "[وصف الفيديو",
+    "[وصف الستيكر", "[وصف الستيكر المرسل]",
     "استنتاج خفيف من النص",
 )
 
@@ -233,6 +242,8 @@ def _strip_media_framing(message: str) -> str:
         if s.startswith("[وصف الصورة"):
             s = s.split("]", 1)[-1].strip() if "]" in s else ""
         elif s.startswith("[وصف الفيديو"):
+            s = s.split("]", 1)[-1].strip() if "]" in s else ""
+        elif s.startswith("[وصف الستيكر"):
             s = s.split("]", 1)[-1].strip() if "]" in s else ""
         if s.startswith("استنتاج خفيف"):
             continue
@@ -699,6 +710,8 @@ __all__ = [
     "NC_SOCIAL_FORWARD",
     "NON_COMMERCE_IMAGE_TAG",
     "NON_COMMERCE_VIDEO_TAG",
+    "NON_COMMERCE_STICKER_TAG",
+    "NON_COMMERCE_STICKER_EXPRESSIVE_TAG",
     "NonCommerceMatch",
     "POSITIVE_COMMERCE_INTENTS",
     "classify_non_commerce",

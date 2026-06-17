@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -182,6 +183,10 @@ AUDIO_FALLBACK_REPLY_AR = (
 )
 IMAGE_FALLBACK_REPLY_AR = (
     "وصلتني الصورة، لكن لم أتمكن من قراءة محتواها بوضوح. "
+    "ممكن توضح طلبك بنص؟"
+)
+STICKER_FALLBACK_REPLY_AR = (
+    "وصلني الملصق، لكن لم أتمكن من قراءة محتواه بوضوح. "
     "ممكن توضح طلبك بنص؟"
 )
 DOCUMENT_FALLBACK_REPLY_AR = (
@@ -831,6 +836,16 @@ async def normalize_whatsapp_inbound(
             ts_raw=ts_raw,
             wa_msg_id=wa_msg_id,
             order_context=order_context,
+        )
+
+    if msg_type == "sticker":
+        return await _process_sticker(
+            db=db,
+            wa_conn=wa_conn,
+            tenant_id=tenant_id,
+            sticker_payload=message.get("sticker") or {},
+            ts_raw=ts_raw,
+            wa_msg_id=wa_msg_id,
         )
 
     if msg_type == "document":
@@ -1866,6 +1881,7 @@ def _apply_non_commerce_media_gate(
     try:
         from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
             NON_COMMERCE_IMAGE_TAG,
+            NON_COMMERCE_STICKER_TAG,
             NON_COMMERCE_VIDEO_TAG,
             classify_non_commerce,
         )
@@ -1880,7 +1896,9 @@ def _apply_non_commerce_media_gate(
         base_meta["non_commerce_category"] = nc.category
         base_meta["non_commerce_source"] = nc.source
         tag = (
-            NON_COMMERCE_IMAGE_TAG
+            NON_COMMERCE_STICKER_TAG
+            if media_type == "sticker"
+            else NON_COMMERCE_IMAGE_TAG
             if media_type == "image"
             else NON_COMMERCE_VIDEO_TAG
         )
@@ -2526,6 +2544,265 @@ def _image_with_fallback(
         metadata=base_meta,
         should_process=False,
         fallback_reply_ar=IMAGE_FALLBACK_REPLY_AR,
+    )
+
+
+# ── Sticker ─────────────────────────────────────────────────────────
+
+
+_ARABIC_TEXT_RE = re.compile(r"[\u0600-\u06FF]")
+_STICKER_NO_TEXT_MARKERS = (
+    "بدون نص",
+    "لا يوجد نص",
+    "no text",
+    "without text",
+    "expressive",
+    "emoji",
+    "emoticon",
+    "تعبيري",
+    "وجه مبتسم",
+    "ملصق تعبير",
+)
+
+
+def _prepare_sticker_vision_bytes(
+    file_bytes: bytes,
+    mime_type: str,
+) -> tuple[bytes, str]:
+    """Return bytes + mime suitable for OpenAI Vision.
+
+    WhatsApp stickers are usually ``image/webp``. OpenAI accepts webp
+    directly; when Pillow is available we convert to JPEG for broader
+    model compatibility.
+    """
+    mime = (mime_type or "image/webp").split(";", 1)[0].strip().lower()
+    if mime != "image/webp":
+        return file_bytes, mime or "image/jpeg"
+    try:
+        from io import BytesIO
+
+        from PIL import Image  # type: ignore[import-untyped]
+
+        img = Image.open(BytesIO(file_bytes))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=90)
+        return out.getvalue(), "image/jpeg"
+    except Exception:
+        return file_bytes, mime
+
+
+def _sticker_has_readable_text(vision_text: str) -> bool:
+    """True when OCR/vision found gratitude, dua, or other readable copy."""
+    body = (vision_text or "").strip()
+    if not body:
+        return False
+    norm = re.sub(r"\s+", " ", body.lower())
+    if any(marker in norm for marker in _STICKER_NO_TEXT_MARKERS):
+        if not re.search(
+            r"جزاك|شكر|بارك|الله|thank",
+            norm,
+        ):
+            return False
+    if _ARABIC_TEXT_RE.search(body):
+        return True
+    return bool(re.search(r"[a-zA-Z]{3,}", body))
+
+
+def _build_sticker_display_body(*, sticker_kind: str = "") -> str:
+    label = "ملصق تعبيري" if sticker_kind == "expressive_only" else "ملصق"
+    return f"🎭 {label}"
+
+
+async def _process_sticker(
+    *,
+    db: Any,
+    wa_conn: Any,
+    tenant_id: int,
+    sticker_payload: Dict[str, Any],
+    ts_raw: Any,
+    wa_msg_id: str,
+) -> MediaNormalizationResult:
+    """Download → persist → OCR/describe an inbound WhatsApp sticker."""
+    media_id = str(sticker_payload.get("id") or "").strip()
+    mime_type = str(sticker_payload.get("mime_type") or "image/webp").strip()
+    animated = bool(sticker_payload.get("animated"))
+
+    base_meta: Dict[str, Any] = {
+        "source_type":             "sticker",
+        "media_id":                media_id or None,
+        "mime_type":               mime_type or None,
+        "animated":                animated,
+        "wa_timestamp":            ts_raw,
+        "wa_message_id":           wa_msg_id or None,
+        "sticker_download_status": "pending",
+        "vision_status":           "pending",
+        "vision_text":             None,
+        "vision_error":            None,
+        "ai_used_sticker":         False,
+        "storage_url":             None,
+        "storage_sha256":          None,
+        "byte_size":               None,
+        "block_commerce_escalation": True,
+    }
+
+    if not media_id:
+        return _sticker_failure(
+            base_meta,
+            download_status="failed",
+            vision_status="skipped",
+            vision_error="missing_media_id",
+        )
+
+    downloaded = await _download_meta_media(
+        db=db,
+        wa_conn=wa_conn,
+        tenant_id=tenant_id,
+        media_id=media_id,
+        mime_type=mime_type,
+    )
+    if downloaded is None:
+        return _sticker_failure(
+            base_meta,
+            download_status="failed",
+            vision_status="skipped",
+            vision_error="download_failed",
+        )
+
+    actual_mime = downloaded["mime_type"] or mime_type
+    file_bytes = downloaded["bytes"]
+
+    stored = _try_persist(
+        tenant_id=tenant_id,
+        file_bytes=file_bytes,
+        mime_type=actual_mime,
+        kind="image",
+        media_id=media_id,
+    )
+    if stored is not None:
+        base_meta["storage_url"] = stored.storage_url
+        base_meta["storage_sha256"] = stored.sha256
+        base_meta["byte_size"] = stored.byte_size
+        base_meta["mime_type"] = stored.mime_type
+    base_meta["sticker_download_status"] = "ok"
+
+    if not _runtime_openai_key():
+        _log_skip(
+            "vision_not_configured",
+            tenant_id=tenant_id,
+            media_id=media_id,
+            kind="sticker",
+        )
+        base_meta["vision_status"] = "skipped"
+        base_meta["vision_error"] = "vision_not_configured"
+        return _sticker_with_fallback(base_meta)
+
+    vision_bytes, vision_mime = _prepare_sticker_vision_bytes(
+        file_bytes,
+        actual_mime,
+    )
+
+    try:
+        vision_text = await _describe_sticker_with_openai(
+            file_bytes=vision_bytes,
+            mime_type=vision_mime,
+            tenant_id=tenant_id,
+            media_id=media_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[MediaNormalizer] sticker vision failed tenant=%s "
+            "media_id=%s err=%s",
+            tenant_id,
+            media_id,
+            exc,
+        )
+        base_meta["vision_status"] = "failed"
+        base_meta["vision_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        return _sticker_with_fallback(base_meta)
+
+    if not vision_text:
+        logger.warning(
+            "[MEDIA_VISION_EMPTY] tenant=%s media_id=%s mime=%s bytes=%d "
+            "kind=sticker — openai returned no usable text",
+            tenant_id,
+            media_id,
+            actual_mime or "—",
+            len(file_bytes),
+        )
+        base_meta["vision_status"] = "empty"
+        base_meta["vision_error"] = "empty_description"
+        return _sticker_with_fallback(base_meta)
+
+    base_meta["vision_status"] = "ok"
+    base_meta["vision_text"] = vision_text
+    base_meta["ai_used_sticker"] = True
+
+    has_text = _sticker_has_readable_text(vision_text)
+    base_meta["sticker_kind"] = "text" if has_text else "expressive_only"
+
+    combined = f"[وصف الستيكر المرسل] {vision_text}"
+    if not has_text:
+        from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
+            NON_COMMERCE_STICKER_EXPRESSIVE_TAG,
+        )
+
+        combined = f"{NON_COMMERCE_STICKER_EXPRESSIVE_TAG}\n{combined}"
+        base_meta["non_commerce_category"] = "social_image"
+        base_meta["non_commerce_source"] = "sticker_expressive"
+    else:
+        combined = _apply_non_commerce_media_gate(
+            combined=combined,
+            base_meta=base_meta,
+            media_type="sticker",
+            tenant_id=tenant_id,
+            media_id=media_id,
+        )
+
+    _apply_semantic_media_classification(
+        base_meta=base_meta,
+        text_blob=vision_text or "",
+        normalized_type="sticker",
+        tenant_id=tenant_id,
+    )
+
+    display_body = _build_sticker_display_body(
+        sticker_kind=str(base_meta.get("sticker_kind") or ""),
+    )
+    base_meta["display_body"] = display_body
+
+    return MediaNormalizationResult(
+        normalized_type="sticker",
+        text=combined,
+        display_body=display_body,
+        metadata=base_meta,
+        should_process=True,
+    )
+
+
+def _sticker_failure(
+    base_meta: Dict[str, Any],
+    *,
+    download_status: str,
+    vision_status: str,
+    vision_error: str,
+) -> MediaNormalizationResult:
+    base_meta["sticker_download_status"] = download_status
+    base_meta["vision_status"] = vision_status
+    base_meta["vision_error"] = vision_error
+    return _sticker_with_fallback(base_meta)
+
+
+def _sticker_with_fallback(
+    base_meta: Dict[str, Any],
+) -> MediaNormalizationResult:
+    return MediaNormalizationResult(
+        normalized_type="sticker",
+        text="",
+        metadata=base_meta,
+        should_process=False,
+        fallback_reply_ar=STICKER_FALLBACK_REPLY_AR,
     )
 
 
@@ -3641,6 +3918,91 @@ async def _describe_image_with_openai(
             tenant_id, media_id, len(result), result[:120],
         )
     return result
+
+
+async def _describe_sticker_with_openai(
+    *,
+    file_bytes: bytes,
+    mime_type: str,
+    tenant_id: Optional[int] = None,
+    media_id: Optional[str] = None,
+) -> str:
+    """OCR/describe a WhatsApp sticker — focus on readable text."""
+    import base64
+
+    headers = {
+        "Authorization": f"Bearer {_runtime_openai_key()}",
+        "Content-Type":  "application/json",
+    }
+    b64 = base64.b64encode(file_bytes).decode("ascii")
+    safe_mime = (mime_type or "image/webp").split(";", 1)[0].strip() or "image/webp"
+    data_url = f"data:{safe_mime};base64,{b64}"
+
+    system_prompt = (
+        "أنت مساعد بصري لمحادثة عربية. العميل أرسل ملصق واتساب (ستيكر). "
+        "مهمتك:\n"
+        "1) اقرأ أي نص مكتوب على الملصق حرفياً كما يظهر (دعاء، شكر، "
+        "تهنئة، …) دون ترجمة.\n"
+        "2) إن لم يوجد نص مقروء وكان الملصق تعبيرياً فقط (وجه، إيموجي، "
+        "رسم بدون كلمات)، قل ذلك بوضوح في سطر واحد.\n"
+        "3) لا تذكر منتجات أو طلبات — الملصقات غالباً اجتماعية.\n"
+        "اكتب بالعربية في 1–3 أسطر دون مقدمات."
+    )
+    user_text = "اقرأ النص على ملصق واتساب المرفق إن وُجد."
+
+    body = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
+                ],
+            },
+        ],
+        "max_tokens": 200,
+        "temperature": 0.1,
+    }
+
+    logger.info(
+        "[MEDIA_VISION_REQ] tenant=%s media_id=%s model=%s "
+        "mime=%s bytes_in=%d b64_len=%d kind=sticker",
+        tenant_id, media_id, OPENAI_VISION_MODEL,
+        safe_mime, len(file_bytes), len(b64),
+    )
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(
+            f"{OPENAI_API_BASE.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    choices = data.get("choices") or []
+    if not choices:
+        logger.warning(
+            "[MEDIA_VISION_EMPTY_CAUSE] tenant=%s media_id=%s "
+            "cause=no_choices kind=sticker",
+            tenant_id, media_id,
+        )
+        return ""
+    msg = (choices[0] or {}).get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts = [
+            str(p.get("text") or "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        return "".join(parts).strip()
+    return str(content or "").strip()
 
 
 def _guess_suffix(mime_type: str) -> str:
