@@ -147,6 +147,36 @@ export interface OrderTimelineEvent {
   icon:  string
 }
 
+export interface OrderShipmentInfo {
+  id: number
+  order_id: number
+  provider: string
+  status: string
+  status_label_ar?: string
+  tracking_number?: string | null
+  label_url?: string | null
+  label_pdf_path?: string | null
+  recipient_name?: string | null
+  recipient_phone?: string | null
+  address_type?: string | null
+  address_text?: string | null
+  address_url?: string | null
+  cod_amount?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  label_placeholder?: boolean
+}
+
+export interface OrderShippingState {
+  can_create_shipment: boolean
+  blocked_reason_key?: string | null
+  blocked_reason_ar?: string | null
+  can_generate_label?: boolean
+  label_blocked_reason_key?: string | null
+  label_blocked_reason_ar?: string | null
+  shipment?: OrderShipmentInfo | null
+}
+
 export interface OrderDetail extends DashboardOrder {
   line_items: OrderDetailLineItem[]
   customer_address: OrderDetailAddress
@@ -156,6 +186,13 @@ export interface OrderDetail extends DashboardOrder {
   notes?: string | null
   timeline: OrderTimelineEvent[]
   payment_reminder_draft?: string | null
+  shipping?: OrderShippingState
+}
+
+export interface CreateShipmentResult {
+  ok: boolean
+  shipment: OrderShipmentInfo
+  order: OrderDetail
 }
 
 export interface PaymentReminderResult {
@@ -521,6 +558,20 @@ export const featureRealityApi = {
     return apiCall(`/orders/${encodeURIComponent(String(orderId))}/confirm-payment`, {
       method: 'POST',
     })
+  },
+  createOrderShipment(orderId: string | number): Promise<CreateShipmentResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/shipments`, {
+      method: 'POST',
+    })
+  },
+  generateOrderShipmentLabel(
+    orderId: string | number,
+    shipmentId: number,
+  ): Promise<CreateShipmentResult> {
+    return apiCall(
+      `/orders/${encodeURIComponent(String(orderId))}/shipments/${shipmentId}/generate-label`,
+      { method: 'POST' },
+    )
   },
   coupons(): Promise<CouponsDashboard> {
     return apiCall('/coupons')

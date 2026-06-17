@@ -388,6 +388,39 @@ class Order(Base):
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='orders')
 
+
+class OrderShipment(Base):
+    """Internal shipment record for merchant fulfillment (foundation — no carrier API)."""
+    __tablename__ = 'order_shipments'
+    __table_args__ = (
+        UniqueConstraint('order_id', name='uq_order_shipments_order_id'),
+        Index('ix_order_shipments_tenant_id', 'tenant_id'),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
+    provider = Column(String, nullable=False, default='internal')
+    status = Column(String, nullable=False, default='shipment_created')
+    tracking_number = Column(String, nullable=True)
+    label_url = Column(String, nullable=True)
+    label_pdf_path = Column(String, nullable=True)
+    recipient_name = Column(String, nullable=True)
+    recipient_phone = Column(String, nullable=True)
+    address_type = Column(String, nullable=True)
+    address_text = Column(Text, nullable=True)
+    address_url = Column(String, nullable=True)
+    latitude = Column(String, nullable=True)
+    longitude = Column(String, nullable=True)
+    cod_amount = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    extra_metadata = Column('metadata', JSONB, nullable=True)
+
+    order = relationship('Order', backref='shipments')
+    tenant = relationship('Tenant')
+
+
 class Coupon(Base):
     __tablename__ = 'coupons'
     __table_args__ = (
