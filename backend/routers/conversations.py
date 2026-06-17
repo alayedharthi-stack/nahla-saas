@@ -1823,9 +1823,8 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    # Manual reply is an outbound action — blocked when no active billing
-    from core.billing import require_outbound_access  # noqa: PLC0415
-    require_outbound_access(db, tenant_id)
+    # Manual merchant replies are allowed even when trial/subscription expired.
+    # Automated paths (AI, campaigns, automations) remain gated by billing.
 
     customer_phone = normalize_phone(body.customer_phone) or body.customer_phone
 

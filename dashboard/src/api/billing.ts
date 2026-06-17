@@ -20,10 +20,18 @@ export interface BillingPlan {
 export interface BillingStatus {
   has_subscription:        boolean
   plan:                    BillingPlan | null
-  status:                  'active' | 'none' | 'cancelled' | 'trial' | 'pending_payment' | 'payment_failed'
+  status:                  'active' | 'none' | 'cancelled' | 'trial' | 'trial_pending_whatsapp' | 'trial_active' | 'trial_expired' | 'expired' | 'pending_payment' | 'payment_failed'
   is_trial:                boolean
+  trial_pending_whatsapp?: boolean
   trial_days_remaining:    number
   trial_expired:           boolean
+  trial_started_at?:       string | null
+  trial_ends_at?:          string | null
+  subscription_started_at?: string | null
+  subscription_ends_at?:   string | null
+  subscription_expired?:   boolean
+  status_reason_ar?:       string
+  warning_level?:          'none' | '7d' | '3d' | '1d' | 'expired'
   conversations_used:      number
   conversations_limit:     number     // -1 = unlimited
   usage_pct?:              number

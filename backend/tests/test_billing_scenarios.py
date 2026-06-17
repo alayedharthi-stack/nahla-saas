@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 # Allow running from repo root or backend/
@@ -217,12 +217,14 @@ class TestScenario1_TrialBlocked:
             or "guard is not applied here" in body.lower(), \
             "process_pending_events should no longer block on billing — guard moved to _execute_action"
 
-    def test_conversations_reply_router_requires_outbound_access(self):
+    def test_conversations_reply_router_allows_manual_without_billing(self):
+        """Manual dashboard replies must stay available after trial/sub expiry."""
         from pathlib import Path
         src = Path(_backend) / "routers" / "conversations.py"
         body = src.read_text(encoding="utf-8")
-        assert "require_outbound_access" in body, \
-            "conversations.reply_to_conversation must call require_outbound_access"
+        reply_fn = body.split("@router.post(\"/reply\")", 1)[1].split("@router.", 1)[0]
+        assert "require_outbound_access" not in reply_fn, \
+            "conversations.reply_to_conversation must NOT gate manual merchant replies"
 
     def test_campaigns_router_requires_outbound_access(self):
         from pathlib import Path
@@ -265,9 +267,12 @@ class TestScenario2_Active:
 
     def _active_nahla_db(self):
         """Nahla-native subscription (Stripe/Hyperpay) with no Salla integration."""
+        now = datetime.now(timezone.utc)
         sub = MagicMock()
         sub.id = 1; sub.tenant_id = 99; sub.status = "active"
-        sub.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        sub.started_at = now - timedelta(days=5)
+        sub.ends_at = now + timedelta(days=25)
+        sub.extra_metadata = {}
 
         db = MockDB()
         db.set("BillingSubscription", sub)
