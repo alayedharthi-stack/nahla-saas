@@ -279,6 +279,17 @@ def _days_until(end: Optional[datetime]) -> int:
     return max(0, int(remaining / 86400) + 1)
 
 
+def _days_since(past: Optional[datetime]) -> int:
+    coerced = _coerce_utc(past)
+    if not coerced:
+        return 0
+    now = datetime.now(timezone.utc)
+    elapsed = (now - coerced).total_seconds()
+    if elapsed <= 0:
+        return 0
+    return max(0, int(elapsed / 86400))
+
+
 def _effective_sub_ends_at(sub) -> Optional[datetime]:
     if sub is None:
         return None
@@ -503,6 +514,14 @@ def resolve_billing_lifecycle(
         subscription_end=_iso(sub_ends),
     )
 
+    expired_since_days = 0
+    if lifecycle_status == "paid_expired" and sub_ends:
+        expired_since_days = _days_since(sub_ends)
+    elif lifecycle_status == "trial_expired":
+        trial_end_dt = _coerce_utc(getattr(tenant, "trial_ends_at", None))
+        if trial_end_dt:
+            expired_since_days = _days_since(trial_end_dt)
+
     return {
         "lifecycle_status":            lifecycle_status,
         "lifecycle_status_label_ar":   _lifecycle_status_label_ar(lifecycle_status),
@@ -520,6 +539,7 @@ def resolve_billing_lifecycle(
         "subscription_ends_at":        _iso(sub_ends),
         "subscription_expired":        subscription_expired,
         "days_remaining":              days_remaining,
+        "expired_since_days":          expired_since_days,
         "warning_level":               warning_level,
         "status_reason_ar":            headline,
         "has_paid_subscription_history": has_paid_history,
@@ -683,6 +703,7 @@ def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
     active_sub = get_tenant_subscription(db, tenant_id)
     latest_paid = get_latest_paid_subscription(db, tenant_id)
     lifecycle = resolve_billing_lifecycle(db, tenant_id, tenant, active_sub=active_sub)
+    renewal = resolve_billing_renewal_info(db, tenant_id, lifecycle)
     trial = compute_trial_info(tenant)
 
     first_wa = _coerce_utc(getattr(tenant, "first_whatsapp_connected_at", None))
@@ -696,6 +717,7 @@ def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
         "found": True,
         "store_name": tenant.name,
         "tenant_created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "billing_channel": renewal.get("billing_channel"),
         "whatsapp_connected": lifecycle["whatsapp_connected"],
         "whatsapp_status": "connected" if lifecycle["whatsapp_connected"] else "not_connected",
         "first_whatsapp_connected_at": _iso(first_wa),
@@ -703,21 +725,29 @@ def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
         "trial_ends_at": tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
         "subscription_started_at": lifecycle.get("subscription_started_at"),
         "subscription_ends_at": lifecycle.get("subscription_ends_at"),
+        "days_remaining": lifecycle.get("days_remaining"),
+        "expired_since_days": lifecycle.get("expired_since_days"),
         "subscription_status": tenant.subscription_status,
         "billing_subscription_status": raw_sub.status if raw_sub else None,
         "lifecycle_status": lifecycle["lifecycle_status"],
         "plan_name": lifecycle.get("plan_name"),
         "has_paid_subscription_history": lifecycle.get("has_paid_subscription_history"),
         "last_payment_at": lifecycle.get("last_payment_at"),
+        "latest_payment_date": lifecycle.get("last_payment_at"),
         "last_payment_amount": lifecycle.get("last_payment_amount"),
+        "latest_payment_amount": lifecycle.get("last_payment_amount"),
         "payment_provider": lifecycle.get("payment_provider"),
         "payment_history": lifecycle.get("payment_history"),
         "trial_info": trial,
         "subscription_expired": lifecycle["subscription_expired"],
         "trial_expired": lifecycle["trial_expired"],
         "ai_auto_replies_allowed": lifecycle["ai_auto_replies_allowed"],
+        "campaigns_automations_allowed": renewal.get("campaigns_automations_allowed"),
         "paid_subscription_effective": lifecycle["has_subscription"],
         "manual_replies_allowed": lifecycle["manual_replies_allowed"],
+        "dashboard_access_allowed": True,
+        "is_salla_managed": renewal.get("is_salla_managed"),
+        "renewal_method": renewal.get("renewal_method"),
     }
 
 

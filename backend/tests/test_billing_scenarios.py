@@ -204,6 +204,15 @@ class TestScenario1_TrialBlocked:
         assert "get_tenant_subscription" in body
         assert "effective_active" in body
 
+    def test_campaign_dispatcher_blocks_expired_tenant_at_runtime(self):
+        """Scheduled campaign sends must not bypass billing after subscription expiry."""
+        from pathlib import Path
+        src = Path(_backend) / "services" / "campaign_dispatcher.py"
+        body = src.read_text(encoding="utf-8")
+        dispatch_fn = body.split("async def dispatch_campaign", 1)[1].split("\nasync def ", 1)[0]
+        assert "has_billing_access" in dispatch_fn
+        assert "billing_access_denied" in dispatch_fn
+
     def test_automation_engine_blocks_outbound(self):
         """_execute_action must return billing_access_denied before any send."""
         from pathlib import Path
