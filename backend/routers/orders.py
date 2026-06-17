@@ -92,6 +92,8 @@ RAW_STATUS_LABELS_AR: Dict[str, str] = {
     "paid":                  "مدفوع",
     "processing":            "قيد التجهيز",
     "ready_to_ship":         "جاهز للشحن",
+    "shipment_created":      "تم إنشاء الشحنة",
+    "label_generated":       "تم توليد البوليصة",
     "shipped":               "تم الشحن",
     "delivered":             "تم التسليم",
     "completed":             "مكتمل",
@@ -571,10 +573,30 @@ def _build_timeline(order: Order, *, has_open_conv: bool, source_label: str) -> 
             "icon":  "package",
         })
 
+    for ship_ev in (meta.get("shipment_timeline") or []):
+        if not isinstance(ship_ev, dict):
+            continue
+        ev_name = str(ship_ev.get("event") or "").strip().lower()
+        at = str(ship_ev.get("at") or "")
+        if ev_name == "shipment_created":
+            events.append({
+                "key":   "shipment_created",
+                "label": "تم إنشاء الشحنة داخل نحلة",
+                "at":    at,
+                "icon":  "package",
+            })
+        elif ev_name == "label_generated":
+            events.append({
+                "key":   "label_generated",
+                "label": "تم توليد بيانات البوليصة",
+                "at":    at,
+                "icon":  "link",
+            })
+
     for st_event in (meta.get("status_timeline") or []):
         if not isinstance(st_event, dict):
             continue
-        to_status = str(st_event.get("to") or "").strip().lower()
+        to_status = str(st_event.get("to") or st_event.get("event") or "").strip().lower()
         at = str(st_event.get("at") or "")
         if to_status == "pending_payment":
             events.append({
@@ -1097,16 +1119,45 @@ async def get_order_detail(order_id: str, request: Request, db: Session = Depend
     customer_lookup = _build_customer_lookup(db, tenant_id)
     vip_phones      = _build_vip_phone_set(db, tenant_id)
     unread_phones   = _build_unread_phone_set(db, tenant_id)
-    return {
-        "order": _serialise_order(
-            order,
-            customer_lookup=customer_lookup,
-            now=datetime.now(timezone.utc),
-            detailed=True,
-            vip_phones=vip_phones,
-            unread_phones=unread_phones,
-        ),
+
+    from core.order_shipment_service import (  # noqa: PLC0415
+        evaluate_create_shipment,
+        get_order_shipment,
+        resolve_tenant_cod_enabled,
+        serialise_shipment,
+    )
+    from core.order_shipping_policy import can_generate_label  # noqa: PLC0415
+
+    cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
+    shipment_row = get_order_shipment(db, tenant_id, order.id)
+    create_gate = evaluate_create_shipment(
+        order,
+        cod_enabled=cod_enabled,
+        existing_shipment=shipment_row,
+    )
+    label_gate = (
+        can_generate_label(order, shipment_row, cod_enabled=cod_enabled)
+        if shipment_row else None
+    )
+
+    payload = _serialise_order(
+        order,
+        customer_lookup=customer_lookup,
+        now=datetime.now(timezone.utc),
+        detailed=True,
+        vip_phones=vip_phones,
+        unread_phones=unread_phones,
+    )
+    payload["shipping"] = {
+        "can_create_shipment": create_gate.allowed,
+        "blocked_reason_key": create_gate.reason_key,
+        "blocked_reason_ar": create_gate.message_ar,
+        "can_generate_label": bool(label_gate and label_gate.allowed),
+        "label_blocked_reason_key": label_gate.reason_key if label_gate else None,
+        "label_blocked_reason_ar": label_gate.message_ar if label_gate else None,
+        "shipment": serialise_shipment(shipment_row) if shipment_row else None,
     }
+    return {"order": payload}
 
 
 # ── Payment reminder ───────────────────────────────────────────────────────
@@ -1342,5 +1393,191 @@ async def confirm_order_payment(
             vip_phones=vip_phones,
             unread_phones=unread_phones,
         ),
+    }
+
+
+# ── Shipments (foundation — internal only, no carrier API) ─────────────────
+
+def _shipment_verified_by(request: Request, tenant_id: int) -> str:
+    return str(
+        request.headers.get("X-Staff-User")
+        or request.headers.get("X-Merchant-User")
+        or f"tenant:{tenant_id}"
+    )
+
+
+@router.post("/{order_id}/shipments")
+async def create_order_shipment_endpoint(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create an internal shipment record when payment + address gates pass."""
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    from core.order_shipment_service import (  # noqa: PLC0415
+        create_order_shipment,
+        evaluate_create_shipment,
+        get_order_shipment,
+        resolve_tenant_cod_enabled,
+        serialise_shipment,
+    )
+
+    cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
+    existing = get_order_shipment(db, tenant_id, order.id)
+    gate = evaluate_create_shipment(
+        order,
+        cod_enabled=cod_enabled,
+        existing_shipment=existing,
+    )
+    if not gate.allowed:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": gate.reason_key,
+                "message_ar": gate.message_ar,
+            },
+        )
+
+    try:
+        shipment, shipment_payload = create_order_shipment(
+            db,
+            tenant_id=tenant_id,
+            order=order,
+            verified_by=_shipment_verified_by(request, tenant_id),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"reason": str(exc), "message_ar": gate.message_ar},
+        ) from exc
+
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    db.refresh(shipment)
+
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
+
+    order_payload = _serialise_order(
+        order,
+        customer_lookup=customer_lookup,
+        now=datetime.now(timezone.utc),
+        detailed=True,
+        vip_phones=vip_phones,
+        unread_phones=unread_phones,
+    )
+    from core.order_shipping_policy import MSG_SHIPMENT_EXISTS  # noqa: PLC0415
+
+    order_payload["shipping"] = {
+        "can_create_shipment": False,
+        "blocked_reason_key": "shipment_exists",
+        "blocked_reason_ar": MSG_SHIPMENT_EXISTS,
+        "can_generate_label": True,
+        "shipment": shipment_payload,
+    }
+
+    return {
+        "ok": True,
+        "shipment": shipment_payload,
+        "order": order_payload,
+    }
+
+
+@router.post("/{order_id}/shipments/{shipment_id}/generate-label")
+async def generate_shipment_label_endpoint(
+    order_id: str,
+    shipment_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Generate placeholder label metadata for an existing shipment."""
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    from models import OrderShipment  # noqa: PLC0415
+    from core.order_shipment_service import (  # noqa: PLC0415
+        generate_shipment_label,
+        resolve_tenant_cod_enabled,
+    )
+    from core.order_shipping_policy import can_generate_label  # noqa: PLC0415
+
+    shipment = (
+        db.query(OrderShipment)
+        .filter(
+            OrderShipment.id == shipment_id,
+            OrderShipment.tenant_id == tenant_id,
+            OrderShipment.order_id == order.id,
+        )
+        .first()
+    )
+    if not shipment:
+        raise HTTPException(status_code=404, detail="shipment_not_found")
+
+    cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
+    gate = can_generate_label(order, shipment, cod_enabled=cod_enabled)
+    if not gate.allowed:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": gate.reason_key,
+                "message_ar": gate.message_ar,
+            },
+        )
+
+    try:
+        shipment_payload = generate_shipment_label(
+            db,
+            tenant_id=tenant_id,
+            order=order,
+            shipment=shipment,
+            verified_by=_shipment_verified_by(request, tenant_id),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"reason": str(exc), "message_ar": gate.message_ar},
+        ) from exc
+
+    db.add(order)
+    db.add(shipment)
+    db.commit()
+    db.refresh(order)
+
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
+
+    order_payload = _serialise_order(
+        order,
+        customer_lookup=customer_lookup,
+        now=datetime.now(timezone.utc),
+        detailed=True,
+        vip_phones=vip_phones,
+        unread_phones=unread_phones,
+    )
+    order_payload["shipping"] = {
+        "can_create_shipment": False,
+        "blocked_reason_key": "shipment_exists",
+        "blocked_reason_ar": None,
+        "can_generate_label": False,
+        "shipment": shipment_payload,
+    }
+
+    return {
+        "ok": True,
+        "shipment": shipment_payload,
+        "order": order_payload,
     }
 
