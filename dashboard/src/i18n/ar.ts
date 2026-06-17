@@ -343,6 +343,7 @@ const ar: Translations = {
     salesBot:         'موظف مبيعات يعمل 24/7',
     kpiRevenue:       'الإيرادات',
     kpiConversations: 'المحادثات',
+    kpiConversationsToday: 'محادثات اليوم',
     kpiOrders:        'الطلبات',
     kpiAiRate:        'معدل الرد بالذكاء',
     recentConvTitle:  'آخر المحادثات',
@@ -381,6 +382,8 @@ const ar: Translations = {
     },
     waUsage: {
       title: 'استخدام واتساب هذا الشهر',
+      periodUsageTitle: 'استخدام فترة الاشتراك الحالية',
+      todayConversations: 'محادثات اليوم',
       emergencyStop: 'إيقاف طارئ',
       campaignsStopped: 'الحملات متوقفة',
       nearLimit90: 'اقتربت من الحد — 90%',

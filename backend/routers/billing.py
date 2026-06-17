@@ -318,8 +318,8 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
 
     # Use real monthly usage from the WhatsApp usage tracker
     try:
-        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
-        _usage_data = get_usage_this_month(db, tenant_id)
+        from core.wa_usage import get_current_period_usage  # noqa: PLC0415
+        _usage_data = get_current_period_usage(db, tenant_id)
     except Exception as exc:
         logger.warning("get_usage_this_month failed (non-fatal): %s", exc)
         _usage_data = {
@@ -1215,8 +1215,8 @@ async def billing_debug_current(
     # ── 6. WA usage (the actual source the Overview page reads) ──────
     @_safe_section("wa_usage_overview_source")
     def _wa_usage_view():
-        from core.wa_usage import get_usage_this_month  # noqa: PLC0415
-        return get_usage_this_month(db, int(tenant_id))
+        from core.wa_usage import get_current_period_usage  # noqa: PLC0415
+        return get_current_period_usage(db, int(tenant_id))
 
     # ── 7. Plain-DB peek at sub 11 metadata (for tenant 33 case) ─────
     # When the merchant has many subs, this surfaces the row metadata

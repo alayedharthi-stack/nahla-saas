@@ -659,6 +659,23 @@ def build_billing_status_payload(
         "status":                  lifecycle["lifecycle_status"],
         "started_at":              lifecycle.get("subscription_started_at"),
         **lifecycle,
+        **{
+            k: usage_data[k]
+            for k in (
+                "period_mode",
+                "period_started_at",
+                "period_ends_at",
+                "current_period_started_at",
+                "current_period_ends_at",
+                "subscription_id",
+                "lifetime_conversations_used",
+                "today_conversations_count",
+                "remaining_conversations",
+                "current_period_conversations_used",
+                "current_period_conversations_limit",
+            )
+            if k in usage_data
+        },
     }
 
     sub_for_plan = active_sub or record_sub

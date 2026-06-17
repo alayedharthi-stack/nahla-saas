@@ -339,6 +339,7 @@ const en: Translations = {
     salesBot:         'Sales agent working 24/7',
     kpiRevenue:       'Revenue',
     kpiConversations: 'Conversations',
+    kpiConversationsToday: 'Conversations today',
     kpiOrders:        'Orders',
     kpiAiRate:        'AI Response Rate',
     recentConvTitle:  'Recent Conversations',
@@ -377,6 +378,8 @@ const en: Translations = {
     },
     waUsage: {
       title: 'WhatsApp usage this month',
+      periodUsageTitle: 'Current subscription period usage',
+      todayConversations: 'Conversations today',
       emergencyStop: 'Emergency stop',
       campaignsStopped: 'Campaigns paused',
       nearLimit90: 'Near limit — 90%',

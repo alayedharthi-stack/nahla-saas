@@ -3070,14 +3070,17 @@ class StoreSyncService:
         window_start_naive = window_start.replace(tzinfo=None)
         conversations_period = 0
         try:
-            conversations_period = (
-                self.db.query(func.count(ConversationLog.id))
-                .filter(
-                    ConversationLog.tenant_id == self.tenant_id,
-                    ConversationLog.conversation_started_at >= window_start_naive,
-                )
-                .scalar()
-            ) or 0
+            from core.wa_usage import count_conversations_in_window  # noqa: PLC0415
+
+            window_end = None
+            if period == "this_month":
+                if today.month == 12:
+                    window_end = datetime(today.year + 1, 1, 1, tzinfo=timezone.utc)
+                else:
+                    window_end = datetime(today.year, today.month + 1, 1, tzinfo=timezone.utc)
+            conversations_period = count_conversations_in_window(
+                self.db, self.tenant_id, window_start, window_end,
+            )
         except Exception as exc:
             logger.debug("[StoreSync] ConversationLog count failed: %s", exc)
 
