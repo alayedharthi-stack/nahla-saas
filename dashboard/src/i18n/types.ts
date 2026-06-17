@@ -600,6 +600,7 @@ export interface Translations {
       menuButtonLabel: string
     }
     scrollToBottom: string
+    aiPausedBadge: string
     errors: {
       refreshFailed: string
       loadMoreFailed: string

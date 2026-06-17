@@ -580,6 +580,7 @@ const ar: Translations = {
       menuButtonLabel: 'إغلاق فلاتر المحادثات',
     },
     scrollToBottom: 'العودة لآخر رسالة',
+    aiPausedBadge: 'ذكاء متوقف',
     errors: {
       refreshFailed: 'تعذّر تحديث المحادثات مؤقتًا، سنعيد المحاولة تلقائيًا.',
       loadMoreFailed: 'تعذّر تحميل المزيد مؤقتًا، حاول خلال ثوانٍ.',

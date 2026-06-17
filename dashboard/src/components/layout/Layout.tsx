@@ -4,6 +4,7 @@ import Sidebar from './Sidebar'
 import Header from './Header'
 import TrialBanner from '../ui/TrialBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
+import { MobileChatFullscreenProvider, useMobileChatFullscreen } from '../../context/MobileChatFullscreenContext'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { getApiBase } from '../../auth'
@@ -194,8 +195,17 @@ const PAGE_META: Record<string, MetaSelector> = {
 }
 
 export default function Layout() {
+  return (
+    <MobileChatFullscreenProvider>
+      <LayoutShell />
+    </MobileChatFullscreenProvider>
+  )
+}
+
+function LayoutShell() {
   const { pathname } = useLocation()
   const { t, dir } = useLanguage()
+  const { active: mobileChatFullscreen } = useMobileChatFullscreen()
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const metaSelector =
@@ -214,19 +224,27 @@ export default function Layout() {
        * ms-60 on lg+ (sidebar is always visible and takes up 240 px).
        */}
       <div className="flex-1 ms-0 lg:ms-60 flex flex-col min-h-0 h-dvh max-h-dvh overflow-hidden">
-        <Header
-          title={meta.title}
-          subtitle={meta.subtitle}
-          onMenuClick={() => setSidebarOpen(o => !o)}
-        />
-        <ImpersonationBanner />
-        <SupportAccessWarningBanner />
-        <TrialBanner />
-        <main dir={dir} className="flex-1 min-h-0 p-3 md:p-6 overflow-y-auto overflow-x-hidden dashboard-main-scroll">
+        {!mobileChatFullscreen && (
+          <>
+            <Header
+              title={meta.title}
+              subtitle={meta.subtitle}
+              onMenuClick={() => setSidebarOpen(o => !o)}
+            />
+            <ImpersonationBanner />
+            <SupportAccessWarningBanner />
+            <TrialBanner />
+          </>
+        )}
+        <main
+          dir={dir}
+          className={`flex-1 min-h-0 overflow-x-hidden dashboard-main-scroll ${
+            mobileChatFullscreen ? 'p-0 overflow-hidden' : 'p-3 md:p-6 overflow-y-auto'
+          }`}
+        >
           <Outlet />
         </main>
-        {/* iOS home-bar safe area */}
-        <div className="pb-safe-bottom" />
+        {!mobileChatFullscreen && <div className="pb-safe-bottom" />}
       </div>
     </div>
   )
