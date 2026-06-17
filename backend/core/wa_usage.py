@@ -415,7 +415,10 @@ def get_merchant_timezone(db: Session, tenant_id: int):
             if cand:
                 tz_name = cand
     except Exception:
-        pass
+        logger.exception(
+            "[WaUsage] merchant_timezone_settings_lookup_failed tenant=%s",
+            tenant_id,
+        )
 
     if ZoneInfo is not None:
         try:
@@ -424,7 +427,11 @@ def get_merchant_timezone(db: Session, tenant_id: int):
             try:
                 return ZoneInfo(DEFAULT_MERCHANT_TZ)
             except Exception:
-                pass
+                logger.exception(
+                    "[WaUsage] merchant_timezone_zoneinfo_default_failed tenant=%s tz=%s",
+                    tenant_id,
+                    DEFAULT_MERCHANT_TZ,
+                )
     return timezone(timedelta(hours=3))
 
 
