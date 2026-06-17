@@ -27,6 +27,7 @@ import {
   type OrderTimelineEvent,
 } from '../api/featureReality'
 import { formatRiyadh } from '../lib/datetime'
+import { formatOrderNumberLabel, orderApiId } from '../lib/orderRoutes'
 
 const STATUS_VARIANT: Record<string, 'green' | 'amber' | 'red' | 'slate'> = {
   paid:      'green',
@@ -106,8 +107,9 @@ export default function OrderDetail() {
 
   const reload = (): Promise<void> => {
     if (!orderId) return Promise.resolve()
+    const routeId = orderId.replace(/^#/, '')
     return featureRealityApi
-      .orderDetail(orderId)
+      .orderDetail(routeId)
       .then(({ order }) => { setOrder(order) })
       .catch((e) => setError(e instanceof Error ? e.message : 'تعذّر تحميل تفاصيل الطلب'))
   }
@@ -125,7 +127,7 @@ export default function OrderDetail() {
     setReminderBusy(true)
     setReminderToast(null)
     try {
-      const res = await featureRealityApi.sendOrderPaymentReminder(order.internal_id || order.id)
+      const res = await featureRealityApi.sendOrderPaymentReminder(orderApiId(order))
       if (res.sent) {
         setReminderToast({ ok: true, text: 'تم إرسال تذكير الدفع بنجاح ✅' })
         await reload()
@@ -158,7 +160,7 @@ export default function OrderDetail() {
     setConfirmBusy(true)
     setConfirmToast(null)
     try {
-      const res = await featureRealityApi.confirmOrderPayment(order.internal_id || order.id)
+      const res = await featureRealityApi.confirmOrderPayment(orderApiId(order))
       setConfirmDialogOpen(false)
       const notice = res.result.merchant_notice
       setConfirmToast({
@@ -185,7 +187,7 @@ export default function OrderDetail() {
     setShipmentBusy(true)
     setShipmentToast(null)
     try {
-      const res = await featureRealityApi.createOrderShipment(order.internal_id || order.id)
+      const res = await featureRealityApi.createOrderShipment(orderApiId(order))
       setOrder(res.order)
       setShipmentToast({ ok: true, text: 'تم إنشاء الشحنة بنجاح ✅' })
     } catch (e) {
@@ -204,7 +206,7 @@ export default function OrderDetail() {
     setShipmentToast(null)
     try {
       const res = await featureRealityApi.generateOrderShipmentLabel(
-        order.internal_id || order.id,
+        orderApiId(order),
         order.shipping.shipment.id,
       )
       setOrder(res.order)
@@ -266,7 +268,7 @@ export default function OrderDetail() {
             <ArrowRight className="w-3 h-3" /> العودة إلى الطلبات
           </Link>
           <h1 className="text-xl font-semibold text-slate-900" dir="ltr">
-            {order.order_number || order.id}
+            {formatOrderNumberLabel(order)}
           </h1>
           <div className="flex items-center gap-2 flex-wrap">
             <Badge label={order.status_label_ar || order.status_label || order.status} variant={statusCls} dot />

@@ -8,6 +8,7 @@ import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { ShoppingCart, Clock, CheckCircle, MessageSquare } from 'lucide-react'
 import { featureRealityApi, type DashboardOrder, type NeedsActionLevel, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
+import { formatOrderNumberLabel, orderDetailPath } from '../lib/orderRoutes'
 import { formatRiyadh } from '../lib/datetime'
 
 // UI_ONLY_GUARD: only static labels below use t(); customer/product names stay as API data.
@@ -241,10 +242,10 @@ export default function Orders() {
                 const chips = o.action_chips?.length ? o.action_chips : o.needs_action
                 const displayStatus = o.status_label_ar || o.raw_status_label || o.status_label || statusLabel(o.status as OrderStatus)
                 return (
-                  <tr key={o.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                  <tr key={o.internal_id || o.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
                     <td className="px-5 py-3.5">
-                      <Link to={`/orders/${o.id}`} className="text-xs font-semibold text-brand-600 hover:underline">
-                        #{o.order_number || o.id}
+                      <Link to={orderDetailPath(o)} className="text-xs font-semibold text-brand-600 hover:underline">
+                        {formatOrderNumberLabel(o)}
                       </Link>
                       {o.is_ai_created && (
                         <span className="inline-flex items-center text-brand-600 ms-1" title={op.badges.createdByAI}>
