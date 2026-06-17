@@ -7,6 +7,7 @@ Uses intent, state, and operational signals — not customer phrase matching.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..types import (
@@ -17,6 +18,7 @@ from ..types import (
     INTENT_ASK_SHIPPING,
     INTENT_GENERAL,
     INTENT_HESITATION,
+    INTENT_START_ORDER,
     INTENT_TRACK_ORDER,
     BrainContext,
 )
@@ -37,6 +39,9 @@ from .types import (
     RECOVERY_DETERMINISTIC,
     RECOVERY_GENERATIVE,
 )
+
+
+logger = logging.getLogger("nahla.brain.clarification.classifier")
 
 
 def _has_resolved_product_query(ctx: BrainContext) -> bool:
@@ -78,6 +83,37 @@ def classify_missing_information(
     state = getattr(ctx, "state", None)
     focus = dict(getattr(state, "current_product_focus", None) or {})
 
+    try:
+        from ..commerce.conversation_context_reset import is_active_order_context  # noqa: PLC0415
+        from ..commerce.product_ordering_prompt import next_missing_order_field  # noqa: PLC0415
+
+        if is_active_order_context(state):
+            missing_field = next_missing_order_field(ctx)
+            if missing_field:
+                return ClarificationSpec(
+                    ambiguity_class=AMBIGUITY_MISSING_VARIANT
+                    if missing_field == "variant"
+                    else AMBIGUITY_MISSING_QUANTITY,
+                    recovery_mode=RECOVERY_DETERMINISTIC,
+                    evidence=evidence,
+                    trigger=trigger,
+                    structured_prompt={
+                        "field": missing_field,
+                        "product_title": str(focus.get("title") or "").strip(),
+                    },
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if intent_name == INTENT_START_ORDER and not focus and not _has_resolved_product_query(ctx):
+        return ClarificationSpec(
+            ambiguity_class=AMBIGUITY_MISSING_PRODUCT_REF,
+            recovery_mode=RECOVERY_DETERMINISTIC,
+            evidence=evidence,
+            trigger=trigger,
+            structured_prompt={"field": "product_order"},
+        )
+
     candidate_titles = list(evidence.get("search_candidate_titles") or [])
     if candidate_titles:
         return ClarificationSpec(
@@ -118,7 +154,9 @@ def classify_missing_information(
                 compose_topic=COMPOSE_TOPIC_SOLUTION_SEEKING,
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[SOLUTION_SEEKING_CLASSIFY] classify_solution_seeking_commerce failed",
+        )
 
     if intent_name in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         if not focus and not _has_resolved_product_query(ctx):

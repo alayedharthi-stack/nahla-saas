@@ -1355,14 +1355,11 @@ class DefaultDecisionEngine:
                     _last_action,
                     (state.current_product_focus or {}).get("title"),
                 )
+                from ..commerce.product_ordering_prompt import build_ordering_clarify_args  # noqa: PLC0415
+
                 return Decision(
                     action=ACTION_CLARIFY,
-                    args={
-                        "question": (
-                            "أرسل اسم المنتج الذي تريده، "
-                            "أو اكتب \"أكثر مبيعاً\" لأعرض لك القائمة مجدداً."
-                        ),
-                    },
+                    args=build_ordering_clarify_args(ctx),
                     reason="numeric pick after list — candidates lost, re-ask",
                     confidence=0.75,
                 )
@@ -2820,12 +2817,14 @@ class DefaultDecisionEngine:
                     "directing to search | tenant=%s intent=%s query=%r",
                     ctx.tenant_id, intent.name, _query,
                 )
+                from ..commerce.product_ordering_prompt import build_ordering_clarify_args  # noqa: PLC0415
+
                 return Decision(
                     action=ACTION_SEARCH_PRODUCTS if _query else ACTION_CLARIFY,
                     args=(
                         {"query": _query}
                         if _query
-                        else {"question": "ما المنتج الذي تودّ طلبه؟ يمكنك ذكر الاسم أو قول «أكثر مبيعاً»."}
+                        else build_ordering_clarify_args(ctx)
                     ),
                     reason="ordering_stage_safety_net: no product focus — ask customer to pick",
                     confidence=0.75,

@@ -10,10 +10,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ..types import BrainContext
 from .types import ClarificationSpec
 
 
-def build_deterministic_question(spec: ClarificationSpec) -> Optional[str]:
+def build_deterministic_question(
+    spec: ClarificationSpec,
+    *,
+    ctx: Optional[BrainContext] = None,
+) -> Optional[str]:
     """
     Build a clarify question from ``structured_prompt`` when options are known.
 
@@ -37,6 +42,13 @@ def build_deterministic_question(spec: ClarificationSpec) -> Optional[str]:
         lines.append("(اكتب رقم الخيار أو اسمه)")
         return "\n".join(lines)
 
+    if field == "product_order":
+        if ctx is not None:
+            from ..commerce.product_ordering_prompt import build_product_ordering_prompt  # noqa: PLC0415
+
+            return build_product_ordering_prompt(ctx)
+        return None
+
     if field == "variant":
         title = str(sp.get("product_title") or "").strip()
         if title:
@@ -45,12 +57,21 @@ def build_deterministic_question(spec: ClarificationSpec) -> Optional[str]:
 
     if field == "quantity":
         title = str(sp.get("product_title") or "").strip()
-        unit = str(sp.get("unit") or "").strip()
-        if title and unit:
-            return f"كم {unit} تقصد من «{title}»؟"
-        if unit:
-            return f"كم {unit} تقصد؟"
-        return None
+        if ctx is not None:
+            from ..commerce.product_ordering_prompt import build_product_ordering_prompt  # noqa: PLC0415
+
+            prompt = build_product_ordering_prompt(ctx)
+            if prompt and "كم" in prompt:
+                return prompt
+        if title:
+            return f"تمام، كم الكمية اللي تبيها من «{title}»؟"
+        return "تمام، كم الكمية اللي تبيها؟"
+
+    if field == "address":
+        return "تمام، وين التوصيل؟ أرسل المدينة أو رابط الموقع."
+
+    if field == "payment":
+        return "تمام، تبي الدفع تحويل بنكي ولا عند الاستلام؟"
 
     return None
 
