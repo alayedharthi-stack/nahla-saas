@@ -373,8 +373,41 @@ def apply_catalog_search_evidence_gate(
     return _weak_query_llm_decision(ctx, decision, query)
 
 
+CATALOG_MISS_CHOSEN_PATH = "catalog_miss_deterministic"
+
+_CATALOG_MISS_NO_MATCH_VARIANTS = (
+    "ما ظهر عندي تطابق واضح في الكتالوج حالياً. "
+    "اكتب اسم المنتج كما يظهر في المتجر أو حدّد النوع/الحجم المطلوب.",
+    "ما لقيت تطابقاً واضحاً في الكتالوج حالياً. "
+    "أرسل اسم المنتج كما في المتجر وساعدك.",
+)
+
+_CATALOG_MISS_NO_SYNCED_VARIANTS = (
+    "ما ظهرت منتجات متزامنة حالياً، "
+    "أقدر أساعدك إذا كتبت اسم المنتج كما يظهر في المتجر.",
+    "لا توجد منتجات متزامنة الآن. "
+    "اكتب اسم المنتج كما يظهر في المتجر.",
+)
+
+
+def compose_catalog_miss_deterministic_reply(
+    *,
+    no_synced_products: bool = False,
+    variant: int = 0,
+) -> str:
+    """Honest deterministic reply after catalog lookup miss — never LLM."""
+    pool = (
+        _CATALOG_MISS_NO_SYNCED_VARIANTS
+        if no_synced_products
+        else _CATALOG_MISS_NO_MATCH_VARIANTS
+    )
+    return pool[variant % len(pool)]
+
+
 __all__ = [
+    "CATALOG_MISS_CHOSEN_PATH",
     "apply_catalog_search_evidence_gate",
+    "compose_catalog_miss_deterministic_reply",
     "has_catalog_search_evidence",
     "has_conversation_fulfillment_context",
     "is_discourse_only_query",

@@ -296,20 +296,30 @@ class DefaultComposer:
                                 f"{data.get('message') or result.error or 'unknown'}"
                             ),
                         )
+                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
                         return compose_resolved_product_search_miss(
                             subject,
                             variant=self._variant_idx(ctx),
                         )
-                    if subject:
-                        logger.info(
-                            "[CATALOG_SEARCH_GATE] search_miss_skip_template "
-                            "tenant=%s subject=%r query=%r → llm_compose",
-                            getattr(ctx, "tenant_id", None),
-                            subject[:40],
-                            (query or "")[:40],
-                        )
-                        result.data["chosen_path"] = "catalog_miss_llm_fallback"
-                        return await self._llm_compose(ctx, result)
+                    from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
+                        CATALOG_MISS_CHOSEN_PATH,
+                        compose_catalog_miss_deterministic_reply,
+                    )
+                    no_synced = data.get("message") == "no_products_in_catalog"
+                    variant = self._variant_idx(ctx)
+                    result.data["chosen_path"] = CATALOG_MISS_CHOSEN_PATH
+                    logger.info(
+                        "[CATALOG_SEARCH_GATE] search_miss_deterministic "
+                        "tenant=%s subject=%r query=%r no_synced=%s",
+                        getattr(ctx, "tenant_id", None),
+                        (subject or "")[:40],
+                        (query or "")[:40],
+                        no_synced,
+                    )
+                    return compose_catalog_miss_deterministic_reply(
+                        no_synced_products=no_synced,
+                        variant=variant,
+                    )
                 except Exception:
                     logger.exception(
                         "[RESPONDER] resolved_product_search_miss compose failed",

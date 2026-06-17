@@ -225,7 +225,7 @@ def test_genuine_product_miss_may_use_search_miss_template() -> None:
     assert should_use_search_miss_template(ctx, "سدر الحجاز", "سدر الحجاز") is True
 
 
-def test_responder_search_miss_falls_back_to_llm_for_weak_subject() -> None:
+def test_responder_search_miss_uses_deterministic_template_for_weak_subject() -> None:
     ctx = _ctx("بكم الرياض", intent_name="ask_price")
     composer = DefaultComposer()
     decision = Decision(
@@ -240,11 +240,10 @@ def test_responder_search_miss_falls_back_to_llm_for_weak_subject() -> None:
     )
 
     with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-        mock_llm.return_value = "رد طبيعي من السياق"
         text = asyncio.run(composer.compose(decision, result, ctx))
-    mock_llm.assert_awaited_once()
-    assert text == "رد طبيعي من السياق"
-    assert "ما ظهر عندي في الكتالوج" not in text
+    mock_llm.assert_not_awaited()
+    assert "الكتالوج" in text
+    assert "ما ظهر عندي تطابق" in text or "ما لقيت تطابق" in text
 
 
 def test_responder_search_miss_uses_template_for_catalog_like_subject() -> None:
