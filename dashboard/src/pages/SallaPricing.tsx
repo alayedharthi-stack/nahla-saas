@@ -68,11 +68,10 @@ function SallaPlanCard({
   const isLoading      = checkingOut === plan.slug
   const isOtherLoading = checkingOut !== null && checkingOut !== plan.slug
 
-  const isPaidActive = billingStatus?.has_subscription
-    && billingStatus.status === 'active'
+  const isPaidActive = billingStatus?.lifecycle_status === 'paid_active'
     && billingStatus.plan?.slug === plan.slug
 
-  const isTrialPlan = billingStatus?.is_trial && !billingStatus.has_subscription
+  const isTrialPlan = billingStatus?.lifecycle_status === 'trial_active'
 
   return (
     <div

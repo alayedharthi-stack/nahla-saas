@@ -263,65 +263,381 @@ def ensure_subscription_ends_at(sub) -> None:
     sub.ends_at = subscription_period_end(anchor).replace(tzinfo=None)
 
 
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    coerced = _coerce_utc(dt)
+    return coerced.isoformat() if coerced else None
+
+
+def _days_until(end: Optional[datetime]) -> int:
+    coerced = _coerce_utc(end)
+    if not coerced:
+        return 0
+    now = datetime.now(timezone.utc)
+    remaining = (coerced - now).total_seconds()
+    if remaining <= 0:
+        return 0
+    return max(0, int(remaining / 86400) + 1)
+
+
+def _effective_sub_ends_at(sub) -> Optional[datetime]:
+    if sub is None:
+        return None
+    ends = _coerce_utc(sub.ends_at)
+    if ends:
+        return ends
+    meta = sub.extra_metadata or {}
+    raw_paid = meta.get("paid_at")
+    anchor = None
+    if raw_paid:
+        try:
+            anchor = _coerce_utc(datetime.fromisoformat(str(raw_paid)))
+        except (TypeError, ValueError):
+            anchor = None
+    anchor = anchor or _coerce_utc(sub.started_at) or datetime.now(timezone.utc)
+    return subscription_period_end(anchor)
+
+
+def _sub_was_paid(sub) -> bool:
+    if sub is None:
+        return False
+    meta = sub.extra_metadata or {}
+    if meta.get("paid_at") or meta.get("moyasar_payment_id"):
+        return True
+    activated_by = meta.get("activated_by") or meta.get("activation_source") or ""
+    return activated_by in ("dashboard", "demo_checkout", "webhook_invoice", "reconcile", "result_page_poll")
+
+
+def get_latest_paid_subscription(db: Session, tenant_id: int):
+    from models import BillingPayment, BillingSubscription  # noqa: PLC0415
+
+    subs = (
+        db.query(BillingSubscription)
+        .filter(BillingSubscription.tenant_id == tenant_id)
+        .order_by(BillingSubscription.id.desc())
+        .all()
+    )
+    for sub in subs:
+        if _sub_was_paid(sub):
+            return sub
+
+    payment = (
+        db.query(BillingPayment)
+        .filter(
+            BillingPayment.tenant_id == tenant_id,
+            BillingPayment.status == "paid",
+        )
+        .order_by(BillingPayment.paid_at.desc(), BillingPayment.id.desc())
+        .first()
+    )
+    if payment and payment.subscription_id:
+        return (
+            db.query(BillingSubscription)
+            .filter(BillingSubscription.id == payment.subscription_id)
+            .first()
+        )
+    return None
+
+
+def get_payment_history(db: Session, tenant_id: int, *, limit: int = 10) -> List[Dict[str, Any]]:
+    from models import BillingPayment, BillingPlan, BillingSubscription  # noqa: PLC0415
+
+    rows = (
+        db.query(BillingPayment)
+        .filter(BillingPayment.tenant_id == tenant_id)
+        .order_by(BillingPayment.paid_at.desc(), BillingPayment.id.desc())
+        .limit(limit)
+        .all()
+    )
+    history: List[Dict[str, Any]] = []
+    for row in rows:
+        plan_name = "—"
+        if row.subscription_id:
+            sub = (
+                db.query(BillingSubscription)
+                .filter(BillingSubscription.id == row.subscription_id)
+                .first()
+            )
+            if sub and sub.plan_id:
+                plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+                if plan:
+                    plan_name = (plan.extra_metadata or {}).get("name_ar") or plan.name
+        history.append({
+            "paid_at":    _iso(row.paid_at),
+            "plan_name":  plan_name,
+            "amount_sar": row.amount_sar,
+            "status":     row.status,
+            "gateway":    row.gateway or "unknown",
+        })
+    return history
+
+
+def _load_plan_row(db: Session, sub) -> tuple:
+    from models import BillingPlan  # noqa: PLC0415
+
+    if not sub or not sub.plan_id:
+        return None, "", ""
+    plan = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
+    if not plan:
+        return None, "", ""
+    meta = plan.extra_metadata or {}
+    return plan, meta.get("name_ar") or plan.name, plan.slug
+
+
+def _lifecycle_headline_ar(
+    lifecycle_status: str,
+    *,
+    plan_name: str,
+    trial_end: Optional[str],
+    subscription_end: Optional[str],
+) -> str:
+    trial_date = (trial_end or "")[:10] or "—"
+    sub_date = (subscription_end or "")[:10] or "—"
+    plan = plan_name or "الباقة"
+
+    if lifecycle_status == "trial_pending_whatsapp":
+        return "تجربتك المجانية لم تبدأ بعد — اربط واتساب لبدء التجربة المجانية"
+    if lifecycle_status == "trial_active":
+        return f"أنت الآن في التجربة المجانية — تنتهي بتاريخ: {trial_date}"
+    if lifecycle_status == "trial_expired":
+        return f"انتهت تجربتك المجانية بتاريخ: {trial_date} — اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي"
+    if lifecycle_status == "paid_active":
+        return f"اشتراكك في باقة {plan} نشط — ينتهي بتاريخ: {sub_date}"
+    if lifecycle_status == "paid_expired":
+        return f"انتهى اشتراكك في باقة {plan} بتاريخ: {sub_date} — يرجى التجديد لاستمرار الردود الذكية وموظف المبيعات الذكي"
+    return ""
+
+
+def _lifecycle_status_label_ar(lifecycle_status: str) -> str:
+    return {
+        "trial_pending_whatsapp": "بانتظار ربط واتساب",
+        "trial_active":           "تجربة مجانية",
+        "trial_expired":          "انتهت التجربة المجانية",
+        "paid_active":            "نشط",
+        "paid_expired":           "منتهي",
+    }.get(lifecycle_status, "—")
+
+
+def resolve_billing_lifecycle(
+    db: Session,
+    tenant_id: int,
+    tenant,
+    *,
+    active_sub=None,
+) -> Dict[str, Any]:
+    """Decide the merchant-facing lifecycle state (trial vs paid, active vs expired)."""
+    from core.billing import has_billing_access  # noqa: PLC0415
+
+    trial_info = compute_trial_info(tenant)
+    latest_paid_sub = get_latest_paid_subscription(db, tenant_id)
+    payments = get_payment_history(db, tenant_id, limit=1)
+    has_paid_history = latest_paid_sub is not None or bool(payments)
+
+    record_sub = active_sub or latest_paid_sub
+    _, plan_name_ar, plan_slug = _load_plan_row(db, record_sub)
+
+    now = datetime.now(timezone.utc)
+    sub_started = _coerce_utc(record_sub.started_at) if record_sub else None
+    sub_ends = _effective_sub_ends_at(record_sub) if record_sub else None
+    sub_expired = bool(sub_ends and sub_ends <= now) if record_sub else False
+
+    if active_sub:
+        lifecycle_status = "paid_active"
+        days_remaining = _days_until(sub_ends)
+        warning_level = _warning_level(days_remaining, expired=False)
+        is_trial = False
+        trial_expired = False
+        subscription_expired = False
+        has_subscription = True
+    elif has_paid_history and record_sub:
+        lifecycle_status = "paid_expired"
+        days_remaining = 0
+        warning_level = "expired"
+        is_trial = False
+        trial_expired = False
+        subscription_expired = True
+        has_subscription = False
+    elif trial_info.get("trial_pending_whatsapp"):
+        lifecycle_status = "trial_pending_whatsapp"
+        days_remaining = 0
+        warning_level = "none"
+        is_trial = False
+        trial_expired = False
+        subscription_expired = False
+        has_subscription = False
+    elif trial_info.get("is_trial"):
+        lifecycle_status = "trial_active"
+        days_remaining = trial_info["trial_days_remaining"]
+        warning_level = trial_info.get("warning_level", "none")
+        is_trial = True
+        trial_expired = False
+        subscription_expired = False
+        has_subscription = False
+    elif trial_info.get("trial_expired"):
+        lifecycle_status = "trial_expired"
+        days_remaining = 0
+        warning_level = "expired"
+        is_trial = False
+        trial_expired = True
+        subscription_expired = False
+        has_subscription = False
+    else:
+        lifecycle_status = "trial_expired"
+        days_remaining = 0
+        warning_level = "expired"
+        is_trial = False
+        trial_expired = True
+        subscription_expired = False
+        has_subscription = False
+
+    last_payment = payments[0] if payments else None
+    payment_provider = "unknown"
+    if last_payment:
+        payment_provider = last_payment.get("gateway") or "unknown"
+    elif record_sub:
+        payment_provider = (record_sub.extra_metadata or {}).get("gateway") or "moyasar"
+
+    headline = _lifecycle_headline_ar(
+        lifecycle_status,
+        plan_name=plan_name_ar,
+        trial_end=trial_info.get("trial_end"),
+        subscription_end=_iso(sub_ends),
+    )
+
+    return {
+        "lifecycle_status":            lifecycle_status,
+        "lifecycle_status_label_ar":   _lifecycle_status_label_ar(lifecycle_status),
+        "headline_ar":                 headline,
+        "plan_name":                   plan_name_ar or None,
+        "plan_slug":                   plan_slug or None,
+        "has_subscription":            has_subscription,
+        "is_trial":                    is_trial,
+        "trial_pending_whatsapp":      lifecycle_status == "trial_pending_whatsapp",
+        "trial_expired":               trial_expired,
+        "trial_days_remaining":        trial_info["trial_days_remaining"] if is_trial else 0,
+        "trial_started_at":            trial_info.get("trial_started_at"),
+        "trial_ends_at":               trial_info.get("trial_end"),
+        "subscription_started_at":     _iso(sub_started),
+        "subscription_ends_at":        _iso(sub_ends),
+        "subscription_expired":        subscription_expired,
+        "days_remaining":              days_remaining,
+        "warning_level":               warning_level,
+        "status_reason_ar":            headline,
+        "has_paid_subscription_history": has_paid_history,
+        "last_payment_at":             last_payment.get("paid_at") if last_payment else None,
+        "last_payment_amount":         last_payment.get("amount_sar") if last_payment else 0,
+        "payment_provider":            payment_provider,
+        "payment_history":             get_payment_history(db, tenant_id),
+        "ai_auto_replies_allowed":     has_billing_access(db, tenant_id),
+        "manual_replies_allowed":      True,
+        "whatsapp_connected":          _tenant_has_connected_whatsapp(db, tenant_id),
+        "record_sub":                  record_sub,
+        "active_sub":                  active_sub,
+    }
+
+
+def build_billing_status_payload(
+    db: Session,
+    tenant_id: int,
+    tenant,
+    *,
+    active_sub,
+    conversations_used: int,
+    usage_data: Dict[str, Any],
+    integration_fee_sar: int,
+) -> Dict[str, Any]:
+    """Unified billing/status response used by the dashboard."""
+    from core.billing import is_launch_discount_active  # noqa: PLC0415
+
+    lifecycle = resolve_billing_lifecycle(db, tenant_id, tenant, active_sub=active_sub)
+    record_sub = lifecycle.pop("record_sub")
+    active_sub = lifecycle.pop("active_sub")
+
+    payload: Dict[str, Any] = {
+        "conversations_used":      conversations_used,
+        "conversations_limit":     usage_data["conversations_limit"],
+        "usage_pct":               usage_data["usage_pct"],
+        "conversations_exceeded":  usage_data["exceeded"],
+        "integration_fee_sar":     integration_fee_sar,
+        "launch_discount_active":  False,
+        "current_price_sar":       0,
+        "plan":                    None,
+        "status":                  lifecycle["lifecycle_status"],
+        "started_at":              lifecycle.get("subscription_started_at"),
+        **lifecycle,
+    }
+
+    sub_for_plan = active_sub or record_sub
+    if sub_for_plan:
+        plan, plan_name_ar, _slug = _load_plan_row(db, sub_for_plan)
+        if plan:
+            meta = plan.extra_metadata or {}
+            launch = is_launch_discount_active(sub_for_plan) if active_sub else False
+            price = meta.get("launch_price_sar", plan.price_sar) if launch else plan.price_sar
+            payload["plan"] = {
+                "id":               plan.id,
+                "slug":             plan.slug,
+                "name":             plan.name,
+                "name_ar":          plan_name_ar,
+                "price_sar":        plan.price_sar,
+                "launch_price_sar": meta.get("launch_price_sar", plan.price_sar),
+                "features":         plan.features or [],
+                "limits":           plan.limits or {},
+            }
+            payload["launch_discount_active"] = launch
+            payload["current_price_sar"] = int(price)
+
+    return payload
+
+
 def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
     """
     Read-only audit snapshot for a tenant's billing / trial state.
     Used for operator review (e.g. tenant 33) and regression tests.
     """
-    from models import Tenant, WhatsAppConnection, BillingSubscription  # noqa: PLC0415
-    from core.billing import has_billing_access  # noqa: PLC0415
+    from models import Tenant  # noqa: PLC0415
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         return {"tenant_id": tenant_id, "found": False}
 
-    conn = (
-        db.query(WhatsAppConnection)
-        .filter(WhatsAppConnection.tenant_id == tenant_id)
-        .first()
-    )
-    sub = (
-        db.query(BillingSubscription)
-        .filter(
-            BillingSubscription.tenant_id == tenant_id,
-            BillingSubscription.status == "active",
-        )
-        .order_by(BillingSubscription.started_at.desc())
-        .first()
-    )
-    effective_sub = get_tenant_subscription(db, tenant_id)
+    active_sub = get_tenant_subscription(db, tenant_id)
+    latest_paid = get_latest_paid_subscription(db, tenant_id)
+    lifecycle = resolve_billing_lifecycle(db, tenant_id, tenant, active_sub=active_sub)
     trial = compute_trial_info(tenant)
 
-    wa_connected = bool(conn and conn.status == "connected" and conn.phone_number_id)
     first_wa = _coerce_utc(getattr(tenant, "first_whatsapp_connected_at", None))
-    if not first_wa and conn:
-        first_wa = _coerce_utc(getattr(conn, "whatsapp_ai_live_since", None)) or _coerce_utc(
-            conn.connected_at
-        )
+    if not first_wa:
+        first_wa = _first_whatsapp_connection_at(db, tenant_id)
 
-    sub_started = _coerce_utc(sub.started_at) if sub and sub.started_at else None
-    sub_ends = _coerce_utc(sub.ends_at) if sub and sub.ends_at else None
-    now = datetime.now(timezone.utc)
-    sub_expired = bool(sub_ends and sub_ends <= now)
+    raw_sub = active_sub or latest_paid
 
     return {
         "tenant_id": tenant_id,
         "found": True,
         "store_name": tenant.name,
         "tenant_created_at": tenant.created_at.isoformat() if tenant.created_at else None,
-        "whatsapp_connected": wa_connected,
-        "whatsapp_status": conn.status if conn else "not_connected",
-        "first_whatsapp_connected_at": first_wa.isoformat() if first_wa else None,
+        "whatsapp_connected": lifecycle["whatsapp_connected"],
+        "whatsapp_status": "connected" if lifecycle["whatsapp_connected"] else "not_connected",
+        "first_whatsapp_connected_at": _iso(first_wa),
         "trial_started_at": tenant.trial_started_at.isoformat() if tenant.trial_started_at else None,
         "trial_ends_at": tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
-        "subscription_started_at": sub_started.isoformat() if sub_started else None,
-        "subscription_ends_at": sub_ends.isoformat() if sub_ends else None,
+        "subscription_started_at": lifecycle.get("subscription_started_at"),
+        "subscription_ends_at": lifecycle.get("subscription_ends_at"),
         "subscription_status": tenant.subscription_status,
-        "billing_subscription_status": sub.status if sub else None,
+        "billing_subscription_status": raw_sub.status if raw_sub else None,
+        "lifecycle_status": lifecycle["lifecycle_status"],
+        "plan_name": lifecycle.get("plan_name"),
+        "has_paid_subscription_history": lifecycle.get("has_paid_subscription_history"),
+        "last_payment_at": lifecycle.get("last_payment_at"),
+        "last_payment_amount": lifecycle.get("last_payment_amount"),
+        "payment_provider": lifecycle.get("payment_provider"),
+        "payment_history": lifecycle.get("payment_history"),
         "trial_info": trial,
-        "subscription_expired": sub_expired,
-        "ai_auto_replies_allowed": has_billing_access(db, tenant_id),
-        "paid_subscription_effective": effective_sub is not None,
+        "subscription_expired": lifecycle["subscription_expired"],
+        "trial_expired": lifecycle["trial_expired"],
+        "ai_auto_replies_allowed": lifecycle["ai_auto_replies_allowed"],
+        "paid_subscription_effective": lifecycle["has_subscription"],
+        "manual_replies_allowed": lifecycle["manual_replies_allowed"],
     }
 
 

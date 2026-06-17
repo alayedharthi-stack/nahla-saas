@@ -40,8 +40,10 @@ from core.trial_lifecycle import (  # noqa: E402
     TRIAL_STATUS_EXPIRED,
     TRIAL_STATUS_PENDING_WHATSAPP,
     audit_tenant_subscription,
+    build_billing_status_payload,
     init_new_tenant_trial_state,
     migrate_existing_tenant_trials,
+    resolve_billing_lifecycle,
     start_trial_on_whatsapp_connect,
     subscription_period_end,
 )
@@ -270,10 +272,92 @@ class TestTenant33Audit:
         assert report["trial_ends_at"] is not None
         assert report["subscription_started_at"] is not None
         assert report["subscription_ends_at"] is not None
+        assert report["lifecycle_status"] == "paid_expired"
+        assert report["trial_expired"] is False
         assert report["subscription_expired"] is True
+        assert report["has_paid_subscription_history"] is True
         assert report["ai_auto_replies_allowed"] is False
+        assert report["manual_replies_allowed"] is True
 
     def test_subscription_period_end_is_30_days(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         end = subscription_period_end(start)
         assert end == start + timedelta(days=30)
+
+
+class TestBillingLifecycleResolution:
+    def test_expired_paid_sub_not_reported_as_trial_expired(self, db):
+        """Tenant 33 pattern: paid sub expired + trial expired → paid_expired."""
+        now = datetime.now(timezone.utc)
+        t = _tenant(db, name="Paid Then Expired")
+        _wa_conn(db, t.id, connected_days_ago=40)
+        t.trial_started_at = (now - timedelta(days=40)).replace(tzinfo=None)
+        t.trial_ends_at = (now - timedelta(days=26)).replace(tzinfo=None)
+        t.subscription_status = TRIAL_STATUS_EXPIRED
+        db.flush()
+
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat()},
+        )
+        db.add(sub)
+        db.commit()
+
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "paid_expired"
+        assert lifecycle["trial_expired"] is False
+        assert lifecycle["subscription_expired"] is True
+        assert lifecycle["has_paid_subscription_history"] is True
+        assert "انتهى اشتراكك" in lifecycle["headline_ar"]
+        assert "انتهت تجربتك" not in lifecycle["headline_ar"]
+
+    def test_trial_expired_without_payment(self, db):
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=20)
+        t.trial_started_at = (now - timedelta(days=20)).replace(tzinfo=None)
+        t.trial_ends_at = (now - timedelta(days=6)).replace(tzinfo=None)
+        t.subscription_status = TRIAL_STATUS_EXPIRED
+        db.commit()
+
+        lifecycle = resolve_billing_lifecycle(db, t.id, t, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "trial_expired"
+        assert lifecycle["trial_expired"] is True
+        assert "انتهت تجربتك" in lifecycle["headline_ar"]
+
+    def test_build_billing_status_payload_includes_lifecycle_fields(self, db):
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=3)
+        start_trial_on_whatsapp_connect(db, t.id, connected_at=now - timedelta(days=3))
+        db.refresh(t)
+
+        payload = build_billing_status_payload(
+            db,
+            t.id,
+            t,
+            active_sub=None,
+            conversations_used=5,
+            usage_data={
+                "conversations_limit": 1000,
+                "usage_pct": 0.5,
+                "exceeded": False,
+            },
+            integration_fee_sar=59,
+        )
+        assert payload["lifecycle_status"] == "trial_active"
+        assert payload["is_trial"] is True
+        assert "ai_auto_replies_allowed" in payload
+        assert payload["manual_replies_allowed"] is True

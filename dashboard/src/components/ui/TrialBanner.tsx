@@ -1,16 +1,23 @@
 /**
  * TrialBanner
  * Shown below the header on every page.
- * - Pending WhatsApp: trial not started yet
- * - During trial: shows days remaining, upgrade CTA
- * - Trial expired: warning banner blocking automation features
- * - Active paid plan: hidden (returns null)
+ * Uses lifecycle_status from billing API to distinguish trial vs paid expiry.
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Clock, AlertTriangle, Zap, X, RefreshCw, Phone, Info } from 'lucide-react'
 import { billingApi, type BillingStatus } from '../../api/billing'
 import { throttleFocusRefetch } from '../../lib/focusThrottleRefetch'
+
+function resolveLifecycle(status: BillingStatus): string {
+  if (status.lifecycle_status) return status.lifecycle_status
+  if (status.trial_pending_whatsapp) return 'trial_pending_whatsapp'
+  if (status.is_trial) return 'trial_active'
+  if (status.subscription_expired) return 'paid_expired'
+  if (status.trial_expired) return 'trial_expired'
+  if (status.has_subscription) return 'paid_active'
+  return 'trial_expired'
+}
 
 export default function TrialBanner() {
   const navigate = useNavigate()
@@ -67,12 +74,15 @@ export default function TrialBanner() {
   }
 
   if (!status) return null
-  if (status.has_subscription && !status.is_trial && !status.subscription_expired) return null
 
-  const { is_trial, trial_days_remaining, trial_expired, trial_pending_whatsapp, warning_level } = status
+  const lifecycle = resolveLifecycle(status)
+  if (lifecycle === 'paid_active') return null
+
+  const { trial_days_remaining, warning_level, headline_ar, plan_name } = status
+  const planLabel = plan_name || status.plan?.name_ar || 'الباقة'
 
   /* ── Trial pending WhatsApp ──────────────────────────────────────── */
-  if (trial_pending_whatsapp) {
+  if (lifecycle === 'trial_pending_whatsapp') {
     return (
       <div className="bg-sky-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
         <div className="flex items-center gap-2 flex-1">
@@ -95,18 +105,39 @@ export default function TrialBanner() {
     )
   }
 
-  /* ── Subscription / trial expired ────────────────────────────────── */
-  if (trial_expired || status.subscription_expired) {
+  /* ── Paid subscription expired ───────────────────────────────────── */
+  if (lifecycle === 'paid_expired') {
+    return (
+      <div className="bg-orange-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
+        <div className="flex items-center gap-2 flex-1">
+          <AlertTriangle className="w-5 h-5 shrink-0" />
+          <div>
+            <span className="font-bold block">انتهى اشتراكك في باقة {planLabel}</span>
+            <span className="text-orange-100 text-xs block mt-0.5">
+              {headline_ar || 'يرجى التجديد لاستمرار الردود الذكية وموظف المبيعات الذكي'}
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => navigate('/billing')}
+          className="shrink-0 bg-white text-orange-700 text-xs font-bold px-4 py-2 rounded-lg hover:bg-orange-50 transition-colors"
+        >
+          تجديد الاشتراك
+        </button>
+      </div>
+    )
+  }
+
+  /* ── Trial expired (no paid history) ─────────────────────────────── */
+  if (lifecycle === 'trial_expired') {
     return (
       <div className="bg-red-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
         <div className="flex items-center gap-2 flex-1">
           <AlertTriangle className="w-5 h-5 shrink-0" />
           <div>
-            <span className="font-bold block">
-              {status.subscription_expired ? 'انتهى اشتراكك' : 'انتهت فترة التجربة المجانية'}
-            </span>
+            <span className="font-bold block">انتهت تجربتك المجانية</span>
             <span className="text-red-200 text-xs block mt-0.5">
-              الطيار الآلي والحملات والرد الذكي متوقفة مؤقتاً — فعّل خطة نحلة للمتابعة
+              الطيار الآلي والحملات والرد الذكي متوقفة — اختر خطة نحلة للمتابعة
             </span>
           </div>
         </div>
@@ -121,7 +152,7 @@ export default function TrialBanner() {
   }
 
   /* ── Active trial / paid expiry warning ──────────────────────────── */
-  if (is_trial || warning_level === '7d' || warning_level === '3d' || warning_level === '1d') {
+  if (lifecycle === 'trial_active' || warning_level === '7d' || warning_level === '3d' || warning_level === '1d') {
     const urgency = warning_level === '1d' || warning_level === '3d' || trial_days_remaining <= 3
 
     return (
@@ -137,7 +168,7 @@ export default function TrialBanner() {
         <div className="flex items-center gap-3 flex-1 min-w-0">
           <Clock className="w-4 h-4 shrink-0" />
           <div className="flex items-center gap-2 flex-wrap">
-            {is_trial ? (
+            {lifecycle === 'trial_active' ? (
               <span className="font-semibold">
                 باقي{' '}
                 <span className="font-bold text-lg leading-none">

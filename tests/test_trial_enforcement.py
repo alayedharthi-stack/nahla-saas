@@ -97,11 +97,11 @@ class TestUnifiedCallChain:
         src = inspect.getsource(has_billing_access)
         assert "has_active_trial" in src
 
-    def test_billing_status_uses_compute_trial_info(self):
+    def test_billing_status_uses_lifecycle_payload(self):
         import inspect
         from routers.billing import get_billing_status
         src = inspect.getsource(get_billing_status)
-        assert "compute_trial_info" in src
+        assert "build_billing_status_payload" in src
 
     def test_webhook_ai_guard_uses_has_billing_access(self):
         from pathlib import Path

@@ -341,108 +341,17 @@ async def get_billing_status(request: Request, db: Session = Depends(get_db)):
 
     tenant = get_or_create_tenant(db, tenant_id)
 
-    from core.billing import compute_trial_info  # noqa: PLC0415
+    from core.trial_lifecycle import build_billing_status_payload  # noqa: PLC0415
 
-    trial_info           = compute_trial_info(tenant)
-    is_trial             = sub is None and trial_info["is_trial"]
-    trial_expired        = sub is None and trial_info["trial_expired"]
-    trial_pending_wa     = sub is None and trial_info.get("trial_pending_whatsapp", False)
-    trial_days_remaining = trial_info["trial_days_remaining"]
-
-    sub_expired = False
-    if sub and sub.ends_at:
-        from core.billing import _coerce_utc  # noqa: PLC0415
-        ends = _coerce_utc(sub.ends_at)
-        sub_expired = bool(ends and ends <= datetime.now(timezone.utc))
-
-    if sub is None:
-        return {
-            "has_subscription":       False,
-            "plan":                   None,
-            "status":                 trial_info.get("status") or ("trial" if is_trial else "none"),
-            "is_trial":               is_trial,
-            "trial_pending_whatsapp": trial_pending_wa,
-            "trial_days_remaining":   trial_days_remaining,
-            "trial_expired":          trial_expired,
-            "trial_started_at":       trial_info.get("trial_started_at"),
-            "trial_ends_at":          trial_info.get("trial_end"),
-            "subscription_started_at": None,
-            "subscription_ends_at":   None,
-            "subscription_expired":   False,
-            "status_reason_ar":       trial_info.get("status_reason_ar", ""),
-            "warning_level":          trial_info.get("warning_level", "none"),
-            "conversations_used":     conversations_used,
-            "conversations_limit":    _usage_data["conversations_limit"],
-            "usage_pct":              _usage_data["usage_pct"],
-            "conversations_exceeded": _usage_data["exceeded"],
-            "launch_discount_active": False,
-            "current_price_sar":      0,
-            "integration_fee_sar":    INTEGRATION_FEE_SAR,
-        }
-
-    plan   = db.query(BillingPlan).filter(BillingPlan.id == sub.plan_id).first()
-    meta   = plan.extra_metadata or {} if plan else {}
-    launch = is_launch_discount_active(sub)
-    price  = meta.get("launch_price_sar", plan.price_sar) if launch else plan.price_sar
-    limits = plan.limits or {}
-
-    from core.billing import _coerce_utc  # noqa: PLC0415
-    now_utc = datetime.now(timezone.utc)
-    sub_ends = _coerce_utc(sub.ends_at) if sub.ends_at else None
-    sub_expired = bool(sub_ends and sub_ends <= now_utc)
-    days_until_sub_end = 0
-    if sub_ends and sub_ends > now_utc:
-        days_until_sub_end = max(0, int((sub_ends - now_utc).total_seconds() / 86400) + 1)
-
-    warning_level = "none"
-    if sub_expired:
-        warning_level = "expired"
-    elif days_until_sub_end <= 1:
-        warning_level = "1d"
-    elif days_until_sub_end <= 3:
-        warning_level = "3d"
-    elif days_until_sub_end <= 7:
-        warning_level = "7d"
-
-    status_reason = (
-        "انتهى الاشتراك المدفوع — يرجى التجديد"
-        if sub_expired
-        else "اشتراك مدفوع نشط"
+    return build_billing_status_payload(
+        db,
+        int(tenant_id),
+        tenant,
+        active_sub=sub,
+        conversations_used=conversations_used,
+        usage_data=_usage_data,
+        integration_fee_sar=INTEGRATION_FEE_SAR,
     )
-
-    return {
-        "has_subscription":        True,
-        "plan": {
-            "id":               plan.id,
-            "slug":             plan.slug,
-            "name":             plan.name,
-            "name_ar":          meta.get("name_ar", plan.name),
-            "price_sar":        plan.price_sar,
-            "launch_price_sar": meta.get("launch_price_sar", plan.price_sar),
-            "features":         plan.features or [],
-            "limits":           limits,
-        },
-        "status":                  "expired" if sub_expired else sub.status,
-        "is_trial":                False,
-        "trial_pending_whatsapp":  False,
-        "trial_days_remaining":    0,
-        "trial_expired":           False,
-        "trial_started_at":        None,
-        "trial_ends_at":           None,
-        "subscription_started_at": sub.started_at.isoformat() if sub.started_at else None,
-        "subscription_ends_at":    sub.ends_at.isoformat() if sub.ends_at else None,
-        "subscription_expired":    sub_expired,
-        "status_reason_ar":        status_reason,
-        "warning_level":           warning_level,
-        "started_at":              sub.started_at.isoformat() if sub.started_at else None,
-        "conversations_used":      conversations_used,
-        "conversations_limit":     _usage_data["conversations_limit"],
-        "usage_pct":               _usage_data["usage_pct"],
-        "conversations_exceeded":  _usage_data["exceeded"],
-        "launch_discount_active":  launch,
-        "current_price_sar":       price,
-        "integration_fee_sar":     INTEGRATION_FEE_SAR,
-    }
 
 
 @router.post("/billing/subscribe")
