@@ -481,31 +481,39 @@ export default function Billing() {
     )
   }
 
+  if (!status) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 className="w-6 h-6 animate-spin text-brand-500" />
+      </div>
+    )
+  }
+
   const pct = usagePercent(
-    status?.conversations_used ?? 0,
-    status?.conversations_limit ?? 0,
+    status.conversations_used ?? 0,
+    status.conversations_limit ?? 0,
   )
 
-  const lifecycle = status?.lifecycle_status ?? (
-    status?.trial_pending_whatsapp ? 'trial_pending_whatsapp'
-    : status?.is_trial ? 'trial_active'
-    : status?.subscription_expired ? 'paid_expired'
-    : status?.trial_expired ? 'trial_expired'
-    : status?.has_subscription ? 'paid_active'
+  const lifecycle = status.lifecycle_status ?? (
+    status.trial_pending_whatsapp ? 'trial_pending_whatsapp'
+    : status.is_trial ? 'trial_active'
+    : status.subscription_expired ? 'paid_expired'
+    : status.trial_expired ? 'trial_expired'
+    : status.has_subscription ? 'paid_active'
     : 'trial_expired'
   )
 
   const daysRemainingLabel = (() => {
     if (lifecycle === 'trial_pending_whatsapp') return '—'
-    if (status?.days_remaining != null && status.days_remaining > 0) {
+    if (status.days_remaining != null && status.days_remaining > 0) {
       return String(status.days_remaining)
     }
-    if (lifecycle === 'trial_active') return String(status?.trial_days_remaining ?? 0)
+    if (lifecycle === 'trial_active') return String(status.trial_days_remaining ?? 0)
     if (lifecycle === 'trial_expired' || lifecycle === 'paid_expired') return '٠'
     return '—'
   })()
 
-  const warningLevel = status?.warning_level ?? 'none'
+  const warningLevel = status.warning_level ?? 'none'
   const showExpiryWarning = ['7d', '3d', '1d', 'expired'].includes(warningLevel)
   const expiryWarningStyle =
     warningLevel === 'expired' ? 'bg-red-50 border-red-200 text-red-800'
@@ -513,8 +521,8 @@ export default function Billing() {
     : warningLevel === '3d'    ? 'bg-amber-50 border-amber-200 text-amber-900'
     : 'bg-amber-50 border-amber-200 text-amber-900'
 
-  const lifecycleHeadline = status?.headline_ar || status?.status_reason_ar || '—'
-  const planDisplayName = status?.plan_name || status?.plan?.name_ar || '—'
+  const lifecycleHeadline = status.headline_ar || status.status_reason_ar || '—'
+  const planDisplayName = status.plan_name || status.plan?.name_ar || '—'
 
   return (
     <div className="space-y-6 mx-auto px-5 py-10" style={{maxWidth: '1100px'}} dir="rtl">
