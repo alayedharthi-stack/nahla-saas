@@ -361,6 +361,7 @@ export interface Translations {
     salesBot:       string
     kpiRevenue:     string
     kpiConversations: string
+    kpiConversationsToday: string
     kpiOrders:      string
     kpiAiRate:      string
     recentConvTitle:string
@@ -399,6 +400,8 @@ export interface Translations {
     }
     waUsage: {
       title: string
+      periodUsageTitle: string
+      todayConversations: string
       emergencyStop: string
       campaignsStopped: string
       nearLimit90: string

@@ -3328,14 +3328,14 @@ async def get_usage(
     Also auto-refreshes Meta tier data when stale (configurable via
     ``NAHLA_META_TIER_STALE_HOURS``, default 6 h) or missing.
     """
-    from core.wa_usage import get_usage_this_month, get_daily_breakdown  # noqa: PLC0415
+    from core.wa_usage import get_current_period_usage, get_daily_breakdown  # noqa: PLC0415
 
     tenant_id = resolve_tenant_id(request)
 
     # ── Opportunistic Meta tier refresh ──────────────────────────────────
     await _maybe_refresh_meta_tier(db, tenant_id)
 
-    data = get_usage_this_month(db, tenant_id)
+    data = get_current_period_usage(db, tenant_id)
 
     if breakdown:
         data["daily_breakdown"] = get_daily_breakdown(

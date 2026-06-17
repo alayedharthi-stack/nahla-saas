@@ -56,8 +56,11 @@ Public API
   check_limit(db, tenant_id, category)
       → AllowResult   (allowed: bool, reason: str)
 
+  get_current_period_usage(db, tenant_id)
+      → dict  (SSOT — period usage + today count + lifetime)
+
   get_usage_this_month(db, tenant_id)
-      → dict  (safe to return as API response)
+      → dict  (alias for get_current_period_usage — backwards compatible)
 
   get_daily_breakdown(db, tenant_id, year, month)
       → list[dict]  (for the detail page chart)
@@ -251,6 +254,7 @@ def _get_or_create_usage(
                 db.rollback()
                 logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
                 raise
+            _reconcile_usage_from_logs(db, tenant_id, row, ctx)
     else:
         year, month = int(ctx["year"]), int(ctx["month"])
         row = (
@@ -287,6 +291,7 @@ def _get_or_create_usage(
                 db.rollback()
                 logger.warning("[WaUsage] flush failed (table may be missing columns): %s", exc)
                 raise
+            _reconcile_usage_from_logs(db, tenant_id, row, ctx)
 
     current_limit = _get_plan_limit(db, tenant_id)
     if int(row.conversations_limit or 0) != int(current_limit):
@@ -305,6 +310,125 @@ def _get_or_create_usage(
             db.rollback()
             logger.warning("[WaUsage] limit re-sync flush failed: %s", exc)
     return row
+
+
+def _period_bounds_naive(ctx: dict, now: Optional[datetime] = None) -> tuple[datetime, Optional[datetime]]:
+    """Return naive-UTC [start, end) bounds for the active usage period."""
+    now = now or _utcnow()
+    if ctx.get("mode") == "subscription":
+        raw_start = ctx.get("period_started_at")
+        raw_end   = ctx.get("period_ends_at")
+        if raw_start is None:
+            start = _naive(now)
+        elif isinstance(raw_start, datetime):
+            start = _naive(raw_start if raw_start.tzinfo else raw_start.replace(tzinfo=timezone.utc))
+        else:
+            start = _naive(now)
+        end: Optional[datetime] = None
+        if isinstance(raw_end, datetime):
+            end = _naive(raw_end if raw_end.tzinfo else raw_end.replace(tzinfo=timezone.utc))
+        return start, end
+
+    year, month = int(ctx["year"]), int(ctx["month"])
+    start = datetime(year, month, 1)
+    if month == 12:
+        end = datetime(year + 1, 1, 1)
+    else:
+        end = datetime(year, month + 1, 1)
+    return start, end
+
+
+def _count_conversation_logs(
+    db: Session,
+    tenant_id: int,
+    start_naive: datetime,
+    end_naive: Optional[datetime] = None,
+    *,
+    category: Optional[str] = None,
+) -> int:
+    """Count billable conversation windows in ``ConversationLog`` (audit SSOT)."""
+    from models import ConversationLog  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+
+    q = (
+        db.query(func.count(ConversationLog.id))
+        .filter(
+            ConversationLog.tenant_id == tenant_id,
+            ConversationLog.conversation_started_at >= start_naive,
+        )
+    )
+    if end_naive is not None:
+        q = q.filter(ConversationLog.conversation_started_at < end_naive)
+    if category is not None:
+        q = q.filter(ConversationLog.category == category)
+    return int(q.scalar() or 0)
+
+
+def count_conversations_in_window(
+    db: Session,
+    tenant_id: int,
+    window_start: datetime,
+    window_end: Optional[datetime] = None,
+) -> int:
+    """Public helper — count ConversationLog rows in a time window (aware or naive UTC)."""
+    if window_start.tzinfo is not None:
+        start_naive = _naive(window_start)
+    else:
+        start_naive = window_start
+    end_naive: Optional[datetime] = None
+    if window_end is not None:
+        end_naive = _naive(window_end) if window_end.tzinfo else window_end
+    return _count_conversation_logs(db, tenant_id, start_naive, end_naive)
+
+
+def get_today_conversations_count(db: Session, tenant_id: int) -> int:
+    """Billable conversation windows opened today (UTC day boundary)."""
+    now   = _utcnow()
+    start = datetime(now.year, now.month, now.day)
+    return _count_conversation_logs(db, tenant_id, start)
+
+
+def _reconcile_usage_from_logs(
+    db: Session,
+    tenant_id: int,
+    usage: "WhatsAppUsage",  # noqa: F821
+    ctx: dict,
+) -> bool:
+    """
+    Heal under-counted ``WhatsAppUsage`` rows from ``ConversationLog``.
+
+    Increment path and read path can drift when a new subscription-period
+    row is created mid-day — logs exist but the fresh counter row reads 0.
+    We only ever *raise* counters to match logs inside the active period;
+    we never decrease (renewals get a new row instead).
+    """
+    start_naive, end_naive = _period_bounds_naive(ctx)
+    log_svc = _count_conversation_logs(db, tenant_id, start_naive, end_naive, category="service")
+    log_mkt = _count_conversation_logs(db, tenant_id, start_naive, end_naive, category="marketing")
+    stored_svc = int(usage.service_conversations_used or 0)
+    stored_mkt = int(usage.marketing_conversations_used or 0)
+    changed = False
+    if log_svc > stored_svc:
+        usage.service_conversations_used = log_svc
+        changed = True
+    if log_mkt > stored_mkt:
+        usage.marketing_conversations_used = log_mkt
+        changed = True
+    if changed:
+        usage.updated_at = _naive(_utcnow())
+        try:
+            db.flush()
+            logger.info(
+                "[WaUsage] Reconciled from ConversationLog | tenant=%s mode=%s "
+                "stored=%s+%s logs=%s+%s",
+                tenant_id, ctx.get("mode"),
+                stored_svc, stored_mkt, log_svc, log_mkt,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[WaUsage] reconcile flush failed: %s", exc)
+            raise
+    return changed
 
 
 def get_lifetime_conversations(db: Session, tenant_id: int) -> int:
@@ -603,27 +727,33 @@ META_TIER_LABEL = {
 }
 
 
-def get_usage_this_month(db: Session, tenant_id: int) -> dict:
-    """Return current-period usage — safe to serialise as an API response."""
+def get_current_period_usage(db: Session, tenant_id: int) -> dict:
+    """
+    Single source of truth for subscription-limit usage + daily analytics.
+
+    ``WhatsAppUsage`` drives enforcement; ``ConversationLog`` is the audit
+    trail written on every billable window. We reconcile on read so the
+    dashboard never shows 0 when logs exist inside the active period.
+    """
     now   = _utcnow()
     ctx   = _usage_period_context(db, tenant_id)
     usage = _get_or_create_usage(db, tenant_id, ctx)
+    _reconcile_usage_from_logs(db, tenant_id, usage, ctx)
 
-    svc   = usage.service_conversations_used
-    mkt   = usage.marketing_conversations_used
+    svc   = int(usage.service_conversations_used or 0)
+    mkt   = int(usage.marketing_conversations_used or 0)
     total = svc + mkt
-    limit = usage.conversations_limit
-    # Treat the unlimited sentinel as "no cap" for percent / exceeded /
-    # near_limit calculations, so the Overview UI never lights up the
-    # amber/red bar for Scale plans.
+    limit = int(usage.conversations_limit or 0)
     is_unlimited = limit >= UNLIMITED_LIMIT_SENTINEL
     pct   = (
         0.0 if is_unlimited
         else (round((total / limit) * 100, 1) if limit > 0 else 0.0)
     )
+    remaining = (-1 if is_unlimited else max(0, limit - total)) if limit > 0 else 0
 
     meta_tier = _get_meta_tier(db, tenant_id)
     lifetime  = get_lifetime_conversations(db, tenant_id)
+    today_count = get_today_conversations_count(db, tenant_id)
 
     period_started_at = ctx.get("period_started_at")
     period_ends_at    = ctx.get("period_ends_at")
@@ -647,30 +777,41 @@ def get_usage_this_month(db: Session, tenant_id: int) -> dict:
         reset_label = end_naive.strftime("%d/%m/%Y")
 
     return {
-        "service_conversations_used":   svc,
-        "marketing_conversations_used": mkt,
-        "conversations_used":           total,
-        "conversations_limit":          (-1 if is_unlimited else limit),
-        "usage_pct":                    pct,
-        "exceeded":                     (not is_unlimited and limit > 0 and total >= limit),
-        "near_limit":                   (not is_unlimited and limit > 0 and pct >= 70 and total < limit),
-        "warning_70":                   (not is_unlimited and limit > 0 and 70 <= pct < 90),
-        "warning_90":                   (not is_unlimited and limit > 0 and pct >= 90 and total < limit),
-        "marketing_blocked":            (not is_unlimited and limit > 0 and total >= limit),
-        "emergency_stop":               (not is_unlimited and limit > 0 and total >= int(limit * SERVICE_EMERGENCY_STOP)),
-        "unlimited":                    is_unlimited,
-        "month":                        now.month,
-        "year":                         now.year,
-        "reset_date":                   reset_label,
-        "period_mode":                  ctx.get("mode"),
-        "period_started_at":            _iso(period_started_at),
-        "period_ends_at":               _iso(period_ends_at),
-        "subscription_id":              ctx.get("subscription_id"),
-        "lifetime_conversations_used":  lifetime,
-        "alert_80_sent":                usage.alert_80_sent,
-        "alert_100_sent":               usage.alert_100_sent,
+        "service_conversations_used":          svc,
+        "marketing_conversations_used":        mkt,
+        "conversations_used":                  total,
+        "current_period_conversations_used": total,
+        "conversations_limit":               (-1 if is_unlimited else limit),
+        "current_period_conversations_limit": (-1 if is_unlimited else limit),
+        "remaining_conversations":           remaining,
+        "usage_pct":                         pct,
+        "exceeded":                          (not is_unlimited and limit > 0 and total >= limit),
+        "near_limit":                        (not is_unlimited and limit > 0 and pct >= 70 and total < limit),
+        "warning_70":                        (not is_unlimited and limit > 0 and 70 <= pct < 90),
+        "warning_90":                        (not is_unlimited and limit > 0 and pct >= 90 and total < limit),
+        "marketing_blocked":                 (not is_unlimited and limit > 0 and total >= limit),
+        "emergency_stop":                    (not is_unlimited and limit > 0 and total >= int(limit * SERVICE_EMERGENCY_STOP)),
+        "unlimited":                         is_unlimited,
+        "month":                             now.month,
+        "year":                              now.year,
+        "reset_date":                        reset_label,
+        "period_mode":                       ctx.get("mode"),
+        "period_started_at":                 _iso(period_started_at),
+        "period_ends_at":                    _iso(period_ends_at),
+        "current_period_started_at":         _iso(period_started_at),
+        "current_period_ends_at":            _iso(period_ends_at),
+        "subscription_id":                   ctx.get("subscription_id"),
+        "lifetime_conversations_used":       lifetime,
+        "today_conversations_count":         today_count,
+        "alert_80_sent":                     usage.alert_80_sent,
+        "alert_100_sent":                    usage.alert_100_sent,
         **meta_tier,
     }
+
+
+def get_usage_this_month(db: Session, tenant_id: int) -> dict:
+    """Backwards-compatible alias for ``get_current_period_usage``."""
+    return get_current_period_usage(db, tenant_id)
 
 
 # Tier "stale" horizon. After this many hours without a successful sync from

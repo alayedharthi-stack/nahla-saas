@@ -72,6 +72,14 @@ export interface BillingStatus {
   whatsapp_connected?:     boolean
   conversations_used:      number
   conversations_limit:     number     // -1 = unlimited
+  current_period_conversations_used?: number
+  current_period_conversations_limit?: number
+  today_conversations_count?: number
+  remaining_conversations?: number
+  lifetime_conversations_used?: number
+  period_mode?:            string
+  period_started_at?:      string | null
+  period_ends_at?:         string | null
   usage_pct?:              number
   conversations_exceeded?: boolean
   launch_discount_active:  boolean

@@ -32,8 +32,11 @@ from models import (  # noqa: E402
 from core.wa_usage import (  # noqa: E402
     _get_or_create_usage,
     _usage_period_context,
+    get_current_period_usage,
     get_lifetime_conversations,
+    get_today_conversations_count,
     get_usage_this_month,
+    track_conversation,
 )
 
 
@@ -166,3 +169,91 @@ class TestSubscriptionPeriodUsage:
 
         row = _get_or_create_usage(db, tenant.id, ctx)
         assert row.subscription_id is None
+
+    def test_reconcile_heals_zero_counter_from_conversation_logs(self, db):
+        """Regression: fresh subscription-period row must not show 0 when logs exist."""
+        tenant, _plan, sub = _seed_tenant(db)
+        now = datetime.now(timezone.utc)
+        period_start = (now - timedelta(hours=1)).replace(tzinfo=None)
+
+        sub.started_at = period_start
+        db.add(
+            WhatsAppUsage(
+                tenant_id=tenant.id,
+                subscription_id=sub.id,
+                year=now.year,
+                month=now.month,
+                service_conversations_used=0,
+                marketing_conversations_used=0,
+                conversations_limit=15000,
+            )
+        )
+        for i in range(3):
+            db.add(ConversationLog(
+                tenant_id=tenant.id,
+                customer_phone=f"+96650000000{i}",
+                conversation_started_at=now.replace(tzinfo=None),
+                source="inbound",
+                category="service",
+            ))
+        db.commit()
+
+        usage = get_current_period_usage(db, tenant.id)
+        assert usage["conversations_used"] == 3
+        assert usage["current_period_conversations_used"] == 3
+        assert usage["today_conversations_count"] == 3
+        assert usage["period_mode"] == "subscription"
+        assert usage["subscription_id"] == sub.id
+
+    def test_track_conversation_increments_subscription_scoped_row(self, db):
+        tenant, _plan, sub = _seed_tenant(db)
+
+        result = track_conversation(
+            db, tenant.id, "+966500000099",
+            source="inbound", category="service",
+        )
+        assert result.counted is True
+        assert result.used_total == 1
+
+        row = (
+            db.query(WhatsAppUsage)
+            .filter(
+                WhatsAppUsage.tenant_id == tenant.id,
+                WhatsAppUsage.subscription_id == sub.id,
+            )
+            .one()
+        )
+        assert row.service_conversations_used == 1
+
+        usage = get_usage_this_month(db, tenant.id)
+        assert usage["conversations_used"] == 1
+        assert usage["subscription_id"] == sub.id
+
+    def test_billing_and_usage_alias_return_same_period_values(self, db):
+        tenant, _plan, sub = _seed_tenant(db)
+        now = datetime.now(timezone.utc)
+
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000010",
+            conversation_started_at=now.replace(tzinfo=None),
+            source="inbound",
+            category="marketing",
+        ))
+        db.add(
+            WhatsAppUsage(
+                tenant_id=tenant.id,
+                subscription_id=sub.id,
+                year=now.year,
+                month=now.month,
+                service_conversations_used=0,
+                marketing_conversations_used=0,
+                conversations_limit=15000,
+            )
+        )
+        db.commit()
+
+        direct = get_current_period_usage(db, tenant.id)
+        alias = get_usage_this_month(db, tenant.id)
+        assert direct["conversations_used"] == alias["conversations_used"] == 1
+        assert direct["today_conversations_count"] == get_today_conversations_count(db, tenant.id)

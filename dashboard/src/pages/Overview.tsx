@@ -62,6 +62,12 @@ interface OverviewStats {
 interface WaUsage {
   conversations_used:    number
   conversations_limit:   number
+  current_period_conversations_used?: number
+  current_period_conversations_limit?: number
+  today_conversations_count?: number
+  remaining_conversations?: number
+  lifetime_conversations_used?: number
+  period_mode?:          string
   usage_pct:             number
   exceeded:              boolean
   near_limit:            boolean
@@ -307,7 +313,7 @@ export default function Overview() {
               <div className="flex items-center gap-2 mb-2 flex-wrap">
                 <MessageSquare className={`w-4 h-4 shrink-0 ${iconColor}`} />
                 <span className="text-sm font-semibold text-slate-700">
-                  {wu.title}
+                  {wu.periodUsageTitle}
                 </span>
                 {waUsage.emergency_stop && (
                   <span className="flex items-center gap-1 text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
@@ -341,12 +347,20 @@ export default function Overview() {
 
               <div className="flex items-center justify-between mt-1.5">
                 <span className="text-xs text-slate-500">
-                  {`${waUsage.conversations_used.toLocaleString(locale)} / ${waUsage.conversations_limit.toLocaleString(locale)} ${wu.conversationsUnit}`}
+                  {`${(waUsage.current_period_conversations_used ?? waUsage.conversations_used).toLocaleString(locale)} / ${(waUsage.current_period_conversations_limit ?? waUsage.conversations_limit).toLocaleString(locale)} ${wu.conversationsUnit}`}
                 </span>
                 <span className={`text-xs font-bold ${pctColor}`}>
                   {waUsage.usage_pct}%
                 </span>
               </div>
+              {typeof waUsage.today_conversations_count === 'number' && (
+                <p className="text-xs text-slate-500 mt-1">
+                  {wu.todayConversations}:{' '}
+                  <span className="font-semibold text-slate-700">
+                    {waUsage.today_conversations_count.toLocaleString(locale)}
+                  </span>
+                </p>
+              )}
             </div>
 
             {/* Right: details + upgrade CTA */}
@@ -579,7 +593,7 @@ export default function Overview() {
           iconBg="bg-emerald-50"
         />
         <StatCard
-          label={ov.kpiConversations}
+          label={period === 'today' ? ov.kpiConversationsToday : ov.kpiConversations}
           subLabel={periodLabelDisplay}
           value={loading ? '—' : kpiConversations.toLocaleString(locale)}
           icon={MessageSquare}
