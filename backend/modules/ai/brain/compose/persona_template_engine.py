@@ -71,6 +71,9 @@ PERSONA_FAREWELL_WARM: tuple[str, ...] = (
 
 # Religious thanks (جزاك الله خير …) — reply with dua, not «العفو».
 PERSONA_SOCIAL_DUA_THANKS: tuple[str, ...] = (
+    "آمين وياك، الله يجزاك خير 🌷",
+    "الله يسعدك ويتقبل دعواتك 🤍",
+    "ولك بالمثل يا غالي، جزاك الله خير",
     "آمين، ولك بالمثل 🤍",
     "ولك بالمثل وأحسن 🌷",
     "وياك يارب، ولك بالمثل 🤍",
@@ -78,7 +81,7 @@ PERSONA_SOCIAL_DUA_THANKS: tuple[str, ...] = (
     "آمين، ولك بالمثل وأحسن 🤍",
 )
 
-PERSONA_SOCIAL_DUA_FALLBACK = "آمين، ولك بالمثل وأحسن 🤍"
+PERSONA_SOCIAL_DUA_FALLBACK = "آمين وياك، الله يجزاك خير 🌷"
 
 _RELIGIOUS_DUA_INBOUND_MARKERS: tuple[str, ...] = (
     "جزاك الله",
@@ -93,10 +96,20 @@ _RELIGIOUS_DUA_INBOUND_MARKERS: tuple[str, ...] = (
     "بارك الله فيكم",
     "الله يبارك فيك",
     "الله يبارك فيكم",
+    "ان شاء الله يبارك",
+    "انشاء الله يبارك",
+    "بارك فيك",
+    "بارك لك",
+    "يعمرك",
+    "يعمركم",
+    "الله يسعدك",
+    "الله يسعدكم",
     "تبارك الله",
     "بيض الله وجهك",
     "بيض الله وجوهكم",
     "الله يبيض وجهك",
+    "يارب",
+    "يا رب",
 )
 
 _RELIGIOUS_DUA_SOCIAL_CATEGORIES: frozenset[str] = frozenset({
@@ -109,7 +122,10 @@ _DUA_REPLY_REQUIRED_MARKERS: tuple[str, ...] = (
     "آمين",
     "ولك بالمثل",
     "وياك يارب",
+    "وياك",
     "الله يجزاك خير",
+    "الله يسعدك",
+    "جزاك الله خير",
 )
 
 _FORBIDDEN_DUA_FRAGMENT_NORMS: frozenset[str] = frozenset({
@@ -121,11 +137,70 @@ _FORBIDDEN_DUA_FRAGMENT_NORMS: frozenset[str] = frozenset({
 
 
 def inbound_is_religious_dua_exchange(inbound_text: str) -> bool:
-    """True for dua-shaped social inbound (e.g. جزاك الله خير)."""
+    """True for religious dua-shaped inbound (e.g. جزاك الله خير)."""
     norm = _norm_phrase(inbound_text)
     if not norm:
         return False
     return any(marker in norm for marker in _RELIGIOUS_DUA_INBOUND_MARKERS)
+
+
+_OPENING_GREETING_REPLY_MARKERS: tuple[str, ...] = (
+    "هلا وغلا",
+    "ياهلا ومرحبا",
+    "يا هلا وسهل",
+    "أهلًا وسهلًا",
+    "اهلا وسهلا",
+    "نورتنا",
+    "ياهلا فيك",
+)
+
+
+def inbound_is_explicit_opening_greeting(inbound_text: str) -> bool:
+    """True for explicit salaam / phatic hello inbound only."""
+    try:
+        from ..intent.social_classifier import is_explicit_opening_greeting  # noqa: PLC0415
+
+        return is_explicit_opening_greeting(inbound_text)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def inbound_blocks_opening_greeting_reply(inbound_text: str) -> bool:
+    """True when inbound must not receive «هلا وغلا»-style openers."""
+    if not (inbound_text or "").strip():
+        return False
+    if inbound_is_explicit_opening_greeting(inbound_text):
+        return False
+    if inbound_is_religious_dua_exchange(inbound_text):
+        return True
+    try:
+        from ..intent.social_classifier import (  # noqa: PLC0415
+            SOCIAL_BLESSING,
+            SOCIAL_COMPLIMENT,
+            SOCIAL_STRONG_PRAISE,
+            SOCIAL_THANKS,
+            classify_social,
+        )
+
+        match = classify_social(inbound_text)
+        if match is not None and match.category in {
+            SOCIAL_THANKS,
+            SOCIAL_BLESSING,
+            SOCIAL_STRONG_PRAISE,
+            SOCIAL_COMPLIMENT,
+        }:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — classifier optional on guard path
+        pass
+    return False
+
+
+def reply_is_opening_greeting_style(reply: str) -> bool:
+    """True when outbound reads as a conversation-opening greeting."""
+    norm = _norm_phrase(reply)
+    if not norm:
+        return False
+    return any(marker in norm for marker in _OPENING_GREETING_REPLY_MARKERS)
 
 
 def _inbound_is_religious_thanks(inbound_text: str) -> bool:
@@ -181,11 +256,11 @@ PERSONA_SOCIAL_WARM_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "الله يسعدك 🤍",
     ),
     "general_courtesy": (
-        "هلا وغلا 😊",
         "حياك الله 🌷",
         "أهلًا فيك 🤍",
         "نورتنا 😊",
         "يامرحبا 🌷",
+        "تسلم 🤍",
     ),
     "compliment": (
         "تسلم 🤍",
@@ -222,6 +297,38 @@ PERSONA_SOCIAL_WARM_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "حياك 😊",
     ),
 }
+
+
+def _social_context_replacement_reply(inbound_text: str) -> str:
+    if inbound_is_religious_dua_exchange(inbound_text):
+        return enforce_persona_dua_reply_guard(
+            PERSONA_SOCIAL_DUA_FALLBACK,
+            inbound_text=inbound_text,
+        )
+    try:
+        from ..intent.social_classifier import (  # noqa: PLC0415
+            SOCIAL_BLESSING,
+            classify_social,
+        )
+
+        match = classify_social(inbound_text)
+        if match is not None and match.category == SOCIAL_BLESSING:
+            return PERSONA_SOCIAL_WARM_BY_CATEGORY["blessing"][0]
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fallback pool if classifier unavailable
+        pass
+    return PERSONA_SOCIAL_WARM_BY_CATEGORY["thanks"][0]
+
+
+def enforce_social_context_reply_guard(reply: str, *, inbound_text: str) -> str:
+    """Block «هلا وغلا»-style openers on dua/thanks inbound turns."""
+    cleaned = (reply or "").strip()
+    if not cleaned or not (inbound_text or "").strip():
+        return cleaned
+    if not inbound_blocks_opening_greeting_reply(inbound_text):
+        return cleaned
+    if not reply_is_opening_greeting_style(cleaned):
+        return cleaned
+    return _social_context_replacement_reply(inbound_text)
 
 
 def _recent_outbound_bodies(ctx: BrainContext, *, limit: int = 5) -> List[str]:
@@ -341,7 +448,8 @@ def pick_persona_social_reply(
         reply = pick_persona_variant(PERSONA_SOCIAL_DUA_THANKS, ctx)
         return enforce_persona_dua_reply_guard(reply, inbound_text=inbound_text)
     if warm:
-        return pick_persona_variant(warm, ctx)
+        picked = pick_persona_variant(warm, ctx)
+        return enforce_social_context_reply_guard(picked, inbound_text=inbound_text)
 
     # Occasion / safety categories — reuse audited template pools.
     from .templates import _SOCIAL_REPLIES_BY_CATEGORY  # noqa: PLC0415

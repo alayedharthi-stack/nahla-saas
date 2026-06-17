@@ -610,6 +610,19 @@ class DefaultComposer:
                     sub_variant=v_secondary,
                     inbound_text=(ctx.message or ""),
                 )
+            try:
+                from ..postprocess.social_reply_context_guard import (  # noqa: PLC0415
+                    apply_social_reply_context_guard,
+                )
+
+                _srcg = apply_social_reply_context_guard(
+                    reply,
+                    inbound_text=(ctx.message or ""),
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                )
+                reply = _srcg.reply
+            except Exception:  # noqa: BLE001
+                pass
             if not (reply or "").strip() and self._understood_social_religious_media(ctx):
                 result.data["chosen_path"] = "social_persona_compose_from_empty_template"
                 reply = await self._compose_social_persona_ack(
