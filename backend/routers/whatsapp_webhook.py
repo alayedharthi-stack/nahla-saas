@@ -3917,7 +3917,7 @@ async def _dispatch_message(
         # ``INBOUND_IGNORED_UNSUPPORTED``. Video reaches the brain
         # exactly like a captioned image: the normaliser builds an
         # Arabic-framed prompt and the brain writes its own reply.
-        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document", "video"}:
+        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document", "video", "sticker"}:
             # ── Button-tap rescue: "button" type = customer tapped a template
             # quick-reply.  The normalizer marks it unsupported, but we have
             # already extracted human-readable text via _extract_wa_message_text.
@@ -4018,7 +4018,7 @@ async def _dispatch_message(
         if (
             not text
             and normalized_inbound.fallback_reply_ar
-            and normalized_inbound.normalized_type in {"audio", "image", "document", "video"}
+            and normalized_inbound.normalized_type in {"audio", "image", "document", "video", "sticker"}
             and not _is_platform_tenant(db, resolved_tenant_id)
         ):
             logger.info(
