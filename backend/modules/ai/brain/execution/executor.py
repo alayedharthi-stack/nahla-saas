@@ -27,7 +27,6 @@ from ..decision.actions import (
     ACTION_PAYMENT_TRANSFER_PROMISE,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
-    ACTION_PRODUCT_MEDIA_IDENTITY,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SEND_PAYMENT_LINK,
@@ -239,24 +238,6 @@ class _PaymentTransferPromiseHandler:
         )
 
 
-class _ProductMediaIdentityHandler:
-    """Deterministic product identity from inbound media evidence."""
-    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        args = dict(decision.args or {})
-        return ActionResult(
-            success=True,
-            data={
-                "type": "product_media_identity",
-                "reply_text": str(args.get("reply_text") or "").strip(),
-                "media_identity_status": args.get("media_identity_status"),
-                "matched_product_id": args.get("matched_product_id"),
-                "matched_product_title": args.get("matched_product_title"),
-                "match_confidence": args.get("match_confidence"),
-                "block_purchase_flow": bool(args.get("block_purchase_flow")),
-            },
-        )
-
-
 class _NarrowHandler:
     """Present a short list of product choices to help the customer decide."""
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
@@ -423,7 +404,6 @@ class DefaultActionExecutor:
             ACTION_ORDER_CONTEXT_UPDATE: _OrderContextUpdateHandler(),
             ACTION_VARIANT_PRICING:       _VariantPricingHandler(),
             ACTION_PAYMENT_TRANSFER_PROMISE: _PaymentTransferPromiseHandler(),
-            ACTION_PRODUCT_MEDIA_IDENTITY: _ProductMediaIdentityHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

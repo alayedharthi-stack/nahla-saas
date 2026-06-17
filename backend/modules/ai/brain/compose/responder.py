@@ -63,7 +63,6 @@ from ..decision.actions import (
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
     ACTION_PAYMENT_TRANSFER_PROMISE,
-    ACTION_PRODUCT_MEDIA_IDENTITY,
     ACTION_VARIANT_PRICING,
 )
 from ..execution.faq import (
@@ -670,14 +669,6 @@ class DefaultComposer:
                 result.data["chosen_path"] = "variant_pricing"
                 return reply
             return T.clarify(question="أي خيار/حجم تقصد؟")
-
-        # ── Product media identity (OCR + vision + catalog) ────────────────
-        if action == ACTION_PRODUCT_MEDIA_IDENTITY:
-            reply = str(data.get("reply_text") or "").strip()
-            if reply:
-                result.data["chosen_path"] = "product_media_identity"
-                return reply
-            return T.clarify(question="أرسل صورة أو اسم المنتج للتحقق.")
 
         # ── Future transfer promise (awaiting receipt) ─────────────────────
         if action == ACTION_PAYMENT_TRANSFER_PROMISE:

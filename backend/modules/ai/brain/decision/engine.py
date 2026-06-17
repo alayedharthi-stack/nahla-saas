@@ -2894,22 +2894,6 @@ class DefaultDecisionEngine:
                 confidence=0.88,
             )
 
-        # Product media identity — OCR + vision + synced catalog (ownership ask)
-        try:
-            from ..commerce.product_media_identity_guard import (  # noqa: PLC0415
-                try_product_media_identity_decision,
-            )
-
-            _pmi_dec = try_product_media_identity_decision(ctx)
-            if _pmi_dec is not None:
-                return _pmi_dec
-        except Exception as _pmi_exc:  # noqa: BLE001  # noqa: silent-ok — guard must not block decide
-            logger.debug(
-                "[PRODUCT_MEDIA_IDENTITY] skipped tenant=%s err=%s",
-                getattr(ctx, "tenant_id", None),
-                _pmi_exc,
-            )
-
         # P1-E: typed product-media goal (honey/process video, product info text)
         try:
             from ..commerce.product_media import (  # noqa: PLC0415

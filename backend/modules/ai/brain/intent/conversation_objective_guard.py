@@ -39,13 +39,13 @@ _OWNERSHIP_RE = re.compile(
     r"(?:"
     r"(?:ده|هذا|هذي|هذه|المنتج\s*(?:ده|هذا|هذي|هذه)?)\s*(?:تبع(?:كم|ك|ه|ها|هم)|"
     r"من\s*(?:عند(?:كم|ك|ه|ها|هم)|كم|ك|ه|ها|هم)|"
+    r"تابع\s*(?:ل)?(?:كم|ك|ه|ها|هم)|"
     r"منتج(?:كم|ك|ه|ها|هم))"
-    r"|(?:هل|ه(?:ل|))\s*(?:هذا|هذي|هذه|المنتج)\s*(?:منتج(?:كم|ك|ه|ها|هم)|"
+    r"|(?:هل|ه(?:ل|)\s*(?:هذا|هذي|هذه|المنتج))\s*(?:منتج(?:كم|ك|ه|ها|هم)|"
     r"تبع(?:كم|ك|ه|ها|هم)|من\s*(?:عند(?:كم|ك)|كم|ك))"
-    r"|^تابع\s*(?:ل\s*)?(?:كم|ك|ه|ها|هم)\b"
-    r"|(?:is\s+this|are\s+you)\s*(?:your\s+product|product|yours|from\s+you)"
+    r"|(?:is\s+this|are\s+you)\s*(?:product|yours|from\s+you)"
     r")",
-    re.UNICODE | re.IGNORECASE | re.MULTILINE,
+    re.UNICODE | re.IGNORECASE,
 )
 
 _RECEIVED_ORDER_RE = re.compile(
@@ -106,14 +106,6 @@ def _has_image_attachment(profile: Dict[str, Any]) -> bool:
     if image_kind and image_kind not in {"text", ""}:
         return True
     return False
-
-
-def is_product_ownership_question(message: str) -> bool:
-    """True when the customer asks if a product belongs to the store."""
-    raw = (message or "").strip()
-    if not raw:
-        return False
-    return bool(_OWNERSHIP_RE.search(_norm(raw)))
 
 
 def _detect_origin_trigger(message: str, *, has_image: bool) -> str:
@@ -363,7 +355,6 @@ __all__ = [
     "ObjectiveTurnResult",
     "apply_objective_to_primary_goal",
     "is_product_origin_objective_active",
-    "is_product_ownership_question",
     "refresh_conversation_objective",
     "should_block_availability_fallback",
 ]
