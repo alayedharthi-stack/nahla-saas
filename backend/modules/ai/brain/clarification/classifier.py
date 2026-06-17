@@ -17,6 +17,7 @@ from ..types import (
     INTENT_ASK_SHIPPING,
     INTENT_GENERAL,
     INTENT_HESITATION,
+    INTENT_START_ORDER,
     INTENT_TRACK_ORDER,
     BrainContext,
 )
@@ -77,6 +78,37 @@ def classify_missing_information(
     intent_name = str(getattr(intent, "name", "") or "")
     state = getattr(ctx, "state", None)
     focus = dict(getattr(state, "current_product_focus", None) or {})
+
+    try:
+        from ..commerce.conversation_context_reset import is_active_order_context  # noqa: PLC0415
+        from ..commerce.product_ordering_prompt import next_missing_order_field  # noqa: PLC0415
+
+        if is_active_order_context(state):
+            missing_field = next_missing_order_field(ctx)
+            if missing_field:
+                return ClarificationSpec(
+                    ambiguity_class=AMBIGUITY_MISSING_VARIANT
+                    if missing_field == "variant"
+                    else AMBIGUITY_MISSING_QUANTITY,
+                    recovery_mode=RECOVERY_DETERMINISTIC,
+                    evidence=evidence,
+                    trigger=trigger,
+                    structured_prompt={
+                        "field": missing_field,
+                        "product_title": str(focus.get("title") or "").strip(),
+                    },
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
+    if intent_name == INTENT_START_ORDER and not focus and not _has_resolved_product_query(ctx):
+        return ClarificationSpec(
+            ambiguity_class=AMBIGUITY_MISSING_PRODUCT_REF,
+            recovery_mode=RECOVERY_DETERMINISTIC,
+            evidence=evidence,
+            trigger=trigger,
+            structured_prompt={"field": "product_order"},
+        )
 
     candidate_titles = list(evidence.get("search_candidate_titles") or [])
     if candidate_titles:

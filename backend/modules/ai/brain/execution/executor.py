@@ -192,6 +192,14 @@ class _ClarifyHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         question = decision.args.get("question", "ما الذي تبحث عنه بالضبط؟")
         try:
+            from ..commerce.product_ordering_prompt import resolve_product_clarify_question  # noqa: PLC0415
+
+            question = resolve_product_clarify_question(ctx, str(question or ""))
+        except Exception:
+            logger.exception(
+                "[EXECUTOR] product_ordering_prompt failed",
+            )
+        try:
             from ..clarification.resolved_product_guard import (  # noqa: PLC0415
                 apply_resolved_product_clarify_guard,
             )

@@ -486,6 +486,30 @@ class MerchantBrain:
             )
             state_for_classify.greeted = True
 
+        # ── 1b.4 Order context TTL / explicit close ───────────────────────
+        try:
+            from .commerce.conversation_context_reset import (  # noqa: PLC0415
+                maybe_reset_stale_order_context,
+            )
+
+            _reset_reason = maybe_reset_stale_order_context(
+                state_for_classify,
+                message,
+            )
+            if _reset_reason:
+                logger.info(
+                    "[ORDER_CONTEXT_RESET] tenant=%s reason=%s preview=%r",
+                    tenant_id,
+                    _reset_reason,
+                    (message or "")[:80],
+                )
+        except Exception as _ocr_exc:  # noqa: BLE001
+            logger.debug(
+                "[ORDER_CONTEXT_RESET] skipped tenant=%s err=%s",
+                tenant_id,
+                _ocr_exc,
+            )
+
         # ── 1b.5 Conversation objective (product-origin verification, …) ───
         try:
             from .intent.conversation_objective_guard import (  # noqa: PLC0415

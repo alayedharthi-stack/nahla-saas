@@ -67,7 +67,7 @@ def _decision_from_spec(
 ) -> Optional[Decision]:
     """Build a Decision from a ClarificationSpec, or None to keep legacy."""
     if spec.is_deterministic:
-        question = build_deterministic_question(spec)
+        question = build_deterministic_question(spec, ctx=ctx)
         if not question:
             log_clarification_skipped(
                 tenant_id=getattr(ctx, "tenant_id", None),
