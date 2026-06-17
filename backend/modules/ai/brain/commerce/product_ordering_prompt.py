@@ -12,6 +12,10 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from .catalog_product_grounding import (
+    build_uncertain_catalog_reply,
+    collect_verified_catalog_titles_from_ctx,
+)
 from ..types import BrainContext, INTENT_START_ORDER
 
 # Legacy phrase — must never reach customers (enforced by tests).
@@ -65,19 +69,7 @@ def _join_names(names: List[str], *, limit: int = 3) -> str:
 
 
 def _catalog_titles(ctx: BrainContext) -> List[str]:
-    state = getattr(ctx, "state", None)
-    facts = getattr(ctx, "facts", None)
-    seen: List[str] = []
-    for source in (
-        list(getattr(state, "last_search_candidates", None) or []),
-        list(getattr(state, "last_recommended_products", None) or []),
-        list(getattr(facts, "top_products", None) or []),
-    ):
-        for prod in source:
-            title = str((prod or {}).get("title") or "").strip()
-            if title and title not in seen:
-                seen.append(title)
-    return seen[:6]
+    return collect_verified_catalog_titles_from_ctx(ctx, limit=6)
 
 
 def _variant_labels(ctx: BrainContext) -> List[str]:
@@ -239,7 +231,7 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
             )
         if joined:
             return f"المتوفر عندنا: {joined}. تبغى أعطيك الأسعار والأحجام؟"
-        return "أبشر، أعطيك المتوفر عندنا — تبغى الأسعار والأحجام؟"
+        return build_uncertain_catalog_reply()
 
     if _is_order_intent_without_product(ctx, message) or _is_honey_context(ctx, message):
         names = _catalog_titles(ctx)
@@ -250,10 +242,7 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
                     f"أبشر، المتوفر عندنا {joined}. "
                     "تفضل أي نوع؟"
                 )
-            return (
-                "أبشر، تبي أجهز لك طلح نجد أو سمر الحجاز؟ "
-                "وإذا عندك نوع معين اكتبه لي."
-            )
+            return build_uncertain_catalog_reply(category_hint="العسل")
         if joined:
             return f"أبشر، المتوفر عندنا {joined}. تفضل أي نوع؟"
         return "أبشر، وش المنتج اللي تبي أجهزه لك؟"
