@@ -26,6 +26,7 @@ from models import (  # noqa: E402
     Base,
     BillingPlan,
     BillingSubscription,
+    Integration,
     Tenant,
     WhatsAppConnection,
 )
@@ -44,6 +45,7 @@ from core.trial_lifecycle import (  # noqa: E402
     init_new_tenant_trial_state,
     migrate_existing_tenant_trials,
     resolve_billing_lifecycle,
+    resolve_billing_renewal_info,
     start_trial_on_whatsapp_connect,
     subscription_period_end,
 )
@@ -363,3 +365,83 @@ class TestBillingLifecycleResolution:
         assert payload["is_trial"] is True
         assert "ai_auto_replies_allowed" in payload
         assert payload["manual_replies_allowed"] is True
+
+
+class TestBillingRenewalChannel:
+    def test_direct_moyasar_merchant_can_renew_outside_salla(self, db):
+        t = _tenant(db)
+        db.commit()
+        lifecycle = {
+            "payment_provider": "moyasar",
+            "has_paid_subscription_history": True,
+            "ai_auto_replies_allowed": False,
+        }
+        info = resolve_billing_renewal_info(db, t.id, lifecycle)
+        assert info["is_salla_managed"] is False
+        assert info["billing_channel"] == "moyasar"
+        assert info["renewal_method"] == "direct_checkout"
+        assert info["can_renew_directly"] is True
+        assert info["renewal_url"] == "/billing"
+
+    def test_salla_managed_merchant_uses_salla_renewal(self, db):
+        t = _tenant(db)
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-1",
+            config={"billing_status": "active", "salla_subscription_id": "sub_1"},
+            enabled=True,
+        ))
+        db.commit()
+        lifecycle = {"payment_provider": "unknown", "has_paid_subscription_history": False}
+        info = resolve_billing_renewal_info(db, t.id, lifecycle)
+        assert info["is_salla_managed"] is True
+        assert info["billing_channel"] == "salla"
+        assert info["renewal_method"] == "salla_app"
+        assert info["can_renew_directly"] is False
+
+    def test_build_billing_status_payload_includes_renewal_fields(self, db):
+        now = datetime.now(timezone.utc)
+        t = _tenant(db)
+        _wa_conn(db, t.id, connected_days_ago=40)
+        t.trial_started_at = (now - timedelta(days=40)).replace(tzinfo=None)
+        t.trial_ends_at = (now - timedelta(days=26)).replace(tzinfo=None)
+        t.subscription_status = TRIAL_STATUS_EXPIRED
+        db.flush()
+        plan = BillingPlan(
+            tenant_id=None, slug="growth", name="Growth", description="",
+            currency="SAR", price_sar=849, billing_cycle="monthly",
+            features=[], limits={},
+        )
+        db.add(plan)
+        db.flush()
+        sub = BillingSubscription(
+            tenant_id=t.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=(now - timedelta(days=35)).replace(tzinfo=None),
+            ends_at=(now - timedelta(days=5)).replace(tzinfo=None),
+            extra_metadata={"paid_at": (now - timedelta(days=35)).isoformat(), "gateway": "moyasar"},
+        )
+        db.add(sub)
+        db.commit()
+
+        payload = build_billing_status_payload(
+            db, t.id, t, active_sub=None,
+            conversations_used=0,
+            usage_data={"conversations_limit": 1000, "usage_pct": 0, "exceeded": False},
+            integration_fee_sar=59,
+        )
+        assert payload["lifecycle_status"] == "paid_expired"
+        assert payload["is_salla_managed"] is False
+        assert payload["renewal_method"] == "direct_checkout"
+        assert payload["can_renew_directly"] is True
+
+
+class TestSilentBillingOutbound:
+    def test_webhook_has_no_customer_billing_fallback(self):
+        from pathlib import Path
+        src = Path(BACKEND_DIR) / "routers" / "whatsapp_webhook.py"
+        body = src.read_text(encoding="utf-8")
+        assert "trial expired fallback" not in body.lower()
+        assert "outbound suppressed" in body.lower()

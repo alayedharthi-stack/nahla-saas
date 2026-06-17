@@ -535,6 +535,81 @@ def resolve_billing_lifecycle(
     }
 
 
+def _tenant_salla_integration(db: Session, tenant_id: int):
+    from models import Integration  # noqa: PLC0415
+
+    return (
+        db.query(Integration)
+        .filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "salla",
+        )
+        .first()
+    )
+
+
+def resolve_billing_renewal_info(
+    db: Session,
+    tenant_id: int,
+    lifecycle: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Decide how a merchant should renew — Salla App Store vs Nahla direct checkout.
+
+    Platform-wide: do not assume every merchant is Salla-managed.
+    """
+    salla_integ = _tenant_salla_integration(db, tenant_id)
+    cfg = (salla_integ.config or {}) if salla_integ else {}
+    billing_status = str(cfg.get("billing_status") or "none").strip().lower()
+    salla_sub_id = cfg.get("salla_subscription_id")
+
+    is_salla_managed = bool(
+        salla_integ
+        and (
+            salla_sub_id
+            or billing_status in ("active", "trial", "trial_blocked", "cancelled", "failed")
+        )
+    )
+
+    payment_provider = str(lifecycle.get("payment_provider") or "unknown").lower()
+    has_paid_history = bool(lifecycle.get("has_paid_subscription_history"))
+
+    if is_salla_managed:
+        billing_channel = "salla"
+        renewal_method = "salla_app"
+        can_renew_directly = False
+        renewal_url = None
+    elif payment_provider == "moyasar":
+        billing_channel = "moyasar"
+        renewal_method = "direct_checkout"
+        can_renew_directly = True
+        renewal_url = "/billing"
+    elif payment_provider == "manual":
+        billing_channel = "manual"
+        renewal_method = "direct_checkout"
+        can_renew_directly = True
+        renewal_url = "/billing"
+    elif has_paid_history:
+        billing_channel = "direct"
+        renewal_method = "direct_checkout"
+        can_renew_directly = True
+        renewal_url = "/billing"
+    else:
+        billing_channel = "unknown"
+        renewal_method = "direct_checkout"
+        can_renew_directly = True
+        renewal_url = "/billing"
+
+    return {
+        "billing_channel":      billing_channel,
+        "renewal_method":       renewal_method,
+        "can_renew_directly":   can_renew_directly,
+        "renewal_url":          renewal_url,
+        "is_salla_managed":     is_salla_managed,
+        "campaigns_automations_allowed": lifecycle.get("ai_auto_replies_allowed", False),
+    }
+
+
 def build_billing_status_payload(
     db: Session,
     tenant_id: int,
@@ -585,6 +660,8 @@ def build_billing_status_payload(
             }
             payload["launch_discount_active"] = launch
             payload["current_price_sar"] = int(price)
+
+    payload.update(resolve_billing_renewal_info(db, tenant_id, lifecycle))
 
     return payload
 

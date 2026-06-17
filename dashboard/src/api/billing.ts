@@ -32,6 +32,9 @@ export type BillingLifecycleStatus =
   | 'paid_active'
   | 'paid_expired'
 
+export type BillingRenewalMethod = 'direct_checkout' | 'salla_app' | 'manual_contact'
+export type BillingChannel = 'direct' | 'salla' | 'moyasar' | 'manual' | 'unknown'
+
 export interface BillingStatus {
   has_subscription:        boolean
   plan:                    BillingPlan | null
@@ -59,6 +62,12 @@ export interface BillingStatus {
   payment_history?:        BillingPaymentHistoryRow[]
   ai_auto_replies_allowed?: boolean
   manual_replies_allowed?: boolean
+  campaigns_automations_allowed?: boolean
+  billing_channel?:        BillingChannel
+  renewal_method?:         BillingRenewalMethod
+  can_renew_directly?:     boolean
+  renewal_url?:            string | null
+  is_salla_managed?:       boolean
   whatsapp_connected?:     boolean
   conversations_used:      number
   conversations_limit:     number     // -1 = unlimited

@@ -326,21 +326,22 @@ export default function Billing() {
   const [checkoutErr, setCheckoutErr] = useState<string | null>(null)
   const [checkoutErrCode, setCheckoutErrCode] = useState<string>('')
 
-  // Detected once per render — Salla merchants must subscribe via Salla.
-  const isSalla = isSallaMerchant()
+  // Salla-managed billing comes from the API — not localStorage alone.
+  const isSallaRenewal = status?.is_salla_managed === true
+  const isSallaEmbedded = isSallaMerchant()
 
   // Inactivity hint for Salla merchants — appears 8 seconds after the page
   // loads if they haven't started a checkout yet.  Helps merchants who don't
   // realise the subscription is completed via Salla's billing UI.
   const [showSallaHint, setShowSallaHint] = useState(false)
   useEffect(() => {
-    if (!isSalla) return
+    if (!isSallaEmbedded) return
     const t = setTimeout(() => {
       // Skip hint if a checkout already started or the page already navigated.
       if (!checkingOut) setShowSallaHint(true)
     }, 8000)
     return () => clearTimeout(t)
-  }, [isSalla, checkingOut])
+  }, [isSallaEmbedded, checkingOut])
 
   // "Returned from Salla without subscribing" banner.  Triggered when the
   // merchant lands on /billing with ?from=salla in the URL — i.e. they
@@ -349,7 +350,7 @@ export default function Billing() {
   // the banner forever.
   const [returnedFromSalla, setReturnedFromSalla] = useState(false)
   useEffect(() => {
-    if (!isSalla) return
+    if (!isSallaEmbedded) return
     try {
       const params = new URLSearchParams(window.location.search)
       if (params.get('from') === 'salla') {
@@ -361,7 +362,7 @@ export default function Billing() {
         trackEvent('salla_returned_without_subscription', { is_salla: true })
       }
     } catch { /* noop */ }
-  }, [isSalla])
+  }, [isSallaEmbedded])
 
   const load = async () => {
     setLoading(true)
@@ -388,7 +389,7 @@ export default function Billing() {
     // subscribe through Salla's billing UI.  Defensive guard in addition to
     // the disabled button: if the click somehow reaches us, redirect to the
     // Salla app subscription page at the top level instead of opening Moyasar.
-    if (isSalla) {
+    if (isSallaRenewal) {
       console.info('[Billing] Salla merchant — redirecting to Salla subscription instead of Moyasar')
       openSallaApp()
       return
@@ -539,7 +540,7 @@ export default function Billing() {
 
       {/* Returned from Salla without subscribing — only for Salla merchants
           who bounced back via ?from=salla query param. */}
-      {isSalla && returnedFromSalla && (
+      {isSallaEmbedded && returnedFromSalla && (
         <div className="flex items-center justify-between gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl px-4 py-3">
           <div className="flex items-start gap-2.5 flex-1">
             <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
@@ -1058,7 +1059,7 @@ export default function Billing() {
           opened this page via Salla embedded session. Required by Salla's
           policy: subscriptions for Salla merchants must go through Salla's
           billing UI to ensure correct activation + linking with their store. */}
-      {isSalla && (
+      {isSallaRenewal && (
         <div className="space-y-3">
           {/* Policy notice */}
           <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
@@ -1161,7 +1162,7 @@ export default function Billing() {
               storeName={(() => {
                 try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
               })()}
-              isSalla={isSalla}
+              isSalla={isSallaRenewal}
             />
           ))}
         </div>
@@ -1169,7 +1170,7 @@ export default function Billing() {
 
       {/* Payment security note — only shown for non-Salla merchants since
           Salla merchants pay via Salla's own checkout. */}
-      {!isSalla && (
+      {!isSallaRenewal && (
       <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-4 border border-slate-200">
         <ShieldCheck className="w-5 h-5 text-slate-400 shrink-0" />
         <div>

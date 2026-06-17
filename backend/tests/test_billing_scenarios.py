@@ -186,12 +186,16 @@ class TestScenario1_TrialBlocked:
             "Brain pipeline is missing the skipped:True contract"
 
     def test_whatsapp_webhook_handles_skip_marker(self):
-        """The webhook reader must check 'reason == billing_access_denied' and suppress reply."""
+        """Webhook must suppress outbound silently — never customer billing messages."""
         from pathlib import Path
         src = Path(_backend) / "routers" / "whatsapp_webhook.py"
         body = src.read_text(encoding="utf-8")
         assert "billing_access_denied" in body, \
             "whatsapp_webhook is missing the billing_access_denied handler"
+        assert "التجربة المنتهية" not in body, \
+            "whatsapp_webhook must not send customer-facing trial expiry fallback"
+        assert "outbound suppressed" in body.lower() or "silent" in body.lower(), \
+            "whatsapp_webhook billing guard must be silent"
 
     def test_automation_engine_blocks_outbound(self):
         """_execute_action must return billing_access_denied before any send."""
