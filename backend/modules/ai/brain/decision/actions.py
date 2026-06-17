@@ -84,6 +84,7 @@ ACTION_VARIANT_PRICING = "variant_pricing"
 
 # Customer promised a future bank transfer while awaiting receipt proof.
 ACTION_PAYMENT_TRANSFER_PROMISE = "payment_transfer_promise"
+ACTION_PRODUCT_MEDIA_IDENTITY = "product_media_identity"
 
 ALL_ACTIONS = [
     ACTION_GREET,
@@ -106,4 +107,5 @@ ALL_ACTIONS = [
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_VARIANT_PRICING,
     ACTION_PAYMENT_TRANSFER_PROMISE,
+    ACTION_PRODUCT_MEDIA_IDENTITY,
 ]
