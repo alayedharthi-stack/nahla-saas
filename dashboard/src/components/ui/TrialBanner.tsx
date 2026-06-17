@@ -19,6 +19,24 @@ function resolveLifecycle(status: BillingStatus): string {
   return 'trial_expired'
 }
 
+const SALLA_APP_URL =
+  (import.meta.env.VITE_SALLA_APP_URL as string | undefined) ||
+  'https://s.salla.sa/apps/nahla'
+
+function renewalCta(status: BillingStatus): { label: string; onClick: () => void } {
+  const useSalla = status.renewal_method === 'salla_app' || status.is_salla_managed === true
+  if (useSalla) {
+    return {
+      label: 'التجديد عبر سلة',
+      onClick: () => { window.top ? (window.top.location.href = SALLA_APP_URL) : (window.location.href = SALLA_APP_URL) },
+    }
+  }
+  return {
+    label: 'جدّد الاشتراك',
+    onClick: () => { /* set by caller via navigate */ },
+  }
+}
+
 export default function TrialBanner() {
   const navigate = useNavigate()
   const [status, setStatus]       = useState<BillingStatus | null>(null)
@@ -80,6 +98,7 @@ export default function TrialBanner() {
 
   const { trial_days_remaining, warning_level, headline_ar, plan_name } = status
   const planLabel = plan_name || status.plan?.name_ar || 'الباقة'
+  const renew = renewalCta(status)
 
   /* ── Trial pending WhatsApp ──────────────────────────────────────── */
   if (lifecycle === 'trial_pending_whatsapp') {
@@ -119,10 +138,16 @@ export default function TrialBanner() {
           </div>
         </div>
         <button
-          onClick={() => navigate('/billing')}
+          onClick={() => {
+            if (status.renewal_method === 'salla_app' || status.is_salla_managed) {
+              renew.onClick()
+            } else {
+              navigate('/billing')
+            }
+          }}
           className="shrink-0 bg-white text-orange-700 text-xs font-bold px-4 py-2 rounded-lg hover:bg-orange-50 transition-colors"
         >
-          تجديد الاشتراك
+          {renew.label}
         </button>
       </div>
     )
@@ -142,10 +167,16 @@ export default function TrialBanner() {
           </div>
         </div>
         <button
-          onClick={() => navigate('/billing')}
+          onClick={() => {
+            if (status.renewal_method === 'salla_app' || status.is_salla_managed) {
+              renew.onClick()
+            } else {
+              navigate('/billing')
+            }
+          }}
           className="shrink-0 bg-white text-red-600 text-xs font-bold px-4 py-2 rounded-lg hover:bg-red-50 transition-colors"
         >
-          ترقية الباقة
+          {status.is_salla_managed ? 'التجديد عبر سلة' : 'جدّد الاشتراك'}
         </button>
       </div>
     )
@@ -195,11 +226,17 @@ export default function TrialBanner() {
 
         <div className="flex items-center gap-2 shrink-0">
           <button
-            onClick={() => navigate('/billing')}
+            onClick={() => {
+              if (status.renewal_method === 'salla_app' || status.is_salla_managed) {
+                renew.onClick()
+              } else {
+                navigate('/billing')
+              }
+            }}
             className="flex items-center gap-1.5 bg-white text-brand-600 text-xs font-bold px-3 py-1.5 rounded-lg hover:bg-slate-50 transition-colors"
           >
             <Zap className="w-3.5 h-3.5" />
-            ترقية الباقة
+            {status.is_salla_managed ? 'التجديد عبر سلة' : 'جدّد الاشتراك'}
           </button>
           {!urgency && (
             <button

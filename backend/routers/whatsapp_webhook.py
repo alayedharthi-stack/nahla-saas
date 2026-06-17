@@ -6474,20 +6474,19 @@ async def _handle_merchant_message(
         logger.info("[Mode] tenant=%s to=%s decision=%s",
                     tenant_id, to, mode_decision.to_log_dict())
 
-        # ── Trial / subscription guard for AI replies ────────────────────────
-        # If trial expired and no subscription: send a static fallback reply
-        # so the customer isn't left hanging, but skip the expensive AI call.
+        # ── Billing guard: silent outbound block (merchant-only expiry state) ─
+        # Inbound is already persisted above. Never expose trial/subscription
+        # expiry to customers — no static fallback, no AI reply, no WhatsApp send.
         from core.billing import has_billing_access as _has_billing  # noqa: PLC0415
         if not _has_billing(db, tenant_id):
-            reply = "شكراً لتواصلك! هذا الحساب في وضع التجربة المنتهية. يُرجى التواصل مع صاحب المتجر."
             _persona_ownership.mark_bypass(_POReason.BILLING_DENIED, owner="billing_guard")
-            StateManager.save_message(
-                db, to, reply, "outbound",
-                conversation_id=convo.id, tenant_id=tenant_id,
-                extra_metadata=_persona_ownership.to_metadata(),
+            _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
+            _trace.response_goal   = "silent"
+            _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
+            logger.info(
+                "[BILLING_GUARD] inbound recorded, outbound suppressed (silent) | tenant=%s to=%s",
+                tenant_id, to,
             )
-            await _send_whatsapp_message(phone_id=phone_id, to=to, text=reply, _tenant_id=tenant_id, _db=db)
-            _trace.mark_outbound_sent(source=_TS.SOURCE_BILLING_DENIED, length=len(reply))
             _sync_persona_observability()
             return
 
