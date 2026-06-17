@@ -196,17 +196,36 @@ def apply_social_phrase_quality_guard(
     if not text:
         return SocialPhraseQualityGuardResult(reply="", stripped=False)
 
+    stripped = False
+    try:
+        from modules.ai.brain.postprocess.social_reply_context_guard import (  # noqa: PLC0415
+            apply_social_reply_context_guard,
+        )
+
+        _ctx_guard = apply_social_reply_context_guard(
+            text,
+            inbound_text=inbound_text,
+            tenant_id=tenant_id,
+        )
+        if _ctx_guard.replaced:
+            text = _ctx_guard.reply
+            stripped = True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — belt guard must never break outbound
+        pass
+
     try:
         from modules.ai.brain.compose.persona_template_engine import (  # noqa: PLC0415
             inbound_is_religious_dua_exchange,
         )
 
         if inbound_is_religious_dua_exchange(inbound_text):
-            return SocialPhraseQualityGuardResult(reply=text, stripped=False)
+            return SocialPhraseQualityGuardResult(reply=text, stripped=stripped)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — bypass must never break outbound
         pass
 
-    cleaned, stripped = strip_social_phrase_violations(text)
+    cleaned, stripped_violations = strip_social_phrase_violations(text)
+    if stripped_violations:
+        stripped = True
     if stripped:
         logger.info(
             "[SOCIAL_PHRASE_QUALITY_GUARD] tenant=%s orig_len=%d new_len=%d "

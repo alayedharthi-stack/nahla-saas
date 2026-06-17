@@ -752,6 +752,30 @@ def match(message: str) -> Optional[Intent]:
             ),
         ))
 
+    try:
+        from .education_context_classifier import classify_education_context  # noqa: PLC0415
+
+        edu = classify_education_context(message)
+        if edu is not None and not any(
+            c[1].slots.get("education_context") for c in candidates
+        ):
+            candidates.append((
+                edu.confidence,
+                Intent(
+                    name=INTENT_GENERAL,
+                    confidence=edu.confidence,
+                    slots={
+                        "block_commerce_escalation": True,
+                        "education_context": True,
+                        "education_topic": edu.topic,
+                    },
+                    raw_message=message,
+                    extraction_method="rules+education_context",
+                ),
+            ))
+    except Exception:  # noqa: silent-ok — education gate must not break match()
+        pass
+
     # ── Layer 2: platform / SaaS inquiry ────────────────────────────────
     platform = classify_platform(message)
     if platform is not None:
@@ -910,6 +934,25 @@ def match(message: str) -> Optional[Intent]:
         # so the LLM brain gets to see and answer the embedded ask.
         # Pure salaams (residue ≤ 2 chars) keep the greeting card.
         if _has_substantive_residue(message):
+            try:
+                from .education_context_classifier import classify_education_context  # noqa: PLC0415
+
+                edu = classify_education_context(message)
+                if edu is not None:
+                    return Intent(
+                        name=INTENT_GENERAL,
+                        confidence=0.85,
+                        slots={
+                            "embedded_greeting": True,
+                            "block_commerce_escalation": True,
+                            "education_context": True,
+                            "education_topic": edu.topic,
+                        },
+                        raw_message=message,
+                        extraction_method="rules+welcome_gate+education",
+                    )
+            except Exception:  # noqa: silent-ok — education gate must not break match()
+                pass
             return Intent(
                 name=INTENT_GENERAL,
                 # Confidence intentionally lower than the original

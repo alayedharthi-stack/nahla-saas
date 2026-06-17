@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-_MEDIA_SOURCE_TYPES = frozenset({"document", "image", "audio", "video"})
+_MEDIA_SOURCE_TYPES = frozenset({"document", "image", "audio", "video", "sticker"})
 
 
 def resolve_pre_brain_customer_message(

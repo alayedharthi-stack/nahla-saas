@@ -3917,7 +3917,7 @@ async def _dispatch_message(
         # ``INBOUND_IGNORED_UNSUPPORTED``. Video reaches the brain
         # exactly like a captioned image: the normaliser builds an
         # Arabic-framed prompt and the brain writes its own reply.
-        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document", "video"}:
+        if normalized_inbound.normalized_type not in {"text", "audio", "image", "document", "video", "sticker"}:
             # ── Button-tap rescue: "button" type = customer tapped a template
             # quick-reply.  The normalizer marks it unsupported, but we have
             # already extracted human-readable text via _extract_wa_message_text.
@@ -4018,7 +4018,7 @@ async def _dispatch_message(
         if (
             not text
             and normalized_inbound.fallback_reply_ar
-            and normalized_inbound.normalized_type in {"audio", "image", "document", "video"}
+            and normalized_inbound.normalized_type in {"audio", "image", "document", "video", "sticker"}
             and not _is_platform_tenant(db, resolved_tenant_id)
         ):
             logger.info(
@@ -4218,6 +4218,7 @@ async def _dispatch_message(
             # On any failure we silently fall through to the brain.
             _payment_claim_decision = None
             _address_decision = None
+            _payment_method_decision = None
             if (
                 _receipt_decision is None
                 and _evidence_decision is None
@@ -4245,6 +4246,31 @@ async def _dispatch_message(
                 and _evidence_decision is None
                 and _map_image_decision is None
                 and _address_decision is None
+                and normalized_inbound.normalized_type == "text"
+            ):
+                try:
+                    from core.order_flow import (  # noqa: PLC0415
+                        maybe_handle_payment_method_selection_inbound,
+                    )
+                    _payment_method_decision = maybe_handle_payment_method_selection_inbound(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender or "",
+                        inbound_text=text or "",
+                    )
+                except Exception as _pm_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] payment_method short-circuit failed "
+                        "tenant=%s phone=%s err=%s",
+                        resolved_tenant_id, sender, _pm_exc,
+                    )
+                    _payment_method_decision = None
+            if (
+                _receipt_decision is None
+                and _evidence_decision is None
+                and _map_image_decision is None
+                and _address_decision is None
+                and _payment_method_decision is None
             ):
                 try:
                     from core.payment_intent import (  # noqa: PLC0415
@@ -4714,6 +4740,34 @@ async def _dispatch_message(
                         "to": sender,
                         "type": "text",
                         "text": {"body": _address_decision["reply_text"]},
+                    },
+                    _tenant_id=resolved_tenant_id,
+                    _db=db,
+                )
+                return
+
+            if _payment_method_decision is not None:
+                if _payment_method_decision.get("state_patch"):
+                    try:
+                        apply_state_patch(
+                            db,
+                            tenant_id=resolved_tenant_id,
+                            phone=sender,
+                            state_patch=_payment_method_decision["state_patch"],
+                        )
+                    except Exception as _pm_patch_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[ORDER_FLOW_STATE] payment_method state_patch failed "
+                            "tenant=%s phone=%s err=%s",
+                            resolved_tenant_id, sender, _pm_patch_exc,
+                        )
+                await _post_wa(
+                    used_pid,
+                    {
+                        "messaging_product": "whatsapp",
+                        "to": sender,
+                        "type": "text",
+                        "text": {"body": _payment_method_decision["reply_text"]},
                     },
                     _tenant_id=resolved_tenant_id,
                     _db=db,

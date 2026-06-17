@@ -27,6 +27,7 @@ import {
   type OrderTimelineEvent,
 } from '../api/featureReality'
 import { formatRiyadh } from '../lib/datetime'
+import { formatOrderNumberLabel, orderApiId } from '../lib/orderRoutes'
 
 const STATUS_VARIANT: Record<string, 'green' | 'amber' | 'red' | 'slate'> = {
   paid:      'green',
@@ -100,11 +101,15 @@ export default function OrderDetail() {
   const [confirmBusy, setConfirmBusy] = useState(false)
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false)
   const [confirmToast, setConfirmToast] = useState<{ ok: boolean; text: string } | null>(null)
+  const [shipmentBusy, setShipmentBusy] = useState(false)
+  const [labelBusy, setLabelBusy] = useState(false)
+  const [shipmentToast, setShipmentToast] = useState<{ ok: boolean; text: string } | null>(null)
 
   const reload = (): Promise<void> => {
     if (!orderId) return Promise.resolve()
+    const routeId = orderId.replace(/^#/, '')
     return featureRealityApi
-      .orderDetail(orderId)
+      .orderDetail(routeId)
       .then(({ order }) => { setOrder(order) })
       .catch((e) => setError(e instanceof Error ? e.message : 'تعذّر تحميل تفاصيل الطلب'))
   }
@@ -122,7 +127,7 @@ export default function OrderDetail() {
     setReminderBusy(true)
     setReminderToast(null)
     try {
-      const res = await featureRealityApi.sendOrderPaymentReminder(order.internal_id || order.id)
+      const res = await featureRealityApi.sendOrderPaymentReminder(orderApiId(order))
       if (res.sent) {
         setReminderToast({ ok: true, text: 'تم إرسال تذكير الدفع بنجاح ✅' })
         await reload()
@@ -155,7 +160,7 @@ export default function OrderDetail() {
     setConfirmBusy(true)
     setConfirmToast(null)
     try {
-      const res = await featureRealityApi.confirmOrderPayment(order.internal_id || order.id)
+      const res = await featureRealityApi.confirmOrderPayment(orderApiId(order))
       setConfirmDialogOpen(false)
       const notice = res.result.merchant_notice
       setConfirmToast({
@@ -174,6 +179,45 @@ export default function OrderDetail() {
       })
     } finally {
       setConfirmBusy(false)
+    }
+  }
+
+  const handleCreateShipment = async () => {
+    if (!order || shipmentBusy) return
+    setShipmentBusy(true)
+    setShipmentToast(null)
+    try {
+      const res = await featureRealityApi.createOrderShipment(orderApiId(order))
+      setOrder(res.order)
+      setShipmentToast({ ok: true, text: 'تم إنشاء الشحنة بنجاح ✅' })
+    } catch (e) {
+      setShipmentToast({
+        ok: false,
+        text: e instanceof Error ? e.message : 'تعذّر إنشاء الشحنة',
+      })
+    } finally {
+      setShipmentBusy(false)
+    }
+  }
+
+  const handleGenerateLabel = async () => {
+    if (!order?.shipping?.shipment || labelBusy) return
+    setLabelBusy(true)
+    setShipmentToast(null)
+    try {
+      const res = await featureRealityApi.generateOrderShipmentLabel(
+        orderApiId(order),
+        order.shipping.shipment.id,
+      )
+      setOrder(res.order)
+      setShipmentToast({ ok: true, text: 'تم توليد بيانات البوليصة ✅' })
+    } catch (e) {
+      setShipmentToast({
+        ok: false,
+        text: e instanceof Error ? e.message : 'تعذّر توليد البوليصة',
+      })
+    } finally {
+      setLabelBusy(false)
     }
   }
 
@@ -210,6 +254,10 @@ export default function OrderDetail() {
   const statusCls   = STATUS_VARIANT[order.status] || 'slate'
   const canRemind   = order.status === 'pending' || order.status === 'failed'
   const needsAction = order.needs_action || []
+  const shipping    = order.shipping
+  const canCreateShipment = Boolean(shipping?.can_create_shipment)
+  const shipment    = shipping?.shipment
+  const canGenerateLabel = Boolean(shipping?.can_generate_label && shipment)
 
   return (
     <div className="space-y-5">
@@ -220,7 +268,7 @@ export default function OrderDetail() {
             <ArrowRight className="w-3 h-3" /> العودة إلى الطلبات
           </Link>
           <h1 className="text-xl font-semibold text-slate-900" dir="ltr">
-            {order.order_number || order.id}
+            {formatOrderNumberLabel(order)}
           </h1>
           <div className="flex items-center gap-2 flex-wrap">
             <Badge label={order.status_label_ar || order.status_label || order.status} variant={statusCls} dot />
@@ -532,6 +580,101 @@ export default function OrderDetail() {
               </dl>
             </div>
           )}
+
+          {/* Shipping */}
+          <div className="card p-5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-slate-900 inline-flex items-center gap-2">
+                <Package className="w-4 h-4 text-slate-500" />
+                الشحن والبوليصة
+              </h2>
+              {canCreateShipment && (
+                <button
+                  type="button"
+                  onClick={handleCreateShipment}
+                  disabled={shipmentBusy}
+                  className="btn-primary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {shipmentBusy ? 'جارٍ الإنشاء…' : 'إنشاء شحنة'}
+                </button>
+              )}
+              {canGenerateLabel && (
+                <button
+                  type="button"
+                  onClick={handleGenerateLabel}
+                  disabled={labelBusy}
+                  className="btn-secondary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {labelBusy ? 'جارٍ التوليد…' : 'توليد البوليصة'}
+                </button>
+              )}
+            </div>
+
+            {shipmentToast && (
+              <div
+                className={`px-3 py-2 rounded-lg border text-xs ${
+                  shipmentToast.ok
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-800'
+                }`}
+              >
+                {shipmentToast.text}
+              </div>
+            )}
+
+            {!canCreateShipment && !shipment && shipping?.blocked_reason_ar && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 leading-relaxed">
+                {shipping.blocked_reason_ar}
+              </p>
+            )}
+
+            {shipment ? (
+              <dl className="grid grid-cols-2 gap-y-1.5 text-xs">
+                <dt className="text-slate-500">حالة الشحنة</dt>
+                <dd className="text-slate-800">{shipment.status_label_ar || shipment.status}</dd>
+                {shipment.tracking_number && (
+                  <>
+                    <dt className="text-slate-500">رقم التتبع</dt>
+                    <dd className="text-slate-800 font-mono" dir="ltr">{shipment.tracking_number}</dd>
+                  </>
+                )}
+                {shipment.recipient_name && (
+                  <>
+                    <dt className="text-slate-500">المستلم</dt>
+                    <dd className="text-slate-800">{shipment.recipient_name}</dd>
+                  </>
+                )}
+                {shipment.recipient_phone && (
+                  <>
+                    <dt className="text-slate-500">الجوال</dt>
+                    <dd className="text-slate-800" dir="ltr">{shipment.recipient_phone}</dd>
+                  </>
+                )}
+                {shipment.address_text && (
+                  <>
+                    <dt className="text-slate-500">العنوان</dt>
+                    <dd className="text-slate-800 col-span-1">{shipment.address_text}</dd>
+                  </>
+                )}
+                {shipment.label_url && (
+                  <>
+                    <dt className="text-slate-500">البوليصة</dt>
+                    <dd className="text-slate-800">
+                      {shipment.label_placeholder ? 'بيانات placeholder — جاهزة لربط مزود الشحن' : shipment.label_url}
+                    </dd>
+                  </>
+                )}
+                {shipment.created_at && (
+                  <>
+                    <dt className="text-slate-500">تاريخ الإنشاء</dt>
+                    <dd className="text-slate-800">{formatDateTime(shipment.created_at)}</dd>
+                  </>
+                )}
+              </dl>
+            ) : canCreateShipment ? (
+              <p className="text-xs text-slate-500">الطلب جاهز للشحن — يمكنك إنشاء شحنة داخلية الآن.</p>
+            ) : null}
+          </div>
 
           {order.notes && (
             <div className="card p-5">

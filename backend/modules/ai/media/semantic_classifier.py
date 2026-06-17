@@ -170,6 +170,8 @@ def compose_neutral_attachment_ack(normalized_type: str) -> str:
         return "وصلني التسجيل 👍"
     if t in {"video"}:
         return "وصلني الفيديو 👍"
+    if t in {"sticker"}:
+        return "وصلني الملصق 👍"
     return "وصلتني الصورة 👍"
 
 

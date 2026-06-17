@@ -43,6 +43,7 @@ NC_SOCIAL_FORWARD = "social_forward"
 NC_RELIGIOUS_MEDIA = "religious_media"
 NC_EMOTIONAL = "emotional_personal"
 NC_INFORMATIONAL = "informational_only"
+NC_EDUCATION = "education_context"
 
 # Tags prepended by media/normalizer.py — grep-stable prefixes.
 NON_COMMERCE_IMAGE_TAG = (
@@ -51,10 +52,18 @@ NON_COMMERCE_IMAGE_TAG = (
 NON_COMMERCE_VIDEO_TAG = (
     "[تصنيف الوسائط: محتوى اجتماعي/ديني — بدون نية شراء]"
 )
+NON_COMMERCE_STICKER_TAG = (
+    "[تصنيف الستيكر: محتوى اجتماعي — بدون نية شراء]"
+)
+NON_COMMERCE_STICKER_EXPRESSIVE_TAG = (
+    "[تصنيف الستيكر: ملصق تعبيري — بدون نية شراء]"
+)
 
 _NON_COMMERCE_TAGS = (
     NON_COMMERCE_IMAGE_TAG,
     NON_COMMERCE_VIDEO_TAG,
+    NON_COMMERCE_STICKER_TAG,
+    NON_COMMERCE_STICKER_EXPRESSIVE_TAG,
     "[تصنيف الصورة: محتوى اجتماعي",
     "[تصنيف الوسائط: محتوى اجتماعي",
 )
@@ -175,6 +184,7 @@ _NC_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 _MEDIA_ORIGIN_MARKERS = (
     "[وصف الصورة", "[وصف الصورة المرسلة]", "[وصف الفيديو",
+    "[وصف الستيكر", "[وصف الستيكر المرسل]",
     "استنتاج خفيف من النص",
 )
 
@@ -233,6 +243,8 @@ def _strip_media_framing(message: str) -> str:
         if s.startswith("[وصف الصورة"):
             s = s.split("]", 1)[-1].strip() if "]" in s else ""
         elif s.startswith("[وصف الفيديو"):
+            s = s.split("]", 1)[-1].strip() if "]" in s else ""
+        elif s.startswith("[وصف الستيكر"):
             s = s.split("]", 1)[-1].strip() if "]" in s else ""
         if s.startswith("استنتاج خفيف"):
             continue
@@ -510,6 +522,19 @@ def classify_non_commerce(
                 topic_hints=hints,
             )
 
+    try:
+        from .education_context_classifier import classify_education_context  # noqa: PLC0415
+
+        edu = classify_education_context(raw)
+        if edu is not None:
+            return NonCommerceMatch(
+                category=edu.category,
+                confidence=edu.confidence,
+                source=edu.source,
+            )
+    except Exception:  # noqa: silent-ok — education gate optional; commerce may proceed
+        pass
+
     # 3. Video topic hint advisory (from normalizer).
     if hints:
         if any("دعاء" in h or "تهنئة" in h for h in hints):
@@ -699,6 +724,8 @@ __all__ = [
     "NC_SOCIAL_FORWARD",
     "NON_COMMERCE_IMAGE_TAG",
     "NON_COMMERCE_VIDEO_TAG",
+    "NON_COMMERCE_STICKER_TAG",
+    "NON_COMMERCE_STICKER_EXPRESSIVE_TAG",
     "NonCommerceMatch",
     "POSITIVE_COMMERCE_INTENTS",
     "classify_non_commerce",

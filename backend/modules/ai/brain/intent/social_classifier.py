@@ -189,6 +189,10 @@ _BLESSING_KEYWORDS = (
     "بيض الله وجهك", "بيض الله وجوهكم",
     "الله يبارك لك", "الله يبارك فيك", "الله يبارك عليك",
     "الله يبارك لكم", "الله يبارك فيكم",
+    # Colloquial dua without leading «الله» — «إن شاء الله يبارك فيك».
+    "ان شاء الله يبارك", "انشاء الله يبارك",
+    "بارك فيك", "بارك لك", "بارك فيكم",
+    "يعمرك", "يعمركم", "يعمر", "يعمرنا",
     "ربي يحفظك", "الله يحفظك", "الله يحفظكم",
     # Reciprocal to «تسلم» — inbound detection only (P1-F post-deploy).
     "الله يسلمك", "الله يسلمكم", "يسلمك", "يسلمكم",
@@ -200,6 +204,47 @@ _BLESSING_KEYWORDS = (
 
 def _is_blessing(norm: str) -> bool:
     return any(kw in norm for kw in _BLESSING_KEYWORDS)
+
+
+def _has_dua_gratitude_dominance(norm: str) -> bool:
+    """True when the message is dominantly dua / thanks regardless of length."""
+    if _is_thanks(norm) or _is_blessing(norm) or _is_strong_praise(norm):
+        return True
+    return any(
+        kw in norm
+        for kw in (
+            "يارب", "يا رب", "آمين", "امين",
+            "ان شاء الله يبارك", "انشاء الله يبارك",
+        )
+    )
+
+
+# ── Explicit opening greetings (salaam / phatic hello only) ───────────────────
+_EXPLICIT_GREETING_PREFIXES = (
+    "السلام عليكم", "وعليكم السلام",
+    "مرحبا", "مرحب", "اهلا", "أهلا", "اهلين", "أهلين",
+    "هلا", "يا هلا", "ياهلا",
+    "صباح الخير", "مساء الخير",
+    "hello", "hi", "hey",
+)
+
+
+def is_explicit_opening_greeting(message: str) -> bool:
+    """True when inbound is a pure or leading explicit salaam / phatic hello."""
+    if not message or not isinstance(message, str):
+        return False
+    norm = _norm(message)
+    if not norm:
+        return False
+    if _has_dua_gratitude_dominance(norm):
+        return False
+    stripped = norm.strip("،,.!؟?…")
+    for prefix in _EXPLICIT_GREETING_PREFIXES:
+        if stripped == prefix or stripped.startswith(prefix + " "):
+            remainder = stripped[len(prefix):].strip("،,.!؟?… ")
+            if not remainder or len(remainder.split()) <= 2:
+                return True
+    return False
 
 
 # ── Strong praise (May 2026 #8) ──────────────────────────────────────────────
@@ -281,7 +326,8 @@ def _is_compliment(norm: str) -> bool:
 # fixing.
 _GENERAL_COURTESY_KEYWORDS = (
     "حياك", "حياكم", "حيا الله", "الله يحييك",
-    "هلا والله", "هلا وغلا",
+    # «هلا وغلا» is an opening-greeting reply — not inbound courtesy signal.
+    "هلا والله",
     "تكفي", "تكفا", "تكفون",
     "لا يهمك", "لايهمك", "لا تشيل هم",
     "خير ان شاء الله",   # post-norm form of "خير إن شاء الله"
@@ -481,8 +527,10 @@ def classify_social(message: str) -> Optional[SocialMatch]:
         return SocialMatch(category=SOCIAL_BASMALA, confidence=0.95)
 
     # 3. Everything else requires SHORT + no commercial signal +
-    #    no dominant relational signal (deferred / support).
-    if _word_count(message) > _MAX_TOKENS_FOR_SOCIAL_DOMINANCE:
+    #    no dominant relational signal (deferred / support) — UNLESS the
+    #    message is dominantly dua / thanks / blessing (length bypass).
+    _dominant_dua = _has_dua_gratitude_dominance(norm)
+    if not _dominant_dua and _word_count(message) > _MAX_TOKENS_FOR_SOCIAL_DOMINANCE:
         return None
     if _has_commercial_signal(norm):
         return None
@@ -534,4 +582,5 @@ __all__ = [
     "SOCIAL_STRONG_PRAISE",
     "SocialMatch",
     "classify_social",
+    "is_explicit_opening_greeting",
 ]

@@ -571,6 +571,12 @@ const en: Translations = {
     replyPlaceholder: 'Write a message…',
     aiHandlingHint: 'Nahla is handling this conversation — tap «Take over» to reply manually',
     unsubscribedFilterHint: 'To win these customers back, we recommend reaching out personally to understand why they unsubscribed. They will return automatically when they send any message.',
+    mobileFilters: {
+      sheetTitle: 'Conversation filters',
+      menuButtonLabel: 'Close conversation filters',
+    },
+    scrollToBottom: 'Jump to latest messages',
+    aiPausedBadge: 'AI paused',
     errors: {
       refreshFailed: 'Could not refresh conversations temporarily — we will retry automatically.',
       loadMoreFailed: 'Could not load more temporarily — try again in a few seconds.',

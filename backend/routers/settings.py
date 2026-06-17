@@ -95,11 +95,19 @@ class NotificationSettingsIn(BaseModel):
     low_balance_alerts: bool = True
 
 
+class PaymentMethodsSettingsIn(BaseModel):
+    bank_transfer_enabled: Optional[bool] = None
+    cash_on_delivery_enabled: Optional[bool] = None
+    moyasar_enabled: Optional[bool] = None
+    manual_payment_enabled: Optional[bool] = None
+
+
 class AllSettingsIn(BaseModel):
     whatsapp: Optional[WhatsAppSettingsIn] = None
     ai: Optional[AISettingsIn] = None
     store: Optional[StoreSettingsIn] = None
     notifications: Optional[NotificationSettingsIn] = None
+    payment_methods: Optional[PaymentMethodsSettingsIn] = None
 
 
 class WidgetSettingsIn(BaseModel):
@@ -122,11 +130,14 @@ async def get_settings(request: Request, db: Session = Depends(get_db)):
 
     wa    = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
     store = merge_defaults(settings.store_settings,    DEFAULT_STORE)
+    from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
+
     return {
         "whatsapp":      apply_masks(wa,    "whatsapp"),
         "ai":            merge_ai_defaults(settings.ai_settings),
         "store":         apply_masks(store, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
+        "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
     }
 
 
@@ -163,17 +174,31 @@ async def update_settings(
         current.update(body.notifications.model_dump())
         settings.notification_settings = current
 
+    if body.payment_methods is not None:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        meta = dict(settings.extra_metadata or {})
+        pm = dict(meta.get("payment_methods") or {})
+        for key, val in body.payment_methods.model_dump(exclude_none=True).items():
+            pm[key] = val
+        meta["payment_methods"] = pm
+        settings.extra_metadata = meta
+        flag_modified(settings, "extra_metadata")
+
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
 
     wa_saved    = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
     store_saved = merge_defaults(settings.store_settings,    DEFAULT_STORE)
+    from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
+
     return {
         "whatsapp":      apply_masks(wa_saved,    "whatsapp"),
         "ai":            merge_ai_defaults(settings.ai_settings),
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
+        "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
     }
 
 
