@@ -4,7 +4,7 @@ import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
-  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil, ChevronDown,
+  Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil,
 } from 'lucide-react'
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
@@ -164,10 +164,10 @@ export default function Conversations() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef    = useRef<HTMLTextAreaElement>(null)
   const isNearBottomRef = useRef(true)
+  const pauseAutoScrollRef = useRef(false)
   const prevMessageCountRef = useRef(0)
   const prevLastMessageIdRef = useRef<number | string | null>(null)
   const selectedPhoneForScrollRef = useRef<string | null>(null)
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false)
 
   const listCtrlRef         = useRef<AbortController | null>(null)
   const msgsCtrlRef         = useRef<AbortController | null>(null)
@@ -606,6 +606,23 @@ export default function Conversations() {
   const isScrollNearBottom = (el: HTMLElement) =>
     el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_PX
 
+  const syncScrollAnchors = (el: HTMLElement) => {
+    const nearBottom = isScrollNearBottom(el)
+    isNearBottomRef.current = nearBottom
+    if (nearBottom) pauseAutoScrollRef.current = false
+    return nearBottom
+  }
+
+  const markUserScrolling = () => {
+    pauseAutoScrollRef.current = true
+  }
+
+  const mayAutoScrollToBottom = () => {
+    const el = messagesScrollRef.current
+    if (el) syncScrollAnchors(el)
+    return !pauseAutoScrollRef.current && isNearBottomRef.current
+  }
+
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'smooth') => {
     const el = messagesScrollRef.current
     if (el) {
@@ -614,8 +631,13 @@ export default function Conversations() {
       messagesEndRef.current?.scrollIntoView({ behavior })
     }
     isNearBottomRef.current = true
-    setShowScrollToBottom(false)
+    pauseAutoScrollRef.current = false
   }
+
+  // Close filter sheet when entering chat view (mobile).
+  useEffect(() => {
+    if (mobileView === 'chat') setMobileFilterMenuOpen(false)
+  }, [mobileView])
 
   // Scroll to bottom once when opening a conversation.
   useEffect(() => {
@@ -624,14 +646,14 @@ export default function Conversations() {
     if (!phoneChanged) return
     selectedPhoneForScrollRef.current = selected.phone
     isNearBottomRef.current = true
-    setShowScrollToBottom(false)
+    pauseAutoScrollRef.current = false
     prevMessageCountRef.current = 0
     prevLastMessageIdRef.current = null
     requestAnimationFrame(() => scrollMessagesToBottom('auto'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.phone])
 
-  // Auto-scroll only when a new message arrives at the bottom and the user is near it.
+  // Auto-scroll only when a new message arrives at the bottom and the user allows it.
   useEffect(() => {
     if (!selected?.messages) return
     const msgs = selected.messages
@@ -646,17 +668,17 @@ export default function Conversations() {
     if (count === 0) return
 
     if (prevCount === 0 && count > 0) {
-      requestAnimationFrame(() => scrollMessagesToBottom('auto'))
+      if (mayAutoScrollToBottom()) {
+        requestAnimationFrame(() => scrollMessagesToBottom('auto'))
+      }
       return
     }
 
     const appendedAtEnd = lastId != null && lastId !== prevLastId && count >= prevCount
     if (!appendedAtEnd) return
 
-    if (isNearBottomRef.current) {
+    if (mayAutoScrollToBottom()) {
       requestAnimationFrame(() => scrollMessagesToBottom('smooth'))
-    } else {
-      setShowScrollToBottom(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.messages])
@@ -676,6 +698,7 @@ export default function Conversations() {
       : c
     setSelected(withMessages)
     setHasMoreMessages(Boolean(cached?.hasMore))
+    setMobileFilterMenuOpen(false)
     setMobileView('chat')
     loadMessagesForOpenChat(c.phone)
     // Zero the unread badge locally the moment we open the
@@ -708,6 +731,7 @@ export default function Conversations() {
       }
       await loadMessagesForOpenChat(selected.phone)
       await reloadFirstPagePreserveTail({ silent: true })
+      pauseAutoScrollRef.current = false
       isNearBottomRef.current = true
       scrollMessagesToBottom('smooth')
     } catch (e) {
@@ -1124,21 +1148,23 @@ export default function Conversations() {
           </div>
         </div>
 
-        {/* Filter tabs — mobile: bottom sheet; desktop: horizontal chips */}
-        <div className="px-3 py-2 bg-white border-b border-slate-100 md:hidden">
-          <ConversationFiltersMobileMenu
-            dir={dir}
-            open={mobileFilterMenuOpen}
-            onOpenChange={setMobileFilterMenuOpen}
-            activeFilter={filter}
-            filterLabels={filterLabels}
-            conversations={conversations}
-            helpers={filterHelpers}
-            menuButtonLabel={cp.mobileFilters.menuButtonLabel}
-            sheetTitle={cp.mobileFilters.sheetTitle}
-            onSelect={setFilter}
-          />
-        </div>
+        {/* Filter tabs — mobile list only; desktop: horizontal chips */}
+        {mobileView === 'list' && (
+          <div className="px-3 py-2 bg-white border-b border-slate-100 md:hidden">
+            <ConversationFiltersMobileMenu
+              dir={dir}
+              open={mobileFilterMenuOpen}
+              onOpenChange={setMobileFilterMenuOpen}
+              activeFilter={filter}
+              filterLabels={filterLabels}
+              conversations={conversations}
+              helpers={filterHelpers}
+              menuButtonLabel={cp.mobileFilters.menuButtonLabel}
+              sheetTitle={cp.mobileFilters.sheetTitle}
+              onSelect={setFilter}
+            />
+          </div>
+        )}
 
         <div
           className="hidden md:flex gap-1.5 px-3 py-2 bg-white border-b border-slate-100 overflow-x-auto"
@@ -1361,9 +1387,9 @@ export default function Conversations() {
           </div>
         ) : (
           <>
-            {/* Chat header */}
-            <div className="flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm shrink-0 min-w-0">
-              {/* Back button — mobile only */}
+            {/* Chat header — sticky on mobile like WhatsApp */}
+            <div className="sticky top-0 z-20 flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm shrink-0 min-w-0">
+              {/* Back → conversation list (mobile only) */}
               <button
                 onClick={goBackToList}
                 className="md:hidden -ms-1 p-2 rounded-full hover:bg-slate-100 text-slate-600 active:bg-slate-200 transition-colors shrink-0"
@@ -1379,33 +1405,35 @@ export default function Conversations() {
                 {initials(selected.customer)}
               </div>
 
-              {/* Name + phone — click to edit customer name */}
-              <div className="flex-1 min-w-0 overflow-hidden group">
+              {/* Name + phone */}
+              <div className="flex-1 min-w-0 overflow-hidden">
                 <button
                   type="button"
                   onClick={openEditCustomerName}
-                  className="flex items-center gap-1.5 min-w-0 w-full text-start rounded-md -mx-1 px-1 py-0.5 hover:bg-slate-50 transition-colors"
+                  className="group flex min-w-0 w-full flex-col items-start text-start rounded-md -mx-1 px-1 py-0.5 hover:bg-slate-50 transition-colors"
                   title={cp.editCustomerName.title}
                 >
-                  <p className="text-sm font-semibold text-slate-900 truncate flex-1 min-w-0">
-                    {conversationHasDisplayName(selected, phonesMatch)
-                      ? selected.customer
-                      : selected.phone}
-                  </p>
-                  <Pencil
-                    aria-hidden="true"
-                    className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block"
-                  />
-                </button>
-                {conversationHasDisplayName(selected, phonesMatch) && (
-                  <p className="text-xs text-slate-400 flex items-center gap-1 truncate px-1">
-                    <Phone className="w-3 h-3 shrink-0" />
+                  <span className="flex items-center gap-1.5 min-w-0 w-full">
+                    <span className="text-sm font-semibold text-slate-900 truncate flex-1 min-w-0">
+                      {conversationHasDisplayName(selected, phonesMatch)
+                        ? selected.customer
+                        : selected.phone}
+                    </span>
+                    <Pencil
+                      aria-hidden="true"
+                      className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden md:block"
+                    />
+                  </span>
+                  <span className={`text-xs text-slate-400 flex items-center gap-1 truncate w-full mt-0.5 ${
+                    conversationHasDisplayName(selected, phonesMatch) ? 'md:mt-0' : 'md:hidden'
+                  }`}>
+                    <Phone className="w-3 h-3 shrink-0 md:hidden" />
                     <span className="truncate">{selected.phone}</span>
-                  </p>
-                )}
+                  </span>
+                </button>
               </div>
 
-              {/* زر أساسي واحد + قائمة ⋮ */}
+              {/* Desktop: pause/resume + menu. Mobile: menu only (AI toggle in reply bar). */}
               <div className="flex items-center gap-1 shrink-0">
                 {!_isBlocked(selected) && (() => {
                   const humanTakeover =
@@ -1415,23 +1443,23 @@ export default function Conversations() {
                   const intelligenceOff = humanTakeover || !!selected.aiPaused
                   return intelligenceOff ? (
                     <button
-                      className="flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-2 md:px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
                       onClick={resumeIntelligenceForSelected}
                       title={cp.actions.resumeAI}
                       aria-label={cp.actions.resumeAI}
                     >
                       <Play className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">{cp.actions.resumeAI}</span>
+                      {cp.actions.resumeAI}
                     </button>
                   ) : (
                     <button
-                      className="flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-2 md:px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
                       onClick={pauseIntelligenceForSelected}
                       title={cp.actions.pauseAI}
                       aria-label={cp.actions.pauseAI}
                     >
                       <Pause className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">{cp.actions.pauseAI}</span>
+                      {cp.actions.pauseAI}
                     </button>
                   )
                 })()}
@@ -1619,11 +1647,12 @@ export default function Conversations() {
                 ref={messagesScrollRef}
                 className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
                 style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
+                onTouchStart={markUserScrolling}
+                onTouchMove={markUserScrolling}
+                onWheel={markUserScrolling}
                 onScroll={(e) => {
                   const el = e.currentTarget
-                  const nearBottom = isScrollNearBottom(el)
-                  isNearBottomRef.current = nearBottom
-                  if (nearBottom) setShowScrollToBottom(false)
+                  syncScrollAnchors(el)
                   if (el.scrollTop <= 48 && selected && hasMoreMessages && !loadingOlderMessages) {
                     void loadOlderMessages(selected.phone)
                   }
@@ -1954,18 +1983,6 @@ export default function Conversations() {
               })}
               <div ref={messagesEndRef} />
               </div>
-
-              {showScrollToBottom && (
-                <button
-                  type="button"
-                  onClick={() => scrollMessagesToBottom('smooth')}
-                  className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-4 py-2 rounded-full bg-white border border-slate-200 shadow-md text-xs font-medium text-slate-700 hover:bg-slate-50 active:bg-slate-100"
-                  aria-label={cp.scrollToBottom}
-                >
-                  {cp.scrollToBottom}
-                  <ChevronDown className="w-4 h-4" />
-                </button>
-              )}
             </div>
 
             {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}

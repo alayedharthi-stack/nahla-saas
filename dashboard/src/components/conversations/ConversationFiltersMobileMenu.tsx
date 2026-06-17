@@ -62,8 +62,15 @@ export default function ConversationFiltersMobileMenu({
         aria-expanded={open}
         aria-haspopup="listbox"
       >
-        <span className="truncate min-w-0">
-          {filterLabels[activeFilter]}
+        <span className="flex flex-col items-start min-w-0 text-start">
+          <span className="truncate w-full">{sheetTitle}</span>
+          {activeFilter !== 'all' && (
+            <span className={`text-xs truncate w-full ${
+              activeFilter === 'campaign_excluded' ? 'text-violet-600' : 'text-slate-500'
+            }`}>
+              {filterLabels[activeFilter]}
+            </span>
+          )}
         </span>
         <ChevronDown className={`w-4 h-4 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
