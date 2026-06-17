@@ -197,6 +197,13 @@ class TestScenario1_TrialBlocked:
         assert "outbound suppressed" in body.lower() or "silent" in body.lower(), \
             "whatsapp_webhook billing guard must be silent"
 
+    def test_billing_checkout_uses_effective_subscription_for_idempotency(self):
+        from pathlib import Path
+        src = Path(_backend) / "routers" / "billing.py"
+        body = src.read_text(encoding="utf-8")
+        assert "get_tenant_subscription" in body
+        assert "effective_active" in body
+
     def test_automation_engine_blocks_outbound(self):
         """_execute_action must return billing_access_denied before any send."""
         from pathlib import Path

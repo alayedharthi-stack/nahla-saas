@@ -86,6 +86,8 @@ export interface CheckoutResult {
   amount_sar:              number
   plan_slug:               string
   demo_mode:               boolean
+  already_active?:         boolean
+  reused?:                 boolean
   // present only in demo mode
   success?:                boolean
   launch_discount_active?: boolean

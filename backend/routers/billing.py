@@ -547,25 +547,19 @@ async def _do_checkout(
     except Exception as _exc:
         logger.warning("[Billing] checkout self-heal reconcile failed: %s", _exc)
 
-    # If reconcile activated something, the tenant now has an active
-    # sub — return it instead of creating a new one. This is the
-    # "already paid, please don't bill me again" case.
-    existing_active = (
-        db.query(BillingSubscription)
-        .filter(
-            BillingSubscription.tenant_id == tenant_id,
-            BillingSubscription.status == "active",
-        )
-        .order_by(BillingSubscription.id.desc())
-        .first()
-    )
-    if existing_active and existing_active.plan_id == plan.id:
+    # If reconcile activated something, the tenant now has a non-expired
+    # active sub — return it instead of creating a new one. Expired rows
+    # kept as status=active must NOT block renewal checkout (tenant-33 class).
+    from core.billing import get_tenant_subscription  # noqa: PLC0415
+
+    effective_active = get_tenant_subscription(db, int(tenant_id))
+    if effective_active and effective_active.plan_id == plan.id:
         logger.info(
             "[Billing] checkout idempotent: tenant=%s already active on plan=%s sub=%s",
-            tenant_id, plan.slug, existing_active.id,
+            tenant_id, plan.slug, effective_active.id,
         )
         return {
-            "subscription_id": existing_active.id,
+            "subscription_id": effective_active.id,
             "checkout_url":    None,
             "gateway":         gateway_name or "active",
             "amount_sar":      price_sar,
