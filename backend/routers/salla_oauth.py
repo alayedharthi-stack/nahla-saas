@@ -1238,6 +1238,8 @@ async def salla_activate_from_email(request: Request, db: Session = Depends(get_
     if not tenant_id:
         unique_name = f"{store_name or 'متجر سلة'}-{merchant_id_str}" if merchant_id_str else (store_name or "متجر سلة")
         new_tenant = Tenant(name=unique_name)
+        from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: PLC0415
+        init_new_tenant_trial_state(new_tenant)
         db.add(new_tenant)
         db.flush()
         tenant_id = new_tenant.id
@@ -2826,6 +2828,8 @@ async def salla_oauth_callback(
                 else (store_name or "متجر سلة")
             )
             new_tenant = Tenant(name=unique_name)
+            from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: PLC0415
+            init_new_tenant_trial_state(new_tenant)
             db.add(new_tenant)
             db.flush()
             tenant_id = new_tenant.id

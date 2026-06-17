@@ -227,7 +227,15 @@ def activate_subscription_from_moyasar_invoice(
             return False, "duplicate_payment"
 
     # ── Activation ────────────────────────────────────────────────────
+    paid_now = datetime.now(timezone.utc)
     sub.status = ACTIVE_STATUS
+    if not sub.started_at:
+        sub.started_at = paid_now.replace(tzinfo=None)
+    from core.trial_lifecycle import ensure_subscription_ends_at, subscription_period_end  # noqa: PLC0415
+    if not sub.ends_at:
+        sub.ends_at = subscription_period_end(paid_now).replace(tzinfo=None)
+    else:
+        ensure_subscription_ends_at(sub)
     meta = dict(sub.extra_metadata or {})
     meta["moyasar_payment_id"] = txn_ref
     meta["moyasar_invoice_id"] = invoice_data.get("id") or meta.get("moyasar_invoice_id")

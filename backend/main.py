@@ -887,6 +887,7 @@ async def on_startup() -> None:
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR",
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_started_at TIMESTAMP",
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP",
+                "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS first_whatsapp_connected_at TIMESTAMP",
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_name VARCHAR",
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_price FLOAT",
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS max_messages_per_month INTEGER DEFAULT 1000",

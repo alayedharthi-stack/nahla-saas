@@ -56,9 +56,10 @@ class Tenant(Base):
     stripe_customer_id      = Column(String, nullable=True)
     stripe_subscription_id  = Column(String, nullable=True)
     stripe_price_id         = Column(String, nullable=True)
-    subscription_status     = Column(String, nullable=True)   # trialing | active | past_due | canceled
+    subscription_status     = Column(String, nullable=True)   # trial_pending_whatsapp | trial_active | trial_expired | active | ...
     trial_started_at        = Column(DateTime, nullable=True)
     trial_ends_at           = Column(DateTime, nullable=True)
+    first_whatsapp_connected_at = Column(DateTime, nullable=True)
     current_period_end      = Column(DateTime, nullable=True)
 
     # HyperPay fields (manual monthly payment flow)

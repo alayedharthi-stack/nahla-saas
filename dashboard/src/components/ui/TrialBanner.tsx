@@ -1,14 +1,14 @@
 /**
  * TrialBanner
  * Shown below the header on every page.
- * - During trial: shows plan, days remaining, upgrade CTA
+ * - Pending WhatsApp: trial not started yet
+ * - During trial: shows days remaining, upgrade CTA
  * - Trial expired: warning banner blocking automation features
  * - Active paid plan: hidden (returns null)
- * - API error: shows a subtle retry-able fallback
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Clock, AlertTriangle, Zap, X, RefreshCw } from 'lucide-react'
+import { Clock, AlertTriangle, Zap, X, RefreshCw, Phone, Info } from 'lucide-react'
 import { billingApi, type BillingStatus } from '../../api/billing'
 import { throttleFocusRefetch } from '../../lib/focusThrottleRefetch'
 
@@ -35,11 +35,6 @@ export default function TrialBanner() {
 
   useEffect(() => {
     fetchStatus()
-    // Refetch when the tab regains focus — covers the "merchant paid in
-    // another tab" case (Moyasar redirect), where the activation flips
-    // server-side but this banner is still rendering its last-known
-    // state. Also catches the case where reconcile activated a sub
-    // moments ago but the cached status still says trial.
     const onFocus = () =>
       throttleFocusRefetch(
         25_000,
@@ -72,19 +67,43 @@ export default function TrialBanner() {
   }
 
   if (!status) return null
-  if (status.has_subscription && !status.is_trial) return null
+  if (status.has_subscription && !status.is_trial && !status.subscription_expired) return null
 
-  const { is_trial, trial_days_remaining, trial_expired } = status
+  const { is_trial, trial_days_remaining, trial_expired, trial_pending_whatsapp, warning_level } = status
 
-  /* ── Trial expired banner ──────────────────────────────────────────── */
-  if (trial_expired) {
+  /* ── Trial pending WhatsApp ──────────────────────────────────────── */
+  if (trial_pending_whatsapp) {
+    return (
+      <div className="bg-sky-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
+        <div className="flex items-center gap-2 flex-1">
+          <Info className="w-5 h-5 shrink-0" />
+          <div>
+            <span className="font-bold block">تجربتك المجانية لم تبدأ بعد</span>
+            <span className="text-sky-100 text-xs block mt-0.5">
+              اربط واتساب لبدء التجربة المجانية
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => navigate('/whatsapp-connect')}
+          className="shrink-0 flex items-center gap-1.5 bg-white text-sky-700 text-xs font-bold px-4 py-2 rounded-lg hover:bg-sky-50"
+        >
+          <Phone className="w-3.5 h-3.5" />
+          ربط واتساب
+        </button>
+      </div>
+    )
+  }
+
+  /* ── Subscription / trial expired ────────────────────────────────── */
+  if (trial_expired || status.subscription_expired) {
     return (
       <div className="bg-red-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
         <div className="flex items-center gap-2 flex-1">
           <AlertTriangle className="w-5 h-5 shrink-0" />
           <div>
             <span className="font-bold block">
-              انتهت فترة التجربة المجانية
+              {status.subscription_expired ? 'انتهى اشتراكك' : 'انتهت فترة التجربة المجانية'}
             </span>
             <span className="text-red-200 text-xs block mt-0.5">
               الطيار الآلي والحملات والرد الذكي متوقفة مؤقتاً — فعّل خطة نحلة للمتابعة
@@ -101,9 +120,9 @@ export default function TrialBanner() {
     )
   }
 
-  /* ── Active trial banner ───────────────────────────────────────────── */
-  if (is_trial) {
-    const urgency = trial_days_remaining <= 3
+  /* ── Active trial / paid expiry warning ──────────────────────────── */
+  if (is_trial || warning_level === '7d' || warning_level === '3d' || warning_level === '1d') {
+    const urgency = warning_level === '1d' || warning_level === '3d' || trial_days_remaining <= 3
 
     return (
       <div
@@ -118,13 +137,23 @@ export default function TrialBanner() {
         <div className="flex items-center gap-3 flex-1 min-w-0">
           <Clock className="w-4 h-4 shrink-0" />
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-semibold">
-              باقي{' '}
-              <span className="font-bold text-lg leading-none">
-                {trial_days_remaining}
+            {is_trial ? (
+              <span className="font-semibold">
+                باقي{' '}
+                <span className="font-bold text-lg leading-none">
+                  {trial_days_remaining}
+                </span>
+                {' '}{trial_days_remaining === 1 ? 'يوم' : 'أيام'} على انتهاء التجربة المجانية
               </span>
-              {' '}{trial_days_remaining === 1 ? 'يوم' : 'أيام'} على انتهاء التجربة المجانية
-            </span>
+            ) : (
+              <span className="font-semibold">
+                {warning_level === '1d'
+                  ? 'يتبقى يوم واحد على انتهاء اشتراكك'
+                  : warning_level === '3d'
+                    ? 'يتبقى 3 أيام على انتهاء اشتراكك'
+                    : 'يتبقى 7 أيام على انتهاء اشتراكك'}
+              </span>
+            )}
             {urgency && (
               <span className="text-amber-100 font-medium hidden sm:inline">
                 · قم بالترقية لتجنب توقف النظام

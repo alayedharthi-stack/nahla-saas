@@ -475,6 +475,26 @@ export default function Billing() {
     status?.conversations_limit ?? 0,
   )
 
+  const daysRemainingLabel = (() => {
+    if (status?.trial_pending_whatsapp) return '—'
+    if (status?.has_subscription && status.subscription_ends_at) {
+      const end = new Date(status.subscription_ends_at)
+      const diff = Math.ceil((end.getTime() - Date.now()) / 86400000)
+      return diff > 0 ? String(diff) : '٠'
+    }
+    if (status?.is_trial) return String(status.trial_days_remaining)
+    if (status?.trial_expired || status?.subscription_expired) return '٠'
+    return '—'
+  })()
+
+  const warningLevel = status?.warning_level ?? 'none'
+  const showExpiryWarning = ['7d', '3d', '1d', 'expired'].includes(warningLevel)
+  const expiryWarningStyle =
+    warningLevel === 'expired' ? 'bg-red-50 border-red-200 text-red-800'
+    : warningLevel === '1d'    ? 'bg-red-50 border-red-200 text-red-800'
+    : warningLevel === '3d'    ? 'bg-amber-50 border-amber-200 text-amber-900'
+    : 'bg-amber-50 border-amber-200 text-amber-900'
+
   return (
     <div className="space-y-6 mx-auto px-5 py-10" style={{maxWidth: '1100px'}} dir="rtl">
 
@@ -516,6 +536,84 @@ export default function Billing() {
             الذهاب إلى سلة
             <ArrowUpRight className="w-3.5 h-3.5" />
           </a>
+        </div>
+      )}
+
+      {/* Subscription lifecycle summary */}
+      {status && (
+        <div className="card p-5 space-y-3">
+          <h2 className="text-sm font-bold text-slate-900">حالة الاشتراك</h2>
+          <div className="grid sm:grid-cols-2 gap-3 text-sm">
+            <div>
+              <p className="text-xs text-slate-500">الحالة</p>
+              <p className="font-semibold text-slate-800">{status.status_reason_ar || '—'}</p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">الأيام المتبقية</p>
+              <p className="font-semibold text-slate-800">{daysRemainingLabel}</p>
+            </div>
+            {(status.trial_started_at || status.subscription_started_at) && (
+              <div>
+                <p className="text-xs text-slate-500">تاريخ البدء</p>
+                <p className="font-medium text-slate-700">
+                  {status.has_subscription
+                    ? (status.subscription_started_at?.slice(0, 10) ?? '—')
+                    : (status.trial_started_at?.slice(0, 10) ?? '—')}
+                </p>
+              </div>
+            )}
+            {(status.trial_ends_at || status.subscription_ends_at) && (
+              <div>
+                <p className="text-xs text-slate-500">تاريخ الانتهاء</p>
+                <p className="font-medium text-slate-700">
+                  {status.has_subscription
+                    ? (status.subscription_ends_at?.slice(0, 10) ?? '—')
+                    : (status.trial_ends_at?.slice(0, 10) ?? '—')}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Trial not started — WhatsApp not connected */}
+      {status?.trial_pending_whatsapp && (
+        <div className="flex items-start gap-3 bg-sky-50 border-2 border-sky-200 rounded-xl p-4">
+          <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-sky-900">تجربتك المجانية لم تبدأ بعد</p>
+            <p className="text-xs text-sky-800 mt-1">
+              اربط واتساب لبدء التجربة المجانية · يمكنك إعداد المتجر الآن دون احتساب أيام
+            </p>
+            <button
+              onClick={() => window.location.href = '/whatsapp-connect'}
+              className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold bg-sky-600 text-white px-3 py-1.5 rounded-lg hover:bg-sky-700"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              اربط واتساب
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Expiry warnings: 7d / 3d / 1d / expired */}
+      {showExpiryWarning && (
+        <div className={`flex items-start gap-3 border-2 rounded-xl p-4 ${expiryWarningStyle}`}>
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold">
+              {warningLevel === 'expired'
+                ? (status?.subscription_expired ? 'انتهى اشتراكك المدفوع' : 'انتهت فترة التجربة المجانية')
+                : warningLevel === '1d'
+                  ? 'يتبقى يوم واحد على انتهاء اشتراكك'
+                  : warningLevel === '3d'
+                    ? 'يتبقى 3 أيام على انتهاء اشتراكك'
+                    : 'يتبقى 7 أيام على انتهاء اشتراكك'}
+            </p>
+            <p className="text-xs mt-1 opacity-90">
+              {status?.status_reason_ar}
+            </p>
+          </div>
         </div>
       )}
 
@@ -683,6 +781,11 @@ export default function Billing() {
                   <Tag className="w-3 h-3" /> خصم الإطلاق فعّال
                 </span>
               )}
+            </>
+          ) : status?.trial_pending_whatsapp ? (
+            <>
+              <p className="text-base font-semibold text-sky-600">في انتظار ربط واتساب</p>
+              <p className="text-xs text-slate-400 mt-1">التجربة المجانية تبدأ بعد الربط</p>
             </>
           ) : status?.is_trial ? (
             <>

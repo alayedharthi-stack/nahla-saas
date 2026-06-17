@@ -720,6 +720,8 @@ async def auth_register(body: RegisterIn, request: Request, db: Session = Depend
         is_active=True,
         created_at=datetime.now(timezone.utc),
     )
+    from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: PLC0415
+    init_new_tenant_trial_state(tenant)
     db.add(tenant)
     try:
         db.flush()

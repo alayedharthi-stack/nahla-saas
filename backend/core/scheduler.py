@@ -1869,7 +1869,6 @@ async def _check_trial_expiry() -> None:
 
     from core.database import SessionLocal  # noqa: PLC0415
     from core.wa_notify import notify_trial_ending  # noqa: PLC0415
-    from core.billing import FREE_TRIAL_DAYS  # noqa: PLC0415
     import time  # noqa: PLC0415
 
     DEDUP_WINDOW = 12 * 3600  # seconds — suppress duplicates within 12 hours
@@ -1882,6 +1881,7 @@ async def _check_trial_expiry() -> None:
 
     try:
         from models import BillingSubscription, Tenant  # noqa: PLC0415
+        from core.billing import compute_trial_info  # noqa: PLC0415
         from core.tenant import (  # noqa: PLC0415
             DEFAULT_STORE, DEFAULT_WHATSAPP,
             get_or_create_settings, merge_defaults,
@@ -1901,13 +1901,11 @@ async def _check_trial_expiry() -> None:
             if tenant.id in subbed_tenants:
                 continue
 
-            _raw = tenant.created_at or now
-            if _raw.tzinfo is None:
-                trial_start = _raw.replace(tzinfo=timezone.utc)
-            else:
-                trial_start = _raw
-            trial_elapsed  = (now - trial_start).days
-            days_remaining = FREE_TRIAL_DAYS - trial_elapsed
+            trial_info = compute_trial_info(tenant)
+            if trial_info.get("trial_pending_whatsapp") or not trial_info.get("trial_started_at"):
+                continue
+
+            days_remaining = trial_info["trial_days_remaining"]
 
             _s         = get_or_create_settings(db, tenant.id)
             _wa        = merge_defaults(_s.whatsapp_settings, DEFAULT_WHATSAPP)

@@ -276,6 +276,15 @@ def commit_connection(
         action, tenant_id, phone_number_id, waba_id, conn.id, actor,
     )
 
+    try:
+        from core.trial_lifecycle import start_trial_on_whatsapp_connect  # noqa: PLC0415
+        start_trial_on_whatsapp_connect(db, tenant_id, connected_at=now)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WASvc] trial start hook failed (non-fatal) tenant=%s: %s",
+            tenant_id, exc,
+        )
+
     result = ConnectionResult(
         tenant_id       = tenant_id,
         wa_conn_id      = conn.id,
