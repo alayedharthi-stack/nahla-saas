@@ -2930,6 +2930,8 @@ class StoreSyncService:
             window_start    = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
             period_label_ar = "اليوم"
 
+        window_start_naive = window_start.replace(tzinfo=None)
+
         # ── Helpers reused from the orders router ─────────────────────────────
         PAID = frozenset({
             "paid", "completed", "complete", "confirmed", "delivered",
@@ -3051,38 +3053,20 @@ class StoreSyncService:
         ]
 
         # ── Conversations within the selected window (Meta-billable) ─────────
-        # We count NEW 24h conversation windows opened — this matches
-        # what Meta actually bills and is the same source as the
-        # "WhatsApp usage this month" widget. ``ConversationLog`` rows
-        # include:
-        #   * inbound replies (source=inbound, category=service)
-        #   * manual marketing campaigns (source=campaign, category=marketing)
-        #   * one-off templates / API sends
-        # so a campaign that opens 8,000 marketing windows is reflected
-        # in this counter — unlike the previous implementation which
-        # only counted AI-traced inbound sessions and silently ignored
-        # outbound campaigns.
-        #
-        # ``ConversationLog.conversation_started_at`` is stored as
-        # naive UTC, while ``window_start`` is timezone-aware. Strip
-        # the tz for the comparison so SQLAlchemy doesn't coerce the
-        # filter into a "naive vs aware" mismatch on Postgres.
-        window_start_naive = window_start.replace(tzinfo=None)
+        # SSOT: ``core.wa_usage.get_daily_activity_metrics`` — billable 24h
+        # windows from ``ConversationLog`` (NOT per-message counts).
         conversations_period = 0
+        today_messages_period = 0
+        activity_metrics: dict = {}
         try:
-            from core.wa_usage import count_conversations_in_window  # noqa: PLC0415
+            from core.wa_usage import get_daily_activity_metrics  # noqa: PLC0415
 
-            window_end = None
-            if period == "this_month":
-                if today.month == 12:
-                    window_end = datetime(today.year + 1, 1, 1, tzinfo=timezone.utc)
-                else:
-                    window_end = datetime(today.year, today.month + 1, 1, tzinfo=timezone.utc)
-            conversations_period = count_conversations_in_window(
-                self.db, self.tenant_id, window_start, window_end,
-            )
+            activity_metrics = get_daily_activity_metrics(self.db, self.tenant_id, period)
+            conversations_period = int(activity_metrics.get("conversations") or 0)
+            today_messages_period = int(activity_metrics.get("messages") or 0)
+            period_label_ar = activity_metrics.get("period_label_ar") or period_label_ar
         except Exception as exc:
-            logger.debug("[StoreSync] ConversationLog count failed: %s", exc)
+            logger.debug("[StoreSync] daily activity metrics failed: %s", exc)
 
         # ── Messages sent (campaign throughput) in the selected window ───────
         # Campaign template sends are the single biggest signal merchants
@@ -3168,6 +3152,20 @@ class StoreSyncService:
             "revenue":                round(revenue_period, 2),
             "orders":                 orders_period,
             "conversations":          conversations_period,
+            # Billable windows vs raw message events — separate metrics.
+            "today_billable_conversations_count": activity_metrics.get(
+                "today_billable_conversations_count", conversations_period,
+            ),
+            "today_messages_count":   activity_metrics.get(
+                "today_messages_count", today_messages_period,
+            ),
+            "metric_kind_conversations": activity_metrics.get(
+                "metric_kind_conversations", "billable_conversation_windows",
+            ),
+            "metric_kind_messages": activity_metrics.get(
+                "metric_kind_messages", "whatsapp_message_events",
+            ),
+            "analytics_timezone": activity_metrics.get("analytics_timezone"),
             # Total marketing-campaign template sends in the window —
             # surfaced as its own counter so merchants can verify that
             # a big blast actually went out, even when most recipients

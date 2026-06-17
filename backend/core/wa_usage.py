@@ -59,6 +59,12 @@ Public API
   get_current_period_usage(db, tenant_id)
       → dict  (SSOT — period usage + today count + lifetime)
 
+  get_daily_activity_metrics(db, tenant_id, period)
+      → dict  (SSOT — Overview KPI billable windows + message events)
+
+  get_usage_audit_snapshot(db, tenant_id)
+      → dict  (debug — raw counts + semantics for one tenant)
+
   get_usage_this_month(db, tenant_id)
       → dict  (alias for get_current_period_usage — backwards compatible)
 
@@ -381,11 +387,260 @@ def count_conversations_in_window(
     return _count_conversation_logs(db, tenant_id, start_naive, end_naive)
 
 
+DEFAULT_MERCHANT_TZ = "Asia/Riyadh"
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore[misc, assignment]
+
+
+def get_merchant_timezone(db: Session, tenant_id: int):
+    """
+    Resolve the merchant's dashboard "today" timezone.
+
+    Falls back to ``Asia/Riyadh`` — the default for Nahla's Saudi merchant base.
+    """
+    from models import TenantSettings  # noqa: PLC0415
+
+    tz_name = DEFAULT_MERCHANT_TZ
+    try:
+        row = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == tenant_id)
+            .first()
+        )
+        if row and isinstance(row.store_settings, dict):
+            cand = (row.store_settings.get("timezone") or "").strip()
+            if cand:
+                tz_name = cand
+    except Exception:
+        logger.exception(
+            "[WaUsage] merchant_timezone_settings_lookup_failed tenant=%s",
+            tenant_id,
+        )
+
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            try:
+                return ZoneInfo(DEFAULT_MERCHANT_TZ)
+            except Exception:
+                logger.exception(
+                    "[WaUsage] merchant_timezone_zoneinfo_default_failed tenant=%s tz=%s",
+                    tenant_id,
+                    DEFAULT_MERCHANT_TZ,
+                )
+    return timezone(timedelta(hours=3))
+
+
+def get_local_day_bounds_utc_naive(
+    db: Session,
+    tenant_id: int,
+    *,
+    ref: Optional[datetime] = None,
+) -> Tuple[datetime, datetime]:
+    """
+    Merchant-local calendar day as naive UTC ``[start, end)`` bounds.
+
+    ``ConversationLog.conversation_started_at`` is stored naive UTC, so we
+    convert the merchant's midnight→midnight window into UTC before querying.
+    """
+    ref = ref or _utcnow()
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    tz = get_merchant_timezone(db, tenant_id)
+    local = ref.astimezone(tz)
+    local_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_end = local_start + timedelta(days=1)
+    return (
+        _naive(local_start.astimezone(timezone.utc)),
+        _naive(local_end.astimezone(timezone.utc)),
+    )
+
+
+def get_local_month_bounds_utc_naive(
+    db: Session,
+    tenant_id: int,
+    *,
+    ref: Optional[datetime] = None,
+) -> Tuple[datetime, datetime]:
+    """Merchant-local calendar month as naive UTC ``[start, end)`` bounds."""
+    ref = ref or _utcnow()
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    tz = get_merchant_timezone(db, tenant_id)
+    local = ref.astimezone(tz)
+    local_start = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if local_start.month == 12:
+        local_end = local_start.replace(year=local_start.year + 1, month=1)
+    else:
+        local_end = local_start.replace(month=local_start.month + 1)
+    return (
+        _naive(local_start.astimezone(timezone.utc)),
+        _naive(local_end.astimezone(timezone.utc)),
+    )
+
+
+def _intersect_window(
+    start_a: datetime,
+    end_a: Optional[datetime],
+    start_b: datetime,
+    end_b: Optional[datetime],
+) -> Optional[Tuple[datetime, datetime]]:
+    """Return naive ``[start, end)`` overlap or ``None`` when disjoint."""
+    end_a_eff = end_a or datetime.max
+    end_b_eff = end_b or datetime.max
+    win_start = max(start_a, start_b)
+    win_end = min(end_a_eff, end_b_eff)
+    if win_start >= win_end:
+        return None
+    return win_start, win_end
+
+
+def count_messages_in_window(
+    db: Session,
+    tenant_id: int,
+    window_start: datetime,
+    window_end: Optional[datetime] = None,
+) -> int:
+    """Count WhatsApp ``MessageEvent`` rows — activity, not billable windows."""
+    from models import MessageEvent  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+
+    start_naive = _naive(window_start) if window_start.tzinfo else window_start
+    q = (
+        db.query(func.count(MessageEvent.id))
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.created_at >= start_naive,
+        )
+    )
+    if window_end is not None:
+        end_naive = _naive(window_end) if window_end.tzinfo else window_end
+        q = q.filter(MessageEvent.created_at < end_naive)
+    return int(q.scalar() or 0)
+
+
+def get_today_billable_conversations_count(db: Session, tenant_id: int) -> int:
+    """Billable Meta 24h windows opened during the merchant-local calendar day."""
+    start, end = get_local_day_bounds_utc_naive(db, tenant_id)
+    return count_conversations_in_window(db, tenant_id, start, end)
+
+
+def get_today_in_period_billable_count(db: Session, tenant_id: int, ctx: dict) -> int:
+    """Billable windows today that also fall inside the active usage period."""
+    period_start, period_end = _period_bounds_naive(ctx)
+    today_start, today_end = get_local_day_bounds_utc_naive(db, tenant_id)
+    overlap = _intersect_window(period_start, period_end, today_start, today_end)
+    if overlap is None:
+        return 0
+    win_start, win_end = overlap
+    return count_conversations_in_window(db, tenant_id, win_start, win_end)
+
+
+def get_today_messages_count(db: Session, tenant_id: int) -> int:
+    """WhatsApp message events in the merchant-local calendar day."""
+    start, end = get_local_day_bounds_utc_naive(db, tenant_id)
+    return count_messages_in_window(db, tenant_id, start, end)
+
+
+def get_daily_activity_metrics(db: Session, tenant_id: int, period: str = "today") -> dict:
+    """
+    SSOT for Overview daily/rolling analytics (separate from plan-limit usage).
+
+    ``conversations`` = billable Meta 24h windows (``ConversationLog`` rows).
+    ``messages``      = WhatsApp message events (``MessageEvent`` rows).
+    """
+    now = _utcnow()
+    tz = get_merchant_timezone(db, tenant_id)
+    tz_name = getattr(tz, "key", None) or DEFAULT_MERCHANT_TZ
+
+    if period == "last_7_days":
+        window_start = _naive(now - timedelta(days=7))
+        window_end = None
+        period_label_ar = "آخر 7 أيام"
+    elif period == "this_month":
+        window_start, window_end = get_local_month_bounds_utc_naive(db, tenant_id, ref=now)
+        period_label_ar = "هذا الشهر"
+    else:
+        period = "today"
+        window_start, window_end = get_local_day_bounds_utc_naive(db, tenant_id, ref=now)
+        period_label_ar = "اليوم"
+
+    billable = count_conversations_in_window(db, tenant_id, window_start, window_end)
+    messages = count_messages_in_window(db, tenant_id, window_start, window_end)
+    today_billable = get_today_billable_conversations_count(db, tenant_id)
+    today_messages = get_today_messages_count(db, tenant_id)
+
+    return {
+        "period": period,
+        "period_label_ar": period_label_ar,
+        "analytics_timezone": tz_name,
+        "window_start_utc": window_start.isoformat(),
+        "window_end_utc": window_end.isoformat() if window_end else None,
+        "conversations": billable,
+        "conversations_today": billable if period == "today" else today_billable,
+        "today_billable_conversations_count": today_billable,
+        "messages": messages,
+        "messages_today": messages if period == "today" else today_messages,
+        "today_messages_count": today_messages,
+        "metric_kind_conversations": "billable_conversation_windows",
+        "metric_kind_messages": "whatsapp_message_events",
+    }
+
+
+def get_usage_audit_snapshot(db: Session, tenant_id: int) -> dict:
+    """Operator/merchant debug view — raw counts by source for one tenant."""
+    ctx = _usage_period_context(db, tenant_id)
+    usage_row = _get_or_create_usage(db, tenant_id, ctx)
+    _reconcile_usage_from_logs(db, tenant_id, usage_row, ctx)
+
+    period_start, period_end = _period_bounds_naive(ctx)
+    today_start, today_end = get_local_day_bounds_utc_naive(db, tenant_id)
+    tz_name = getattr(get_merchant_timezone(db, tenant_id), "key", DEFAULT_MERCHANT_TZ)
+
+    period_logs = count_conversations_in_window(db, tenant_id, period_start, period_end)
+    today_logs = count_conversations_in_window(db, tenant_id, today_start, today_end)
+    today_in_period = get_today_in_period_billable_count(db, tenant_id, ctx)
+    today_msgs = get_today_messages_count(db, tenant_id)
+
+    stored_total = int(usage_row.service_conversations_used or 0) + int(
+        usage_row.marketing_conversations_used or 0
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "period_mode": ctx.get("mode"),
+        "subscription_id": ctx.get("subscription_id"),
+        "period_started_at": period_start.isoformat(),
+        "period_ends_at": period_end.isoformat() if period_end else None,
+        "analytics_timezone": tz_name,
+        "today_window_start_utc": today_start.isoformat(),
+        "today_window_end_utc": today_end.isoformat(),
+        "whatsapp_usage_stored_total": stored_total,
+        "conversation_log_period_count": period_logs,
+        "conversation_log_today_count": today_logs,
+        "conversation_log_today_in_period_count": today_in_period,
+        "message_events_today_count": today_msgs,
+        "semantics": {
+            "billable_conversation": (
+                "One ConversationLog row = one new Meta 24h billable window "
+                "(per customer, not per message)."
+            ),
+            "period_usage": "ConversationLog rows inside the active billing period.",
+            "today_conversations": (
+                "ConversationLog rows inside the merchant-local calendar day."
+            ),
+            "today_messages": "MessageEvent rows inside the merchant-local calendar day.",
+        },
+    }
+
+
 def get_today_conversations_count(db: Session, tenant_id: int) -> int:
-    """Billable conversation windows opened today (UTC day boundary)."""
-    now   = _utcnow()
-    start = datetime(now.year, now.month, now.day)
-    return _count_conversation_logs(db, tenant_id, start)
+    """Backwards-compatible alias — merchant-local billable windows today."""
+    return get_today_billable_conversations_count(db, tenant_id)
 
 
 def _reconcile_usage_from_logs(
@@ -753,7 +1008,12 @@ def get_current_period_usage(db: Session, tenant_id: int) -> dict:
 
     meta_tier = _get_meta_tier(db, tenant_id)
     lifetime  = get_lifetime_conversations(db, tenant_id)
-    today_count = get_today_conversations_count(db, tenant_id)
+    tz        = get_merchant_timezone(db, tenant_id)
+    tz_name   = getattr(tz, "key", None) or DEFAULT_MERCHANT_TZ
+    today_billable = get_today_billable_conversations_count(db, tenant_id)
+    today_in_period = get_today_in_period_billable_count(db, tenant_id, ctx)
+    today_messages = get_today_messages_count(db, tenant_id)
+    pre_renewal_today = max(0, today_billable - today_in_period)
 
     period_started_at = ctx.get("period_started_at")
     period_ends_at    = ctx.get("period_ends_at")
@@ -802,7 +1062,15 @@ def get_current_period_usage(db: Session, tenant_id: int) -> dict:
         "current_period_ends_at":            _iso(period_ends_at),
         "subscription_id":                   ctx.get("subscription_id"),
         "lifetime_conversations_used":       lifetime,
-        "today_conversations_count":         today_count,
+        "analytics_timezone":                tz_name,
+        "today_conversations_count":         today_billable,
+        "today_billable_conversations_count": today_billable,
+        "today_in_period_conversations_count": today_in_period,
+        "today_messages_count":              today_messages,
+        "today_pre_renewal_conversations_count": pre_renewal_today,
+        "metric_kind_period_usage":          "billable_conversation_windows",
+        "metric_kind_today_conversations":   "billable_conversation_windows",
+        "metric_kind_today_messages":        "whatsapp_message_events",
         "alert_80_sent":                     usage.alert_80_sent,
         "alert_100_sent":                    usage.alert_100_sent,
         **meta_tier,

@@ -3345,6 +3345,24 @@ async def get_usage(
     return data
 
 
+@router.get("/usage/audit")
+async def get_usage_audit(
+    request: Request,
+    db:      Session = Depends(get_db),
+    _scope:  dict    = Depends(require_merchant_scope),
+):
+    """
+    Debug/audit snapshot for conversation usage semantics.
+
+    Surfaces period bounds, billable-window counts, and message-event counts
+    so operators can explain dashboard numbers without tenant-specific logic.
+    """
+    from core.wa_usage import get_usage_audit_snapshot  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    return get_usage_audit_snapshot(db, tenant_id)
+
+
 # NOTE: the canonical stale horizon lives in ``core.wa_usage``. We keep a local
 # reference here so the legacy `_maybe_refresh_meta_tier` path (which runs
 # inline on /whatsapp/usage requests) stays in lockstep with the value the

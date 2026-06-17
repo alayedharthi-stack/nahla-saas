@@ -362,6 +362,7 @@ export interface Translations {
     kpiRevenue:     string
     kpiConversations: string
     kpiConversationsToday: string
+    kpiMessagesToday: string
     kpiOrders:      string
     kpiAiRate:      string
     recentConvTitle:string
@@ -402,6 +403,10 @@ export interface Translations {
       title: string
       periodUsageTitle: string
       todayConversations: string
+      todayInPeriod: string
+      periodUsageHint: string
+      todayConversationsHint: string
+      preRenewalNote: string
       emergencyStop: string
       campaignsStopped: string
       nearLimit90: string
