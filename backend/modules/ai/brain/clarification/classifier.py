@@ -7,6 +7,7 @@ Uses intent, state, and operational signals — not customer phrase matching.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..types import (
@@ -38,6 +39,9 @@ from .types import (
     RECOVERY_DETERMINISTIC,
     RECOVERY_GENERATIVE,
 )
+
+
+logger = logging.getLogger("nahla.brain.clarification.classifier")
 
 
 def _has_resolved_product_query(ctx: BrainContext) -> bool:
@@ -150,7 +154,9 @@ def classify_missing_information(
                 compose_topic=COMPOSE_TOPIC_SOLUTION_SEEKING,
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[SOLUTION_SEEKING_CLASSIFY] classify_solution_seeking_commerce failed",
+        )
 
     if intent_name in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         if not focus and not _has_resolved_product_query(ctx):

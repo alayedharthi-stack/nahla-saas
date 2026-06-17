@@ -654,8 +654,9 @@ class MerchantBrain:
                     history=history,
                 )
             except Exception as _prs_exc:  # noqa: BLE001
-                logger.debug(
-                    "[POST_REPAIR_SUPPRESSION] skipped tenant=%s err=%s",
+                logger.exception(
+                    "[POST_REPAIR_SUPPRESSION] apply_post_repair_suppression failed "
+                    "tenant=%s: %s",
                     tenant_id,
                     _prs_exc,
                 )
