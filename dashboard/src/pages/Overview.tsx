@@ -51,6 +51,11 @@ interface OverviewStats {
   conversations_today: number
   orders_today: number
   revenue_today: number
+  today_billable_conversations_count?: number
+  today_messages_count?: number
+  metric_kind_conversations?: string
+  metric_kind_messages?: string
+  analytics_timezone?: string
   ai_rate: number
   ai_revenue: number
   ai_orders: number
@@ -65,6 +70,13 @@ interface WaUsage {
   current_period_conversations_used?: number
   current_period_conversations_limit?: number
   today_conversations_count?: number
+  today_billable_conversations_count?: number
+  today_in_period_conversations_count?: number
+  today_messages_count?: number
+  today_pre_renewal_conversations_count?: number
+  analytics_timezone?: string
+  metric_kind_period_usage?: string
+  metric_kind_today_conversations?: string
   remaining_conversations?: number
   lifetime_conversations_used?: number
   period_mode?:          string
@@ -214,6 +226,15 @@ export default function Overview() {
   // older backend during a partial deploy.
   const kpiRevenue       = stats?.revenue       ?? stats?.revenue_today       ?? 0
   const kpiConversations = stats?.conversations ?? stats?.conversations_today ?? 0
+  const kpiMessagesToday = stats?.today_messages_count ?? 0
+  const kpiConversationLabel = period === 'today'
+    ? (stats?.metric_kind_conversations === 'billable_conversation_windows'
+        ? ov.kpiConversationsToday
+        : ov.kpiMessagesToday)
+    : ov.kpiConversations
+  const kpiConversationValue = period === 'today' && stats?.metric_kind_conversations !== 'billable_conversation_windows'
+    ? kpiMessagesToday
+    : kpiConversations
   const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
   const kpiMessagesSent  = stats?.messages_sent ?? 0
   const periodLabelDisplay = lang === 'en'
@@ -353,14 +374,32 @@ export default function Overview() {
                   {waUsage.usage_pct}%
                 </span>
               </div>
-              {typeof waUsage.today_conversations_count === 'number' && (
-                <p className="text-xs text-slate-500 mt-1">
+              {typeof waUsage.today_billable_conversations_count === 'number' && (
+                <p className="text-xs text-slate-500 mt-1" title={wu.todayConversationsHint}>
                   {wu.todayConversations}:{' '}
                   <span className="font-semibold text-slate-700">
-                    {waUsage.today_conversations_count.toLocaleString(locale)}
+                    {waUsage.today_billable_conversations_count.toLocaleString(locale)}
                   </span>
+                  {typeof waUsage.today_in_period_conversations_count === 'number'
+                    && waUsage.today_in_period_conversations_count !== waUsage.today_billable_conversations_count && (
+                    <span className="text-slate-400">
+                      {' '}
+                      ({wu.todayInPeriod}: {waUsage.today_in_period_conversations_count.toLocaleString(locale)})
+                    </span>
+                  )}
                 </p>
               )}
+              {(waUsage.today_pre_renewal_conversations_count ?? 0) > 0 && (
+                <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                  {wu.preRenewalNote.replace(
+                    '{count}',
+                    String(waUsage.today_pre_renewal_conversations_count),
+                  )}
+                </p>
+              )}
+              <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed" title={wu.periodUsageHint}>
+                {wu.periodUsageHint}
+              </p>
             </div>
 
             {/* Right: details + upgrade CTA */}
@@ -593,9 +632,9 @@ export default function Overview() {
           iconBg="bg-emerald-50"
         />
         <StatCard
-          label={period === 'today' ? ov.kpiConversationsToday : ov.kpiConversations}
+          label={kpiConversationLabel}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : kpiConversations.toLocaleString(locale)}
+          value={loading ? '—' : kpiConversationValue.toLocaleString(locale)}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"

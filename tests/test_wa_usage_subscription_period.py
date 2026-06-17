@@ -26,15 +26,23 @@ from models import (  # noqa: E402
     BillingPlan,
     BillingSubscription,
     ConversationLog,
+    MessageEvent,
     Tenant,
+    TenantSettings,
     WhatsAppUsage,
 )
 from core.wa_usage import (  # noqa: E402
     _get_or_create_usage,
     _usage_period_context,
     get_current_period_usage,
+    get_daily_activity_metrics,
     get_lifetime_conversations,
+    get_local_day_bounds_utc_naive,
+    get_today_billable_conversations_count,
     get_today_conversations_count,
+    get_today_in_period_billable_count,
+    get_today_messages_count,
+    get_usage_audit_snapshot,
     get_usage_this_month,
     track_conversation,
 )
@@ -257,3 +265,132 @@ class TestSubscriptionPeriodUsage:
         alias = get_usage_this_month(db, tenant.id)
         assert direct["conversations_used"] == alias["conversations_used"] == 1
         assert direct["today_conversations_count"] == get_today_conversations_count(db, tenant.id)
+
+
+class TestConversationSemantics:
+    def test_conversation_log_is_billable_window_not_message(self, db):
+        tenant = Tenant(name="Semantics Store", subscription_status="trial")
+        db.add(tenant)
+        db.commit()
+
+        track_conversation(db, tenant.id, "+966500000001", source="inbound", category="service")
+        track_conversation(db, tenant.id, "+966500000001", source="inbound", category="service")
+
+        assert db.query(ConversationLog).filter(ConversationLog.tenant_id == tenant.id).count() == 1
+
+    def test_merchant_local_day_differs_from_utc_day(self, db):
+        tenant = Tenant(name="TZ Store", subscription_status="trial")
+        db.add(tenant)
+        db.flush()
+        db.add(TenantSettings(tenant_id=tenant.id, store_settings={"timezone": "Asia/Riyadh"}))
+        db.commit()
+
+        # 2026-06-18 22:30 UTC = 2026-06-19 01:30 Riyadh (next local day)
+        ref = datetime(2026, 6, 18, 22, 30, 0, tzinfo=timezone.utc)
+        start, end = get_local_day_bounds_utc_naive(db, tenant.id, ref=ref)
+
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000001",
+            conversation_started_at=datetime(2026, 6, 18, 22, 0, 0),
+            source="inbound",
+            category="service",
+        ))
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000002",
+            conversation_started_at=datetime(2026, 6, 18, 20, 0, 0),
+            source="inbound",
+            category="service",
+        ))
+        db.commit()
+
+        # Only the 22:00 UTC log falls in Riyadh-local June 19
+        from core.wa_usage import count_conversations_in_window  # noqa: E402
+
+        in_local_day = count_conversations_in_window(db, tenant.id, start, end)
+        assert in_local_day == 1
+
+    def test_today_in_period_is_subset_of_period_and_today(self, db):
+        from unittest.mock import patch  # noqa: PLC0415
+
+        tenant, _plan, sub = _seed_tenant(db)
+        fixed_now = datetime(2026, 6, 18, 16, 0, 0, tzinfo=timezone.utc)
+        sub.started_at = datetime(2026, 6, 18, 12, 0, 0)
+        db.commit()
+
+        for hour, phone in ((8, "+966500000001"), (10, "+966500000002"), (14, "+966500000003")):
+            db.add(ConversationLog(
+                tenant_id=tenant.id,
+                customer_phone=phone,
+                conversation_started_at=datetime(2026, 6, 18, hour, 0, 0),
+                source="inbound",
+                category="service",
+            ))
+        db.commit()
+
+        with patch("core.wa_usage._utcnow", return_value=fixed_now):
+            ctx = _usage_period_context(db, tenant.id)
+            usage = get_current_period_usage(db, tenant.id)
+            today_in_period = get_today_in_period_billable_count(db, tenant.id, ctx)
+            today_billable = get_today_billable_conversations_count(db, tenant.id)
+
+        assert today_in_period == 1
+        assert today_billable == 3
+        assert usage["current_period_conversations_used"] == 1
+        assert usage["today_pre_renewal_conversations_count"] == 2
+
+    def test_messages_and_conversations_are_separate_metrics(self, db):
+        tenant = Tenant(name="Msg Store", subscription_status="trial")
+        db.add(tenant)
+        db.commit()
+
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000001",
+            conversation_started_at=now_naive,
+            source="inbound",
+            category="service",
+        ))
+        for _ in range(5):
+            db.add(MessageEvent(tenant_id=tenant.id, direction="inbound", body="hi"))
+        db.commit()
+
+        assert get_today_billable_conversations_count(db, tenant.id) == 1
+        assert get_today_messages_count(db, tenant.id) == 5
+
+    def test_daily_activity_matches_usage_today_fields(self, db):
+        tenant, _plan, _sub = _seed_tenant(db)
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000099",
+            conversation_started_at=now_naive,
+            source="inbound",
+            category="service",
+        ))
+        db.commit()
+
+        activity = get_daily_activity_metrics(db, tenant.id, "today")
+        usage = get_current_period_usage(db, tenant.id)
+        assert activity["conversations"] == usage["today_billable_conversations_count"]
+        assert activity["metric_kind_conversations"] == "billable_conversation_windows"
+
+    def test_audit_snapshot_exposes_raw_counts(self, db):
+        tenant, _plan, sub = _seed_tenant(db)
+        now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.add(ConversationLog(
+            tenant_id=tenant.id,
+            customer_phone="+966500000010",
+            conversation_started_at=now_naive,
+            source="inbound",
+            category="service",
+        ))
+        db.commit()
+
+        audit = get_usage_audit_snapshot(db, tenant.id)
+        assert audit["subscription_id"] == sub.id
+        assert audit["conversation_log_today_count"] >= 1
+        assert audit["conversation_log_period_count"] >= 1
+        assert "semantics" in audit
