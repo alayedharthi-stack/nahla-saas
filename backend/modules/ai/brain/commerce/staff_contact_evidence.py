@@ -326,11 +326,15 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
 
     from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
         is_generic_store_contact_phrase,
+        is_store_channel_phone_phrase,
         is_thanks_with_contact_phrase,
     )
 
     if is_thanks_with_contact_phrase(raw):
         return StaffContactRequest(kind="none")
+
+    if is_store_channel_phone_phrase(raw):
+        return StaffContactRequest(kind="general_channel")
 
     if is_generic_store_contact_phrase(raw):
         return StaffContactRequest(kind="general_channel")

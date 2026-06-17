@@ -486,6 +486,34 @@ class MerchantBrain:
             )
             state_for_classify.greeted = True
 
+        # ── 1b.5 Conversation objective (product-origin verification, …) ───
+        try:
+            from .intent.conversation_objective_guard import (  # noqa: PLC0415
+                refresh_conversation_objective,
+            )
+
+            _objective_turn = refresh_conversation_objective(
+                state_for_classify,
+                message,
+                profile or {},
+            )
+            if _objective_turn.active or _objective_turn.cleared:
+                logger.info(
+                    "[CONVERSATION_OBJECTIVE] tenant=%s active=%s objective=%r "
+                    "trigger=%r cleared=%s",
+                    tenant_id,
+                    _objective_turn.active,
+                    _objective_turn.objective,
+                    _objective_turn.trigger or "-",
+                    _objective_turn.cleared,
+                )
+        except Exception as _obj_exc:  # noqa: BLE001
+            logger.debug(
+                "[CONVERSATION_OBJECTIVE] skipped tenant=%s err=%s",
+                tenant_id,
+                _obj_exc,
+            )
+
         # ── 1c. Catalog-order product-focus pin (June 2026) ──────────────
         # When the customer submits a WhatsApp catalog order, the inbound
         # text is framed by ``modules.ai.media.normalizer`` with a fixed
@@ -841,7 +869,7 @@ class MerchantBrain:
                     db, tenant_id, customer_phone,
                 )
             except Exception as _cb_exc:  # noqa: BLE001
-                logger.debug(
+                logger.exception(
                     "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
                     tenant_id, _cb_exc,
                 )
@@ -1134,6 +1162,18 @@ class MerchantBrain:
         new_state.last_presentation_mode = str(
             (decision.args or {}).get("presentation_mode") or ""
         )
+
+        # Carry conversation objective memory forward (short TTL session lock).
+        new_state.active_conversation_objective = str(
+            getattr(state, "active_conversation_objective", "") or ""
+        )
+        new_state.objective_started_turn = int(
+            getattr(state, "objective_started_turn", 0) or 0
+        )
+        new_state.objective_last_reinforced_turn = int(
+            getattr(state, "objective_last_reinforced_turn", 0) or 0
+        )
+        new_state.objective_evidence = dict(getattr(state, "objective_evidence", None) or {})
 
         # ── Conversation-context memory (May 2026) ───────────────────────
         # Persist the platform topic so a bare "نعم" on the NEXT turn
@@ -2157,6 +2197,9 @@ class MerchantBrain:
                 primary_customer_goal=str(
                     getattr(getattr(ctx, "reply_state", None), "primary_customer_goal", "")
                     or ""
+                ),
+                conversation_objective=str(
+                    getattr(state, "active_conversation_objective", "") or ""
                 ),
                 locale=str((profile or {}).get("preferred_language") or "ar"),
                 tenant_id=tenant_id,

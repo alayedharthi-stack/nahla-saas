@@ -19,6 +19,23 @@ _STORE_PRONOUN_TOKENS = frozenset({
     "معك", "معاك", "معكم", "معكن", "معاكم", "معاك", "معا", "مع",
 })
 
+_STORE_CHANNEL_PHONE_TOKENS = frozenset({
+    "تليفونكم", "تلفونكم", "هاتفكم", "رقمكم", "جوالكم", "موبايلكم",
+    "تليفونك", "تلفونك", "هاتفك", "رقمك", "جوالك", "موبايلك",
+    "تليفون", "تلفون", "هاتف", "جوال", "موبايل",
+    "الهاتف", "الجوال", "التلفون", "التليفون",
+    "رقم", "phone", "contact",
+})
+
+_STORE_CHANNEL_PHONE_PHRASE_RE = re.compile(
+    r"(?:"
+    r"(?:ع(?:ل|)?(?:ي|يه|ا)\s+)?(?:رقم\s+)?(?:ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل)(?:كم|ك|ه|ها|هم)?"
+    r"|(?:رقم(?:كم|ك|ه|ها|هم)?)(?:\s*(?:ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل))?"
+    r"|(?:هاتف|تليفون|تلفون|جوال|موبايل)(?:كم|ك|ه|ها|هم)?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _THANKS_LEAD_RE = re.compile(
     r"^(?:شكر|شكرا|شكراً|thanks|thx|مشكور|تسلم|يعطيك\s+العاف)",
     re.UNICODE | re.IGNORECASE,
@@ -57,16 +74,50 @@ def _clean_staff_candidate(raw: str) -> str:
     cand = _WS_RE.sub(" ", (raw or "").strip()).strip("؟?.,! ")
     if not cand:
         return ""
-    tokens = cand.split()
+    norm_cand = _norm(cand)
+    if norm_cand in _STORE_CHANNEL_PHONE_TOKENS:
+        return ""
+    tokens = norm_cand.split()
     if all(tok in _STORE_PRONOUN_TOKENS for tok in tokens):
+        return ""
+    if all(tok in (_STORE_PRONOUN_TOKENS | _STORE_CHANNEL_PHONE_TOKENS) for tok in tokens):
         return ""
     if cand in _STORE_PRONOUN_TOKENS:
         return ""
     if re.fullmatch(r"(?:مع)?(?:اك|اكم|كم|كن|ك)", cand):
         return ""
+    if re.fullmatch(
+        r"رقم(?:\s+ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل)?(?:كم|ك|ه|ها|هم)?",
+        norm_cand,
+    ):
+        return ""
     if len(cand) <= 2:
         return ""
     return cand
+
+
+def is_store_channel_phone_phrase(message: str) -> bool:
+    """
+    True for store-wide phone/channel asks — not a named staff member.
+
+    Examples: «عليه رقم تليفونكم», «رقمكم», «رقم الهاتف».
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if extract_staff_name_candidate(raw):
+        return False
+    norm = _norm(raw)
+    if _STORE_CHANNEL_PHONE_PHRASE_RE.search(norm):
+        return True
+    if re.fullmatch(r"رقم(?:كم|ك|ه|ها|هم)?", norm):
+        return True
+    if re.fullmatch(
+        r"رقم(?:\s+ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل)",
+        norm,
+    ):
+        return True
+    return False
 
 
 def extract_staff_name_candidate(message: str) -> str:
@@ -104,6 +155,8 @@ def is_generic_store_contact_phrase(message: str) -> bool:
     raw = (message or "").strip()
     if not raw or is_thanks_with_contact_phrase(raw):
         return False
+    if is_store_channel_phone_phrase(raw):
+        return True
     if extract_staff_name_candidate(raw):
         return False
     norm = _norm(raw)
@@ -202,5 +255,6 @@ __all__ = [
     "has_explicit_purchase_intent",
     "is_generic_store_contact_phrase",
     "is_identity_collaboration_without_purchase",
+    "is_store_channel_phone_phrase",
     "is_thanks_with_contact_phrase",
 ]

@@ -472,6 +472,19 @@ def compute_customer_intent_priority(
     ranking = _rank_elements(elements)
     primary = _resolve_primary_goal(elements, intent, norm=norm)
 
+    try:
+        from ..intent.conversation_objective_guard import (  # noqa: PLC0415
+            apply_objective_to_primary_goal,
+        )
+
+        primary = apply_objective_to_primary_goal(
+            primary,
+            message=raw,
+            state=state,
+        )
+    except Exception:  # noqa: silent-ok — objective gate must not break priority
+        pass
+
     secondary = [
         e.element_type
         for e in elements
