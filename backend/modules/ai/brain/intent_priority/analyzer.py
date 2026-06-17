@@ -294,6 +294,17 @@ def _resolve_primary_goal(
     *,
     norm: str = "",
 ) -> str:
+    try:
+        from ..intent.education_context_classifier import is_education_non_commerce_context  # noqa: PLC0415
+
+        if is_education_non_commerce_context(norm):
+            element_types = {e.element_type for e in elements}
+            if ELEMENT_GREETING in element_types:
+                return GOAL_GREETING_ONLY
+            return GOAL_SOCIAL_ONLY
+    except Exception:  # noqa: silent-ok — education gate must not break priority
+        pass
+
     commercial = [
         e for e in elements
         if e.element_type in _COMMERCIAL_ELEMENT_TYPES
@@ -458,6 +469,17 @@ def compute_customer_intent_priority(
     raw = (message or "").strip()
     norm = _norm(raw)
     elements = _detect_elements(norm, raw)
+
+    try:
+        from ..intent.education_context_classifier import is_education_non_commerce_context  # noqa: PLC0415
+
+        if is_education_non_commerce_context(raw):
+            elements = [
+                e for e in elements
+                if e.element_type not in _COMMERCIAL_ELEMENT_TYPES
+            ]
+    except Exception:  # noqa: silent-ok — education gate must not break priority
+        pass
 
     has_image = _has_image_attachment(profile or {})
     if has_image:

@@ -13,13 +13,19 @@ import unicodedata
 from dataclasses import dataclass
 from typing import List, Optional, Pattern, Tuple
 
-from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY
+from modules.ai.brain.intent_priority.types import (
+    GOAL_GREETING_ONLY,
+    GOAL_PRODUCT_AVAILABILITY,
+    GOAL_SOCIAL_ONLY,
+)
 
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
 
 _FALLBACK_AVAILABILITY_AR = "التوفر قيد التحقق."
 _FALLBACK_PRODUCT_UNRESOLVED_AR = "حدّد المنتج أو المقاس المطلوب."
 _FALLBACK_DELIVERY_AR = "التوصيل لمنطقتك قيد التحقق."
+_FALLBACK_SOCIAL_AR = "حياك الله، وصلت رسالتك."
+_FALLBACK_GREETING_AR = "وعليكم السلام، حياك الله."
 
 _MIN_MEANINGFUL_CHARS = 6
 
@@ -220,12 +226,32 @@ def _is_short_product_probe(inbound_text: str) -> bool:
     return bool(re.search(r"[\u0600-\u06FFa-z]", inbound_text or ""))
 
 
+_NON_COMMERCE_INTENTS = frozenset({
+    "social",
+    "greeting",
+    "general",
+    "persona_interaction",
+    "who_are_you",
+})
+
+
 def select_arabic_commerce_fallback(
     *,
     intent_name: str = "",
     primary_customer_goal: str = "",
     inbound_text: str = "",
 ) -> Tuple[str, str]:
+    try:
+        from modules.ai.brain.intent.education_context_classifier import (  # noqa: PLC0415
+            education_clarify_reply,
+            is_education_non_commerce_context,
+        )
+
+        if is_education_non_commerce_context(inbound_text):
+            return education_clarify_reply(inbound_text), "education"
+    except Exception:  # noqa: silent-ok — education gate must not break fallback
+        pass
+
     if _is_delivery_turn(
         intent_name=intent_name,
         primary_customer_goal=primary_customer_goal,
@@ -234,6 +260,11 @@ def select_arabic_commerce_fallback(
         return _FALLBACK_DELIVERY_AR, "delivery"
     goal = (primary_customer_goal or "").strip().lower()
     intent = (intent_name or "").strip().lower()
+    if goal in {GOAL_GREETING_ONLY, GOAL_SOCIAL_ONLY} or intent in _NON_COMMERCE_INTENTS:
+        norm = _normalize_for_match(inbound_text)
+        if norm.startswith("السلام") or "سلام عليكم" in norm:
+            return _FALLBACK_GREETING_AR, "greeting"
+        return _FALLBACK_SOCIAL_AR, "social"
     if _is_short_product_probe(inbound_text) and (
         goal == GOAL_PRODUCT_AVAILABILITY
         or intent in {"ask_product", "solution_seeking_commerce", "product_availability"}
@@ -241,7 +272,7 @@ def select_arabic_commerce_fallback(
         return _FALLBACK_PRODUCT_UNRESOLVED_AR, "product_unresolved"
     if goal == GOAL_PRODUCT_AVAILABILITY or intent in _COMMERCE_INTENTS:
         return _FALLBACK_AVAILABILITY_AR, "availability"
-    return _FALLBACK_AVAILABILITY_AR, "availability"
+    return _FALLBACK_SOCIAL_AR, "social"
 
 
 def _meaningful_length(text: str) -> int:

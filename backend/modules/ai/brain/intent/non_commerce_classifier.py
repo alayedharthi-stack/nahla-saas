@@ -43,6 +43,7 @@ NC_SOCIAL_FORWARD = "social_forward"
 NC_RELIGIOUS_MEDIA = "religious_media"
 NC_EMOTIONAL = "emotional_personal"
 NC_INFORMATIONAL = "informational_only"
+NC_EDUCATION = "education_context"
 
 # Tags prepended by media/normalizer.py — grep-stable prefixes.
 NON_COMMERCE_IMAGE_TAG = (
@@ -520,6 +521,19 @@ def classify_non_commerce(
                 norm=norm,
                 topic_hints=hints,
             )
+
+    try:
+        from .education_context_classifier import classify_education_context  # noqa: PLC0415
+
+        edu = classify_education_context(raw)
+        if edu is not None:
+            return NonCommerceMatch(
+                category=edu.category,
+                confidence=edu.confidence,
+                source=edu.source,
+            )
+    except Exception:  # noqa: silent-ok — education gate optional; commerce may proceed
+        pass
 
     # 3. Video topic hint advisory (from normalizer).
     if hints:
