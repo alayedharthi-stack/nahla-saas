@@ -225,9 +225,9 @@ class TestExpiryEnforcement:
         assert "require_outbound_access" not in src
 
 
-class TestTenant33Audit:
-    def test_audit_reports_exact_fields(self, db):
-        """Regression fixture mirroring tenant 33 — active sub past ends_at blocks AI."""
+class TestBillingLifecycleAuditRegression:
+    def test_paid_expired_production_regression_audit_fields(self, db):
+        """Regression audit for paid-expired merchant (production example: tenant 33)."""
         now = datetime.now(timezone.utc)
         t = Tenant(
             id=33,
@@ -279,6 +279,8 @@ class TestTenant33Audit:
         assert report["ai_auto_replies_allowed"] is False
         assert report["manual_replies_allowed"] is True
 
+
+class TestSubscriptionPeriod:
     def test_subscription_period_end_is_30_days(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         end = subscription_period_end(start)
@@ -286,8 +288,8 @@ class TestTenant33Audit:
 
 
 class TestBillingLifecycleResolution:
-    def test_expired_paid_sub_not_reported_as_trial_expired(self, db):
-        """Tenant 33 pattern: paid sub expired + trial expired → paid_expired."""
+    def test_paid_expired_subscription_takes_priority_over_trial_expiry(self, db):
+        """Paid subscription expiry wins over trial expiry when payment history exists."""
         now = datetime.now(timezone.utc)
         t = _tenant(db, name="Paid Then Expired")
         _wa_conn(db, t.id, connected_days_ago=40)

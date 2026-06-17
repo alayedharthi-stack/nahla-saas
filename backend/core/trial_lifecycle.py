@@ -424,7 +424,7 @@ def resolve_billing_lifecycle(
     *,
     active_sub=None,
 ) -> Dict[str, Any]:
-    """Decide the merchant-facing lifecycle state (trial vs paid, active vs expired)."""
+    """Decide the merchant-facing lifecycle state for any tenant (trial vs paid, active vs expired)."""
     from core.billing import has_billing_access  # noqa: PLC0415
 
     trial_info = compute_trial_info(tenant)
@@ -545,7 +545,7 @@ def build_billing_status_payload(
     usage_data: Dict[str, Any],
     integration_fee_sar: int,
 ) -> Dict[str, Any]:
-    """Unified billing/status response used by the dashboard."""
+    """Unified billing/status response for every merchant on the dashboard."""
     from core.billing import is_launch_discount_active  # noqa: PLC0415
 
     lifecycle = resolve_billing_lifecycle(db, tenant_id, tenant, active_sub=active_sub)
@@ -591,8 +591,11 @@ def build_billing_status_payload(
 
 def audit_tenant_subscription(db: Session, tenant_id: int) -> Dict[str, Any]:
     """
-    Read-only audit snapshot for a tenant's billing / trial state.
-    Used for operator review (e.g. tenant 33) and regression tests.
+    Read-only audit snapshot for any merchant's billing / trial state.
+
+    Used for operator review after deploy and regression tests. Individual
+    tenant IDs in tests (e.g. production regression examples) are fixtures
+    only — the resolver applies platform-wide to every merchant.
     """
     from models import Tenant  # noqa: PLC0415
 
