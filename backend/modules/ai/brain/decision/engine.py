@@ -786,7 +786,7 @@ class DefaultDecisionEngine:
                     preview=(ctx.message or "")[:80],
                 )
                 return _order_ctx_decision
-        except Exception as _oc_exc:  # noqa: BLE001
+        except Exception as _oc_exc:  # noqa: BLE001  # noqa: silent-ok — order context gate must not block decide
             logger.debug(
                 "[ORDER_CONTEXT_GATE] update routing skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
@@ -859,7 +859,7 @@ class DefaultDecisionEngine:
             )
             if _absence_dec is not None:
                 return _absence_dec
-        except Exception as _abs_exc:  # noqa: BLE001
+        except Exception as _abs_exc:  # noqa: BLE001  # noqa: silent-ok — absence gate must not block decide
             logger.debug(
                 "[ABSENCE_COMMERCE_GATE] skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
