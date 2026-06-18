@@ -237,8 +237,13 @@ def resolve_cart_line_item(
                                 if v.get("option_summary") or v.get("name")
                             ],
                         })
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[WA_CART_CATALOG] variant enrich failed: %s", exc)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[WA_CART_CATALOG] variant_enrich_failed tenant=%s product_id=%s variant_hint=%r",
+                    tenant_id,
+                    product_id,
+                    variant_hint,
+                )
         return enriched, side
 
     from services.product_resolver import resolve_best_effort  # noqa: PLC0415
@@ -382,7 +387,7 @@ def resolve_and_enrich_cart_state(
                 "unmatched_items": resolution.unmatched_items,
                 "closest_suggestions": resolution.closest_suggestions,
             })
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok - optional order_prep metadata stamp must not block cart resolution
         pass
 
     logger.info(
