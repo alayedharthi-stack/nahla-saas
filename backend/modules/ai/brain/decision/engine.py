@@ -435,6 +435,37 @@ class DefaultDecisionEngine:
                 confidence=0.99,
             )
 
+        # ── -0.5 Pending cart confirmation (P0 gift-order gate) ─────────────
+        try:
+            from ..commerce.gift_order_gate import try_pending_cart_confirmation_decision  # noqa: PLC0415
+
+            _pcc = try_pending_cart_confirmation_decision(ctx)
+            if _pcc is not None:
+                return _pcc
+        except Exception as _pcc_exc:  # noqa: BLE001
+            logger.debug(
+                "[GIFT_ORDER_GATE] pending_cart_confirmation skipped err=%s",
+                _pcc_exc,
+            )
+
+        # ── -0.4 Ready-for-order creation (P0 gift-order gate) ──────────────
+        try:
+            from ..commerce.gift_order_gate import try_ready_for_order_decision  # noqa: PLC0415
+
+            _rfo = try_ready_for_order_decision(ctx)
+            if _rfo is not None:
+                logger.info(
+                    "[GIFT_ORDER_GATE] ready_for_order_creation tenant=%s reason=%s",
+                    ctx.tenant_id,
+                    _rfo.reason,
+                )
+                return _rfo
+        except Exception as _rfo_exc:  # noqa: BLE001
+            logger.debug(
+                "[GIFT_ORDER_GATE] ready_for_order skipped err=%s",
+                _rfo_exc,
+            )
+
         # ── 0z. Reference resolution: bare confirmation inherits last topic ──
         # A short "نعم" / "طيب" / "أرسل" / "اي" / "okay" on its own carries
         # no commercial signal by itself, but in conversation it almost

@@ -1424,6 +1424,36 @@ def maybe_handle_wa_address_inbound(
         or bs.get("cart_items")
     )
     if not has_active:
+        try:
+            from modules.ai.brain.commerce.gift_order_gate import (  # noqa: PLC0415
+                build_pending_delivery_location_patch,
+            )
+
+            stash = build_pending_delivery_location_patch(address_patch)
+            bs["pending_delivery_location"] = stash.get("pending_delivery_location") or {}
+            op.update(stash)
+            meta = dict(getattr(_conv, "extra_metadata", None) or {})
+            meta["brain_state"] = {**bs, "order_prep": op}
+            _conv.extra_metadata = meta
+            try:
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+                flag_modified(_conv, "extra_metadata")
+            except Exception:  # noqa: BLE001
+                pass
+            db.flush()
+            logger.info(
+                "[ORDER_FLOW_STATE] stashed pending_delivery_location (pre-order) "
+                "tenant=%s phone=*%s type=%s",
+                tenant_id,
+                (phone or "")[-4:],
+                inbound_normalized_type,
+            )
+        except Exception as _stash_exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDER_FLOW_STATE] pending_delivery_location stash failed: %s",
+                _stash_exc,
+            )
         logger.info(
             "[ORDER_FLOW_STATE] address inbound ignored — no active order "
             "tenant=%s phone=*%s type=%s",

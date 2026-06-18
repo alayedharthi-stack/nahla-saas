@@ -210,6 +210,54 @@ def apply_staff_escalation_truth_guard(
                 "[STAFF_ESCALATION_TRUTH_GUARD] order_tracking_guard failed err=%s",
                 _otg_exc,
             )
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                has_active_commerce_from_state,
+                should_suppress_generic_stub_injection,
+                strip_escalation_claim_sentences,
+            )
+            from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
+                build_short_honey_order_clarify_reply,
+                is_short_honey_order_request,
+            )
+
+            if is_short_honey_order_request(inbound_text):
+                return StaffEscalationTruthGuardResult(
+                    reply=build_short_honey_order_clarify_reply(inbound_text),
+                    action="blocked_false_escalation_order_clarify",
+                    replaced=True,
+                    reason="short_honey_order_clarify",
+                    evidence=evidence,
+                    staff_escalation_claim_blocked=True,
+                )
+
+            if should_suppress_generic_stub_injection(
+                inbound_text=inbound_text,
+                state=state,
+            ) or has_active_commerce_from_state(state):
+                scrubbed = strip_escalation_claim_sentences(original)
+                if scrubbed and len(scrubbed.strip()) >= 6:
+                    return StaffEscalationTruthGuardResult(
+                        reply=scrubbed,
+                        action="blocked_false_escalation_scrubbed",
+                        replaced=True,
+                        reason="escalation_claim_scrubbed_active_commerce",
+                        evidence=evidence,
+                        staff_escalation_claim_blocked=True,
+                    )
+                return StaffEscalationTruthGuardResult(
+                    reply="تمام، أكمل معك الطلب — وش تحتاج؟",
+                    action="blocked_false_escalation_order_continue",
+                    replaced=True,
+                    reason="active_commerce_continue",
+                    evidence=evidence,
+                    staff_escalation_claim_blocked=True,
+                )
+        except Exception as _stub_ctx_exc:  # noqa: BLE001
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] stub context failed err=%s",
+                _stub_ctx_exc,
+            )
         return StaffEscalationTruthGuardResult(
             reply=SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,
             action="blocked_false_escalation",

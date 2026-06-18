@@ -40,6 +40,16 @@ _ORDER_INTENT_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_SHORT_HONEY_ORDER_RE = re.compile(
+    r"(?:"
+    r"(?:اب[ىي]|أب[ىي]|اريد|أريد|ابغ[ىي]|أبغ[ىي]|ابي|أبي|بدي)"
+    r".*?(?:ربع|نصف|نص|كilo|كيلo|كيلو|1\s*kg).*?عسل"
+    r"|(?:ربع|نصف|نص)\s*(?:كilo|كيلo|كيلو)?.*?(?:من\s+)?عسل"
+    r"|عسل.*?(?:ربع|نصف|نص|كilo|كيلo|كيلo)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _BROWSE_INVENTORY_RE = re.compile(
     r"(?:"
     r"وش\s*عندكم|ايش\s*عندكم|ايه\s*عندكم|ما\s*المتوفر|وش\s*المتوفر|"
@@ -176,6 +186,35 @@ def _is_order_intent_without_product(ctx: BrainContext, message: str) -> bool:
     return bool(_ORDER_INTENT_RE.search(message or "")) and not _resolved_product_title(ctx)
 
 
+def is_short_honey_order_request(message: str) -> bool:
+    """Bare honey order with quantity hint — route before generic retry."""
+    text = message or ""
+    if not text.strip():
+        return False
+    if not _HONEY_RE.search(text):
+        return False
+    return bool(_SHORT_HONEY_ORDER_RE.search(text))
+
+
+def _quantity_phrase_from_message(message: str) -> str:
+    norm = _normalize(message)
+    if re.search(r"ربع", norm):
+        return "ربع كيلو"
+    if re.search(r"(?:نصف|نص)", norm):
+        return "نص كيلو"
+    if re.search(r"(?:كilo|كيلo|كيلو|1\s*kg)", norm):
+        return "كيلو"
+    return ""
+
+
+def build_short_honey_order_clarify_reply(message: str) -> str:
+    """Deterministic first-turn honey order prompt (variant/type clarification)."""
+    qty = _quantity_phrase_from_message(message)
+    if qty:
+        return f"أبشر، تبي {qty} من أي نوع عسل؟"
+    return "أبشر، وش نوع العسل اللي تبيه؟"
+
+
 def next_missing_order_field(ctx: BrainContext) -> Optional[str]:
     """Public wrapper — next checkout slot when product context is active."""
     return _next_missing_order_field(ctx)
@@ -275,6 +314,8 @@ __all__ = [
     "LEGACY_ROBOTIC_PRODUCT_PROMPT",
     "build_ordering_clarify_args",
     "build_product_ordering_prompt",
+    "build_short_honey_order_clarify_reply",
+    "is_short_honey_order_request",
     "next_missing_order_field",
     "resolve_product_clarify_question",
 ]

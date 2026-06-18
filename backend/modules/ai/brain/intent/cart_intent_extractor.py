@@ -21,6 +21,9 @@ _PRODUCT_KEYWORDS = {
     "سمر": "عسل سمر",
     "سدر": "عسل سدر",
     "شوك": "عسل شوك",
+    "صيف": "عسل صيفي",
+    "صيفي": "عسل صيفي",
+    "الصيفي": "عسل صيفي",
     "حبة": "عسل حبة البركة",
     "بركة": "عسل حبة البركة",
     "نجد": "عسل طلح",
@@ -128,10 +131,13 @@ def _resolve_product_name(text: str) -> str:
     if "عسل" in norm:
         if "سمر" in norm and "حجاز" in norm:
             return "عسل سمر الحجاز"
+        if "صيف" in norm:
+            return "عسل صيفي"
         if "سمر" in norm:
             return "عسل سمر"
         if "طلح" in norm or "نجد" in norm:
             return "عسل طلح"
+        return "عسل"
     for key, name in _PRODUCT_KEYWORDS.items():
         if key in norm:
             return name
@@ -150,8 +156,33 @@ def _resolve_product_name(text: str) -> str:
 
 
 def _split_multi_segments(message: str) -> List[str]:
+    lines = [p.strip() for p in re.split(r"[\n\r]+", message.strip()) if p.strip()]
+    if len(lines) > 1:
+        return lines
     parts = re.split(r"\s+(?:و|،|,)\s*", message.strip())
     return [p.strip() for p in parts if p.strip()]
+
+
+def _skip_cart_segment(segment: str) -> bool:
+    """Skip gift headers and recipient name lines — not cart lines."""
+    seg = (segment or "").strip()
+    if not seg:
+        return True
+    norm = _norm(seg)
+    if re.search(r"طلب\s+توصيل", norm):
+        if not _parse_variant(seg) and not any(
+            k in norm for k in ("طلح", "سمر", "صيف", "سدر", "شوك")
+        ):
+            return True
+    if re.search(r"لهذا\s+الشخص|هدية", norm) and not _parse_variant(seg):
+        if not any(k in norm for k in _PRODUCT_KEYWORDS) and "عسل" not in norm:
+            return True
+    tokens = [t for t in seg.split() if t.strip()]
+    if len(tokens) >= 2 and len(tokens) <= 4:
+        if not _parse_variant(seg) and not any(k in norm for k in _PRODUCT_KEYWORDS):
+            if "عسل" not in norm and not _ADD_RE.search(seg):
+                return True
+    return False
 
 
 def _extract_add_segment(segment: str) -> Optional[Dict[str, Any]]:
@@ -194,7 +225,7 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     norm = _norm(text)
     if norm in _ARABIC_NON_CART_TOKENS:
         return []
-    has_product_hint = any(k in norm for k in _PRODUCT_KEYWORDS)
+    has_product_hint = any(k in norm for k in _PRODUCT_KEYWORDS) or "عسل" in norm
     has_cart_verb = bool(
         _ADD_RE.search(text)
         or _REMOVE_RE.search(text)
@@ -295,6 +326,8 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     segments = _split_multi_segments(text)
     if len(segments) > 1:
         for seg in segments:
+            if _skip_cart_segment(seg):
+                continue
             item = _extract_add_segment(seg)
             if item:
                 intents.append(item)

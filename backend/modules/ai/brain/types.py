@@ -230,6 +230,11 @@ class OrderPreparationState:
     # PR-4 — multi-item WhatsApp cart mirror (consumed by nahla_order_bridge).
     line_items: List[Dict[str, Any]] = field(default_factory=list)
     cart_deltas: List[Dict[str, Any]] = field(default_factory=list)
+    # Gift / recipient delivery (P0 gift-order gate)
+    recipient_name: str = ""
+    fulfillment_kind: str = ""
+    pending_cart_confirmation: Dict[str, Any] = field(default_factory=dict)
+    pending_delivery_location: Dict[str, Any] = field(default_factory=dict)
     # ── Variant choice gate (migration 0064 — Phase 3) ───────────────────
     # When the resolver returns a parent with 2+ in-stock variants, the
     # responder ships ``ask_product_variants`` instead of the product
@@ -292,6 +297,10 @@ class OrderPreparationState:
             "payment_claim_text_preview":  self.payment_claim_text_preview,
             "line_items": list(self.line_items or []),
             "cart_deltas": list(self.cart_deltas or []),
+            "recipient_name": str(self.recipient_name or ""),
+            "fulfillment_kind": str(self.fulfillment_kind or ""),
+            "pending_cart_confirmation": dict(self.pending_cart_confirmation or {}),
+            "pending_delivery_location": dict(self.pending_delivery_location or {}),
             "awaiting_variant_choice":  self.awaiting_variant_choice,
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
@@ -352,6 +361,10 @@ class OrderPreparationState:
             payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),
             line_items=list(raw.get("line_items") or []),
             cart_deltas=list(raw.get("cart_deltas") or []),
+            recipient_name=str(raw.get("recipient_name", "") or ""),
+            fulfillment_kind=str(raw.get("fulfillment_kind", "") or ""),
+            pending_cart_confirmation=dict(raw.get("pending_cart_confirmation") or {}),
+            pending_delivery_location=dict(raw.get("pending_delivery_location") or {}),
             awaiting_variant_choice=bool(raw.get("awaiting_variant_choice", False)),
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),
@@ -425,6 +438,7 @@ class MerchantConversationState:
     pending_short_address_code: str = ""
     pending_google_maps_url: str = ""
     pending_city: str = ""
+    pending_delivery_location: Dict[str, Any] = field(default_factory=dict)
     # Most recent brain action (`propose_draft_order`, `search_products`,
     # `stash_address_pre_product`, …) — used for the BRAIN_RESULT trace
     # log and the `/debug/recent-whatsapp-turns` endpoint.
@@ -531,6 +545,7 @@ class MerchantConversationState:
             "pending_short_address_code": self.pending_short_address_code,
             "pending_google_maps_url": self.pending_google_maps_url,
             "pending_city": self.pending_city,
+            "pending_delivery_location": dict(self.pending_delivery_location or {}),
             "last_action": self.last_action,
             "last_presentation_mode": self.last_presentation_mode,
             "general_streak": self.general_streak,
@@ -592,6 +607,7 @@ class MerchantConversationState:
             pending_short_address_code=str(d.get("pending_short_address_code", "") or ""),
             pending_google_maps_url=str(d.get("pending_google_maps_url", "") or ""),
             pending_city=str(d.get("pending_city", "") or ""),
+            pending_delivery_location=dict(d.get("pending_delivery_location") or {}),
             last_action=str(d.get("last_action", "") or ""),
             last_presentation_mode=str(d.get("last_presentation_mode", "") or ""),
             general_streak=int(d.get("general_streak", 0) or 0),

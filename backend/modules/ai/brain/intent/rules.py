@@ -116,6 +116,21 @@ _register(RuleSet(
     confidence=0.93,
 ))
 
+# ── Delivery / gift order creation (before generic ask_product) ─────────────
+_register(RuleSet(
+    intent=INTENT_START_ORDER,
+    patterns=[
+        r"طلب\s+توصيل",
+        r"(?:أ?رسل|ارسل|وصل)\s+(?:ال)?(?:عسل|طلب|منتج).{0,25}(?:له|لشخص|لهذا\s+الشخص)",
+        r"(?:ابغ[ىي]|أبغ[ىي]|ابي|أبي)\s+توصيل\s+(?:ال)?(?:عسل|طلب|منتج)",
+        r"توصيل\s+(?:ال)?(?:عسل|طلب).{0,20}(?:له|لشخص|لهذا\s+الشخص)",
+        r"لهذا\s+الشخص",
+        r"(?:هدية|وصل\s+له|أرسل\s+له|ارسل\s+له)",
+    ],
+    confidence=0.93,
+    slots={"order_mode": "delivery"},
+))
+
 # ── Ask for a product ─────────────────────────────────────────────────────────
 _register(RuleSet(
     intent=INTENT_ASK_PRODUCT,
