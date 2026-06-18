@@ -140,29 +140,13 @@ def _looks_like_phone(text: str) -> bool:
 
 
 def _resolve_customer_display(order: Order, customer_lookup: Optional[Dict[str, str]] = None) -> str:
-    """
-    display_name = metadata.customer_name → order.customer_name → customer_info.name →
-                   Customer lookup (incl. WA profile) → phone → "—"
-    Never returns blank so the merchant always has something to act on.
-    """
-    meta = order.extra_metadata or {}
-    meta_name = str(meta.get("customer_name") or "").strip()
-    if meta_name and not _looks_like_phone(meta_name):
-        return meta_name
+    from core.order_customer_display import resolve_order_customer_display_name  # noqa: PLC0415
 
-    direct = (getattr(order, "customer_name", None) or "").strip()
-    if direct and not _looks_like_phone(direct):
-        return direct
-    info = order.customer_info or {}
-    name = (info.get("name") or "").strip()
-    if name and not _looks_like_phone(name):
-        return name
-    phone = (info.get("phone") or info.get("mobile") or info.get("shipping_phone") or "").strip()
-    if customer_lookup and phone:
-        looked_up = customer_lookup.get(phone) or customer_lookup.get(_normalise_phone_key(phone))
-        if looked_up and not _looks_like_phone(looked_up):
-            return looked_up
-    return direct or name or phone or "—"
+    return resolve_order_customer_display_name(
+        order,
+        customer_lookup,
+        normalise_phone_key=_normalise_phone_key,
+    )
 
 
 def _resolve_order_number(order: Order) -> str:
@@ -1822,6 +1806,9 @@ async def patch_order_customer(
             internal_note=body.internal_note,
             actor=actor,
         )
+        from core.order_customer_display import sync_order_customer_identity  # noqa: PLC0415
+
+        sync_order_customer_identity(db, tenant_id, order)
     except OrderEditError as exc:
         raise _handle_order_edit_error(exc) from exc
 

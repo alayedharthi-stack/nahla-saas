@@ -119,6 +119,20 @@ _MULTISPACE_RE = re.compile(r"\s+")
 # name clear, but must never become a campaign/AI greeting slot.
 _PHONE_LIKE_RE = re.compile(r"^[+]?[\d\s\-()]{7,}$")
 
+_INVALID_DISPLAY_NAMES = frozenset({".", "—", "-", "..", "..."})
+
+
+def is_valid_customer_display_name(raw: Optional[str]) -> bool:
+    """Operational display names must not be blank, dot placeholders, or phones."""
+    if raw is None or not isinstance(raw, str):
+        return False
+    text = raw.strip()
+    if not text or text in _INVALID_DISPLAY_NAMES:
+        return False
+    if looks_like_phone_personalization_name(text):
+        return False
+    return any(ch.isalpha() for ch in text) or len(text.split()) >= 2
+
 
 def looks_like_phone_personalization_name(raw: Optional[str]) -> bool:
     """True when ``raw`` looks like a phone number, not a human name.

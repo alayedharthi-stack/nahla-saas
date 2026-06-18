@@ -365,12 +365,24 @@ def update_order_customer(
     if internal_note is not None:
         meta["internal_note"] = str(internal_note).strip()
 
+    from core.customer_display import is_valid_customer_display_name  # noqa: PLC0415
+
     display = _resolve_display_name(
         meta.get("customer_first_name", ""),
         meta.get("customer_last_name", ""),
         fallback=str(getattr(order, "customer_name", "") or ""),
     )
-    order.customer_name = display
+    if is_valid_customer_display_name(display):
+        order.customer_name = display
+        meta["customer_name"] = display
+        info["name"] = display
+        meta["customer_name_source"] = "merchant_order_edit"
+    else:
+        phone_fb = str(info.get("phone") or info.get("mobile") or "").strip()
+        order.customer_name = phone_fb or "—"
+        meta.pop("customer_name", None)
+        info.pop("name", None)
+
     order.customer_info = info
     order.extra_metadata = meta
     _stamp_merchant_edit(meta, actor=actor, action="update_customer")
