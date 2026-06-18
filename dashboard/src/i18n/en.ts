@@ -1084,6 +1084,8 @@ const en: Translations = {
       support:       'Priority support',
       whiteLabel:    'White-label branding',
     },
+    pricingDetailsTitle: 'Pricing details',
+    pricingDetailsBody:  'All Nahla plans (Starter · Growth · Scale) are billed monthly and include autopilot, AI replies, campaigns, and the sales agent. Listed prices are all-inclusive with no separate integration fees.',
   },
 
   merchants: {

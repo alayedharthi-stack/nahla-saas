@@ -1079,6 +1079,8 @@ export interface Translations {
       support:       string
       whiteLabel:    string
     }
+    pricingDetailsTitle: string
+    pricingDetailsBody:  string
   }
 
   /** WhatsApp Templates page strings */

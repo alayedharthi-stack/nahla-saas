@@ -5,6 +5,7 @@ import {
   Clock, Sparkles, Bot, Phone, Info, ArrowUpRight,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
+import { displayPlanFeature } from '../lib/planFeatures'
 
 // ── Salla app URL ─────────────────────────────────────────────────────────────
 // Single source of truth for "subscribe / manage your plan via Salla".
@@ -204,19 +205,10 @@ function PlanCard({
       <div className="p-5 flex-1">
         <ul className="space-y-2.5">
           {plan.features.map((f, i) => (
-            i === 0 ? (
-              /* First feature = killer feature — gets a prominent
-                 visual treatment to draw the eye immediately. */
-              <li key={i} className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 -mx-1">
-                <span className="text-base shrink-0 mt-0.5">📱</span>
-                <span className="text-xs font-bold text-amber-900 leading-snug">{f}</span>
-              </li>
-            ) : (
-              <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-                <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                {f}
-              </li>
-            )
+            <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+              <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+              <span className="leading-snug">{displayPlanFeature(f)}</span>
+            </li>
           ))}
         </ul>
       </div>
@@ -326,7 +318,6 @@ function PlanCard({
 export default function Billing() {
   const [status,      setStatus]      = useState<BillingStatus | null>(null)
   const [plans,       setPlans]       = useState<BillingPlan[]>([])
-  const [integFee,    setIntegFee]    = useState(59)
   const [loading,     setLoading]     = useState(true)
   const [loadError,   setLoadError]   = useState<string | null>(null)
   const [checkingOut, setCheckingOut] = useState<string | null>(null)
@@ -403,7 +394,6 @@ export default function Billing() {
       ])
       setStatus(statusRes)
       setPlans(plansRes.plans)
-      setIntegFee(plansRes.integration_fee_sar)
     } catch {
       setLoadError('تعذّر تحميل بيانات الاشتراك')
     } finally {
@@ -824,11 +814,40 @@ export default function Billing() {
         </div>
       )}
 
+      {/* Plans grid — primary decision area, placed before supporting marketing blocks */}
+      <div>
+        <div className="flex items-end justify-between mb-1">
+          <h2 className="text-base font-bold text-slate-900">اختر خطتك</h2>
+          <span className="text-xs text-brand-600 font-medium flex items-center gap-1">
+            <Sparkles className="w-3 h-3" />
+            خصم 50% — أول شهرين
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 mb-4">
+          جميع الخطط تشمل الطيار الآلي · الردود الذكية · وكيل المبيعات 24/7
+        </p>
+        <div className="grid md:grid-cols-3 gap-6">
+          {plans.map(plan => (
+            <PlanCard
+              key={plan.slug}
+              plan={plan}
+              billingStatus={status}
+              onCheckout={handleCheckout}
+              checkingOut={checkingOut}
+              storeName={(() => {
+                try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
+              })()}
+              isSalla={isSallaRenewal}
+            />
+          ))}
+        </div>
+      </div>
+
       {/* Hero value proposition */}
       <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
         {/* Killer feature banner */}
         <div className="mb-4 bg-white/15 border border-white/25 rounded-xl px-3 py-2.5 flex items-center gap-2.5">
-          <span className="text-xl shrink-0">📱</span>
+          <MessageSquare className="w-5 h-5 shrink-0" />
           <div>
             <p className="text-sm font-bold leading-snug">
               واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا
@@ -1003,7 +1022,7 @@ export default function Billing() {
       )}
 
       {/* Current status cards */}
-      <div className="grid sm:grid-cols-3 gap-4">
+      <div className="grid sm:grid-cols-2 gap-4">
 
         {/* Active plan */}
         <div className="card p-5">
@@ -1084,19 +1103,6 @@ export default function Billing() {
           )}
         </div>
 
-        {/* Integration fee */}
-        <div className="card p-5">
-          <p className="text-xs text-slate-500 mb-1">رسوم التكامل (سلة/زد)</p>
-          <div className="flex items-baseline gap-1 mt-1">
-            <span className="text-2xl font-black text-slate-700">
-              {integFee.toLocaleString('ar-SA')}
-            </span>
-            <span className="text-xs text-slate-500">ر.س/شهر</span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
-            تُدفع عبر سلة أو زد. تشمل ربط المتجر ومزامنة الطلبات.
-          </p>
-        </div>
       </div>
 
       {/* No subscription alert — trial expired without payment */}
@@ -1220,35 +1226,6 @@ export default function Billing() {
         </div>
       )}
 
-      {/* Plans grid */}
-      <div>
-        <div className="flex items-end justify-between mb-1">
-          <h2 className="text-base font-bold text-slate-900">اختر خطتك</h2>
-          <span className="text-xs text-brand-600 font-medium flex items-center gap-1">
-            <Sparkles className="w-3 h-3" />
-            خصم 50% — أول شهرين
-          </span>
-        </div>
-        <p className="text-xs text-slate-400 mb-4">
-          جميع الخطط تشمل الطيار الآلي · الردود الذكية · وكيل المبيعات 24/7
-        </p>
-        <div className="grid md:grid-cols-3 gap-6">
-          {plans.map(plan => (
-            <PlanCard
-              key={plan.slug}
-              plan={plan}
-              billingStatus={status}
-              onCheckout={handleCheckout}
-              checkingOut={checkingOut}
-              storeName={(() => {
-                try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
-              })()}
-              isSalla={isSallaRenewal}
-            />
-          ))}
-        </div>
-      </div>
-
       {/* Payment security note — only shown for non-Salla merchants since
           Salla merchants pay via Salla's own checkout. */}
       {!isSallaRenewal && (
@@ -1264,25 +1241,14 @@ export default function Billing() {
       </div>
       )}
 
-      {/* Pricing structure */}
+      {/* Pricing details */}
       <div className="card p-5 bg-slate-50">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">هيكل الأسعار</h3>
-        <div className="space-y-3">
-          <div className="flex items-start gap-3">
-            <div className="w-6 h-6 rounded-full bg-slate-700 text-white text-xs font-bold flex items-center justify-center shrink-0">١</div>
-            <div>
-              <p className="text-sm font-medium text-slate-800">رسوم تكامل سلة/زد — {integFee} ر.س/شهر</p>
-              <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر المنصة · ربط المتجر، مزامنة الطلبات والمنتجات</p>
-            </div>
-          </div>
-          <div className="flex items-start gap-3">
-            <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0">٢</div>
-            <div>
-              <p className="text-sm font-medium text-slate-800">خطة نحلة — من 449 ر.س/شهر</p>
-              <p className="text-xs text-slate-500 mt-0.5">تُدفع عبر موى · الطيار الآلي، الردود الذكية، الحملات، وكيل المبيعات</p>
-            </div>
-          </div>
-        </div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-2">تفاصيل الأسعار</h3>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          جميع خطط نحلة (الأساسية · النمو · التوسع) فواتير شهرية عبر موى —
+          تشمل الطيار الآلي، الردود الذكية، الحملات، ووكيل المبيعات.
+          الأسعار المعروضة أعلاه شاملة بدون رسوم تكامل إضافية.
+        </p>
       </div>
 
     </div>

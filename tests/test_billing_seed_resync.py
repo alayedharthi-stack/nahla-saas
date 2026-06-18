@@ -76,15 +76,13 @@ def test_seeded_features_match_seed_exactly():
 
 
 def test_killer_feature_is_first_for_every_plan():
-    """Regression guard for the 'first feature must be the killer'
-    contract — the UI uses ``i === 0`` to render the amber-pill badge,
-    so re-ordering would break the visual hierarchy."""
+    """First feature remains the WhatsApp + AI + campaigns headline."""
     db = _make_db()
     ensure_billing_plans(db)
     rows = db.query(BillingPlan).all()
     for r in rows:
         first = (r.features or [""])[0]
-        assert "📱" in first
+        assert "📱" not in first
         assert "واتساب الأعمال على الجوال" in first
         assert "الذكاء الاصطناعي" in first
         assert "الحملات" in first
