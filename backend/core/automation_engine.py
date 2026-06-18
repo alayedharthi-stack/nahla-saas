@@ -1811,7 +1811,9 @@ def _build_template_vars(
     a real coupon and passes it down here so the same code path renders
     both ad-hoc and pool-backed templates.
     """
-    customer_name: str = getattr(customer, "name", None) or "العميل"
+    customer_name: str = display_name_passthrough_or_fallback(
+        getattr(customer, "name", None)
+    )
     payload: Dict[str, Any] = event.payload or {}
     coupon_extras = coupon_extras or {}
 

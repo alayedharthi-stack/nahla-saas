@@ -1957,8 +1957,11 @@ async def _dispatch_queued_rows(
             #     the static greeting (``عميلنا الغالي``).
             # Anything that survives in the DB at send time is what
             # the merchant explicitly approved — we trust it.
-            from core.customer_display import display_name_passthrough_or_fallback  # noqa: PLC0415
-            customer_name = display_name_passthrough_or_fallback(
+            from core.customer_display import (  # noqa: PLC0415
+                display_name_passthrough_or_fallback,
+                personalization_customer_name_or_fallback,
+            )
+            customer_name = personalization_customer_name_or_fallback(
                 customer.name if customer else None
             )
 
