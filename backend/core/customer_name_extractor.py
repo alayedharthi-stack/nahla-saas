@@ -15,8 +15,9 @@ used to update the canonical ``Customer.name`` row in the DB.
 We need a second, narrower channel that:
   * Runs on every inbound text (not only during the order funnel).
   * Triggers ONLY on unambiguous self-identification patterns —
-    "اسمي محمد", "أنا دخيل الله", "معك فهد" — never on incidental
-    use of a name elsewhere in the sentence.
+    "اسمي محمد", "أنا اسمي عبدالله", "معك فهد" — never on bare
+    "أنا …" (complaints, jokes, requests) or incidental name
+    mentions elsewhere in the sentence.
   * Returns a single, clean name string with a confidence label so
     the caller can decide whether to write to ``Customer.name``.
 
@@ -76,10 +77,9 @@ logger = logging.getLogger("nahla.customer_name_extractor")
 # casual use of the same word inside a longer sentence does NOT
 # trigger an extraction.
 #
-# We deliberately do NOT include "أنا" alone — "أنا" appears in
-# countless non-naming contexts ("أنا أبغى", "أنا في الرياض").
-# The "أنا" anchor requires a verbatim "أنا اسمي" / "أنا محمد"
-# follow-up, encoded explicitly below.
+# We deliberately do NOT include bare "أنا …" — "أنا" appears in
+# countless non-naming contexts ("أنا أبغى", "أنا انضحك علي",
+# "أنا وصلت"). Only an explicit "أنا اسمي …" intro is allowed.
 _NAME_PATTERNS = [
     # "اسمي محمد"             | "اسمي محمد العتيبي"
     (
@@ -89,12 +89,13 @@ _NAME_PATTERNS = [
         ),
         "اسمي",
     ),
-    # "أنا محمد"  (only when message is just the intro — bounded length)
+    # "أنا اسمي عبدالله" — explicit self-ID only; never bare "أنا …"
     (
         re.compile(
-            r"^\s*(?:انا|أنا|أنه)\s+(?P<name>[\u0600-\u06FF\u0750-\u077F][\u0600-\u06FF\u0750-\u077F\s]{1,28})\s*$"
+            r"^\s*(?:انا|أنا)\s+(?:اسمي|إسمي|اسمى|إسمى)"
+            r"\s+(?P<name>[\u0600-\u06FF\u0750-\u077Fa-zA-Z][\u0600-\u06FF\u0750-\u077Fa-zA-Z\s]{1,58})\s*$"
         ),
-        "أنا",
+        "أنا اسمي",
     ),
     # "معك محمد" — corner-shop self-intro
     (
@@ -164,6 +165,13 @@ _BLOCKED_TOKENS = frozenset({
     "مسافر", "مسافره", "خارج", "داخل",
     "من", "الى", "عند", "بعد", "قبل", "مع",
     "محل", "زبون",
+    # ── Verbs / complaints / request context (Jun 2026 P0) ─────────────
+    # Production: "انا انضحك علي" → Customer.name = "انضحك عليه".
+    # Normalised forms only — see ``_normalize_arabic``.
+    "انضحك", "انضحكك", "انضح", "امزح", "امزحك",
+    "اشتريت", "اشتري", "طلبت", "دفعت", "ارسلت",
+    "مشكله", "مشكل", "شكوى", "شكوي",
+    "شحنه", "الشحنه", "شحنة", "الشحنة",
     # ── Arrival / presence verbs (May 2026 hotfix) ────────────────────
     # Real cases from production: "أنا وصلت" / "وصلت" / "أنا جاي"
     # / "جايه الحين" got stored as the customer's name (we ended up
@@ -239,6 +247,22 @@ def _is_pure_letter_token(token: str) -> bool:
     return True
 
 
+_ANA_INTRO_RE = re.compile(
+    r"^\s*(?:انا|أنا)\s+(?:اسمي|إسمي|اسمى|إسمى)\s+",
+    re.UNICODE,
+)
+_ANA_BARE_RE = re.compile(r"^\s*(?:انا|أنا)\s+", re.UNICODE)
+
+
+def _message_starts_with_bare_ana(message: str) -> bool:
+    """True when the message opens with ``أنا`` without an explicit
+    name-intro marker (``أنا اسمي …``). Such messages are never
+    name introductions — they are complaints, jokes, or requests."""
+    if not _ANA_BARE_RE.match(message):
+        return False
+    return not bool(_ANA_INTRO_RE.match(message))
+
+
 def _normalize_arabic(token: str) -> str:
     """Light Arabic normalisation used ONLY for stopword comparison.
     We do NOT mutate the stored value — the customer's exact
@@ -274,6 +298,8 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         # introductions. Avoid wasting regex passes — and avoid
         # the rare case where a long message coincidentally
         # starts with "اسمي ...".
+        return None
+    if _message_starts_with_bare_ana(txt):
         return None
 
     for pattern, label in _NAME_PATTERNS:
