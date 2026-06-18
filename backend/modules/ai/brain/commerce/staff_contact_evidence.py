@@ -305,6 +305,25 @@ def load_staff_contact_registry(
 class StaffContactRequest:
     kind: str
     matched_alias: str = ""
+    target_tier: str = ""
+    target_reason: str = ""
+    target_confidence: float = 0.0
+    raw_span: str = ""
+
+
+def _request_from_target_verdict(verdict: Any) -> StaffContactRequest:
+    kind_map = {
+        "named_person": "named",
+        "generic_role": "generic_staff",
+        "ambiguous": "generic_staff",
+    }
+    return StaffContactRequest(
+        kind=kind_map.get(verdict.tier, "generic_staff"),
+        target_tier=verdict.tier,
+        target_reason=verdict.reason,
+        target_confidence=float(verdict.confidence),
+        raw_span=verdict.raw_span,
+    )
 
 
 _PAYMENT_OR_NON_STAFF_RE = re.compile(
@@ -318,11 +337,20 @@ _PAYMENT_OR_NON_STAFF_RE = re.compile(
 )
 
 
-def classify_staff_contact_request(message: str) -> StaffContactRequest:
+def classify_staff_contact_request(
+    message: str,
+    *,
+    registry: Optional[StaffContactRegistry] = None,
+    role_graph: Optional[StaffRoleAliasGraph] = None,
+) -> StaffContactRequest:
     """Classify inbound staff-contact intent (deterministic)."""
     raw = (message or "").strip()
     if not raw:
         return StaffContactRequest(kind="none")
+
+    from modules.ai.brain.commerce.staff_target_classifier import (  # noqa: PLC0415
+        classify_staff_target,
+    )
 
     from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
         is_generic_store_contact_phrase,
@@ -381,10 +409,30 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
         return StaffContactRequest(kind="customer_service")
 
     if _GENERIC_STAFF_RE.search(norm):
-        return StaffContactRequest(kind="generic_staff")
+        return StaffContactRequest(
+            kind="generic_staff",
+            target_tier="generic_role",
+            target_reason="structure:generic_staff_ask",
+            target_confidence=0.93,
+        )
 
     if _ROLE_STAFF_RE.search(norm):
-        return StaffContactRequest(kind="generic_staff")
+        return StaffContactRequest(
+            kind="generic_staff",
+            target_tier="generic_role",
+            target_reason="structure:verbal_role_ask",
+            target_confidence=0.93,
+        )
+
+    message_verdict = classify_staff_target(
+        raw,
+        registry=registry,
+        role_graph=role_graph,
+    )
+    if message_verdict.tier == "generic_role" and message_verdict.reason.startswith(
+        ("structure:", "evidence:kb_role_alias"),
+    ):
+        return _request_from_target_verdict(message_verdict)
 
     from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
         extract_staff_name_candidate,
@@ -396,15 +444,28 @@ def classify_staff_contact_request(message: str) -> StaffContactRequest:
 
     if _CONTACT_ASK_RE.search(norm):
         if has_explicit_contact_intent(raw):
-            if extract_staff_name_candidate(raw):
-                return StaffContactRequest(kind="named")
+            span = extract_staff_name_candidate(raw)
+            if span:
+                verdict = classify_staff_target(
+                    raw,
+                    raw_span=span,
+                    registry=registry,
+                    role_graph=role_graph,
+                )
+                return _request_from_target_verdict(verdict)
             return StaffContactRequest(kind="none")
         return StaffContactRequest(kind="none")
 
     # Single-token bare configured name only ("هشام") — not generic phrases.
     words = norm.split()
     if len(words) == 1 and len(norm) >= 2:
-        return StaffContactRequest(kind="named")
+        verdict = classify_staff_target(
+            raw,
+            raw_span=raw,
+            registry=registry,
+            role_graph=role_graph,
+        )
+        return _request_from_target_verdict(verdict)
 
     return StaffContactRequest(kind="none")
 
@@ -444,12 +505,8 @@ def resolve_staff_contact(
         rec = registry.match_record_in_message(message)
         if rec:
             return StaffContactResolution(found=True, record=rec, reason="named_match")
-        from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
-            extract_staff_name_candidate,
-        )
-
-        candidate = extract_staff_name_candidate(message)
-        if candidate and _CONTACT_ASK_RE.search(_norm(message)):
+        tier = (request.target_tier or "").strip().lower()
+        if tier == "named_person" and _CONTACT_ASK_RE.search(_norm(message)):
             return StaffContactResolution(
                 found=False,
                 reason="name_not_configured",
@@ -466,6 +523,9 @@ MSG_CS_NOT_CONFIGURED = (
 )
 MSG_NAME_NOT_CONFIGURED = (
     "هذا الاسم غير مهيأ للتواصل حالياً."
+)
+MSG_AMBIGUOUS_STAFF_CLARIFY = (
+    "هل تقصد أحد العاملين في المعرض؟"
 )
 MSG_ESCALATION_NOT_CONFIGURED = (
     "أرقام التصعيد غير مهيأة لهذا المتجر حالياً."
@@ -573,8 +633,15 @@ def build_deliver_reply_text(record: StaffContactRecord) -> str:
     return f"تقدر تتواصل مع {label}."
 
 
-def build_not_configured_reply(resolution: StaffContactResolution) -> str:
-    if resolution.unknown_name or resolution.reason == "name_not_configured":
+def build_not_configured_reply(
+    resolution: StaffContactResolution,
+    *,
+    target_tier: str = "",
+) -> str:
+    if resolution.unknown_name or (
+        resolution.reason == "name_not_configured"
+        and (target_tier or "").strip().lower() == "named_person"
+    ):
         return MSG_NAME_NOT_CONFIGURED
     if resolution.reason == "cs_not_configured":
         return MSG_CS_NOT_CONFIGURED
@@ -582,6 +649,7 @@ def build_not_configured_reply(resolution: StaffContactResolution) -> str:
 
 
 __all__ = [
+    "MSG_AMBIGUOUS_STAFF_CLARIFY",
     "MSG_CS_NOT_CONFIGURED",
     "MSG_ESCALATION_NOT_CONFIGURED",
     "MSG_NAME_NOT_CONFIGURED",

@@ -30,6 +30,9 @@ class StaffContactPolicyDecision:
     request_kind: str = ""
     evidence_source: str = ""
     skip_brain: bool = True
+    staff_target_tier: str = ""
+    staff_target_reason: str = ""
+    staff_target_confidence: float = 0.0
 
 
 def _build_call_target(record: Any) -> Optional[Any]:
@@ -38,6 +41,59 @@ def _build_call_target(record: Any) -> Optional[Any]:
     )
 
     return build_staff_call_target_from_record(record)
+
+
+def _load_role_graph(db: Any, tenant_id: int) -> Any:
+    from modules.ai.brain.commerce.staff_contact_fallback_v0 import (  # noqa: PLC0415
+        extract_staff_role_aliases_from_sections,
+        load_staff_chain_sections,
+    )
+
+    sections = load_staff_chain_sections(db, int(tenant_id or 0))
+    return extract_staff_role_aliases_from_sections(sections)
+
+
+def _log_target_trace(
+    *,
+    tenant_id: int,
+    request: Any,
+    resolution_reason: str = "",
+    deliver: bool = False,
+) -> None:
+    logger.info(
+        "[STAFF_CONTACT_POLICY] tenant=%s staff_target_tier=%s "
+        "staff_target_reason=%s staff_target_confidence=%.2f "
+        "kind=%s resolution=%s deliver=%s",
+        tenant_id,
+        getattr(request, "target_tier", "") or "",
+        getattr(request, "target_reason", "") or "",
+        float(getattr(request, "target_confidence", 0.0) or 0.0),
+        getattr(request, "kind", "") or "",
+        resolution_reason,
+        deliver,
+    )
+
+
+def _decision_with_target(
+    request: Any,
+    *,
+    reply_text: str,
+    deliver_contact: bool = False,
+    call_target: Any = None,
+    reason: str = "",
+    evidence_source: str = "",
+) -> StaffContactPolicyDecision:
+    return StaffContactPolicyDecision(
+        reply_text=reply_text,
+        call_target=call_target,
+        deliver_contact=deliver_contact,
+        reason=reason,
+        request_kind=getattr(request, "kind", "") or "",
+        evidence_source=evidence_source,
+        staff_target_tier=getattr(request, "target_tier", "") or "",
+        staff_target_reason=getattr(request, "target_reason", "") or "",
+        staff_target_confidence=float(getattr(request, "target_confidence", 0.0) or 0.0),
+    )
 
 
 def evaluate_staff_contact_policy(
@@ -52,6 +108,7 @@ def evaluate_staff_contact_policy(
         return None
 
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+        MSG_AMBIGUOUS_STAFF_CLARIFY,
         _CONTACT_ASK_RE,
         _norm as _evidence_norm,
         build_deliver_reply_text,
@@ -72,7 +129,16 @@ def evaluate_staff_contact_policy(
         )
         return None
 
-    request = classify_staff_contact_request(message or "")
+    registry = load_staff_contact_registry(
+        db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
+    )
+    role_graph = _load_role_graph(db, int(tenant_id or 0))
+    request = classify_staff_contact_request(
+        message or "",
+        registry=registry,
+        role_graph=role_graph,
+    )
+
     if request.kind in {"none", "arrival", "not_responding"}:
         return None
 
@@ -92,9 +158,6 @@ def evaluate_staff_contact_policy(
             request_kind="general_channel",
         )
 
-    registry = load_staff_contact_registry(
-        db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
-    )
     registry_match = registry.match_record_in_message(message or "") is not None
     explicit_ask = bool(_CONTACT_ASK_RE.search(_evidence_norm(message or "")))
 
@@ -112,6 +175,12 @@ def evaluate_staff_contact_policy(
     resolution = resolve_staff_contact(registry, request, message=message or "")
 
     if not resolution.found and resolution.reason == "no_named_intent":
+        _log_target_trace(
+            tenant_id=tenant_id,
+            request=request,
+            resolution_reason=resolution.reason,
+            deliver=False,
+        )
         logger.info(
             "[STAFF_CONTACT_POLICY] tenant=%s kind=%s defer=true reason=no_named_intent",
             tenant_id, request.kind,
@@ -121,48 +190,69 @@ def evaluate_staff_contact_policy(
     if resolution.found and resolution.record is not None:
         target = _build_call_target(resolution.record)
         if target is None:
-            logger.info(
-                "[STAFF_CONTACT_POLICY] tenant=%s kind=%s reason=phone_normalize_failed",
-                tenant_id, request.kind,
+            _log_target_trace(
+                tenant_id=tenant_id,
+                request=request,
+                resolution_reason="phone_normalize_failed",
+                deliver=False,
             )
-            return StaffContactPolicyDecision(
-                reply_text=build_not_configured_reply(resolution),
+            return _decision_with_target(
+                request,
+                reply_text=build_not_configured_reply(
+                    resolution,
+                    target_tier=request.target_tier,
+                ),
                 deliver_contact=False,
                 reason="phone_normalize_failed",
-                request_kind=request.kind,
                 evidence_source=resolution.record.source,
             )
-        logger.info(
-            "[STAFF_CONTACT_POLICY] tenant=%s kind=%s deliver=true "
-            "reason=%s source=%s name_len=%d",
-            tenant_id,
-            request.kind,
-            resolution.reason,
-            resolution.record.source,
-            len(resolution.record.lookup_name or ""),
+        _log_target_trace(
+            tenant_id=tenant_id,
+            request=request,
+            resolution_reason=resolution.reason,
+            deliver=True,
         )
-        return StaffContactPolicyDecision(
+        return _decision_with_target(
+            request,
             reply_text=build_deliver_reply_text(resolution.record),
             call_target=target,
             deliver_contact=True,
             reason=resolution.reason,
-            request_kind=request.kind,
             evidence_source=resolution.record.source,
         )
 
-    logger.info(
-        "[STAFF_CONTACT_POLICY] tenant=%s kind=%s deliver=false reason=%s",
-        tenant_id, request.kind, resolution.reason,
+    _log_target_trace(
+        tenant_id=tenant_id,
+        request=request,
+        resolution_reason=resolution.reason,
+        deliver=False,
     )
+
     if resolution.reason in {"no_named_intent", "name_not_configured"} and not resolution.unknown_name:
         return None
     if should_defer_contact_policies_for_commerce(message or ""):
         return None
-    return StaffContactPolicyDecision(
-        reply_text=build_not_configured_reply(resolution),
+
+    if (
+        request.target_tier == "ambiguous"
+        and request.kind == "generic_staff"
+        and resolution.reason == "escalation_not_configured"
+    ):
+        return _decision_with_target(
+            request,
+            reply_text=MSG_AMBIGUOUS_STAFF_CLARIFY,
+            deliver_contact=False,
+            reason="ambiguous_staff_clarify",
+        )
+
+    return _decision_with_target(
+        request,
+        reply_text=build_not_configured_reply(
+            resolution,
+            target_tier=request.target_tier,
+        ),
         deliver_contact=False,
         reason=resolution.reason,
-        request_kind=request.kind,
     )
 
 
@@ -188,32 +278,44 @@ def evaluate_generic_handoff_contact_policy(
     registry = load_staff_contact_registry(
         db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
     )
+    request = StaffContactRequest(
+        kind="generic_staff",
+        target_tier="generic_role",
+        target_reason="handoff:generic_staff",
+        target_confidence=0.90,
+    )
     resolution = resolve_staff_contact(
         registry,
-        StaffContactRequest(kind="generic_staff"),
+        request,
         message=message or "",
     )
     if resolution.found and resolution.record is not None:
         target = _build_call_target(resolution.record)
         if target is None:
-            return StaffContactPolicyDecision(
-                reply_text=build_not_configured_reply(resolution),
+            return _decision_with_target(
+                request,
+                reply_text=build_not_configured_reply(
+                    resolution,
+                    target_tier=request.target_tier,
+                ),
                 reason="phone_normalize_failed",
-                request_kind="generic_staff",
             )
-        return StaffContactPolicyDecision(
+        return _decision_with_target(
+            request,
             reply_text=build_deliver_reply_text(resolution.record),
             call_target=target,
             deliver_contact=True,
             reason=resolution.reason,
-            request_kind="generic_staff",
             evidence_source=resolution.record.source,
         )
-    return StaffContactPolicyDecision(
-        reply_text=build_not_configured_reply(resolution),
+    return _decision_with_target(
+        request,
+        reply_text=build_not_configured_reply(
+            resolution,
+            target_tier=request.target_tier,
+        ),
         deliver_contact=False,
         reason=resolution.reason,
-        request_kind="generic_staff",
     )
 
 
