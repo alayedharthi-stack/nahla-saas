@@ -91,7 +91,7 @@ function fmtDate(iso?: string | null) {
 
 function paymentProviderLabel(provider?: string) {
   if (!provider || provider === 'unknown') return 'غير معروف'
-  if (provider === 'moyasar') return 'Moyasar'
+  if (provider === 'moyasar') return 'ميسر'
   if (provider === 'manual') return 'يدوي'
   return provider
 }
@@ -305,7 +305,7 @@ function PlanCard({
         {!isPaidActive && !isSalla && (
           <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
             <ShieldCheck className="w-3 h-3" />
-            دفع آمن عبر موى
+            دفع آمن عبر ميسر
           </p>
         )}
       </div>
@@ -633,7 +633,162 @@ export default function Billing() {
         </div>
       )}
 
-      {/* Subscription lifecycle summary */}
+      {/* Hero value proposition — above plans so merchants see value first */}
+      <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
+        <div className="mb-4 bg-white/15 border border-white/25 rounded-xl px-3 py-2.5 flex items-center gap-2.5">
+          <MessageSquare className="w-5 h-5 shrink-0" />
+          <div>
+            <p className="text-sm font-bold leading-snug">
+              واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا
+            </p>
+            <p className="text-white/70 text-[11px] mt-0.5">
+              استخدم تطبيق واتساب الأعمال على جوالك كالمعتاد — نحلة تعمل في الخلفية بدون أي تعارض. لا حاجة لحذف التطبيق.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+            <Bot className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <h2 className="font-bold text-base leading-snug">
+              نحلة — موظف مبيعات يعمل 24/7
+            </h2>
+            <p className="text-white/80 text-xs mt-1 leading-relaxed">
+              يرد على العملاء، يُكمل الطلبات، ويُرسل روابط الدفع — بشكل تلقائي، دون توقف.
+              لا رواتب، لا إجازات، لا تأخير.
+            </p>
+          </div>
+          <div className="hidden sm:flex flex-col items-end shrink-0">
+            <div className="flex items-center gap-1 bg-white/20 rounded-lg px-2.5 py-1 text-xs font-semibold">
+              <Sparkles className="w-3 h-3" />
+              14 يوم مجاناً
+            </div>
+            <p className="text-white/60 text-[11px] mt-1">ثم من 449 ر.س/شهر</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Trial not started — WhatsApp not connected */}
+      {lifecycle === 'trial_pending_whatsapp' && (
+        <div className="flex items-start gap-3 bg-sky-50 border-2 border-sky-200 rounded-xl p-4">
+          <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-sky-900">تجربتك المجانية لم تبدأ بعد</p>
+            <p className="text-xs text-sky-800 mt-1">
+              اربط واتساب لبدء التجربة المجانية · يمكنك إعداد المتجر الآن دون احتساب أيام
+            </p>
+            <button
+              onClick={() => window.location.href = '/whatsapp-connect'}
+              className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold bg-sky-600 text-white px-3 py-1.5 rounded-lg hover:bg-sky-700"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              اربط واتساب
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Expiry warnings: 7d / 3d / 1d / expired */}
+      {showExpiryWarning && (
+        <div className={`flex items-start gap-3 border-2 rounded-xl p-4 ${expiryWarningStyle}`}>
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold">
+              {warningLevel === 'expired'
+                ? (lifecycle === 'paid_expired'
+                    ? `انتهى اشتراكك${(status.expired_since_days ?? 0) > 0
+                        ? ` منذ ${status.expired_since_days} ${status.expired_since_days === 1 ? 'يوم' : 'أيام'}`
+                        : ''} — جدّد الاشتراك لاستمرار الردود الذكية والحملات والأتمتة`
+                    : lifecycle === 'trial_expired'
+                      ? 'انتهت تجربتك المجانية'
+                      : lifecycleHeadline)
+                : warningLevel === '1d'
+                  ? 'يتبقى يوم واحد على انتهاء اشتراكك'
+                  : warningLevel === '3d'
+                    ? 'يتبقى 3 أيام على انتهاء اشتراكك'
+                    : 'يتبقى 7 أيام على انتهاء اشتراكك'}
+            </p>
+            <p className="text-xs mt-1 opacity-90">{lifecycleHeadline}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Checkout feedback banners */}
+      {checkoutMsg && (
+        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
+          <CheckCircle className="w-4 h-4 shrink-0" />
+          {checkoutMsg}
+        </div>
+      )}
+      {checkoutErr && (() => {
+        const isProviderNotReady = checkoutErrCode === 'payment_provider_not_ready'
+        const palette = isProviderNotReady
+          ? { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-800', icon: 'text-amber-500' }
+          : { bg: 'bg-red-50',   border: 'border-red-200',   text: 'text-red-700',   icon: 'text-red-500'   }
+        const title = isProviderNotReady
+          ? 'بوابة الدفع قيد المراجعة'
+          : 'تعذّر إنشاء جلسة الدفع'
+        return (
+          <div className={`flex items-start gap-3 ${palette.bg} border ${palette.border} ${palette.text} rounded-xl px-4 py-3 text-sm`}>
+            <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${palette.icon}`} />
+            <div className="flex-1">
+              <p className="font-semibold">{title}</p>
+              <p className="mt-0.5">{checkoutErr}</p>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <a
+                  href={buildSupportUrl('—', (() => {
+                    try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
+                  })())}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-bold bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition-colors"
+                >
+                  <Phone className="w-3.5 h-3.5" />
+                  تفعيل الاشتراك يدوياً عبر واتساب
+                </a>
+                <button
+                  onClick={() => { setCheckoutErr(null); setCheckoutErrCode('') }}
+                  className="text-xs text-slate-500 hover:text-slate-700 underline"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* Plans grid — primary decision area */}
+      <div>
+        <div className="flex items-end justify-between mb-1">
+          <h2 className="text-base font-bold text-slate-900">اختر خطتك</h2>
+          <span className="text-xs text-brand-600 font-medium flex items-center gap-1">
+            <Sparkles className="w-3 h-3" />
+            خصم 50% — أول شهرين
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 mb-4">
+          جميع الخطط تشمل الطيار الآلي · الردود الذكية · وكيل المبيعات 24/7
+        </p>
+        <div className="grid md:grid-cols-3 gap-6">
+          {plans.map(plan => (
+            <PlanCard
+              key={plan.slug}
+              plan={plan}
+              billingStatus={status}
+              onCheckout={handleCheckout}
+              checkingOut={checkingOut}
+              storeName={(() => {
+                try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
+              })()}
+              isSalla={isSallaRenewal}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Subscription lifecycle summary — below plans */}
       <div className="card p-5 space-y-3">
           <h2 className="text-sm font-bold text-slate-900">حالة الاشتراك</h2>
           <p className="text-sm font-semibold text-slate-800 leading-relaxed">{lifecycleHeadline}</p>
@@ -688,7 +843,7 @@ export default function Billing() {
           </div>
         </div>
 
-      {/* Subscription details */}
+      {/* Subscription details — below plans */}
       <div className="card p-5 space-y-4">
           <h2 className="text-sm font-bold text-slate-900">تفاصيل الاشتراك</h2>
           <div className="grid sm:grid-cols-2 gap-3 text-sm">
@@ -769,116 +924,20 @@ export default function Billing() {
           )}
         </div>
 
-      {/* Trial not started — WhatsApp not connected */}
-      {lifecycle === 'trial_pending_whatsapp' && (
-        <div className="flex items-start gap-3 bg-sky-50 border-2 border-sky-200 rounded-xl p-4">
-          <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-bold text-sky-900">تجربتك المجانية لم تبدأ بعد</p>
-            <p className="text-xs text-sky-800 mt-1">
-              اربط واتساب لبدء التجربة المجانية · يمكنك إعداد المتجر الآن دون احتساب أيام
-            </p>
-            <button
-              onClick={() => window.location.href = '/whatsapp-connect'}
-              className="mt-2 inline-flex items-center gap-1.5 text-xs font-bold bg-sky-600 text-white px-3 py-1.5 rounded-lg hover:bg-sky-700"
-            >
-              <Phone className="w-3.5 h-3.5" />
-              اربط واتساب
-            </button>
-          </div>
+      {/* Redirecting overlay — fixed; only while waiting for backend response */}
+      {checkingOut && !checkoutErr && (
+        <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center gap-4">
+          <Loader2 className="w-10 h-10 animate-spin text-brand-500" />
+          <p className="text-sm font-semibold text-slate-700">جارٍ التحضير لصفحة الدفع...</p>
+          <p className="text-xs text-slate-400">يرجى الانتظار بضع ثوانٍ</p>
+          <button
+            onClick={() => setCheckingOut(null)}
+            className="mt-2 text-xs text-slate-500 hover:text-slate-700 underline"
+          >
+            إلغاء
+          </button>
         </div>
       )}
-
-      {/* Expiry warnings: 7d / 3d / 1d / expired */}
-      {showExpiryWarning && (
-        <div className={`flex items-start gap-3 border-2 rounded-xl p-4 ${expiryWarningStyle}`}>
-          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-bold">
-              {warningLevel === 'expired'
-                ? (lifecycle === 'paid_expired'
-                    ? `انتهى اشتراكك${(status.expired_since_days ?? 0) > 0
-                        ? ` منذ ${status.expired_since_days} ${status.expired_since_days === 1 ? 'يوم' : 'أيام'}`
-                        : ''} — جدّد الاشتراك لاستمرار الردود الذكية والحملات والأتمتة`
-                    : lifecycle === 'trial_expired'
-                      ? 'انتهت تجربتك المجانية'
-                      : lifecycleHeadline)
-                : warningLevel === '1d'
-                  ? 'يتبقى يوم واحد على انتهاء اشتراكك'
-                  : warningLevel === '3d'
-                    ? 'يتبقى 3 أيام على انتهاء اشتراكك'
-                    : 'يتبقى 7 أيام على انتهاء اشتراكك'}
-            </p>
-            <p className="text-xs mt-1 opacity-90">{lifecycleHeadline}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Plans grid — primary decision area, placed before supporting marketing blocks */}
-      <div>
-        <div className="flex items-end justify-between mb-1">
-          <h2 className="text-base font-bold text-slate-900">اختر خطتك</h2>
-          <span className="text-xs text-brand-600 font-medium flex items-center gap-1">
-            <Sparkles className="w-3 h-3" />
-            خصم 50% — أول شهرين
-          </span>
-        </div>
-        <p className="text-xs text-slate-400 mb-4">
-          جميع الخطط تشمل الطيار الآلي · الردود الذكية · وكيل المبيعات 24/7
-        </p>
-        <div className="grid md:grid-cols-3 gap-6">
-          {plans.map(plan => (
-            <PlanCard
-              key={plan.slug}
-              plan={plan}
-              billingStatus={status}
-              onCheckout={handleCheckout}
-              checkingOut={checkingOut}
-              storeName={(() => {
-                try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
-              })()}
-              isSalla={isSallaRenewal}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* Hero value proposition */}
-      <div className="rounded-2xl bg-gradient-to-l from-brand-600 to-brand-400 p-5 text-white">
-        {/* Killer feature banner */}
-        <div className="mb-4 bg-white/15 border border-white/25 rounded-xl px-3 py-2.5 flex items-center gap-2.5">
-          <MessageSquare className="w-5 h-5 shrink-0" />
-          <div>
-            <p className="text-sm font-bold leading-snug">
-              واتساب الأعمال على الجوال + الذكاء الاصطناعي + الحملات معًا
-            </p>
-            <p className="text-white/70 text-[11px] mt-0.5">
-              استخدم تطبيق واتساب الأعمال على جوالك كالمعتاد — نحلة تعمل في الخلفية بدون أي تعارض. لا حاجة لحذف التطبيق.
-            </p>
-          </div>
-        </div>
-        <div className="flex items-start gap-3">
-          <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
-            <Bot className="w-5 h-5" />
-          </div>
-          <div className="flex-1">
-            <h2 className="font-bold text-base leading-snug">
-              نحلة — موظف مبيعات يعمل 24/7
-            </h2>
-            <p className="text-white/80 text-xs mt-1 leading-relaxed">
-              يرد على العملاء، يُكمل الطلبات، ويُرسل روابط الدفع — بشكل تلقائي، دون توقف.
-              لا رواتب، لا إجازات، لا تأخير.
-            </p>
-          </div>
-          <div className="hidden sm:flex flex-col items-end shrink-0">
-            <div className="flex items-center gap-1 bg-white/20 rounded-lg px-2.5 py-1 text-xs font-semibold">
-              <Sparkles className="w-3 h-3" />
-              14 يوم مجاناً
-            </div>
-            <p className="text-white/60 text-[11px] mt-1">ثم من 449 ر.س/شهر</p>
-          </div>
-        </div>
-      </div>
 
       {/* Trial status card — shown only during trial */}
       {lifecycle === 'trial_active' && (
@@ -956,68 +1015,6 @@ export default function Billing() {
               يرجى التجديد لاستمرار الردود الذكية وموظف المبيعات الذكي.
             </p>
           </div>
-        </div>
-      )}
-
-      {/* Banners */}
-      {checkoutMsg && (
-        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
-          <CheckCircle className="w-4 h-4 shrink-0" />
-          {checkoutMsg}
-        </div>
-      )}
-      {checkoutErr && (() => {
-        // Provider-not-ready is an "info" state, not a hard error.
-        const isProviderNotReady = checkoutErrCode === 'payment_provider_not_ready'
-        const palette = isProviderNotReady
-          ? { bg: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-800', icon: 'text-amber-500' }
-          : { bg: 'bg-red-50',   border: 'border-red-200',   text: 'text-red-700',   icon: 'text-red-500'   }
-        const title = isProviderNotReady
-          ? 'بوابة الدفع قيد المراجعة'
-          : 'تعذّر إنشاء جلسة الدفع'
-        return (
-          <div className={`flex items-start gap-3 ${palette.bg} border ${palette.border} ${palette.text} rounded-xl px-4 py-3 text-sm`}>
-            <AlertCircle className={`w-4 h-4 shrink-0 mt-0.5 ${palette.icon}`} />
-            <div className="flex-1">
-              <p className="font-semibold">{title}</p>
-              <p className="mt-0.5">{checkoutErr}</p>
-              <div className="flex items-center gap-2 mt-2 flex-wrap">
-                <a
-                  href={buildSupportUrl('—', (() => {
-                    try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
-                  })())}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-xs font-bold bg-emerald-600 text-white px-3 py-1.5 rounded-lg hover:bg-emerald-700 transition-colors"
-                >
-                  <Phone className="w-3.5 h-3.5" />
-                  تفعيل الاشتراك يدوياً عبر واتساب
-                </a>
-                <button
-                  onClick={() => { setCheckoutErr(null); setCheckoutErrCode('') }}
-                  className="text-xs text-slate-500 hover:text-slate-700 underline"
-                >
-                  إغلاق
-                </button>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
-
-      {/* Redirecting overlay — only while waiting for backend response.
-          Auto-dismisses on error so the merchant can act. */}
-      {checkingOut && !checkoutErr && (
-        <div className="fixed inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center gap-4">
-          <Loader2 className="w-10 h-10 animate-spin text-brand-500" />
-          <p className="text-sm font-semibold text-slate-700">جارٍ التحضير لصفحة الدفع...</p>
-          <p className="text-xs text-slate-400">يرجى الانتظار بضع ثوانٍ</p>
-          <button
-            onClick={() => setCheckingOut(null)}
-            className="mt-2 text-xs text-slate-500 hover:text-slate-700 underline"
-          >
-            إلغاء
-          </button>
         </div>
       )}
 
@@ -1234,7 +1231,7 @@ export default function Billing() {
         <div>
           <p className="text-xs font-semibold text-slate-700">دفع آمن ومشفّر</p>
           <p className="text-xs text-slate-500 mt-0.5">
-            تتم معالجة جميع المدفوعات عبر بوابة موى (Moyasar) المرخّصة في المملكة العربية السعودية.
+            تتم معالجة جميع المدفوعات عبر بوابة ميسر المرخّصة في المملكة العربية السعودية.
             بيانات بطاقتك لا تُخزَّن على خوادم نحلة.
           </p>
         </div>
@@ -1245,7 +1242,7 @@ export default function Billing() {
       <div className="card p-5 bg-slate-50">
         <h3 className="text-sm font-semibold text-slate-700 mb-2">تفاصيل الأسعار</h3>
         <p className="text-sm text-slate-600 leading-relaxed">
-          جميع خطط نحلة (الأساسية · النمو · التوسع) فواتير شهرية عبر موى —
+          جميع خطط نحلة (الأساسية · النمو · التوسع) فواتير شهرية عبر ميسر —
           تشمل الطيار الآلي، الردود الذكية، الحملات، ووكيل المبيعات.
           الأسعار المعروضة أعلاه شاملة بدون رسوم تكامل إضافية.
         </p>
