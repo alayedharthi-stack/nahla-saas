@@ -1,10 +1,10 @@
 import type { DashboardConversation, DashboardMessage } from '../api/featureReality'
 
 const LIST_KEY = (tenantId: string | number | null) =>
-  `nahla:conv:list:v1:${tenantId ?? '0'}`
+  `nahla:conv:list:v2:${tenantId ?? '0'}`
 
 const MSGS_KEY = (tenantId: string | number | null, phone: string) =>
-  `nahla:conv:msgs:v1:${tenantId ?? '0'}:${phone}`
+  `nahla:conv:msgs:v2:${tenantId ?? '0'}:${phone}`
 
 const MAX_CACHED_CONVERSATIONS = 120
 const MAX_CACHED_MESSAGES = 80
