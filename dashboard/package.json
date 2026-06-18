@@ -11,7 +11,9 @@
     "check:i18n-static": "npx --yes tsx@4 scripts/check-i18n-static.mts",
     "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts",
     "check:billing-redirects": "npx --yes tsx@4 scripts/check-billing-redirects.mts",
-    "check:plan-features": "npx --yes tsx@4 scripts/check-plan-features.mts"
+    "check:plan-features": "npx --yes tsx@4 scripts/check-plan-features.mts",
+    "check:no-native-dialogs": "npx --yes tsx@4 scripts/check-no-native-dialogs.mts",
+    "smoke:order-catalog-pick": "npx --yes tsx@4 scripts/smoke-order-catalog-pick.mts"
   },
   "dependencies": {
     "@sentry/react": "^8.30.0",
