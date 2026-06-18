@@ -11,12 +11,17 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import List, Optional, Pattern, Tuple
+from typing import Any, List, Optional, Pattern, Tuple
 
 from modules.ai.brain.intent_priority.types import (
     GOAL_GREETING_ONLY,
+    GOAL_ORDER_REQUEST,
     GOAL_PRODUCT_AVAILABILITY,
     GOAL_SOCIAL_ONLY,
+)
+from modules.ai.brain.postprocess.stub_reply_guard_context import (
+    is_lightweight_social_turn,
+    should_suppress_generic_stub_injection,
 )
 
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
@@ -241,7 +246,65 @@ def select_arabic_commerce_fallback(
     primary_customer_goal: str = "",
     inbound_text: str = "",
     conversation_objective: str = "",
+    state: Any = None,
+    inbound_metadata: Optional[dict] = None,
 ) -> Tuple[str, str]:
+    try:
+        from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
+            build_short_honey_order_clarify_reply,
+            is_short_honey_order_request,
+        )
+
+        if is_short_honey_order_request(inbound_text):
+            return build_short_honey_order_clarify_reply(inbound_text), "short_honey_order"
+    except Exception:  # noqa: silent-ok — ordering prompt must not break fallback
+        pass
+
+    if should_suppress_generic_stub_injection(
+        inbound_text=inbound_text,
+        intent_name=intent_name,
+        primary_customer_goal=primary_customer_goal,
+        conversation_objective=conversation_objective,
+        state=state,
+        inbound_metadata=inbound_metadata,
+    ):
+        if is_lightweight_social_turn(
+            inbound_text,
+            intent_name=intent_name,
+            primary_customer_goal=primary_customer_goal,
+            inbound_metadata=inbound_metadata,
+        ):
+            try:
+                from modules.ai.brain.compose.templates import (  # noqa: PLC0415
+                    social_mirror_fallback_reply,
+                )
+
+                mirrored = social_mirror_fallback_reply(inbound_text)
+                if mirrored:
+                    return mirrored, "social_mirror"
+            except Exception:  # noqa: silent-ok
+                pass
+            return "", "social_suppressed"
+        if (primary_customer_goal or "").strip().lower() == GOAL_ORDER_REQUEST:
+            try:
+                from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
+                    build_short_honey_order_clarify_reply,
+                )
+
+                return build_short_honey_order_clarify_reply(inbound_text), "order_request"
+            except Exception:  # noqa: silent-ok
+                pass
+
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                has_active_commerce_from_state,
+            )
+
+            if has_active_commerce_from_state(state):
+                return "تمام، أكمل معك الطلب — وش تحتاج؟", "active_order_continue"
+        except Exception:  # noqa: silent-ok
+            pass
+
     try:
         from modules.ai.brain.intent.education_context_classifier import (  # noqa: PLC0415
             education_clarify_reply,
@@ -265,7 +328,15 @@ def select_arabic_commerce_fallback(
         norm = _normalize_for_match(inbound_text)
         if norm.startswith("السلام") or "سلام عليكم" in norm:
             return _FALLBACK_GREETING_AR, "greeting"
-        return _FALLBACK_SOCIAL_AR, "social"
+        try:
+            from modules.ai.brain.compose.templates import social_mirror_fallback_reply  # noqa: PLC0415
+
+            mirrored = social_mirror_fallback_reply(inbound_text)
+            if mirrored:
+                return mirrored, "social_mirror"
+        except Exception:  # noqa: silent-ok
+            pass
+        return "", "social_suppressed"
     if _is_short_product_probe(inbound_text) and (
         goal == GOAL_PRODUCT_AVAILABILITY
         or intent in {"ask_product", "solution_seeking_commerce", "product_availability"}
@@ -286,7 +357,15 @@ def select_arabic_commerce_fallback(
             norm = _normalize_for_match(inbound_text)
             if norm.startswith("السلام") or "سلام عليكم" in norm:
                 return _FALLBACK_GREETING_AR, "greeting"
-            return _FALLBACK_SOCIAL_AR, "social"
+            try:
+                from modules.ai.brain.compose.templates import social_mirror_fallback_reply  # noqa: PLC0415
+
+                mirrored = social_mirror_fallback_reply(inbound_text)
+                if mirrored:
+                    return mirrored, "social_mirror"
+            except Exception:  # noqa: silent-ok
+                pass
+            return "", "social_suppressed"
     except Exception:  # noqa: silent-ok — objective gate must not break fallback
         pass
 
@@ -298,7 +377,15 @@ def select_arabic_commerce_fallback(
     norm = _normalize_for_match(inbound_text)
     if norm.startswith("السلام") or "سلام عليكم" in norm:
         return _FALLBACK_GREETING_AR, "greeting"
-    return _FALLBACK_SOCIAL_AR, "social"
+    try:
+        from modules.ai.brain.compose.templates import social_mirror_fallback_reply  # noqa: PLC0415
+
+        mirrored = social_mirror_fallback_reply(inbound_text)
+        if mirrored:
+            return mirrored, "social_mirror"
+    except Exception:  # noqa: silent-ok
+        pass
+    return "", "social_suppressed"
 
 
 def _meaningful_length(text: str) -> int:
@@ -315,6 +402,8 @@ def apply_commerce_reply_quality_guard(
     locale: str = "ar",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    state: Any = None,
+    inbound_metadata: Optional[dict] = None,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     if not original:
@@ -323,7 +412,18 @@ def apply_commerce_reply_quality_guard(
             primary_customer_goal=primary_customer_goal,
             inbound_text=inbound_text,
             conversation_objective=conversation_objective,
+            state=state,
+            inbound_metadata=inbound_metadata,
         )
+        if not fallback and kind == "social_suppressed":
+            return CommerceReplyQualityGuardResult(
+                reply="",
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind=kind,
+            )
         return CommerceReplyQualityGuardResult(
             reply=fallback,
             replaced=True,
@@ -364,8 +464,13 @@ def apply_commerce_reply_quality_guard(
             primary_customer_goal=primary_customer_goal,
             inbound_text=inbound_text,
             conversation_objective=conversation_objective,
+            state=state,
+            inbound_metadata=inbound_metadata,
         )
         used_fallback = True
+        if not text and fallback_kind == "social_suppressed":
+            used_fallback = False
+            needs_fallback = False
 
     replaced = text != original
     if replaced:

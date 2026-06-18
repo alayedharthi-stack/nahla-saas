@@ -1116,9 +1116,60 @@ class MerchantBrain:
                 _cid_exc,
             )
 
+        # ── 3.96 Pre-decide order extraction (P0 gift-order gate) ───────────
+        # Cart + gift recipient + pending location must land BEFORE decide()
+        # so order_recovery never sees stale order_prep on the same turn.
+        _pre_decide_summary: Dict[str, Any] = {}
+        try:
+            from modules.ai.brain.commerce.gift_order_gate import (  # noqa: PLC0415
+                is_order_shaped_message,
+                run_pre_decide_order_extraction,
+            )
+
+            if is_order_shaped_message(message or ""):
+                _pre_decide_summary = run_pre_decide_order_extraction(
+                    ctx,
+                    db=db,
+                    tenant_id=tenant_id,
+                )
+                if _pre_decide_summary.get("applied"):
+                    logger.info(
+                        "[GIFT_ORDER_GATE] pre_decide tenant=%s cart_size=%s "
+                        "ready=%s reason=%s",
+                        tenant_id,
+                        _pre_decide_summary.get("cart_size"),
+                        _pre_decide_summary.get("ready_for_order_creation"),
+                        _pre_decide_summary.get("ready_reason"),
+                    )
+        except Exception as _gog_exc:  # noqa: BLE001
+            logger.warning(
+                "[GIFT_ORDER_GATE] pre_decide failed tenant=%s err=%s",
+                tenant_id,
+                _gog_exc,
+            )
+
         # ── 4. Decision ───────────────────────────────────────────────────
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
+
+        try:
+            from modules.ai.brain.commerce.gift_order_gate import (  # noqa: PLC0415
+                maybe_clear_pending_cart_confirmation,
+            )
+
+            maybe_clear_pending_cart_confirmation(
+                prep=getattr(state, "order_prep", None),
+                decision=decision,
+                message=message or "",
+                intent_name=str(getattr(intent, "name", "") or ""),
+            )
+        except Exception as _pcc_clear_exc:  # noqa: BLE001
+            logger.debug(
+                "[GIFT_ORDER_GATE] pending_cart clear skipped tenant=%s err=%s",
+                tenant_id,
+                _pcc_clear_exc,
+            )
+
         decision             = self._policy_gate.gate(decision, ctx)
 
         try:
@@ -2419,6 +2470,8 @@ class MerchantBrain:
                 locale=str((profile or {}).get("preferred_language") or "ar"),
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
+                state=new_state,
+                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
             )
             if _crqg.replaced:
                 reply = _crqg.reply
