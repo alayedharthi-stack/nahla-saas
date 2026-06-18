@@ -638,7 +638,18 @@ class CustomerIntelligenceService:
         customer = self._find_customer_by_external_id(external_id)
         if customer is None and e164:
             customer = self.find_customer_by_phone(e164)
-        if customer is None and clean_name:
+        # WhatsApp channel identity is the sender phone — never merge two
+        # different numbers onto one Customer row via profile-name equality.
+        _wa_phone_authoritative_sources = frozenset({
+            "whatsapp_inbound",
+            "whatsapp_lead",
+            "whatsapp_outbound_echo",
+        })
+        if (
+            customer is None
+            and clean_name
+            and (source or "") not in _wa_phone_authoritative_sources
+        ):
             normalized_name = normalize_name(clean_name)
             for row in self._query_customers():
                 if normalize_name(row.name) == normalized_name:

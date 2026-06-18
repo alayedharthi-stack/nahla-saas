@@ -1358,8 +1358,7 @@ async def get_conversation_messages(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    from sqlalchemy import or_  # noqa: PLC0415
-    from core.conversation_engine import PLATFORM_TENANT_ID  # noqa: PLC0415
+    from sqlalchemy import and_, or_  # noqa: PLC0415
 
     normalized = normalize_phone(customer_phone) or customer_phone
     phone_variants = {customer_phone, normalized}
@@ -1369,37 +1368,35 @@ async def get_conversation_messages(
     phone_variants.add(stripped)
     phone_variants.discard("")
 
-    tenant_ids = list({tenant_id, PLATFORM_TENANT_ID})
+    if not phone_variants:
+        return {"messages": [], "has_more": False}
+
+    # Resolve conversations for THIS merchant tenant + phone only.
+    # Never widen to PLATFORM_TENANT_ID or metadata-only OR across the inbox.
+    conv_ids = [c.id for c in _find_conversations_for_phone(db, tenant_id, customer_phone)]
+    if not conv_ids:
+        return {"messages": [], "has_more": False}
 
     phone_filters = []
     for variant in phone_variants:
         phone_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
         phone_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
 
-    conv_ids = [
-        c.id for c in db.query(Conversation.id).filter(
-            Conversation.tenant_id.in_(tenant_ids),
-            Conversation.customer_id.in_(
-                db.query(Customer.id).filter(
-                    Customer.tenant_id.in_(tenant_ids),
-                    or_(
-                        Customer.phone.in_(list(phone_variants)),
-                        Customer.normalized_phone.in_(list(phone_variants)),
-                    ),
-                )
-            ),
-        ).all()
-    ]
-
-    me_filter = or_(*phone_filters) if phone_filters else False
-    if conv_ids:
-        me_filter = or_(me_filter, MessageEvent.conversation_id.in_(conv_ids))
+    # Legacy rows with empty metadata stay visible only inside their convo.
+    missing_phone = or_(
+        MessageEvent.extra_metadata["phone"].astext.is_(None),
+        MessageEvent.extra_metadata["phone"].astext == "",
+    )
+    identity_filter = (
+        or_(*phone_filters, missing_phone) if phone_filters else missing_phone
+    )
 
     me_query = (
         db.query(MessageEvent)
         .filter(
-            MessageEvent.tenant_id.in_(tenant_ids),
-            me_filter,
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.conversation_id.in_(conv_ids),
+            identity_filter,
         )
     )
     if before_id is not None:
@@ -1505,7 +1502,7 @@ async def get_conversation_messages(
     trace_rows = (
         db.query(ConversationTrace)
         .filter(
-            ConversationTrace.tenant_id.in_(tenant_ids),
+            ConversationTrace.tenant_id == tenant_id,
             ConversationTrace.customer_phone.in_(list(phone_variants)),
         )
         .order_by(ConversationTrace.created_at.desc())
