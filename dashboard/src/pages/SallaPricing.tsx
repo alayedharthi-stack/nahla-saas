@@ -204,7 +204,7 @@ function SallaPlanCard({
         {!isPaidActive && (
           <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
             <ShieldCheck className="w-3 h-3" />
-            دفع آمن عبر موى
+            دفع آمن عبر ميسر
           </p>
         )}
       </div>
@@ -403,7 +403,7 @@ export default function SallaPricing() {
               <div>
                 <p className="text-xs font-semibold text-slate-700">دفع آمن ومشفّر</p>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  تتم معالجة جميع المدفوعات عبر بوابة موى (Moyasar) المرخّصة في المملكة العربية السعودية.
+                  تتم معالجة جميع المدفوعات عبر بوابة ميسر المرخّصة في المملكة العربية السعودية.
                   بيانات بطاقتك لا تُخزَّن على خوادم نحلة.
                 </p>
               </div>
