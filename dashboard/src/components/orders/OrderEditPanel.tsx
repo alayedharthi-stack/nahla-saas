@@ -19,6 +19,7 @@ import {
 import CatalogProductPicker, { type CatalogPickPayload } from './CatalogProductPicker'
 import ConfirmModal from '../ui/ConfirmModal'
 import { orderApiId } from '../../lib/orderRoutes'
+import { catalogPickApiPayload, mapOrderEditError } from '../../lib/orderCatalogPick'
 
 const MISSING_FIELD_LABELS: Record<string, string> = {
   customer_first_name: 'الاسم الأول',
@@ -143,18 +144,32 @@ export default function OrderEditPanel({ order, onOrderUpdated }: Props) {
     } catch (e: unknown) {
       setToast({
         ok: false,
-        text: e instanceof Error ? e.message : 'تعذّر حفظ التعديل',
+        text: mapOrderEditError(e),
       })
     } finally {
       setBusy(false)
     }
   }
 
-  const catalogLinePayload = (pick: CatalogPickPayload) => ({
-    product_id: pick.productRef,
-    variant_id: pick.variantId,
-    quantity: pick.quantity,
-  })
+  const runCatalogPick = async (
+    fn: () => Promise<{ order: OrderDetailType }>,
+    okText: string,
+    failText = 'تعذّر إضافة المنتج',
+  ) => {
+    setBusy(true)
+    setToast(null)
+    try {
+      const res = await fn()
+      onOrderUpdated(res.order)
+      setToast({ ok: true, text: okText })
+    } catch (e: unknown) {
+      const text = mapOrderEditError(e, failText)
+      setToast({ ok: false, text })
+      throw new Error(text)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const saveCustomer = () => run(
     () => featureRealityApi.updateOrderCustomer(apiId, {
@@ -190,8 +205,8 @@ export default function OrderEditPanel({ order, onOrderUpdated }: Props) {
     'تم حفظ بيانات الشحن',
   )
 
-  const addCatalogItem = (pick: CatalogPickPayload) => run(
-    () => featureRealityApi.addOrderLineItem(apiId, catalogLinePayload(pick)),
+  const addCatalogItem = (pick: CatalogPickPayload) => runCatalogPick(
+    () => featureRealityApi.addOrderLineItem(apiId, catalogPickApiPayload(pick)),
     'تمت إضافة المنتج',
   )
 
@@ -203,12 +218,15 @@ export default function OrderEditPanel({ order, onOrderUpdated }: Props) {
     )
   }
 
-  const replaceItem = (idx: number, pick: CatalogPickPayload) => run(
+  const replaceItem = (idx: number, pick: CatalogPickPayload) => runCatalogPick(
     () => featureRealityApi.patchOrderLineItem(apiId, idx, {
-      ...catalogLinePayload(pick),
-      quantity: pick.quantity || order.line_items[idx]?.quantity || 1,
+      ...catalogPickApiPayload({
+        ...pick,
+        quantity: order.line_items[idx]?.quantity || pick.quantity || 1,
+      }),
     }),
     'تم تغيير المنتج',
+    'تعذّر استبدال المنتج',
   )
 
   const handleConfirmReady = () => run(

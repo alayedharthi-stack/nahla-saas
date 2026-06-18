@@ -1088,6 +1088,13 @@ def _product_diag_rows(
         image_url   = meta.get("image_url") or meta.get("thumbnail") or ""
         product_url = meta.get("product_url") or meta.get("url") or ""
         currency    = meta.get("currency") or ""
+        price_val   = getattr(p, "price", None)
+        if not price_val:
+            price_val = (
+                meta.get("price")
+                or meta.get("sale_price")
+                or meta.get("regular_price")
+            )
 
         # Variant intelligence layer (migration 0064). Surface the
         # per-variant rows so ProductStudio can render the expandable
@@ -1124,7 +1131,7 @@ def _product_diag_rows(
             "publish_status":        status,
             "in_stock":              bool(getattr(p, "in_stock", True)),
             "stock_quantity":        getattr(p, "stock_quantity", None),
-            "price":                 getattr(p, "price", None),
+            "price":                 price_val,
             "currency":              currency or None,
             "image_url":             image_url,
             "product_url":           product_url,
