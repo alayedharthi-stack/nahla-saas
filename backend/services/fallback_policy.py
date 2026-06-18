@@ -735,7 +735,7 @@ def emit_temp_error_fallback_log(
                 "[AI_TEMP_ERROR_FALLBACK] emit failed (suppressed)",
                 exc_info=True,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — fallback emit must not crash reply path
             pass
 
 
