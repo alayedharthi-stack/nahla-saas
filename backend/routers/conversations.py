@@ -336,8 +336,11 @@ def _get_or_create_conversation(
 
 
 def _resolve_customer_phone(convo: Conversation) -> str:
-    if convo.customer and convo.customer.phone:
-        return str(convo.customer.phone)
+    if convo.customer:
+        if convo.customer.normalized_phone:
+            return str(convo.customer.normalized_phone)
+        if convo.customer.phone:
+            return str(convo.customer.phone)
     meta = convo.extra_metadata or {}
     return str(meta.get("customer_phone") or meta.get("phone") or "")
 
@@ -347,6 +350,56 @@ def _digits_only(value: str | None) -> str:
     if not value:
         return ""
     return "".join(c for c in str(value) if c.isdigit())
+
+
+def _phone_lookup_variants(customer_phone: str) -> tuple[list[str], str]:
+    """Expand a dashboard/WhatsApp phone into lookup forms + 9-digit suffix."""
+    raw = (customer_phone or "").strip()
+    norm = normalize_phone(raw) or raw
+    digits = _digits_only(norm or raw)
+    suffix = digits[-9:] if len(digits) >= 9 else digits
+    variants: list[str] = []
+    for v in (raw, norm, digits, f"+{digits}" if digits else ""):
+        v = (v or "").strip()
+        if v and v not in variants:
+            variants.append(v)
+    if suffix and len(suffix) == 9 and suffix.startswith("5"):
+        local = f"0{suffix}"
+        if local not in variants:
+            variants.append(local)
+    return variants, suffix
+
+
+def _message_identity_clause(phone_variants: list[str], phone_suffix: str):
+    """Within phone-resolved conversations, keep rows stamped for this customer.
+
+    Scoped to ``conversation_id.in_(conv_ids)`` upstream — never widens across
+    customers. Accepts legacy unstamped rows, exact variant matches, and
+    suffix matches on ``phone`` / ``customer_phone`` / ``sender_phone``.
+    """
+    from sqlalchemy import and_, false, or_  # noqa: PLC0415
+
+    phone_col = MessageEvent.extra_metadata["phone"].astext
+    cust_col = MessageEvent.extra_metadata["customer_phone"].astext
+    send_col = MessageEvent.extra_metadata["sender_phone"].astext
+
+    def _blank(col):
+        return or_(col.is_(None), col == "")
+
+    def _matches_target(col):
+        clauses = [col == variant for variant in phone_variants]
+        if phone_suffix:
+            clauses.append(
+                and_(col.isnot(None), col != "", col.like(f"%{phone_suffix}"))
+            )
+        return or_(*clauses) if clauses else false()
+
+    return or_(
+        and_(_blank(phone_col), _blank(cust_col), _blank(send_col)),
+        _matches_target(phone_col),
+        _matches_target(cust_col),
+        _matches_target(send_col),
+    )
 
 
 def _find_conversations_for_phone(
@@ -367,15 +420,8 @@ def _find_conversations_for_phone(
        (digits-only suffix match) for orphaned rows that never got a
        Customer link.
     """
-    norm = normalize_phone(customer_phone) or customer_phone
-    digits = _digits_only(norm)
-    suffix = digits[-9:] if len(digits) >= 9 else digits
-
-    candidates: list[str] = []
-    for v in (customer_phone, norm, digits, f"+{digits}" if digits else ""):
-        v = (v or "").strip()
-        if v and v not in candidates:
-            candidates.append(v)
+    candidates, suffix = _phone_lookup_variants(customer_phone)
+    digits = _digits_only(normalize_phone(customer_phone) or customer_phone)
 
     customer_ids: list[int] = []
     if candidates:
@@ -1358,16 +1404,7 @@ async def get_conversation_messages(
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    from sqlalchemy import and_, or_  # noqa: PLC0415
-
-    normalized = normalize_phone(customer_phone) or customer_phone
-    phone_variants = {customer_phone, normalized}
-    if normalized.startswith("966"):
-        phone_variants.add("+" + normalized)
-    stripped = normalized.lstrip("+")
-    phone_variants.add(stripped)
-    phone_variants.discard("")
-
+    phone_variants, phone_suffix = _phone_lookup_variants(customer_phone)
     if not phone_variants:
         return {"messages": [], "has_more": False}
 
@@ -1377,19 +1414,7 @@ async def get_conversation_messages(
     if not conv_ids:
         return {"messages": [], "has_more": False}
 
-    phone_filters = []
-    for variant in phone_variants:
-        phone_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
-        phone_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
-
-    # Legacy rows with empty metadata stay visible only inside their convo.
-    missing_phone = or_(
-        MessageEvent.extra_metadata["phone"].astext.is_(None),
-        MessageEvent.extra_metadata["phone"].astext == "",
-    )
-    identity_filter = (
-        or_(*phone_filters, missing_phone) if phone_filters else missing_phone
-    )
+    identity_filter = _message_identity_clause(phone_variants, phone_suffix)
 
     me_query = (
         db.query(MessageEvent)
