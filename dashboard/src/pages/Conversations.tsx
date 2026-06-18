@@ -726,11 +726,15 @@ export default function Conversations() {
 
   const selectConversation = (c: Conversation) => {
     const cached = loadConversationMessagesCache(getTenantId(), c.phone)
-    const withMessages = cached?.messages?.length
-      ? { ...c, messages: cached.messages }
-      : c
+    // Always reset the visible thread on phone change. Re-hydrate from
+    // per-phone cache only — never carry the prior customer's messages.
+    const withMessages: Conversation = {
+      ...c,
+      messages: cached?.messages?.length ? cached.messages : [],
+    }
     setSelected(withMessages)
     setHasMoreMessages(Boolean(cached?.hasMore))
+    setLoadingMessages(!cached?.messages?.length)
     setMobileFilterMenuOpen(false)
     setMobileView('chat')
     loadMessagesForOpenChat(c.phone)
