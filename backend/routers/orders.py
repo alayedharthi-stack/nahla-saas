@@ -1767,7 +1767,23 @@ def _detail_order_payload(
 
 
 def _handle_order_edit_error(exc: Exception) -> HTTPException:
-    return HTTPException(status_code=409, detail=str(exc))
+    raw = str(exc)
+    code = raw.split(":", 1)[-1].strip() if raw.startswith("catalog_evidence_incomplete:") else raw.strip()
+    messages = {
+        "catalog_variant_required": "اختر الحجم أولًا",
+        "catalog_variant_not_found": "الحجم المختار غير موجود في الكتالوج",
+        "catalog_product_not_found": "المنتج غير موجود في الكتالوج",
+        "product_id_required": "اختر منتجًا من الكتالوج",
+        "confirmed_item_requires_price": "السعر غير متوفر في الكتالوج",
+        "confirmed_item_requires_variant": "اختر الحجم أولًا",
+        "needs_variant": "اختر الحجم أولًا",
+        "needs_review": "تعذّر إضافة المنتج — بيانات الكتالوج غير مكتملة",
+    }
+    if raw.startswith("catalog_evidence_incomplete:"):
+        detail = messages.get(code, messages["needs_review"])
+    else:
+        detail = messages.get(code, raw)
+    return HTTPException(status_code=409, detail=detail)
 
 
 def _commit_edited_order(
