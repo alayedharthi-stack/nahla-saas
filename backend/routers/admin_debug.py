@@ -38,7 +38,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -4581,6 +4581,7 @@ async def admin_debug_send_product(
 
 @router.get("/conversation-list-visibility")
 async def admin_debug_conversation_list_visibility(
+    request: Request,
     tenant_id: int = Query(..., description="Merchant tenant id to diagnose."),
     phone: str = Query(
         ...,
@@ -4604,32 +4605,28 @@ async def admin_debug_conversation_list_visibility(
 
         GET /admin/debug/conversation-list-visibility?tenant_id=33&phone=966505263377
     """
-    from routers.conversations import (  # noqa: PLC0415
-        diagnose_conversation_list_visibility,
-        list_conversations,
-    )
+    from routers import conversations as conv_router  # noqa: PLC0415
 
-    _state = type("S", (), {})()
-    _state.tenant_id = tenant_id
-
-    class _FakeReq:
-        headers = {"X-Tenant-ID": str(tenant_id)}
-        cookies: dict = {}
-        state = _state
-
-    list_api = await list_conversations(
-        _FakeReq(),  # type: ignore[arg-type]
-        db,
-        limit=limit,
-        offset=offset,
-        filter=filter,
-    )
-    return await diagnose_conversation_list_visibility(
-        db,
-        tenant_id,
-        phone,
-        filter_slug=filter,
-        limit=limit,
-        offset=offset,
-        list_api_result=list_api,
-    )
+    # list_conversations calls resolve_tenant_id(request). Admin routes are
+    # JWT-public and use ?tenant_id=, so pin tenant scope for this probe only.
+    original_resolve = conv_router.resolve_tenant_id
+    conv_router.resolve_tenant_id = lambda _req: tenant_id  # type: ignore[assignment]
+    try:
+        list_api = await conv_router.list_conversations(
+            request,
+            db,
+            limit=limit,
+            offset=offset,
+            filter=filter,
+        )
+        return await conv_router.diagnose_conversation_list_visibility(
+            db,
+            tenant_id,
+            phone,
+            filter_slug=filter,
+            limit=limit,
+            offset=offset,
+            list_api_result=list_api,
+        )
+    finally:
+        conv_router.resolve_tenant_id = original_resolve
