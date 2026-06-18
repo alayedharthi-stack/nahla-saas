@@ -158,7 +158,7 @@ def apply_gift_recipient_to_prep(prep: Any, message: str) -> bool:
         prov = dict(getattr(prep, "identity_provenance", None) or {})
         prov["recipient_name"] = "gift_order_gate"
         prep.identity_provenance = prov
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance stamp is best-effort on dynamic prep
         pass
     logger.info(
         "[GIFT_ORDER_GATE] recipient_name=%r fulfillment_kind=gift_delivery",
@@ -485,7 +485,7 @@ def run_pre_decide_order_extraction(
 
             resolve_and_enrich_cart_state(db, tenant_id, state, prep)
             summary["catalog_resolved"] = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — optional catalog enrich must not block pre-decide
             logger.debug("[GIFT_ORDER_GATE] catalog resolve skipped err=%s", exc)
 
     try:
@@ -495,7 +495,7 @@ def run_pre_decide_order_extraction(
 
         apply_customer_identity_during_order_flow(ctx, db=db)
         summary["identity_applied"] = True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — identity bridge must not block pre-decide
         logger.debug("[GIFT_ORDER_GATE] identity apply skipped err=%s", exc)
 
     if _cart_after:
