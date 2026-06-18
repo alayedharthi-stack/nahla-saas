@@ -253,7 +253,7 @@ def apply_staff_escalation_truth_guard(
                     evidence=evidence,
                     staff_escalation_claim_blocked=True,
                 )
-        except Exception as _stub_ctx_exc:  # noqa: BLE001
+        except Exception as _stub_ctx_exc:  # noqa: BLE001  # noqa: silent-ok — stub context enrich must not break guard
             logger.debug(
                 "[STAFF_ESCALATION_TRUTH_GUARD] stub context failed err=%s",
                 _stub_ctx_exc,
