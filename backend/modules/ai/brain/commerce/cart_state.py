@@ -140,6 +140,8 @@ def apply_cart_intents_to_state(
             continue
         if delta.get("op") == "add" and isinstance(delta.get("item"), dict):
             item = dict(delta["item"])
+            if not item.get("query_hint"):
+                item["query_hint"] = str(item.get("product_name") or "")
             if product_info:
                 if not item.get("product_id"):
                     item["product_id"] = str(

@@ -13,6 +13,10 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+ITEM_STATUS_CONFIRMED = "confirmed"
+ITEM_STATUS_NEEDS_REVIEW = "needs_review"
+ITEM_STATUS_CUSTOM_UNMATCHED = "custom_unmatched_item"
+
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
@@ -86,6 +90,10 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
     ).strip()
     variant_id = str(raw.get("variant_id") or raw.get("external_variant_id") or "").strip()
 
+    match_status = str(raw.get("match_status") or "").strip()
+    if not match_status:
+        match_status = ITEM_STATUS_CONFIRMED if product_id else ITEM_STATUS_NEEDS_REVIEW
+
     item: Dict[str, Any] = {
         "product_name": name or "منتج",
         "title":          name or "منتج",
@@ -94,8 +102,11 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
         "variant":        variant,
         "quantity":       quantity,
         "source":         str(raw.get("source") or source),
+        "match_status":   match_status,
         "last_updated_at": str(raw.get("last_updated_at") or _utcnow_iso()),
     }
+    if raw.get("query_hint"):
+        item["query_hint"] = str(raw.get("query_hint"))
     if product_id:
         item["product_id"] = product_id
     if variant_id:
@@ -471,6 +482,9 @@ def cart_total_amount(items: List[Dict[str, Any]]) -> Optional[float]:
 
 
 __all__ = [
+    "ITEM_STATUS_CONFIRMED",
+    "ITEM_STATUS_CUSTOM_UNMATCHED",
+    "ITEM_STATUS_NEEDS_REVIEW",
     "apply_cart_delta",
     "apply_focus_item",
     "build_line_items_from_order_prep",

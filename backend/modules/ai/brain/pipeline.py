@@ -1320,15 +1320,29 @@ class MerchantBrain:
         try:
             from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noqa: PLC0415
 
+            _cart_changed = False
+            _catalog_resolution = None
             if message and new_state.stage in ("ordering", "deciding", "checkout", ""):
+                _cart_before = list(getattr(new_state, "cart_items", None) or [])
                 maybe_apply_cart_message(
                     state=new_state,
                     prep=new_state.order_prep,
                     message=message,
                     product_info=new_state.current_product_focus,
                 )
+                _cart_after = list(getattr(new_state, "cart_items", None) or [])
+                _cart_changed = _cart_before != _cart_after or bool(
+                    getattr(new_state.order_prep, "cart_deltas", None)
+                )
+                if _cart_after and db is not None:
+                    from core.wa_cart_catalog_resolver import resolve_and_enrich_cart_state  # noqa: PLC0415
+                    _catalog_resolution = resolve_and_enrich_cart_state(
+                        db, tenant_id, new_state, new_state.order_prep,
+                    )
         except Exception as _cart_exc:  # noqa: BLE001
             logger.debug("[CART_STATE] pipeline hook skipped: %s", _cart_exc)
+            _cart_changed = False
+            _catalog_resolution = None
 
         # Persist address signals captured BEFORE a product was picked
         # (e.g. customer typed "TAPA7401" while still browsing). The
@@ -1730,6 +1744,24 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        try:
+            from core.wa_draft_confirmation import maybe_inject_draft_flow_reply  # noqa: PLC0415
+
+            reply = maybe_inject_draft_flow_reply(
+                reply=reply or "",
+                order_prep=new_state.order_prep,
+                brain_state=new_state,
+                catalog_resolution=_catalog_resolution,
+                cart_changed=_cart_changed,
+            )
+            if reply and result.data.get("wa_draft_reply_injected") is None:
+                result.data["wa_draft_reply_injected"] = bool(_cart_changed or _catalog_resolution)
+        except Exception as _draft_reply_exc:  # noqa: BLE001
+            logger.warning(
+                "[WA_DRAFT_CONFIRM] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _draft_reply_exc,
+            )
 
         try:
             from .commerce.product_visual import stamp_visual_focus_from_outbound_reply  # noqa: PLC0415
