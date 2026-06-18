@@ -723,11 +723,18 @@ def _serialise_order(
                 "name":         name,
                 "quantity":     qty,
                 "variant_id":   str(item.get("variant_id") or "") or None,
-                "variant_label": str(item.get("variant_label") or item.get("size") or "").strip() or None,
+                "variant_label": str(
+                    item.get("variant_label")
+                    or item.get("variant")
+                    or item.get("size")
+                    or ""
+                ).strip() or None,
                 "edition":      str(item.get("edition") or item.get("production") or "").strip() or None,
                 "unit_price":   unit_price_f,
                 "line_total":   round(unit_price_f * qty, 2) if unit_price_f is not None else None,
                 "image_url":    item.get("image_url") or item.get("image") or None,
+                "match_status": str(item.get("match_status") or "confirmed"),
+                "query_hint":   item.get("query_hint"),
             })
 
     source_key   = _resolve_source(order)
@@ -920,6 +927,32 @@ def _serialise_order(
             )
         else:
             payload["payment_reminder_draft"] = None
+
+        from core.wa_order_editor import order_edit_capabilities  # noqa: PLC0415
+
+        caps = order_edit_capabilities(order)
+        payload.update(caps)
+        payload["customer_first_name"] = caps.get("customer_first_name")
+        payload["customer_last_name"] = caps.get("customer_last_name")
+        payload["internal_note"] = caps.get("internal_note")
+        payload["google_maps_url"] = (
+            order_meta.get("google_maps_url")
+            or order_meta.get("delivery_address_url")
+            or customer_info.get("google_maps_url")
+        )
+        payload["short_address_code"] = (
+            order_meta.get("short_address_code")
+            or order_meta.get("national_short_address")
+            or customer_info.get("short_address_code")
+        )
+        payload["shipping_meta"] = {
+            "shipping_provider": caps.get("shipping_provider") or "manual",
+            "shipping_cost": caps.get("shipping_cost"),
+            "tracking_number": caps.get("tracking_number"),
+            "shipping_status": caps.get("shipping_status"),
+            "national_short_address": caps.get("national_short_address"),
+            "delivery_notes": caps.get("delivery_notes"),
+        }
 
     return payload
 
@@ -1581,3 +1614,384 @@ async def generate_shipment_label_endpoint(
         "order": order_payload,
     }
 
+
+# ── P1 — Merchant draft order editing (WhatsApp / Nahla-native) ─────────────
+
+class OrderCustomerPatch(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    internal_note: Optional[str] = None
+
+
+class OrderAddressPatch(BaseModel):
+    city: Optional[str] = None
+    district: Optional[str] = None
+    street: Optional[str] = None
+    address: Optional[str] = None
+    short_address_code: Optional[str] = None
+    google_maps_url: Optional[str] = None
+    delivery_notes: Optional[str] = None
+
+
+class OrderShippingMetaPatch(BaseModel):
+    shipping_provider: Optional[str] = None
+    shipping_cost: Optional[float] = None
+    tracking_number: Optional[str] = None
+    shipping_status: Optional[str] = None
+    delivery_notes: Optional[str] = None
+
+
+class OrderLineItemAdd(BaseModel):
+    product_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    quantity: int = 1
+    product_name: Optional[str] = None
+    unit_price: Optional[float] = None
+
+
+class OrderLineItemPatch(BaseModel):
+    product_id: Optional[str] = None
+    variant_id: Optional[str] = None
+    quantity: Optional[int] = None
+    product_name: Optional[str] = None
+    unit_price: Optional[float] = None
+
+
+class OrderCancelIn(BaseModel):
+    reason: Optional[str] = None
+
+
+def _merchant_actor(request: Request, tenant_id: int) -> str:
+    return str(
+        request.headers.get("X-Staff-User")
+        or request.headers.get("X-Merchant-User")
+        or f"tenant:{tenant_id}"
+    )
+
+
+def _detail_order_payload(
+    db: Session,
+    tenant_id: int,
+    order: Order,
+) -> Dict[str, Any]:
+    customer_lookup = _build_customer_lookup(db, tenant_id)
+    vip_phones      = _build_vip_phone_set(db, tenant_id)
+    unread_phones   = _build_unread_phone_set(db, tenant_id)
+
+    from core.order_shipment_service import (  # noqa: PLC0415
+        evaluate_create_shipment,
+        get_order_shipment,
+        resolve_tenant_cod_enabled,
+        serialise_shipment,
+    )
+    from core.order_shipping_policy import can_generate_label  # noqa: PLC0415
+
+    cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
+    shipment_row = get_order_shipment(db, tenant_id, order.id)
+    create_gate = evaluate_create_shipment(
+        order,
+        cod_enabled=cod_enabled,
+        existing_shipment=shipment_row,
+    )
+    label_gate = (
+        can_generate_label(order, shipment_row, cod_enabled=cod_enabled)
+        if shipment_row else None
+    )
+
+    payload = _serialise_order(
+        order,
+        customer_lookup=customer_lookup,
+        now=datetime.now(timezone.utc),
+        detailed=True,
+        vip_phones=vip_phones,
+        unread_phones=unread_phones,
+    )
+    payload["shipping"] = {
+        "can_create_shipment": create_gate.allowed,
+        "blocked_reason_key": create_gate.reason_key,
+        "blocked_reason_ar": create_gate.message_ar,
+        "can_generate_label": bool(label_gate and label_gate.allowed),
+        "label_blocked_reason_key": label_gate.reason_key if label_gate else None,
+        "label_blocked_reason_ar": label_gate.message_ar if label_gate else None,
+        "shipment": serialise_shipment(shipment_row) if shipment_row else None,
+    }
+    return payload
+
+
+def _handle_order_edit_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+def _commit_edited_order(
+    db: Session,
+    tenant_id: int,
+    order: Order,
+) -> Dict[str, Any]:
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return {"ok": True, "order": _detail_order_payload(db, tenant_id, order)}
+
+
+@router.patch("/{order_id}/customer")
+async def patch_order_customer(
+    order_id: str,
+    body: OrderCustomerPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, update_order_customer  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        update_order_customer(
+            order,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            phone=body.phone,
+            internal_note=body.internal_note,
+            actor=actor,
+        )
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.patch("/{order_id}/address")
+async def patch_order_address(
+    order_id: str,
+    body: OrderAddressPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, update_order_address  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        update_order_address(
+            order,
+            city=body.city,
+            district=body.district,
+            street=body.street,
+            address=body.address,
+            short_address_code=body.short_address_code,
+            google_maps_url=body.google_maps_url,
+            delivery_notes=body.delivery_notes,
+            actor=actor,
+        )
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.patch("/{order_id}/shipping-meta")
+async def patch_order_shipping_meta(
+    order_id: str,
+    body: OrderShippingMetaPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, update_order_shipping_meta  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        update_order_shipping_meta(
+            order,
+            shipping_provider=body.shipping_provider,
+            shipping_cost=body.shipping_cost,
+            tracking_number=body.tracking_number,
+            shipping_status=body.shipping_status,
+            delivery_notes=body.delivery_notes,
+            actor=actor,
+        )
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.post("/{order_id}/line-items")
+async def add_order_line_item_endpoint(
+    order_id: str,
+    body: OrderLineItemAdd,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, add_order_line_item  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        add_order_line_item(
+            order,
+            body.model_dump(exclude_none=True),
+            db=db,
+            tenant_id=tenant_id,
+            actor=actor,
+        )
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.patch("/{order_id}/line-items/{item_index}")
+async def patch_order_line_item_endpoint(
+    order_id: str,
+    item_index: int,
+    body: OrderLineItemPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, update_order_line_item  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        update_order_line_item(
+            order,
+            item_index,
+            body.model_dump(exclude_none=True),
+            db=db,
+            tenant_id=tenant_id,
+            actor=actor,
+        )
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.delete("/{order_id}/line-items/{item_index}")
+async def delete_order_line_item_endpoint(
+    order_id: str,
+    item_index: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, delete_order_line_item  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        delete_order_line_item(order, item_index, actor=actor)
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.post("/{order_id}/confirm-ready")
+async def confirm_order_ready_endpoint(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, confirm_order_ready  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        confirm_order_ready(order, actor=actor)
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.post("/{order_id}/cancel")
+async def cancel_order_endpoint(
+    order_id: str,
+    body: OrderCancelIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import OrderEditError, cancel_order  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        cancel_order(order, actor=actor, reason=body.reason or "")
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    return _commit_edited_order(db, tenant_id, order)
+
+
+@router.delete("/{order_id}")
+async def delete_draft_order_endpoint(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from core.wa_order_editor import (  # noqa: PLC0415
+        OrderEditError,
+        delete_draft_order,
+        log_draft_delete_audit,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    order = _lookup_order(db, tenant_id, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="order_not_found")
+
+    actor = _merchant_actor(request, tenant_id)
+    try:
+        delete_draft_order(order, actor=actor)
+    except OrderEditError as exc:
+        raise _handle_order_edit_error(exc) from exc
+
+    log_draft_delete_audit(order, actor=actor)
+    db.add(order)
+    db.flush()
+    db.delete(order)
+    db.commit()
+
+    return {"ok": True, "deleted": True, "order_id": order_id}

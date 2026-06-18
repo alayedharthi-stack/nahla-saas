@@ -19,6 +19,7 @@ import {
   User,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
+import OrderEditPanel from '../components/orders/OrderEditPanel'
 import {
   featureRealityApi,
   type NeedsActionLevel,
@@ -446,6 +447,8 @@ export default function OrderDetail() {
         </div>
       )}
 
+      <OrderEditPanel order={order} onOrderUpdated={setOrder} />
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* Main column */}
         <div className="lg:col-span-2 space-y-5">
@@ -482,6 +485,11 @@ export default function OrderDetail() {
                         <div>
                           <p className="font-medium text-slate-800">{it.name}</p>
                           {it.variant_id && <p className="text-[10px] text-slate-400">#{it.variant_id}</p>}
+                          {it.match_status && it.match_status !== 'confirmed' && (
+                            <p className="text-[10px] text-amber-700 mt-0.5">
+                              {it.match_status === 'needs_review' ? 'يحتاج مراجعة كتالوج' : 'منتج غير مطابق'}
+                            </p>
+                          )}
                         </div>
                       </div>
                     </td>

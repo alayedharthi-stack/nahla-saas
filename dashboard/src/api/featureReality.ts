@@ -122,6 +122,22 @@ export interface OrderDetailLineItem {
   unit_price?: number | null
   line_total?: number | null
   image_url?: string | null
+  match_status?: 'confirmed' | 'needs_review' | 'custom_unmatched_item' | string
+  query_hint?: string | null
+}
+
+export interface OrderShippingMeta {
+  shipping_provider?: 'manual' | 'oto' | 'beez' | string
+  shipping_cost?: number | null
+  tracking_number?: string | null
+  shipping_status?: string | null
+  national_short_address?: string | null
+  delivery_notes?: string | null
+}
+
+export interface OrderEditResult {
+  ok: boolean
+  order: OrderDetail
 }
 
 export interface OrderDetailLinks {
@@ -187,6 +203,18 @@ export interface OrderDetail extends DashboardOrder {
   timeline: OrderTimelineEvent[]
   payment_reminder_draft?: string | null
   shipping?: OrderShippingState
+  is_editable?: boolean
+  can_delete_draft?: boolean
+  can_cancel?: boolean
+  missing_fields?: string[]
+  needs_amount_review?: boolean
+  merchant_edited_at?: string | null
+  customer_first_name?: string | null
+  customer_last_name?: string | null
+  internal_note?: string | null
+  google_maps_url?: string | null
+  short_address_code?: string | null
+  shipping_meta?: OrderShippingMeta
 }
 
 export interface CreateShipmentResult {
@@ -572,6 +600,99 @@ export const featureRealityApi = {
       `/orders/${encodeURIComponent(String(orderId))}/shipments/${shipmentId}/generate-label`,
       { method: 'POST' },
     )
+  },
+  updateOrderCustomer(
+    orderId: string | number,
+    body: {
+      first_name?: string
+      last_name?: string
+      phone?: string
+      internal_note?: string
+    },
+  ): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/customer`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    })
+  },
+  updateOrderAddress(
+    orderId: string | number,
+    body: {
+      city?: string
+      district?: string
+      street?: string
+      address?: string
+      short_address_code?: string
+      google_maps_url?: string
+      delivery_notes?: string
+    },
+  ): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/address`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    })
+  },
+  updateOrderShippingMeta(
+    orderId: string | number,
+    body: Partial<OrderShippingMeta>,
+  ): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/shipping-meta`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    })
+  },
+  addOrderLineItem(
+    orderId: string | number,
+    body: {
+      product_id?: string
+      variant_id?: string
+      quantity?: number
+      product_name?: string
+      unit_price?: number
+    },
+  ): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/line-items`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  patchOrderLineItem(
+    orderId: string | number,
+    itemIndex: number,
+    body: {
+      product_id?: string
+      variant_id?: string
+      quantity?: number
+      product_name?: string
+      unit_price?: number
+    },
+  ): Promise<OrderEditResult> {
+    return apiCall(
+      `/orders/${encodeURIComponent(String(orderId))}/line-items/${itemIndex}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    )
+  },
+  deleteOrderLineItem(orderId: string | number, itemIndex: number): Promise<OrderEditResult> {
+    return apiCall(
+      `/orders/${encodeURIComponent(String(orderId))}/line-items/${itemIndex}`,
+      { method: 'DELETE' },
+    )
+  },
+  confirmOrderReady(orderId: string | number): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/confirm-ready`, {
+      method: 'POST',
+    })
+  },
+  cancelOrder(orderId: string | number, body: { reason?: string } = {}): Promise<OrderEditResult> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+  deleteDraftOrder(orderId: string | number): Promise<{ ok: boolean; deleted: boolean }> {
+    return apiCall(`/orders/${encodeURIComponent(String(orderId))}`, {
+      method: 'DELETE',
+    })
   },
   coupons(): Promise<CouponsDashboard> {
     return apiCall('/coupons')

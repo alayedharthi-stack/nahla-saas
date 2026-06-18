@@ -125,6 +125,12 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
     if edition:
         item["edition"] = edition
         item["notes"] = edition
+    match_status = str(raw.get("match_status") or "").strip()
+    if match_status:
+        item["match_status"] = match_status
+    query_hint = str(raw.get("query_hint") or "").strip()
+    if query_hint:
+        item["query_hint"] = query_hint
     return item
 
 
