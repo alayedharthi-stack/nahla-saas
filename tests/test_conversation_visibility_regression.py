@@ -134,6 +134,138 @@ class TestConversationVisibilityRegression:
         phones = [row["phone"] for row in result["conversations"]]
         assert PHONE_E164 in phones, phones
 
+    def test_list_shows_normalized_phone_with_local_metadata_preview(self):
+        """Production shape: normalized_phone-only customer + local metadata stamp."""
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust = Customer(
+            tenant_id=t.id,
+            phone=None,
+            normalized_phone=PHONE_E164,
+            name="Buyer",
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=cust.id,
+            status="active",
+            extra_metadata={},
+        )
+        db.add(convo)
+        db.commit()
+        db.refresh(convo)
+        db.add(
+            MessageEvent(
+                tenant_id=t.id,
+                conversation_id=convo.id,
+                direction="inbound",
+                body="السعر. 387 ريال الكيلو",
+                event_type="whatsapp",
+                created_at=datetime.utcnow(),
+                extra_metadata={"phone": PHONE_LOCAL, "customer_phone": PHONE_LOCAL},
+            )
+        )
+        db.commit()
+
+        result = _call_list(db, t.id)
+        row = next(
+            (r for r in result["conversations"] if r["phone"] == PHONE_E164),
+            None,
+        )
+        assert row is not None, [r["phone"] for r in result["conversations"]]
+        assert row["lastMsg"] == "السعر. 387 ريال الكيلو"
+
+    def test_list_resolves_phone_from_message_when_customer_link_stale(self):
+        """Stale customer row with no phone still surfaces via message metadata."""
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        stale = Customer(
+            tenant_id=t.id,
+            phone=None,
+            normalized_phone=None,
+            name="Legacy",
+        )
+        db.add(stale)
+        db.commit()
+        db.refresh(stale)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=stale.id,
+            status="active",
+            extra_metadata={},
+        )
+        db.add(convo)
+        db.commit()
+        db.refresh(convo)
+        db.add(
+            MessageEvent(
+                tenant_id=t.id,
+                conversation_id=convo.id,
+                direction="inbound",
+                body="السعر. 387 ريال الكيلو",
+                event_type="whatsapp",
+                created_at=datetime.utcnow(),
+                extra_metadata={"phone": PHONE_LOCAL},
+            )
+        )
+        db.commit()
+
+        result = _call_list(db, t.id)
+        row = next(
+            (r for r in result["conversations"] if r["phone"] == PHONE_E164),
+            None,
+        )
+        assert row is not None, [r["phone"] for r in result["conversations"]]
+        assert "387" in row["lastMsg"]
+
+    def test_list_preview_falls_back_when_latest_row_is_historical_only(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust = Customer(
+            tenant_id=t.id,
+            phone=None,
+            normalized_phone=PHONE_E164,
+            name="Buyer",
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=cust.id,
+            status="active",
+            extra_metadata={"customer_phone": PHONE_E164},
+        )
+        db.add(convo)
+        db.commit()
+        db.refresh(convo)
+        db.add(
+            MessageEvent(
+                tenant_id=t.id,
+                conversation_id=convo.id,
+                direction="inbound",
+                body="historical-only",
+                event_type="whatsapp",
+                created_at=datetime.utcnow(),
+                extra_metadata={
+                    "phone": PHONE_E164,
+                    "historical_import": True,
+                    "message_origin": "historical_sync",
+                },
+            )
+        )
+        db.commit()
+
+        result = _call_list(db, t.id)
+        row = next(
+            (r for r in result["conversations"] if r["phone"] == PHONE_E164),
+            None,
+        )
+        assert row is not None
+        assert row["lastMsg"] == "historical-only"
+
     def test_local_metadata_phone_visible_for_e164_request(self):
         db, _ = _make_db()
         t = _seed_tenant(db)
