@@ -288,7 +288,7 @@ def test_resolve_named_unknown_without_hardcode() -> None:
     registry = compile_staff_contact_registry([])
     resolution = resolve_staff_contact(
         registry,
-        StaffContactRequest(kind="named"),
+        StaffContactRequest(kind="named", target_tier="named_person"),
         message="ارسل رقم شخص_غير_موجود",
     )
     assert resolution.found is False
