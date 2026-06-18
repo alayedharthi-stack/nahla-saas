@@ -77,6 +77,7 @@ class StateRelevanceVerdict:
     pending_candidates_relevant: bool = False
     safe_to_resume_state: bool = True
     detected_topic_shift: bool = False
+    support_listing_topic_shift: bool = False
     relevance_confidence: float = 0.5
     active_workflows: tuple = field(default_factory=tuple)
     current_intent_hint: str = ""
@@ -91,6 +92,7 @@ class StateRelevanceVerdict:
             "pending_candidates_relevant": self.pending_candidates_relevant,
             "safe_to_resume_state": self.safe_to_resume_state,
             "detected_topic_shift": self.detected_topic_shift,
+            "support_listing_topic_shift": self.support_listing_topic_shift,
             "relevance_confidence": self.relevance_confidence,
             "active_workflows": list(self.active_workflows),
             "current_intent_hint": self.current_intent_hint,
@@ -263,6 +265,22 @@ def validate_state_relevance(
         msg, semantic_intent=sem_intent, intent_name=intent_name,
     )
 
+    support_listing_shift = False
+    try:
+        from .support_listing_topic import (  # noqa: PLC0415
+            collect_support_listing_context,
+            detect_support_listing_topic_shift,
+        )
+
+        _extra = ""
+        if ctx is not None:
+            _extra = collect_support_listing_context(ctx)
+        support_listing_shift = detect_support_listing_topic_shift(
+            msg, extra_context=_extra,
+        )
+    except Exception:  # noqa: BLE001
+        support_listing_shift = False
+
     _global_browse = False
     try:
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415
@@ -289,6 +307,8 @@ def validate_state_relevance(
     fulfillment_relevant = fulfillment_turn
     if commerce_turn and not fulfillment_turn:
         fulfillment_relevant = False
+    if support_listing_shift:
+        fulfillment_relevant = False
 
     pending_candidates_relevant = (
         replay_turn
@@ -305,6 +325,7 @@ def validate_state_relevance(
         (commerce_turn or fulfillment_turn or payment_turn)
         and not (awaiting_payment and commerce_turn and not payment_turn)
         and not _global_browse
+        and not support_listing_shift
     )
 
     addon_relevant = (
@@ -330,6 +351,8 @@ def validate_state_relevance(
         confidence = max(confidence, 0.78)
     if topic_shift:
         confidence = max(confidence, 0.75)
+    if support_listing_shift:
+        confidence = max(confidence, 0.84)
 
     return StateRelevanceVerdict(
         payment_state_relevant=payment_relevant,
@@ -340,6 +363,7 @@ def validate_state_relevance(
         pending_candidates_relevant=pending_candidates_relevant,
         safe_to_resume_state=safe,
         detected_topic_shift=topic_shift,
+        support_listing_topic_shift=support_listing_shift,
         relevance_confidence=confidence,
         active_workflows=active,
         current_intent_hint=sem_intent or intent_name,
@@ -405,12 +429,18 @@ def should_block_workflow_resume(
         "payment_flow": not verdict.payment_state_relevant,
         "awaiting_transfer": not verdict.payment_state_relevant,
         "active_fulfillment": (
-            not verdict.fulfillment_state_relevant
-            and verdict.detected_topic_shift
+            verdict.support_listing_topic_shift
+            or (
+                not verdict.fulfillment_state_relevant
+                and verdict.detected_topic_shift
+            )
         ),
         "awaiting_location": (
-            not verdict.fulfillment_state_relevant
-            and verdict.detected_topic_shift
+            verdict.support_listing_topic_shift
+            or (
+                not verdict.fulfillment_state_relevant
+                and verdict.detected_topic_shift
+            )
         ),
         "pending_candidates": (
             not verdict.pending_candidates_relevant
@@ -420,8 +450,11 @@ def should_block_workflow_resume(
         "show_more": not verdict.product_replay_relevant,
         "addon_recommendation": not verdict.addon_recommendation_relevant,
         "stale_product_focus": (
-            not verdict.stale_product_focus_relevant
-            and verdict.detected_topic_shift
+            verdict.support_listing_topic_shift
+            or (
+                not verdict.stale_product_focus_relevant
+                and verdict.detected_topic_shift
+            )
         ),
     }
     return bool(mapping.get(workflow, False))
@@ -438,12 +471,14 @@ def log_state_relevance(
     try:
         logger.info(
             "[STATE_RELEVANCE] tenant=%s state=%s relevant=%s reason=%s "
-            "topic_shift=%s intent_hint=%s confidence=%.2f active=%s",
+            "topic_shift=%s support_listing_shift=%s intent_hint=%s "
+            "confidence=%.2f active=%s",
             tenant_id,
             state_name or "-",
             str(relevant if relevant is not None else verdict.safe_to_resume_state).lower(),
             reason or "-",
             str(verdict.detected_topic_shift).lower(),
+            str(verdict.support_listing_topic_shift).lower(),
             verdict.current_intent_hint or "-",
             float(verdict.relevance_confidence or 0.0),
             ",".join(verdict.active_workflows) or "-",

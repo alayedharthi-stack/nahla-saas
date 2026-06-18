@@ -1322,6 +1322,42 @@ def maybe_handle_map_image_inbound(
     if md.get("image_kind") != "map_screenshot":
         return None
 
+    recent_inbound: list = []
+    try:
+        from core.conversation_engine import StateManager  # noqa: PLC0415
+
+        _hist = StateManager.load_history(
+            db, phone=phone, limit=10, tenant_id=tenant_id,
+        )
+        recent_inbound = [
+            str(h.get("body") or "").strip()
+            for h in (_hist or [])
+            if str(h.get("direction") or "") == "inbound"
+            and str(h.get("body") or "").strip()
+        ][-5:]
+    except Exception:  # noqa: BLE001
+        recent_inbound = []
+
+    try:
+        from modules.ai.brain.state.support_listing_topic import (  # noqa: PLC0415
+            detect_support_listing_from_image_metadata,
+        )
+
+        if detect_support_listing_from_image_metadata(md, recent_inbound):
+            logger.info(
+                "[ORDER_FLOW_STATE] map_screenshot skipped — support/listing "
+                "context tenant=%s phone=*%s recent_preview=%r",
+                tenant_id,
+                (phone or "")[-4:],
+                (recent_inbound[-1] if recent_inbound else "")[:80],
+            )
+            return None
+    except Exception as _sl_exc:  # noqa: BLE001
+        logger.debug(
+            "[ORDER_FLOW_STATE] support/listing map guard skipped tenant=%s: %s",
+            tenant_id, _sl_exc,
+        )
+
     _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
     summary = _focus_summary(bs)
 

@@ -337,6 +337,16 @@ class DefaultDecisionEngine:
             except Exception:  # noqa: BLE001
                 return None
 
+        def _support_listing_blocks_checkout() -> bool:
+            try:
+                _verdict = _state_relevance()
+                return bool(
+                    _verdict is not None
+                    and getattr(_verdict, "support_listing_topic_shift", False)
+                )
+            except Exception:  # noqa: BLE001
+                return False
+
         def _block_stale_resume(workflow: str, *, reason: str = "semantic_mismatch") -> bool:
             try:
                 from ..state.state_relevance import (  # noqa: PLC0415
@@ -930,6 +940,7 @@ class DefaultDecisionEngine:
             and (_is_confirm or _has_prep)
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
+            and not _support_listing_blocks_checkout()
         ):
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
@@ -1652,6 +1663,7 @@ class DefaultDecisionEngine:
             and not _active_candidates          # GUARD: no pending list
             and not _explicit_commerce_switch
             and not _is_global_browse
+            and not _support_listing_blocks_checkout()
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
@@ -2739,6 +2751,7 @@ class DefaultDecisionEngine:
                 and facts.orderable
                 and not state.checkout_url
                 and not _is_global_browse
+                and not _support_listing_blocks_checkout()
             ):
                 logger.info(
                     "[ORDER FLOW] FORCED action=propose_draft_order "
