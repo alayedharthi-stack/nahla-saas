@@ -50,6 +50,8 @@ from core.customer_display import (  # noqa: E402
     display_customer_name,
     display_customer_name_or_fallback,
     display_name_passthrough_or_fallback,
+    looks_like_phone_personalization_name,
+    personalization_customer_name_or_fallback,
     sanitize_display_customer_name,
 )
 
@@ -61,10 +63,10 @@ class TestPassthroughHelper:
     """``display_name_passthrough_or_fallback`` is the runtime helper
     used by campaigns / automations / AI prompts after May 2026.
 
-    Its contract is intentionally tiny: return the stored value
-    verbatim if usable, otherwise the static fallback. Anything
-    fancier (stopword stripping, phone-only detection) belongs to
-    the bulk admin tool, which mutates the DB row once."""
+    Its contract is intentionally tiny: return the stored official
+    ``Customer.name`` verbatim if usable, otherwise the static fallback.
+    Phone-shaped values and empty inputs fall back even if dashboard
+    ``display_name`` shows the number for row identification."""
 
     @pytest.mark.parametrize("raw, expected", [
         # Names already clean — passthrough.
@@ -103,6 +105,108 @@ class TestPassthroughHelper:
     def test_custom_fallback_honoured(self):
         out = display_name_passthrough_or_fallback("", fallback="صديقي")
         assert out == "صديقي"
+
+
+class TestPersonalizationPhoneGuard:
+    """Campaign/automation slots must never greet by phone number."""
+
+    @pytest.mark.parametrize("raw", [
+        None,
+        "",
+        "   ",
+        "+966554722395",
+        "966554722395",
+        "050554722395",
+    ])
+    def test_phone_or_empty_uses_fallback(self, raw):
+        assert personalization_customer_name_or_fallback(raw) == DEFAULT_FALLBACK_NAME
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("أبو نايف", "أبو نايف"),
+        ("عبدالله", "عبدالله"),
+    ])
+    def test_real_names_passthrough(self, raw, expected):
+        assert personalization_customer_name_or_fallback(raw) == expected
+
+    @pytest.mark.parametrize("raw", [
+        "+966554722395",
+        "966554722395",
+    ])
+    def test_looks_like_phone_helper(self, raw):
+        assert looks_like_phone_personalization_name(raw) is True
+        assert looks_like_phone_personalization_name("أبو نايف") is False
+
+
+class TestCampaignTemplatePersonalization:
+    """Lock the campaign rendering path: ``Customer.name`` only."""
+
+    def _body_for_name(self, customer_name: str) -> str:
+        from types import SimpleNamespace
+
+        from services.campaign_dispatcher import _reconstruct_template_body
+
+        template = SimpleNamespace(components=[{
+            "type": "BODY",
+            "text": "اشتقنا لك يا {{1}} 💛",
+        }])
+        return _reconstruct_template_body(
+            template,
+            customer_name,
+            "متجر نهلة",
+            "",
+        )
+
+    def test_null_name_uses_fallback_not_phone_display(self):
+        name = personalization_customer_name_or_fallback(None)
+        body = self._body_for_name(name)
+        assert f"يا {DEFAULT_FALLBACK_NAME}" in body
+        assert "966" not in body
+
+    def test_empty_name_uses_fallback_not_phone_display(self):
+        name = personalization_customer_name_or_fallback("")
+        body = self._body_for_name(name)
+        assert f"يا {DEFAULT_FALLBACK_NAME}" in body
+
+    def test_phone_stored_as_name_uses_fallback(self):
+        name = personalization_customer_name_or_fallback("+966554722395")
+        body = self._body_for_name(name)
+        assert f"يا {DEFAULT_FALLBACK_NAME}" in body
+
+    def test_real_name_used_in_template(self):
+        for raw, fragment in (("أبو نايف", "يا أبو نايف"), ("عبدالله", "يا عبدالله")):
+            name = personalization_customer_name_or_fallback(raw)
+            body = self._body_for_name(name)
+            assert fragment in body
+
+
+class TestAutomationPersonalizationName:
+    """Automation/AI template slots must share the same name policy."""
+
+    def test_build_template_vars_fallback_for_phone_only_name(self):
+        from types import SimpleNamespace
+
+        from core.automation_engine import _build_template_vars
+
+        customer = SimpleNamespace(name="+966554722395")
+        vars_map = _build_template_vars(
+            event=SimpleNamespace(payload={}),
+            customer=customer,
+            config={},
+        )
+        assert vars_map["{{1}}"] == DEFAULT_FALLBACK_NAME
+
+    def test_build_template_vars_keeps_real_name(self):
+        from types import SimpleNamespace
+
+        from core.automation_engine import _build_template_vars
+
+        customer = SimpleNamespace(name="عبدالله")
+        vars_map = _build_template_vars(
+            event=SimpleNamespace(payload={}),
+            customer=customer,
+            config={},
+        )
+        assert vars_map["{{1}}"] == "عبدالله"
 
 
 # ── 2) Back-compat aliases ────────────────────────────────────────────

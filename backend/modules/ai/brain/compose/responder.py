@@ -886,17 +886,19 @@ class DefaultComposer:
                 confidence=float(state.customer_gender_confidence or 0.0),
                 source="context",
             )
+            from core.customer_display import looks_like_phone_personalization_name  # noqa: PLC0415
             # Customer name resolution — best-effort. The profile
-            # dict shape varies by loader; try the two most common
-            # keys.
+            # dict shape varies by loader; use official ``name`` only
+            # (never dashboard ``display_name`` which may be a phone).
             customer_name = ""
             if isinstance(ctx.profile, dict):
-                customer_name = str(
+                raw_name = str(
                     ctx.profile.get("name")
                     or ctx.profile.get("customer_name")
-                    or ctx.profile.get("display_name")
                     or ""
-                )
+                ).strip()
+                if raw_name and not looks_like_phone_personalization_name(raw_name):
+                    customer_name = raw_name
 
             hint = detect_gender(
                 message=ctx.message or "",

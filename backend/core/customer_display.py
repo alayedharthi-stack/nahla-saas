@@ -20,9 +20,13 @@ behaviour was hard to debug. The decision (May 2026) is:
 
   **The merchant-controlled bulk tool is the SOLE source of truth.**
 
-  * If ``Customer.name`` is set, callers use it **verbatim**.
-  * If it's ``NULL`` / empty / whitespace-only, callers fall back
-    to the static greeting :data:`DEFAULT_FALLBACK_NAME`.
+  * If ``Customer.name`` is set and is a real name (not phone-shaped),
+    callers use it **verbatim**.
+  * If it's ``NULL`` / empty / whitespace-only / phone-shaped, callers
+    fall back to the static greeting :data:`DEFAULT_FALLBACK_NAME`.
+  * Dashboard ``display_name`` may show the phone for row identification;
+    that value must **never** be passed into this helper — only
+    ``Customer.name`` belongs in campaigns / automations / AI greetings.
   * No runtime mutation at send time — the value the merchant sees
     in the customers page is the value Meta receives.
 
@@ -110,6 +114,27 @@ _EMOJI_RE = re.compile(
 _BAD_PUNCT_RE = re.compile(r"[!@#$%^&*()_=+\[\]{}|\\/<>?\":;,~`«»“”‘’]+")
 
 _MULTISPACE_RE = re.compile(r"\s+")
+
+# Phone-shaped values are valid dashboard row labels after a manual
+# name clear, but must never become a campaign/AI greeting slot.
+_PHONE_LIKE_RE = re.compile(r"^[+]?[\d\s\-()]{7,}$")
+
+
+def looks_like_phone_personalization_name(raw: Optional[str]) -> bool:
+    """True when ``raw`` looks like a phone number, not a human name.
+
+    Used by the personalization layer only — dashboard list rendering
+    may still show the phone via ``display_name_for_customer``.
+    """
+    if raw is None or not isinstance(raw, str):
+        return False
+    candidate = raw.strip()
+    if not candidate:
+        return False
+    if _PHONE_LIKE_RE.match(candidate):
+        digits_only = "".join(ch for ch in candidate if ch.isdigit())
+        return len(digits_only) >= 7
+    return False
 
 
 def _strip_definite_article(token: str) -> str:
@@ -207,27 +232,41 @@ def display_name_passthrough_or_fallback(
     raw: Optional[str],
     fallback: str = DEFAULT_FALLBACK_NAME,
 ) -> str:
-    """Greeting-ready version of ``raw`` — **no sanitisation**.
+    """Greeting-ready version of ``Customer.name`` — **no sanitisation**.
 
-    This is the runtime greeting helper. Its only job is to decide
-    between "use the stored name" and "fall back to the static
-    greeting"; it does NOT strip stopwords, mutate Unicode, or
-    second-guess the merchant.
+    This is the runtime personalization helper for campaigns,
+    automations, and AI greetings. Its job is to decide between
+    "use the stored official name" and "fall back to the static
+    greeting"; it does NOT strip stopwords or read dashboard
+    ``display_name``.
 
     Rules:
       * ``None`` / non-string         → fallback.
       * Empty / whitespace-only       → fallback.
+      * Phone-shaped (``+966…``, digits-only, etc.) → fallback.
       * Anything else                 → ``raw.strip()`` verbatim.
 
-    Cleanup of badly-imported names is now done **once**, up front,
-    via the bulk admin tool on the customers page. Once a name is
-    stored on ``Customer.name``, that's what the merchant sees in
-    the dashboard AND what Meta receives in the ``{{1}}`` slot.
+    Cleanup of badly-imported names is done **once**, up front,
+    via the bulk admin tool on the customers page.
     """
     if raw is None or not isinstance(raw, str):
         return fallback
     cleaned = raw.strip()
-    return cleaned if cleaned else fallback
+    if not cleaned or looks_like_phone_personalization_name(cleaned):
+        return fallback
+    return cleaned
+
+
+def personalization_customer_name_or_fallback(
+    raw: Optional[str],
+    fallback: str = DEFAULT_FALLBACK_NAME,
+) -> str:
+    """Explicit alias for campaign/template/AI personalization slots.
+
+    Callers must pass ``Customer.name`` only — never dashboard
+    ``display_name``.
+    """
+    return display_name_passthrough_or_fallback(raw, fallback=fallback)
 
 
 # ── Deprecated aliases (kept for back-compat with older imports) ─────

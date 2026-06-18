@@ -3124,8 +3124,12 @@ async def resolve_template_vars(
     settings = get_or_create_settings(db, tenant_id)
     store = merge_defaults(settings.store_settings, DEFAULT_STORE)
 
+    from core.customer_display import display_name_passthrough_or_fallback  # noqa: PLC0415
+
     field_values: Dict[str, str] = {
-        "customer_name": (customer.name if customer else "العميل") or "العميل",
+        "customer_name": display_name_passthrough_or_fallback(
+            customer.name if customer else None
+        ),
         "store_name": store.get("store_name", "") or "المتجر",
         "status": (profile.customer_status if profile and getattr(profile, "customer_status", None) else profile.segment if profile else "lead"),
         "status_label": CUSTOMER_STATUS_LABELS.get((profile.customer_status if profile and getattr(profile, "customer_status", None) else profile.segment if profile else "lead"), "العميل"),
