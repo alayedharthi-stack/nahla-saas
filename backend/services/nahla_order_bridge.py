@@ -525,6 +525,18 @@ def _build_line_items(
         existing_meta=existing_meta,
         existing_line_items=existing_line_items,
     )
+    if db is not None and items:
+        from core.wa_cart_catalog_resolver import resolve_cart_line_items  # noqa: PLC0415
+
+        resolution = resolve_cart_line_items(db, tenant_id, items)
+        items = resolution.items
+        order_prep["wa_cart_catalog_resolution"] = {
+            "needs_clarification": resolution.needs_clarification,
+            "clarification_question": resolution.clarification_question,
+            "variant_unavailable": resolution.variant_unavailable,
+            "unmatched_items": resolution.unmatched_items,
+            "closest_suggestions": resolution.closest_suggestions,
+        }
     items = _enrich_line_item_titles(db=db, tenant_id=tenant_id, items=items)
     if not primary_title or primary_title == "منتج":
         primary_title = _resolve_product_title(

@@ -83,6 +83,15 @@ _KILO_ONLY_RE = re.compile(
     r"^(?:كilo|كيلo|كيلو|1\s*kg|1\s*كilo|ك\s*ilo)\s*$",
     re.I,
 )
+_LARGE_ONLY_RE = re.compile(r"^(?:كبير|كبيرة)\s*$", re.I)
+_BUCKET_KG_RE = re.compile(
+    r"(?:10\s*(?:كilo|كيلo|كيلو|kg|ك)?|(?:كilo|كيلo|كيلو)\s*10|سطل\s*(?:10)?|10\s*سطل)",
+    re.I,
+)
+_QTY_FOUR_RE = re.compile(
+    r"^(?:٤|4|اربع|أربع|اربعة|أربعة)\s*(?:حبة|حبات|قطعة|قطع)?\s*$",
+    re.I,
+)
 _EDITION_ONLY_RE = re.compile(r"^(?:ال)?جديد(?:\s|$)?$", re.I)
 _QTY_TWO_RE = re.compile(r"^(?:حبتين|اثنين|2\s*(?:حبة|حبات)?)\s*$", re.I)
 
@@ -136,8 +145,7 @@ def _resolve_product_name(text: str) -> str:
     cleaned = _WS_RE.sub(" ", cleaned).strip()
     if cleaned in _ARABIC_NON_CART_TOKENS:
         return ""
-    if len(cleaned) >= 2:
-        return f"عسل {cleaned}" if not cleaned.startswith("عسل") else cleaned
+    # Do not invent free-text product names — only known honey keywords above.
     return ""
 
 
@@ -199,6 +207,9 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     )
     if not has_product_hint and not has_cart_verb:
         return []
+    # Short product tokens like "سمر" alone are valid ordering hints.
+    if norm in _PRODUCT_KEYWORDS or norm in {"سمر", "طلح", "سدر", "شوك"}:
+        has_product_hint = True
     intents: List[Dict[str, Any]] = []
 
     if _CLEAR_RE.search(norm):
@@ -293,6 +304,15 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     item = _extract_add_segment(text)
     if item:
         intents.append(item)
+    elif norm in {"سمر", "طلح", "سدر", "شوك"} or norm in _PRODUCT_KEYWORDS:
+        name = _resolve_product_name(text)
+        if name:
+            intents.append({
+                "action": "add_item",
+                "product_name": name,
+                "variant": _parse_variant(text),
+                "quantity": 1,
+            })
     return intents
 
 
@@ -353,6 +373,38 @@ def extract_cart_intents_with_context(
             "product_name": active.get("product_name") or "",
             "match": _match_for_item(active),
             "new_variant": "1kg",
+        }]
+
+    if _LARGE_ONLY_RE.match(norm) and active:
+        variant = str(active.get("variant") or "").strip()
+        if variant:
+            return [{
+                "action": "update_quantity",
+                "product_name": active.get("product_name") or "",
+                "match": _match_for_item(active),
+                "quantity": 1,
+            }]
+        return [{
+            "action": "update_variant",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "new_variant": "1kg",
+        }]
+
+    if _BUCKET_KG_RE.search(text) and active:
+        return [{
+            "action": "update_variant",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "new_variant": "10kg",
+        }]
+
+    if _QTY_FOUR_RE.match(norm) and active:
+        return [{
+            "action": "update_quantity",
+            "product_name": active.get("product_name") or "",
+            "match": _match_for_item(active),
+            "quantity": 4,
         }]
 
     if _QTY_TWO_RE.match(norm) and active:
