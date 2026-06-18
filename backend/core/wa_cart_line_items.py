@@ -92,7 +92,9 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
 
     match_status = str(raw.get("match_status") or "").strip()
     if not match_status:
-        match_status = ITEM_STATUS_CONFIRMED if product_id else ITEM_STATUS_NEEDS_REVIEW
+        match_status = (
+            ITEM_STATUS_NEEDS_REVIEW if product_id else ITEM_STATUS_CUSTOM_UNMATCHED
+        )
 
     item: Dict[str, Any] = {
         "product_name": name or "منتج",

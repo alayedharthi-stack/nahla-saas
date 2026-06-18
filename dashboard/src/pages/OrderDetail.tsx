@@ -483,11 +483,15 @@ export default function OrderDetail() {
                           ? <img src={it.image_url} alt="" className="w-8 h-8 rounded object-cover" />
                           : <div className="w-8 h-8 rounded bg-slate-100 flex items-center justify-center"><Package className="w-3.5 h-3.5 text-slate-400" /></div>}
                         <div>
-                          <p className="font-medium text-slate-800">{it.name}</p>
-                          {it.variant_id && <p className="text-[10px] text-slate-400">#{it.variant_id}</p>}
-                          {it.match_status && it.match_status !== 'confirmed' && (
+                          <p className="font-medium text-slate-800">{it.catalog_product_name || it.name}</p>
+                          {it.is_catalog_matched && (it.variant_label || it.variant_name) && (
+                            <p className="text-[10px] text-slate-500">{it.variant_label || it.variant_name}</p>
+                          )}
+                          {!it.is_catalog_matched && (
                             <p className="text-[10px] text-amber-700 mt-0.5">
-                              {it.match_status === 'needs_review' ? 'يحتاج مراجعة كتالوج' : 'منتج غير مطابق'}
+                              {it.match_status === 'needs_variant'
+                                ? 'يحتاج اختيار الحجم'
+                                : 'يحتاج مراجعة'}
                             </p>
                           )}
                         </div>

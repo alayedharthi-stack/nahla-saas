@@ -684,6 +684,8 @@ def _serialise_order(
     detailed: bool = False,
     vip_phones: Optional[set[str]] = None,
     unread_phones: Optional[set[str]] = None,
+    db: Optional[Session] = None,
+    tenant_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Render an order for the dashboard. ``detailed=True`` adds line-item
@@ -702,6 +704,7 @@ def _serialise_order(
 
     item_titles: List[str] = []
     detailed_items: List[Dict[str, Any]] = []
+    source_key   = _resolve_source(order)
     for item in line_items:
         name = (
             item.get("product_name")
@@ -712,32 +715,63 @@ def _serialise_order(
         )
         qty  = int(item.get("quantity") or 1)
         item_titles.append(f"{name} ×{qty}")
-        if detailed:
-            unit_price = item.get("unit_price") or item.get("price")
-            try:
-                unit_price_f = float(unit_price) if unit_price is not None else None
-            except Exception:
-                unit_price_f = None
-            detailed_items.append({
-                "product_id":   str(item.get("product_id") or ""),
-                "name":         name,
-                "quantity":     qty,
-                "variant_id":   str(item.get("variant_id") or "") or None,
-                "variant_label": str(
-                    item.get("variant_label")
-                    or item.get("variant")
-                    or item.get("size")
-                    or ""
-                ).strip() or None,
-                "edition":      str(item.get("edition") or item.get("production") or "").strip() or None,
-                "unit_price":   unit_price_f,
-                "line_total":   round(unit_price_f * qty, 2) if unit_price_f is not None else None,
-                "image_url":    item.get("image_url") or item.get("image") or None,
-                "match_status": str(item.get("match_status") or "confirmed"),
-                "query_hint":   item.get("query_hint"),
-            })
 
-    source_key   = _resolve_source(order)
+    if detailed:
+        if db is not None and tenant_id is not None and source_key == "whatsapp":
+            from core.wa_order_line_item_evidence import (  # noqa: PLC0415
+                enrich_order_line_items_for_dashboard,
+            )
+
+            detailed_items = enrich_order_line_items_for_dashboard(
+                db, tenant_id, line_items,
+            )
+        else:
+            from core.wa_order_line_item_evidence import (  # noqa: PLC0415
+                MATCH_STATUS_CONFIRMED,
+                MATCH_STATUS_CUSTOM_UNMATCHED,
+                MATCH_STATUS_NEEDS_REVIEW,
+                parse_unit_price,
+                sanitize_line_item_without_db,
+            )
+
+            for item in line_items:
+                row = sanitize_line_item_without_db(dict(item or {}))
+                name = (
+                    row.get("product_name")
+                    or row.get("title")
+                    or row.get("name")
+                    or meta_product
+                    or "منتج"
+                )
+                qty = int(row.get("quantity") or 1)
+                unit_price_f = parse_unit_price(row.get("unit_price") or row.get("price"))
+                status = str(row.get("match_status") or "").strip()
+                if not status:
+                    status = (
+                        MATCH_STATUS_CUSTOM_UNMATCHED
+                        if not row.get("product_id")
+                        else MATCH_STATUS_NEEDS_REVIEW
+                    )
+                detailed_items.append({
+                    "product_id":   str(row.get("product_id") or ""),
+                    "name":         name,
+                    "quantity":     qty,
+                    "variant_id":   str(row.get("variant_id") or "") or None,
+                    "variant_label": str(
+                        row.get("variant_label")
+                        or row.get("variant")
+                        or row.get("size")
+                        or ""
+                    ).strip() or None,
+                    "edition":      str(row.get("edition") or row.get("production") or "").strip() or None,
+                    "unit_price":   unit_price_f,
+                    "line_total":   round(unit_price_f * qty, 2) if unit_price_f is not None else None,
+                    "image_url":    row.get("image_url") or row.get("image") or None,
+                    "match_status": status,
+                    "is_catalog_matched": status == MATCH_STATUS_CONFIRMED,
+                    "query_hint":   row.get("query_hint"),
+                })
+
     source_label = SOURCE_LABELS_AR.get(source_key, source_key)
     order_number = _resolve_order_number(order)
     display_name = _resolve_customer_display(order, customer_lookup)
@@ -930,7 +964,10 @@ def _serialise_order(
 
         from core.wa_order_editor import order_edit_capabilities  # noqa: PLC0415
 
-        caps = order_edit_capabilities(order)
+        caps = order_edit_capabilities(
+            order,
+            enriched_line_items=detailed_items if detailed else None,
+        )
         payload.update(caps)
         payload["customer_first_name"] = caps.get("customer_first_name")
         payload["customer_last_name"] = caps.get("customer_last_name")
@@ -1180,6 +1217,8 @@ async def get_order_detail(order_id: str, request: Request, db: Session = Depend
         detailed=True,
         vip_phones=vip_phones,
         unread_phones=unread_phones,
+        db=db,
+        tenant_id=tenant_id,
     )
     payload["shipping"] = {
         "can_create_shipment": create_gate.allowed,
@@ -1425,6 +1464,8 @@ async def confirm_order_payment(
             detailed=True,
             vip_phones=vip_phones,
             unread_phones=unread_phones,
+            db=db,
+            tenant_id=tenant_id,
         ),
     }
 
@@ -1506,6 +1547,8 @@ async def create_order_shipment_endpoint(
         detailed=True,
         vip_phones=vip_phones,
         unread_phones=unread_phones,
+        db=db,
+        tenant_id=tenant_id,
     )
     from core.order_shipping_policy import MSG_SHIPMENT_EXISTS  # noqa: PLC0415
 
@@ -1599,6 +1642,8 @@ async def generate_shipment_label_endpoint(
         detailed=True,
         vip_phones=vip_phones,
         unread_phones=unread_phones,
+        db=db,
+        tenant_id=tenant_id,
     )
     order_payload["shipping"] = {
         "can_create_shipment": False,
@@ -1706,6 +1751,8 @@ def _detail_order_payload(
         detailed=True,
         vip_phones=vip_phones,
         unread_phones=unread_phones,
+        db=db,
+        tenant_id=tenant_id,
     )
     payload["shipping"] = {
         "can_create_shipment": create_gate.allowed,
@@ -1933,7 +1980,7 @@ async def confirm_order_ready_endpoint(
 
     actor = _merchant_actor(request, tenant_id)
     try:
-        confirm_order_ready(order, actor=actor)
+        confirm_order_ready(order, actor=actor, db=db, tenant_id=tenant_id)
     except OrderEditError as exc:
         raise _handle_order_edit_error(exc) from exc
 

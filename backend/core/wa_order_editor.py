@@ -16,6 +16,7 @@ logger = logging.getLogger("nahla.wa_order_editor")
 
 MATCH_STATUS_CONFIRMED = "confirmed"
 MATCH_STATUS_NEEDS_REVIEW = "needs_review"
+MATCH_STATUS_NEEDS_VARIANT = "needs_variant"
 MATCH_STATUS_CUSTOM_UNMATCHED = "custom_unmatched_item"
 
 EDITABLE_STATUSES = frozenset({
@@ -191,11 +192,15 @@ def _order_prep_from_order(order: Any) -> Dict[str, Any]:
 
 def _refresh_order_state(order: Any) -> None:
     from core.wa_cart_line_items import cart_total_amount, merge_line_items  # noqa: PLC0415
+    from core.wa_order_line_item_evidence import sanitize_line_item_without_db  # noqa: PLC0415
     from core.wa_order_lifecycle import resolve_wa_order_status  # noqa: PLC0415
 
     meta = _meta(order)
     info = _customer_info(order)
-    line_items = merge_line_items(list(getattr(order, "line_items", None) or []))
+    line_items = [
+        sanitize_line_item_without_db(item)
+        for item in merge_line_items(list(getattr(order, "line_items", None) or []))
+    ]
     order.line_items = line_items
 
     prep = _order_prep_from_order(order)
@@ -235,25 +240,22 @@ def _refresh_order_state(order: Any) -> None:
 
 
 def _validate_line_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    from core.wa_cart_line_items import normalize_line_item  # noqa: PLC0415
+    from core.wa_order_line_item_evidence import sanitize_line_item_without_db  # noqa: PLC0415
 
-    row = normalize_line_item(dict(item or {}))
+    row = sanitize_line_item_without_db(dict(item or {}))
     status = str(row.get("match_status") or "").strip()
     pid = str(row.get("product_id") or "").strip()
-    vid = str(row.get("variant_id") or "").strip()
 
     if status == MATCH_STATUS_CONFIRMED:
         if not pid:
             raise OrderEditError("confirmed_item_requires_product_id")
+        from core.wa_order_line_item_evidence import parse_unit_price  # noqa: PLC0415
+
+        if parse_unit_price(row.get("unit_price")) is None:
+            raise OrderEditError("confirmed_item_requires_price")
+        vid = str(row.get("variant_id") or "").strip()
         if not vid and not str(row.get("variant") or "").strip():
             raise OrderEditError("confirmed_item_requires_variant")
-    else:
-        if not pid:
-            row["match_status"] = MATCH_STATUS_CUSTOM_UNMATCHED
-        elif status not in (MATCH_STATUS_NEEDS_REVIEW, MATCH_STATUS_CUSTOM_UNMATCHED):
-            row["match_status"] = MATCH_STATUS_NEEDS_REVIEW
-        elif not status:
-            row["match_status"] = MATCH_STATUS_NEEDS_REVIEW
     return row
 
 
@@ -265,54 +267,30 @@ def _lookup_catalog_line_item(
     variant_id: Optional[Any] = None,
     quantity: int = 1,
 ) -> Dict[str, Any]:
-    from models import Product, ProductVariant  # noqa: PLC0415
+    from core.wa_order_line_item_evidence import (  # noqa: PLC0415
+        MATCH_STATUS_CONFIRMED,
+        enrich_line_item_with_catalog,
+        product_requires_variant_selection,
+        resolve_catalog_product,
+        resolve_catalog_variant,
+    )
 
     ref = str(product_id or "").strip()
     if not ref:
         raise OrderEditError("product_id_required")
 
-    q = db.query(Product).filter(Product.tenant_id == tenant_id)
-    product = None
-    if ref.isdigit():
-        product = q.filter(Product.id == int(ref)).first()
-    if product is None:
-        product = q.filter(
-            (Product.external_id == ref) | (Product.sku == ref)
-        ).first()
+    product = resolve_catalog_product(db, tenant_id, ref)
     if product is None:
         raise OrderEditError("catalog_product_not_found")
 
-    variant_row = None
+    requires_variant = product_requires_variant_selection(db, product)
     vid = str(variant_id or "").strip()
-    if vid:
-        if vid.isdigit():
-            variant_row = (
-                db.query(ProductVariant)
-                .filter(
-                    ProductVariant.product_id == product.id,
-                    ProductVariant.id == int(vid),
-                )
-                .first()
-            )
-        if variant_row is None:
-            variant_row = (
-                db.query(ProductVariant)
-                .filter(
-                    ProductVariant.product_id == product.id,
-                    (
-                        (ProductVariant.salla_variant_id == vid)
-                        | (ProductVariant.retailer_id == vid)
-                        | (ProductVariant.sku == vid)
-                    ),
-                )
-                .first()
-            )
-    elif product.default_variant_id:
-        variant_row = (
-            db.query(ProductVariant)
-            .filter(ProductVariant.id == product.default_variant_id)
-            .first()
-        )
+    if requires_variant and not vid:
+        raise OrderEditError("catalog_variant_required")
+
+    variant_row = resolve_catalog_variant(db, product, vid) if vid else None
+    if requires_variant and vid and variant_row is None:
+        raise OrderEditError("catalog_variant_not_found")
 
     ext_id = str(product.external_id or product.id)
     item: Dict[str, Any] = {
@@ -321,11 +299,10 @@ def _lookup_catalog_line_item(
         "product_name": product.title,
         "title":        product.title,
         "quantity":     max(int(quantity or 1), 1),
-        "match_status": MATCH_STATUS_CONFIRMED,
         "source":       "merchant_dashboard",
     }
-    if product.price:
-        item["unit_price"] = product.price
+    if vid:
+        item["variant_id"] = vid
     if variant_row:
         item["variant_id"] = str(
             variant_row.salla_variant_id
@@ -335,7 +312,31 @@ def _lookup_catalog_line_item(
         item["variant"] = str(variant_row.option_summary or variant_row.sku or "").strip()
         if variant_row.price:
             item["unit_price"] = variant_row.price
-    return _validate_line_item(item)
+        if variant_row.image_url:
+            item["image_url"] = variant_row.image_url
+    elif product.price:
+        item["unit_price"] = product.price
+
+    media_meta = getattr(product, "extra_metadata", None) or {}
+    if isinstance(media_meta, dict):
+        if media_meta.get("image_url") and not item.get("image_url"):
+            item["image_url"] = media_meta.get("image_url")
+        if media_meta.get("product_url"):
+            item["product_url"] = media_meta.get("product_url")
+
+    enriched = enrich_line_item_with_catalog(db, tenant_id, item)
+    if enriched["match_status"] != MATCH_STATUS_CONFIRMED:
+        raise OrderEditError(f"catalog_evidence_incomplete:{enriched['match_status']}")
+
+    return {
+        **item,
+        "match_status": MATCH_STATUS_CONFIRMED,
+        "unit_price": enriched.get("unit_price"),
+        "catalog_product_name": enriched.get("catalog_product_name"),
+        "product_url": enriched.get("product_url"),
+        "image_url": enriched.get("image_url"),
+        "variant": enriched.get("variant_label") or item.get("variant"),
+    }
 
 
 def update_order_customer(
@@ -543,25 +544,40 @@ def delete_order_line_item(
     set_order_line_items(order, items, actor=actor)
 
 
-def confirm_order_ready(order: Any, *, actor: str = "merchant") -> None:
+def confirm_order_ready(
+    order: Any,
+    *,
+    actor: str = "merchant",
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+) -> None:
     """Move toward pending_payment when minimum data is present."""
     assert_editable(order)
     meta = _meta(order)
     prep = _order_prep_from_order(order)
     missing = list(meta.get("missing_fields") or [])
 
+    from core.wa_order_line_item_evidence import (  # noqa: PLC0415
+        enrich_order_line_items_for_dashboard,
+        order_line_items_block_confirm,
+        sanitize_line_item_without_db,
+    )
+
+    raw_items = list(getattr(order, "line_items", None) or [])
+    if db is not None and tenant_id is not None:
+        eval_items = enrich_order_line_items_for_dashboard(db, tenant_id, raw_items)
+    else:
+        eval_items = [
+            sanitize_line_item_without_db(dict(item or {}))
+            for item in raw_items
+        ]
+
     blockers = []
     if not prep.get("customer_first_name"):
         blockers.append("customer_first_name")
     if not prep.get("customer_last_name"):
         blockers.append("customer_last_name")
-    for item in list(getattr(order, "line_items", None) or []):
-        if str(item.get("match_status") or "") != MATCH_STATUS_CONFIRMED:
-            blockers.append("catalog_review_required")
-            break
-        if not item.get("product_id"):
-            blockers.append("catalog_review_required")
-            break
+    blockers.extend(order_line_items_block_confirm(eval_items))
 
     if blockers or missing:
         raise OrderEditError(f"order_incomplete:{','.join(sorted(set(blockers + missing)))}")
@@ -600,14 +616,28 @@ def log_draft_delete_audit(order: Any, *, actor: str) -> None:
     order.extra_metadata = meta
 
 
-def order_edit_capabilities(order: Any) -> Dict[str, Any]:
+def order_edit_capabilities(
+    order: Any,
+    *,
+    enriched_line_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    from core.wa_order_line_item_evidence import order_line_items_block_confirm  # noqa: PLC0415
+
     meta = _meta(order)
     prep = _order_prep_from_order(order)
+    items = enriched_line_items if enriched_line_items is not None else list(
+        getattr(order, "line_items", None) or []
+    )
+    catalog_blockers = order_line_items_block_confirm(items)
+    missing = list(meta.get("missing_fields") or [])
+    confirm_blockers = sorted(set(missing + catalog_blockers))
     return {
         "is_editable":          is_order_editable(order),
         "can_delete_draft":     can_delete_draft_order(order),
         "can_cancel":           can_cancel_order(order),
-        "missing_fields":       list(meta.get("missing_fields") or []),
+        "can_confirm_ready":    is_order_editable(order) and not confirm_blockers,
+        "confirm_blockers":     confirm_blockers,
+        "missing_fields":       missing,
         "needs_amount_review":  bool(meta.get("needs_amount_review")),
         "merchant_edited_at":   meta.get("merchant_edited_at"),
         "customer_first_name":  prep.get("customer_first_name"),
@@ -626,6 +656,7 @@ __all__ = [
     "MATCH_STATUS_CONFIRMED",
     "MATCH_STATUS_CUSTOM_UNMATCHED",
     "MATCH_STATUS_NEEDS_REVIEW",
+    "MATCH_STATUS_NEEDS_VARIANT",
     "OrderEditError",
     "add_order_line_item",
     "cancel_order",
