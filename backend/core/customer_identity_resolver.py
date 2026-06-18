@@ -212,8 +212,10 @@ def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
 
 
 def display_name_for_customer(customer: Any, *, phone_fallback: str = "") -> str:
+    from core.customer_display import is_valid_customer_display_name  # noqa: PLC0415
+
     snap = read_customer_identity(customer)
-    if snap.display_name:
+    if snap.display_name and is_valid_customer_display_name(snap.display_name):
         return snap.display_name
     return phone_fallback
 
