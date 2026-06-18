@@ -4577,3 +4577,59 @@ async def admin_debug_send_product(
         "cta_only":     cta_only_block,
         "final_mode":   final_mode,
     }
+
+
+@router.get("/conversation-list-visibility")
+async def admin_debug_conversation_list_visibility(
+    tenant_id: int = Query(..., description="Merchant tenant id to diagnose."),
+    phone: str = Query(
+        ...,
+        description="Customer phone to trace (E.164, digits-only, or 05XXXXXXXX).",
+    ),
+    filter: str = Query(
+        "all",
+        description="Same filter slug as GET /conversations (default: all).",
+    ),
+    limit: int = Query(80, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Read-only: why a phone is included/excluded from the inbox list.
+
+    Temporary P0 diagnostic — does NOT mutate DB state or weaken message
+    isolation on ``GET /conversations/messages/{phone}``.
+
+    Usage::
+
+        GET /admin/debug/conversation-list-visibility?tenant_id=33&phone=966505263377
+    """
+    from routers.conversations import (  # noqa: PLC0415
+        diagnose_conversation_list_visibility,
+        list_conversations,
+    )
+
+    _state = type("S", (), {})()
+    _state.tenant_id = tenant_id
+
+    class _FakeReq:
+        headers = {"X-Tenant-ID": str(tenant_id)}
+        cookies: dict = {}
+        state = _state
+
+    list_api = await list_conversations(
+        _FakeReq(),  # type: ignore[arg-type]
+        db,
+        limit=limit,
+        offset=offset,
+        filter=filter,
+    )
+    return await diagnose_conversation_list_visibility(
+        db,
+        tenant_id,
+        phone,
+        filter_slug=filter,
+        limit=limit,
+        offset=offset,
+        list_api_result=list_api,
+    )
