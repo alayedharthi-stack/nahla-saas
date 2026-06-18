@@ -392,26 +392,52 @@ def _latest_messages_for_conversations(
     return {row.conversation_id: row for row in rows}
 
 
+def _norm_phone_key(p: str) -> str:
+    return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
+
+
+def _phone_from_message_event(msg: MessageEvent | None) -> str:
+    if msg is None:
+        return ""
+    meta = msg.extra_metadata or {}
+    raw = str(meta.get("customer_phone") or meta.get("phone") or "").strip()
+    if not raw:
+        return ""
+    return normalize_phone(raw) or raw
+
+
+def _conversation_recency_ts(
+    conv_id: int,
+    latest_map: dict[int, MessageEvent],
+) -> float:
+    msg = latest_map.get(conv_id)
+    if msg and msg.created_at:
+        return msg.created_at.timestamp()
+    return 0.0
+
+
 def _resolve_list_phone(
     convo: Conversation,
     latest_any_by_conv: dict[int, MessageEvent] | None = None,
 ) -> str:
     """Resolve the inbox phone key for list rendering.
 
-    Falls back to the newest message metadata when the Customer /
-    Conversation metadata link is stale (common after identity split).
+    Prefer the newest MessageEvent phone stamp over stale Customer /
+    Conversation metadata (common after identity split or orphaned rows).
     """
-    phone = _resolve_customer_phone(convo)
-    if phone:
-        return normalize_phone(phone) or phone
-
     latest = (latest_any_by_conv or {}).get(convo.id)
-    if latest is not None:
-        meta = latest.extra_metadata or {}
-        meta_phone = str(meta.get("customer_phone") or meta.get("phone") or "").strip()
-        if meta_phone:
-            return normalize_phone(meta_phone) or meta_phone
+    msg_phone = _phone_from_message_event(latest)
+    link_phone = _resolve_customer_phone(convo)
+    if link_phone:
+        link_phone = normalize_phone(link_phone) or link_phone
 
+    if msg_phone:
+        if link_phone and _norm_phone_key(link_phone) != _norm_phone_key(msg_phone):
+            return msg_phone
+        return link_phone or msg_phone
+
+    if link_phone:
+        return link_phone
     return ""
 
 
@@ -539,6 +565,83 @@ def _find_conversations_for_phone(
                 matches[c.id] = c
 
     return list(matches.values())
+
+
+def _conversation_ids_from_exact_message_phone(
+    db: Session,
+    tenant_id: int,
+    variants: list[str],
+) -> list[int]:
+    """Conversation ids with exact metadata phone stamps (tenant-scoped)."""
+    if not variants:
+        return []
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    clauses = []
+    for variant in variants:
+        clauses.append(MessageEvent.extra_metadata["phone"].astext == variant)
+        clauses.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
+    rows = (
+        db.query(MessageEvent.conversation_id)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.conversation_id.isnot(None),
+            or_(*clauses),
+        )
+        .distinct()
+        .all()
+    )
+    return [int(r[0]) for r in rows if r[0] is not None]
+
+
+def _rank_conversations_for_list_phone(
+    conversations: list[Conversation],
+    latest_by_conv: dict[int, MessageEvent],
+) -> list[Conversation]:
+    """Active message threads beat stale metadata-only stubs for the same phone."""
+
+    def _sort_key(c: Conversation) -> tuple:
+        msg = latest_by_conv.get(c.id)
+        msg_ts = msg.created_at.timestamp() if msg and msg.created_at else 0.0
+        meta = c.extra_metadata or {}
+        has_meta = bool(meta.get("customer_phone") or meta.get("phone"))
+        metadata_only_empty = 1 if has_meta and not msg else 0
+        return (1 if msg else 0, msg_ts, -metadata_only_empty, c.id)
+
+    return sorted(conversations, key=_sort_key, reverse=True)
+
+
+def _find_conversations_for_list_phone(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+) -> list[Conversation]:
+    """List/diagnostic resolver: customer link, metadata, and message stamps.
+
+    Exact variant match on MessageEvent metadata only — never a tenant-wide OR.
+    When several rows resolve to the same phone, prefer the one with the
+    newest MessageEvent over an empty metadata-only stub.
+    """
+    variants, _suffix = _phone_lookup_variants(customer_phone)
+    by_id: dict[int, Conversation] = {}
+    for c in _find_conversations_for_phone(db, tenant_id, customer_phone):
+        by_id[c.id] = c
+    for cid in _conversation_ids_from_exact_message_phone(db, tenant_id, variants):
+        if cid in by_id:
+            continue
+        row = (
+            db.query(Conversation)
+            .filter(Conversation.id == cid, Conversation.tenant_id == tenant_id)
+            .first()
+        )
+        if row:
+            by_id[row.id] = row
+    if not by_id:
+        return []
+    latest = _latest_messages_for_conversations(
+        db, tenant_id, list(by_id.keys()), live_only=False,
+    )
+    return _rank_conversations_for_list_phone(list(by_id.values()), latest)
 
 
 def record_outbound_message(
@@ -711,7 +814,7 @@ async def diagnose_conversation_list_visibility(
             .all()
         )
 
-    conv_by_phone_resolver = _find_conversations_for_phone(db, tenant_id, customer_phone)
+    conv_by_phone_resolver = _find_conversations_for_list_phone(db, tenant_id, customer_phone)
 
     all_target_convos: dict[int, Conversation] = {}
     for c in conv_by_customer + conv_by_phone_resolver:
@@ -1318,6 +1421,14 @@ async def list_conversations(
                 prev["isAI"] = False
             if _customer_marketing_opt_out(convo):
                 prev["marketingOptOutManual"] = True
+            prev_cid = prev.get("_conv_id")
+            if _conversation_recency_ts(convo.id, any_latest_by_conv) > _conversation_recency_ts(
+                int(prev_cid) if prev_cid else 0,
+                any_latest_by_conv,
+            ):
+                prev["id"] = str(convo.id)
+                prev["_conv_id"] = convo.id
+                prev["customerId"] = getattr(convo, "customer_id", None)
             prev_has_name = prev["customer"] and prev["customer"] != prev["phone"]
             if name and not prev_has_name:
                 phone_info.pop(existing_key)
