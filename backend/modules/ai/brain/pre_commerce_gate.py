@@ -47,6 +47,7 @@ def should_pre_commerce_shortcut(
     min_confidence: Optional[float] = None,
     message: str = "",
     state: Any = None,
+    social_human_context: Any = None,
 ) -> bool:
     """True when this turn must bypass commerce preload entirely."""
     threshold = (
@@ -56,6 +57,11 @@ def should_pre_commerce_shortcut(
     )
     conf = float(getattr(intent, "confidence", 0) or 0)
     slots = getattr(intent, "slots", None) or {}
+
+    if social_human_context is not None and getattr(
+        social_human_context, "suppress_greeting_fast_path", False
+    ):
+        return False
 
     if nc_match is not None and nc_match.block_commerce:
         if float(nc_match.confidence or 0) >= threshold:

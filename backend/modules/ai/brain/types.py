@@ -901,6 +901,8 @@ class BrainContext:
     # Customer Intent Priority verdict (AI-ARCH-007). Computed after
     # intent classification; consumed by clarification, discovery, compose.
     intent_priority: Optional[Any] = None
+    # Social & Human Context Layer (P0) — computed after intent priority.
+    social_human_context: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

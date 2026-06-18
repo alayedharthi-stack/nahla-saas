@@ -531,6 +531,19 @@ class DefaultDecisionEngine:
                 getattr(ctx, "tenant_id", None), _sem_route_exc,
             )
 
+        # ── 0. Social & Human Context Layer (P0) ───────────────────────────
+        try:
+            from ..social_human_context import try_social_human_context_decision  # noqa: PLC0415
+
+            _shc_dec = try_social_human_context_decision(ctx)
+            if _shc_dec is not None:
+                return _shc_dec
+        except Exception as _shc_route_exc:  # noqa: BLE001
+            logger.debug(
+                "[SOCIAL_HUMAN_CONTEXT] routing skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None), _shc_route_exc,
+            )
+
         # ── 0a. Social / courtesy / religious (May 2026 #4) ─────────────────
         # The intent classifier set INTENT_SOCIAL when the customer's
         # message is a deterministic social ACK — thanks, blessing,
@@ -1030,7 +1043,7 @@ class DefaultDecisionEngine:
                     ),
                     confidence=0.93,
                 )
-        except Exception as _tlg_exc:  # noqa: BLE001
+        except Exception as _tlg_exc:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up guard best-effort
             logger.debug(
                 "[TRACKING_LINK_GUARD] skipped tenant=%s err=%s",
                 ctx.tenant_id, _tlg_exc,

@@ -75,6 +75,15 @@ _SERVICE_CLOSER_MARKERS: Tuple[str, ...] = (
     "أقدر أساعدك أكثر",
     "اقدر اساعدك اكثر",
     "لأساعدك أكثر",
+    "اكتب استفسارك",
+    "اكتب استفسارك هنا",
+    "تقدر تكتب استفسارك",
+    "تقدر تكتب استفسارك هنا",
+    "نخدمك باذن الله",
+    "نخدمك بإذن الله",
+    "اذا احتجت اي حاجه من المتجر",
+    "إذا احتجت أي حاجة من المتجر",
+    "تواصل معنا",
 )
 
 _SALES_CLOSER_MARKERS: Tuple[str, ...] = (
@@ -95,7 +104,8 @@ _SALES_CLOSER_MARKERS: Tuple[str, ...] = (
 _INLINE_TAIL_START_RE = re.compile(
     r"(?:[،,.!\s…]|^)"
     r"(?:"
-    r"(?:إذا|لو)\s+تحتاج(?:\s+أي|\s+مس)?"
+    r"(?:إذا|لو)\s+(?:تحتاج|احتج(?:ت)?)(?:\s+أي|\s+مس)?(?:\s+حاج(?:ة|ه))?"
+    r"|(?:إذا|لو)\s+احتج(?:ت)?\s+أي\s+حاج(?:ة|ه)\s+من\s+المتجر"
     r"|عندك(?:\s+أي)?\s+استفسار"
     r"|(?:أنا\s+هنا|أنا\s+موجود)"
     r"|كيف\s+حالك(?:\s+اليوم)?"
@@ -106,6 +116,8 @@ _INLINE_TAIL_START_RE = re.compile(
     r"|(?:^|[،.\s])بالخدمه"
     r"|تحت\s+أمر(?:ك|كم|كن)"
     r"|(?:^|[،.\s])(?:كيف\s+أ(?:قدر|خدم)|خبرني\s+كيف)"
+    r"|نخدمك\s+ب(?:اذ|إذ)ن\s+الله"
+    r"|(?:اكت|تكتب)\s+استفسار(?:ك|ات)?(?:\s+هنا)?"
     r")",
     re.UNICODE,
 )
@@ -180,17 +192,23 @@ def _strip_inline_service_tail(line: str) -> Tuple[str, bool]:
     if not raw:
         return "", False
 
-    match = _INLINE_TAIL_START_RE.search(raw)
-    if not match:
-        norm = _normalize_ar(raw)
-        if norm in _NORM_SERVICE_MARKERS:
-            return "", True
-        return raw, False
+    stripped_any = False
+    current = raw
+    while current:
+        match = _INLINE_TAIL_START_RE.search(current)
+        if not match:
+            norm = _normalize_ar(current)
+            if norm in _NORM_SERVICE_MARKERS:
+                return "", True
+            break
 
-    kept = raw[: match.start()].rstrip(" ،,.!…")
-    if not kept.strip():
-        return "", True
-    return kept.strip(), True
+        kept = current[: match.start()].rstrip(" ،,.!…")
+        if not kept.strip():
+            return "", True
+        stripped_any = True
+        current = kept.strip()
+
+    return current, stripped_any
 
 
 def strip_closer_segments(text: str, *, non_commerce: bool = False) -> Tuple[str, bool]:

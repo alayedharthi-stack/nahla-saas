@@ -37,8 +37,12 @@ TEMPLATE_ONLY_SOCIAL_CATEGORIES = frozenset({
 _NO_SERVICE_CLOSER = (
     "Do NOT end with customer-service or help-desk closers — no "
     "«كيف أقدر أخدمك», «كيف أساعدك», «أنا هنا للمساعدة», "
-    "«إذا احتجت أي مساعدة», «خبرني كيف أساعدك», or «تحت أمرك» as a "
-    "closing line. End on the social beat; do not pivot to assistance."
+    "«إذا احتجت أي مساعدة», «إذا احتجت أي حاجة من المتجر», "
+    "«اكتب استفسارك», «نخدمك بإذن الله», «خبرني كيف أساعدك», or "
+    "«تحت أمرك» as a closing line. "
+    "If the inbound is purely social/human, do NOT assume you must "
+    "return the customer to sales or service — end naturally on the "
+    "social beat without a follow-up CTA."
 )
 
 _KIND_GUIDANCE: dict[str, str] = {
