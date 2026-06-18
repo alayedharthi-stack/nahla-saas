@@ -275,6 +275,11 @@ def _resolve_sync_action(
     curr_snap: Dict[str, Any],
     order_prep: Dict[str, Any],
 ) -> Tuple[bool, str, str]:
+    if existing is not None and not is_paid_path:
+        locked_meta = getattr(existing, "extra_metadata", None) or {}
+        if locked_meta.get("merchant_edit_locked"):
+            return False, "merchant_edit_locked", "skip"
+
     if is_paid_path:
         if existing is None:
             return True, "lifecycle:promote_paid", "create"
