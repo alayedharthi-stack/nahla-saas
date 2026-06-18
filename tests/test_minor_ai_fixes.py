@@ -74,13 +74,23 @@ def test_arrival_verbs_are_not_extracted_as_names() -> None:
 
 
 def test_real_names_still_extracted() -> None:
-    """Sanity: legitimate self-intros still get captured (we did
-    not over-prune the blocklist)."""
+    """Sanity: explicit self-intros still get captured; bare ``أنا …``
+    without ``اسمي`` is rejected under the P0 name policy."""
     from core.customer_name_extractor import extract_high_confidence_name
 
-    result = extract_high_confidence_name("أنا محمد")
+    assert extract_high_confidence_name("أنا محمد") is None
+
+    result = extract_high_confidence_name("أنا اسمي محمد")
     assert result is not None
-    assert "محمد" in result.value
+    assert result.value == "محمد"
+
+    result = extract_high_confidence_name("اسمي محمد")
+    assert result is not None
+    assert result.value == "محمد"
+
+    result = extract_high_confidence_name("معك محمد")
+    assert result is not None
+    assert result.value == "محمد"
 
 
 def test_ordering_extractor_rejects_arrival_verbs() -> None:
