@@ -727,9 +727,13 @@ class MerchantBrain:
                         state_name=_wf,
                         relevant=_rel,
                         reason=(
-                            "topic_shift"
-                            if _state_relevance.detected_topic_shift and not _rel
-                            else "current_turn_match"
+                            "support_listing_topic_shift"
+                            if _state_relevance.support_listing_topic_shift and not _rel
+                            else (
+                                "topic_shift"
+                                if _state_relevance.detected_topic_shift and not _rel
+                                else "current_turn_match"
+                            )
                         ),
                     )
         except Exception as _sr_exc:  # noqa: BLE001
