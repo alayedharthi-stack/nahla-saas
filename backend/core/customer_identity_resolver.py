@@ -191,7 +191,15 @@ def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
         else:
             status = STATUS_MISSING
 
-    display = name if is_official_name_status(status) and name else (proposed or name)
+    manual_cleared = bool(meta.get("manual_name_cleared"))
+    if manual_cleared and not name:
+        # Merchant intentionally wiped the name — never resurrect a
+        # WhatsApp-profile ``proposed_name`` ghost in the table.
+        display = ""
+    elif is_official_name_status(status) and name:
+        display = name
+    else:
+        display = proposed or name
     return CustomerIdentitySnapshot(
         customer_name=name,
         customer_name_source=source,

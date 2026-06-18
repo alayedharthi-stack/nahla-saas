@@ -149,6 +149,13 @@ export interface CustomerCreatePayload {
   email?: string
 }
 
+/** PATCH body — ``name: null`` explicitly clears the stored name. */
+export interface CustomerPatchPayload {
+  name?: string | null
+  phone?: string
+  email?: string
+}
+
 export interface CustomerSegmentMeta {
   key: string
   label_ar: string
@@ -460,16 +467,18 @@ export const customersApi = {
     })
   },
 
-  update(id: number, data: Partial<CustomerCreatePayload>) {
+  update(id: number, data: Partial<CustomerPatchPayload>) {
     // Backend returns the persisted name + manual_name_override flag
     // so the caller can update the in-memory row without a refetch.
     return apiCall<{
       updated:               boolean
       id:                    number
       name:                  string
+      display_name:          string
       phone:                 string
       email:                 string
       manual_name_override:  boolean
+      manual_name_cleared?:  boolean
       name_changed:          boolean
     }>(`/customers/${id}`, {
       method: 'PATCH',
