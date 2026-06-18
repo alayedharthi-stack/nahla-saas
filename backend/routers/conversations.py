@@ -345,6 +345,76 @@ def _resolve_customer_phone(convo: Conversation) -> str:
     return str(meta.get("customer_phone") or meta.get("phone") or "")
 
 
+def _inbox_live_only_filter():
+    """Rows stamped as historical/backfill must not drive inbox surface."""
+    from sqlalchemy import and_, or_  # noqa: PLC0415
+
+    hi = MessageEvent.extra_metadata["historical_import"].astext
+    mo = MessageEvent.extra_metadata["message_origin"].astext
+    return and_(
+        or_(hi.is_(None), hi != "true"),
+        or_(mo.is_(None), mo != "historical_sync"),
+    )
+
+
+def _latest_messages_for_conversations(
+    db: Session,
+    tenant_id: int,
+    conv_ids: list[int],
+    *,
+    live_only: bool = False,
+) -> dict[int, MessageEvent]:
+    """Return the newest MessageEvent per conversation_id (map by conv id)."""
+    if not conv_ids:
+        return {}
+    from sqlalchemy import func  # noqa: PLC0415
+
+    filters = [
+        MessageEvent.tenant_id == tenant_id,
+        MessageEvent.conversation_id.in_(conv_ids),
+    ]
+    if live_only:
+        filters.append(_inbox_live_only_filter())
+    latest_sq = (
+        db.query(
+            MessageEvent.conversation_id,
+            func.max(MessageEvent.id).label("max_id"),
+        )
+        .filter(*filters)
+        .group_by(MessageEvent.conversation_id)
+        .subquery()
+    )
+    rows = (
+        db.query(MessageEvent)
+        .join(latest_sq, MessageEvent.id == latest_sq.c.max_id)
+        .all()
+    )
+    return {row.conversation_id: row for row in rows}
+
+
+def _resolve_list_phone(
+    convo: Conversation,
+    latest_any_by_conv: dict[int, MessageEvent] | None = None,
+) -> str:
+    """Resolve the inbox phone key for list rendering.
+
+    Falls back to the newest message metadata when the Customer /
+    Conversation metadata link is stale (common after identity split).
+    """
+    phone = _resolve_customer_phone(convo)
+    if phone:
+        return normalize_phone(phone) or phone
+
+    latest = (latest_any_by_conv or {}).get(convo.id)
+    if latest is not None:
+        meta = latest.extra_metadata or {}
+        meta_phone = str(meta.get("customer_phone") or meta.get("phone") or "").strip()
+        if meta_phone:
+            return normalize_phone(meta_phone) or meta_phone
+
+    return ""
+
+
 def _digits_only(value: str | None) -> str:
     """Phone helper — strip everything but digits."""
     if not value:
@@ -617,13 +687,7 @@ async def list_conversations(
     _t0 = _time.perf_counter()
 
     def _inbox_live_only_clause():
-        """Rows stamped as historical/backfill must not drive inbox surface."""
-        hi = MessageEvent.extra_metadata["historical_import"].astext
-        mo = MessageEvent.extra_metadata["message_origin"].astext
-        return and_(
-            or_(hi.is_(None), hi != "true"),
-            or_(mo.is_(None), mo != "historical_sync"),
-        )
+        return _inbox_live_only_filter()
 
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
@@ -744,17 +808,16 @@ async def list_conversations(
     fetch_cap = max(200, (paging_cap_limit + max(0, int(offset or 0))) * 3)
     fetch_cap = min(fetch_cap, 1500)
 
-    # MAX(created_at) per conversation — used both for ordering here AND
-    # reused below as the "latest message" source where possible.
+    # MAX(created_at) per conversation — used for SQL ordering. Use ANY
+    # message timestamp so rows are not pushed to nullslast() (and cut off
+    # by fetch_cap) when the newest row is historical-only or metadata uses
+    # a local phone stamp. Preview still prefers live rows below.
     last_msg_ts_sq = (
         db.query(
             MessageEvent.conversation_id.label("conv_id"),
             func.max(MessageEvent.created_at).label("last_msg_at"),
         )
-        .filter(
-            MessageEvent.tenant_id == tenant_id,
-            _inbox_live_only_clause(),
-        )
+        .filter(MessageEvent.tenant_id == tenant_id)
         .group_by(MessageEvent.conversation_id)
         .subquery()
     )
@@ -873,6 +936,11 @@ async def list_conversations(
     )
     convo_rows = convo_rows_q.all()
 
+    prefetch_conv_ids = [c.id for c in convo_rows]
+    any_latest_by_conv = _latest_messages_for_conversations(
+        db, tenant_id, prefetch_conv_ids, live_only=False,
+    )
+
     # Tenant-wide totals (cheap COUNT — used for has_more / paging math).
     # Recomputed against the SAME filter so the slice math is honest.
     tenant_convo_count = (
@@ -884,7 +952,7 @@ async def list_conversations(
     norm_to_key: Dict[str, str] = {}
     conv_id_to_phone: Dict[int, str] = {}
     for convo in convo_rows:
-        phone = _resolve_customer_phone(convo)
+        phone = _resolve_list_phone(convo, any_latest_by_conv)
         if not phone:
             continue
         n = _norm(phone)
@@ -1010,24 +1078,10 @@ async def list_conversations(
     # ── 2. Latest MessageEvent per conversation_id (single query) ────────────
     conv_ids = list(conv_id_to_phone.keys())
     if conv_ids:
-        latest_sq = (
-            db.query(
-                MessageEvent.conversation_id,
-                func.max(MessageEvent.id).label("max_id"),
-            )
-            .filter(
-                MessageEvent.tenant_id == tenant_id,
-                MessageEvent.conversation_id.in_(conv_ids),
-                _inbox_live_only_clause(),
-            )
-            .group_by(MessageEvent.conversation_id)
-            .subquery()
+        live_latest_by_conv = _latest_messages_for_conversations(
+            db, tenant_id, conv_ids, live_only=True,
         )
-        latest_msgs = (
-            db.query(MessageEvent)
-            .join(latest_sq, MessageEvent.id == latest_sq.c.max_id)
-            .all()
-        )
+
         def _last_msg_hint(msg) -> str:
             et = (msg.event_type or "").lower()
             meta = msg.extra_metadata or {}
@@ -1046,12 +1100,33 @@ async def list_conversations(
                 return "manual"
             return "system"
 
-        for msg in latest_msgs:
-            phone = conv_id_to_phone.get(msg.conversation_id)
-            if phone and phone in phone_info:
-                phone_info[phone]["lastMsg"] = msg.body or ""
-                phone_info[phone]["time"] = msg.created_at.isoformat() if msg.created_at else ""
-                phone_info[phone]["lastMsgType"] = _last_msg_hint(msg)
+        phone_to_cids: dict[str, list[int]] = {}
+        for cid, phone in conv_id_to_phone.items():
+            if phone:
+                phone_to_cids.setdefault(phone, []).append(cid)
+
+        for phone, cids in phone_to_cids.items():
+            if phone not in phone_info:
+                continue
+            best_msg: MessageEvent | None = None
+            for cid in cids:
+                msg = live_latest_by_conv.get(cid) or any_latest_by_conv.get(cid)
+                if msg is None:
+                    continue
+                if best_msg is None:
+                    best_msg = msg
+                    continue
+                msg_ts = msg.created_at or datetime.min
+                best_ts = best_msg.created_at or datetime.min
+                if msg_ts > best_ts:
+                    best_msg = msg
+            if best_msg is None:
+                continue
+            phone_info[phone]["lastMsg"] = best_msg.body or ""
+            phone_info[phone]["time"] = (
+                best_msg.created_at.isoformat() if best_msg.created_at else ""
+            )
+            phone_info[phone]["lastMsgType"] = _last_msg_hint(best_msg)
 
     # ── 3. Unread count per conversation (inbound after last outbound) ───────
     if conv_ids:
