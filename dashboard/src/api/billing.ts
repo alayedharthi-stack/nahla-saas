@@ -1,4 +1,5 @@
 import { apiCall } from './client'
+import { checkoutRedirectBases } from '../lib/billingPostPayment'
 
 export interface BillingPlan {
   id:               number
@@ -133,13 +134,10 @@ export const billingApi = {
    */
   createCheckout: (plan_slug: string) => {
     const origin = typeof window !== 'undefined' ? window.location.origin : ''
+    const { success_url, error_url } = checkoutRedirectBases(origin)
     return apiCall<CheckoutResult>('/billing/checkout', {
       method:  'POST',
-      body:    JSON.stringify({
-        plan_slug,
-        success_url: `${origin}/billing/payment-result`,
-        error_url:   `${origin}/billing/payment-result`,
-      }),
+      body:    JSON.stringify({ plan_slug, success_url, error_url }),
     })
   },
 

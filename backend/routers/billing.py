@@ -528,8 +528,7 @@ async def _do_checkout(
     is_launch  = now <= LAUNCH_PROMO_UNTIL
     price_sar  = int(plan_meta.get("launch_price_sar", plan.price_sar)) if is_launch else int(plan.price_sar)
 
-    base_success = (body.success_url or "").rstrip("/") or "https://app.nahlah.ai/billing"
-    base_error   = (body.error_url   or "").rstrip("/") or "https://app.nahlah.ai/billing"
+    from core.billing_redirects import build_moyasar_checkout_redirects  # noqa: PLC0415
 
     gateway_client, gateway_name, gateway_cfg = get_billing_gateway(db, tenant_id)
 
@@ -649,8 +648,9 @@ async def _do_checkout(
         db.add(sub)
         db.flush()
 
-        success_redirect = f"{base_success}?status=paid&sub_id={sub.id}"
-        error_redirect   = f"{base_error}?status=failed&sub_id={sub.id}"
+        success_redirect, error_redirect = build_moyasar_checkout_redirects(
+            body.success_url, body.error_url, sub.id,
+        )
 
         try:
             invoice = await gateway_client.create_invoice(
