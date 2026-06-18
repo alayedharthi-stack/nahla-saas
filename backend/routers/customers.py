@@ -176,6 +176,8 @@ class CustomerPatchIn(BaseModel):
             raise ValueError(
                 f"الاسم طويل جداً (الحد الأقصى {CUSTOMER_NAME_MAX_LEN} حرفاً)"
             )
+        if not v:
+            return None
         return v
 
 
@@ -1051,7 +1053,7 @@ async def update_customer(
     # without a ``name`` key) MUST be a no-op.
     name_changed = False
     name_cleared = False
-    _name_field_sent = "name" in getattr(body, "model_fields_set", set())
+    _name_field_sent = "name" in getattr(body, "model_fields_set", set()) or "name" in getattr(body, "__fields_set__", set())
     if _name_field_sent:
         new_value: Optional[str] = body.name if (body.name or "").strip() else None
         previous_name = cust.name or None

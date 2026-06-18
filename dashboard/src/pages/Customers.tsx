@@ -217,8 +217,11 @@ export default function Customers() {
   const INLINE_NAME_MAX_LEN = 80
 
   const startInlineEdit = useCallback((cust: CustomerRecord) => {
+    // Edit the canonical ``name`` only — ``display_name`` may be a
+    // phone fallback after a manual clear and must not pre-fill the
+    // input with the customer's number.
     setInlineEditId(cust.id)
-    setInlineEditValue(cust.display_name || cust.name || '')
+    setInlineEditValue(cust.name || '')
     setInlineEditError('')
   }, [])
 
@@ -256,8 +259,9 @@ export default function Customers() {
     setInlineEditSaving(true)
     setInlineEditError('')
     try {
-      const res = await customersApi.update(cust.id, { name: trimmed })
+      const res = await customersApi.update(cust.id, { name: trimmed || null })
       const _wasCleared = !trimmed
+      const _nextDisplay = res.display_name ?? (trimmed || cust.phone || '')
       // Update the row IN-PLACE so the merchant stays inside the
       // current search / filter / page view. Critical for the
       // "search for 'تيك توك' → edit row → keep going" workflow.
@@ -270,7 +274,9 @@ export default function Customers() {
           c.id === cust.id
             ? {
                 ...c,
-                name: res.name ?? trimmed,
+                name: res.name ?? '',
+                display_name: _nextDisplay,
+                proposed_name: _wasCleared ? '' : c.proposed_name,
                 manual_name_override: res.manual_name_override ?? true,
                 manual_name_cleared: (res as any).manual_name_cleared ?? _wasCleared,
                 manual_name_edited_at: new Date().toISOString(),
@@ -284,7 +290,9 @@ export default function Customers() {
         prev && prev.id === cust.id
           ? {
               ...prev,
-              name: res.name ?? trimmed,
+              name: res.name ?? '',
+              display_name: _nextDisplay,
+              proposed_name: _wasCleared ? '' : prev.proposed_name,
               manual_name_override: res.manual_name_override ?? true,
               manual_name_cleared: (res as any).manual_name_cleared ?? _wasCleared,
               manual_name_edited_at: new Date().toISOString(),
