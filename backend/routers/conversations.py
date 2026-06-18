@@ -638,6 +638,313 @@ def record_outbound_message(
         )
 
 
+def _deploy_sha_for_diagnostics() -> dict[str, str | bool | None]:
+    import os  # noqa: PLC0415
+
+    sha = (
+        os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+        or os.environ.get("GIT_COMMIT_SHA")
+        or os.environ.get("COMMIT_SHA")
+        or ""
+    )
+    return {
+        "git_sha": sha or None,
+        "git_sha_short": (sha[:7] if sha else None),
+        "includes_be61eea1_list_fix": (
+            bool(sha) and (sha.startswith("99c18a7") or sha.startswith("be61eea"))
+        ),
+    }
+
+
+async def diagnose_conversation_list_visibility(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+    *,
+    filter_slug: str = "all",
+    limit: int = 80,
+    offset: int = 0,
+    list_api_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read-only probe: why a phone is included/excluded from list_conversations."""
+    from sqlalchemy import and_, func, or_  # noqa: PLC0415
+
+    variants, suffix = _phone_lookup_variants(customer_phone)
+    target_norm = _digits_only(normalize_phone(customer_phone) or customer_phone)
+
+    def _norm(p: str) -> str:
+        return (p or "").strip().replace("+", "").replace("-", "").replace(" ", "")
+
+    def _cust_row(c: Customer) -> dict[str, Any]:
+        return {
+            "id": c.id,
+            "phone": c.phone,
+            "normalized_phone": c.normalized_phone,
+            "name": c.name,
+            "acquisition_channel": getattr(c, "acquisition_channel", None),
+        }
+
+    customer_matches = []
+    if variants:
+        customer_matches = (
+            db.query(Customer)
+            .filter(
+                Customer.tenant_id == tenant_id,
+                or_(
+                    Customer.phone.in_(variants),
+                    Customer.normalized_phone.in_(variants),
+                ),
+            )
+            .all()
+        )
+
+    customer_ids = [c.id for c in customer_matches]
+    conv_by_customer = []
+    if customer_ids:
+        conv_by_customer = (
+            db.query(Conversation)
+            .filter(
+                Conversation.tenant_id == tenant_id,
+                Conversation.customer_id.in_(customer_ids),
+            )
+            .order_by(Conversation.id.desc())
+            .all()
+        )
+
+    conv_by_phone_resolver = _find_conversations_for_phone(db, tenant_id, customer_phone)
+
+    all_target_convos: dict[int, Conversation] = {}
+    for c in conv_by_customer + conv_by_phone_resolver:
+        all_target_convos[c.id] = c
+    if all_target_convos:
+        target_conversations = (
+            db.query(Conversation)
+            .options(joinedload(Conversation.customer))
+            .filter(Conversation.id.in_(list(all_target_convos.keys())))
+            .all()
+        )
+    else:
+        target_conversations = []
+
+    phone_meta_filters = []
+    for variant in variants:
+        phone_meta_filters.append(MessageEvent.extra_metadata["phone"].astext == variant)
+        phone_meta_filters.append(MessageEvent.extra_metadata["customer_phone"].astext == variant)
+
+    message_filters = [MessageEvent.body.ilike("%387%")]
+    if phone_meta_filters:
+        message_filters.append(or_(*phone_meta_filters))
+    recent_messages = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            or_(*message_filters),
+        )
+        .order_by(MessageEvent.id.desc())
+        .limit(25)
+        .all()
+    )
+
+    paging_cap_limit = max(1, min(int(limit or 80), 200))
+    fetch_cap = max(200, (paging_cap_limit + max(0, int(offset or 0))) * 3)
+    fetch_cap = min(fetch_cap, 1500)
+
+    last_msg_ts_sq = (
+        db.query(
+            MessageEvent.conversation_id.label("conv_id"),
+            func.max(MessageEvent.created_at).label("last_msg_at"),
+        )
+        .filter(MessageEvent.tenant_id == tenant_id)
+        .group_by(MessageEvent.conversation_id)
+        .subquery()
+    )
+
+    convo_rows_q = (
+        db.query(Conversation, last_msg_ts_sq.c.last_msg_at)
+        .outerjoin(last_msg_ts_sq, last_msg_ts_sq.c.conv_id == Conversation.id)
+        .filter(Conversation.tenant_id == tenant_id)
+        .order_by(
+            last_msg_ts_sq.c.last_msg_at.desc().nullslast(),
+            Conversation.id.desc(),
+        )
+    )
+    tenant_convo_count = (
+        db.query(func.count(Conversation.id))
+        .filter(Conversation.tenant_id == tenant_id)
+        .scalar()
+    ) or 0
+    capped_rows = convo_rows_q.limit(fetch_cap).all()
+    capped_ids = {row[0].id for row in capped_rows}
+
+    prefetch_ids = [row[0].id for row in capped_rows]
+    any_latest_by_conv = _latest_messages_for_conversations(
+        db, tenant_id, prefetch_ids, live_only=False,
+    )
+
+    conv_traces: list[dict[str, Any]] = []
+    for convo in target_conversations:
+        last_at = (
+            db.query(func.max(MessageEvent.created_at))
+            .filter(
+                MessageEvent.tenant_id == tenant_id,
+                MessageEvent.conversation_id == convo.id,
+            )
+            .scalar()
+        )
+        ahead_count = None
+        if last_at is not None:
+            ahead_count = (
+                db.query(func.count(Conversation.id))
+                .outerjoin(last_msg_ts_sq, last_msg_ts_sq.c.conv_id == Conversation.id)
+                .filter(
+                    Conversation.tenant_id == tenant_id,
+                    last_msg_ts_sq.c.last_msg_at > last_at,
+                )
+                .scalar()
+            )
+        else:
+            ahead_count = (
+                db.query(func.count(Conversation.id))
+                .outerjoin(last_msg_ts_sq, last_msg_ts_sq.c.conv_id == Conversation.id)
+                .filter(
+                    Conversation.tenant_id == tenant_id,
+                    last_msg_ts_sq.c.last_msg_at.isnot(None),
+                )
+                .scalar()
+            )
+
+        resolved_customer = _resolve_customer_phone(convo)
+        resolved_list = _resolve_list_phone(
+            convo,
+            any_latest_by_conv if convo.id in any_latest_by_conv else _latest_messages_for_conversations(
+                db, tenant_id, [convo.id], live_only=False,
+            ),
+        )
+        latest_any = _latest_messages_for_conversations(
+            db, tenant_id, [convo.id], live_only=False,
+        ).get(convo.id)
+        latest_live = _latest_messages_for_conversations(
+            db, tenant_id, [convo.id], live_only=True,
+        ).get(convo.id)
+
+        in_fetch_cap = convo.id in capped_ids
+        skip_reasons: list[str] = []
+        if not in_fetch_cap:
+            skip_reasons.append(
+                f"conversation_not_in_fetch_cap (rank≈{(ahead_count or 0) + 1} of {tenant_convo_count}, fetch_cap={fetch_cap})"
+            )
+        if not resolved_list:
+            skip_reasons.append("list_phone_resolution_empty")
+        if resolved_list and _norm(resolved_list) != target_norm:
+            skip_reasons.append(
+                f"resolved_list_phone_mismatch (got={resolved_list}, expected_norm={target_norm})"
+            )
+
+        conv_traces.append({
+            "conversation_id": convo.id,
+            "customer_id": convo.customer_id,
+            "status": convo.status,
+            "extra_metadata_phone": (convo.extra_metadata or {}).get("phone")
+            or (convo.extra_metadata or {}).get("customer_phone"),
+            "linked_customer": _cust_row(convo.customer) if convo.customer else None,
+            "resolved_customer_phone": resolved_customer or None,
+            "resolved_list_phone": resolved_list or None,
+            "latest_any_message": {
+                "id": latest_any.id,
+                "body": (latest_any.body or "")[:120],
+                "created_at": latest_any.created_at.isoformat() if latest_any and latest_any.created_at else None,
+                "metadata_phone": (latest_any.extra_metadata or {}).get("phone") if latest_any else None,
+                "metadata_customer_phone": (latest_any.extra_metadata or {}).get("customer_phone") if latest_any else None,
+            } if latest_any else None,
+            "latest_live_message": {
+                "id": latest_live.id,
+                "body": (latest_live.body or "")[:120],
+            } if latest_live else None,
+            "in_fetch_cap": in_fetch_cap,
+            "approx_rank_by_last_message": (ahead_count or 0) + 1 if ahead_count is not None else None,
+            "tenant_conversation_count": tenant_convo_count,
+            "would_skip_in_list_loop": bool(skip_reasons),
+            "skip_reasons": skip_reasons,
+        })
+
+    api_rows = (list_api_result or {}).get("conversations") or []
+    api_phones = [row.get("phone") for row in api_rows]
+    api_match = next(
+        (row for row in api_rows if _norm(str(row.get("phone") or "")) == target_norm),
+        None,
+    )
+
+    verdict_reasons: list[str] = []
+    if api_match:
+        verdict = "included_in_list_api"
+    elif not target_conversations:
+        verdict = "no_matching_conversation_rows"
+        verdict_reasons.append("no Customer/Conversation rows resolve for phone variants")
+    elif all(t["would_skip_in_list_loop"] for t in conv_traces):
+        verdict = "excluded_by_list_pipeline"
+        for t in conv_traces:
+            verdict_reasons.extend(t["skip_reasons"])
+    elif not api_match and target_conversations:
+        verdict = "excluded_after_merge_or_pagination"
+        verdict_reasons.append(
+            f"conv rows exist but phone absent from list API page (offset={offset}, limit={limit})"
+        )
+    else:
+        verdict = "unknown"
+
+    payload = {
+        "deploy": _deploy_sha_for_diagnostics(),
+        "tenant_id": tenant_id,
+        "queried_phone": customer_phone,
+        "phone_variants": variants,
+        "phone_suffix_9": suffix,
+        "target_norm_digits": target_norm,
+        "filter": filter_slug,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "fetch_cap": fetch_cap,
+            "tenant_conversation_count": tenant_convo_count,
+            "fetch_cap_hit": len(capped_rows) >= fetch_cap,
+        },
+        "customers_matching_variants": [_cust_row(c) for c in customer_matches],
+        "conversations_for_customers": [c.id for c in conv_by_customer],
+        "conversations_from_phone_resolver": [c.id for c in conv_by_phone_resolver],
+        "conversation_traces": conv_traces,
+        "recent_messages_387_or_phone": [
+            {
+                "id": m.id,
+                "conversation_id": m.conversation_id,
+                "body": (m.body or "")[:120],
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "metadata_phone": (m.extra_metadata or {}).get("phone"),
+                "metadata_customer_phone": (m.extra_metadata or {}).get("customer_phone"),
+                "historical_import": (m.extra_metadata or {}).get("historical_import"),
+                "message_origin": (m.extra_metadata or {}).get("message_origin"),
+            }
+            for m in recent_messages
+        ],
+        "list_api": {
+            "returned_count": len(api_rows),
+            "has_more": (list_api_result or {}).get("has_more"),
+            "phones_sample": api_phones[:15],
+            "matched_row": api_match,
+        },
+        "verdict": verdict,
+        "verdict_reasons": list(dict.fromkeys(verdict_reasons)),
+    }
+    _log.info(
+        "[CONV_LIST_DIAG] tenant=%s phone=%s verdict=%s customers=%d convs=%d api_match=%s",
+        tenant_id,
+        customer_phone,
+        verdict,
+        len(customer_matches),
+        len(target_conversations),
+        bool(api_match),
+    )
+    return payload
+
+
 @router.get("")
 async def list_conversations(
     request: Request,
