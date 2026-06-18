@@ -1043,7 +1043,7 @@ class DefaultDecisionEngine:
                     ),
                     confidence=0.93,
                 )
-        except Exception as _tlg_exc:  # noqa: BLE001
+        except Exception as _tlg_exc:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up guard best-effort
             logger.debug(
                 "[TRACKING_LINK_GUARD] skipped tenant=%s err=%s",
                 ctx.tenant_id, _tlg_exc,

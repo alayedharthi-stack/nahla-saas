@@ -321,7 +321,7 @@ def _detect_from_intent_priority(intent_priority: Any) -> tuple[str, float, str]
             if et == ELEMENT_COURTESY:
                 return SHC_GRATITUDE, max(conf, 0.86), f"intent_priority:{et}"
     except Exception:
-        pass
+        logger.exception("[SOCIAL_HUMAN_CONTEXT] intent_priority enrichment failed")
     return "", 0.0, ""
 
 
@@ -719,7 +719,10 @@ def log_social_human_context(
             (preview or "")[:80],
         )
     except Exception:
-        pass
+        logger.exception(
+            "[SOCIAL_HUMAN_CONTEXT] diagnostic log failed tenant=%s",
+            tenant_id,
+        )
 
 
 __all__ = [
