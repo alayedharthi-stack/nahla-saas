@@ -42,12 +42,36 @@ assert(
   !postPaymentDashboardRoute().includes('/app/pricing'),
 )
 assert(
+  'post-payment dashboard route never uses /app/entry',
+  !postPaymentDashboardRoute().includes('/app/entry'),
+)
+assert(
   'post-payment billing route never uses /app/pricing',
   !postPaymentBillingRoute().includes('/app/pricing'),
 )
 assert(
+  'post-payment billing route never uses /app/entry',
+  !postPaymentBillingRoute().includes('/app/entry'),
+)
+assert(
   'pricing back route defaults to billing when not embedded',
   pricingPageBackRoute() === '/billing',
+)
+assert(
+  'unsubscribed salla onboarding back uses entry',
+  pricingPageBackRoute({ sallaEmbedded: true }) === '/app/entry',
+)
+assert(
+  'active merchant back from pricing uses overview even when embedded',
+  pricingPageBackRoute({ sallaEmbedded: true, subscriptionActive: true }) === '/overview',
+)
+assert(
+  'payment success back from pricing uses overview even when embedded',
+  pricingPageBackRoute({ sallaEmbedded: true, paymentSuccess: true }) === '/overview',
+)
+assert(
+  'active merchant back never uses /app/entry',
+  pricingPageBackRoute({ sallaEmbedded: true, subscriptionActive: true }) !== '/app/entry',
 )
 
 if (failed > 0) {

@@ -12,7 +12,7 @@ import {
   Tag, ShieldCheck, Sparkles, Phone, Clock, ArrowRight, Star, MessageSquare,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
-import { pricingPageBackRoute } from '../lib/billingPostPayment'
+import { pricingPageBackRoute, pricingPageBackLabel, pricingBackOpensFullDashboard } from '../lib/billingPostPayment'
 import { displayPlanFeature } from '../lib/planFeatures'
 
 const SUPPORT_WHATSAPP = '966555000000'
@@ -221,6 +221,25 @@ export default function SallaPricing() {
   const [loadError,   setLoadError]   = useState<string | null>(null)
   const [checkingOut, setCheckingOut] = useState<string | null>(null)
   const [checkoutErr, setCheckoutErr] = useState<string | null>(null)
+  const [paymentSuccess, setPaymentSuccess] = useState(false)
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('payment') === 'success') {
+        setPaymentSuccess(true)
+        params.delete('payment')
+        const cleanSearch = params.toString()
+        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
+        window.history.replaceState(null, '', cleanUrl)
+      }
+    } catch { /* noop */ }
+  }, [])
+
+  const backRoute = pricingPageBackRoute({
+    paymentSuccess,
+    subscriptionActive: status?.lifecycle_status === 'paid_active',
+  })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -293,13 +312,25 @@ export default function SallaPricing() {
 
         {/* ── Navigation ─────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between gap-3">
-          <Link
-            to={pricingPageBackRoute()}
-            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-brand-600 transition-colors"
-          >
-            <ArrowRight className="w-4 h-4 rtl:rotate-180" />
-            {pricingPageBackRoute() === '/app/entry' ? 'العودة للوحة التطبيق' : 'العودة للاشتراك والفوترة'}
-          </Link>
+          {pricingBackOpensFullDashboard(backRoute) ? (
+            <a
+              href="/overview"
+              target="_top"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-brand-600 transition-colors"
+            >
+              <ArrowRight className="w-4 h-4 rtl:rotate-180" />
+              {pricingPageBackLabel(backRoute)}
+            </a>
+          ) : (
+            <Link
+              to={backRoute}
+              className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-brand-600 transition-colors"
+            >
+              <ArrowRight className="w-4 h-4 rtl:rotate-180" />
+              {pricingPageBackLabel(backRoute)}
+            </Link>
+          )}
           {status?.lifecycle_status === 'paid_active' && status.plan && (
             <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
               <CheckCircle className="w-3.5 h-3.5" />

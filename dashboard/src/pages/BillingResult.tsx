@@ -6,6 +6,7 @@ import { invalidateEntitlementsCache } from '../hooks/useEntitlements'
 import {
   postPaymentDashboardRoute,
   postPaymentBillingRoute,
+  goToPostPaymentDashboard,
 } from '../lib/billingPostPayment'
 
 const MAX_POLLS       = 12
@@ -87,12 +88,12 @@ export default function BillingResult() {
     if (!isActivated || redirecting) return
     setRedirecting(true)
     redirectRef.current = setTimeout(() => {
-      navigate(dashboardRoute, { replace: true })
+      goToPostPaymentDashboard(navigate)
     }, SUCCESS_REDIRECT_MS)
     return () => {
       if (redirectRef.current) clearTimeout(redirectRef.current)
     }
-  }, [isActivated, redirecting, navigate, dashboardRoute])
+  }, [isActivated, redirecting, navigate])
 
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4" dir="rtl">
@@ -133,7 +134,7 @@ export default function BillingResult() {
                 </p>
               </div>
               <button
-                onClick={() => navigate(dashboardRoute)}
+                onClick={() => goToPostPaymentDashboard(navigate)}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
               >
                 الذهاب إلى لوحة التحكم
@@ -162,7 +163,7 @@ export default function BillingResult() {
                 )}
               </div>
               <button
-                onClick={() => navigate(dashboardRoute, { replace: true })}
+                onClick={() => goToPostPaymentDashboard(navigate)}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
               >
                 الذهاب إلى لوحة التحكم
