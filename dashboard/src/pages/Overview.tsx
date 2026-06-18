@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
-  Sparkles, Clock, AlertTriangle, RefreshCw,
+  Sparkles, Clock, AlertTriangle, RefreshCw, CheckCircle,
 } from 'lucide-react'
 
 const ArrowUp = TrendingUp
@@ -156,6 +156,20 @@ export default function Overview() {
     diagnostics?: Array<{ path: string; status?: any; error?: string | null; body?: any }>
   } | null>(null)
   const [showTierDiag, setShowTierDiag] = useState(false)
+  const [paymentSuccess, setPaymentSuccess] = useState(false)
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('payment') === 'success') {
+        setPaymentSuccess(true)
+        params.delete('payment')
+        const cleanSearch = params.toString()
+        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
+        window.history.replaceState(null, '', cleanUrl)
+      }
+    } catch { /* noop */ }
+  }, [])
 
   const refreshMetaTier = async () => {
     if (tierRefreshing) return
@@ -250,6 +264,22 @@ export default function Overview() {
 
   return (
     <div className="space-y-6">
+      {paymentSuccess && (
+        <div className="flex items-center gap-3 bg-emerald-50 border-2 border-emerald-300 rounded-xl px-4 py-3">
+          <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+          <p className="text-sm font-semibold text-emerald-900 leading-relaxed flex-1">
+            تم تجديد اشتراكك بنجاح — مرحباً بعودتك إلى لوحة التحكم.
+          </p>
+          <button
+            type="button"
+            onClick={() => setPaymentSuccess(false)}
+            className="text-xs text-emerald-700 hover:text-emerald-900 underline shrink-0"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
+
       {/* Nahla Impact Banner — "موظف مبيعات يعمل 24/7" */}
       <div className="rounded-2xl overflow-hidden bg-gradient-to-l from-brand-600 to-amber-500 p-px">
         <div className="bg-gradient-to-l from-brand-600/10 to-amber-500/10 rounded-2xl px-5 py-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">

@@ -3,14 +3,14 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { CheckCircle, XCircle, Loader2, ArrowRight, RefreshCw, Clock } from 'lucide-react'
 import { billingApi, type PaymentResult } from '../api/billing'
 import { invalidateEntitlementsCache } from '../hooks/useEntitlements'
+import {
+  postPaymentDashboardRoute,
+  postPaymentBillingRoute,
+} from '../lib/billingPostPayment'
 
-const MAX_POLLS  = 12
-const POLL_DELAY = 2500   // ms
-
-// Detect Salla embedded session — set by SallaEmbedded.tsx on login
-function isSallaEmbedded(): boolean {
-  try { return localStorage.getItem('nahla_salla_embedded') === '1' } catch { return false }
-}
+const MAX_POLLS       = 12
+const POLL_DELAY      = 2500   // ms
+const SUCCESS_REDIRECT_MS = 2800
 
 export default function BillingResult() {
   const navigate      = useNavigate()
@@ -18,21 +18,21 @@ export default function BillingResult() {
   const rawStatus     = params.get('status')      // 'paid' | 'failed' | null
   const subIdStr      = params.get('sub_id')
 
-  // Routes differ: Salla embedded → /app/pricing, regular → /overview or /billing
-  const dashboardRoute = isSallaEmbedded() ? '/app/pricing' : '/overview'
-  const billingRoute   = isSallaEmbedded() ? '/app/pricing' : '/billing'
+  const dashboardRoute = postPaymentDashboardRoute()
+  const billingRoute   = postPaymentBillingRoute(rawStatus === 'failed')
 
   const [result,       setResult]       = useState<PaymentResult | null>(null)
   const [polling,      setPolling]      = useState(false)
   const [attempts,     setAttempts]     = useState(0)
   const [error,        setError]        = useState<string | null>(null)
   const [slowWebhook,  setSlowWebhook]  = useState(false)
+  const [redirecting,  setRedirecting]  = useState(false)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const redirectRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const poll = async (subId: number, attempt: number) => {
     if (attempt > MAX_POLLS) {
       setPolling(false)
-      // Webhook may still be in flight — show "processing" state instead of hard error
       setSlowWebhook(true)
       return
     }
@@ -43,15 +43,10 @@ export default function BillingResult() {
 
       if (res.activated) {
         setPolling(false)
-        // Activation just happened — bust any cached billing state so
-        // the next page (overview / billing / Salla embedded pricing)
-        // doesn't render stale "no plan / trial expired" copy from the
-        // 2-minute useEntitlements cache. See hooks/useEntitlements.ts.
         try { invalidateEntitlementsCache() } catch { /* noop */ }
       } else if (res.status === 'payment_failed') {
         setPolling(false)
       } else {
-        // Still pending — poll again
         pollRef.current = setTimeout(() => poll(subId, attempt + 1), POLL_DELAY)
       }
     } catch {
@@ -71,7 +66,6 @@ export default function BillingResult() {
       setPolling(true)
       poll(subId, 1)
     } else {
-      // Moyasar returned an error status
       billingApi.getPaymentResult(subId)
         .then(r => setResult(r))
         .catch(() => setError('تعذّر التحقق من حالة الدفع.'))
@@ -79,21 +73,31 @@ export default function BillingResult() {
 
     return () => {
       if (pollRef.current) clearTimeout(pollRef.current)
+      if (redirectRef.current) clearTimeout(redirectRef.current)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // ── Determine UI state ───────────────────────────────────────────────────────
 
   const isActivated  = result?.activated === true
   const isFailed     = result?.status === 'payment_failed' || rawStatus === 'failed'
   const isPending    = polling || (!isActivated && !isFailed && !error && !slowWebhook)
 
+  // Auto-redirect to dashboard after successful activation
+  useEffect(() => {
+    if (!isActivated || redirecting) return
+    setRedirecting(true)
+    redirectRef.current = setTimeout(() => {
+      navigate(dashboardRoute, { replace: true })
+    }, SUCCESS_REDIRECT_MS)
+    return () => {
+      if (redirectRef.current) clearTimeout(redirectRef.current)
+    }
+  }, [isActivated, redirecting, navigate, dashboardRoute])
+
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4" dir="rtl">
       <div className="w-full max-w-sm">
 
-        {/* Logo */}
         <div className="flex justify-center mb-6">
           <div className="w-12 h-12 bg-brand-500 rounded-2xl flex items-center justify-center shadow-lg shadow-brand-500/30">
             <span className="text-white font-black text-lg">ن</span>
@@ -102,12 +106,11 @@ export default function BillingResult() {
 
         <div className="bg-white rounded-2xl shadow-xl p-8 text-center space-y-5">
 
-          {/* Polling / loading */}
           {isPending && !error && (
             <>
               <Loader2 className="w-14 h-14 animate-spin text-brand-500 mx-auto" />
               <div>
-                <p className="text-base font-bold text-slate-900">جارٍ تأكيد الدفع…</p>
+                <p className="text-base font-bold text-slate-900">جارٍ التحقق من الدفع…</p>
                 <p className="text-xs text-slate-400 mt-1">
                   يرجى الانتظار بينما نتحقق من حالة الدفع
                   {attempts > 0 && ` (${attempts}/${MAX_POLLS})`}
@@ -116,7 +119,6 @@ export default function BillingResult() {
             </>
           )}
 
-          {/* Slow webhook — payment likely succeeded, webhook still in transit */}
           {slowWebhook && !isActivated && !isFailed && (
             <>
               <Clock className="w-14 h-14 text-amber-400 mx-auto" />
@@ -140,12 +142,11 @@ export default function BillingResult() {
             </>
           )}
 
-          {/* Success */}
           {isActivated && (
             <>
               <CheckCircle className="w-14 h-14 text-emerald-500 mx-auto" />
               <div>
-                <p className="text-base font-bold text-slate-900">تم الدفع بنجاح!</p>
+                <p className="text-base font-bold text-slate-900">تم تجديد اشتراكك بنجاح</p>
                 <p className="text-sm text-slate-500 mt-1">
                   خطة{' '}
                   <strong>{result?.plan_name_ar ?? 'نحلة'}</strong>{' '}
@@ -156,9 +157,12 @@ export default function BillingResult() {
                     المبلغ المدفوع: {result.amount_sar.toLocaleString('ar-SA')} ر.س
                   </p>
                 )}
+                {redirecting && (
+                  <p className="text-xs text-brand-600 mt-2">جارٍ تحويلك إلى لوحة التحكم…</p>
+                )}
               </div>
               <button
-                onClick={() => navigate(dashboardRoute)}
+                onClick={() => navigate(dashboardRoute, { replace: true })}
                 className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
               >
                 الذهاب إلى لوحة التحكم
@@ -167,20 +171,18 @@ export default function BillingResult() {
             </>
           )}
 
-          {/* Failed */}
           {isFailed && !isActivated && (
             <>
               <XCircle className="w-14 h-14 text-red-400 mx-auto" />
               <div>
-                <p className="text-base font-bold text-slate-900">لم يتم الدفع</p>
+                <p className="text-base font-bold text-slate-900">لم يكتمل الدفع</p>
                 <p className="text-sm text-slate-500 mt-1">
-                  حدث خطأ أثناء معالجة الدفع أو تم إلغاؤه.
-                  يمكنك المحاولة مجدداً.
+                  لم يكتمل الدفع، يمكنك المحاولة مرة أخرى
                 </p>
               </div>
               <div className="flex flex-col gap-2">
                 <button
-                  onClick={() => navigate(billingRoute)}
+                  onClick={() => navigate(postPaymentBillingRoute(true))}
                   className="w-full bg-brand-500 hover:bg-brand-600 text-white font-bold py-2.5 rounded-xl text-sm transition-colors flex items-center justify-center gap-2"
                 >
                   <RefreshCw className="w-4 h-4" />
@@ -196,7 +198,6 @@ export default function BillingResult() {
             </>
           )}
 
-          {/* Error */}
           {error && (
             <>
               <XCircle className="w-14 h-14 text-amber-400 mx-auto" />

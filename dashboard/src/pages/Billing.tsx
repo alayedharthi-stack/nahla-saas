@@ -357,6 +357,27 @@ export default function Billing() {
   // Cleans the query param immediately so a browser refresh doesn't re-show
   // the banner forever.
   const [returnedFromSalla, setReturnedFromSalla] = useState(false)
+  const [paymentSuccess, setPaymentSuccess] = useState(false)
+  const [paymentFailed, setPaymentFailed] = useState(false)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('payment') === 'success') {
+        setPaymentSuccess(true)
+        params.delete('payment')
+        const cleanSearch = params.toString()
+        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
+        window.history.replaceState(null, '', cleanUrl)
+        trackEvent('billing_payment_success_landed', { source: 'billing_page' })
+      } else if (params.get('payment') === 'failed') {
+        setPaymentFailed(true)
+        params.delete('payment')
+        const cleanSearch = params.toString()
+        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
+        window.history.replaceState(null, '', cleanUrl)
+      }
+    } catch { /* noop */ }
+  }, [])
   useEffect(() => {
     if (!isSallaEmbedded) return
     try {
@@ -552,6 +573,40 @@ export default function Billing() {
         <h1 className="text-xl font-bold text-slate-900">الاشتراك والفوترة</h1>
         <p className="text-sm text-slate-500 mt-1">إدارة خطة نحلة واستخدامك الشهري</p>
       </div>
+
+      {/* Payment success — landed from /billing/payment-result redirect */}
+      {paymentSuccess && (
+        <div className="flex items-center gap-3 bg-emerald-50 border-2 border-emerald-300 rounded-xl px-4 py-3">
+          <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+          <p className="text-sm font-semibold text-emerald-900 leading-relaxed flex-1">
+            تم تجديد اشتراكك بنجاح — اشتراكك فعّال الآن.
+          </p>
+          <button
+            type="button"
+            onClick={() => setPaymentSuccess(false)}
+            className="text-xs text-emerald-700 hover:text-emerald-900 underline shrink-0"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
+
+      {/* Payment failed — retry path from payment-result page */}
+      {paymentFailed && (
+        <div className="flex items-center gap-3 bg-red-50 border-2 border-red-200 rounded-xl px-4 py-3">
+          <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+          <p className="text-sm font-semibold text-red-800 leading-relaxed flex-1">
+            لم يكتمل الدفع، يمكنك المحاولة مرة أخرى من الأسفل.
+          </p>
+          <button
+            type="button"
+            onClick={() => setPaymentFailed(false)}
+            className="text-xs text-red-700 hover:text-red-900 underline shrink-0"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
 
       {/* Returned from Salla without subscribing — only for Salla merchants
           who bounced back via ?from=salla query param. */}

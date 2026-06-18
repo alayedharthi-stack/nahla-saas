@@ -9,7 +9,8 @@
     "preview": "vite preview --host 0.0.0.0 --port 3000",
     "check:i18n": "npx --yes tsx@4 scripts/check-embedded-i18n.mts",
     "check:i18n-static": "npx --yes tsx@4 scripts/check-i18n-static.mts",
-    "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts"
+    "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts",
+    "check:billing-redirects": "npx --yes tsx@4 scripts/check-billing-redirects.mts"
   },
   "dependencies": {
     "@sentry/react": "^8.30.0",

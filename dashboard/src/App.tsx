@@ -110,7 +110,7 @@ export default function App() {
           <Route path="/app/salla"                  element={<SallaEmbedded />} />
           {/* Mini-dashboard — "استخدام التطبيق" inside Salla iframe (status + onboarding + metrics + CTAs) */}
           <Route path="/app/entry"                  element={<SallaEntryScreen />} />
-          {/* Pricing page — no Navbar/Sidebar; CTAs open app.nahlah.ai/billing externally */}
+          {/* Standalone Salla iframe pricing — not used as post-payment landing */}
           <Route path="/app/pricing"                element={<SallaPricing />} />
           {/* Quick Setup — shown to new Salla merchants before entry screen */}
           <Route path="/app/salla/setup"            element={<SallaSetup />} />

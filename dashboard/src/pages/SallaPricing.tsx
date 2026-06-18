@@ -1,16 +1,18 @@
 /**
  * SallaPricing.tsx — /app/pricing
  * -------------------------------------------------------
- * Salla Embedded pricing page — no Navbar, no Sidebar.
- * Dafع داخل iframe مباشرة عبر موى (نفس منطق Billing.tsx).
+ * Salla Embedded pricing page — standalone layout for iframe use.
+ * Post-payment merchants are redirected to /overview or /billing, not here.
  */
 import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import {
   CheckCircle, Zap, TrendingUp, Rocket,
   Loader2, AlertCircle, RefreshCw,
-  Tag, ShieldCheck, Sparkles, Phone, Clock,
+  Tag, ShieldCheck, Sparkles, Phone, Clock, ArrowRight,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
+import { pricingPageBackRoute } from '../lib/billingPostPayment'
 
 const SUPPORT_WHATSAPP = '966555000000'
 
@@ -294,6 +296,23 @@ export default function SallaPricing() {
       )}
 
       <div className="max-w-5xl mx-auto space-y-6">
+
+        {/* ── Navigation ─────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between gap-3">
+          <Link
+            to={pricingPageBackRoute()}
+            className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 hover:text-brand-600 transition-colors"
+          >
+            <ArrowRight className="w-4 h-4 rtl:rotate-180" />
+            {pricingPageBackRoute() === '/app/entry' ? 'العودة للوحة التطبيق' : 'العودة للاشتراك والفوترة'}
+          </Link>
+          {status?.lifecycle_status === 'paid_active' && status.plan && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+              <CheckCircle className="w-3.5 h-3.5" />
+              مشترك — {status.plan.name_ar}
+            </span>
+          )}
+        </div>
 
         {/* ── Header ─────────────────────────────────────────────────────── */}
         <div className="text-center space-y-2">
