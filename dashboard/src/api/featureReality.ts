@@ -117,12 +117,18 @@ export interface OrderDetailLineItem {
   name: string
   quantity: number
   variant_id?: string | null
+  variant_name?: string | null
   variant_label?: string | null
   edition?: string | null
   unit_price?: number | null
   line_total?: number | null
   image_url?: string | null
-  match_status?: 'confirmed' | 'needs_review' | 'custom_unmatched_item' | string
+  product_url?: string | null
+  catalog_product_id?: number | null
+  catalog_product_name?: string | null
+  match_status?: 'confirmed' | 'needs_review' | 'needs_variant' | 'custom_unmatched_item' | string
+  is_catalog_matched?: boolean
+  requires_variant_selection?: boolean
   query_hint?: string | null
 }
 
@@ -204,6 +210,8 @@ export interface OrderDetail extends DashboardOrder {
   payment_reminder_draft?: string | null
   shipping?: OrderShippingState
   is_editable?: boolean
+  can_confirm_ready?: boolean
+  confirm_blockers?: string[]
   can_delete_draft?: boolean
   can_cancel?: boolean
   missing_fields?: string[]

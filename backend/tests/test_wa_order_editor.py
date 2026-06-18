@@ -247,4 +247,5 @@ class TestSerializerEditFields:
         assert payload["is_editable"] is True
         assert payload["can_delete_draft"] is True
         assert payload["missing_fields"] == ["delivery_address"]
-        assert payload["line_items"][0]["match_status"] == MATCH_STATUS_NEEDS_REVIEW
+        assert payload["line_items"][0]["match_status"] == MATCH_STATUS_CUSTOM_UNMATCHED
+        assert payload["line_items"][0]["is_catalog_matched"] is False
