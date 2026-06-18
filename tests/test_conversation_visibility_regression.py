@@ -392,3 +392,64 @@ class TestConversationVisibilityRegression:
         bodies = [m["body"] for m in result["messages"]]
         assert "own-message" in bodies
         assert "other-customer-stamp" not in bodies
+
+    def test_list_prefers_message_active_conversation_over_stale_metadata_stub(self):
+        """Stale metadata-only row must not hide the live MessageEvent thread."""
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+
+        stale = Conversation(
+            tenant_id=t.id,
+            customer_id=None,
+            status="active",
+            extra_metadata={"phone": PHONE_DIGITS, "customer_phone": PHONE_DIGITS},
+        )
+        db.add(stale)
+        db.commit()
+        db.refresh(stale)
+
+        wrong_cust = Customer(
+            tenant_id=t.id,
+            phone=PHONE_OTHER,
+            normalized_phone=PHONE_OTHER,
+            name="Wrong link",
+        )
+        db.add(wrong_cust)
+        db.commit()
+        db.refresh(wrong_cust)
+
+        active = Conversation(
+            tenant_id=t.id,
+            customer_id=wrong_cust.id,
+            status="active",
+            extra_metadata={},
+        )
+        db.add(active)
+        db.commit()
+        db.refresh(active)
+
+        db.add(
+            MessageEvent(
+                tenant_id=t.id,
+                conversation_id=active.id,
+                direction="inbound",
+                body="السعر. 387 ريال الكيلو",
+                event_type="whatsapp",
+                created_at=datetime.utcnow(),
+                extra_metadata={
+                    "phone": PHONE_DIGITS,
+                    "customer_phone": PHONE_DIGITS,
+                },
+            )
+        )
+        db.commit()
+
+        result = _call_list(db, t.id)
+        row = next(
+            (r for r in result["conversations"] if r["phone"] == PHONE_E164),
+            None,
+        )
+        assert row is not None, [r["phone"] for r in result["conversations"]]
+        assert row["lastMsg"] == "السعر. 387 ريال الكيلو"
+        assert int(row["id"]) == active.id
+
