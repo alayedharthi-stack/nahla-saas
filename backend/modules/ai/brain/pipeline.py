@@ -769,6 +769,38 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001
             _nc_match = None
 
+        # ── 1a.6 Social & Human Context Layer (P0) ───────────────────────
+        _social_human_context = None
+        try:
+            from .social_human_context import (  # noqa: PLC0415
+                compute_social_human_context,
+                enrich_intent_with_social_human,
+                log_social_human_context,
+            )
+
+            _social_human_context = compute_social_human_context(
+                message=_raw_message or message,
+                intent=intent,
+                state=state_for_classify,
+                history=history,
+                inbound_metadata=(profile or {}).get("inbound_metadata"),
+                nc_match=_nc_match,
+                intent_priority=_intent_priority,
+            )
+            intent = enrich_intent_with_social_human(intent, _social_human_context)
+            log_social_human_context(
+                tenant_id=tenant_id,
+                shc=_social_human_context,
+                preview=_raw_message or message,
+            )
+        except Exception as _shc_exc:  # noqa: BLE001
+            logger.debug(
+                "[SOCIAL_HUMAN_CONTEXT] skipped tenant=%s err=%s",
+                tenant_id,
+                _shc_exc,
+            )
+            _social_human_context = None
+
         from .pre_commerce_gate import (  # noqa: PLC0415
             load_minimal_ai_settings,
             load_minimal_commerce_facts,
@@ -813,6 +845,7 @@ class MerchantBrain:
                 _nc_match,
                 message=message or "",
                 state=state_for_classify,
+                social_human_context=_social_human_context,
             )
             or _order_fulfillment_skip
         )
@@ -924,8 +957,15 @@ class MerchantBrain:
             raw_message=_raw_message,
             state_relevance=_state_relevance,
             intent_priority=_intent_priority,
+            social_human_context=_social_human_context,
         )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
+        if (
+            _social_human_context is not None
+            and _social_human_context.block_commerce_escalation
+            and _social_human_context.is_pure_social_turn
+        ):
+            ctx.block_commerce_escalation = True
         if human_priority:
             logger.info(
                 "[HUMAN_PRIORITY] pipeline=enter tenant=%s phone=%s convo=%s — "
@@ -1918,8 +1958,14 @@ class MerchantBrain:
         # conversation as greeted so the welcome card cannot fire later.
         try:
             _embedded = bool(getattr(ctx.intent, "slots", {}).get("embedded_greeting"))
+            _shc = getattr(ctx, "social_human_context", None)
+            _suppress_prepend = bool(
+                _shc is not None
+                and getattr(_shc, "suppress_embedded_greeting_prepend", False)
+            )
             if (
                 _embedded
+                and not _suppress_prepend
                 and not new_state.greeted
                 and decision.action not in {ACTION_GREET, ACTION_SOCIAL_REPLY, ACTION_OUT_OF_SCOPE}
                 and isinstance(reply, str)
@@ -2327,6 +2373,31 @@ class MerchantBrain:
             logger.warning(
                 "[CATALOG_PRODUCT_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _cpgg_exc,
+            )
+
+        try:
+            from modules.ai.brain.postprocess.commerce_tail_guard import (  # noqa: PLC0415
+                apply_commerce_tail_guard,
+            )
+
+            _ctg = apply_commerce_tail_guard(
+                reply=reply or "",
+                ctx=ctx,
+                intent_name=str(getattr(intent, "name", "") or ""),
+                inbound_text=message or "",
+                conversation_objective=str(
+                    getattr(new_state, "active_conversation_objective", "") or ""
+                ),
+                chosen_path=_chosen_path,
+                tenant_id=tenant_id,
+            )
+            if _ctg.stripped:
+                reply = _ctg.reply
+                _guard_replaced["commerce_tail_guard"] = True
+        except Exception as _ctg_exc:  # noqa: BLE001
+            logger.warning(
+                "[COMMERCE_TAIL_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _ctg_exc,
             )
 
         try:

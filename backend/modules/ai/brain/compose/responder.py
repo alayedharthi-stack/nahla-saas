@@ -640,6 +640,23 @@ class DefaultComposer:
                     ctx, result, social_category=category,
                 )
                 return reply
+            if not (reply or "").strip():
+                shc = getattr(ctx, "social_human_context", None)
+                if (
+                    shc
+                    and shc.is_pure_social_turn
+                    and (
+                        shc.block_commerce_tail
+                        or shc.category == "wellbeing_check"
+                    )
+                ):
+                    result.data["chosen_path"] = "social_persona_compose_from_empty_template"
+                    reply = await self._compose_social_persona_ack(
+                        ctx,
+                        result,
+                        social_category=category or shc.category,
+                    )
+                    return reply
             return self._apply_gender_hint(reply, ctx)
 
         # ── Platform / SaaS inquiry ────────────────────────────────────────
