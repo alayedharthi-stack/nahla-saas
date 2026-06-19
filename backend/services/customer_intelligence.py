@@ -116,6 +116,10 @@ CUSTOMER_STATUS_LABELS: Dict[str, str] = {
     "inactive": "غير نشط",
 }
 
+# Recent WhatsApp / profile contact within this window prevents a stale
+# purchase-only verdict of ``inactive``.
+RECENT_CONTACT_DAYS = 30
+
 RFM_SEGMENT_ORDER = (
     "lead",
     "champions",
@@ -162,6 +166,7 @@ class CustomerMetrics:
     last_order_at: Optional[datetime]
     days_since_first_order: Optional[int]
     days_since_last_order: Optional[int]
+    days_since_last_seen: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -321,8 +326,16 @@ def is_countable_order(order_or_status: Any) -> bool:
     return status not in EXCLUDED_ORDER_STATUSES and bool(status)
 
 
+def _days_since_last_seen(metrics: CustomerMetrics, now: datetime) -> Optional[int]:
+    if metrics.days_since_last_seen is not None:
+        return metrics.days_since_last_seen
+    if metrics.last_seen_at is not None:
+        return max(0, (now - ensure_utc(metrics.last_seen_at)).days)
+    return None
+
+
 def compute_customer_status(metrics: CustomerMetrics, now: Optional[datetime] = None) -> str:
-    _ = now
+    current_time = ensure_utc(now) or utcnow()
     if metrics.total_orders <= 0:
         return "lead"
 
@@ -338,6 +351,17 @@ def compute_customer_status(metrics: CustomerMetrics, now: Optional[datetime] = 
         and metrics.days_since_first_order is not None
         and metrics.days_since_first_order <= 30
     )
+    days_since_contact = _days_since_last_seen(metrics, current_time)
+    has_recent_contact = (
+        days_since_contact is not None
+        and days_since_contact <= RECENT_CONTACT_DAYS
+    )
+
+    if has_recent_contact:
+        if is_new_window:
+            return "new"
+        return "active"
+
     is_recent = (
         metrics.last_order_at is not None
         and metrics.days_since_last_order is not None
@@ -575,22 +599,24 @@ class CustomerIntelligenceService:
             .first()
         )
         if not profile:
+            init_contact = ensure_utc(seen_at) if seen_at else None
             profile = CustomerProfile(
                 customer_id=customer.id,
                 tenant_id=self.tenant_id,
                 segment="lead",
                 customer_status="lead",
                 rfm_segment="lead",
-                first_seen_at=now,
-                last_seen_at=now,
-                metrics_computed_at=now,
+                first_seen_at=init_contact or utcnow(),
+                last_seen_at=init_contact,
+                metrics_computed_at=utcnow(),
                 last_recomputed_reason="profile_initialized",
-                updated_at=now,
+                updated_at=utcnow(),
             )
             self.db.add(profile)
             self.db.flush()
 
         if seen_at:
+            now = ensure_utc(seen_at) or utcnow()
             if not profile.first_seen_at or ensure_utc(profile.first_seen_at) > now:
                 profile.first_seen_at = now
             if not profile.last_seen_at or ensure_utc(profile.last_seen_at) < now:
@@ -918,12 +944,12 @@ class CustomerIntelligenceService:
             phone_index, name_index = self._index_orders(base_orders)
 
         normalized_phone = normalize_phone(customer.phone)
+        if not normalized_phone:
+            normalized_phone = normalize_phone(
+                getattr(customer, "normalized_phone", None) or ""
+            )
         if normalized_phone and normalized_phone in phone_index:
             return list(phone_index.get(normalized_phone, []))
-
-        normalized_name = normalize_name(customer.name)
-        if normalized_name and normalized_name in name_index:
-            return list(name_index.get(normalized_name, []))
 
         return []
 
@@ -964,6 +990,8 @@ class CustomerIntelligenceService:
         if last_seen_at is None:
             last_seen_at = ensure_utc(profile.last_seen_at) if profile else None
 
+        profile_contact_at = ensure_utc(profile.last_seen_at) if profile else None
+
         if first_seen_at is None and profile is not None:
             first_seen_at = ensure_utc(profile.metrics_computed_at) or current_time
         if last_seen_at is None and first_seen_at is not None:
@@ -974,6 +1002,13 @@ class CustomerIntelligenceService:
         )
         days_since_last_order = (
             max(0, (current_time - last_order_at).days) if last_order_at else None
+        )
+        # Engagement gating uses explicit profile contact (WhatsApp / ensure_profile),
+        # not synthetic last_seen fallbacks from metrics_computed_at.
+        days_since_last_seen = (
+            max(0, (current_time - profile_contact_at).days)
+            if profile_contact_at
+            else None
         )
 
         total_spend_sar = round(sum(totals), 2)
@@ -990,6 +1025,7 @@ class CustomerIntelligenceService:
             last_order_at=last_order_at,
             days_since_first_order=days_since_first_order,
             days_since_last_order=days_since_last_order,
+            days_since_last_seen=days_since_last_seen,
         )
 
     def _apply_profile_metrics(

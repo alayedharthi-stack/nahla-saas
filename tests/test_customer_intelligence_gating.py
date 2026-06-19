@@ -145,6 +145,7 @@ def test_zero_orders_is_lead():
         last_order_at=None,
         days_since_first_order=None,
         days_since_last_order=None,
+        days_since_last_seen=0,
     )
     assert compute_customer_status(metrics, now) == "lead"
     scores = compute_rfm_scores(metrics, now)
@@ -166,6 +167,7 @@ def test_first_time_recent_buyer_is_new():
         last_order_at=now - timedelta(days=1),
         days_since_first_order=5,
         days_since_last_order=1,
+        days_since_last_seen=1,
     )
     status = compute_customer_status(metrics, now)
     assert status == "new"
@@ -185,6 +187,7 @@ def test_repeat_recent_buyer_is_active():
         last_order_at=now - timedelta(days=10),
         days_since_first_order=80,
         days_since_last_order=10,
+        days_since_last_seen=10,
     )
     status = compute_customer_status(metrics, now)
     assert status == "active"
@@ -204,6 +207,7 @@ def test_high_value_customer_is_vip():
         last_order_at=now - timedelta(days=5),
         days_since_first_order=120,
         days_since_last_order=5,
+        days_since_last_seen=5,
     )
     status = compute_customer_status(metrics, now)
     scores = compute_rfm_scores(metrics, now)
@@ -227,6 +231,7 @@ def test_previously_active_becomes_at_risk():
         last_order_at=now - timedelta(days=75),
         days_since_first_order=180,
         days_since_last_order=75,
+        days_since_last_seen=75,
     )
     status = compute_customer_status(metrics, now)
     assert status == "at_risk"
@@ -246,6 +251,7 @@ def test_long_inactive_is_inactive():
         last_order_at=now - timedelta(days=120),
         days_since_first_order=200,
         days_since_last_order=120,
+        days_since_last_seen=120,
     )
     status = compute_customer_status(metrics, now)
     scores = compute_rfm_scores(metrics, now)
@@ -253,6 +259,157 @@ def test_long_inactive_is_inactive():
     assert status == "inactive"
     assert scores.code == "121"
     assert segment == "lost_customers"
+
+
+def test_zero_orders_recent_contact_stays_lead_not_inactive():
+    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    metrics = CustomerMetrics(
+        total_orders=0,
+        total_spend_sar=0.0,
+        average_order_value_sar=0.0,
+        max_single_order_sar=0.0,
+        first_seen_at=now,
+        last_seen_at=now,
+        first_order_at=None,
+        last_order_at=None,
+        days_since_first_order=None,
+        days_since_last_order=None,
+        days_since_last_seen=0,
+    )
+    assert compute_customer_status(metrics, now) == "lead"
+
+
+def test_recent_contact_today_with_old_order_is_active_not_inactive():
+    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    metrics = CustomerMetrics(
+        total_orders=2,
+        total_spend_sar=250.0,
+        average_order_value_sar=125.0,
+        max_single_order_sar=150.0,
+        first_seen_at=now - timedelta(days=220),
+        last_seen_at=now,
+        first_order_at=now - timedelta(days=200),
+        last_order_at=now - timedelta(days=120),
+        days_since_first_order=200,
+        days_since_last_order=120,
+        days_since_last_seen=0,
+    )
+    assert compute_customer_status(metrics, now) == "active"
+
+
+def test_old_order_without_recent_contact_stays_inactive():
+    now = datetime(2026, 4, 15, tzinfo=timezone.utc)
+    metrics = CustomerMetrics(
+        total_orders=2,
+        total_spend_sar=250.0,
+        average_order_value_sar=125.0,
+        max_single_order_sar=150.0,
+        first_seen_at=now - timedelta(days=220),
+        last_seen_at=now - timedelta(days=120),
+        first_order_at=now - timedelta(days=200),
+        last_order_at=now - timedelta(days=120),
+        days_since_first_order=200,
+        days_since_last_order=120,
+        days_since_last_seen=120,
+    )
+    assert compute_customer_status(metrics, now) == "inactive"
+
+
+def test_orders_are_not_attributed_by_name_only():
+    from models import Customer, Order
+
+    db, engine = _make_db()
+    try:
+        tenant = _seed_tenant(db, "Name Isolation Tenant")
+        now = datetime.now(timezone.utc)
+        shared_name = "منفور سدر"
+
+        buyer = Customer(
+            tenant_id=tenant.id,
+            name=shared_name,
+            phone="+966511111111",
+            normalized_phone="+966511111111",
+        )
+        talker = Customer(
+            tenant_id=tenant.id,
+            name=shared_name,
+            phone="+966522222222",
+            normalized_phone="+966522222222",
+        )
+        db.add_all([buyer, talker])
+        db.commit()
+
+        db.add(
+            Order(
+                tenant_id=tenant.id,
+                external_id="buyer-order",
+                status="completed",
+                total="100",
+                customer_info={"name": shared_name, "mobile": "+966511111111"},
+                line_items=[],
+                extra_metadata={"created_at": (now - timedelta(days=120)).isoformat()},
+            )
+        )
+        db.commit()
+
+        svc = CustomerIntelligenceService(db, tenant.id)
+        svc.ensure_profile(talker, seen_at=now)
+        svc.recompute_profile_for_customer(
+            buyer.id, "test_name_isolation", commit=False, emit_event=False,
+        )
+        svc.recompute_profile_for_customer(
+            talker.id, "test_name_isolation", commit=True, emit_event=False,
+        )
+
+        buyer_profile = db.query(CustomerProfile).filter_by(customer_id=buyer.id).first()
+        talker_profile = db.query(CustomerProfile).filter_by(customer_id=talker.id).first()
+
+        assert buyer_profile is not None
+        assert talker_profile is not None
+        assert buyer_profile.total_orders == 1
+        assert talker_profile.total_orders == 0
+        assert talker_profile.customer_status == "lead"
+        assert talker_profile.customer_status != "inactive"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_serialize_customer_ignores_legacy_segment_for_status():
+    from models import Customer
+    from routers.customers import _serialize_customer
+
+    db, engine = _make_db()
+    try:
+        tenant = _seed_tenant(db, "Serialize Tenant")
+        cust = Customer(
+            tenant_id=tenant.id,
+            name="Legacy Row",
+            phone="+966533333333",
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+
+        profile = CustomerProfile(
+            customer_id=cust.id,
+            tenant_id=tenant.id,
+            segment="inactive",
+            customer_status=None,
+            rfm_segment="lost_customers",
+            total_orders=0,
+        )
+        db.add(profile)
+        db.commit()
+
+        payload = _serialize_customer(cust, profile)
+
+        assert payload["status"] == "lead"
+        assert payload["status_label"] == "عميل محتمل"
+        assert payload["customer_status"] == "lead"
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_rfm_scoring_is_deterministic():
@@ -269,6 +426,7 @@ def test_rfm_scoring_is_deterministic():
         last_order_at=now - timedelta(days=20),
         days_since_first_order=100,
         days_since_last_order=20,
+        days_since_last_seen=20,
     )
     scores_a = compute_rfm_scores(metrics, now)
     scores_b = compute_rfm_scores(metrics, now)
