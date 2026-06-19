@@ -24,13 +24,17 @@ from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: E402
     is_bare_start_order_phrase,
     is_order_verb_only_query,
 )
-from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_LLM_REPLY,
+    ACTION_SEARCH_PRODUCTS,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
     INTENT_START_ORDER,
+    INTENT_WHO_ARE_YOU,
     Intent,
     MerchantConversationState,
 )
@@ -152,3 +156,21 @@ class TestStartOrderVerbGuardRouting:
             query=str((DefaultDecisionEngine().decide(ctx).args or {}).get("query") or ""),
         )
         assert subject == ""
+
+    def test_identity_phrase_not_order_product_query(self) -> None:
+        """Regression: «من أنت» must not be hijacked as catalog search."""
+        msg = "من أنت"
+        assert is_bare_start_order_phrase(msg) is False
+        assert extract_start_order_product_query(msg) == ""
+        ctx = BrainContext(
+            tenant_id=7,
+            customer_phone="966542980511",
+            message=msg,
+            intent=Intent(name=INTENT_WHO_ARE_YOU, confidence=0.98, raw_message=msg),
+            state=MerchantConversationState(greeted=False, stage="discovery"),
+            facts=_facts(),
+        )
+        dec = DefaultDecisionEngine().decide(ctx)
+        assert dec.action == ACTION_LLM_REPLY
+        assert dec.args.get("topic") == "persona_identity"
+        assert dec.args.get("block_commerce_escalation") is True

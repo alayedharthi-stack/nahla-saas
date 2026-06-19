@@ -132,13 +132,21 @@ def extract_start_order_product_query(message: str) -> str:
         return ""
 
     rest = raw
+    stripped = False
     prefix = _START_PREFIX_RE.match(rest)
     if prefix:
         rest = rest[prefix.end():].strip()
+        stripped = True
 
     verb = _ORDER_VERB_PREFIX_RE.match(rest)
     if verb:
         rest = rest[verb.end():].strip()
+        stripped = True
+
+    # Only consume text after a recognized order-start prefix/verb — never
+    # treat an unrelated full message (e.g. «من أنت») as a product query.
+    if not stripped:
+        return ""
 
     rest = rest.strip(" ؟?!.,،")
     if rest and _has_product_substance(rest):
