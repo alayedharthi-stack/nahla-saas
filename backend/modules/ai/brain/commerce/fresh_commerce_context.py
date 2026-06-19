@@ -120,7 +120,7 @@ def is_fresh_exploratory_product_question(message: str) -> bool:
             return True
         if explicit_soft_browse_requested(text):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy import; regex fallback remains
         pass
     return bool(_FRESH_CATEGORY_EXPLORE_RE.search(text))
 
@@ -212,7 +212,7 @@ def log_commerce_context_decay(
             (message or "")[:80],
         )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[COMMERCE_CONTEXT_DECAY] telemetry_emit_failed")
 
 
 __all__ = [

@@ -238,8 +238,8 @@ def maybe_reset_stale_order_context(
 
         if detect_explicit_order_resume(message):
             return None
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[COMMERCE_CONTEXT_DECAY] resume probe skipped err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[COMMERCE_CONTEXT_DECAY] resume_probe_failed")
 
     if is_context_expired(state, now=now):
         clear_active_order_context(state, reason=f"ttl_expired_{stage}")
@@ -253,8 +253,8 @@ def maybe_reset_stale_order_context(
         decay = maybe_reset_abandoned_commerce_on_fresh_exploration(state, message)
         if decay:
             return decay
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[COMMERCE_CONTEXT_DECAY] skipped err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[COMMERCE_CONTEXT_DECAY] fresh_exploration_decay_failed")
 
     return None
 
