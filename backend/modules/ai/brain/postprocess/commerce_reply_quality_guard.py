@@ -260,6 +260,26 @@ def select_arabic_commerce_fallback(
     except Exception:  # noqa: silent-ok — ordering prompt must not break fallback
         pass
 
+    try:
+        from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+            message_has_bare_quantity_or_variant_signal,
+            resolve_active_order_quantity_reply,
+        )
+        from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+            has_active_commerce_from_state,
+        )
+
+        if message_has_bare_quantity_or_variant_signal(inbound_text):
+            qty_reply = resolve_active_order_quantity_reply(
+                inbound_text,
+                state=state,
+                active_commerce=has_active_commerce_from_state(state),
+            )
+            if qty_reply:
+                return qty_reply, "active_order_quantity"
+    except Exception:  # noqa: silent-ok — qty fallback must not break commerce guard
+        pass
+
     if should_suppress_generic_stub_injection(
         inbound_text=inbound_text,
         intent_name=intent_name,

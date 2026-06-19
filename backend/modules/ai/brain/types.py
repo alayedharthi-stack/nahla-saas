@@ -235,6 +235,8 @@ class OrderPreparationState:
     fulfillment_kind: str = ""
     pending_cart_confirmation: Dict[str, Any] = field(default_factory=dict)
     pending_delivery_location: Dict[str, Any] = field(default_factory=dict)
+    # Turn-local clarification when bare qty/variant needs product mapping (Phase 2).
+    active_order_quantity_clarification: str = ""
     # ── Variant choice gate (migration 0064 — Phase 3) ───────────────────
     # When the resolver returns a parent with 2+ in-stock variants, the
     # responder ships ``ask_product_variants`` instead of the product
@@ -301,6 +303,7 @@ class OrderPreparationState:
             "fulfillment_kind": str(self.fulfillment_kind or ""),
             "pending_cart_confirmation": dict(self.pending_cart_confirmation or {}),
             "pending_delivery_location": dict(self.pending_delivery_location or {}),
+            "active_order_quantity_clarification": str(self.active_order_quantity_clarification or ""),
             "awaiting_variant_choice":  self.awaiting_variant_choice,
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
@@ -365,6 +368,9 @@ class OrderPreparationState:
             fulfillment_kind=str(raw.get("fulfillment_kind", "") or ""),
             pending_cart_confirmation=dict(raw.get("pending_cart_confirmation") or {}),
             pending_delivery_location=dict(raw.get("pending_delivery_location") or {}),
+            active_order_quantity_clarification=str(
+                raw.get("active_order_quantity_clarification", "") or ""
+            ),
             awaiting_variant_choice=bool(raw.get("awaiting_variant_choice", False)),
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),

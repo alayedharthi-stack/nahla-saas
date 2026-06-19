@@ -208,6 +208,31 @@ def apply_cart_intents_to_state(
     return cart, deltas, changed
 
 
+def _active_commerce_from_state_and_prep(state: Any, prep: Any) -> bool:
+    from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+        has_active_commerce_from_state,
+    )
+
+    merged: Dict[str, Any] = {}
+    if isinstance(state, dict):
+        merged.update(state)
+    elif state is not None:
+        if hasattr(state, "order_prep"):
+            merged["order_prep"] = getattr(state, "order_prep", None)
+        for key in (
+            "cart_items",
+            "current_product_focus",
+            "awaiting_option_confirmation",
+            "last_question_asked",
+            "pending_cart_confirmation",
+        ):
+            if hasattr(state, key):
+                merged[key] = getattr(state, key)
+    if prep is not None and "order_prep" not in merged:
+        merged["order_prep"] = prep
+    return has_active_commerce_from_state(merged)
+
+
 def maybe_apply_cart_message(
     *,
     state: Any,
@@ -222,9 +247,32 @@ def maybe_apply_cart_message(
     cart = list(getattr(state, "cart_items", None) or [])
     if not cart and hasattr(prep, "line_items"):
         cart = list(getattr(prep, "line_items", None) or [])
-    intents = extract_cart_intents_with_context(message, cart_items=cart)
+    focus = product_info or getattr(state, "current_product_focus", None)
+    active_commerce = _active_commerce_from_state_and_prep(state, prep)
+    intents = extract_cart_intents_with_context(
+        message,
+        cart_items=cart,
+        product_focus=focus,
+        order_prep=prep,
+        active_commerce=active_commerce,
+    )
     if not intents:
         return list(getattr(state, "cart_items", None) or []), [], False
+
+    if str(intents[0].get("action") or "").lower() == "active_order_clarify":
+        reply = str(intents[0].get("reply") or "").strip()
+        if reply:
+            if hasattr(prep, "active_order_quantity_clarification"):
+                prep.active_order_quantity_clarification = reply
+            elif isinstance(prep, dict):
+                prep["active_order_quantity_clarification"] = reply
+        return list(getattr(state, "cart_items", None) or []), [], False
+
+    if hasattr(prep, "active_order_quantity_clarification"):
+        prep.active_order_quantity_clarification = ""
+    elif isinstance(prep, dict):
+        prep.pop("active_order_quantity_clarification", None)
+
     return apply_cart_intents_to_state(
         state=state,
         prep=prep,

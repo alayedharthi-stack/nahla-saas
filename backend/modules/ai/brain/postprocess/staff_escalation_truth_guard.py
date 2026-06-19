@@ -231,10 +231,37 @@ def apply_staff_escalation_truth_guard(
                     staff_escalation_claim_blocked=True,
                 )
 
+            _active_commerce = has_active_commerce_from_state(state)
             if should_suppress_generic_stub_injection(
                 inbound_text=inbound_text,
                 state=state,
-            ) or has_active_commerce_from_state(state):
+            ) or _active_commerce:
+                try:
+                    from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+                        message_has_bare_quantity_or_variant_signal,
+                        resolve_active_order_quantity_reply,
+                    )
+
+                    if message_has_bare_quantity_or_variant_signal(inbound_text):
+                        qty_reply = resolve_active_order_quantity_reply(
+                            inbound_text,
+                            state=state,
+                            active_commerce=_active_commerce,
+                        )
+                        if qty_reply:
+                            return StaffEscalationTruthGuardResult(
+                                reply=qty_reply,
+                                action="blocked_false_escalation_active_order_quantity",
+                                replaced=True,
+                                reason="active_order_quantity_input",
+                                evidence=evidence,
+                                staff_escalation_claim_blocked=True,
+                            )
+                except Exception as _qty_exc:  # noqa: BLE001  # noqa: silent-ok
+                    logger.debug(
+                        "[STAFF_ESCALATION_TRUTH_GUARD] qty reply failed err=%s",
+                        _qty_exc,
+                    )
                 scrubbed = strip_escalation_claim_sentences(original)
                 if scrubbed and len(scrubbed.strip()) >= 6:
                     return StaffEscalationTruthGuardResult(
