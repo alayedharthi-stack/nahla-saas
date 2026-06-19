@@ -32,6 +32,8 @@ _TYPE_REOPEN_MARKERS = (
 _BARE_SUBJECT_TOKENS = frozenset({
     "كilo", "كيلo", "كيلو", "كيلوغرام", "kg", "gram", "جرام", "كجم", "g",
     "لتر", "ml", "piece", "pack", "حبه", "حبة", "سعر", "بكم", "كم", "ال",
+    # Order-start verbs — never catalog product names (P0 start-order guard).
+    "اطلب", "اشتري", "طلب", "order", "buy", "purchase", "اخذ", "استلم", "شراء",
 })
 
 
@@ -44,6 +46,15 @@ def _normalize(text: str) -> str:
 
 
 def _has_product_substance(subject: str) -> bool:
+    try:
+        from ..commerce.start_order_verb_guard import is_order_verb_only_query  # noqa: PLC0415
+
+        if is_order_verb_only_query(subject):
+            return False
+    except Exception:
+        logger.exception(
+            "[RESOLVED_PRODUCT_GUARD] start_order_verb_guard probe failed",
+        )
     norm = _normalize(subject)
     norm = re.sub(r"^ال", "", norm)
     tokens = [t for t in norm.split() if t and t not in _BARE_SUBJECT_TOKENS]
@@ -117,6 +128,12 @@ def compose_resolved_product_search_miss(
     variant: int = 0,
 ) -> str:
     """Concise honest failure — never re-ask product type."""
+    if not _has_product_substance(subject):
+        from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
+            compose_catalog_miss_deterministic_reply,
+        )
+
+        return compose_catalog_miss_deterministic_reply(variant=variant)
     name = (subject or "المنتج").strip()
     variants = (
         (

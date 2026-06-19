@@ -1873,22 +1873,16 @@ class DefaultDecisionEngine:
 
         # ── 3.8c Extract product name from order phrases ──────────────────
         # "أبغى أطلب X" / "ابي اطلب X" / "اطلب X" / "أريد X"
-        _ORDER_PREFIX_RE = re.compile(
-            r"(?:ابغى|ابي|أبغى|أبي|اريد|أريد|بغيت|عطني|عطيني)"
-            r"[\s\u0020]*"
-            r"(?:اطلب|أطلب|اشتري|أشتري|آخذ|اخذ|استلم)?"
-            r"[\s\u0020]+"
-            r"(.{2,30})",
-            re.UNICODE,
+        # Bare openers («ابي اطلب») must not yield the verb as product_query.
+        from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
+            extract_start_order_product_query,
+            is_bare_start_order_phrase,
         )
+
         _extracted_product_query = ""
-        _order_match = _ORDER_PREFIX_RE.search(ctx.message or "")
-        if _order_match:
-            _extracted = (_order_match.group(1) or "").strip()
-            # Discard if extracted part looks like a filler/stop word
-            _STOP = {"شي", "شيء", "منتج", "بضاعه", "بضاعة", "حاجه", "حاجة", "طلب"}
-            _norm_extracted = _normalize_ar(_extracted)
-            if _norm_extracted and _norm_extracted not in _STOP and len(_norm_extracted) >= 2:
+        if not is_bare_start_order_phrase(ctx.message or ""):
+            _extracted = extract_start_order_product_query(ctx.message or "")
+            if _extracted:
                 from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
                 from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
                 from ..commerce.contact_escalation import (  # noqa: PLC0415

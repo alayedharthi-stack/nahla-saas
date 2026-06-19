@@ -168,7 +168,14 @@ def is_discourse_only_query(query: str) -> bool:
     tokens = [_norm_token(t) for t in (query or "").split() if t.strip()]
     if not tokens:
         return True
-    return all(t in _DISCOURSE_ONLY_TOKENS for t in tokens)
+    if all(t in _DISCOURSE_ONLY_TOKENS for t in tokens):
+        return True
+    try:
+        from .start_order_verb_guard import is_order_verb_only_query  # noqa: PLC0415
+
+        return is_order_verb_only_query(query)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def is_explicit_customer_visual_product_ask(message: str) -> bool:
@@ -242,6 +249,8 @@ def has_catalog_search_evidence(
         return True
 
     if args.get("after_search") == "propose_order":
+        if is_discourse_only_query(q):
+            return False
         return True
 
     intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
