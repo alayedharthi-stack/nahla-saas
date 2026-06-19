@@ -2747,6 +2747,32 @@ class MerchantBrain:
         except Exception:
             _relational_moment_token = ""
 
+        try:
+            from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
+                emit_pipeline_turn_evidence,
+            )
+
+            emit_pipeline_turn_evidence(
+                tenant_id=tenant_id,
+                phone=customer_phone,
+                turn=getattr(new_state, "turn", None),
+                message=message or "",
+                intent=intent,
+                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                state_before=state,
+                state_after=new_state,
+                reply=reply or "",
+                decision_action=str(getattr(decision, "action", "") or ""),
+                chosen_path=_chosen_path,
+                decision_reason=str(getattr(decision, "reason", "") or ""),
+            )
+        except Exception as _ofe_exc:  # noqa: BLE001  # noqa: silent-ok — evidence emit must not break turn
+            logger.debug(
+                "[ORDER_FLOW_EVIDENCE] pipeline emit skipped tenant=%s err=%s",
+                tenant_id,
+                _ofe_exc,
+            )
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
