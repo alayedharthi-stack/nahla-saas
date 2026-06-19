@@ -33,6 +33,9 @@ _TOP_PRODUCTS_SOURCES = frozenset({
     "top_products_numeric_fallback",
     "top_products_replay_fallback",
     "top_products_start_order",
+    "global_browse_recovery",
+    "global_browse",
+    "category_browse",
 })
 
 _CONTINUATION_SOURCES = frozenset({
@@ -146,14 +149,18 @@ _TYPES_OVERVIEW_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
-# Trailing storefront fluff after the family noun («… السمر عندكم؟»).
+# Trailing storefront fluff after the family noun («… السمر عندكم؟» / «… العسل المتوفرة؟»).
 _TYPES_SUBJECT_TAIL_RE = re.compile(
-    r"(?:\s+(?:عندكم|عندك|لديكم|لديك|متوفرة|متوفر|available))+\s*$",
+    r"(?:\s+(?:"
+    r"عندكم|عندك|لديكم|لديك|"
+    r"(?:ال)?(?:متوفرة|متوفر|available)"
+    r"))+\s*$",
     re.UNICODE | re.IGNORECASE,
 )
 
 _TYPES_SUBJECT_STOPWORDS = frozenset({
-    "الي", "اللي", "ال", "عندكم", "عندك", "لديكم", "لديك", "متوفر", "متوفرة",
+    "الي", "اللي", "ال", "عندكم", "عندك", "لديكم", "لديك",
+    "متوفر", "متوفرة", "المتوفر", "المتوفرة",
     "available", "what", "which",
 })
 
@@ -261,6 +268,12 @@ def extract_types_overview_query(message: str) -> str:
         candidate,
         flags=re.UNICODE | re.IGNORECASE,
     )
+    parts = [p for p in re.split(r"[\s,،]+", candidate) if p]
+    if parts:
+        candidate = parts[0]
+    norm_candidate = _normalize_ar(candidate)
+    if norm_candidate in _TYPES_SUBJECT_STOPWORDS:
+        return ""
     return candidate.strip(" ؟?!.")
 
 
@@ -702,6 +715,9 @@ def product_discovery_block_reason(
         return "price_without_product_context"
 
     if has_explicit_product_inquiry(msg):
+        return None
+
+    if src in {"global_browse_recovery", "global_browse", "category_browse"}:
         return None
 
     if src in _TOP_PRODUCTS_SOURCES and not has_explicit_broad_browse_request(msg):

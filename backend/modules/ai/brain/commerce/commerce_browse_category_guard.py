@@ -53,6 +53,7 @@ _GLOBAL_ONLY_RE = re.compile(
 _SCOPE_STOPWORDS = frozenset({
     "وش", "ايش", "ايه", "ما", "عندكم", "عندك", "لديكم", "لديك",
     "متوفر", "متوفره", "متاح", "available", "products", "product",
+    "المتوفر", "المتوفرة", "المتوفره",
     "المنتجات", "منتج", "منتجات", "الانواع", "انواع", "أنواع",
     "اعرض", "وريني", "ارسل", "أرسل", "show", "display", "browse",
     "ابي", "أبي", "ابغ", "أبغ", "اريد", "أريد", "want", "need",
@@ -61,6 +62,7 @@ _SCOPE_STOPWORDS = frozenset({
     "collection", "options", "option", "items", "item", "line", "lines",
     "season", "seasonal", "batch", "inventory", "stock",
     "خيارات", "الخيارات", "وين", "where",
+    "الي", "الli", "اللي", "الى",
     "؟", "?", ".", "!", ",",
 })
 
@@ -240,7 +242,12 @@ def extract_browse_category_scope(
         if has_types_overview_ask(msg, q):
             subject = extract_types_overview_query(msg) or q
             scope = _canonical_scope_token(subject)
+            if not _is_valid_scope_token(scope):
+                scope = _canonical_scope_token(q or "")
             if _is_valid_scope_token(scope):
+                if scope_norm := _canonical_scope_token(scope):
+                    if scope_norm in _HONEY_SUBTYPE_SCOPE_HINTS or scope_norm == "عسل":
+                        return "عسل"
                 return scope
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] types_overview extract failed")

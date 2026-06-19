@@ -47,6 +47,7 @@ from .decision.actions import (
     ACTION_OUT_OF_SCOPE,
     ACTION_PLATFORM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEARCH_PRODUCTS,
     ACTION_SOCIAL_REPLY,
 )
 from .protocols import (
@@ -2484,6 +2485,35 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.commerce.catalog_browse_reply import (  # noqa: PLC0415
+                build_catalog_browse_reply,
+                should_rewrite_vague_browse_reply,
+            )
+
+            _catalog_products = list(
+                result.data.get("pending_candidates")
+                or result.data.get("products")
+                or []
+            )
+            if (
+                str(getattr(decision, "action", "") or "") == ACTION_SEARCH_PRODUCTS
+                and _catalog_products
+                and should_rewrite_vague_browse_reply(reply or "", _catalog_products)
+            ):
+                reply = build_catalog_browse_reply(
+                    _catalog_products,
+                    max_items=max(1, len(_catalog_products)),
+                )
+                _guard_replaced["vague_browse_reply_guard"] = True
+                result.data["vague_browse_reply_replaced"] = True
+        except Exception as _vbr_exc:  # noqa: BLE001  # noqa: silent-ok — vague browse guard must not break turn
+            logger.debug(
+                "[VAGUE_BROWSE_REPLY_GUARD] skipped tenant=%s err=%s",
+                tenant_id,
+                _vbr_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.commerce_tail_guard import (  # noqa: PLC0415
                 apply_commerce_tail_guard,
             )
@@ -2810,6 +2840,9 @@ class MerchantBrain:
             "reply": reply,
             "buttons": pending_buttons,
             "handoff": decision.action == ACTION_HANDOFF,
+            "catalog_browse_attachments": list(
+                result.data.get("catalog_browse_attachments") or []
+            ),
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
             "non_commerce_block_mode": bool(

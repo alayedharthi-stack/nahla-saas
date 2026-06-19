@@ -5475,6 +5475,7 @@ async def _handle_merchant_message(
     )
     _persona_ownership = _PORecord()
     _brain_reply_candidate = ""
+    _brain_catalog_browse_attachments: List[Dict[str, Any]] = []
     _outbound_abort_suppressor = ""
     _outbound_abort_audited = False
     _outbound_customer_id: int | None = None
@@ -7548,12 +7549,16 @@ async def _handle_merchant_message(
                         _brain_buttons = []
                         _brain_handoff = False
                         _relational_moment = ""
+                        _brain_catalog_browse_attachments = []
                     else:
                         reply   = brain_result.get("reply", "") or ""
                         _brain_reply_candidate = (reply or "").strip()
                         _outbound_customer_id = profile.get("id")
                         _brain_buttons = brain_result.get("buttons") or []
                         _brain_handoff = bool(brain_result.get("handoff"))
+                        _brain_catalog_browse_attachments = list(
+                            brain_result.get("catalog_browse_attachments") or []
+                        )
                         # Tenant 33 #49 (Commit 3): the brain pipeline
                         # surfaces the relational moment when the
                         # relational layer is enabled. Empty string
@@ -7614,6 +7619,7 @@ async def _handle_merchant_message(
                     _brain_buttons = []
                     _brain_handoff = False
                     _relational_moment = ""
+                    _brain_catalog_browse_attachments = []
 
                 # ── Belt-and-suspenders handoff guard (May 2026) ─────────
                 # Even when the brain returned ACTION_LLM_REPLY (because
@@ -9675,6 +9681,29 @@ async def _handle_merchant_message(
         # (image + caption + cta_url button) lives further down in
         # the outbound dispatch loop.
         _product_attachments: List[Dict[str, Any]] = []
+        if (
+            not _product_escalation_blocked
+            and _brain_catalog_browse_attachments
+        ):
+            _existing_product_ids = {
+                a.get("id") for a in _product_attachments if a.get("id")
+            }
+            for _cba in _brain_catalog_browse_attachments:
+                if len(_product_attachments) >= _catalog_card_limit:
+                    break
+                _cba_id = _cba.get("id")
+                if _cba_id and _cba_id in _existing_product_ids:
+                    continue
+                _product_attachments.append(_cba)
+                if _cba_id:
+                    _existing_product_ids.add(_cba_id)
+            logger.info(
+                "[PRODUCT_ATTACHMENT] tenant=%s stage=brain_catalog_browse "
+                "source=catalog_browse queued=%d merged=%d",
+                tenant_id,
+                len(_brain_catalog_browse_attachments),
+                len(_product_attachments),
+            )
         if (
             not _product_escalation_blocked
             and reply

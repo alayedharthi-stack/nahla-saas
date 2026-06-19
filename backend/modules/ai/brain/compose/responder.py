@@ -401,16 +401,44 @@ class DefaultComposer:
                 })
             result.data["pending_buttons"] = wa_buttons
             result.data["pending_candidates"] = candidates
+            result.data["chosen_path"] = "product_search_results"
             variant = self._variant_idx(ctx)
-            text = T.narrow_choices(
-                products=candidates,
-                variant=variant,
+            _browse_source = str((decision.args or {}).get("source") or "").strip().lower()
+            from ..commerce.catalog_browse_reply import (  # noqa: PLC0415
+                build_catalog_browse_attachments,
+                build_catalog_browse_reply,
+                log_catalog_browse_reply,
+            )
+            from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                clamp_product_attachments,
+            )
+
+            text = build_catalog_browse_reply(
+                candidates,
+                max_items=breadth.display_limit,
+                include_descriptions=True,
                 show_more_hint=bool(breadth_meta.get("show_more_hint")),
             )
+            attachments = build_catalog_browse_attachments(
+                candidates,
+                limit=breadth.catalog_card_limit,
+            )
+            attachments = clamp_product_attachments(attachments, breadth)
+            if attachments:
+                result.data["catalog_browse_attachments"] = attachments
+            log_catalog_browse_reply(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                product_count=len(candidates),
+                attachment_count=len(attachments),
+                source=_browse_source,
+                preview=(ctx.message or "")[:80],
+            )
             if self._is_duplicate(text, ctx):
-                text = T.narrow_choices(
-                    products=candidates,
-                    variant=(variant + 1) % 3,
+                text = build_catalog_browse_reply(
+                    candidates,
+                    max_items=breadth.display_limit,
+                    intro="هذه أقرب الخيارات المتوفرة:",
+                    include_descriptions=True,
                     show_more_hint=bool(breadth_meta.get("show_more_hint")),
                 )
             return text
