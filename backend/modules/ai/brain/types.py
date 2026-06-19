@@ -504,6 +504,7 @@ class MerchantConversationState:
     # fresh signal reinforces it; see detector.py for the cascade.
     customer_gender_hint: str = ""
     customer_gender_confidence: float = 0.0
+    customer_gender_source: str = ""
     # Staff contact cards already dispatched this conversation.
     # Each entry: {"name", "phone", "turn"}. Generic across merchants;
     # escalation-chain logic (Phase 2) derives ordering from KB/config.
@@ -568,6 +569,7 @@ class MerchantConversationState:
             "last_link_sent_turn": self.last_link_sent_turn,
             "customer_gender_hint": self.customer_gender_hint,
             "customer_gender_confidence": self.customer_gender_confidence,
+            "customer_gender_source": self.customer_gender_source,
             "staff_contacts_sent": list(self.staff_contacts_sent or []),
             "commerce_session": dict(self.commerce_session or {}),
         }
@@ -638,6 +640,7 @@ class MerchantConversationState:
             customer_gender_confidence=float(
                 d.get("customer_gender_confidence") or 0.0
             ),
+            customer_gender_source=str(d.get("customer_gender_source", "") or ""),
             staff_contacts_sent=list(d.get("staff_contacts_sent") or []),
             commerce_session=dict(d.get("commerce_session") or {}),
         )

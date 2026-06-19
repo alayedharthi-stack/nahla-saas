@@ -30,9 +30,17 @@ from __future__ import annotations
 
 from .detector import GenderHint, detect_gender
 from .conjugator import apply_gender_to_social_reply
+from .context import (
+    CustomerGenderContext,
+    persist_gender_hint,
+    resolve_customer_gender_context,
+)
 
 __all__ = [
+    "CustomerGenderContext",
     "GenderHint",
     "apply_gender_to_social_reply",
     "detect_gender",
+    "persist_gender_hint",
+    "resolve_customer_gender_context",
 ]
