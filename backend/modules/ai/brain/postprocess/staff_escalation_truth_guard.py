@@ -133,6 +133,29 @@ def apply_staff_escalation_truth_guard(
         if not original.strip():
             return StaffEscalationTruthGuardResult(reply=original, action="allowed")
 
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                is_generic_stub_reply,
+                is_staff_route_rejection_message,
+                resolve_staff_rejection_commerce_resume,
+            )
+
+            if is_staff_route_rejection_message(inbound_text):
+                if is_generic_stub_reply(original) or reply_contains_escalation_claim(
+                    original,
+                ):
+                    return StaffEscalationTruthGuardResult(
+                        reply=resolve_staff_rejection_commerce_resume(state),
+                        action="staff_route_rejected_resume",
+                        replaced=True,
+                        reason="staff_route_rejected_commerce_resume",
+                    )
+        except Exception as _rej_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] staff_rejection resume failed err=%s",
+                _rej_exc,
+            )
+
         evidence = evaluate_staff_escalation_evidence(
             inbound_metadata=inbound_metadata,
             conversation_flags=conversation_flags,
@@ -318,6 +341,26 @@ def apply_staff_escalation_truth_guard(
                 reason="social_thanks_mirror_fallback",
                 evidence=evidence,
                 staff_escalation_claim_blocked=True,
+            )
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                is_staff_route_rejection_message,
+                resolve_staff_rejection_commerce_resume,
+            )
+
+            if is_staff_route_rejection_message(inbound_text):
+                return StaffEscalationTruthGuardResult(
+                    reply=resolve_staff_rejection_commerce_resume(state),
+                    action="blocked_false_escalation_staff_rejected_resume",
+                    replaced=True,
+                    reason="staff_route_rejected_commerce_resume",
+                    evidence=evidence,
+                    staff_escalation_claim_blocked=True,
+                )
+        except Exception as _rej_fb_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] staff_rejection fallback failed err=%s",
+                _rej_fb_exc,
             )
         return StaffEscalationTruthGuardResult(
             reply=SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,

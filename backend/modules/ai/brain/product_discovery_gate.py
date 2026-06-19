@@ -152,6 +152,11 @@ _TYPES_SUBJECT_TAIL_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_TYPES_SUBJECT_STOPWORDS = frozenset({
+    "الي", "اللي", "ال", "عندكم", "عندك", "لديكم", "لديك", "متوفر", "متوفرة",
+    "available", "what", "which",
+})
+
 _SKU_SPECIFICITY_RE = re.compile(
     r"(?:"
     r"\d|"
@@ -217,9 +222,13 @@ def is_generic_category_noun(query: str) -> bool:
     core = _strip_category_noun(query)
     if not core or len(core) < 2:
         return False
+    if _normalize_ar(core) in _TYPES_SUBJECT_STOPWORDS:
+        return False
     if _SKU_SPECIFICITY_RE.search(core):
         return False
     tokens = [t for t in core.split() if t]
+    if len(tokens) == 1 and _normalize_ar(tokens[0]) in _TYPES_SUBJECT_STOPWORDS:
+        return False
     return len(tokens) <= 1
 
 
@@ -370,6 +379,15 @@ def try_types_overview_decision(ctx: BrainContext) -> Optional[Decision]:
     msg = ctx.message or ""
     if not has_types_overview_ask(msg):
         return None
+    try:
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+
+        if global_availability_browse_requested(msg):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
     if not getattr(ctx.facts, "has_products", False):
         return None
     subject = extract_types_overview_query(msg)
@@ -1288,7 +1306,7 @@ def clarify_instead_of_top_products(
                 _question,
                 source="clarify_instead_of_top_products",
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — clarify guard must not block discovery gate
         pass
 
     try:

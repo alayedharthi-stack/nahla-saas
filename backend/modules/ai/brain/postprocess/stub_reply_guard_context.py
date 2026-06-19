@@ -53,6 +53,15 @@ _BARE_AFFIRMATIVES = frozenset({
     "اوكي", "ok", "okay", "ماشي", "موافق", "يلا", "حاضر",
 })
 
+_STAFF_ROUTE_REJECTION_RE = re.compile(
+    r"(?:"
+    r"ما\s+ا?ب(?:ي|غ(?:ى|a)?)\s+(?:أ?مين|امين|الموظف|موظف|المعرض|الفرع|خدمة\s*العملاء)"
+    r"|(?:ما|مو)\s+(?:أ?بي|ابي|أبغى|ابغى)\s+(?:أ?مين|امين|المعرض|الفرع)"
+    r"|(?:أ?ب(?:ي|غ(?:ى|a)?)|اريد|أريد|اب(?:ي|غ(?:ى|a)?))\s+(?:أ?شتري|اشتري|أ?طلب|اطلب|أ?كمل|اكمل)\s+(?:ال)?(?:طلب|عسل|منتج)?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def is_generic_stub_reply(text: str) -> bool:
     raw = (text or "").strip()
@@ -165,6 +174,43 @@ def has_active_commerce_from_state(state: Any) -> bool:
     return False
 
 
+def is_staff_route_rejection_message(message: str) -> bool:
+    """Customer explicitly rejects staff/showroom and wants to continue buying."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    return bool(_STAFF_ROUTE_REJECTION_RE.search(raw))
+
+
+def resolve_staff_rejection_commerce_resume(state: Any) -> str:
+    """Resume active order after staff-route rejection — no generic ACK."""
+    op = _order_prep_from_state(state)
+    lines = ["أبشر."]
+    if op is not None:
+        if isinstance(op, dict):
+            city = str(op.get("city") or "").strip()
+            qty = str(op.get("quantity_label") or op.get("quantity") or "").strip()
+            product = str(op.get("product_name") or "").strip()
+        else:
+            city = str(getattr(op, "city", "") or "").strip()
+            qty = str(getattr(op, "quantity_label", "") or getattr(op, "quantity", "") or "").strip()
+            product = str(getattr(op, "product_name", "") or "").strip()
+        detail_parts: list[str] = []
+        if qty:
+            detail_parts.append(qty)
+        if product and product not in qty:
+            detail_parts.append(product)
+        if city:
+            if detail_parts:
+                lines.append(f"{' '.join(detail_parts)} والتوصيل ل{city}.")
+            else:
+                lines.append(f"تمام، التوصيل ل{city}.")
+        elif detail_parts:
+            lines.append(f"{' '.join(detail_parts)}.")
+    lines.append("أي نوع عسل تفضّل؟")
+    return "\n".join(lines)
+
+
 def should_suppress_generic_stub_injection(
     *,
     inbound_text: str = "",
@@ -175,6 +221,8 @@ def should_suppress_generic_stub_injection(
     inbound_metadata: Optional[dict] = None,
 ) -> bool:
     """True when guards must not inject «وصلت رسالتك» / receipt-style stubs."""
+    if is_staff_route_rejection_message(inbound_text):
+        return True
     goal = (primary_customer_goal or "").strip().lower()
     intent = (intent_name or "").strip().lower()
     try:
@@ -259,7 +307,9 @@ __all__ = [
     "has_active_commerce_from_state",
     "is_generic_stub_reply",
     "is_lightweight_social_turn",
+    "is_staff_route_rejection_message",
     "resolve_social_thanks_guard_reply",
+    "resolve_staff_rejection_commerce_resume",
     "should_suppress_generic_stub_injection",
     "strip_escalation_claim_sentences",
 ]
