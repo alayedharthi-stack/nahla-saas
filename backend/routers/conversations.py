@@ -24,6 +24,7 @@ from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import Conversation, ConversationLog, ConversationTrace, Customer, HandoffSession, MessageEvent, WhatsAppConnection
 from services.manual_segments import (
     is_marketing_opted_out,
+    is_marketing_opted_out_from_meta,
     marketing_opt_out_manual_sql_truthy,
 )
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
@@ -1812,7 +1813,7 @@ async def list_conversations(
                 continue
             is_unsub = bool(meta.get("is_unsubscribed"))
             is_pending = _is_pending_active(meta)
-            is_mkt_opt_out = bool(meta.get("marketing_opt_out_manual"))
+            is_mkt_opt_out = is_marketing_opted_out_from_meta(meta)
             if not is_unsub and not is_pending and not is_mkt_opt_out:
                 continue
             c_norm = _norm(cust.normalized_phone or cust.phone or "")

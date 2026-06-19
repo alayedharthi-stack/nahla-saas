@@ -53,6 +53,7 @@ from services.nahla_segments import (
 )
 from services.manual_segments import (
     UnknownSegmentError,
+    META_KEY_TEST_RECIPIENT,
     add_manual_segment,
     assert_known_segment,
     customer_ids_with_manual_segment,
@@ -62,6 +63,7 @@ from services.manual_segments import (
     set_marketing_opt_out_manual,
     is_marketing_opted_out_from_meta,
     marketing_opt_out_manual_sql_truthy,
+    marketing_opt_out_manual_sql_falsy,
     set_test_recipient,
 )
 from services.customer_intelligence import (
@@ -623,20 +625,17 @@ async def list_customers(
     # Stored on Customer.extra_metadata so we use the same JSON-cast
     # pattern as the unsubscribed segment for cross-dialect support.
     if marketing_opt_out is not None:
-        is_opted = marketing_opt_out_manual_sql_truthy()
-        q = q.filter(is_opted) if marketing_opt_out else q.filter(~is_opted)
+        if marketing_opt_out:
+            q = q.filter(marketing_opt_out_manual_sql_truthy())
+        else:
+            q = q.filter(marketing_opt_out_manual_sql_falsy())
 
     if test_recipient is not None:
-        from sqlalchemy import String, cast, func  # noqa: PLC0415
-        is_test = cast(
-            func.coalesce(
-                Customer.extra_metadata["is_campaign_test_recipient"].astext
-                if hasattr(Customer.extra_metadata, "astext")
-                else func.json_extract(Customer.extra_metadata, "$.is_campaign_test_recipient"),
-                "false",
-            ),
-            String,
-        ).in_(["true", "1"])
+        from sqlalchemy import or_  # noqa: PLC0415
+        from services.manual_segments import _json_meta_text  # noqa: PLC0415
+
+        raw = _json_meta_text(META_KEY_TEST_RECIPIENT)
+        is_test = or_(raw == "true", raw == "1")
         q = q.filter(is_test) if test_recipient else q.filter(~is_test)
 
     search_clause = _customer_search_clauses(search)
@@ -2088,7 +2087,7 @@ async def name_cleanup_preview(
                 "phone":          cust.phone or "",
                 "draft":          _serialise_draft(draft),
                 "marketing_opt_out_manual":
-                    bool(cust_meta.get("marketing_opt_out_manual")),
+                    is_marketing_opted_out_from_meta(cust_meta),
             })
         else:
             truncated = True

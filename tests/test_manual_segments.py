@@ -1042,6 +1042,82 @@ class TestCustomersListEndpointContract:
         assert META_KEY_OPT_OUT not in meta
         db2.close()
 
+    def test_marketing_opt_out_filter_all_legacy_keys(self):
+        """Canonical + every legacy key must match ``marketing_opt_out=true``."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        excluded_ids = []
+        for idx, key in enumerate(
+            (
+                META_KEY_OPT_OUT,
+                "marketing_opt_out",
+                "campaign_opt_out",
+                "excluded_from_campaigns",
+            ),
+            start=1,
+        ):
+            c = _seed_customer(
+                db, t.id, f"+96650000000{idx}",
+                extra={key: True},
+            )
+            excluded_ids.append(c.id)
+        eligible = _seed_customer(db, t.id, "+966500000099")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=True)
+        assert result["total"] == len(excluded_ids)
+        assert {c["id"] for c in result["customers"]} == set(excluded_ids)
+        assert eligible.id not in {c["id"] for c in result["customers"]}
+
+    def test_marketing_opt_out_filter_includes_customer_without_conversation(self):
+        """Excluded customers must appear even when they have no Conversation row."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        orphan = _seed_customer(
+            db, t.id, "+966500000050",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        orphan_id = orphan.id
+        _seed_customer(db, t.id, "+966500000051")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(engine, tenant_id, marketing_opt_out=True)
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == orphan_id
+
+    def test_marketing_opt_out_sql_uses_postgresql_json_arrow(self):
+        """Regression: ``json_extract`` is SQLite-only and broke prod filters."""
+        from sqlalchemy.dialects import postgresql
+
+        from services.manual_segments import marketing_opt_out_manual_sql_truthy
+
+        compiled = str(
+            marketing_opt_out_manual_sql_truthy().compile(
+                dialect=postgresql.dialect(),
+            )
+        )
+        assert "json_extract" not in compiled
+        assert "->>" in compiled
+
+    def test_marketing_opt_out_filter_not_narrowed_by_segment_all(self):
+        """Campaign-excluded chip must not send a narrowing ``segment=`` param."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        excluded = _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_list(
+            engine, tenant_id, marketing_opt_out=True, segment="all",
+        )
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == excluded.id
+
     def _call_patch_marketing_prefs(
         self, engine, tenant_id: int, customer_id: int, *, opted_out: bool,
     ):

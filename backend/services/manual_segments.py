@@ -778,6 +778,11 @@ LEGACY_MARKETING_OPT_OUT_KEYS: tuple[str, ...] = (
     "do_not_campaign",
 )
 
+# Canonical + legacy keys for read paths (filter, dispatcher, list payload).
+MARKETING_OPT_OUT_KEYS: tuple[str, ...] = (
+    META_KEY_OPT_OUT,
+) + LEGACY_MARKETING_OPT_OUT_KEYS
+
 
 def _meta_flag_truthy(val: object) -> bool:
     """Interpret a JSON metadata flag without mutating stored values."""
@@ -798,24 +803,62 @@ def is_marketing_opted_out_from_meta(meta: Optional[Dict[str, Any]]) -> bool:
     return any(_meta_flag_truthy(data.get(key)) for key in LEGACY_MARKETING_OPT_OUT_KEYS)
 
 
+def _json_meta_text(key: str):
+    """Cross-dialect JSON text extraction for ``Customer.extra_metadata``.
+
+    Uses PostgreSQL/SQLite ``metadata->>'key'`` (via SQLAlchemy ``op("->>")``)
+    — the same pattern as ``nahla_segments._f_unsubscribed``. Do **not** use
+    ``hasattr(column, "astext")`` (always false on the column) or
+    ``func.json_extract`` (SQLite-only; breaks production PostgreSQL filters).
+    """
+    from sqlalchemy import String, cast  # noqa: PLC0415
+
+    return cast(Customer.extra_metadata.op("->>")(key), String)
+
+
 def marketing_opt_out_manual_sql_truthy():
     """SQLAlchemy expression — ``True`` when customer is manually excluded.
 
     Matches boolean JSON ``true``, string ``"true"`` / ``"1"``, and legacy
     keys. Does not rewrite ``extra_metadata``."""
-    from sqlalchemy import String, cast, func, or_  # noqa: PLC0415
+    from sqlalchemy import and_, or_  # noqa: PLC0415
 
     def _path_truthy(path_key: str):
-        raw = func.coalesce(
-            Customer.extra_metadata[path_key].astext
-            if hasattr(Customer.extra_metadata, "astext")
-            else func.json_extract(Customer.extra_metadata, f"$.{path_key}"),
-            "false",
+        raw = _json_meta_text(path_key)
+        return or_(
+            raw == "true",
+            raw == "1",
+            raw == "True",
+            raw == "TRUE",
+            raw == "yes",
+            raw == "Yes",
         )
-        return cast(raw, String).in_(["true", "1", "True", "TRUE", "yes", "Yes"])
 
-    keys = (META_KEY_OPT_OUT,) + LEGACY_MARKETING_OPT_OUT_KEYS
-    return or_(*(_path_truthy(k) for k in keys))
+    return or_(*(_path_truthy(k) for k in MARKETING_OPT_OUT_KEYS))
+
+
+def marketing_opt_out_manual_sql_falsy():
+    """SQLAlchemy expression — customer is NOT manually excluded.
+
+    Uses NULL-safe semantics (missing keys count as not opted-out), mirroring
+    ``nahla_segments._reachable_filter``."""
+    from sqlalchemy import and_, or_  # noqa: PLC0415
+
+    def _path_not_truthy(path_key: str):
+        raw = _json_meta_text(path_key)
+        return or_(
+            raw.is_(None),
+            and_(
+                raw != "true",
+                raw != "1",
+                raw != "True",
+                raw != "TRUE",
+                raw != "yes",
+                raw != "Yes",
+            ),
+        )
+
+    return and_(*(_path_not_truthy(k) for k in MARKETING_OPT_OUT_KEYS))
 
 
 def _get_customer(db: Session, tenant_id: int, customer_id: int) -> Customer:
@@ -939,10 +982,12 @@ __all__ = [
     "assert_known_segment",
     "customer_ids_with_manual_segment",
     "LEGACY_MARKETING_OPT_OUT_KEYS",
+    "MARKETING_OPT_OUT_KEYS",
     "is_marketing_opted_out",
     "is_marketing_opted_out_from_meta",
     "is_test_recipient",
     "marketing_opt_out_manual_sql_truthy",
+    "marketing_opt_out_manual_sql_falsy",
     "list_manual_segments_bulk",
     "list_manual_segments_for_customer",
     "remove_manual_segment",

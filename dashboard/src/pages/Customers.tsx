@@ -1254,7 +1254,12 @@ export default function Customers() {
           segments={segments}
           loading={segmentsLoading}
           active={segmentKey}
-          onSelect={setSegmentKey}
+          onSelect={(key) => {
+            setSegmentKey(key)
+            if (key !== 'all') {
+              setMarketingOptOutFilter('all')
+            }
+          }}
           campaignExcludedActive={marketingOptOutFilter === 'out'}
           onToggleCampaignExcluded={() => {
             setMarketingOptOutFilter((prev) => {
@@ -1293,7 +1298,12 @@ export default function Customers() {
           <Tag className="absolute start-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
           <select
             value={manualSegmentKey}
-            onChange={(e) => setManualSegmentKey(e.target.value)}
+            onChange={(e) => {
+              setManualSegmentKey(e.target.value)
+              if (e.target.value) {
+                setMarketingOptOutFilter('all')
+              }
+            }}
             dir={dir}
             className="ps-9 pe-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none bg-white"
             title={cu.filters.manualSegmentTitle}
