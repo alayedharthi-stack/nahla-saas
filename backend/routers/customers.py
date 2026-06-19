@@ -348,7 +348,6 @@ def _serialize_customer(
     manual_name_cleared:    bool = bool(meta.get("manual_name_cleared"))
     status = str(
         (profile.customer_status if profile and getattr(profile, "customer_status", None) else None)
-        or (profile.segment if profile else None)
         or "lead"
     )
     rfm_segment = str(
