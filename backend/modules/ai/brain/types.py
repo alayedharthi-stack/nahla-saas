@@ -925,6 +925,9 @@ class BrainContext:
     intent_priority: Optional[Any] = None
     # Social & Human Context Layer (P0) — computed after intent priority.
     social_human_context: Optional[Any] = None
+    # Phase 1.5 — drop stale summary/history on emoji/status after long gap.
+    fresh_social_context: bool = False
+    fresh_social_context_reason: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
