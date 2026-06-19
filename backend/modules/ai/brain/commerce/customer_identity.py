@@ -763,6 +763,27 @@ def apply_customer_identity_during_order_flow(
             result.needs_confirmation = item
             _log_skip(item.field, "ambiguous")
 
+    if result.applied:
+        try:
+            from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
+                emit_slot_consume,
+                infer_expected_slot,
+            )
+
+            for item in result.applied:
+                emit_slot_consume(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    phone_tail=str(getattr(ctx, "customer_phone", "") or "")[-4:],
+                    turn=int(getattr(ctx.state, "turn", 0) or 0),
+                    expected_slot=infer_expected_slot(ctx.state, getattr(ctx, "intent", None)),
+                    received={item.field: item.raw_value},
+                    consumed=True,
+                    reason="identity_bridge_applied",
+                    source="customer_identity",
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — identity evidence emit must not break turn
+            pass
+
     return result
 
 

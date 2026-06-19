@@ -8741,6 +8741,8 @@ async def _handle_merchant_message(
                 from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
                     apply_staff_escalation_truth_guard,
                 )
+                from core.order_flow import _load_brain_state as _setg_load  # noqa: PLC0415
+
                 _setg_meta = (
                     dict(inbound_metadata or {})
                     if isinstance(inbound_metadata, dict)
@@ -8749,8 +8751,10 @@ async def _handle_merchant_message(
                 _setg_path = str(
                     _setg_meta.get("deterministic_path") or _br_action or ""
                 )
+                _, _setg_bs = _setg_load(db, tenant_id=tenant_id, phone=to)
                 _setg_result = apply_staff_escalation_truth_guard(
                     reply=reply,
+                    inbound_text=text or "",
                     inbound_metadata=_setg_meta,
                     conversation_flags={
                         "needs_human": bool(getattr(convo, "needs_human", False)),
@@ -8762,9 +8766,59 @@ async def _handle_merchant_message(
                     brain_handoff=bool(_brain_handoff),
                     tenant_id=tenant_id,
                     conversation_id=getattr(convo, "id", None),
+                    state=_setg_bs,
                 )
                 if _setg_result.replaced:
                     reply = _setg_result.reply
+                try:
+                    from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
+                        detect_input_types,
+                        emit_ack_decision,
+                        is_generic_ack_stub,
+                        reply_acknowledges_important_input,
+                    )
+                    from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                        has_active_commerce_from_state,
+                    )
+
+                    _wh_types = detect_input_types(
+                        message=text or "",
+                        inbound_metadata=_setg_meta,
+                    )
+                    _wh_important = bool(_wh_types)
+                    _wh_ack = reply_acknowledges_important_input(
+                        reply=reply or "",
+                        input_types=_wh_types,
+                        state=_setg_bs,
+                    )
+                    _wh_stub = is_generic_ack_stub(reply or "")
+                    emit_ack_decision(
+                        tenant_id=tenant_id,
+                        phone_tail=(to or "")[-4:],
+                        important_customer_input=_wh_important,
+                        input_types=_wh_types,
+                        acknowledged=_wh_ack,
+                        reason=(
+                            "webhook_belt_generic_ack_violation"
+                            if _wh_important and _wh_stub and not _wh_ack
+                            else "webhook_belt"
+                        ),
+                        outbound_preview=reply or "",
+                        decision_action=str(_br_action or ""),
+                        chosen_path=_setg_path,
+                        generic_ack_stub=_wh_stub,
+                        generic_ack_violation=bool(
+                            _wh_important and _wh_stub and not _wh_ack
+                        ),
+                        staff_route_detected=False,
+                        fulfillment_locked=has_active_commerce_from_state(_setg_bs),
+                    )
+                except Exception as _wh_ack_exc:  # noqa: BLE001  # noqa: silent-ok — evidence emit must not block send
+                    logger.debug(
+                        "[ACK_DECISION] webhook emit skipped tenant=%s err=%s",
+                        tenant_id,
+                        _wh_ack_exc,
+                    )
             except Exception as _setg_exc:  # noqa: BLE001
                 logger.debug(
                     "[STAFF_ESCALATION_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
