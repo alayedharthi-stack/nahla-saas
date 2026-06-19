@@ -121,7 +121,7 @@ def test_location_only_does_not_deliver_reception() -> None:
     assert decision.deliver_contact is False
 
 
-def test_location_plus_reception_delivers_reception() -> None:
+def test_location_plus_reception_asks_before_vcard() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -132,8 +132,11 @@ def test_location_plus_reception_delivers_reception() -> None:
         db, tenant_id=10, message="وين موقعكم؟",
     )
     assert decision is not None
-    assert decision.deliver_reception_after_maps is True
-    assert decision.reception_call_target is not None
+    assert decision.trigger_type == "location_request"
+    assert decision.maps_url
+    assert decision.deliver_reception_after_maps is False
+    assert decision.reception_call_target is None
+    assert "المعرض" in decision.reply_text
 
 
 def test_arrival_soft_does_not_escalate_or_vcard() -> None:

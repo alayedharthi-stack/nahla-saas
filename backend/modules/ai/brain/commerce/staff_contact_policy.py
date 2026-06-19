@@ -102,9 +102,26 @@ def evaluate_staff_contact_policy(
     tenant_id: int,
     message: str,
     store_contact_phone: str = "",
+    customer_phone: str = "",
 ) -> Optional[StaffContactPolicyDecision]:
     """Return a short-circuit decision for explicit contact requests."""
     if not staff_contact_policy_enabled():
+        return None
+
+    from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+        should_defer_contact_routing_for_checkout_slot,
+    )
+
+    if should_defer_contact_routing_for_checkout_slot(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_slot",
+            tenant_id,
+        )
         return None
 
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415

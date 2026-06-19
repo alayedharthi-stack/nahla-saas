@@ -318,8 +318,12 @@ def select_arabic_commerce_fallback(
         try:
             from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
                 has_active_commerce_from_state,
+                is_staff_route_rejection_message,
+                resolve_staff_rejection_commerce_resume,
             )
 
+            if is_staff_route_rejection_message(inbound_text):
+                return resolve_staff_rejection_commerce_resume(state), "staff_route_rejected_resume"
             if has_active_commerce_from_state(state):
                 return "تمام، أكمل معك الطلب — وش تحتاج؟", "active_order_continue"
         except Exception:  # noqa: silent-ok
@@ -426,6 +430,27 @@ def apply_commerce_reply_quality_guard(
     inbound_metadata: Optional[dict] = None,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
+    try:
+        from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+            is_generic_stub_reply,
+            is_staff_route_rejection_message,
+            resolve_staff_rejection_commerce_resume,
+        )
+
+        if is_staff_route_rejection_message(inbound_text):
+            if not original or is_generic_stub_reply(original):
+                resume = resolve_staff_rejection_commerce_resume(state)
+                return CommerceReplyQualityGuardResult(
+                    reply=resume,
+                    replaced=True,
+                    stripped_residue=False,
+                    stripped_english=False,
+                    used_fallback=True,
+                    fallback_kind="staff_route_rejected_resume",
+                )
+    except Exception:  # noqa: silent-ok
+        pass
+
     if not original:
         fallback, kind = select_arabic_commerce_fallback(
             intent_name=intent_name,
@@ -493,6 +518,25 @@ def apply_commerce_reply_quality_guard(
             needs_fallback = False
 
     replaced = text != original
+    try:
+        from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+            is_generic_stub_reply,
+            is_staff_route_rejection_message,
+            resolve_staff_rejection_commerce_resume,
+        )
+
+        if (
+            not replaced
+            and is_generic_stub_reply(text)
+            and is_staff_route_rejection_message(inbound_text)
+        ):
+            text = resolve_staff_rejection_commerce_resume(state)
+            used_fallback = True
+            fallback_kind = "staff_route_rejected_resume"
+            replaced = text != original
+    except Exception:  # noqa: silent-ok
+        pass
+
     if replaced:
         logger.info(
             "[COMMERCE_REPLY_QUALITY_GUARD] tenant=%s conversation=%s "

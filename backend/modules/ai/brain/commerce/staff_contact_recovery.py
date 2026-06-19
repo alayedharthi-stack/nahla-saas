@@ -113,6 +113,18 @@ def evaluate_staff_contact_recovery(
         )
         return None
 
+    from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+        should_defer_contact_routing_for_checkout_slot,
+    )
+
+    if should_defer_contact_routing_for_checkout_slot(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=phone or "",
+        message=message or "",
+    ):
+        return None
+
     from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
         classify_employee_not_responding,
     )

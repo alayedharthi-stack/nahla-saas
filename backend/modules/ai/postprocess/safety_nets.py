@@ -1645,6 +1645,7 @@ def apply_staff_contact_safety_net(
     detected_call_markers: int,
     db: Any = None,
     tenant_id: int = 0,
+    customer_phone: str = "",
     history: Optional[List[Any]] = None,
     staff_contacts_sent: Optional[List[Dict[str, Any]]] = None,
     conversation_turn: int = 0,
@@ -1778,6 +1779,26 @@ def apply_staff_contact_safety_net(
         )
         result.skipped_reason = "commerce_deferred"
         return result
+
+    if db is not None and tenant_id and customer_phone:
+        try:
+            from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+                should_defer_contact_routing_for_checkout_slot,
+            )
+
+            if should_defer_contact_routing_for_checkout_slot(
+                db,
+                tenant_id=int(tenant_id or 0),
+                customer_phone=str(customer_phone or ""),
+                message=customer_msg or "",
+            ):
+                result.skipped_reason = "checkout_slot_deferred"
+                return result
+        except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — checkout defer probe must not block staff net
+            logger.debug(
+                "[STAFF_CONTACT_SAFETY_NET] checkout_slot_defer_probe_failed err=%s",
+                exc,
+            )
 
     _policy_allowed = bool(
         _arrival_policy is not None and _arrival_policy.allowed

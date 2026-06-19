@@ -168,15 +168,27 @@ def evaluate_arrival_contact_delivery(
     *,
     tenant_id: int,
     message: str,
+    customer_phone: str = "",
 ) -> Optional[ArrivalContactDeliveryDecision]:
     """Pre-brain short-circuit for arrival / visit signals."""
     if not arrival_contact_delivery_enabled():
         return None
 
+    from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+        should_defer_contact_routing_for_checkout_slot,
+    )
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
         is_explicit_arrival_intent,
         should_defer_contact_policies_for_commerce,
     )
+
+    if should_defer_contact_routing_for_checkout_slot(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        return None
 
     if should_defer_contact_policies_for_commerce(message or ""):
         return None

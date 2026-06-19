@@ -32,6 +32,9 @@ MSG_ESCALATION_EXHAUSTED = (
     "حاضر، وصلنا لأعلى مستوى في سلسلة التصعيد. سنتابع معك."
 )
 MSG_BRANCH_CLARIFY = "أي فرع تقصد؟"
+MSG_PICKUP_PREFERENCE_ASK = (
+    "هل ترغب بالاستلام من المعرض؟ أو أرسل لك موقع المعرض؟"
+)
 
 
 @dataclass(frozen=True)
@@ -112,10 +115,20 @@ def _build_location_decision(
         if config.location_instructions_text:
             reply = f"{reply}\n{config.location_instructions_text}"
 
+    from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+        is_explicit_arrival_intent,
+    )
+
     deliver_reception = config.location_response_mode == LOCATION_MODE_PLUS_RECEPTION
     reception_target = None
     reception_reply = ""
-    if deliver_reception:
+    _arrival_confirmed = is_explicit_arrival_intent(message or "")
+    if deliver_reception and not _arrival_confirmed:
+        deliver_reception = False
+        if config.location_instructions_text:
+            reply = f"{reply}\n{config.location_instructions_text}"
+        reply = f"{reply}\n{MSG_PICKUP_PREFERENCE_ASK}"
+    elif deliver_reception:
         reception_target, reception_reply = _build_reception_targets(
             db, tenant_id, message,
         )
@@ -317,12 +330,63 @@ def evaluate_branch_trigger_routing(
     if not tenant_has_structured_branch_data(db, int(tenant_id or 0)):
         return None
 
+    from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+        should_defer_contact_routing_for_checkout_slot,
+    )
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+        is_explicit_arrival_intent,
         should_defer_contact_policies_for_commerce,
     )
+    from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+        resolve_branch_for_message,
+    )
+
+    if should_defer_contact_routing_for_checkout_slot(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        return None
 
     if should_defer_contact_policies_for_commerce(message or ""):
         return None
+
+    _pickup_confirm_re = None
+    try:
+        import re as _re  # noqa: PLC0415
+
+        from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+            has_explicit_showroom_pickup_intent,
+        )
+
+        _raw = (message or "").strip()
+        _pickup_confirm_re = (
+            has_explicit_showroom_pickup_intent(_raw)
+            and _re.search(
+                r"(?:المعرض|الفرع|استلام\s*من|أ?ستلم\s*من|أ?ج(?:ي|يك)(?:كم|ك)?\s*(?:المعرض|الفرع)?|"
+                r"موقع\s*المعرض|فرع\s+)",
+                _raw,
+                flags=_re.UNICODE | _re.IGNORECASE,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        _pickup_confirm_re = None
+
+    if (
+        _pickup_confirm_re
+        and not is_explicit_arrival_intent(message or "")
+    ):
+        branch = resolve_branch_for_message(db, int(tenant_id or 0), message or "")
+        if branch is not None:
+            return BranchTriggerDecision(
+                trigger_type=TRIGGER_ARRIVAL_SOFT,
+                matched_phrase="showroom_pickup_intent",
+                branch_id=branch.id,
+                reason="pickup_intent_confirm_first",
+                reply_text=MSG_PICKUP_PREFERENCE_ASK,
+                deliver_contact=False,
+            )
 
     match = match_branch_trigger(db, int(tenant_id or 0), message or "")
     if match is None:

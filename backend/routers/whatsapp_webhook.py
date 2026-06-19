@@ -6981,6 +6981,7 @@ async def _handle_merchant_message(
                 db,
                 tenant_id=tenant_id,
                 message=_pre_brain_customer_msg,
+                customer_phone=to or "",
             )
         except Exception as _acd_exc:  # noqa: BLE001
             logger.warning(
@@ -7118,6 +7119,7 @@ async def _handle_merchant_message(
                 db,
                 tenant_id=tenant_id,
                 message=text or "",
+                customer_phone=to or "",
             )
         except Exception as _scp_exc:  # noqa: BLE001
             logger.warning(
@@ -9957,18 +9959,9 @@ async def _handle_merchant_message(
                         reply_text=reply or "",
                         existing_call_targets=_call_targets,
                         detected_call_markers=_marker_detected["call"],
-                        # May 2026 #36 KB scan: when the LLM
-                        # mentioned a staff name but omitted the
-                        # phone, the safety net now lifts the
-                        # number from a free-form KB section so
-                        # the merchant's name+phone pair lands
-                        # without needing a structured directory.
                         db=db,
                         tenant_id=tenant_id,
-                        # May 2026 #38 follow-up: pass history so
-                        # pronoun-only asks ("كم رقمه؟") can recover
-                        # the staff name from the prior bot turn
-                        # that the customer is following up on.
+                        customer_phone=to or "",
                         history=history if isinstance(history, list) else None,
                         staff_contacts_sent=list(
                             _bs_for_nc.get("staff_contacts_sent") or []
