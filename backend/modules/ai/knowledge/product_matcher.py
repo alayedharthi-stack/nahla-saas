@@ -89,6 +89,30 @@ def tokenize(text: str) -> List[str]:
     return [t for t in raw if len(t) >= 2 and t not in _STOPWORDS]
 
 
+def _short_generic_title_false_positive(
+    text_tokens: set[str],
+    title_token_set: set[str],
+    overlap: set[str],
+    *,
+    sku_match: bool,
+) -> bool:
+    """Reject short generic titles that only share a couple tokens with long OCR."""
+    if sku_match:
+        return False
+    if len(title_token_set) > 2:
+        return False
+    extra = text_tokens - title_token_set
+    if len(text_tokens) >= len(title_token_set) + 3 and len(extra) >= 2:
+        return True
+    if (
+        title_token_set <= text_tokens
+        and len(text_tokens) >= 5
+        and len(title_token_set) <= 2
+    ):
+        return True
+    return False
+
+
 def match_products(
     text: str,
     products: Iterable[CatalogProductForMatch],
@@ -142,6 +166,14 @@ def match_products(
         if not sku_match and len(overlap) < 2 and len(title_token_set) > 1:
             continue
 
+        if _short_generic_title_false_positive(
+            text_tokens,
+            title_token_set,
+            overlap,
+            sku_match=sku_match,
+        ):
+            continue
+
         if sku_match:
             score = max(score, 0.9)
 
@@ -157,5 +189,7 @@ def match_products(
             )
         )
 
-    candidates.sort(key=lambda m: (-m.confidence, m.title))
+    candidates.sort(
+        key=lambda m: (-m.confidence, -len(tokenize(m.title)), m.title),
+    )
     return candidates[:limit]

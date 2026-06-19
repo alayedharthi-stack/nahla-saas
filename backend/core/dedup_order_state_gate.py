@@ -137,6 +137,21 @@ def should_suppress_dedup_order_templates(
     normalized_type: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Return (suppress, reason) for order/payment dedup template resurrection."""
+    try:
+        from modules.ai.brain.state.product_correction import (  # noqa: PLC0415
+            detect_product_correction,
+        )
+        from modules.ai.brain.state.product_information_topic import (  # noqa: PLC0415
+            detect_product_information_topic_shift,
+        )
+
+        if detect_product_correction(message or ""):
+            return True, "product_correction"
+        if detect_product_information_topic_shift(message or ""):
+            return True, "product_information_topic"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional topic-shift imports at webhook boundary
+        pass
+
     if not inbound_pivots_away_from_order_state(
         message,
         inbound_metadata=inbound_metadata,

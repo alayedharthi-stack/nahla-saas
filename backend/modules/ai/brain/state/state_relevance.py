@@ -78,6 +78,8 @@ class StateRelevanceVerdict:
     safe_to_resume_state: bool = True
     detected_topic_shift: bool = False
     support_listing_topic_shift: bool = False
+    product_correction_topic_shift: bool = False
+    product_information_topic_shift: bool = False
     relevance_confidence: float = 0.5
     active_workflows: tuple = field(default_factory=tuple)
     current_intent_hint: str = ""
@@ -93,6 +95,8 @@ class StateRelevanceVerdict:
             "safe_to_resume_state": self.safe_to_resume_state,
             "detected_topic_shift": self.detected_topic_shift,
             "support_listing_topic_shift": self.support_listing_topic_shift,
+            "product_correction_topic_shift": self.product_correction_topic_shift,
+            "product_information_topic_shift": self.product_information_topic_shift,
             "relevance_confidence": self.relevance_confidence,
             "active_workflows": list(self.active_workflows),
             "current_intent_hint": self.current_intent_hint,
@@ -281,6 +285,31 @@ def validate_state_relevance(
     except Exception:  # noqa: BLE001
         support_listing_shift = False
 
+    product_correction_shift = False
+    product_info_shift = False
+    try:
+        from .product_correction import detect_product_correction  # noqa: PLC0415
+
+        product_correction_shift = detect_product_correction(msg)
+    except Exception:  # noqa: BLE001
+        product_correction_shift = False
+    try:
+        from .product_information_topic import (  # noqa: PLC0415
+            detect_product_information_topic_shift,
+            recent_unresolved_product_information,
+        )
+
+        _history = list(getattr(ctx, "history", None) or [])
+        product_info_shift = (
+            detect_product_information_topic_shift(msg)
+            or recent_unresolved_product_information(
+                _history,
+                current_message=msg,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        product_info_shift = False
+
     _global_browse = False
     try:
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415
@@ -309,6 +338,8 @@ def validate_state_relevance(
         fulfillment_relevant = False
     if support_listing_shift:
         fulfillment_relevant = False
+    if product_correction_shift or product_info_shift:
+        fulfillment_relevant = False
 
     pending_candidates_relevant = (
         replay_turn
@@ -326,6 +357,8 @@ def validate_state_relevance(
         and not (awaiting_payment and commerce_turn and not payment_turn)
         and not _global_browse
         and not support_listing_shift
+        and not product_correction_shift
+        and not product_info_shift
     )
 
     addon_relevant = (
@@ -353,6 +386,10 @@ def validate_state_relevance(
         confidence = max(confidence, 0.75)
     if support_listing_shift:
         confidence = max(confidence, 0.84)
+    if product_correction_shift:
+        confidence = max(confidence, 0.86)
+    if product_info_shift:
+        confidence = max(confidence, 0.85)
 
     return StateRelevanceVerdict(
         payment_state_relevant=payment_relevant,
@@ -364,6 +401,8 @@ def validate_state_relevance(
         safe_to_resume_state=safe,
         detected_topic_shift=topic_shift,
         support_listing_topic_shift=support_listing_shift,
+        product_correction_topic_shift=product_correction_shift,
+        product_information_topic_shift=product_info_shift,
         relevance_confidence=confidence,
         active_workflows=active,
         current_intent_hint=sem_intent or intent_name,
@@ -430,6 +469,8 @@ def should_block_workflow_resume(
         "awaiting_transfer": not verdict.payment_state_relevant,
         "active_fulfillment": (
             verdict.support_listing_topic_shift
+            or verdict.product_correction_topic_shift
+            or verdict.product_information_topic_shift
             or (
                 not verdict.fulfillment_state_relevant
                 and verdict.detected_topic_shift
@@ -437,6 +478,8 @@ def should_block_workflow_resume(
         ),
         "awaiting_location": (
             verdict.support_listing_topic_shift
+            or verdict.product_correction_topic_shift
+            or verdict.product_information_topic_shift
             or (
                 not verdict.fulfillment_state_relevant
                 and verdict.detected_topic_shift
@@ -451,6 +494,8 @@ def should_block_workflow_resume(
         "addon_recommendation": not verdict.addon_recommendation_relevant,
         "stale_product_focus": (
             verdict.support_listing_topic_shift
+            or verdict.product_correction_topic_shift
+            or verdict.product_information_topic_shift
             or (
                 not verdict.stale_product_focus_relevant
                 and verdict.detected_topic_shift
@@ -471,7 +516,8 @@ def log_state_relevance(
     try:
         logger.info(
             "[STATE_RELEVANCE] tenant=%s state=%s relevant=%s reason=%s "
-            "topic_shift=%s support_listing_shift=%s intent_hint=%s "
+            "topic_shift=%s support_listing_shift=%s product_correction=%s "
+            "product_information=%s intent_hint=%s "
             "confidence=%.2f active=%s",
             tenant_id,
             state_name or "-",
@@ -479,6 +525,8 @@ def log_state_relevance(
             reason or "-",
             str(verdict.detected_topic_shift).lower(),
             str(verdict.support_listing_topic_shift).lower(),
+            str(verdict.product_correction_topic_shift).lower(),
+            str(verdict.product_information_topic_shift).lower(),
             verdict.current_intent_hint or "-",
             float(verdict.relevance_confidence or 0.0),
             ",".join(verdict.active_workflows) or "-",

@@ -639,6 +639,23 @@ def try_fulfillment_lock_continuation(ctx: BrainContext) -> Optional[Decision]:
     except Exception:  # noqa: BLE001
         pass
 
+    try:
+        from .state.product_information_topic import (  # noqa: PLC0415
+            product_information_blocks_checkout,
+        )
+
+        if product_information_blocks_checkout(ctx):
+            log_state_resurrection_blocked(
+                tenant_id=getattr(ctx, "tenant_id", None),
+                blocked_state="active_fulfillment",
+                reason="product_information_topic_shift",
+                preview=(ctx.message or "")[:80],
+                intent_hint="product_usage_information",
+            )
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+
     product = _resolve_product_for_update(ctx)
     if product:
         logger.info(

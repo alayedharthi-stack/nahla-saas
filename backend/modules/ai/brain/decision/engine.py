@@ -347,6 +347,28 @@ class DefaultDecisionEngine:
             except Exception:  # noqa: BLE001
                 return False
 
+        def _product_correction_or_info_blocks_checkout() -> bool:
+            try:
+                _verdict = _state_relevance()
+                if _verdict is not None and (
+                    getattr(_verdict, "product_correction_topic_shift", False)
+                    or getattr(_verdict, "product_information_topic_shift", False)
+                ):
+                    return True
+                from ..state.product_information_topic import (  # noqa: PLC0415
+                    product_information_blocks_checkout,
+                )
+
+                return product_information_blocks_checkout(ctx)
+            except Exception:  # noqa: BLE001
+                return False
+
+        def _checkout_topic_blocks() -> bool:
+            return (
+                _support_listing_blocks_checkout()
+                or _product_correction_or_info_blocks_checkout()
+            )
+
         def _block_stale_resume(workflow: str, *, reason: str = "semantic_mismatch") -> bool:
             try:
                 from ..state.state_relevance import (  # noqa: PLC0415
@@ -898,7 +920,78 @@ class DefaultDecisionEngine:
                 confidence=intent.confidence,
             )
 
-        # ── 0. Deterministic checkout continuation (highest priority) ────────
+        # ── 0. Product correction / information (before checkout continuation) ─
+        try:
+            from ..state.product_correction import parse_product_correction  # noqa: PLC0415
+
+            _pc = parse_product_correction(ctx.message or "")
+            if _pc.detected:
+                if _pc.replacement_query:
+                    logger.info(
+                        "[PRODUCT_CORRECTION] tenant=%s re-search replacement=%r",
+                        ctx.tenant_id,
+                        _pc.replacement_query[:80],
+                    )
+                    return Decision(
+                        action=ACTION_SEARCH_PRODUCTS,
+                        args={
+                            "query": _pc.replacement_query,
+                            "source": "product_correction",
+                        },
+                        reason="product_correction: replacement catalog search",
+                        confidence=0.94,
+                    )
+                logger.info(
+                    "[PRODUCT_CORRECTION] tenant=%s negation without replacement",
+                    ctx.tenant_id,
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "product_correction",
+                        "response_goal": (
+                            "The customer rejected the previously assumed product. "
+                            "Do not mention the old product. Ask which product they mean."
+                        ),
+                    },
+                    reason="product_correction: stale product rejected",
+                    confidence=0.93,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            from ..state.product_information_topic import (  # noqa: PLC0415
+                detect_product_information_topic_shift,
+                product_information_blocks_checkout,
+            )
+
+            if (
+                detect_product_information_topic_shift(ctx.message or "")
+                or product_information_blocks_checkout(ctx)
+            ):
+                logger.info(
+                    "[PRODUCT_INFORMATION] tenant=%s answer before checkout preview=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:80],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "product_usage_information",
+                        "response_goal": (
+                            "Answer the customer's product usage, dosage, ingredients, "
+                            "benefits, or suitability question before continuing checkout."
+                        ),
+                        "suppress_checkout": True,
+                    },
+                    reason="product_information_topic_shift — answer before checkout",
+                    confidence=0.92,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # ── 0b. Deterministic checkout continuation (highest priority) ────────
         # When the customer is actively in the ordering stage and sends a
         # confirmation / continuation message, NEVER let it fall through to
         # the LLM.  This block fires before anything else so that explicit
@@ -940,7 +1033,7 @@ class DefaultDecisionEngine:
             and (_is_confirm or _has_prep)
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
-            and not _support_listing_blocks_checkout()
+            and not _checkout_topic_blocks()
         ):
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
@@ -1663,7 +1756,7 @@ class DefaultDecisionEngine:
             and not _active_candidates          # GUARD: no pending list
             and not _explicit_commerce_switch
             and not _is_global_browse
-            and not _support_listing_blocks_checkout()
+            and not _checkout_topic_blocks()
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
@@ -2426,7 +2519,7 @@ class DefaultDecisionEngine:
                     _nb = classify_solution_seeking_commerce(ctx.message or "")
                     if _nb is not None:
                         _need_cat = _nb.axis
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — optional solution-seeking classifier fallback
                     pass
             if not _need_cat:
                 _need_cat = "general_attribute"
@@ -2440,7 +2533,7 @@ class DefaultDecisionEngine:
                     route="decision_engine",
                     preview=ctx.message or "",
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — solution-seeking telemetry must not block reply
                 pass
             return Decision(
                 action=ACTION_LLM_REPLY,
@@ -2751,7 +2844,7 @@ class DefaultDecisionEngine:
                 and facts.orderable
                 and not state.checkout_url
                 and not _is_global_browse
-                and not _support_listing_blocks_checkout()
+                and not _checkout_topic_blocks()
             ):
                 logger.info(
                     "[ORDER FLOW] FORCED action=propose_draft_order "
