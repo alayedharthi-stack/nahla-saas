@@ -207,3 +207,29 @@ class TestCampaignExcludedFilter:
         phones = [c["phone"] for c in result["conversations"]]
         assert phones == ["+966500000040"]
         assert result["conversations"][0]["marketingOptOutManual"] is True
+
+    def test_filter_includes_legacy_campaign_opt_out_key(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust = Customer(
+            tenant_id=t.id,
+            phone="+966500000041",
+            normalized_phone="+966500000041",
+            name="LegacyCampaign",
+            extra_metadata={"campaign_opt_out": True},
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=cust.id,
+            status="active",
+            extra_metadata={"customer_phone": "+966500000041", "phone": "+966500000041"},
+        )
+        db.add(convo)
+        db.commit()
+
+        result = _call_list(db, t.id, filter="campaign_excluded")
+        assert [c["phone"] for c in result["conversations"]] == ["+966500000041"]
+        assert result["conversations"][0]["marketingOptOutManual"] is True
