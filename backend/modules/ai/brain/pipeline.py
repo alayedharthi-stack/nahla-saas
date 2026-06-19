@@ -1206,6 +1206,23 @@ class MerchantBrain:
             )
 
         # ── 4. Decision ───────────────────────────────────────────────────
+        try:
+            from .commerce.commerce_conversation_guard import (  # noqa: PLC0415
+                maybe_lock_honey_order_context,
+            )
+
+            maybe_lock_honey_order_context(
+                state,
+                message or "",
+                catalog=list(getattr(facts, "top_products", None) or []),
+            )
+        except Exception as _hlock_exc:  # noqa: BLE001  # noqa: silent-ok — honey session lock must not block decide
+            logger.debug(
+                "[COMMERCE_SESSION] honey order lock skipped tenant=%s err=%s",
+                tenant_id,
+                _hlock_exc,
+            )
+
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
 
@@ -1266,7 +1283,7 @@ class MerchantBrain:
                         "[CX] router rerouted tenant=%s before=%s after=%s",
                         ctx.tenant_id, _action_before_router, decision.action,
                     )
-        except Exception as _rr_exc:  # noqa: BLE001
+        except Exception as _rr_exc:  # noqa: BLE001  # noqa: silent-ok — relational router optional
             logger.debug(
                 "[CX] relational router invocation failed (non-fatal) "
                 "tenant=%s err=%s",

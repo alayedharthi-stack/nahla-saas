@@ -206,14 +206,13 @@ def resolve_browse_category_scope(
         return "عسل"
 
     locked = _canonical_scope_token(active_category or "")
-    if locked != "عسل":
-        return None
-
     src = str(source or "").strip().lower()
-    if is_generic_category_browse(message, query):
-        return "عسل"
-    if src in _SESSION_SCOPED_SOURCES:
-        return "عسل"
+    if locked == "عسل":
+        if is_generic_category_browse(message, query):
+            return "عسل"
+        if src in _SESSION_SCOPED_SOURCES:
+            return "عسل"
+
     return None
 
 

@@ -704,6 +704,14 @@ def product_discovery_block_reason(
     if has_explicit_product_inquiry(msg):
         return None
 
+    try:
+        from .commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+
+        if is_bare_start_order_phrase(msg):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+
     if src in _TOP_PRODUCTS_SOURCES and not has_explicit_broad_browse_request(msg):
         return "weak_or_unknown_intent"
 
@@ -979,6 +987,19 @@ def clarify_instead_of_top_products(
     msg = ctx.message or ""
     state = ctx.state
     try:
+        from .commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: PLC0415
+
+        if is_bare_start_order_phrase(msg):
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "", "source": "top_products_start_order"},
+                reason=f"bare start-order opener — recover from blocked top_products ({reason})",
+                confidence=0.90,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from .commerce.product_breadth_policy import (  # noqa: PLC0415
             global_availability_browse_requested,
         )
@@ -1035,7 +1056,7 @@ def clarify_instead_of_top_products(
                 ),
                 confidence=0.85,
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — pure greeting persona path optional
         pass
     tenant_id = getattr(ctx, "tenant_id", None)
     history = list(getattr(ctx, "history", None) or [])
@@ -1067,7 +1088,7 @@ def clarify_instead_of_top_products(
         )
         if _priority_dec is not None:
             return _priority_dec
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — conversational priority optional
         pass
 
     try:

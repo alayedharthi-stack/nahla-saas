@@ -255,6 +255,29 @@ def apply_staff_escalation_truth_guard(
                     staff_escalation_claim_blocked=True,
                 )
 
+            try:
+                from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: PLC0415
+                    is_bare_start_order_phrase,
+                )
+                from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
+                    build_bare_start_order_guard_reply,
+                )
+
+                if is_bare_start_order_phrase(inbound_text):
+                    return StaffEscalationTruthGuardResult(
+                        reply=build_bare_start_order_guard_reply(inbound_text),
+                        action="blocked_false_escalation_bare_start_order",
+                        replaced=True,
+                        reason="bare_start_order_guard_reply",
+                        evidence=evidence,
+                        staff_escalation_claim_blocked=True,
+                    )
+            except Exception as _bso_exc:  # noqa: BLE001  # noqa: silent-ok
+                logger.debug(
+                    "[STAFF_ESCALATION_TRUTH_GUARD] bare_start_order reply failed err=%s",
+                    _bso_exc,
+                )
+
             _active_commerce = has_active_commerce_from_state(state)
             _suppress_stub = should_suppress_generic_stub_injection(
                 inbound_text=inbound_text,

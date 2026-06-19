@@ -274,6 +274,73 @@ def _detect_honey_scope(text: str) -> Optional[str]:
     return None
 
 
+def _catalog_row_is_honey_sku(row: Mapping[str, Any]) -> bool:
+    """True when a catalog row is honey-family, not cream/oil derivative."""
+    title = str(row.get("title") or row.get("name") or "")
+    category = str(row.get("category") or "")
+    blob = _norm(f"{category} {title}")
+    if not blob:
+        return False
+    if any(marker in blob.split() or marker in blob for marker in _VENOM_DRIFT_MARKERS):
+        if "عسل" not in blob and not (set(_tokens(blob)) & _HONEY_SUBTYPE_HINTS):
+            return False
+    if "عسل" in blob or (set(_tokens(blob)) & _HONEY_TOKENS):
+        return True
+    if set(_tokens(blob)) & _HONEY_SUBTYPE_HINTS:
+        return True
+    try:
+        from .honey_browse_strategy import classify_honey_type  # noqa: PLC0415
+
+        if classify_honey_type(title):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — honey type classify optional
+        pass
+    return False
+
+
+def catalog_has_honey_skus(catalog: Sequence[Mapping[str, Any]]) -> bool:
+    """Platform-wide: any synced honey SKU — used to lock browse after order intent."""
+    return any(
+        isinstance(row, Mapping) and _catalog_row_is_honey_sku(row)
+        for row in (catalog or [])
+    )
+
+
+def maybe_lock_honey_order_context(
+    state: Any,
+    message: str,
+    *,
+    catalog: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    """
+    Persist honey category lock after bare order-start in honey-capable catalogs.
+
+    Returns True when ``commerce_session.active_category`` was set to ``عسل``.
+    """
+    try:
+        from .start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional guard import must not block session lock
+        return False
+
+    if not is_bare_start_order_phrase(message or ""):
+        return False
+    if not catalog_has_honey_skus(catalog):
+        return False
+
+    session = load_commerce_session(state)
+    session.order_intent = True
+    session.stage = session.stage or "order_intent"
+    if not str(session.active_category or "").strip():
+        session.active_category = "عسل"
+        apply_commerce_session(state, session)
+        logger.info(
+            "[COMMERCE_SESSION] locked active_category=عسل reason=bare_start_order",
+        )
+        return True
+    apply_commerce_session(state, session)
+    return str(session.active_category or "").strip() == "عسل"
+
+
 def _product_matches_name(catalog_row: Mapping[str, Any], name_hint: str) -> bool:
     hint = _norm(name_hint)
     if not hint:
@@ -519,10 +586,12 @@ __all__ = [
     "apply_commerce_session",
     "build_order_summary_hint",
     "catalog_availability_for_name",
+    "catalog_has_honey_skus",
     "detect_ask_cod",
     "filter_catalog_for_active_category",
     "is_social_ack_message",
     "load_commerce_session",
+    "maybe_lock_honey_order_context",
     "prepare_commerce_inbound",
     "product_title_drifts_from_honey",
     "strip_quoted_bot_echo",

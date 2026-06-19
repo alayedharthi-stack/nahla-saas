@@ -220,6 +220,12 @@ def next_missing_order_field(ctx: BrainContext) -> Optional[str]:
     return _next_missing_order_field(ctx)
 
 
+def build_bare_start_order_guard_reply(message: str = "") -> str:
+    """Deterministic order-start prompt — never generic receipt ACK."""
+    _ = message
+    return "أبشر، وش المنتج اللي ترغب تطلبه؟"
+
+
 def build_product_ordering_prompt(ctx: BrainContext) -> str:
     """
     Choose a natural Saudi WhatsApp prompt from conversation context.
@@ -312,6 +318,7 @@ def build_ordering_clarify_args(ctx: BrainContext) -> Dict[str, Any]:
 
 __all__ = [
     "LEGACY_ROBOTIC_PRODUCT_PROMPT",
+    "build_bare_start_order_guard_reply",
     "build_ordering_clarify_args",
     "build_product_ordering_prompt",
     "build_short_honey_order_clarify_reply",
