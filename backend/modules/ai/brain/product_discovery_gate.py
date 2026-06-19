@@ -1300,8 +1300,10 @@ def clarify_instead_of_top_products(
             reason=reason,
             preview=msg,
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception(
+            "[PRODUCT_DISCOVERY_GATE] intelligent_need_clarification_log_failed",
+        )
 
     return Decision(
         action=ACTION_CLARIFY,

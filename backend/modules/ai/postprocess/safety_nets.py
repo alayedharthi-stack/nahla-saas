@@ -2207,8 +2207,11 @@ def apply_staff_contact_safety_net(
                         name = rec.lookup_name
                     role = rec.role or role
                     break
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception(
+                "[SAFETY_NET:staff_contact] registry_role_lookup_failed tenant=%s",
+                tenant_id,
+            )
 
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
         build_staff_call_target,

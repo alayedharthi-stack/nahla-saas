@@ -240,8 +240,11 @@ def search_retry_queries(query: str) -> list[str]:
 
         for variant in expand_catalog_search_queries(raw):
             _add(variant)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception(
+            "[RESOLVED_PRODUCT_GUARD] catalog_query_expansion_failed query=%r",
+            raw[:80],
+        )
 
     return out[:6]
 

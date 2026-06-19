@@ -8,8 +8,11 @@ explicit contact/role intent, not a bare token match.
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
+
+logger = logging.getLogger("nahla.brain.commerce.staff_ameen_disambiguation")
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -86,8 +89,11 @@ def is_religious_ameen_context(message: str) -> bool:
             re.UNICODE,
         ):
             return True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception(
+            "[STAFF_AMEEN_DISAMBIGUATION] social_ack_probe_failed preview=%r",
+            raw[:80],
+        )
     return False
 
 
