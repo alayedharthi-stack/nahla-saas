@@ -2818,6 +2818,11 @@ class MerchantBrain:
             "non_commerce_category": str(
                 getattr(ctx, "non_commerce_category", "") or ""
             ),
+            "decision_action": str(getattr(decision, "action", "") or ""),
+            "decision_args": dict(getattr(decision, "args", None) or {}),
+            "social_human_context_category": str(
+                getattr(_social_human_context, "category", "") or ""
+            ),
         }
 
 

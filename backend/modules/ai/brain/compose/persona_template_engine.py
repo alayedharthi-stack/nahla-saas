@@ -439,7 +439,14 @@ def pick_persona_social_reply(
     inbound_text: str = "",
 ) -> str:
     """Warm social ack for routine no-LLM turns."""
-    cat = (category or "general_courtesy").strip().lower() or "general_courtesy"
+    from ..postprocess.social_single_reply_guard import (  # noqa: PLC0415
+        resolve_time_aware_social_category,
+    )
+
+    cat = resolve_time_aware_social_category(
+        (category or "general_courtesy").strip().lower() or "general_courtesy",
+        inbound_text=inbound_text,
+    )
 
     warm = PERSONA_SOCIAL_WARM_BY_CATEGORY.get(cat)
     if cat in _RELIGIOUS_DUA_SOCIAL_CATEGORIES and inbound_is_religious_dua_exchange(
