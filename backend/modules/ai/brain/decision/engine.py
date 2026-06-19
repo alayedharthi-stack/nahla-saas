@@ -1902,6 +1902,26 @@ class DefaultDecisionEngine:
                     and not is_branch_list_request(ctx.message or "")
                 ):
                     _extracted_product_query = _extracted
+        if not _extracted_product_query:
+            from ..commerce.catalog_query_normalization import (  # noqa: PLC0415
+                extract_english_order_product_query,
+            )
+
+            _en_extracted = extract_english_order_product_query(ctx.message or "")
+            if _en_extracted:
+                from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
+                from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
+                from ..commerce.contact_escalation import (  # noqa: PLC0415
+                    is_branch_list_request,
+                    is_branch_location_order_tail,
+                )
+                if (
+                    not is_order_fulfillment_product_query(_en_extracted)
+                    and not has_inquiry_phrasing(ctx.message or "")
+                    and not is_branch_location_order_tail(_en_extracted)
+                    and not is_branch_list_request(ctx.message or "")
+                ):
+                    _extracted_product_query = _en_extracted
 
         # ── 3.8d Product visual / image request (before order-query hijack) ─
         if intent.name == INTENT_PRODUCT_VISUAL_REQUEST:

@@ -233,7 +233,20 @@ def search_retry_queries(query: str) -> list[str]:
         if bare and bare != token:
             _add(bare)
 
-    return out[:4]
+    try:
+        from ..commerce.catalog_query_normalization import (  # noqa: PLC0415
+            expand_catalog_search_queries,
+        )
+
+        for variant in expand_catalog_search_queries(raw):
+            _add(variant)
+    except Exception:
+        logger.exception(
+            "[RESOLVED_PRODUCT_GUARD] catalog_query_expansion_failed query=%r",
+            raw[:80],
+        )
+
+    return out[:6]
 
 
 def extract_resolved_product_subject_from_message(message: str) -> str:
@@ -253,6 +266,13 @@ def extract_resolved_product_subject_from_message(message: str) -> str:
             c = str(candidate or "").strip()
             if c and _has_product_substance(c):
                 return c
+        from ..commerce.catalog_query_normalization import (  # noqa: PLC0415
+            extract_english_order_product_query,
+        )
+
+        en = extract_english_order_product_query(raw)
+        if en and _has_product_substance(en):
+            return en
     except Exception:
         logger.exception(
             "[RESOLVED_PRODUCT_GUARD] message subject extraction failed",
