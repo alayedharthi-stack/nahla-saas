@@ -983,6 +983,39 @@ class MerchantBrain:
             intent_priority=_intent_priority,
             social_human_context=_social_human_context,
         )
+        try:
+            from .context.fresh_social_context import (  # noqa: PLC0415
+                days_since_last_activity,
+                log_fresh_social_context,
+                should_apply_fresh_social_context,
+            )
+
+            _primary_goal = str(
+                getattr(_intent_priority, "primary_customer_goal", "") or ""
+            )
+            _fresh_social, _fresh_social_reason = should_apply_fresh_social_context(
+                inbound_text=message or "",
+                state=state,
+                intent_name=str(getattr(intent, "name", "") or ""),
+                primary_customer_goal=_primary_goal,
+                inbound_metadata=dict((profile or {}).get("inbound_metadata") or {}),
+                human_priority=bool(human_priority),
+            )
+            ctx.fresh_social_context = _fresh_social
+            ctx.fresh_social_context_reason = _fresh_social_reason
+            log_fresh_social_context(
+                tenant_id=tenant_id,
+                phone_tail=(customer_phone or "")[-4:],
+                applied=_fresh_social,
+                reason=_fresh_social_reason,
+                gap_days=days_since_last_activity(state),
+            )
+        except Exception as _fresh_soc_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[FRESH_SOCIAL_CONTEXT] evaluate failed tenant=%s err=%s",
+                tenant_id,
+                _fresh_soc_exc,
+            )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         if (
             _social_human_context is not None
@@ -2866,6 +2899,18 @@ def _build_reply_state(
         if role == "customer":
             recent_customer_messages.append(body)
 
+    _conversation_summary = str(current_state.conversation_summary or "")
+    if getattr(ctx, "fresh_social_context", False):
+        from .context.fresh_social_context import filter_recent_turns_for_fresh_social  # noqa: PLC0415
+
+        _conversation_summary = ""
+        recent_turns = filter_recent_turns_for_fresh_social(
+            current_message=ctx.message or "",
+        )
+        recent_customer_messages = [
+            str(ctx.message or "").strip(),
+        ] if str(ctx.message or "").strip() else []
+
     # ── Semantic stance detection (May 2026 #7) ──────────────────────────
     # Closed-enum classification of the customer's relational frame for THIS
     # turn. Pure function — see modules/ai/brain/intent/stance_detector.py.
@@ -3042,7 +3087,7 @@ def _build_reply_state(
         },
         recent_turns=recent_turns,
         policy_reason=str(decision.args.get("policy_reason") or ""),
-        conversation_summary=current_state.conversation_summary,
+        conversation_summary=_conversation_summary,
         store_knowledge=(ctx.sales_context.store_profile if ctx.sales_context else {}),
         customer_memory={
             **(ctx.sales_context.customer_profile if ctx.sales_context else {}),

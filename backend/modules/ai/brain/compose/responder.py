@@ -1136,7 +1136,11 @@ class DefaultComposer:
 
             prompt = build_brain_reply_prompt(reply_state)
             locale = str(ctx.profile.get("preferred_language") or "ar")
-            history_messages = _as_ai_history(ctx.history, ctx.message)
+            history_messages = _as_ai_history(
+                ctx.history,
+                ctx.message,
+                fresh_social_context=bool(getattr(ctx, "fresh_social_context", False)),
+            )
 
             try:
                 from modules.ai.brain.observability.memory_selection_evidence import (  # noqa: PLC0415
@@ -1158,6 +1162,8 @@ class DefaultComposer:
                     inbound_metadata=dict(_profile.get("inbound_metadata") or {}),
                     human_priority=bool(getattr(ctx, "human_priority", False)),
                     history_messages_count=len(history_messages),
+                    fresh_social_context=bool(getattr(ctx, "fresh_social_context", False)),
+                    fresh_social_reason=str(getattr(ctx, "fresh_social_context_reason", "") or ""),
                 )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break compose
                 pass
@@ -1631,7 +1637,18 @@ class DefaultComposer:
         return T.generic_fallback(variant=self._variant_idx(ctx))
 
 
-def _as_ai_history(history: List[Dict[str, Any]], current_message: str) -> List[Dict[str, str]]:
+def _as_ai_history(
+    history: List[Dict[str, Any]],
+    current_message: str,
+    *,
+    fresh_social_context: bool = False,
+) -> List[Dict[str, str]]:
+    if fresh_social_context:
+        msg = str(current_message or "").strip()
+        if msg:
+            return [{"role": "user", "content": msg}]
+        return []
+
     messages: List[Dict[str, str]] = []
     for turn in (history or [])[-20:]:
         direction = str(turn.get("direction") or "").strip()
