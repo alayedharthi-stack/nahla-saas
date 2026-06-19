@@ -369,6 +369,9 @@ def extract_cart_intents_with_context(
     message: str,
     *,
     cart_items: Optional[List[Dict[str, Any]]] = None,
+    product_focus: Optional[Dict[str, Any]] = None,
+    order_prep: Any = None,
+    active_commerce: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Context-aware cart intents — stabilizes repeated ``كيلo`` / edition picks.
@@ -448,7 +451,31 @@ def extract_cart_intents_with_context(
             "quantity": 2,
         }]
 
-    return extract_cart_intents(message)
+    base = extract_cart_intents(message)
+    if base:
+        return base
+
+    if active_commerce:
+        from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+            extract_active_order_quantity_fallback,
+        )
+
+        fallback = extract_active_order_quantity_fallback(
+            message,
+            cart_items=cart,
+            product_focus=product_focus,
+            order_prep=order_prep,
+            active_commerce=True,
+        )
+        if fallback.clarification_reply:
+            return [{
+                "action": "active_order_clarify",
+                "reply": fallback.clarification_reply,
+            }]
+        if fallback.intents:
+            return fallback.intents
+
+    return []
 
 
 __all__ = ["extract_cart_intents", "extract_cart_intents_with_context"]

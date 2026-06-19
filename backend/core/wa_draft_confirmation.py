@@ -153,6 +153,14 @@ def compose_wa_order_flow_reply(
     prep_dict = order_prep if isinstance(order_prep, dict) else (
         order_prep.to_dict() if hasattr(order_prep, "to_dict") else {}
     )
+    qty_clarify = ""
+    if isinstance(order_prep, dict):
+        qty_clarify = str(order_prep.get("active_order_quantity_clarification") or "").strip()
+    else:
+        qty_clarify = str(getattr(order_prep, "active_order_quantity_clarification", "") or "").strip()
+    if qty_clarify:
+        return qty_clarify
+
     if not cart_changed and not _cart_changed_this_turn(prep_dict):
         if not _draft_would_sync(prep_dict, brain_state):
             return None

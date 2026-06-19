@@ -174,6 +174,15 @@ def should_suppress_generic_stub_injection(
     """True when guards must not inject «وصلت رسالتك» / receipt-style stubs."""
     goal = (primary_customer_goal or "").strip().lower()
     intent = (intent_name or "").strip().lower()
+    try:
+        from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+            message_has_bare_quantity_or_variant_signal,
+        )
+
+        if message_has_bare_quantity_or_variant_signal(inbound_text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — qty signal must not break stub guard
+        pass
     if has_active_commerce_from_state(state):
         return True
     if goal == GOAL_ORDER_REQUEST or intent in _COMMERCE_INTENTS:
