@@ -922,16 +922,35 @@ def _evidence_backed_name_from_message(
 def _find_staff_name(
     customer_msg_norm: str,
     candidates: Optional[List[str]] = None,
+    *,
+    customer_msg_raw: str = "",
 ) -> Optional[str]:
     """Pick the longest configured alias found as a whole token in the message."""
     if not customer_msg_norm:
         return None
+    raw = (customer_msg_raw or customer_msg_norm or "").strip()
+    try:
+        from modules.ai.brain.commerce.staff_ameen_disambiguation import (  # noqa: PLC0415
+            is_religious_ameen_context,
+            staff_name_token_allowed,
+        )
+
+        if is_religious_ameen_context(raw):
+            return None
+    except Exception:  # noqa: BLE001
+        staff_name_token_allowed = None  # type: ignore[assignment,misc]
+        is_religious_ameen_context = None  # type: ignore[assignment,misc]
+
     pool = candidates or []
     msg_fold = _normalise_alif(customer_msg_norm)
-    hits = [
-        n for n in pool
-        if n and _candidate_token_present(msg_fold, _normalise_alif(n))
-    ]
+    hits = []
+    for n in pool:
+        if not n:
+            continue
+        if staff_name_token_allowed is not None and not staff_name_token_allowed(raw, n):
+            continue
+        if _candidate_token_present(msg_fold, _normalise_alif(n)):
+            hits.append(n)
     if not hits:
         return None
     hits.sort(key=len, reverse=True)
@@ -1679,6 +1698,17 @@ def apply_staff_contact_safety_net(
         result.skipped_reason = "empty_msg"
         return result
 
+    try:
+        from modules.ai.brain.commerce.staff_ameen_disambiguation import (  # noqa: PLC0415
+            is_religious_ameen_context,
+        )
+
+        if is_religious_ameen_context(customer_msg or ""):
+            result.skipped_reason = "religious_ameen_context"
+            return result
+    except Exception:  # noqa: BLE001
+        pass
+
     _alias_candidates = _staff_alias_candidates(db, int(tenant_id or 0))
 
     # Emit the structured contact-graph snapshot once per turn so
@@ -1793,7 +1823,11 @@ def apply_staff_contact_safety_net(
     explicit_customer_intent = (
         _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
         or _employee_not_responding is not None
-        or bool(_find_staff_name(msg_norm, _alias_candidates))
+        or bool(_find_staff_name(
+            msg_norm,
+            _alias_candidates,
+            customer_msg_raw=customer_msg or "",
+        ))
     )
     customer_intent = explicit_customer_intent or _arrival_gated_intent
 

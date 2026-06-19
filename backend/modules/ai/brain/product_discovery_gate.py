@@ -505,6 +505,16 @@ def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
     if str(extracted or "").strip():
         return str(extracted or "").strip()
     try:
+        from .commerce.catalog_query_normalization import (  # noqa: PLC0415
+            extract_english_order_product_query,
+        )
+
+        en = extract_english_order_product_query(ctx.message or "")
+        if en:
+            return en
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from .commerce.price_turn_classifier import (  # noqa: PLC0415
             normalize_price_subject,
         )

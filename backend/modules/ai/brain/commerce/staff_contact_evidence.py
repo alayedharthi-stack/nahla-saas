@@ -159,12 +159,28 @@ class StaffContactRegistry:
         norm = _norm(message or "")
         if not norm:
             return None
+        try:
+            from .staff_ameen_disambiguation import (  # noqa: PLC0415
+                is_religious_ameen_context,
+                staff_name_token_allowed,
+            )
+
+            if is_religious_ameen_context(message or ""):
+                return None
+        except Exception:  # noqa: BLE001
+            staff_name_token_allowed = None  # type: ignore[assignment,misc]
+
         best: Optional[Tuple[int, StaffContactRecord]] = None
         for rec in self.records:
             if rec.is_owner:
                 continue
             for token in rec.all_match_tokens():
                 if len(token) < 2:
+                    continue
+                if (
+                    staff_name_token_allowed is not None
+                    and not staff_name_token_allowed(message or "", token)
+                ):
                     continue
                 if _token_present_in_text(norm, token):
                     score = len(token)
