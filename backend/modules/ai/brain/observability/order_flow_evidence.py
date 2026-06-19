@@ -30,6 +30,7 @@ _INPUT_TYPE_VARIANT = "variant"
 _INPUT_TYPE_PAYMENT = "payment"
 _INPUT_TYPE_LOCATION = "location"
 _INPUT_TYPE_PRODUCT = "product"
+_INPUT_TYPE_SOCIAL_THANKS = "social_thanks"
 
 _NAME_HINT_RE = re.compile(
     r"(?:اسمي|معك|أنا|انا)\s+\S+|"
@@ -240,6 +241,16 @@ def detect_input_types(
 
     if _PAYMENT_HINT_RE.search(text):
         types.append(_INPUT_TYPE_PAYMENT)
+
+    try:
+        from modules.ai.brain.commerce.commerce_conversation_guard import (  # noqa: PLC0415
+            is_social_ack_message,
+        )
+
+        if is_social_ack_message(text):
+            types.append(_INPUT_TYPE_SOCIAL_THANKS)
+    except Exception:  # noqa: BLE001
+        logger.exception("[ORDER_FLOW_EVIDENCE] social_thanks_detect_failed")
 
     # dedupe preserve order
     seen: set[str] = set()
@@ -485,7 +496,10 @@ def emit_pipeline_turn_evidence(
         locked = has_active_commerce_from_state(state_after)
 
         reason = "ok"
-        if violation:
+        if stub and _INPUT_TYPE_SOCIAL_THANKS in input_types:
+            reason = "social_ack_fallback"
+            violation = True
+        elif violation:
             reason = "generic_ack_without_consumption_or_next_step"
         elif important and not ack:
             reason = "important_input_not_reflected_in_reply"

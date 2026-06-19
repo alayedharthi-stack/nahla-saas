@@ -213,6 +213,7 @@ def apply_staff_escalation_truth_guard(
         try:
             from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
                 has_active_commerce_from_state,
+                resolve_social_thanks_guard_reply,
                 should_suppress_generic_stub_injection,
                 strip_escalation_claim_sentences,
             )
@@ -232,10 +233,22 @@ def apply_staff_escalation_truth_guard(
                 )
 
             _active_commerce = has_active_commerce_from_state(state)
-            if should_suppress_generic_stub_injection(
+            _suppress_stub = should_suppress_generic_stub_injection(
                 inbound_text=inbound_text,
                 state=state,
-            ) or _active_commerce:
+            )
+            if _suppress_stub and not _active_commerce:
+                _social_reply = resolve_social_thanks_guard_reply(inbound_text)
+                if _social_reply:
+                    return StaffEscalationTruthGuardResult(
+                        reply=_social_reply,
+                        action="blocked_false_escalation_social_thanks",
+                        replaced=True,
+                        reason="social_thanks_mirror",
+                        evidence=evidence,
+                        staff_escalation_claim_blocked=True,
+                    )
+            if _suppress_stub or _active_commerce:
                 try:
                     from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
                         message_has_bare_quantity_or_variant_signal,
@@ -284,6 +297,27 @@ def apply_staff_escalation_truth_guard(
             logger.debug(
                 "[STAFF_ESCALATION_TRUTH_GUARD] stub context failed err=%s",
                 _stub_ctx_exc,
+            )
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                resolve_social_thanks_guard_reply,
+            )
+
+            _social_fallback = resolve_social_thanks_guard_reply(inbound_text)
+        except Exception as _soc_exc:  # noqa: BLE001
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] social thanks fallback failed err=%s",
+                _soc_exc,
+            )
+            _social_fallback = None
+        if _social_fallback:
+            return StaffEscalationTruthGuardResult(
+                reply=_social_fallback,
+                action="blocked_false_escalation_social_thanks",
+                replaced=True,
+                reason="social_thanks_mirror_fallback",
+                evidence=evidence,
+                staff_escalation_claim_blocked=True,
             )
         return StaffEscalationTruthGuardResult(
             reply=SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,

@@ -6,9 +6,12 @@ Shared predicates for when generic stub replies («وصلت رسالتك»,
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any, Optional
+
+logger = logging.getLogger("nahla.brain.stub_reply_guard_context")
 
 from modules.ai.brain.intent_priority.types import (
     GOAL_GREETING_ONLY,
@@ -196,7 +199,42 @@ def should_suppress_generic_stub_injection(
         inbound_metadata=inbound_metadata,
     ):
         return True
+    try:
+        from modules.ai.brain.commerce.commerce_conversation_guard import (  # noqa: PLC0415
+            is_social_ack_message,
+        )
+
+        if is_social_ack_message(inbound_text):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("[STUB_REPLY_GUARD] social_ack_probe_failed")
     return False
+
+
+def resolve_social_thanks_guard_reply(inbound_text: str) -> Optional[str]:
+    """Reciprocal social reply for thanks/closing — never generic receipt ACK."""
+    raw = (inbound_text or "").strip()
+    if not raw:
+        return None
+    try:
+        from modules.ai.brain.commerce.commerce_conversation_guard import (  # noqa: PLC0415
+            is_social_ack_message,
+        )
+
+        if not is_social_ack_message(raw):
+            return None
+    except Exception:  # noqa: BLE001
+        logger.exception("[STUB_REPLY_GUARD] social_thanks_resolve_probe_failed")
+        return None
+    try:
+        from modules.ai.brain.compose.mirror_replies import mirror_reply  # noqa: PLC0415
+
+        mirrored = mirror_reply(raw)
+        if mirrored and mirrored.strip():
+            return mirrored.strip()
+    except Exception:  # noqa: BLE001
+        logger.exception("[STUB_REPLY_GUARD] social_thanks_mirror_failed")
+    return "الله يعافيك ويسعدك 🌷"
 
 
 def strip_escalation_claim_sentences(reply: str) -> str:
@@ -221,6 +259,7 @@ __all__ = [
     "has_active_commerce_from_state",
     "is_generic_stub_reply",
     "is_lightweight_social_turn",
+    "resolve_social_thanks_guard_reply",
     "should_suppress_generic_stub_injection",
     "strip_escalation_claim_sentences",
 ]
