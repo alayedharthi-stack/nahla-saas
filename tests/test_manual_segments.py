@@ -1172,6 +1172,55 @@ class TestCustomersListEndpointContract:
         assert (refreshed.extra_metadata or {})[META_KEY_OPT_OUT] is True
         db2.close()
 
+    def _call_segments(self, engine, tenant_id: int):
+        import asyncio
+
+        from routers import customers as customers_router
+
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        original_resolve = customers_router.resolve_tenant_id
+        customers_router.resolve_tenant_id = (  # type: ignore
+            lambda request, db=None: tenant_id
+        )
+
+        class _FakeReq:
+            headers: dict = {}
+            cookies: dict = {}
+            state = type("S", (), {})()
+
+        try:
+            return asyncio.run(
+                customers_router.customers_segments(request=_FakeReq(), db=db)
+            )
+        finally:
+            customers_router.resolve_tenant_id = original_resolve
+            db.close()
+
+    def test_segments_campaign_excluded_count_excludes_unsubscribed_only(self):
+        """Chip count uses marketing opt-out truth, not ``is_unsubscribed``."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        _seed_customer(
+            db, t.id, "+966500000002",
+            extra={"marketing_opt_out": True},
+        )
+        _seed_customer(
+            db, t.id, "+966500000003",
+            extra={"is_unsubscribed": True},
+        )
+        _seed_customer(db, t.id, "+966500000004")
+        tenant_id = t.id
+        db.close()
+
+        result = self._call_segments(engine, tenant_id)
+        assert result["campaignExcludedCount"] == 2
+
     def _call_delete(self, engine, tenant_id: int, customer_id: int, segment_key: str):
         """Direct in-process call to ``remove_customer_segment``."""
         import asyncio

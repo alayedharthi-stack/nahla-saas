@@ -154,6 +154,7 @@ export default function Customers() {
   const [manualSegmentKey, setManualSegmentKey] = useState<string>('')
   const [marketingOptOutFilter, setMarketingOptOutFilter] = useState<'all' | 'out'>('all')
   const [segments, setSegments] = useState<CustomerSegmentMeta[]>([])
+  const [campaignExcludedCount, setCampaignExcludedCount] = useState<number | null>(null)
   const [segmentsLoading, setSegmentsLoading] = useState(true)
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
@@ -432,8 +433,12 @@ export default function Customers() {
     try {
       const res = await customersApi.segments()
       setSegments(res.segments)
+      setCampaignExcludedCount(
+        typeof res.campaignExcludedCount === 'number' ? res.campaignExcludedCount : null,
+      )
     } catch {
       setSegments([])
+      setCampaignExcludedCount(null)
     } finally {
       setSegmentsLoading(false)
     }
@@ -1261,6 +1266,7 @@ export default function Customers() {
             }
           }}
           campaignExcludedActive={marketingOptOutFilter === 'out'}
+          campaignExcludedCount={campaignExcludedCount}
           onToggleCampaignExcluded={() => {
             setMarketingOptOutFilter((prev) => {
               const next = prev === 'out' ? 'all' : 'out'
@@ -2571,7 +2577,10 @@ export default function Customers() {
                   // reload.
                   setCustomers(prev => prev.map(c => c.id === next.id ? next : c))
                 }}
-                onRequireListReload={load}
+                onRequireListReload={() => {
+                  void load()
+                  void loadSegments()
+                }}
               />
 
               <div className="space-y-3">
@@ -3051,13 +3060,14 @@ interface SegmentChipsProps {
   active: string
   onSelect: (key: string) => void
   campaignExcludedActive: boolean
+  campaignExcludedCount: number | null
   onToggleCampaignExcluded: () => void
   campaignExcludedLabel: string
 }
 
 function SegmentChips({
   cu, lang, locale, segments, loading, active, onSelect,
-  campaignExcludedActive, onToggleCampaignExcluded, campaignExcludedLabel,
+  campaignExcludedActive, campaignExcludedCount, onToggleCampaignExcluded, campaignExcludedLabel,
 }: SegmentChipsProps) {
   const [openInfo, setOpenInfo] = useState<string | null>(null)
 
@@ -3150,6 +3160,18 @@ function SegmentChips({
           >
             <Megaphone className="w-3 h-3 shrink-0" />
             <span>{campaignExcludedLabel}</span>
+            {campaignExcludedCount != null && (
+              <span
+                className={
+                  'inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full text-[10px] font-semibold ' +
+                  (campaignExcludedActive
+                    ? 'bg-white/20 text-white'
+                    : 'bg-violet-100 text-violet-700')
+                }
+              >
+                {campaignExcludedCount.toLocaleString(locale)}
+              </span>
+            )}
           </button>
         </div>
 

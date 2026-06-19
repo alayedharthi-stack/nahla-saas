@@ -61,6 +61,7 @@ from services.manual_segments import (
     list_manual_segments_for_customer,
     remove_manual_segment,
     set_marketing_opt_out_manual,
+    count_marketing_opted_out_customers,
     is_marketing_opted_out_from_meta,
     marketing_opt_out_manual_sql_truthy,
     marketing_opt_out_manual_sql_falsy,
@@ -799,6 +800,7 @@ async def customers_segments(request: Request, db: Session = Depends(get_db)):
         "segments": list_segments_with_counts(
             db, tenant_id, require_reachable=False,
         ),
+        "campaignExcludedCount": count_marketing_opted_out_customers(db, tenant_id),
     }
 
 

@@ -25,6 +25,21 @@ export interface ConversationFilterHelpers {
   isClosed: (c: DashboardConversation) => boolean
 }
 
+export function resolveConversationFilterCount(
+  f: ConversationFilter,
+  serverCounts: Partial<Record<ConversationFilter, number>> | null | undefined,
+  conversations: DashboardConversation[],
+  h: ConversationFilterHelpers,
+): number | null {
+  if (f === 'all') return null
+  const fromServer = serverCounts?.[f]
+  if (typeof fromServer === 'number' && Number.isFinite(fromServer)) {
+    return fromServer
+  }
+  return null
+}
+
+/** @deprecated Prefer ``resolveConversationFilterCount`` with backend totals. */
 export function conversationFilterCount(
   f: ConversationFilter,
   conversations: DashboardConversation[],
