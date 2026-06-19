@@ -288,6 +288,24 @@ def evaluate_layer0_route(
     if not text:
         return None
 
+    try:
+        from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
+            should_defer_layer0_for_brain_social,
+        )
+
+        if should_defer_layer0_for_brain_social(text):
+            logger.info(
+                "[LAYER0_ROUTER] defer=brain_social tenant=%s preview=%r",
+                tenant_id,
+                text[:80],
+            )
+            return None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[LAYER0_ROUTER] brain_social defer check failed: %s",
+            exc,
+        )
+
     from modules.ai.brain.intent import rules  # noqa: PLC0415
 
     intent = rules.match(text)

@@ -2006,7 +2006,7 @@ async def _handle_360dialog_body(
                     except Exception as exc:  # noqa: BLE001
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — rollback best-effort after coexistence branch failure
                             pass
                         logger.exception(
                             "[Webhook360] coexistence branch failed isolated "
@@ -7378,29 +7378,53 @@ async def _handle_merchant_message(
                         _tenant_id=tenant_id,
                         _db=db,
                     )
-                    StateManager.save_message(
-                        db,
-                        to,
-                        _l0_reply,
-                        "outbound",
-                        conversation_id=convo.id,
-                        tenant_id=tenant_id,
-                        extra_metadata={
-                            **_persona_ownership.to_metadata(),
-                            "deterministic_path": f"layer0:{_l0_decision.matched}",
-                            "layer0_matched": _l0_decision.matched,
-                            "layer0_intent": _l0_decision.intent_name,
-                        },
-                    )
+                    if _l0_ok:
+                        try:
+                            from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
+                                SocialReplySelection,
+                                claim_social_reply_selection,
+                            )
+
+                            claim_social_reply_selection(
+                                _trace,
+                                selection=SocialReplySelection(
+                                    action=_l0_decision.intent_name or _l0_decision.matched,
+                                    source="layer0_router",
+                                    category=_l0_decision.social_category,
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace claim must not block send
+                            pass
+                        _trace.mark_outbound_sent(
+                            source=_TS.SOURCE_LAYER0,
+                            length=len(_l0_reply or ""),
+                        )
+                    try:
+                        StateManager.save_message(
+                            db,
+                            to,
+                            _l0_reply,
+                            "outbound",
+                            conversation_id=convo.id,
+                            tenant_id=tenant_id,
+                            extra_metadata={
+                                **_persona_ownership.to_metadata(),
+                                "deterministic_path": f"layer0:{_l0_decision.matched}",
+                                "layer0_matched": _l0_decision.matched,
+                                "layer0_intent": _l0_decision.intent_name,
+                            },
+                        )
+                    except Exception as _l0_save_exc:  # noqa: BLE001
+                        logger.exception(
+                            "[LAYER0_ROUTER] persist failed tenant=%s err=%s "
+                            "— outbound already sent, not falling through to Brain",
+                            tenant_id,
+                            _l0_save_exc,
+                        )
                     try:
                         _trace.intent = _l0_decision.intent_name or _l0_decision.matched
                         _trace.response_goal = f"layer0_{_l0_decision.matched}"
                         _trace.fallback_source = "layer0_router"
-                        if _l0_ok:
-                            _trace.mark_outbound_sent(
-                                source=_TS.SOURCE_LAYER0,
-                                length=len(_l0_reply or ""),
-                            )
                     except Exception:  # noqa: BLE001
                         pass
                     _sync_persona_observability()
@@ -7416,6 +7440,16 @@ async def _handle_merchant_message(
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
         _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)
+        if _brain_active and not _trace.outbound_lock_acquired():
+            logger.warning(
+                "[BRAIN] skipped — outbound already sent for this inbound | "
+                "tenant=%s to=%s reply_source=%s",
+                tenant_id,
+                to,
+                getattr(_trace, "reply_source", ""),
+            )
+            _sync_persona_observability()
+            return
         if _brain_active:
             try:
                 from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
@@ -7524,6 +7558,43 @@ async def _handle_merchant_message(
                         _brain_nc_category = str(
                             brain_result.get("non_commerce_category") or ""
                         ).strip()
+                        try:
+                            from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
+                                SocialReplySelection,
+                                claim_social_reply_selection,
+                                is_social_greeting_decision,
+                            )
+                            from modules.ai.brain.types import Decision  # noqa: PLC0415
+
+                            _br_dec_action = str(
+                                brain_result.get("decision_action") or ""
+                            )
+                            _br_dec_args = dict(
+                                brain_result.get("decision_args") or {}
+                            )
+                            _br_shc_cat = str(
+                                brain_result.get("social_human_context_category") or ""
+                            )
+                            _br_decision = Decision(
+                                action=_br_dec_action,
+                                args=_br_dec_args,
+                                reason="",
+                            )
+                            if is_social_greeting_decision(_br_decision):
+                                claim_social_reply_selection(
+                                    _trace,
+                                    selection=SocialReplySelection(
+                                        action=_br_dec_action,
+                                        source="brain",
+                                        category=str(
+                                            _br_dec_args.get("social_category")
+                                            or _br_shc_cat
+                                            or ""
+                                        ),
+                                    ),
+                                )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace claim must not block send
+                            pass
                 else:
                     reply          = str(brain_result or "")
                     _brain_buttons = []
@@ -10865,7 +10936,42 @@ async def _handle_merchant_message(
                 )
 
         _send_ok = False
-        if _should_suppress_empty_outbound_reply(
+        _social_send_suppressed = False
+        try:
+            from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
+                should_suppress_competing_social_outbound,
+            )
+
+            _social_send_suppressed = should_suppress_competing_social_outbound(
+                _trace,
+                source="brain_wire_send",
+                action=str(getattr(_trace, "brain_action", "") or ""),
+                inbound_text=text or "",
+            )
+        except Exception:  # noqa: BLE001
+            _social_send_suppressed = False
+
+        if _social_send_suppressed:
+            if not _outbound_abort_audited:
+                _maybe_log_outbound_candidate_abort(
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                    customer_id=_outbound_customer_id,
+                    brain_candidate=_brain_reply_candidate,
+                    final_reply=reply,
+                    abort_reason="social_single_reply_guard",
+                    final_stage="pre_provider_send",
+                    suppressor=_outbound_abort_suppressor or None,
+                    expression_owner=_persona_ownership.expression_owner,
+                )
+                _outbound_abort_audited = True
+            _log_empty_outbound_suppressed(
+                tenant_id=tenant_id,
+                to=to,
+                conversation_id=getattr(convo, "id", None),
+                reason="social_single_reply_guard",
+            )
+        elif _should_suppress_empty_outbound_reply(
             reply,
             brain_buttons=_brain_buttons,
             pending_attachments=(
