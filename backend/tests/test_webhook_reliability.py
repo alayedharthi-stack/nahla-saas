@@ -243,13 +243,9 @@ def test_outbound_echo_source_does_not_update_last_interaction_at(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``upsert_customer_identity(source='whatsapp_outbound_echo')``
-    must FIND the existing customer and update phone / name /
-    metadata as needed, but MUST NOT assign
-    ``last_interaction_at``. This is the timestamp the silence-
-    detector reads to decide "has this customer been quiet long
-    enough to re-engage?" — bumping it on merchant-driven echoes
-    would mask stale conversations and break the cart-recovery
-    funnel.
+    must FIND the existing customer and update phone / metadata as
+    needed, but MUST NOT assign ``last_interaction_at`` NOR adopt a
+    name from merchant-mobile echo text.
     """
     from datetime import datetime, timezone
 
@@ -268,20 +264,25 @@ def test_outbound_echo_source_does_not_update_last_interaction_at(
     monkeypatch.setattr(svc, "ensure_profile", lambda _c, **_kw: None)
 
     pre_writes = list(customer._writes)
+    pre_name = customer.name
     svc.upsert_customer_identity(
         phone="966500000001",
-        name="خالد",
+        name="ايه وقف النحلة شغلتنا",
         source="whatsapp_outbound_echo",
         seen_at=datetime.now(timezone.utc),
     )
 
     # The function may legitimately update phone/email/metadata,
     # but ``last_interaction_at`` is the single attribute we MUST
-    # NOT see in the writes list.
+    # NOT see in the writes list, and echo text must never become
+    # the canonical customer name.
     new_writes = customer._writes[len(pre_writes):]
     assert "last_interaction_at" not in new_writes, (
         "echo source unexpectedly bumped last_interaction_at "
         f"(writes seen: {new_writes!r})"
+    )
+    assert customer.name == pre_name, (
+        "echo source must not adopt merchant message text as Customer.name"
     )
 
 

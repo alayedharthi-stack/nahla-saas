@@ -172,6 +172,8 @@ _BLOCKED_TOKENS = frozenset({
     "اشتريت", "اشتري", "طلبت", "دفعت", "ارسلت",
     "مشكله", "مشكل", "شكوى", "شكوي",
     "شحنه", "الشحنه", "شحنة", "الشحنة",
+    # Conversation / complaint fragments (Jun 2026 P0)
+    "ايه", "اية", "وقف", "شغلتنا", "شغلنا", "النحلة", "نحلة",
     # ── Arrival / presence verbs (May 2026 hotfix) ────────────────────
     # Real cases from production: "أنا وصلت" / "وصلت" / "أنا جاي"
     # / "جايه الحين" got stored as the customer's name (we ended up

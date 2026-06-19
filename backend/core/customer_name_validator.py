@@ -34,6 +34,8 @@ _CONVERSATIONAL_TOKENS: FrozenSet[str] = frozenset({
     # Question / small-talk — never names
     "وش", "ايش", "كيف", "متى", "وين", "ليش", "ليه", "حقي", "حال", "الحال",
     "طبعا", "اه", "آه", "ابد", "ابدا",
+    # Conversation / complaint fragments (Jun 2026 P0 — production echo leak)
+    "ايه", "اية", "وقف", "شغلتنا", "شغلنا", "النحلة", "نحلة",
 })
 
 _COMMERCE_TOKENS: FrozenSet[str] = frozenset({

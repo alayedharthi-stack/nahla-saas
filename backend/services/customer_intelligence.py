@@ -651,6 +651,24 @@ class CustomerIntelligenceService:
         clean_name       = str(name or "").strip()
         clean_email      = str(email or "").strip() or None
 
+        # ── Central name-adoption guard (Jun 2026 P0) ─────────────────────
+        # Block outbound echoes, campaigns, automations, and any other
+        # non-inbound channel from adopting message text as identity.
+        # Trusted admin/import/order paths pass through; WhatsApp profile
+        # hints remain proposed-only via the resolver.
+        from core.customer_name_adoption_guard import (  # noqa: PLC0415
+            filter_name_for_identity_upsert,
+        )
+
+        _explicit_entry = (source or "") == "ai_detected_name"
+        clean_name, _name_mode = filter_name_for_identity_upsert(
+            clean_name,
+            source,
+            explicit_customer_entry=_explicit_entry,
+        )
+        if _name_mode == "blocked":
+            clean_name = ""
+
         if not any([normalized_phone, clean_name, clean_email, external_id]):
             return None
 

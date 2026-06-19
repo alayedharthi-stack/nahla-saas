@@ -460,10 +460,30 @@ def _persist_customer_profile(
             )
             return
 
+        from core.customer_name_adoption_guard import (  # noqa: PLC0415
+            filter_name_for_identity_upsert,
+        )
+
+        adopted_name, mode = filter_name_for_identity_upsert(
+            name,
+            "ai_detected_name",
+            direction="inbound",
+            explicit_customer_entry=True,
+        )
+        if mode != "official" or not adopted_name:
+            logger.info(
+                "[CUSTOMER_PROFILE_UPDATED] blocked by adoption guard "
+                "tenant=%s phone=%s mode=%s",
+                tenant_id,
+                phone,
+                mode,
+            )
+            return
+
         svc = CustomerIntelligenceService(db, tenant_id)
         svc.upsert_customer_identity(
             phone=phone,
-            name=name,
+            name=adopted_name,
             source="ai_detected_name",
         )
         logger.info(
