@@ -44,6 +44,10 @@ class ReplyContextSnapshot:
     fresh_social_context: bool = False
     fresh_social_reason: str = ""
     gap_days: Optional[float] = None
+    used_active_order: bool = False
+    used_product_focus: bool = False
+    used_order_prep: bool = False
+    used_conversation_summary: bool = False
 
 
 def _gap_days(state: Any) -> Optional[float]:
@@ -199,7 +203,9 @@ def emit_reply_context(
         logger.info(
             "[REPLY_CONTEXT] tenant=%s phone=*%s sources=%s "
             "history_turns=%s summary_chars=%s social_in_window=%s "
-            "lightweight_social=%s fresh_social=%s fresh_reason=%s gap_days=%s",
+            "lightweight_social=%s fresh_social=%s fresh_reason=%s gap_days=%s "
+            "used_active_order=%s used_product_focus=%s used_order_prep=%s "
+            "used_conversation_summary=%s",
             tenant_id,
             phone_tail,
             ",".join(snapshot.sources_used) or "-",
@@ -210,6 +216,10 @@ def emit_reply_context(
             snapshot.fresh_social_context,
             snapshot.fresh_social_reason or "-",
             f"{snapshot.gap_days:.1f}" if snapshot.gap_days is not None else "-",
+            snapshot.used_active_order,
+            snapshot.used_product_focus,
+            snapshot.used_order_prep,
+            snapshot.used_conversation_summary,
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok
         pass
@@ -318,6 +328,20 @@ def emit_compose_memory_evidence(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — social count optional for telemetry
         pass
 
+    used_active_order = "active_order" in sources
+    op = getattr(state, "order_prep", None) if state is not None else None
+    used_order_prep = bool(
+        used_active_order
+        and op is not None
+        and str(getattr(op, "product_id", "") or "").strip()
+    )
+    used_product_focus = bool(
+        used_active_order
+        and state is not None
+        and getattr(state, "current_product_focus", None)
+    )
+    used_conversation_summary = bool(summary_chars) and "conversation_summary" in sources
+
     emit_reply_context(
         tenant_id=tenant_id,
         phone_tail=phone_tail,
@@ -330,6 +354,10 @@ def emit_compose_memory_evidence(
             fresh_social_context=fresh_social_context,
             fresh_social_reason=fresh_social_reason,
             gap_days=gap,
+            used_active_order=used_active_order,
+            used_product_focus=used_product_focus,
+            used_order_prep=used_order_prep,
+            used_conversation_summary=used_conversation_summary,
         ),
     )
 

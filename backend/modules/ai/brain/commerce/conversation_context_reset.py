@@ -230,9 +230,31 @@ def maybe_reset_stale_order_context(
     if stage == STAGE_PAID_ORDER:
         return None
 
+    if str(getattr(state, "stage", "") or "").strip().lower() == "support":
+        return None
+
+    try:
+        from .fresh_commerce_context import detect_explicit_order_resume  # noqa: PLC0415
+
+        if detect_explicit_order_resume(message):
+            return None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[COMMERCE_CONTEXT_DECAY] resume probe skipped err=%s", exc)
+
     if is_context_expired(state, now=now):
         clear_active_order_context(state, reason=f"ttl_expired_{stage}")
         return f"ttl_expired_{stage}"
+
+    try:
+        from .fresh_commerce_context import (  # noqa: PLC0415
+            maybe_reset_abandoned_commerce_on_fresh_exploration,
+        )
+
+        decay = maybe_reset_abandoned_commerce_on_fresh_exploration(state, message)
+        if decay:
+            return decay
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[COMMERCE_CONTEXT_DECAY] skipped err=%s", exc)
 
     return None
 
