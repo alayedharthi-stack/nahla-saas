@@ -4,9 +4,9 @@ import { ChevronDown, X } from 'lucide-react'
 import {
   CONVERSATION_FILTER_KEYS,
   conversationFilterActiveClass,
-  conversationFilterCount,
   conversationFilterIcon,
   conversationFilterInactiveClass,
+  resolveConversationFilterCount,
   type ConversationFilter,
   type ConversationFilterHelpers,
 } from './conversationFilterConfig'
@@ -18,6 +18,7 @@ export interface ConversationFiltersMobileMenuProps {
   onOpenChange: (open: boolean) => void
   activeFilter: ConversationFilter
   filterLabels: Record<ConversationFilter, string>
+  filterCounts?: Partial<Record<ConversationFilter, number>> | null
   conversations: DashboardConversation[]
   helpers: ConversationFilterHelpers
   menuButtonLabel: string
@@ -31,6 +32,7 @@ export default function ConversationFiltersMobileMenu({
   onOpenChange,
   activeFilter,
   filterLabels,
+  filterCounts,
   conversations,
   helpers,
   menuButtonLabel,
@@ -104,7 +106,9 @@ export default function ConversationFiltersMobileMenu({
 
             <div className="overflow-y-auto overscroll-contain py-2 px-2">
               {CONVERSATION_FILTER_KEYS.map((f) => {
-                const count = conversationFilterCount(f, conversations, helpers)
+                const count = resolveConversationFilterCount(
+                  f, filterCounts, conversations, helpers,
+                )
                 const isActive = activeFilter === f
                 const rowAccent =
                   f === 'campaign_excluded'
@@ -113,7 +117,7 @@ export default function ConversationFiltersMobileMenu({
                       : 'text-violet-800 hover:bg-violet-50')
                     : (isActive
                       ? conversationFilterActiveClass(f)
-                      : conversationFilterInactiveClass(f, count))
+                      : conversationFilterInactiveClass(f, count ?? 0))
 
                 return (
                   <button
@@ -131,7 +135,7 @@ export default function ConversationFiltersMobileMenu({
                       {conversationFilterIcon(f)}
                       <span className="truncate">{filterLabels[f]}</span>
                     </span>
-                    {f !== 'all' && count > 0 && (
+                    {f !== 'all' && count != null && count > 0 && (
                       <span className={`shrink-0 text-xs font-semibold px-2 py-0.5 rounded-full ${
                         isActive
                           ? 'bg-white/20 text-inherit'

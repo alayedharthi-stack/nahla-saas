@@ -942,6 +942,20 @@ def is_marketing_opted_out(customer: Customer) -> bool:
     return is_marketing_opted_out_from_meta(customer.extra_metadata)
 
 
+def count_marketing_opted_out_customers(db: Session, tenant_id: int) -> int:
+    """Tenant-wide count for the customers-page campaign-exclusion chip."""
+    from sqlalchemy import func  # noqa: PLC0415
+
+    return (
+        db.query(func.count(Customer.id))
+        .filter(
+            Customer.tenant_id == tenant_id,
+            marketing_opt_out_manual_sql_truthy(),
+        )
+        .scalar()
+    ) or 0
+
+
 def is_test_recipient(customer: Customer) -> bool:
     meta = customer.extra_metadata or {}
     return bool(meta.get(META_KEY_TEST_RECIPIENT))
@@ -980,6 +994,7 @@ __all__ = [
     "UnknownSegmentError",
     "add_manual_segment",
     "assert_known_segment",
+    "count_marketing_opted_out_customers",
     "customer_ids_with_manual_segment",
     "LEGACY_MARKETING_OPT_OUT_KEYS",
     "MARKETING_OPT_OUT_KEYS",

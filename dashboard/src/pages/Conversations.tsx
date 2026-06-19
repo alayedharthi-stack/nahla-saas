@@ -17,10 +17,10 @@ import ConversationFiltersMobileMenu from '../components/conversations/Conversat
 import {
   CONVERSATION_FILTER_KEYS,
   conversationFilterActiveClass,
-  conversationFilterCount,
   conversationFilterCountClass,
   conversationFilterIcon,
   conversationFilterInactiveClass,
+  resolveConversationFilterCount,
   type ConversationFilter,
 } from '../components/conversations/conversationFilterConfig'
 
@@ -42,6 +42,26 @@ const LIST_PAGE_LIMIT = 60
 const LIST_POLL_MS = 5_000
 const MESSAGE_PAGE_LIMIT = 30
 const MESSAGE_POLL_MS = 4_000
+
+type ConversationFilterCounts = Partial<Record<ConversationFilter, number>>
+
+function mergeFilterCountsFromListResponse(
+  page: { filter_counts?: Partial<Record<string, number>>; total_count?: number },
+  activeFilter: ConversationFilter,
+): ConversationFilterCounts | null {
+  const base =
+    page.filter_counts && typeof page.filter_counts === 'object'
+      ? { ...(page.filter_counts as ConversationFilterCounts) }
+      : null
+  if (
+    activeFilter !== 'all' &&
+    typeof page.total_count === 'number' &&
+    Number.isFinite(page.total_count)
+  ) {
+    return { ...(base ?? {}), [activeFilter]: page.total_count }
+  }
+  return base
+}
 
 function logConversationsUiFetch(meta: {
   endpoint: string
@@ -190,6 +210,7 @@ export default function Conversations() {
   // narrowing depends on this — that's the post-pagination fix for
   // "بعض الفلاتر تأثرت بعد إصلاحات SQL".
   const filterRef = useRef<ConversationFilter>('all')
+  const [filterCounts, setFilterCounts] = useState<ConversationFilterCounts | null>(null)
 
   const [listStaleBanner, setListStaleBanner] = useState<string | null>(null)
   const [hasMoreServer, setHasMoreServer]      = useState(false)
@@ -273,6 +294,8 @@ export default function Conversations() {
       })
       if (gen !== listReqGen.current) return
       const rows = Array.isArray(page.conversations) ? page.conversations : []
+      const mergedCounts = mergeFilterCountsFromListResponse(page, filterRef.current)
+      if (mergedCounts) setFilterCounts(mergedCounts)
       nextSliceOffsetRef.current = rows.length
       setHasMoreServer(Boolean(page.has_more))
       setConversations((prev) => {
@@ -325,6 +348,8 @@ export default function Conversations() {
       let rows = Array.isArray(page.conversations)
         ? (page.conversations as DashboardConversation[])
         : []
+      const mergedCounts = mergeFilterCountsFromListResponse(page, filterRef.current)
+      if (mergedCounts) setFilterCounts(mergedCounts)
       nextSliceOffsetRef.current = rows.length
       setHasMoreServer(Boolean(page.has_more))
 
@@ -1198,6 +1223,7 @@ export default function Conversations() {
               onOpenChange={setMobileFilterMenuOpen}
               activeFilter={filter}
               filterLabels={filterLabels}
+              filterCounts={filterCounts}
               conversations={conversations}
               helpers={filterHelpers}
               menuButtonLabel={cp.mobileFilters.menuButtonLabel}
@@ -1212,7 +1238,9 @@ export default function Conversations() {
           style={{ scrollbarWidth: 'thin' }}
         >
           {CONVERSATION_FILTER_KEYS.map((f) => {
-            const count = conversationFilterCount(f, conversations, filterHelpers)
+            const count = resolveConversationFilterCount(
+              f, filterCounts, conversations, filterHelpers,
+            )
             const isActive = filter === f
 
             return (
@@ -1222,12 +1250,12 @@ export default function Conversations() {
                 className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
                   isActive
                     ? conversationFilterActiveClass(f)
-                    : conversationFilterInactiveClass(f, count)
+                    : conversationFilterInactiveClass(f, count ?? 0)
                 }`}
               >
                 {conversationFilterIcon(f)}
                 {filterLabels[f]}
-                {f !== 'all' && count > 0 && (
+                {f !== 'all' && count != null && count > 0 && (
                   <span className={`ms-1 ${conversationFilterCountClass(f, isActive)}`}>
                     {count}
                   </span>

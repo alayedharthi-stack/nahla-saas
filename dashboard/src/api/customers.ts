@@ -177,6 +177,8 @@ export interface CustomerSegmentMeta {
 
 export interface CustomersSegmentsResponse {
   segments: CustomerSegmentMeta[]
+  /** Manual campaign-exclusion count (canonical + legacy metadata keys). */
+  campaignExcludedCount?: number | null
 }
 
 export interface CustomersListFilters {

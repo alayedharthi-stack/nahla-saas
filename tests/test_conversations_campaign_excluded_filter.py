@@ -233,3 +233,41 @@ class TestCampaignExcludedFilter:
         result = _call_list(db, t.id, filter="campaign_excluded")
         assert [c["phone"] for c in result["conversations"]] == ["+966500000041"]
         assert result["conversations"][0]["marketingOptOutManual"] is True
+
+    def test_filter_counts_campaign_excluded_matches_list_total(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        for i in range(3):
+            _seed_conversation(
+                db, t.id, f"+96650000000{i}", marketing_opt_out=True,
+            )
+        _seed_conversation(db, t.id, "+966500000099", marketing_opt_out=False)
+
+        result = _call_list(db, t.id, filter="campaign_excluded")
+        assert result["filter_counts"]["campaign_excluded"] == 3
+        assert result["total_count"] == 3
+
+    def test_filter_counts_includes_legacy_opt_out_customer(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        cust = Customer(
+            tenant_id=t.id,
+            phone="+966500000060",
+            normalized_phone="+966500000060",
+            name="Legacy",
+            extra_metadata={"campaign_opt_out": True},
+        )
+        db.add(cust)
+        db.commit()
+        db.refresh(cust)
+        convo = Conversation(
+            tenant_id=t.id,
+            customer_id=cust.id,
+            status="active",
+            extra_metadata={"customer_phone": "+966500000060", "phone": "+966500000060"},
+        )
+        db.add(convo)
+        db.commit()
+
+        result = _call_list(db, t.id, filter="all")
+        assert result["filter_counts"]["campaign_excluded"] == 1

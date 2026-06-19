@@ -755,6 +755,7 @@ export const featureRealityApi = {
     conversations: DashboardConversation[]
     total_count?: number
     has_more?: boolean
+    filter_counts?: Partial<Record<string, number>>
   }> {
     const q = new URLSearchParams()
     if (opts?.limit != null) q.set('limit', String(opts.limit))

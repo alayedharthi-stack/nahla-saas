@@ -1081,10 +1081,10 @@ async def list_conversations(
       - ``paid``                    → confirmed payment receipt on row.
       - ``campaign_excluded``       → customer has manual marketing
                                       opt-out (``marketing_opt_out_manual``).
-      - ``active`` / ``unsubscribed`` / ``all`` → no SQL narrowing; the
-                                      client filter is enough (cheap to do
-                                      because the SQL cap already trims the
-                                      tail by recency).
+      - ``active``                  → open WhatsApp window / recent message,
+                                      customer not unsubscribed.
+      - ``unsubscribed``            → customer unsubscribed or pending opt-out.
+      - ``all``                     → no SQL narrowing.
 
     ``total_count`` and ``has_more`` are recomputed against the SAME
     filter so the merchant can keep pressing "load more" until the
@@ -1238,101 +1238,21 @@ async def list_conversations(
     # consistent with the slice we return. For filters that need data
     # outside the Conversation row (HandoffSession, blocklist, …) we
     # still pre-resolve here so the SQL stays a single roundtrip.
-    extra_clauses: list = []
-    if filter_slug in ("human", "agent_req"):
-        # Canonical "this conversation needs human attention" check.
-        # Mirrors `_is_human_takeover()` + active handoff-session lookup.
-        handoff_session_phones = list(active_handoffs.keys())  # already normalised
-        handoff_or = [
-            Conversation.is_human_handoff.is_(True),
-            Conversation.needs_human.is_(True),
-            Conversation.handoff_active.is_(True),
-            Conversation.taken_over_at.isnot(None),
-            func.lower(Conversation.status) == "human",
-        ]
-        if handoff_session_phones:
-            # Pre-loaded set of normalised customer phones with an
-            # active HandoffSession. The Customer rows may store the
-            # phone with or without a leading '+'; cover both.
-            phone_variants: set[str] = set()
-            for p in handoff_session_phones:
-                if not p:
-                    continue
-                phone_variants.add(p)
-                phone_variants.add(f"+{p}")
-            handoff_or.append(
-                Conversation.customer.has(
-                    or_(
-                        Customer.normalized_phone.in_(list(phone_variants)),
-                        Customer.phone.in_(list(phone_variants)),
-                    )
-                )
-            )
-        extra_clauses.append(or_(*handoff_or))
-    elif filter_slug == "closed":
-        # Only conversations the merchant (or an automation) explicitly
-        # marked as closed. 24h-window expiry is a client-only signal
-        # because the WhatsApp window can re-open the moment the
-        # customer sends a new message — we don't want the row to
-        # vanish from the filter just because the API was hit a few
-        # seconds later than the timer.
-        extra_clauses.append(func.lower(Conversation.status) == "closed")
-    elif filter_slug == "paused":
-        # AI paused AND NOT a human takeover. The "blocked" and
-        # "human" filters are kept disjoint at the SQL level too so
-        # the badge counts add up to <= the tenant total.
-        extra_clauses.extend([
-            Conversation.ai_paused.is_(True),
-            Conversation.is_human_handoff.is_(False),
-            Conversation.needs_human.is_(False),
-            Conversation.handoff_active.is_(False),
-            or_(
-                Conversation.ai_paused_reason.is_(None),
-                func.lower(Conversation.ai_paused_reason) != "internal_number",
-            ),
-        ])
-    elif filter_slug == "blocked":
-        # The tenant blocklist is the source of truth (`_blocked_digits`
-        # — already loaded). We also accept the legacy
-        # ``ai_paused_reason='internal_number'`` row as blocked. The
-        # blocklist join uses the normalised phone via Customer.
-        blocked_clauses = []
-        if _blocked_digits:
-            blocked_variants: set[str] = set()
-            for d in _blocked_digits:
-                if not d:
-                    continue
-                blocked_variants.add(d)
-                blocked_variants.add(f"+{d}")
-            blocked_clauses.append(
-                Conversation.customer.has(
-                    or_(
-                        Customer.normalized_phone.in_(list(blocked_variants)),
-                        Customer.phone.in_(list(blocked_variants)),
-                    )
-                )
-            )
-        blocked_clauses.append(
-            and_(
-                Conversation.ai_paused.is_(True),
-                func.lower(Conversation.ai_paused_reason) == "internal_number",
-            )
-        )
-        extra_clauses.append(or_(*blocked_clauses))
-    elif filter_slug == "paid":
-        # "طلبات مدفوعة" — conversations whose customer has uploaded a
-        # receipt the platform recognised as
-        # ``payment_evidence_status='confirmed'`` (the
-        # ``maybe_handle_receipt_inbound`` short-circuit stamps
-        # ``Conversation.last_payment_confirmed_at``). NULL is filtered
-        # out so the merchant only sees rows with a real confirmation
-        # signal — not every active conversation.
-        extra_clauses.append(Conversation.last_payment_confirmed_at.isnot(None))
-    elif filter_slug == "campaign_excluded":
-        extra_clauses.append(
-            Conversation.customer.has(marketing_opt_out_manual_sql_truthy())
-        )
-    # ``all`` / ``active`` / ``unsubscribed`` → no SQL narrowing.
+    from services.conversation_filter_counts import (  # noqa: PLC0415
+        ConversationFilterContext,
+        build_conversation_filter_clauses,
+        compute_conversation_filter_counts,
+    )
+
+    filter_ctx = ConversationFilterContext(
+        active_handoffs=active_handoffs,
+        blocked_digits=_blocked_digits,
+        open_window_phones=_open_windows,
+        window_cutoff=_window_cutoff,
+    )
+    extra_clauses = build_conversation_filter_clauses(
+        filter_slug, filter_ctx, tenant_id=tenant_id, db=db,
+    )
 
     convo_rows_q = (
         db.query(Conversation)
@@ -1884,6 +1804,12 @@ async def list_conversations(
         "conversations": page,
         "total_count": total,
         "has_more": has_more,
+        **(
+            {"filter_counts": compute_conversation_filter_counts(
+                db, tenant_id, filter_ctx,
+            )}
+            if safe_offset == 0 else {}
+        ),
     }
 
 
