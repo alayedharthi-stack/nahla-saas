@@ -223,8 +223,6 @@ _PAYMENT_CONFIRMATION_PHRASES: Tuple[str, ...] = tuple(
 # the middle of a question must not match here.
 _PAYMENT_CONFIRMATION_EXACT: frozenset = frozenset(
     _normalise_arabic(p) for p in (
-        "تم",
-        "تمام",
         "حولت",
         "دفعت",
         "سددت",
@@ -246,6 +244,70 @@ _PAYMENT_CONFIRMATION_EXACT: frozenset = frozenset(
         "تحويل بنكى",
     )
 )
+
+
+_GENERIC_PAYMENT_ACK_ONLY: frozenset = frozenset(
+    _normalise_arabic(p) for p in (
+        "تمام",
+        "تم",
+        "طيب",
+        "اوك",
+        "ok",
+        "okay",
+        "ماشي",
+        "حاضر",
+        "موافق",
+        "نعم",
+        "ايه",
+        "ايوه",
+        "يلا",
+        "حسنا",
+        "حسن",
+        "شكرا",
+        "شكراً",
+        "thanks",
+        "thank you",
+    )
+)
+
+
+def is_generic_payment_acknowledgement_only(text: Optional[str]) -> bool:
+    """True when inbound is only a neutral ack — never payment evidence."""
+    if not text or not isinstance(text, str):
+        return False
+    normalised = _normalise_arabic(text.strip())
+    if not normalised:
+        return False
+    return normalised in _GENERIC_PAYMENT_ACK_ONLY
+
+
+def has_explicit_payment_receipt_evidence(
+    text: Optional[str],
+    *,
+    inbound_metadata: Optional[dict] = None,
+    normalized_type: Optional[str] = None,
+    has_attached_media: bool = False,
+) -> bool:
+    """Require explicit payment/receipt signals — not bare acknowledgements."""
+    if is_generic_payment_acknowledgement_only(text):
+        return False
+    if has_attached_media:
+        try:
+            from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
+                is_receipt_inbound,
+            )
+
+            return is_receipt_inbound(
+                inbound_metadata,
+                normalized_type=normalized_type,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+    meta = inbound_metadata or {}
+    pe = str(meta.get("payment_evidence_status") or "").strip().lower()
+    if pe in {"confirmed", "needs_confirmation", "pre_transfer_review"}:
+        return True
+    return detect_payment_confirmation_text(text)
 
 
 # Generic fallback phrases the brain occasionally ships when it does
@@ -487,6 +549,8 @@ def detect_payment_confirmation_text(text: Optional[str]) -> bool:
     normalised = _normalise_arabic(raw)
     if not normalised:
         return False
+    if is_generic_payment_acknowledgement_only(raw):
+        return False
 
     # 1) Exact-message match (short claims like "تم التحويل").
     if normalised in _PAYMENT_CONFIRMATION_EXACT:
@@ -598,7 +662,10 @@ def maybe_handle_payment_claim(
     """
     if has_attached_media:
         return None
-    if not detect_payment_confirmation_text(inbound_text):
+    if not has_explicit_payment_receipt_evidence(
+        inbound_text,
+        has_attached_media=False,
+    ):
         return None
 
     # ── Post-shipment delivery-confirmation gate (May 2026 #12) ──────
@@ -1256,6 +1323,8 @@ def detect_future_transfer_promise_text(text: Optional[str]) -> bool:
 __all__ = [
     "detect_payment_confirmation_text",
     "detect_future_transfer_promise_text",
+    "has_explicit_payment_receipt_evidence",
+    "is_generic_payment_acknowledgement_only",
     "looks_like_generic_fallback_reply",
     "compose_payment_claim_ack",
     "maybe_handle_payment_claim",
