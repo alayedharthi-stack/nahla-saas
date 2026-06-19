@@ -510,6 +510,26 @@ class MerchantBrain:
                 _ocr_exc,
             )
 
+        try:
+            from .state.product_correction import (  # noqa: PLC0415
+                clear_stale_product_state_for_correction,
+                detect_product_correction,
+            )
+
+            if detect_product_correction(message or ""):
+                clear_stale_product_state_for_correction(state_for_classify)
+                logger.info(
+                    "[PRODUCT_CORRECTION] tenant=%s cleared stale product focus preview=%r",
+                    tenant_id,
+                    (message or "")[:80],
+                )
+        except Exception as _pc_exc:  # noqa: BLE001
+            logger.debug(
+                "[PRODUCT_CORRECTION] skipped tenant=%s err=%s",
+                tenant_id,
+                _pc_exc,
+            )
+
         # ── 1b.5 Conversation objective (product-origin verification, …) ───
         try:
             from .intent.conversation_objective_guard import (  # noqa: PLC0415
@@ -2090,7 +2110,7 @@ class MerchantBrain:
                     "len_before=%d len_after=%d",
                     tenant_id, len(_orig_policy or ""), len(reply or ""),
                 )
-        except Exception as _policy_exc:  # noqa: BLE001
+        except Exception as _policy_exc:  # noqa: BLE001  # noqa: silent-ok — policy scrub must never block reply
             logger.debug(
                 "[BRAIN_SCRUB] policy scrub skipped tenant=%s: %s",
                 tenant_id, _policy_exc,
