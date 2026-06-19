@@ -214,6 +214,11 @@ _PHYSICAL_SITE_NOUN_RE = re.compile(
     r"(?:^|\s)موقع(?:\s+(?:المتجر|المعرض|المحل|الفرع|كم|ك|نا))\b",
     re.UNICODE | re.IGNORECASE,
 )
+_SEND_LOCATION_REQUEST_RE = re.compile(
+    r"(?:^|\s)(?:ارسل|أرسل|ارسلي|أرسلي|ابعث|أبعث|ابعثلي|أبعثلي|ابي|أبي|ابغى|أبغى)"
+    r"\s*(?:لي\s+)?(?:ال)?(?:موقع|عنوان|اللوكيشن)(?:ه|ها|كم|ك)?\b",
+    re.UNICODE | re.IGNORECASE,
+)
 
 _PAYMENT_LINK_MARKERS: tuple = (
     "رابط الدفع",
@@ -433,6 +438,8 @@ def looks_like_physical_location_request(message: str) -> bool:
         return False
     if looks_like_ecommerce_store_link_request(message):
         return False
+    if _SEND_LOCATION_REQUEST_RE.search(norm):
+        return True
     if _contains_any(norm, _PHYSICAL_LOCATION_MARKERS):
         return True
     if _PHYSICAL_LOCATION_SITE_RE.search(norm):

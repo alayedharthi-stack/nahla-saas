@@ -858,6 +858,58 @@ class DefaultDecisionEngine:
                 _otg_exc,
             )
 
+        # ── 0a.55 Price objection / explicit branch location ───────────────
+        try:
+            from ..state.price_objection_topic import (  # noqa: PLC0415
+                detect_price_objection_topic_shift,
+            )
+
+            if detect_price_objection_topic_shift(ctx.message or ""):
+                logger.info(
+                    "[PRICE_OBJECTION] tenant=%s route=llm preview=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:80],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "price_objection",
+                        "response_goal": (
+                            "Answer the customer's price or competitor comparison "
+                            "objection. Briefly explain quality/value, and offer to "
+                            "check wholesale quantity pricing or available offers."
+                        ),
+                    },
+                    reason="price_objection — commerce answer before generic ack",
+                    confidence=0.93,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection gate must not block decide
+            pass
+
+        try:
+            from ..intent.link_disambiguation import (  # noqa: PLC0415
+                looks_like_physical_location_request,
+            )
+            from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
+
+            _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
+            if (
+                looks_like_physical_location_request(ctx.message or "")
+                and _maps_url
+            ):
+                logger.info(
+                    "[LOCATION_REQUEST] tenant=%s route=faq_location maps=1",
+                    ctx.tenant_id,
+                )
+                return Decision(
+                    action=ACTION_FAQ_REPLY,
+                    args={"topic": TOPIC_LOCATION},
+                    reason="explicit branch location request — configured maps URL",
+                    confidence=0.94,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — location FAQ gate must not block decide
+            pass
+
         # ── 0a.565 Identity / collaboration guard (Jun 2026) ─────────────
         # Self-intro or collaboration inbounds must not assume purchase intent.
         try:
@@ -2232,6 +2284,23 @@ class DefaultDecisionEngine:
                         return _loc_update
             except Exception:  # noqa: BLE001
                 pass
+            _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
+            if _maps_url:
+                from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
+
+                logger.info(
+                    "[LOCATION_INTENT] faq_location with configured maps | tenant=%s",
+                    ctx.tenant_id,
+                )
+                return Decision(
+                    action=ACTION_FAQ_REPLY,
+                    args={"topic": TOPIC_LOCATION},
+                    reason=(
+                        "customer asked for physical shop / Google Maps location "
+                        "— send configured branch maps URL"
+                    ),
+                    confidence=0.94,
+                )
             # Physical-shop / branch questions defer to the brain for
             # natural prose. The post-compose ``apply_location_safety_net``
             # still injects the maps URL + CTA button — same contract as

@@ -65,8 +65,9 @@ def test_ecommerce_explicit_triggers_store_link_not_maps(message: str) -> None:
     assert not looks_like_physical_location_request(message)
 
 
-def test_mawqe_almatjar_routes_to_location_delivery_llm_not_store() -> None:
-    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+def test_mawqe_almatjar_routes_to_faq_location_when_maps_configured() -> None:
+    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.execution.faq import TOPIC_LOCATION
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.types import (
         BrainContext,
@@ -100,8 +101,8 @@ def test_mawqe_almatjar_routes_to_location_delivery_llm_not_store() -> None:
         facts=facts,
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == "location_delivery"
+    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.args.get("topic") == TOPIC_LOCATION
 
 
 def test_store_link_safety_net_suppressed_for_mawqe_almatjar(

@@ -244,6 +244,14 @@ def _has_commercial_primary(
     if _is_job_help_message(norm):
         return False
 
+    try:
+        from .state.price_objection_topic import detect_price_objection_topic_shift  # noqa: PLC0415
+
+        if detect_price_objection_topic_shift(message):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-objection import in social layer
+        pass
+
     if str(getattr(intent, "name", "") or "") in _COMMERCE_INTENTS:
         return True
 
