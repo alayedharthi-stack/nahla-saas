@@ -234,18 +234,29 @@ def _get_or_create_customer(
 
     service = CustomerIntelligenceService(db, tenant_id)
     normalized_phone = normalize_phone(customer_phone) or customer_phone
-    resolved_name = customer_name
-    if not resolved_name:
+
+    # Never adopt names from outbound echoes / system channels, and never
+    # use the phone number as a placeholder name (Jun 2026 P0).
+    from core.customer_name_adoption_guard import (  # noqa: PLC0415
+        is_untrusted_message_name_source,
+    )
+
+    resolved_name = (customer_name or "").strip()
+    if is_untrusted_message_name_source(source):
+        resolved_name = ""
+    elif not resolved_name:
         existing = db.query(Customer).filter(
             Customer.tenant_id == tenant_id,
             (Customer.phone == customer_phone)
             | (Customer.phone == normalized_phone)
             | (Customer.normalized_phone == normalized_phone),
         ).first()
-        resolved_name = (existing.name if existing and existing.name else "") or normalized_phone
+        if existing and existing.name:
+            resolved_name = str(existing.name).strip()
+
     customer = service.upsert_customer_identity(
         phone=normalized_phone,
-        name=resolved_name,
+        name=resolved_name or None,
         source=source,
         extra_metadata={"source": source},
         seen_at=datetime.now(timezone.utc),

@@ -6030,9 +6030,21 @@ async def _handle_merchant_message(
 
         _name_hit = extract_high_confidence_name(text)
         if _name_hit:
+            from core.customer_name_adoption_guard import (  # noqa: PLC0415
+                is_trusted_name_adoption_source,
+            )
             from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
 
-            if not validate_customer_name(_name_hit.value).valid:
+            if not is_trusted_name_adoption_source(
+                "ai_detected_name",
+                direction="inbound",
+                explicit_customer_entry=True,
+            ):
+                logger.info(
+                    "[NAME_EXTRACTOR] blocked by adoption guard | tenant=%s phone=%s",
+                    tenant_id, to,
+                )
+            elif not validate_customer_name(_name_hit.value).valid:
                 logger.info(
                     "[NAME_EXTRACTOR] rejected by validator | tenant=%s phone=%s name=%r",
                     tenant_id, to, _name_hit.value,
