@@ -112,6 +112,35 @@ class TestPaymentReceiptGating:
         assert MSG_WA_PAYMENT_UNLINKED in (result.get("reply_text") or "")
 
 
+class TestPriceObjectionDetection:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "عندكم شاشة كمبيوتر؟",
+            "عندكم عسل طلح؟",
+            "هل يوجد عندكم سمر؟",
+            "متوفر عندكم كيلو؟",
+        ],
+    )
+    def test_availability_phrasing_is_not_price_objection(self, message: str) -> None:
+        assert not detect_price_objection_topic_shift(message)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "عند منافسيكم الكيلو ٢٠٠ ريال",
+            "عند غيركم أرخص",
+            "ليش سعركم غالي؟",
+            "نحن عملاء شبه جملة",
+            "السعر عالي مقارنة بالسوق",
+            "أبغى خصم جملة",
+            "منافسيكم أرخص منكم",
+        ],
+    )
+    def test_price_objection_phrasing_detected(self, message: str) -> None:
+        assert detect_price_objection_topic_shift(message)
+
+
 class TestPriceObjectionRouting:
     def test_price_objection_detected(self) -> None:
         assert detect_price_objection_topic_shift(_PRICE_MSG)
