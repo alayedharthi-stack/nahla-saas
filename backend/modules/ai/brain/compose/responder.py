@@ -1138,6 +1138,30 @@ class DefaultComposer:
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(ctx.history, ctx.message)
 
+            try:
+                from modules.ai.brain.observability.memory_selection_evidence import (  # noqa: PLC0415
+                    emit_compose_memory_evidence,
+                )
+
+                _rs = reply_state
+                _primary_goal = str(getattr(_rs, "primary_customer_goal", "") or "")
+                _profile = dict(getattr(ctx, "profile", None) or {})
+                emit_compose_memory_evidence(
+                    tenant_id=ctx.tenant_id,
+                    phone=ctx.customer_phone or "",
+                    state=ctx.state,
+                    history=ctx.history,
+                    conversation_summary=str(getattr(_rs, "conversation_summary", "") or ""),
+                    inbound_text=ctx.message or "",
+                    intent_name=str(getattr(ctx.intent, "name", "") or ""),
+                    primary_customer_goal=_primary_goal,
+                    inbound_metadata=dict(_profile.get("inbound_metadata") or {}),
+                    human_priority=bool(getattr(ctx, "human_priority", False)),
+                    history_messages_count=len(history_messages),
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break compose
+                pass
+
             from modules.ai.brain.cost.intent_cost_policy import (  # noqa: PLC0415
                 emit_llm_avoidable_call,
                 should_avoid_llm_for_intent,
