@@ -887,26 +887,18 @@ class DefaultComposer:
         return self._apply_gender_hint(text, ctx)
 
     def _apply_gender_hint(self, reply: str, ctx: BrainContext) -> str:
+        """Persist gender evidence only — outbound fixes run post-compose."""
         if not reply:
             return reply
         try:
-            from ...gender import (  # noqa: PLC0415
-                GenderHint, apply_gender_to_social_reply, detect_gender,
-            )
+            from ...gender import detect_gender, persist_gender_hint  # noqa: PLC0415
+            from ...gender.detector import GenderHint  # noqa: PLC0415
         except Exception:  # noqa: BLE001
             return reply
 
         try:
             state = ctx.state
-            prior = GenderHint(
-                value=(state.customer_gender_hint or "unknown"),
-                confidence=float(state.customer_gender_confidence or 0.0),
-                source="context",
-            )
             from core.customer_display import looks_like_phone_personalization_name  # noqa: PLC0415
-            # Customer name resolution — best-effort. The profile
-            # dict shape varies by loader; use official ``name`` only
-            # (never dashboard ``display_name`` which may be a phone).
             customer_name = ""
             if isinstance(ctx.profile, dict):
                 raw_name = str(
@@ -917,24 +909,20 @@ class DefaultComposer:
                 if raw_name and not looks_like_phone_personalization_name(raw_name):
                     customer_name = raw_name
 
-            hint = detect_gender(
+            prior_value = str(getattr(state, "customer_gender_hint", "") or "")
+            prior = GenderHint(
+                value=prior_value if prior_value in ("male", "female") else "unknown",
+                confidence=float(getattr(state, "customer_gender_confidence", 0.0) or 0.0),
+                source=str(getattr(state, "customer_gender_source", "") or "context"),
+            )
+            detected = detect_gender(
                 message=ctx.message or "",
                 customer_name=customer_name or None,
-                prior_hint=prior,
+                prior_hint=prior if prior.value in ("male", "female") else None,
             )
-
-            # Sticky update: persist on state only when the new hint
-            # carries equal-or-better confidence than what we had.
-            # This prevents a low-signal turn from erasing a strong
-            # prior classification.
-            if (
-                hint.value in ("male", "female")
-                and hint.confidence >= prior.confidence
-            ):
-                state.customer_gender_hint = hint.value
-                state.customer_gender_confidence = float(hint.confidence)
-
-            return apply_gender_to_social_reply(reply, hint)
+            if detected.value in ("male", "female"):
+                persist_gender_hint(state, hint=detected)
+            return reply
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "[GenderHint] swallowed exception (returning unmodified "

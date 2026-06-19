@@ -2602,6 +2602,39 @@ class MerchantBrain:
                 "[COMMERCE_REPLY_HUMANIZER] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _crh_exc,
             )
+
+        try:
+            from modules.ai.brain.postprocess.gender_agreement_guard import (  # noqa: PLC0415
+                apply_gender_agreement_guard,
+            )
+            from core.customer_display import looks_like_phone_personalization_name  # noqa: PLC0415
+
+            _gender_customer_name = ""
+            if isinstance(profile, dict):
+                _raw_gn = str(
+                    profile.get("name") or profile.get("customer_name") or ""
+                ).strip()
+                if _raw_gn and not looks_like_phone_personalization_name(_raw_gn):
+                    _gender_customer_name = _raw_gn
+
+            _gag = apply_gender_agreement_guard(
+                reply or "",
+                message=message or "",
+                customer_name=_gender_customer_name,
+                state=new_state,
+                profile=profile if isinstance(profile, dict) else None,
+                tenant_id=tenant_id,
+            )
+            if _gag.replaced:
+                reply = _gag.reply
+                _guard_replaced["gender_agreement_guard"] = True
+                result.data["gender_agreement_style"] = _gag.reply_style
+                result.data["gender_agreement_source"] = _gag.gender_source
+        except Exception as _gag_exc:  # noqa: BLE001
+            logger.warning(
+                "[GENDER_AGREEMENT_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _gag_exc,
+            )
             _crh = None
 
         try:
