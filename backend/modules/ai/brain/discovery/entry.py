@@ -469,11 +469,10 @@ def _resolve_strategy_layer(
             collection_count = len(
                 CatalogIntelligence(provider).list_collections(limit=20)
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "[DISCOVERY_STRATEGY] collection_count_failed tenant=%s err=%s",
+        except Exception:
+            logger.exception(
+                "[DISCOVERY_STRATEGY] collection_count_failed tenant=%s",
                 getattr(ctx, "tenant_id", None),
-                exc,
             )
     catalog_ctx = build_catalog_context_snapshot(
         facts=facts,
@@ -488,8 +487,8 @@ def _resolve_strategy_layer(
     )
     try:
         ctx.state.last_discovery_mode = strategy.mode.value
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_STRATEGY] last_discovery_mode_stamp_failed")
     return objective, strategy, strategy_to_decision_args(strategy)
 
 
