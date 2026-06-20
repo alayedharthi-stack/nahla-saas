@@ -50,12 +50,14 @@ def _patch_store_url(monkeypatch, url):
 class TestStoreLinkIntent:
     @pytest.mark.parametrize("msg", [
         "رابط المتجر",
+        "رابط الموقع",
         "وين رابط المتجر",
         "ارسل الرابط",
         "أرسل الرابط",
         "ابعث اللينك",
         "أبي رابط المتجر؟",
         "المتجر الإلكتروني",
+        "الموقع الإلكتروني",
         "store link",
         "send the link",
         "your website",
@@ -82,10 +84,12 @@ class TestStoreLinkIntent:
 
     @pytest.mark.parametrize("msg", [
         "موقعكم",
-        "رابط الموقع",
+        "وين موقعكم؟",
+        "ارسل اللوكيشن",
+        "موقع المعرض",
     ])
     def test_location_phrases_not_store_link_intent(self, msg):
-        """May 2026 #36: bare موقع / رابط الموقع → location safety net."""
+        """Physical location asks → location safety net, not store URL."""
         from modules.ai.postprocess.safety_nets import (
             _looks_like_location_request,
             _looks_like_store_link_request,
