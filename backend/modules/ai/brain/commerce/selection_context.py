@@ -1,0 +1,741 @@
+"""
+commerce/selection_context.py
+─────────────────────────────
+Phase 4B — deterministic follow-up resolution against products the customer
+just saw during discovery (ordinals, sizes, prices, same-product variants).
+
+Operational claims use catalog evidence only; no LLM routing.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence
+
+from ..decision.actions import (
+    ACTION_CLARIFY,
+    ACTION_LLM_REPLY,
+    ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEARCH_PRODUCTS,
+)
+from ..types import BrainContext, Decision
+from .variant_pricing import (
+    UnitSpec,
+    bindings_from_catalog_product,
+    normalize_text,
+    parse_unit_from_text,
+)
+
+logger = logging.getLogger("nahla.brain.selection_context")
+
+SELECTION_CONTEXT_TTL_TURNS = 12
+
+_ORDINAL_INDEX: Dict[str, int] = {
+    "الاول": 1, "الأول": 1, "اول": 1, "١": 1, "1": 1,
+    "الثاني": 2, "الثانيه": 2, "الثانية": 2, "ثاني": 2, "٢": 2, "2": 2,
+    "الثالث": 3, "الثالثه": 3, "الثالثة": 3, "ثالث": 3, "٣": 3, "3": 3,
+    "الرابع": 4, "رابع": 4, "٤": 4, "4": 4,
+}
+
+_SIZE_AVAILABILITY_RE = re.compile(
+    r"(?:"
+    r"^(?:هل\s+)?(?:فيه|يوجد|متوفر|available)\s+(?:بال)?"
+    r"(?:كilo|كيلo|كيلو|kg|جرام|gram|g|لتر|ml|"
+    r"كبير|كبيره|كبيرة|large|صغير|small|وسط|medium)"
+    r"|"
+    r"بال(?:كilo|كيلo|كيلو|kg|جرام|gram|g|لتر|ml)\s*[?؟]?\s*$"
+    r"|"
+    r"(?:كilo|كيلo|كيلو|kg)\s*[?؟]?\s*$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_LARGER_SIZE_RE = re.compile(
+    r"فيه\s+(?:أكبر|اكبر|حجم\s+ثاني|حجم\s+اكبر|عبو[ةه]\s+أكبر|عبو[ةه]\s+اكبر|"
+    r"size\s+bigger|bigger\s+size|larger)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SAME_PRODUCT_RE = re.compile(
+    r"نفس(?:ه|ها|ي|هم)\s*(?:لكن|بس|ب)?\s*(?:بال)?"
+    r"(?:كilo|كيلo|كيلو|kg|جرام|gram|g|حجم|size|large|small|medium|كبير|صغير)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PICK_VERB_RE = re.compile(
+    r"^(?:ابغ|ابغى|ابغي|ابي|أبغ|أبغى|أبي|اريد|أريد|ودي|اختر|اختار|this|that)\s+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PRICE_ORDINAL_RE = re.compile(
+    r"(?:كم\s+سعر|كم\s+السعر|بكم|سعر)\s+(?:ال)?("
+    + "|".join(re.escape(k) for k in _ORDINAL_INDEX)
+    + r")\s*[?؟]?\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_WEIGHT_STRIP_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*"
+    r"(?:g|gram|grams|جر|جرام|kg|kilo|kilos|كilo|كيلo|كيلو|ml|l|لتر|"
+    r"pack|packs|حزمه|حزم|عبوه|عبوات)\b",
+    re.I | re.UNICODE,
+)
+
+
+def _normalize_ar(text: str) -> str:
+    return normalize_text(text or "")
+
+
+def _product_key(product: Dict[str, Any]) -> str:
+    for key in ("id", "external_id", "sku"):
+        val = str(product.get(key) or "").strip()
+        if val:
+            return val
+    return str(product.get("title") or "").strip().lower()
+
+
+def _product_id(product: Dict[str, Any]) -> str:
+    return str(product.get("id") or product.get("external_id") or "").strip()
+
+
+def _format_price(product: Dict[str, Any]) -> str:
+    raw = product.get("sale_price")
+    if raw is None:
+        raw = product.get("price")
+    if raw is None:
+        return "السعر غير محدد"
+    if re.match(r"^\s*\d+(\.\d+)?\s*$", str(raw)):
+        return f"{raw} ريال"
+    return str(raw)
+
+
+def _display_label(product: Dict[str, Any]) -> str:
+    title = str(product.get("display_label") or product.get("title") or "").strip()
+    for key in ("variant_name", "size", "weight", "unit", "option_label"):
+        value = str(product.get(key) or "").strip()
+        if value and value.lower() not in title.lower():
+            return f"{title} {value}".strip()
+    return title
+
+
+def normalize_presented_product(
+    product: Dict[str, Any],
+    *,
+    list_index: int = 0,
+    collection_id: str = "",
+) -> Dict[str, Any]:
+    row = dict(product or {})
+    row["list_index"] = list_index or row.get("list_index") or 0
+    if collection_id:
+        row["collection_id"] = collection_id
+    row.setdefault("display_label", _display_label(row))
+    return row
+
+
+def stamp_selection_context_from_products(
+    state: Any,
+    *,
+    products: Sequence[Dict[str, Any]],
+    collections: Optional[Sequence[Dict[str, Any]]] = None,
+    discovery_mode: str = "",
+    selected_collection: str = "",
+) -> None:
+    """Persist what was shown to the customer for follow-up resolution."""
+    coll_id = str(selected_collection or getattr(state, "selected_collection", "") or "").strip()
+    presented = [
+        normalize_presented_product(p, list_index=i, collection_id=coll_id)
+        for i, p in enumerate(list(products or []), start=1)
+    ]
+    state.last_presented_products = presented
+    if collections is not None:
+        state.last_presented_collections = [
+            dict(c) if isinstance(c, dict) else {"label": str(c)}
+            for c in collections
+        ]
+    if discovery_mode:
+        state.last_discovery_mode = str(discovery_mode)
+    if coll_id:
+        state.selected_collection = coll_id
+    state.selection_context_turn = int(getattr(state, "turn", 0) or 0)
+    logger.info(
+        "[SELECTION_CONTEXT] stamped products=%d collections=%d collection=%r turn=%d",
+        len(presented),
+        len(state.last_presented_collections or []),
+        coll_id or "-",
+        state.selection_context_turn,
+    )
+
+
+def apply_selection_context_patch(state: Any, patch: Dict[str, Any]) -> None:
+    if not isinstance(patch, dict):
+        return
+    if patch.get("selected_product_id") is not None:
+        state.selected_product_id = str(patch.get("selected_product_id") or "")
+    if patch.get("selected_variant_id") is not None:
+        state.selected_variant_id = str(patch.get("selected_variant_id") or "")
+    if patch.get("selected_collection") is not None:
+        state.selected_collection = str(patch.get("selected_collection") or "")
+    if patch.get("last_presented_products") is not None:
+        state.last_presented_products = list(patch.get("last_presented_products") or [])
+    if patch.get("selection_context_turn") is not None:
+        state.selection_context_turn = int(patch.get("selection_context_turn") or 0)
+    if str(getattr(state, "selected_product_id", "") or "").strip():
+        try:
+            from .commerce_objective import COMMERCE_OBJECTIVE_SELECTION  # noqa: PLC0415
+
+            state.commerce_objective = COMMERCE_OBJECTIVE_SELECTION
+            state.commerce_objective_turn = int(getattr(state, "turn", 0) or 0)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — commerce objective stamp is optional
+            pass
+
+
+def get_presented_products(state: Any) -> List[Dict[str, Any]]:
+    presented = list(getattr(state, "last_presented_products", None) or [])
+    if presented:
+        return presented
+    return list(getattr(state, "last_search_candidates", None) or [])
+
+
+def selection_product_pool(state: Any) -> List[Dict[str, Any]]:
+    """Broader pool: presented list + progressive browse pool (deduped)."""
+    seen: set[str] = set()
+    pool: List[Dict[str, Any]] = []
+    for source in (
+        get_presented_products(state),
+        list(getattr(state, "catalog_browse_pool", None) or []),
+    ):
+        for product in source:
+            key = _product_key(product)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            pool.append(product)
+    return pool
+
+
+def has_active_selection_context(state: Any) -> bool:
+    if not get_presented_products(state):
+        return False
+    turn = int(getattr(state, "turn", 0) or 0)
+    ctx_turn = int(getattr(state, "selection_context_turn", 0) or 0)
+    if ctx_turn <= 0:
+        return True
+    return (turn - ctx_turn) <= SELECTION_CONTEXT_TTL_TURNS
+
+
+def is_selection_followup_message(message: str) -> bool:
+    norm = _normalize_ar(message)
+    if not norm:
+        return False
+    if _SIZE_AVAILABILITY_RE.search(norm):
+        return True
+    if _LARGER_SIZE_RE.search(norm):
+        return True
+    if _SAME_PRODUCT_RE.search(norm):
+        return True
+    if _PRICE_ORDINAL_RE.search(norm):
+        return True
+    if _extract_ordinal_pick(norm) is not None:
+        return True
+    if _extract_name_pick(norm):
+        return True
+    return False
+
+
+def _extract_ordinal_token(norm: str) -> Optional[int]:
+    tokens = norm.split()
+    for token in tokens:
+        if token in _ORDINAL_INDEX:
+            return _ORDINAL_INDEX[token]
+    for word, idx in _ORDINAL_INDEX.items():
+        if word in norm:
+            return idx
+    return None
+
+
+def _extract_ordinal_pick(norm: str) -> Optional[int]:
+    if _PRICE_ORDINAL_RE.search(norm):
+        return None
+    if _LARGER_SIZE_RE.search(norm):
+        return None
+    if not _PICK_VERB_RE.search(norm) and not any(
+        w in norm for w in ("الاول", "الأول", "اول", "الثاني", "ثاني", "الثالث", "ثالث")
+    ):
+        return None
+    if _PICK_VERB_RE.search(norm) and _SIZE_AVAILABILITY_RE.search(norm):
+        return None
+    return _extract_ordinal_token(norm)
+
+
+def _extract_name_pick(norm: str) -> str:
+    m = _PICK_VERB_RE.match(norm)
+    if not m:
+        return ""
+    rest = norm[m.end():].strip(" ؟?!.")
+    rest = re.sub(r"^(?:ال|the)\s+", "", rest, flags=re.UNICODE)
+    if not rest or rest in _ORDINAL_INDEX:
+        return ""
+    if _extract_ordinal_token(rest):
+        return ""
+    if len(rest) <= 1:
+        return ""
+    return rest.strip()
+
+
+def _family_base(title: str) -> str:
+    base = _WEIGHT_STRIP_RE.sub("", title or "")
+    base = re.sub(r"\s+", " ", base).strip().lower()
+    return base
+
+
+def find_product_family(
+    reference: Dict[str, Any],
+    products: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    ref_base = _family_base(str(reference.get("title") or reference.get("display_label") or ""))
+    if not ref_base:
+        return [reference]
+    family: List[Dict[str, Any]] = []
+    for product in products:
+        title = str(product.get("title") or product.get("display_label") or "")
+        base = _family_base(title)
+        if not base:
+            continue
+        if ref_base in base or base in ref_base or _token_overlap(ref_base, base) >= 0.6:
+            family.append(product)
+    return family or [reference]
+
+
+def _token_overlap(a: str, b: str) -> float:
+    ta = {t for t in a.split() if len(t) > 1}
+    tb = {t for t in b.split() if len(t) > 1}
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
+
+
+def _product_unit_magnitude(product: Dict[str, Any]) -> Optional[float]:
+    unit = parse_unit_from_text(
+        " ".join(
+            str(product.get(k) or "")
+            for k in ("title", "display_label", "variant_name", "size", "weight", "unit")
+        )
+    )
+    if unit and unit.magnitude is not None and unit.kind.value == "weight":
+        return float(unit.magnitude)
+    bindings = bindings_from_catalog_product(product)
+    mags = [
+        b.unit.magnitude
+        for b in bindings
+        if b.unit.magnitude is not None and b.unit.kind.value == "weight"
+    ]
+    return max(mags) if mags else None
+
+
+def find_matching_variants(
+    products: Sequence[Dict[str, Any]],
+    *,
+    requested_unit: Optional[UnitSpec] = None,
+    message: str = "",
+) -> List[Dict[str, Any]]:
+    unit = requested_unit or parse_unit_from_text(message or "")
+    if not unit:
+        return []
+    matches: List[Dict[str, Any]] = []
+    for product in products:
+        label_blob = " ".join(
+            str(product.get(k) or "")
+            for k in ("title", "display_label", "variant_name", "size", "weight", "unit")
+        )
+        prod_unit = parse_unit_from_text(label_blob)
+        if prod_unit and _units_match(unit, prod_unit):
+            matches.append(product)
+            continue
+        for binding in bindings_from_catalog_product(product):
+            if binding.unit and _units_match(unit, binding.unit):
+                matches.append(product)
+                break
+    return matches
+
+
+def _units_match(requested: UnitSpec, candidate: UnitSpec) -> bool:
+    if requested.kind != candidate.kind:
+        return False
+    if requested.kind.value in {"weight", "volume", "pack", "count"}:
+        if requested.magnitude is None or candidate.magnitude is None:
+            return requested.normalized_key == candidate.normalized_key
+        return abs(requested.magnitude - candidate.magnitude) < 1e-4
+    return requested.normalized_key == candidate.normalized_key
+
+
+def find_larger_sizes(
+    reference: Dict[str, Any],
+    products: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    ref_mag = _product_unit_magnitude(reference)
+    if ref_mag is None:
+        return []
+    family = find_product_family(reference, products)
+    larger: List[Dict[str, Any]] = []
+    for product in family:
+        mag = _product_unit_magnitude(product)
+        if mag is not None and mag > ref_mag + 1e-6:
+            larger.append(product)
+    larger.sort(key=lambda p: _product_unit_magnitude(p) or 0.0)
+    return larger
+
+
+def _resolve_reference_product(state: Any) -> Optional[Dict[str, Any]]:
+    selected_id = str(getattr(state, "selected_product_id", "") or "").strip()
+    presented = get_presented_products(state)
+    if selected_id:
+        for product in presented:
+            if _product_id(product) == selected_id:
+                return product
+    if presented:
+        return presented[0]
+    return None
+
+
+def _product_at_index(products: Sequence[Dict[str, Any]], index: int) -> Optional[Dict[str, Any]]:
+    if index < 1 or index > len(products):
+        return None
+    return products[index - 1]
+
+
+def _match_product_by_name(name: str, products: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    norm = _normalize_ar(name)
+    if not norm:
+        return []
+    hits: List[Dict[str, Any]] = []
+    for product in products:
+        labels = [
+            str(product.get("display_label") or ""),
+            str(product.get("title") or ""),
+            str(product.get("label_override") or ""),
+        ]
+        for label in labels:
+            title = _normalize_ar(label)
+            if not title:
+                continue
+            if norm in title or title in norm:
+                hits.append(product)
+                break
+            if any(tok in title for tok in norm.split() if len(tok) > 2):
+                hits.append(product)
+                break
+    return hits
+
+
+def _focus_from_product(product: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": _product_id(product),
+        "title": _display_label(product),
+        "price": product.get("price") or product.get("sale_price"),
+        "external_id": product.get("external_id") or _product_id(product),
+    }
+
+
+def compose_size_availability(
+    products: Sequence[Dict[str, Any]],
+    *,
+    unit_phrase: str = "بالكيلو",
+) -> str:
+    lines = [f"نعم، متوفر {unit_phrase}:", ""]
+    for i, product in enumerate(products, start=1):
+        lines.append(f"{i}. {_display_label(product)} — {_format_price(product)}")
+    lines.extend(["", "اكتب رقم المنتج أو اسمه ونكمل طلبك."])
+    return "\n".join(lines)
+
+
+def compose_family_sizes(products: Sequence[Dict[str, Any]]) -> str:
+    lines = ["متوفر منه:", ""]
+    for product in products:
+        lines.append(f"• {_display_label(product)} — {_format_price(product)}")
+    lines.extend(["", "أي حجم يناسبك؟"])
+    return "\n".join(lines)
+
+
+def compose_selected_product(product: Dict[str, Any]) -> str:
+    return (
+        f"تم اختيار:\n{_display_label(product)}\n\n"
+        "كم الكمية المطلوبة؟"
+    )
+
+
+@dataclass
+class SelectionResolution:
+    kind: str
+    products: List[Dict[str, Any]] = None
+    selected: Optional[Dict[str, Any]] = None
+    presentation_text: str = ""
+    unit_phrase: str = ""
+
+    def __post_init__(self) -> None:
+        if self.products is None:
+            self.products = []
+
+
+def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution]:
+    state = ctx.state
+    if not has_active_selection_context(state):
+        return None
+    msg = ctx.message or ""
+    norm = _normalize_ar(msg)
+    if not norm:
+        return None
+
+    presented = get_presented_products(state)
+    pool = selection_product_pool(state)
+    reference = _resolve_reference_product(state)
+
+    price_ord = _PRICE_ORDINAL_RE.search(norm)
+    if price_ord:
+        idx = _ORDINAL_INDEX.get(price_ord.group(1).lower())
+        product = _product_at_index(presented, idx or 0)
+        if product:
+            return SelectionResolution(
+                kind="price_ordinal",
+                selected=product,
+                presentation_text=f"{_display_label(product)} — {_format_price(product)}",
+            )
+        return None
+
+    if _SAME_PRODUCT_RE.search(norm) and reference:
+        unit = parse_unit_from_text(msg)
+        family = find_product_family(reference, pool)
+        if unit:
+            matches = find_matching_variants(family, requested_unit=unit)
+            if matches:
+                return SelectionResolution(
+                    kind="same_product_variant",
+                    products=matches,
+                    selected=matches[0] if len(matches) == 1 else None,
+                    presentation_text=(
+                        compose_selected_product(matches[0])
+                        if len(matches) == 1
+                        else compose_size_availability(
+                            matches,
+                            unit_phrase=unit.display_label or "بهذا الحجم",
+                        )
+                    ),
+                )
+        if len(family) > 1:
+            return SelectionResolution(
+                kind="family_sizes",
+                products=family,
+                presentation_text=compose_family_sizes(family),
+            )
+        return None
+
+    if _LARGER_SIZE_RE.search(norm) and reference:
+        larger = find_larger_sizes(reference, pool)
+        if larger:
+            return SelectionResolution(
+                kind="larger_size",
+                products=larger,
+                presentation_text=compose_size_availability(
+                    larger,
+                    unit_phrase="بحجم أكبر",
+                ),
+            )
+        return SelectionResolution(
+            kind="no_larger_size",
+            presentation_text="ما لقينا حجم أكبر من اللي عرضناه — تبغى واحد من الخيارات المعروضة؟",
+        )
+
+    if _SIZE_AVAILABILITY_RE.search(norm):
+        unit = parse_unit_from_text(msg)
+        unit_phrase = unit.display_label if unit else "بهذا الحجم"
+        matches = find_matching_variants(pool, requested_unit=unit, message=msg)
+        if not matches and unit is None and re.search(r"كيل|kg|kilo", norm):
+            unit = parse_unit_from_text("1 kg")
+            unit_phrase = "بالكيلو"
+            matches = find_matching_variants(pool, requested_unit=unit)
+        if matches:
+            return SelectionResolution(
+                kind="size_availability",
+                products=matches,
+                unit_phrase=unit_phrase or "بالكيلو",
+                presentation_text=compose_size_availability(
+                    matches,
+                    unit_phrase=unit_phrase or "بالكيلو",
+                ),
+            )
+        return SelectionResolution(
+            kind="size_not_found",
+            presentation_text="ما لقينا هذا الحجم ضمن الخيارات المعروضة — تبغى نعرض الأحجام المتوفرة؟",
+        )
+
+    ordinal = _extract_ordinal_pick(norm)
+    if ordinal is not None:
+        product = _product_at_index(presented, ordinal)
+        if product:
+            return SelectionResolution(
+                kind="ordinal_select",
+                selected=product,
+                presentation_text=compose_selected_product(product),
+            )
+        return None
+
+    name_pick = _extract_name_pick(norm)
+    if name_pick:
+        hits = _match_product_by_name(name_pick, presented)
+        if len(hits) == 1:
+            return SelectionResolution(
+                kind="name_select",
+                selected=hits[0],
+                presentation_text=compose_selected_product(hits[0]),
+            )
+        if len(hits) > 1:
+            return SelectionResolution(
+                kind="name_ambiguous",
+                products=hits,
+                presentation_text=compose_size_availability(hits, unit_phrase="من الخيارات"),
+            )
+
+    if re.search(r"^(?:ابغ|ابي|أبغ|أبي)\s+(?:ال)?(?:أكبر|اكبر|biggest|larger)\s*[?؟]?\s*$", norm):
+        if reference:
+            larger = find_larger_sizes(reference, pool)
+            if larger:
+                return SelectionResolution(
+                    kind="want_larger",
+                    products=larger,
+                    presentation_text=compose_size_availability(larger, unit_phrase="بحجم أكبر"),
+                )
+
+    return None
+
+
+def _selection_patch_from_product(product: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "selected_product_id": _product_id(product),
+        "selected_variant_id": str(product.get("variant_id") or product.get("default_variant_id") or ""),
+        "selection_context_turn": None,
+    }
+
+
+def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Resolve follow-up turns against last presented discovery products."""
+    if not has_active_selection_context(ctx.state):
+        return None
+    if not is_selection_followup_message(ctx.message or ""):
+        return None
+
+    resolution = resolve_selection_context(ctx)
+    if resolution is None:
+        return None
+
+    logger.info(
+        "[SELECTION_CONTEXT] tenant=%s kind=%s products=%d selected=%r preview=%r",
+        getattr(ctx, "tenant_id", None),
+        resolution.kind,
+        len(resolution.products or []),
+        (resolution.selected or {}).get("title") if resolution.selected else None,
+        (ctx.message or "")[:60],
+    )
+
+    if resolution.kind in {"ordinal_select", "name_select"} and resolution.selected:
+        product = resolution.selected
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={
+                "product": _focus_from_product(product),
+                "source": "selection_context_ordinal",
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": _selection_patch_from_product(product),
+                "await_quantity": True,
+            },
+            reason=f"selection context {resolution.kind}",
+            confidence=0.92,
+        )
+
+    if resolution.kind == "price_ordinal" and resolution.selected:
+        product = resolution.selected
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "selection_context_price",
+                "product": _focus_from_product(product),
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": _selection_patch_from_product(product),
+            },
+            reason="selection context price for listed product",
+            confidence=0.91,
+        )
+
+    if resolution.kind == "same_product_variant" and resolution.selected:
+        product = resolution.selected
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={
+                "product": _focus_from_product(product),
+                "source": "selection_context_same_variant",
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": _selection_patch_from_product(product),
+                "await_quantity": True,
+            },
+            reason="selection context same product variant",
+            confidence=0.91,
+        )
+
+    if resolution.products and resolution.kind in {
+        "size_availability",
+        "larger_size",
+        "want_larger",
+        "name_ambiguous",
+        "family_sizes",
+    }:
+        return Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": str(getattr(ctx.state, "last_browse_query", "") or ""),
+                "source": f"selection_context_{resolution.kind}",
+                "products": list(resolution.products),
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": {
+                    "last_presented_products": [
+                        normalize_presented_product(p, list_index=i)
+                        for i, p in enumerate(resolution.products, start=1)
+                    ],
+                    "selection_context_turn": int(getattr(ctx.state, "turn", 0) or 0),
+                },
+            },
+            reason=f"selection context {resolution.kind}",
+            confidence=0.90,
+        )
+
+    if resolution.presentation_text and resolution.kind in {"size_not_found", "no_larger_size"}:
+        return Decision(
+            action=ACTION_CLARIFY,
+            args={
+                "question": resolution.presentation_text,
+                "topic": "selection_context",
+                "source": resolution.kind,
+            },
+            reason=f"selection context {resolution.kind}",
+            confidence=0.84,
+        )
+
+    return None
+
+
+__all__ = [
+    "SELECTION_CONTEXT_TTL_TURNS",
+    "apply_selection_context_patch",
+    "compose_family_sizes",
+    "compose_selected_product",
+    "compose_size_availability",
+    "find_larger_sizes",
+    "find_matching_variants",
+    "find_product_family",
+    "get_presented_products",
+    "has_active_selection_context",
+    "is_selection_followup_message",
+    "normalize_presented_product",
+    "resolve_selection_context",
+    "selection_product_pool",
+    "stamp_selection_context_from_products",
+    "try_selection_context_decision",
+]

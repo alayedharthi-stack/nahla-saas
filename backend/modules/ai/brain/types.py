@@ -517,6 +517,13 @@ class MerchantConversationState:
     commerce_objective_evidence: Dict[str, Any] = field(default_factory=dict)
     # Last resolved discovery strategy mode for progressive browse continuity.
     last_discovery_mode: str = ""
+    # Phase 4B — selection context after discovery presentation.
+    last_presented_products: List[Dict[str, Any]] = field(default_factory=list)
+    last_presented_collections: List[Dict[str, Any]] = field(default_factory=list)
+    selected_product_id: str = ""
+    selected_variant_id: str = ""
+    selected_collection: str = ""
+    selection_context_turn: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -582,6 +589,12 @@ class MerchantConversationState:
             "commerce_objective_turn": self.commerce_objective_turn,
             "commerce_objective_evidence": dict(self.commerce_objective_evidence or {}),
             "last_discovery_mode": self.last_discovery_mode,
+            "last_presented_products": self.last_presented_products,
+            "last_presented_collections": self.last_presented_collections,
+            "selected_product_id": self.selected_product_id,
+            "selected_variant_id": self.selected_variant_id,
+            "selected_collection": self.selected_collection,
+            "selection_context_turn": self.selection_context_turn,
         }
 
     @staticmethod
@@ -657,6 +670,12 @@ class MerchantConversationState:
             commerce_objective_turn=int(d.get("commerce_objective_turn") or 0),
             commerce_objective_evidence=dict(d.get("commerce_objective_evidence") or {}),
             last_discovery_mode=str(d.get("last_discovery_mode", "") or ""),
+            last_presented_products=list(d.get("last_presented_products") or []),
+            last_presented_collections=list(d.get("last_presented_collections") or []),
+            selected_product_id=str(d.get("selected_product_id", "") or ""),
+            selected_variant_id=str(d.get("selected_variant_id", "") or ""),
+            selected_collection=str(d.get("selected_collection", "") or ""),
+            selection_context_turn=int(d.get("selection_context_turn") or 0),
         )
 
 

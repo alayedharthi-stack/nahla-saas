@@ -1081,6 +1081,18 @@ def positive_commerce_signal(
     except Exception:
         logger.exception("[CONVERSATIONAL_PRIORITY] discovery_category_signal_probe_failed")
 
+    try:
+        from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
+            has_active_selection_context,
+            is_selection_followup_message,
+        )
+
+        if state is not None and has_active_selection_context(state):
+            if is_selection_followup_message(message or ""):
+                return True
+    except Exception:
+        logger.exception("[CONVERSATIONAL_PRIORITY] selection_context_signal_probe_failed")
+
     return False
 
 
