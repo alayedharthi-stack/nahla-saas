@@ -589,6 +589,18 @@ def is_price_without_product_context(
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return False
+    try:
+        from .commerce.selection_context import (  # noqa: PLC0415
+            has_active_selection_context,
+            is_selection_followup_message,
+        )
+
+        if has_active_selection_context(ctx.state) and is_selection_followup_message(
+            ctx.message or "",
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional selection context probe
+        pass
     if ctx.state.current_product_focus:
         return False
     if _resolved_product_query(ctx, extracted_product_query):
@@ -633,6 +645,16 @@ def _has_fulfillment_message_context(message: str) -> bool:
 
 def _has_prior_browse_context(ctx: BrainContext) -> bool:
     state = ctx.state
+    try:
+        from .commerce.selection_context import (  # noqa: PLC0415
+            get_presented_products,
+            has_active_selection_context,
+        )
+
+        if has_active_selection_context(state) and get_presented_products(state):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional selection context probe
+        pass
     if list(getattr(state, "last_search_candidates", None) or []):
         return True
     if list(getattr(state, "catalog_browse_pool", None) or []):
@@ -722,6 +744,17 @@ def product_discovery_block_reason(
 
     if has_explicit_product_inquiry(msg):
         return None
+
+    try:
+        from .commerce.selection_context import (  # noqa: PLC0415
+            has_active_selection_context,
+            is_selection_followup_message,
+        )
+
+        if has_active_selection_context(ctx.state) and is_selection_followup_message(msg):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional selection context probe
+        pass
 
     try:
         from .commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
@@ -897,6 +930,17 @@ def try_price_query_decision(
     msg = ctx.message or ""
     focus = ctx.state.current_product_focus
     product_query = _resolved_product_query(ctx, extracted_product_query)
+
+    try:
+        from .commerce.selection_context import (  # noqa: PLC0415
+            try_selection_context_decision,
+        )
+
+        _sel_dec = try_selection_context_decision(ctx)
+        if _sel_dec is not None:
+            return _sel_dec
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional selection context routing
+        pass
 
     _price_kind = None
     _focus_first_kinds: set = set()

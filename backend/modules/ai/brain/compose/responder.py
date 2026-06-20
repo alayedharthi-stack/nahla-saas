@@ -263,6 +263,10 @@ class DefaultComposer:
                 )
 
             discovery_text = str(data.get("discovery_presentation_text") or "").strip()
+            selection_text = str(data.get("selection_presentation_text") or "").strip()
+            if selection_text:
+                result.data["chosen_path"] = "selection_context_presentation"
+                return selection_text
             discovery_kind = str(data.get("discovery_output_kind") or "").strip().lower()
             if discovery_text and discovery_kind in {
                 "products",
@@ -809,6 +813,10 @@ class DefaultComposer:
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
+            _sel_price = str((decision.args or {}).get("selection_presentation_text") or "").strip()
+            if _sel_price and str((decision.args or {}).get("topic") or "") == "selection_context_price":
+                result.data["chosen_path"] = "selection_context_price"
+                return _sel_price
             text = await self._llm_compose(ctx, result, decision=decision)
             _topic = str((decision.args or {}).get("topic") or "").strip()
             if _topic == "social_persona_ack":

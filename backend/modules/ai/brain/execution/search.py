@@ -56,6 +56,23 @@ class ProductSearchHandler:
                 },
             )
 
+        source = str(decision.args.get("source") or "").strip().lower()
+        if source.startswith("selection_context") and decision.args.get("products"):
+            products = list(decision.args.get("products") or [])
+            presentation = str(decision.args.get("selection_presentation_text") or "").strip()
+            return ActionResult(
+                success=True,
+                data={
+                    "products": products,
+                    "product_lines": presentation,
+                    "count": len(products),
+                    "query": str(decision.args.get("query") or ""),
+                    "suggest_narrow": False,
+                    "selection_presentation_text": presentation,
+                    "discovery_output_kind": "products",
+                },
+            )
+
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415
             _product_key,
             next_catalog_browse_batch,

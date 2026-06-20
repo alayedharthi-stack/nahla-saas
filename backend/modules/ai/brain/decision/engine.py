@@ -772,6 +772,20 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
+        # ── 0a.535 Selection context follow-up (Phase 4B) ─────────────────
+        try:
+            from ..commerce.selection_context import try_selection_context_decision  # noqa: PLC0415
+
+            _selection_dec = try_selection_context_decision(ctx)
+            if _selection_dec is not None:
+                return _selection_dec
+        except Exception as _sel_exc:  # noqa: BLE001  # noqa: silent-ok — selection context hook must not block decide
+            logger.debug(
+                "[SELECTION_CONTEXT] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _sel_exc,
+            )
+
         # ── 0a.54 Types/options overview (beats stale browse continuation) ──
         try:
             from ..product_discovery_gate import try_types_overview_decision  # noqa: PLC0415

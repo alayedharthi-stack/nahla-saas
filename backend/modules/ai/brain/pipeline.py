@@ -1410,6 +1410,14 @@ class MerchantBrain:
                     stamp_visual_focus_metadata(new_state, result.data["product"])
             except Exception:  # noqa: BLE001
                 pass
+        _sel_patch = (decision.args or {}).get("selection_context_patch")
+        if isinstance(_sel_patch, dict):
+            try:
+                from .commerce.selection_context import apply_selection_context_patch  # noqa: PLC0415
+
+                apply_selection_context_patch(new_state, _sel_patch)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — selection context patch is best-effort
+                logger.debug("[SELECTION_CONTEXT] patch apply failed", exc_info=True)
         _variant_binding = result.data.get("variant_binding")
         if isinstance(_variant_binding, dict) and _variant_binding.get("price") is not None:
             new_state.selected_variant = _variant_binding
@@ -1616,6 +1624,22 @@ class MerchantBrain:
         elif _search_products:
             # Must match numbered list shown to the customer (breadth policy).
             new_state.last_search_candidates = list(_search_products)[:_breadth_cap]
+            try:
+                from .commerce.selection_context import stamp_selection_context_from_products  # noqa: PLC0415
+
+                stamp_selection_context_from_products(
+                    new_state,
+                    products=new_state.last_search_candidates,
+                    collections=result.data.get("collections"),
+                    discovery_mode=str(getattr(new_state, "last_discovery_mode", "") or ""),
+                    selected_collection=str(
+                        (new_state.commerce_session or {}).get("active_category")
+                        or getattr(new_state, "selected_collection", "")
+                        or ""
+                    ),
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — selection context stamp is best-effort
+                logger.debug("[SELECTION_CONTEXT] stamp failed after product list", exc_info=True)
 
             # ── Diagnostic: log what we stored vs what was old focus ──────────
             _old_focus_title = (new_state.current_product_focus or {}).get("title")
