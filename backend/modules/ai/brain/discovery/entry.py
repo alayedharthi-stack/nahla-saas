@@ -582,9 +582,19 @@ def _discovery_decision(
         and entry.entry_type not in {SHOW_MORE, PRODUCT_SPECIFIC, GLOBAL_BROWSE}
         and action == ACTION_SEARCH_PRODUCTS
     ):
-        question = str(strategy.guided_question or "").strip() or (
-            "وش نوع المنتج اللي تدور عليه؟"
+        from ..catalog.discovery_presenter import DiscoveryPresentationComposer  # noqa: PLC0415
+        from ..catalog.catalog_intelligence import DiscoveryPlan  # noqa: PLC0415
+
+        guided = DiscoveryPresentationComposer().compose(
+            plan=DiscoveryPlan(
+                output_kind="guided",
+                guided_question=strategy.guided_question or "",
+            ),
+            strategy=strategy,
+            entry_source=str(entry.source or ""),
+            entry_type=entry.entry_type,
         )
+        question = guided.text
         return Decision(
             action=ACTION_CLARIFY,
             args={
