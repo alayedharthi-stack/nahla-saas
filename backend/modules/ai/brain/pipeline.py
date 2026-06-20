@@ -2324,10 +2324,30 @@ class MerchantBrain:
             from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
                 apply_payment_reply_guard,
             )
+            _prg_meta = dict((profile or {}).get("inbound_metadata") or {})
+            _op = getattr(new_state, "order_prep", None)
+            if _op is not None:
+                _focus = getattr(new_state, "current_product_focus", None)
+                _prg_meta["awaiting_payment_receipt"] = bool(
+                    getattr(_op, "awaiting_payment_receipt", False)
+                )
+                _prg_meta["payment_receipt_received"] = bool(
+                    getattr(_op, "payment_receipt_received", False)
+                )
+                _prg_meta["order_status"] = str(getattr(_op, "order_status", "") or "")
+                _prg_meta["payment_method"] = str(
+                    getattr(_op, "payment_method", "") or ""
+                )
+                if _focus is not None:
+                    _prg_meta["selected_product"] = str(
+                        getattr(_focus, "title", None)
+                        or getattr(_focus, "name", None)
+                        or ""
+                    )
             _prg = apply_payment_reply_guard(
                 reply=reply or "",
                 inbound_text=message or "",
-                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                inbound_metadata=_prg_meta,
                 payment_receipt_received=bool(
                     getattr(new_state.order_prep, "payment_receipt_received", False)
                 ),

@@ -71,6 +71,36 @@ def evaluate_payment_evidence(
         )
 
     try:
+        from core.payment_receipt_attachment_gate import (  # noqa: PLC0415
+            has_inbound_attachment,
+            is_likely_payment_receipt_attachment,
+        )
+
+        if has_inbound_attachment(
+            str(md.get("normalized_type") or md.get("inbound_type") or ""),
+            md,
+        ) and is_likely_payment_receipt_attachment(
+            str(md.get("normalized_type") or md.get("inbound_type") or ""),
+            md,
+            summary={
+                "awaiting_payment_receipt": bool(md.get("awaiting_payment_receipt")),
+                "payment_receipt_received": bool(md.get("payment_receipt_received")),
+                "selected_product": md.get("selected_product"),
+                "order_status": md.get("order_status"),
+                "payment_method": md.get("payment_method"),
+            },
+        ):
+            return PaymentEvidenceResult(
+                evidence_ok=True,
+                evidence_source="attachment_metadata",
+                payment_evidence_status=pe,
+                receipt_media_present=True,
+                reason="attachment_metadata_gate",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional attachment gate import
+        pass
+
+    try:
         from core.payment_intent import detect_payment_confirmation_text  # noqa: PLC0415
 
         if detect_payment_confirmation_text(inbound_text):

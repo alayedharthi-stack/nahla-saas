@@ -8763,6 +8763,15 @@ async def _handle_merchant_message(
                     if isinstance(inbound_metadata, dict)
                     else {}
                 )
+                for _ctx_key in (
+                    "awaiting_payment_receipt",
+                    "payment_receipt_received",
+                    "selected_product",
+                    "order_status",
+                    "payment_method",
+                ):
+                    if _ctx_key in _prg_summary:
+                        _prg_meta[_ctx_key] = _prg_summary[_ctx_key]
                 _prg_result = apply_payment_reply_guard(
                     reply=reply,
                     inbound_text=text or "",

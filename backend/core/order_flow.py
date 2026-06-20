@@ -649,17 +649,54 @@ def maybe_handle_receipt_inbound(
     cached message replay) still cannot leak through to the "thanks,
     order under review" ACK without explicit completion proof.
     """
-    if inbound_normalized_type not in ("document", "image"):
+    from core.payment_media_metadata import flatten_inbound_payment_metadata  # noqa: PLC0415
+    from core.payment_receipt_attachment_gate import (  # noqa: PLC0415
+        has_inbound_attachment,
+        payment_context_active,
+        try_metadata_receipt_short_circuit,
+    )
+
+    md = flatten_inbound_payment_metadata(inbound_metadata or {})
+    if not has_inbound_attachment(inbound_normalized_type, md):
         return None
+
+    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+    summary = _focus_summary(bs)
+
+    has_active = bool(summary.get("selected_product"))
+    awaiting = bool(summary.get("awaiting_payment_receipt"))
+    if not (has_active or awaiting or summary.get("payment_receipt_received")):
+        if not payment_context_active(summary):
+            logger.info(
+                "[ORDER_FLOW_STATE] receipt arrived but no active order — "
+                "letting brain handle | tenant=%s phone=*%s",
+                tenant_id, phone[-4:] if phone else "",
+            )
+            return None
 
     # The PDF classifier or the image vision check sets these slots.
-    kind = (inbound_metadata or {}).get("pdf_kind") \
-        or (inbound_metadata or {}).get("image_kind")
-    if kind != "payment_receipt":
-        return None
+    kind = md.get("pdf_kind") or md.get("image_kind")
+    pe_status = md.get("payment_evidence_status")
+    strict_ok = kind == "payment_receipt" and (
+        not pe_status or pe_status == "confirmed"
+    )
+    if not strict_ok:
+        _metadata_decision = try_metadata_receipt_short_circuit(
+            inbound_normalized_type=inbound_normalized_type,
+            inbound_metadata=md,
+            summary=summary,
+        )
+        if _metadata_decision is not None:
+            logger.info(
+                "[PAYMENT_RECEIPT_ATTACHMENT] short_circuit tenant=%s phone=*%s "
+                "route=%s duplicate=%s",
+                tenant_id,
+                phone[-4:] if phone else "",
+                _metadata_decision.get("route"),
+                _metadata_decision.get("duplicate"),
+            )
+        return _metadata_decision
 
-    # Universal payment-evidence gate.
-    pe_status = (inbound_metadata or {}).get("payment_evidence_status")
     if pe_status and pe_status != "confirmed":
         logger.info(
             "[PAYMENT_EVIDENCE] receipt short-circuit blocked tenant=%s "
@@ -667,19 +704,20 @@ def maybe_handle_receipt_inbound(
             "payment_evidence_reason=%s",
             tenant_id, (phone[-4:] if phone else ""), kind,
             pe_status,
-            (inbound_metadata or {}).get("payment_evidence_reason"),
+            md.get("payment_evidence_reason"),
         )
-        return None
+        return try_metadata_receipt_short_circuit(
+            inbound_normalized_type=inbound_normalized_type,
+            inbound_metadata=md,
+            summary=summary,
+        )
 
-    _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
-    summary = _focus_summary(bs)
+    inbound_metadata = md
 
     # Guard: we only short-circuit when the conversation has SOME
     # evidence of an active order. Otherwise a random PDF that
     # happens to be classified as a receipt could trigger an
     # acknowledgement for an order that doesn't exist.
-    has_active = bool(summary.get("selected_product"))
-    awaiting   = bool(summary.get("awaiting_payment_receipt"))
     if not (has_active or awaiting):
         logger.info(
             "[ORDER_FLOW_STATE] receipt arrived but no active order — "
