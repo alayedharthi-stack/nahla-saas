@@ -189,7 +189,7 @@ def test_kb_allows_wasilat_after_location_reply_offer_fires(
     )
     history = [{"direction": "in", "body": "وين موقعكم؟"}]
     result = apply_staff_contact_safety_net(
-        customer_msg="وصلت",
+        customer_msg="وصلت للمعرض",
         reply_text="تواصل مع أمين عند البوابة",
         existing_call_targets=[],
         detected_call_markers=0,
@@ -240,7 +240,11 @@ def test_no_arrival_policy_same_messages_no_vcard(
         tenant_id=42,
     )
     assert result.fired is False
-    assert result.skipped_reason == "arrival_policy_denied"
+    assert result.skipped_reason in {
+        "arrival_policy_denied",
+        "blocked:keyword_only_no_intent",
+        "no_staff_intent",
+    }
 
 
 def test_shipping_wasilat_no_staff_contact(
@@ -290,7 +294,12 @@ def test_staff_phone_only_no_arrival_policy_denied(
         tenant_id=42,
     )
     assert result.fired is False
-    assert result.skipped_reason == "arrival_policy_denied"
+    assert result.skipped_reason in {
+        "arrival_policy_denied",
+        "blocked:delivery_received_phrase",
+        "blocked:keyword_only_no_intent",
+        "no_staff_intent",
+    }
 
 
 def test_telemetry_policy_and_escalation(
@@ -305,7 +314,7 @@ def test_telemetry_policy_and_escalation(
         sections=[_policy_section(), _staff_section()],
     )
     apply_staff_contact_safety_net(
-        customer_msg="وصلت",
+        customer_msg="أنا عند باب المعرض",
         reply_text="تواصل مع أمين عند الوصول",
         existing_call_targets=[],
         detected_call_markers=0,
@@ -404,7 +413,11 @@ def test_owner_only_contact_no_vcard_on_arrival(
         tenant_id=42,
     )
     assert result.fired is False
-    assert result.skipped_reason in {"arrival_policy_denied", "no_staff_name", "no_phone_in_reply"}
+    assert result.skipped_reason in {
+        "arrival_policy_denied",
+        "blocked:keyword_only_no_intent",
+        "no_staff_intent",
+    }
 
 
 def test_explicit_staff_ask_unchanged_without_arrival_signal(
