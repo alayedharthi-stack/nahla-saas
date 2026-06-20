@@ -511,6 +511,12 @@ class MerchantConversationState:
     staff_contacts_sent: List[Dict[str, Any]] = field(default_factory=list)
     # Active commerce funnel lock (category/product/variant/order stage).
     commerce_session: Dict[str, Any] = field(default_factory=dict)
+    # Phase 2 — session commerce objective (independent from stage).
+    commerce_objective: str = ""
+    commerce_objective_turn: int = 0
+    commerce_objective_evidence: Dict[str, Any] = field(default_factory=dict)
+    # Last resolved discovery strategy mode for progressive browse continuity.
+    last_discovery_mode: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -572,6 +578,10 @@ class MerchantConversationState:
             "customer_gender_source": self.customer_gender_source,
             "staff_contacts_sent": list(self.staff_contacts_sent or []),
             "commerce_session": dict(self.commerce_session or {}),
+            "commerce_objective": self.commerce_objective,
+            "commerce_objective_turn": self.commerce_objective_turn,
+            "commerce_objective_evidence": dict(self.commerce_objective_evidence or {}),
+            "last_discovery_mode": self.last_discovery_mode,
         }
 
     @staticmethod
@@ -643,6 +653,10 @@ class MerchantConversationState:
             customer_gender_source=str(d.get("customer_gender_source", "") or ""),
             staff_contacts_sent=list(d.get("staff_contacts_sent") or []),
             commerce_session=dict(d.get("commerce_session") or {}),
+            commerce_objective=str(d.get("commerce_objective", "") or ""),
+            commerce_objective_turn=int(d.get("commerce_objective_turn") or 0),
+            commerce_objective_evidence=dict(d.get("commerce_objective_evidence") or {}),
+            last_discovery_mode=str(d.get("last_discovery_mode", "") or ""),
         )
 
 

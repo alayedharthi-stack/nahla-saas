@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from ..decision.actions import ACTION_SEARCH_PRODUCTS
+from ..decision.actions import ACTION_CLARIFY, ACTION_SEARCH_PRODUCTS
 from ..types import (
     BrainContext,
     Decision,
@@ -438,6 +438,101 @@ def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     return DiscoveryEntryDecision.no_match("not_discovery")
 
 
+def _resolve_strategy_layer(
+    ctx: BrainContext,
+    entry: DiscoveryEntryDecision,
+    facts: Any,
+) -> tuple[str, Any, dict]:
+    from ..commerce.commerce_objective import update_commerce_objective  # noqa: PLC0415
+    from ..commerce.discovery_strategy import (  # noqa: PLC0415
+        DiscoveryMode,
+        build_catalog_context_snapshot,
+        resolve_discovery_strategy,
+        strategy_to_decision_args,
+    )
+    from ..commerce.merchant_discovery_settings import load_merchant_discovery_settings  # noqa: PLC0415
+    from ..catalog.catalog_intelligence import CatalogIntelligence  # noqa: PLC0415
+    from ..catalog.catalog_provider import get_catalog_provider  # noqa: PLC0415
+
+    objective = update_commerce_objective(ctx, entry)
+    settings = load_merchant_discovery_settings(getattr(ctx, "tenant_context", None))
+    collection_count = 0
+    db = getattr(ctx, "_db", None)
+    platform = str(getattr(facts, "integration_platform", "") or "")
+    if db is not None:
+        try:
+            provider = get_catalog_provider(
+                db,
+                ctx.tenant_id,
+                integration_platform=platform,
+            )
+            collection_count = len(
+                CatalogIntelligence(provider).list_collections(limit=20)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[DISCOVERY_STRATEGY] collection_count_failed tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                exc,
+            )
+    catalog_ctx = build_catalog_context_snapshot(
+        facts=facts,
+        collection_count=collection_count,
+        has_featured=bool(settings.featured_product_ids),
+    )
+    strategy = resolve_discovery_strategy(
+        commerce_objective=objective,
+        entry_type=entry.entry_type,
+        catalog_context=catalog_ctx,
+        merchant_settings=settings,
+    )
+    try:
+        ctx.state.last_discovery_mode = strategy.mode.value
+    except Exception:  # noqa: BLE001
+        pass
+    return objective, strategy, strategy_to_decision_args(strategy)
+
+
+def _discovery_decision(
+    ctx: BrainContext,
+    entry: DiscoveryEntryDecision,
+    facts: Any,
+    *,
+    action: str,
+    args: dict,
+    reason: str,
+    confidence: float,
+    allow_guided: bool = True,
+) -> Decision:
+    _objective, strategy, strategy_args = _resolve_strategy_layer(ctx, entry, facts)
+    merged = dict(args or {})
+    merged.update(strategy_args)
+    merged["commerce_objective"] = _objective
+
+    from ..commerce.discovery_strategy import DiscoveryMode  # noqa: PLC0415
+
+    if (
+        allow_guided
+        and strategy.mode == DiscoveryMode.GUIDED_DISCOVERY
+        and entry.entry_type not in {SHOW_MORE, PRODUCT_SPECIFIC}
+        and action == ACTION_SEARCH_PRODUCTS
+    ):
+        question = str(strategy.guided_question or "").strip() or (
+            "وش نوع المنتج اللي تدور عليه؟"
+        )
+        return Decision(
+            action=ACTION_CLARIFY,
+            args={
+                **merged,
+                "question": question,
+                "topic": "discovery_guided",
+            },
+            reason=f"guided discovery — {reason}",
+            confidence=confidence,
+        )
+    return Decision(action=action, args=merged, reason=reason, confidence=confidence)
+
+
 def route_discovery_entry(
     ctx: BrainContext,
     entry: DiscoveryEntryDecision,
@@ -491,7 +586,10 @@ def route_discovery_entry(
             len(getattr(ctx.state, "catalog_browse_pool", None) or []),
             getattr(ctx, "tenant_id", None),
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={
                 "query": str(entry.query or ""),
@@ -499,6 +597,7 @@ def route_discovery_entry(
             },
             reason=entry.reason,
             confidence=0.90,
+            allow_guided=False,
         )
 
     scope = (entry.category_scope or "").strip()
@@ -511,7 +610,10 @@ def route_discovery_entry(
             scope,
             getattr(ctx, "tenant_id", None),
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": scope, "source": "category_browse"},
             reason=(
@@ -528,7 +630,10 @@ def route_discovery_entry(
             source,
             getattr(ctx, "tenant_id", None),
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": "", "source": "top_products_start_order"},
             reason="start_order with no product query — bare start-order opener",
@@ -542,11 +647,15 @@ def route_discovery_entry(
             query,
             getattr(ctx, "tenant_id", None),
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": query, "after_search": "propose_order"},
             reason=entry.reason,
             confidence=0.88,
+            allow_guided=False,
         )
 
     if entry.entry_type in {TOP_PRODUCTS, GLOBAL_BROWSE}:
@@ -557,7 +666,10 @@ def route_discovery_entry(
             getattr(ctx, "tenant_id", None),
             (ctx.message or "")[:60],
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": "", "source": source or "top_products"},
             reason=entry.reason,
@@ -571,7 +683,10 @@ def route_discovery_entry(
             query or scope,
             getattr(ctx, "tenant_id", None),
         )
-        return Decision(
+        return _discovery_decision(
+            ctx,
+            entry,
+            facts,
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": query or scope, "source": "category_browse"},
             reason=entry.reason,
