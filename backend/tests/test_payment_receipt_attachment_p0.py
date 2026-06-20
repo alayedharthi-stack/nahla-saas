@@ -215,3 +215,73 @@ class TestOrderFlowMetadataFallback:
         assert decision is not None
         assert decision["reply_text"] == PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
         assert decision["state_patch"]["payment_receipt_received"] is True
+
+
+class TestPreTransferReviewBlocksReceiptAck:
+    def test_pre_transfer_review_does_not_fire_ack(self) -> None:
+        summary = _payment_context_summary()
+        assessment = assess_payment_receipt_attachment(
+            inbound_normalized_type="document",
+            inbound_metadata={
+                "pdf_kind": "payment_receipt",
+                "payment_evidence_status": "pre_transfer_review",
+                "payment_evidence_reason": "pre_transfer_review_phrase",
+            },
+            summary=summary,
+        )
+        assert assessment is None
+
+        db = _mock_db(brain_state=_brain_state_awaiting_receipt())
+        decision = maybe_handle_receipt_inbound(
+            db=db,
+            tenant_id=33,
+            phone="+966500000000",
+            inbound_normalized_type="document",
+            inbound_metadata={
+                "pdf_kind": "payment_receipt",
+                "payment_evidence_status": "pre_transfer_review",
+                "payment_evidence_reason": "pre_transfer_review_phrase",
+            },
+        )
+        assert decision is None
+
+    def test_review_screen_before_receipt_submission(self) -> None:
+        summary = _payment_context_summary()
+        for metadata in (
+            {
+                "pdf_kind": "payment_pre_review",
+                "payment_evidence_status": "pre_transfer_review",
+            },
+            {
+                "image_kind": "payment_pre_review",
+                "payment_evidence_status": "needs_confirmation",
+            },
+        ):
+            assert assess_payment_receipt_attachment(
+                inbound_normalized_type="document",
+                inbound_metadata=metadata,
+                summary=summary,
+            ) is None
+            assert try_metadata_receipt_short_circuit(
+                inbound_normalized_type="document",
+                inbound_metadata=metadata,
+                summary=summary,
+            ) is None
+
+        guard_result = apply_payment_reply_guard(
+            reply=TEXT_CLAIM_NO_EVIDENCE_REPLY_AR,
+            inbound_text="[document]",
+            inbound_metadata={
+                "normalized_type": "document",
+                "pdf_kind": "payment_pre_review",
+                "payment_evidence_status": "pre_transfer_review",
+                "awaiting_payment_receipt": True,
+                "selected_product": "عسل سدر",
+                "order_status": "awaiting_receipt",
+                "payment_method": "bank_transfer",
+            },
+            payment_receipt_received=False,
+        )
+        assert guard_result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
+        assert guard_result.replaced is False
+        assert PAYMENT_RECEIPT_ATTACHMENT_ACK_AR not in guard_result.reply

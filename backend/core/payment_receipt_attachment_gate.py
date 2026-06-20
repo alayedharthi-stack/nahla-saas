@@ -61,6 +61,11 @@ _EXCLUDED_KINDS = frozenset({
     "payment_pending_evidence",
 })
 
+_PRE_TRANSFER_PE_STATUSES = frozenset({
+    "pre_transfer_review",
+    "needs_confirmation",
+})
+
 _PAYMENT_FLOW_STATUSES = frozenset({
     "awaiting_payment",
     "awaiting_payment_receipt",
@@ -146,6 +151,22 @@ def payment_context_active(summary: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def blocks_receipt_received_ack(
+    metadata: Optional[Dict[str, Any]],
+    *,
+    summary: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True when attachment is a pre-transfer/review screen — not a receipt yet."""
+    md = flatten_inbound_payment_metadata(metadata or {})
+    pe = str(md.get("payment_evidence_status") or "").strip().lower()
+    kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip().lower()
+    if pe in _PRE_TRANSFER_PE_STATUSES:
+        return True
+    if kind in _EXCLUDED_KINDS:
+        return True
+    return False
+
+
 def is_excluded_non_receipt_attachment(
     metadata: Optional[Dict[str, Any]],
     *,
@@ -154,6 +175,8 @@ def is_excluded_non_receipt_attachment(
 ) -> bool:
     """Return True when attachment should NOT flip receipt-received state."""
     if not payment_context:
+        return True
+    if blocks_receipt_received_ack(metadata, summary=summary):
         return True
     s = summary or {}
     if bool(s.get("awaiting_payment_receipt")):
@@ -181,6 +204,8 @@ def is_likely_payment_receipt_attachment(
     summary: Optional[Dict[str, Any]] = None,
 ) -> bool:
     if not has_inbound_attachment(inbound_normalized_type, metadata):
+        return False
+    if blocks_receipt_received_ack(metadata, summary=summary):
         return False
     if not payment_context_active(summary):
         return False
@@ -273,6 +298,9 @@ def assess_payment_receipt_attachment(
     if not has_inbound_attachment(inbound_normalized_type, inbound_metadata):
         return None
 
+    if blocks_receipt_received_ack(inbound_metadata, summary=s):
+        return None
+
     if bool(s.get("payment_receipt_received")):
         return PaymentReceiptAttachmentAssessment(
             route=ROUTE_PAYMENT_RECEIPT_RECEIVED,
@@ -337,6 +365,7 @@ __all__ = [
     "ROUTE_PAYMENT_RECEIPT_RECEIVED",
     "PaymentReceiptAttachmentAssessment",
     "assess_payment_receipt_attachment",
+    "blocks_receipt_received_ack",
     "build_receipt_received_state_patch",
     "filename_suggests_receipt",
     "has_inbound_attachment",
