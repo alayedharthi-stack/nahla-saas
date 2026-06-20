@@ -120,6 +120,26 @@ def is_location_query(message: str) -> bool:
     if not raw:
         return False
     try:
+        from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+            LinkIntentType,
+            resolve_link_intent,
+        )
+
+        resolved = resolve_link_intent(raw)
+        if resolved == LinkIntentType.PHYSICAL_LOCATION:
+            return True
+        if resolved in (
+            LinkIntentType.WEBSITE_URL,
+            LinkIntentType.PRODUCT_URL,
+            LinkIntentType.PAYMENT_LINK,
+        ):
+            return False
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[CONTACT_ROUTE_POLICY] location_query_check_failed err=%s",
+            exc,
+        )
+    try:
         from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
             looks_like_physical_location_request,
         )
@@ -137,8 +157,10 @@ def is_location_query(message: str) -> bool:
     has_where = any(t in norm for t in ("وين", "اين", "أين", "where"))
     has_place = any(
         t in norm
-        for t in ("موقع", "فرع", "معرض", "محل", "عنوان", "مقر", "location", "maps")
+        for t in ("فرع", "معرض", "محل", "عنوان", "مقر", "location", "maps")
     )
+    # Bare «الموقع» alone is ambiguous — require an explicit where-clause
+    # plus a physical-place noun, never «موقع» by itself.
     return bool(has_where and has_place)
 
 

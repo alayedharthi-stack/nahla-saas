@@ -887,27 +887,40 @@ class DefaultDecisionEngine:
             pass
 
         try:
-            from ..intent.link_disambiguation import (  # noqa: PLC0415
-                looks_like_physical_location_request,
-            )
-            from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
+            from ..commerce.link_intent import LinkIntentType, resolve_link_intent
+            from ..execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
+
+            _link_intent = resolve_link_intent(ctx.message or "")
+            if _link_intent == LinkIntentType.WEBSITE_URL:
+                logger.info(
+                    "[LINK_INTENT] tenant=%s route=store_info",
+                    ctx.tenant_id,
+                )
+                return Decision(
+                    action=ACTION_FAQ_REPLY,
+                    args={"topic": TOPIC_STORE_INFO},
+                    reason="customer asked for online store / website URL",
+                    confidence=0.94,
+                )
 
             _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
             if (
-                looks_like_physical_location_request(ctx.message or "")
+                _link_intent == LinkIntentType.PHYSICAL_LOCATION
                 and _maps_url
             ):
                 logger.info(
-                    "[LOCATION_REQUEST] tenant=%s route=faq_location maps=1",
+                    "[LINK_INTENT] tenant=%s route=faq_location maps=1",
                     ctx.tenant_id,
                 )
                 return Decision(
                     action=ACTION_FAQ_REPLY,
                     args={"topic": TOPIC_LOCATION},
-                    reason="explicit branch location request — configured maps URL",
+                    reason=(
+                        "explicit branch location request — configured maps URL"
+                    ),
                     confidence=0.94,
                 )
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — location FAQ gate must not block decide
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — link intent gate must not block decide
             pass
 
         # ── 0a.565 Identity / collaboration guard (Jun 2026) ─────────────

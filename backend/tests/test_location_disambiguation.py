@@ -39,6 +39,8 @@ def test_physical_phrases_classify_as_location_intent(message: str) -> None:
 @pytest.mark.parametrize("message", [
     "رابط المتجر",
     "المتجر الإلكتروني",
+    "الموقع الإلكتروني",
+    "رابط الموقع",
 ])
 def test_ecommerce_phrases_classify_as_store_info(message: str) -> None:
     from modules.ai.brain.intent.rules import match

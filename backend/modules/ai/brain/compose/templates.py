@@ -646,8 +646,8 @@ def faq_identity(
 
 
 MSG_STORE_LINK_NOT_CONFIGURED = (
-    "لم يتم ربط رابط المتجر الإلكتروني حالياً. "
-    "أرسل اسم المنتج الذي تبحث عنه وسنساعدك."
+    "ما عندي رابط المتجر الإلكتروني حالياً، "
+    "تقدر تذكر المنتج اللي تبيه وأساعدك من هنا."
 )
 
 MSG_WORKING_HOURS_NOT_CONFIGURED = (
@@ -682,7 +682,7 @@ def faq_store_info(
     # store link they want the link, not a sales nudge.
     name = store_name or "متجرنا"
     if store_url:
-        return f"هذا {name} 🌷\n{store_url}"
+        return f"هذا رابط المتجر الإلكتروني: {store_url}"
     if store_description:
         return f"هذا {name} 🌷\n{store_description}"
     return MSG_STORE_LINK_NOT_CONFIGURED
