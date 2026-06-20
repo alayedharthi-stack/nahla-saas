@@ -269,8 +269,19 @@ class ProductSearchHandler:
                     data={"message": "no_products_in_catalog"},
                 )
 
+            products = _apply_category_scope(products)
+            strategy_result = _apply_discovery_strategy(
+                products,
+                decision=decision,
+                ctx=ctx,
+                query=str(query or ""),
+                source=source,
+            )
+            if strategy_result is not None:
+                return strategy_result
+
             # Re-rank by customer affinity before formatting lines
-            products = _apply_category_scope(_apply_affinity_boost(products, ctx))
+            products = _apply_affinity_boost(products, ctx)
 
             return _format_result(
                 products,
@@ -358,3 +369,119 @@ def _apply_affinity_boost(
         for p in products:
             p.setdefault("affinity_score", 0.0)
         return products
+
+
+def _apply_discovery_strategy(
+    products: List[Dict[str, Any]],
+    *,
+    decision: Decision,
+    ctx: BrainContext,
+    query: str,
+    source: str,
+) -> ActionResult | None:
+    """Apply Phase 2 catalog intelligence + presentation contract."""
+    args = getattr(decision, "args", None) or {}
+    mode = str(args.get("discovery_mode") or "").strip().lower()
+    if not mode or source == "show_more":
+        return None
+
+    try:
+        from ..commerce.discovery_strategy import strategy_from_decision_args  # noqa: PLC0415
+        from ..catalog.catalog_intelligence import (  # noqa: PLC0415
+            CatalogIntelligence,
+            attach_discovery_signals_from_db,
+        )
+        from ..catalog.catalog_provider import get_catalog_provider  # noqa: PLC0415
+        from ..catalog.presentation_contract import validate_discovery_products  # noqa: PLC0415
+
+        strategy = strategy_from_decision_args(args)
+        db = getattr(ctx, "_db", None)
+        platform = str(getattr(getattr(ctx, "facts", None), "integration_platform", "") or "")
+        if db is None:
+            return None
+
+        provider = get_catalog_provider(
+            db,
+            ctx.tenant_id,
+            integration_platform=platform,
+        )
+        intel = CatalogIntelligence(provider)
+        plan = intel.build_discovery_plan(
+            strategy=strategy,
+            query=query,
+            source=source,
+            preferred_collections=args.get("discovery_preferred_collections"),
+        )
+
+        if plan.output_kind == "collections":
+            collections = [group.to_dict() for group in plan.collections]
+            lines = [
+                f"• {c.get('group_name')} ({c.get('product_count', 0)})"
+                for c in collections
+            ]
+            logger.info(
+                "[SearchHandler] discovery_collections | tenant=%s count=%d mode=%s",
+                ctx.tenant_id,
+                len(collections),
+                mode,
+            )
+            return ActionResult(
+                success=True,
+                data={
+                    "products": [],
+                    "collections": collections,
+                    "product_lines": "\n".join(lines),
+                    "count": 0,
+                    "query": query,
+                    "suggest_narrow": False,
+                    "discovery_output_kind": "collections",
+                    "discovery_plan": plan.evidence,
+                },
+            )
+
+        enriched = attach_discovery_signals_from_db(
+            list(products or plan.products),
+            db=db,
+            tenant_id=ctx.tenant_id,
+        )
+        ranked = intel.rank_products(enriched, strategy=strategy)
+        ranked = validate_discovery_products(ranked)
+        if not ranked:
+            return None
+
+        lines = []
+        for p in ranked[: strategy.initial_count]:
+            price_str = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
+            line = f"• {p['title']} — {price_str}"
+            if p.get("sku"):
+                line += f" [SKU: {p['sku']}]"
+            lines.append(line)
+
+        logger.info(
+            "[SearchHandler] discovery_ranked | tenant=%s mode=%s count=%d top_score=%s",
+            ctx.tenant_id,
+            mode,
+            len(ranked),
+            ranked[0].get("discovery_score") if ranked else "-",
+        )
+        return ActionResult(
+            success=True,
+            data={
+                "products": ranked[: strategy.initial_count],
+                "product_lines": "\n".join(lines),
+                "count": len(ranked[: strategy.initial_count]),
+                "query": query,
+                "suggest_narrow": len(ranked) > strategy.initial_count,
+                "discovery_output_kind": "products",
+                "discovery_plan": plan.evidence,
+                "browse_pool": ranked,
+                "browse_offset": 0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[SearchHandler] discovery_strategy_skipped tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            exc,
+        )
+        return None
