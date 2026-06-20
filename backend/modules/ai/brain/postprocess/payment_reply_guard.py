@@ -274,12 +274,95 @@ def apply_payment_reply_guard(
 
         has_receipt_wording = reply_contains_receipt_confirmation(original)
         future_intent = detect_future_transfer_intent(inbound_text)
+        attachment_summary = {
+            "awaiting_payment_receipt": bool(md.get("awaiting_payment_receipt")),
+            "payment_receipt_received": payment_receipt_received
+            or bool(md.get("payment_receipt_received")),
+            "selected_product": md.get("selected_product"),
+            "order_status": md.get("order_status"),
+            "payment_method": md.get("payment_method"),
+        }
+        evidence_md = dict(md)
+        evidence_md.setdefault(
+            "awaiting_payment_receipt",
+            attachment_summary["awaiting_payment_receipt"],
+        )
+        evidence_md.setdefault(
+            "payment_receipt_received",
+            attachment_summary["payment_receipt_received"],
+        )
         evidence = evaluate_payment_evidence(
-            inbound_metadata=md,
+            inbound_metadata=evidence_md,
             chosen_path=path,
             inbound_text=inbound_text,
             payment_receipt_received=payment_receipt_received,
         )
+
+        try:
+            from core.payment_receipt_attachment_gate import (  # noqa: PLC0415
+                PAYMENT_RECEIPT_ATTACHMENT_ACK_AR,
+                PAYMENT_RECEIPT_DUPLICATE_ACK_AR,
+                has_inbound_attachment,
+                is_likely_payment_receipt_attachment,
+                reply_asks_to_send_receipt,
+            )
+
+            attachment_present = has_inbound_attachment(
+                str(md.get("normalized_type") or md.get("inbound_type") or ""),
+                md,
+            )
+            if attachment_present and is_likely_payment_receipt_attachment(
+                str(md.get("normalized_type") or md.get("inbound_type") or ""),
+                md,
+                summary=attachment_summary,
+            ):
+                ack = (
+                    PAYMENT_RECEIPT_DUPLICATE_ACK_AR
+                    if payment_receipt_received
+                    else PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
+                )
+                if (
+                    not evidence.evidence_ok
+                    or reply_asks_to_send_receipt(original)
+                    or original.strip() == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
+                    or (has_receipt_wording and not payment_receipt_received)
+                ):
+                    log_payment_reply_guard(
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        payment_evidence_status=pe,
+                        pdf_kind=pdf_kind,
+                        image_kind=image_kind,
+                        evidence_source="attachment_metadata",
+                        reason="attachment_present_ack",
+                        action="blocked_receipt_confirmation",
+                    )
+                    return PaymentReplyGuardResult(
+                        reply=ack,
+                        action="blocked_receipt_confirmation",
+                        replaced=True,
+                        reason="attachment_present_ack",
+                    )
+
+            if payment_receipt_received and reply_asks_to_send_receipt(original):
+                log_payment_reply_guard(
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    payment_evidence_status=pe,
+                    pdf_kind=pdf_kind,
+                    image_kind=image_kind,
+                    evidence_source=evidence.evidence_source,
+                    reason="receipt_already_received",
+                    action="blocked_receipt_confirmation",
+                )
+                return PaymentReplyGuardResult(
+                    reply=PAYMENT_RECEIPT_DUPLICATE_ACK_AR,
+                    action="blocked_receipt_confirmation",
+                    replaced=True,
+                    reason="receipt_already_received",
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — attachment gate must not break guard
+            pass
 
         if not has_receipt_wording:
             log_payment_reply_guard(
