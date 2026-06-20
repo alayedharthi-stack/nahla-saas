@@ -1047,6 +1047,40 @@ def positive_commerce_signal(
     except Exception:  # noqa: BLE001
         pass
 
+    try:
+        from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            has_explicit_broad_browse_request,
+        )
+
+        if global_availability_browse_requested(message) or has_explicit_broad_browse_request(
+            message,
+        ):
+            return True
+    except Exception:
+        logger.exception("[CONVERSATIONAL_PRIORITY] global_browse_signal_probe_failed")
+
+    try:
+        from modules.ai.brain.commerce.commerce_objective import (  # noqa: PLC0415
+            COMMERCE_OBJECTIVE_DISCOVERY,
+            get_commerce_objective,
+        )
+        from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            _is_valid_scope_token,
+            extract_browse_category_scope,
+        )
+
+        if state is not None and get_commerce_objective(state) == COMMERCE_OBJECTIVE_DISCOVERY:
+            scope = extract_browse_category_scope(message or "", "")
+            if scope and _is_valid_scope_token(scope):
+                words = [w for w in str(message or "").split() if w.strip()]
+                if len(words) <= 3:
+                    return True
+    except Exception:
+        logger.exception("[CONVERSATIONAL_PRIORITY] discovery_category_signal_probe_failed")
+
     return False
 
 
