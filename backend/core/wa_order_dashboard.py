@@ -63,9 +63,10 @@ PAYMENT_STATUS_LABELS_AR: Dict[str, str] = {
 }
 
 PAYMENT_VERIFICATION_LABELS_AR: Dict[str, str] = {
-    "pending":             "بانتظار التحقق",
-    "confirmed":           "مؤكد",
-    "provider_confirmed":  "مؤكد (مزود الدفع)",
+    "pending":                    "بانتظار التحقق",
+    "pending_merchant_review":    "بانتظار اعتماد التاجر",
+    "confirmed":                  "مؤكد",
+    "provider_confirmed":         "مؤكد (مزود الدفع)",
 }
 
 BANK_TRANSFER_VERIFY_CHIP = "دفع مرسل — يحتاج تحقق"
