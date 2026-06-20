@@ -185,8 +185,30 @@ def enrich_order_payment_metadata(
         )
     else:
         out["payment_confirmed"] = False
-        if out.get("payment_receipt_received") or out.get("payment_submission_received"):
-            out["payment_verification_status"] = "pending"
+        prep_status = str(order_prep.get("payment_verification_status") or "").strip().lower()
+        if prep_status == "pending_merchant_review":
+            out["payment_verification_status"] = "pending_merchant_review"
+        elif order_prep.get("payment_receipt_received") or order_prep.get(
+            "payment_submission_received"
+        ):
+            out["payment_verification_status"] = prep_status or "pending"
+    for flag_key in (
+        "payment_receipt_received",
+        "payment_receipt_parsed",
+        "manual_verification_required",
+        "shipping_blocked_reason",
+    ):
+        if flag_key in order_prep:
+            out[flag_key] = order_prep[flag_key]
+    receipt_meta = order_prep.get("payment_receipt_metadata")
+    if isinstance(receipt_meta, dict):
+        out["payment_receipt_metadata"] = dict(receipt_meta)
+        parsed_fields = receipt_meta.get("parsed_receipt_fields")
+        if isinstance(parsed_fields, dict):
+            out["parsed_receipt_fields"] = dict(parsed_fields)
+            out["receipt_data"] = parsed_fields.get("receipt_data") or receipt_meta.get(
+                "receipt_data"
+            )
     if payment_method == PAYMENT_METHOD_BANK_TRANSFER and not out.get("payment_provider"):
         out["payment_provider"] = None
     return out

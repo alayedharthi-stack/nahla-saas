@@ -896,6 +896,11 @@ def _serialise_order(
         "merchant_payment_alerts": payment_alerts,
         "can_confirm_bank_transfer": can_show_confirm_bank_transfer_button(order),
         "merchant_post_confirm_notice": order_meta.get("merchant_post_confirm_notice"),
+        "payment_receipt_received": bool(order_meta.get("payment_receipt_received")),
+        "payment_receipt_parsed": order_meta.get("payment_receipt_parsed"),
+        "shipping_blocked_reason": order_meta.get("shipping_blocked_reason"),
+        "parsed_receipt_fields": order_meta.get("parsed_receipt_fields")
+        or (order_meta.get("payment_receipt_metadata") or {}).get("parsed_receipt_fields"),
     }
 
     if detailed:
