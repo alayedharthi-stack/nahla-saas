@@ -1840,29 +1840,10 @@ class DefaultDecisionEngine:
             pass
 
         # ── 3.8 Text-pattern rules (message-level, intent-agnostic) ─────────
-        # These fire regardless of intent classification because the NLU
-        # sometimes misses Arabic commerce patterns. They run after the
-        # order-continuation blocks so they never interrupt an active checkout.
+        # Discovery browse / start-order / show-more → unified entry (3.8u).
+        # Replay list patterns remain here until Phase 2.
         _msg_norm = _normalize_ar(ctx.message or "")
 
-        # ── 3.8a Top-sellers / "show me products" request ────────────────
-        _is_top_seller_req = _is_global_browse
-
-        # ── 3.8b Show more / replay list ──────────────────────────────────
-        _SHOW_MORE_PATTERNS = [
-            "باقي الخيارات", "وريني باقي", "خيارات اكثر", "خيارات أكثر",
-            "more options", "show more",
-        ]
-        try:
-            from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
-                browse_alternatives_requested as _browse_alt_requested,
-            )
-        except Exception:  # noqa: BLE001
-            _browse_alt_requested = lambda _m: False  # noqa: E731
-        _is_show_more_req = (
-            any(p in _msg_norm for p in _SHOW_MORE_PATTERNS)
-            or _browse_alt_requested(ctx.message or "")
-        )
         _REPEAT_PATTERNS = [
             "مره ثانيه", "مره اخرى", "مرة اخرى", "مرة ثانية",
             "كرر", "اعد", "اعيد", "وريني الخيارات",
@@ -1872,50 +1853,9 @@ class DefaultDecisionEngine:
         _is_repeat_req = any(p in _msg_norm for p in _REPEAT_PATTERNS)
 
         # ── 3.8c Extract product name from order phrases ──────────────────
-        # "أبغى أطلب X" / "ابي اطلب X" / "اطلب X" / "أريد X"
-        # Bare openers («ابي اطلب») must not yield the verb as product_query.
-        from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
-            extract_start_order_product_query,
-            is_bare_start_order_phrase,
-        )
+        from ..discovery.entry import extract_order_product_query  # noqa: PLC0415
 
-        _extracted_product_query = ""
-        if not is_bare_start_order_phrase(ctx.message or ""):
-            _extracted = extract_start_order_product_query(ctx.message or "")
-            if _extracted:
-                from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
-                from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
-                from ..commerce.contact_escalation import (  # noqa: PLC0415
-                    is_branch_list_request,
-                    is_branch_location_order_tail,
-                )
-                if (
-                    not is_order_fulfillment_product_query(_extracted)
-                    and not has_inquiry_phrasing(ctx.message or "")
-                    and not is_branch_location_order_tail(_extracted)
-                    and not is_branch_list_request(ctx.message or "")
-                ):
-                    _extracted_product_query = _extracted
-        if not _extracted_product_query:
-            from ..commerce.catalog_query_normalization import (  # noqa: PLC0415
-                extract_english_order_product_query,
-            )
-
-            _en_extracted = extract_english_order_product_query(ctx.message or "")
-            if _en_extracted:
-                from ..order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
-                from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
-                from ..commerce.contact_escalation import (  # noqa: PLC0415
-                    is_branch_list_request,
-                    is_branch_location_order_tail,
-                )
-                if (
-                    not is_order_fulfillment_product_query(_en_extracted)
-                    and not has_inquiry_phrasing(ctx.message or "")
-                    and not is_branch_location_order_tail(_en_extracted)
-                    and not is_branch_list_request(ctx.message or "")
-                ):
-                    _extracted_product_query = _en_extracted
+        _extracted_product_query = extract_order_product_query(ctx)
 
         # ── 3.8d Product visual / image request (before order-query hijack) ─
         if intent.name == INTENT_PRODUCT_VISUAL_REQUEST:
@@ -2003,83 +1943,25 @@ class DefaultDecisionEngine:
                 confidence=0.85,
             )
 
-        # ── 3.8a handler ─────────────────────────────────────────────────
-        if (
-            _is_top_seller_req
-            and facts.has_products
-            and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked("top_products")
-        ):
-            try:
-                from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-                    active_category_from_state,
-                    resolve_browse_category_scope,
-                )
+        # ── 3.8u Unified discovery entry (Phase 1) ────────────────────────
+        from ..discovery.entry import (  # noqa: PLC0415
+            resolve_discovery_entry,
+            route_discovery_entry,
+        )
 
-                _category_scope = resolve_browse_category_scope(
-                    ctx.message or "",
-                    "",
-                    active_category=active_category_from_state(state),
-                    source="top_products",
-                )
-            except Exception:  # noqa: BLE001
-                _category_scope = ""
-            if _category_scope:
-                logger.info(
-                    "[ORDER FLOW] intent_rule_matched | rule=category_browse "
-                    "query=%r tenant=%s intent=%s msg=%r",
-                    _category_scope,
-                    ctx.tenant_id,
-                    intent.name,
-                    (ctx.message or "")[:60],
-                )
-                return Decision(
-                    action=ACTION_SEARCH_PRODUCTS,
-                    args={
-                        "query": _category_scope,
-                        "source": "category_browse",
-                    },
-                    reason=(
-                        "text-pattern: category-scoped inventory browse — "
-                        f"search '{_category_scope}' not top_products"
-                    ),
-                    confidence=0.93,
-                )
-            logger.info(
-                "[ORDER FLOW] intent_rule_matched | rule=top_products query='' "
-                "tenant=%s intent=%s msg=%r",
-                ctx.tenant_id, intent.name, (ctx.message or "")[:60],
+        _discovery_entry = resolve_discovery_entry(ctx)
+        if _discovery_entry.matched:
+            _discovery_decision = route_discovery_entry(
+                ctx,
+                _discovery_entry,
+                facts=facts,
+                product_discovery_blocked=_product_discovery_blocked,
+                fulfillment_locked_fallback=_fulfillment_locked_fallback,
+                block_stale_resume=_block_stale_resume,
+                is_commerce_blocked=_is_commerce_blocked,
             )
-            return Decision(
-                action=ACTION_SEARCH_PRODUCTS,
-                args={"query": "", "source": "top_products"},
-                reason="text-pattern: top-sellers / show-products request",
-                confidence=0.92,
-            )
-
-        # ── 3.8b handler — show NEXT options (not a repeat) ───────────────
-        if (
-            _is_show_more_req
-            and facts.has_products
-            and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked("show_more")
-            and not _block_stale_resume("show_more")
-        ):
-            logger.info(
-                "[ORDER FLOW] show_more_candidates | offset=%d pool=%d tenant=%s",
-                int(getattr(state, "catalog_browse_offset", 0) or 0),
-                len(getattr(state, "catalog_browse_pool", None) or []),
-                ctx.tenant_id,
-            )
-            return Decision(
-                action=ACTION_SEARCH_PRODUCTS,
-                args={
-                    "query": str(getattr(state, "last_browse_query", "") or ""),
-                    "source": "show_more",
-                },
-                reason="text-pattern: show more product options",
-                confidence=0.90,
-            )
+            if _discovery_decision is not None:
+                return _discovery_decision
 
         # ── 3.8c handler — verbatim repeat of last list ───────────────────
         if (
@@ -2120,31 +2002,6 @@ class DefaultDecisionEngine:
         _goal_dec = _goal_based_commerce_decision(ctx)
         if _goal_dec is not None:
             return _goal_dec
-
-        # ── 3.8c handler ─────────────────────────────────────────────────
-        if (
-            _extracted_product_query
-            and facts.has_products
-            and not _is_commerce_blocked(ctx)
-            and not _product_discovery_blocked("order_product_query")
-            and intent.name not in {
-                INTENT_NEED_BASED_PRODUCT_ADVICE,
-                "need_based_product_advice",
-                "solution_seeking_commerce",
-            }
-            and getattr(ctx, "goal_regimen_bundle", None) is None
-        ):
-            logger.info(
-                "[ORDER FLOW] intent_rule_matched | rule=order_product_query "
-                "query=%r tenant=%s intent=%s",
-                _extracted_product_query, ctx.tenant_id, intent.name,
-            )
-            return Decision(
-                action=ACTION_SEARCH_PRODUCTS,
-                args={"query": _extracted_product_query, "after_search": "propose_order"},
-                reason=f"text-pattern: extracted product query '{_extracted_product_query}' from order phrase",
-                confidence=0.88,
-            )
 
         # ── 3.9: Refine existing search by price ──────────────────────────
         # When the customer has already seen a product list (last_search_candidates
@@ -2654,6 +2511,25 @@ class DefaultDecisionEngine:
                     or _extracted_product_query
                 )
                 if not query:
+                    from ..discovery.entry import (  # noqa: PLC0415
+                        START_ORDER_BARE,
+                        resolve_discovery_entry,
+                        route_discovery_entry,
+                    )
+
+                    _so_entry = resolve_discovery_entry(ctx)
+                    if _so_entry.matched and _so_entry.entry_type == START_ORDER_BARE:
+                        _so_dec = route_discovery_entry(
+                            ctx,
+                            _so_entry,
+                            facts=facts,
+                            product_discovery_blocked=_product_discovery_blocked,
+                            fulfillment_locked_fallback=_fulfillment_locked_fallback,
+                            block_stale_resume=_block_stale_resume,
+                            is_commerce_blocked=_is_commerce_blocked,
+                        )
+                        if _so_dec is not None:
+                            return _so_dec
                     if _product_discovery_blocked("top_products_start_order"):
                         _fb = _fulfillment_locked_fallback()
                         if _fb is not None:
