@@ -262,6 +262,52 @@ class DefaultComposer:
                     alternatives=alts,
                 )
 
+            discovery_text = str(data.get("discovery_presentation_text") or "").strip()
+            discovery_kind = str(data.get("discovery_output_kind") or "").strip().lower()
+            if discovery_text and discovery_kind in {
+                "products",
+                "collections",
+                "empty",
+            }:
+                result.data["chosen_path"] = f"discovery_presentation_{discovery_kind}"
+                if discovery_kind == "products":
+                    raw_products = list(data.get("products") or [])
+                    safe_products = [
+                        p for p in raw_products
+                        if p.get("can_checkout", p.get("orderable", True))
+                    ]
+                    from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                        apply_display_slice,
+                        log_product_breadth,
+                        resolve_product_breadth_from_context,
+                    )
+                    breadth = resolve_product_breadth_from_context(ctx, decision)
+                    candidates, breadth_meta = apply_display_slice(safe_products, breadth)
+                    log_product_breadth(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        breadth=breadth,
+                        total=len(safe_products),
+                        shown=len(candidates),
+                        action=action,
+                    )
+                    result.data["product_breadth"] = breadth.to_log_dict()
+                    result.data["product_breadth_meta"] = breadth_meta
+                    wa_buttons = []
+                    for i, p in enumerate(candidates[:3], 1):
+                        from core.product_button_label import (  # noqa: PLC0415
+                            compact_whatsapp_product_button_title,
+                        )
+
+                        raw_title = str(p.get("title") or "")
+                        title = compact_whatsapp_product_button_title(raw_title)
+                        wa_buttons.append({
+                            "type": "reply",
+                            "reply": {"id": f"pick_{i}", "title": title or str(i)},
+                        })
+                    result.data["pending_buttons"] = wa_buttons
+                    result.data["pending_candidates"] = candidates
+                return discovery_text
+
             if not result.success or data.get("message") == "no_products_in_catalog":
                 query = str((decision.args or {}).get("query") or "").strip()
                 inquiry_query = ""

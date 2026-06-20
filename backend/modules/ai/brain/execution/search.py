@@ -86,6 +86,7 @@ class ProductSearchHandler:
             query: str,
             browse_pool: List[Dict[str, Any]] | None = None,
             browse_offset: int | None = None,
+            attach_discovery_presentation: bool = False,
         ) -> ActionResult:
             lines = []
             for p in products:
@@ -111,6 +112,13 @@ class ProductSearchHandler:
                 payload["browse_pool"] = browse_pool
             if browse_offset is not None:
                 payload["browse_offset"] = browse_offset
+            if attach_discovery_presentation:
+                payload = _attach_discovery_presentation(
+                    payload,
+                    decision=decision,
+                    ctx=ctx,
+                    source=source,
+                )
             return ActionResult(success=True, data=payload)
 
         # Verbatim repeat — same list the customer already saw.
@@ -206,6 +214,10 @@ class ProductSearchHandler:
                 query=str(query or getattr(state, "last_browse_query", "") or ""),
                 browse_pool=refreshed_pool,
                 browse_offset=next_offset,
+                attach_discovery_presentation=bool(
+                    getattr(state, "last_discovery_mode", None)
+                    or (decision.args or {}).get("discovery_mode")
+                ),
             )
 
         try:
@@ -371,6 +383,69 @@ def _apply_affinity_boost(
         return products
 
 
+def _attach_discovery_presentation(
+    payload: Dict[str, Any],
+    *,
+    decision: Decision,
+    ctx: BrainContext,
+    source: str,
+    plan: Any | None = None,
+    strategy: Any | None = None,
+) -> Dict[str, Any]:
+    """Phase 3 — evidence-based discovery reply text on executor payload."""
+    from ..catalog.discovery_presenter import (  # noqa: PLC0415
+        DiscoveryPresentationComposer,
+        resolve_strategy_for_presentation,
+    )
+    from ..commerce.merchant_discovery_settings import parse_merchant_discovery_settings  # noqa: PLC0415
+
+    args = getattr(decision, "args", None) or {}
+    settings_raw = args.get("discovery_settings")
+    merchant_settings = parse_merchant_discovery_settings(
+        settings_raw if isinstance(settings_raw, dict) else {}
+    )
+    composer = DiscoveryPresentationComposer()
+    resolved_strategy = strategy or resolve_strategy_for_presentation(
+        args,
+        state=getattr(ctx, "state", None),
+    )
+    entry_source = str(source or args.get("source") or "").strip().lower()
+    entry_type = str(args.get("discovery_entry_type") or "").strip().lower()
+    query = str(payload.get("query") or args.get("query") or ctx.message or "")
+
+    if plan is not None:
+        presentation = composer.compose(
+            plan=plan,
+            strategy=resolved_strategy,
+            entry_source=entry_source,
+            entry_type=entry_type,
+            merchant_settings=merchant_settings,
+            query=query,
+        )
+    else:
+        presentation = composer.compose_products(
+            list(payload.get("products") or []),
+            strategy=resolved_strategy,
+            entry_source=entry_source,
+            entry_type=entry_type,
+            merchant_settings=merchant_settings,
+            query=query,
+        )
+
+    out = dict(payload)
+    out["discovery_presentation_text"] = presentation.text
+    out["discovery_output_kind"] = presentation.output_kind
+    out["product_lines"] = presentation.text
+    if presentation.products:
+        out["products"] = presentation.products
+        out["count"] = len(presentation.products)
+    if presentation.collections:
+        out["collections"] = presentation.collections
+    if plan is not None and getattr(plan, "evidence", None):
+        out["discovery_plan"] = dict(plan.evidence)
+    return out
+
+
 def _apply_discovery_strategy(
     products: List[Dict[str, Any]],
     *,
@@ -379,7 +454,7 @@ def _apply_discovery_strategy(
     query: str,
     source: str,
 ) -> ActionResult | None:
-    """Apply Phase 2 catalog intelligence + presentation contract."""
+    """Apply Phase 2 catalog intelligence + Phase 3/4A presentation composer."""
     args = getattr(decision, "args", None) or {}
     mode = str(args.get("discovery_mode") or "").strip().lower()
     if not mode or source == "show_more":
@@ -387,19 +462,19 @@ def _apply_discovery_strategy(
 
     try:
         from ..commerce.discovery_strategy import strategy_from_decision_args  # noqa: PLC0415
+        from ..commerce.merchant_discovery_settings import parse_merchant_discovery_settings  # noqa: PLC0415
         from ..catalog.catalog_intelligence import (  # noqa: PLC0415
             CatalogIntelligence,
+            DiscoveryPlan,
             attach_discovery_signals_from_db,
         )
         from ..catalog.catalog_provider import get_catalog_provider  # noqa: PLC0415
+        from ..catalog.discovery_presenter import DiscoveryPresentationComposer  # noqa: PLC0415
         from ..catalog.presentation_contract import validate_discovery_products  # noqa: PLC0415
 
         strategy = strategy_from_decision_args(args)
-        settings_raw = args.get("discovery_settings")
-        from ..commerce.merchant_discovery_settings import parse_merchant_discovery_settings  # noqa: PLC0415
-
         merchant_settings = parse_merchant_discovery_settings(
-            settings_raw if isinstance(settings_raw, dict) else {}
+            args.get("discovery_settings") if isinstance(args.get("discovery_settings"), dict) else {}
         )
         db = getattr(ctx, "_db", None)
         platform = str(getattr(getattr(ctx, "facts", None), "integration_platform", "") or "")
@@ -419,87 +494,129 @@ def _apply_discovery_strategy(
             preferred_collections=args.get("discovery_preferred_collections"),
             merchant_settings=merchant_settings,
         )
+        composer = DiscoveryPresentationComposer()
+        entry_type = str(args.get("discovery_entry_type") or "").strip().lower()
 
-        if plan.output_kind == "collections":
-            from ..catalog.discovery_presenter import compose_merchant_collections  # noqa: PLC0415
+        if plan.output_kind == "collections" and len(plan.collections) == 1:
+            group = plan.collections[0]
+            raw = provider.get_collection_products(
+                group.group_name,
+                limit=max(12, strategy.initial_count * 4),
+            )
+            enriched = attach_discovery_signals_from_db(
+                list(raw or []),
+                db=db,
+                tenant_id=ctx.tenant_id,
+            )
+            ranked = validate_discovery_products(
+                intel.rank_products(
+                    enriched,
+                    strategy=strategy,
+                    merchant_settings=merchant_settings,
+                    collection=merchant_settings.match_collection(group.group_name),
+                ),
+            )
+            if ranked:
+                plan = DiscoveryPlan(
+                    output_kind="products",
+                    products=ranked[: max(1, strategy.initial_count)],
+                    presentation=strategy.presentation,
+                    evidence={
+                        **dict(plan.evidence),
+                        "single_collection_pivot": group.group_name,
+                    },
+                )
 
-            collections = [group.to_dict() for group in plan.collections]
-            presentation = compose_merchant_collections(
-                plan.collections,
+        if plan.output_kind == "products":
+            enriched = attach_discovery_signals_from_db(
+                list(products or plan.products),
+                db=db,
+                tenant_id=ctx.tenant_id,
+            )
+            matched_collection = merchant_settings.match_collection(query)
+            ranked_full = intel.rank_products(
+                enriched,
+                strategy=strategy,
                 merchant_settings=merchant_settings,
+                collection=matched_collection,
             )
-            logger.info(
-                "[SearchHandler] discovery_collections | tenant=%s count=%d mode=%s",
-                ctx.tenant_id,
-                len(collections),
-                mode,
-            )
-            return ActionResult(
-                success=True,
-                data={
-                    "products": [],
-                    "collections": collections,
-                    "product_lines": presentation,
-                    "discovery_presentation_text": presentation,
-                    "count": 0,
-                    "query": query,
-                    "suggest_narrow": False,
-                    "discovery_output_kind": "collections",
-                    "discovery_plan": plan.evidence,
+            ranked = validate_discovery_products(ranked_full)
+            if not ranked:
+                empty = composer.compose(
+                    plan=DiscoveryPlan(output_kind="empty"),
+                    strategy=strategy,
+                    entry_source=source,
+                    entry_type=entry_type,
+                    merchant_settings=merchant_settings,
+                    query=query,
+                )
+                logger.info(
+                    "[SearchHandler] discovery_empty | tenant=%s mode=%s",
+                    ctx.tenant_id,
+                    mode,
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "products": [],
+                        "product_lines": empty.text,
+                        "count": 0,
+                        "query": query,
+                        "suggest_narrow": False,
+                        "discovery_output_kind": "empty",
+                        "discovery_presentation_text": empty.text,
+                        "discovery_plan": plan.evidence,
+                    },
+                )
+            shown = ranked[: max(1, strategy.initial_count)]
+            plan = DiscoveryPlan(
+                output_kind="products",
+                products=shown,
+                presentation=strategy.presentation,
+                evidence={
+                    **dict(plan.evidence),
+                    "ranked_count": len(ranked),
                 },
             )
+            browse_pool = ranked
+        else:
+            browse_pool = []
 
-        enriched = attach_discovery_signals_from_db(
-            list(products or plan.products),
-            db=db,
-            tenant_id=ctx.tenant_id,
-        )
-        matched_collection = merchant_settings.match_collection(query)
-        ranked = intel.rank_products(
-            enriched,
+        presentation = composer.compose(
+            plan=plan,
             strategy=strategy,
+            entry_source=source,
+            entry_type=entry_type,
             merchant_settings=merchant_settings,
-            collection=matched_collection,
+            query=query,
         )
-        ranked = validate_discovery_products(ranked)
-        if not ranked:
-            return None
-
-        from ..catalog.discovery_presenter import compose_collection_products  # noqa: PLC0415
-
-        presentation = compose_collection_products(
-            ranked[: strategy.initial_count],
-            collection=matched_collection,
-            merchant_settings=merchant_settings,
-            collection_label=matched_collection.label if matched_collection else "",
-        )
+        payload: Dict[str, Any] = {
+            "products": list(presentation.products or []),
+            "collections": list(presentation.collections or []),
+            "product_lines": presentation.text,
+            "discovery_presentation_text": presentation.text,
+            "count": len(presentation.products or []),
+            "query": query,
+            "suggest_narrow": False,
+            "discovery_output_kind": presentation.output_kind,
+            "discovery_plan": plan.evidence,
+        }
+        if presentation.output_kind == "products" and browse_pool:
+            payload["browse_pool"] = browse_pool
+            payload["browse_offset"] = 0
+            payload["suggest_narrow"] = len(browse_pool) > strategy.initial_count
 
         logger.info(
-            "[SearchHandler] discovery_ranked | tenant=%s mode=%s count=%d top_score=%s",
+            "[SearchHandler] discovery_presented | tenant=%s mode=%s kind=%s count=%d",
             ctx.tenant_id,
             mode,
-            len(ranked),
-            ranked[0].get("discovery_score") if ranked else "-",
+            presentation.output_kind,
+            payload["count"],
         )
-        return ActionResult(
-            success=True,
-            data={
-                "products": ranked[: strategy.initial_count],
-                "product_lines": presentation,
-                "discovery_presentation_text": presentation,
-                "count": len(ranked[: strategy.initial_count]),
-                "query": query,
-                "suggest_narrow": len(ranked) > strategy.initial_count,
-                "discovery_output_kind": "products",
-                "discovery_plan": plan.evidence,
-                "browse_pool": ranked,
-                "browse_offset": 0,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[SearchHandler] discovery_strategy_skipped tenant=%s err=%s",
+        return ActionResult(success=True, data=payload)
+    except Exception:
+        logger.exception(
+            "[SearchHandler] discovery_strategy_failed tenant=%s",
             getattr(ctx, "tenant_id", None),
-            exc,
         )
         return None
