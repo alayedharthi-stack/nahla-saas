@@ -522,11 +522,9 @@ _HANDOFF_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
-# Neutral replacement when we strip the promise. Conservative copy
-# (Tenant 33 owner explicitly said the AI must NOT clown-tone or
-# escalate falsely) — we acknowledge receipt without promising any
-# automated transfer.
-_HANDOFF_NEUTRAL_TEXT = "تمام 🌷 وصلت رسالتك."
+# When scrubbing a false handoff promise, strip the claim only —
+# never inject a generic ACK stub (P0 / Nahla Doctrine).
+_HANDOFF_NEUTRAL_TEXT = ""
 
 
 def contains_handoff_promise(text: str) -> Optional[str]:
@@ -571,17 +569,23 @@ def maybe_scrub_handoff_promise(
         # Honest promise — let it through.
         return text, False
 
-    match = contains_handoff_promise(text)
-    if not match:
-        return text, False
-
-    logger.warning(
-        "[HANDOFF_PROMISE_SCRUBBED] tenant=%s to=%s marker=%r "
-        "original_len=%d preview=%r — handoff state NOT active, "
-        "replacing with neutral ack",
-        tenant_id, recipient, match, len(text), text[:140],
-    )
-    return _HANDOFF_NEUTRAL_TEXT, True
+    stripped = text
+    scrubbed = False
+    while True:
+        match = contains_handoff_promise(stripped)
+        if not match:
+            break
+        if not scrubbed:
+            logger.warning(
+                "[HANDOFF_PROMISE_SCRUBBED] tenant=%s to=%s marker=%r "
+                "original_len=%d preview=%r — handoff state NOT active, "
+                "stripping promise (no generic ack injection)",
+                tenant_id, recipient, match, len(text), text[:140],
+            )
+        stripped = stripped.replace(match, "").strip()
+        stripped = re.sub(r"\s{2,}", " ", stripped)
+        scrubbed = True
+    return stripped, scrubbed
 
 
 # ── Promised-asset leak (May 2026 P1, Tenant 33) ───────────────────────────

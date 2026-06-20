@@ -12,9 +12,9 @@ import re
 import unicodedata
 from typing import Tuple
 
-# Honest system fallback when compose returns empty — not a CS opener.
+# Honest system fallback when compose returns empty — triggers recovery, not ACK stub.
 EMPTY_REPLY_OPERATIONAL_AR = (
-    "وصلت رسالتك. جاري المعالجة — إذا تأخر الرد أعد المحاولة."
+    "تعذّرت صياغة الرد الآن — أعد رسالتك لو يناسبك."
 )
 
 # Last-resort compose error — no product/sales CTA.

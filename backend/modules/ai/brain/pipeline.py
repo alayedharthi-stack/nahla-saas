@@ -130,9 +130,9 @@ def _resolve_last_shipment_at(
                 if isinstance(stamp, str) and stamp:
                     try:
                         return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                    except Exception:
+                    except Exception:  # noqa: silent-ok — timestamp parse fallback
                         pass
-    except Exception:
+    except Exception:  # noqa: silent-ok — history stamp probe must not break pipeline
         pass
     try:
         if isinstance(history, list):
@@ -1365,6 +1365,23 @@ class MerchantBrain:
         )
         new_state.objective_evidence = dict(getattr(state, "objective_evidence", None) or {})
 
+        try:
+            from .commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+                apply_complaint_refund_session_flags,
+            )
+            from .commerce.staff_contact_suppression import (  # noqa: PLC0415
+                apply_staff_contact_session_flags,
+            )
+
+            apply_complaint_refund_session_flags(
+                new_state, ctx.message or "", decision,
+            )
+            apply_staff_contact_session_flags(
+                new_state, ctx.message or "", decision,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # ── Conversation-context memory (May 2026) ───────────────────────
         # Persist the platform topic so a bare "نعم" on the NEXT turn
         # can be resolved by the decision engine's context-inheritance
@@ -1936,14 +1953,23 @@ class MerchantBrain:
 
         try:
             from core.wa_draft_confirmation import maybe_inject_draft_flow_reply  # noqa: PLC0415
-
-            reply = maybe_inject_draft_flow_reply(
-                reply=reply or "",
-                order_prep=new_state.order_prep,
-                brain_state=new_state,
-                catalog_resolution=_catalog_resolution,
-                cart_changed=_cart_changed,
+            from .commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+                should_block_order_draft_injection,
             )
+
+            if not should_block_order_draft_injection(
+                brain_state=new_state,
+                customer_message=ctx.message or "",
+                decision=decision,
+            ):
+                reply = maybe_inject_draft_flow_reply(
+                    reply=reply or "",
+                    order_prep=new_state.order_prep,
+                    brain_state=new_state,
+                    catalog_resolution=_catalog_resolution,
+                    cart_changed=_cart_changed,
+                    customer_message=ctx.message or "",
+                )
             if reply and result.data.get("wa_draft_reply_injected") is None:
                 result.data["wa_draft_reply_injected"] = bool(_cart_changed or _catalog_resolution)
         except Exception as _draft_reply_exc:  # noqa: BLE001
@@ -3489,6 +3515,20 @@ def _compose_base_response_goal(
         from .persona_expression import compose_non_sales_ambiguous_goal  # noqa: PLC0415
 
         return compose_non_sales_ambiguous_goal()
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "conversation_recovery"
+    ):
+        from .persona_expression import compose_conversation_recovery_goal  # noqa: PLC0415
+
+        _args = decision.args or {}
+        return compose_conversation_recovery_goal(
+            inbound_text=str(_args.get("inbound_preview") or ""),
+            last_question=str(_args.get("last_question_asked") or ""),
+            last_outbound=str(_args.get("last_outbound_snippet") or ""),
+            recovery_reason=str(_args.get("recovery_reason") or ""),
+        )
 
     if (
         decision.action == ACTION_LLM_REPLY

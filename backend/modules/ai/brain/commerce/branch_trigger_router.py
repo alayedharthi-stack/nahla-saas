@@ -33,7 +33,7 @@ MSG_ESCALATION_EXHAUSTED = (
 )
 MSG_BRANCH_CLARIFY = "أي فرع تقصد؟"
 MSG_PICKUP_PREFERENCE_ASK = (
-    "هل ترغب بالاستلام من المعرض؟ أو أرسل لك موقع المعرض؟"
+    "هل تفضّل أرسل لك موقع المعرض أو بيانات التواصل؟"
 )
 
 

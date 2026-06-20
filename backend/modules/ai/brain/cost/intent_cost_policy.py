@@ -32,23 +32,11 @@ ROUTINE_LLM_AVOID_INTENTS: FrozenSet[str] = frozenset({
 })
 
 # Social categories answered via ``templates.social_reply`` (variant rotation).
+# Occasion/safety categories only — ACK-style buckets route to persona compose.
 TEMPLATE_FIRST_SOCIAL_CATEGORIES: FrozenSet[str] = frozenset({
-    "thanks",
-    "blessing",
-    "general_courtesy",
-    "morning_greeting",
-    "celebration",
-    "informational_only",
-    "social_forward",
-    "basmala",
-    "prophet_invocation",
-    "compliment",
-    "strong_praise",
-    "emotional_personal",
     "eid_greeting",
     "dua",
     "condolence",
-    "religious_media",
 })
 
 
