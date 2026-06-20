@@ -166,15 +166,15 @@ def _is_price_turn(ctx: BrainContext) -> bool:
 
             if classify_price_turn(ctx) == PriceTurnKind.PRODUCT_PRICE_ASK:
                 return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception("[DISCOVERY_ENTRY] price_turn_classifier_failed")
     try:
         from ..product_discovery_gate import _extract_price_subject  # noqa: PLC0415
 
         if _extract_price_subject(msg):
             return True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] price_subject_extract_failed")
     return False
 
 
@@ -192,8 +192,8 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
         matched = rules.match(msg)
         if matched is not None and matched.name == INTENT_WHO_ARE_YOU:
             return "persona_identity"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] identity_rules_match_failed")
 
     norm = _normalize_ar(msg)
     if norm in {"من انت", "من انت؟"} or re.match(r"^من\s+انت", norm):
@@ -207,16 +207,16 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
 
         if message_fulfills_checkout_slot(msg, order_prep=order_prep):
             return "checkout_slot"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] checkout_slot_probe_failed")
 
     try:
         from ..order_context_gate import should_block_product_discovery  # noqa: PLC0415
 
         if should_block_product_discovery(ctx, msg):
             return "active_fulfillment"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] fulfillment_lock_probe_failed")
 
     return None
 
@@ -231,7 +231,8 @@ def _is_show_more_request(message: str) -> bool:
         )
 
         return bool(browse_alternatives_requested(message or ""))
-    except Exception:  # noqa: BLE001
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] show_more_probe_failed")
         return False
 
 
@@ -257,7 +258,8 @@ def _resolve_category_scope(
             active_category=active_category_from_state(ctx.state),
             source=source,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] resolve_category_scope_failed")
         return None
 
 
@@ -276,8 +278,8 @@ def _category_browse_entry(ctx: BrainContext) -> Optional[DiscoveryEntryDecision
 
         if global_availability_browse_requested(msg):
             return None
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] global_browse_probe_failed")
 
     if has_types_overview_ask(msg):
         subject = extract_types_overview_query(msg)
@@ -319,8 +321,8 @@ def _category_browse_entry(ctx: BrainContext) -> Optional[DiscoveryEntryDecision
                 category_scope=locked,
                 reason="session-locked category browse",
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] category_browse_entry_failed")
     return None
 
 
