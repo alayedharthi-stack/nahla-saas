@@ -394,6 +394,7 @@ from routers.admin_debug  import router as _admin_debug_router   # noqa: E402
 from routers.admin_salla_token import router as _admin_salla_token_router  # noqa: E402
 from routers.auth         import router as _auth_router          # noqa: E402
 from routers.settings     import router as _settings_router      # noqa: E402
+from routers.discovery_settings import router as _discovery_settings_router  # noqa: E402
 from routers.templates    import router as _templates_router     # noqa: E402
 from routers.campaigns    import router as _campaigns_router     # noqa: E402
 from routers.campaign_wizard import router as _campaign_wizard_router  # noqa: E402
@@ -463,6 +464,7 @@ app.include_router(_admin_inbound_debug_router)
 app.include_router(_auth_router)
 app.include_router(_twofa_router)
 app.include_router(_settings_router)
+app.include_router(_discovery_settings_router)
 app.include_router(_templates_router)
 app.include_router(_campaigns_router)
 app.include_router(_delivery_quality_router)

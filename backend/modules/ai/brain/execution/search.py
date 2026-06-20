@@ -395,6 +395,12 @@ def _apply_discovery_strategy(
         from ..catalog.presentation_contract import validate_discovery_products  # noqa: PLC0415
 
         strategy = strategy_from_decision_args(args)
+        settings_raw = args.get("discovery_settings")
+        from ..commerce.merchant_discovery_settings import parse_merchant_discovery_settings  # noqa: PLC0415
+
+        merchant_settings = parse_merchant_discovery_settings(
+            settings_raw if isinstance(settings_raw, dict) else {}
+        )
         db = getattr(ctx, "_db", None)
         platform = str(getattr(getattr(ctx, "facts", None), "integration_platform", "") or "")
         if db is None:
@@ -411,14 +417,17 @@ def _apply_discovery_strategy(
             query=query,
             source=source,
             preferred_collections=args.get("discovery_preferred_collections"),
+            merchant_settings=merchant_settings,
         )
 
         if plan.output_kind == "collections":
+            from ..catalog.discovery_presenter import compose_merchant_collections  # noqa: PLC0415
+
             collections = [group.to_dict() for group in plan.collections]
-            lines = [
-                f"• {c.get('group_name')} ({c.get('product_count', 0)})"
-                for c in collections
-            ]
+            presentation = compose_merchant_collections(
+                plan.collections,
+                merchant_settings=merchant_settings,
+            )
             logger.info(
                 "[SearchHandler] discovery_collections | tenant=%s count=%d mode=%s",
                 ctx.tenant_id,
@@ -430,7 +439,8 @@ def _apply_discovery_strategy(
                 data={
                     "products": [],
                     "collections": collections,
-                    "product_lines": "\n".join(lines),
+                    "product_lines": presentation,
+                    "discovery_presentation_text": presentation,
                     "count": 0,
                     "query": query,
                     "suggest_narrow": False,
@@ -444,18 +454,25 @@ def _apply_discovery_strategy(
             db=db,
             tenant_id=ctx.tenant_id,
         )
-        ranked = intel.rank_products(enriched, strategy=strategy)
+        matched_collection = merchant_settings.match_collection(query)
+        ranked = intel.rank_products(
+            enriched,
+            strategy=strategy,
+            merchant_settings=merchant_settings,
+            collection=matched_collection,
+        )
         ranked = validate_discovery_products(ranked)
         if not ranked:
             return None
 
-        lines = []
-        for p in ranked[: strategy.initial_count]:
-            price_str = f"{p['price']} ريال" if p.get("price") else "السعر غير محدد"
-            line = f"• {p['title']} — {price_str}"
-            if p.get("sku"):
-                line += f" [SKU: {p['sku']}]"
-            lines.append(line)
+        from ..catalog.discovery_presenter import compose_collection_products  # noqa: PLC0415
+
+        presentation = compose_collection_products(
+            ranked[: strategy.initial_count],
+            collection=matched_collection,
+            merchant_settings=merchant_settings,
+            collection_label=matched_collection.label if matched_collection else "",
+        )
 
         logger.info(
             "[SearchHandler] discovery_ranked | tenant=%s mode=%s count=%d top_score=%s",
@@ -468,7 +485,8 @@ def _apply_discovery_strategy(
             success=True,
             data={
                 "products": ranked[: strategy.initial_count],
-                "product_lines": "\n".join(lines),
+                "product_lines": presentation,
+                "discovery_presentation_text": presentation,
                 "count": len(ranked[: strategy.initial_count]),
                 "query": query,
                 "suggest_narrow": len(ranked) > strategy.initial_count,

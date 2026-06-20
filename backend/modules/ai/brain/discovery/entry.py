@@ -478,6 +478,29 @@ def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     return DiscoveryEntryDecision.no_match("not_discovery")
 
 
+def _load_merchant_discovery_settings(ctx: BrainContext):
+    from ..commerce.merchant_discovery_settings import load_merchant_discovery_settings  # noqa: PLC0415
+
+    merchant_context = getattr(ctx, "merchant_context", None)
+    if isinstance(merchant_context, dict) and merchant_context.get("discovery_settings"):
+        return load_merchant_discovery_settings(merchant_context)
+
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is not None and tenant_id is not None:
+        try:
+            from services.merchant_discovery_settings_service import load_settings_for_brain  # noqa: PLC0415
+
+            return load_settings_for_brain(db, int(tenant_id))
+        except Exception:
+            logger.exception(
+                "[DISCOVERY_STRATEGY] discovery_settings_db_load_failed tenant=%s",
+                tenant_id,
+            )
+
+    return load_merchant_discovery_settings(getattr(ctx, "tenant_context", None))
+
+
 def _resolve_strategy_layer(
     ctx: BrainContext,
     entry: DiscoveryEntryDecision,
@@ -490,12 +513,11 @@ def _resolve_strategy_layer(
         resolve_discovery_strategy,
         strategy_to_decision_args,
     )
-    from ..commerce.merchant_discovery_settings import load_merchant_discovery_settings  # noqa: PLC0415
     from ..catalog.catalog_intelligence import CatalogIntelligence  # noqa: PLC0415
     from ..catalog.catalog_provider import get_catalog_provider  # noqa: PLC0415
 
     objective = update_commerce_objective(ctx, entry)
-    settings = load_merchant_discovery_settings(getattr(ctx, "tenant_context", None))
+    settings = _load_merchant_discovery_settings(ctx)
     collection_count = 0
     db = getattr(ctx, "_db", None)
     platform = str(getattr(facts, "integration_platform", "") or "")
@@ -507,7 +529,10 @@ def _resolve_strategy_layer(
                 integration_platform=platform,
             )
             collection_count = len(
-                CatalogIntelligence(provider).list_collections(limit=20)
+                CatalogIntelligence(provider).list_collections(
+                    limit=20,
+                    merchant_settings=settings,
+                )
             )
         except Exception:
             logger.exception(
@@ -517,7 +542,7 @@ def _resolve_strategy_layer(
     catalog_ctx = build_catalog_context_snapshot(
         facts=facts,
         collection_count=collection_count,
-        has_featured=bool(settings.featured_product_ids),
+        has_featured=bool(settings.global_featured_product_ids()),
     )
     strategy = resolve_discovery_strategy(
         commerce_objective=objective,
@@ -529,7 +554,7 @@ def _resolve_strategy_layer(
         ctx.state.last_discovery_mode = strategy.mode.value
     except Exception:
         logger.exception("[DISCOVERY_STRATEGY] last_discovery_mode_stamp_failed")
-    return objective, strategy, strategy_to_decision_args(strategy)
+    return objective, strategy, strategy_to_decision_args(strategy, merchant_settings=settings)
 
 
 def _discovery_decision(

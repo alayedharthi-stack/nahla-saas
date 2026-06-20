@@ -87,20 +87,45 @@ def resolve_discovery_strategy(
     settings = merchant_settings or MerchantDiscoverySettings()
     entry = str(entry_type or NO_DISCOVERY).strip().lower()
     objective = str(commerce_objective or COMMERCE_OBJECTIVE_DISCOVERY).strip().lower()
+    merchant_mode = str(settings.default_mode or settings.mode_override or "").strip().lower()
+    merchant_collections = settings.has_merchant_collections()
+    effective_collection_count = max(
+        catalog_context.collection_count,
+        len(settings.enabled_collections()) if merchant_collections else 0,
+    )
 
-    if settings.mode_override:
-        mode = DiscoveryMode(settings.mode_override)
-        evidence = {"rule": "merchant_override", "mode": mode.value}
-    elif entry == GLOBAL_BROWSE:
-        if catalog_context.collection_count >= 2:
-            mode = DiscoveryMode.COLLECTIONS_FIRST
-            evidence = {"rule": "global_browse_collections", "collections": catalog_context.collection_count}
-        elif catalog_context.product_count > 0:
+    def _merchant_mode() -> Optional[DiscoveryMode]:
+        if merchant_mode not in {m.value for m in DiscoveryMode}:
+            return None
+        return DiscoveryMode(merchant_mode)
+
+    evidence: Dict[str, Any] = {}
+    mode: DiscoveryMode
+
+    if entry == GLOBAL_BROWSE:
+        if objective == COMMERCE_OBJECTIVE_SELECTION:
             mode = DiscoveryMode.DIRECT_CATALOG
-            evidence = {"rule": "global_browse_direct"}
+            evidence = {"rule": "selection_direct"}
         else:
-            mode = DiscoveryMode.GUIDED_DISCOVERY
-            evidence = {"rule": "global_browse_no_catalog"}
+            forced = _merchant_mode()
+            if forced is not None:
+                mode = forced
+                evidence = {"rule": "merchant_default_mode", "mode": mode.value}
+            elif merchant_collections:
+                mode = DiscoveryMode.COLLECTIONS_FIRST
+                evidence = {
+                    "rule": "global_browse_merchant_collections",
+                    "collections": effective_collection_count,
+                }
+            elif effective_collection_count >= 2:
+                mode = DiscoveryMode.COLLECTIONS_FIRST
+                evidence = {"rule": "global_browse_collections", "collections": effective_collection_count}
+            elif catalog_context.product_count > 0:
+                mode = DiscoveryMode.DIRECT_CATALOG
+                evidence = {"rule": "global_browse_direct"}
+            else:
+                mode = DiscoveryMode.GUIDED_DISCOVERY
+                evidence = {"rule": "global_browse_no_catalog"}
     elif entry == TOP_PRODUCTS:
         mode = DiscoveryMode.FEATURED_FIRST
         evidence = {"rule": "top_products_featured_first"}
@@ -111,7 +136,7 @@ def resolve_discovery_strategy(
         if catalog_context.product_count <= settings.small_catalog_threshold:
             mode = DiscoveryMode.DIRECT_CATALOG
             evidence = {"rule": "start_order_small_catalog"}
-        elif catalog_context.collection_count >= 2:
+        elif effective_collection_count >= 2:
             mode = DiscoveryMode.COLLECTIONS_FIRST
             evidence = {"rule": "start_order_collections_first"}
         else:
@@ -134,19 +159,21 @@ def resolve_discovery_strategy(
     if mode == DiscoveryMode.GUIDED_DISCOVERY:
         guided_question = str(settings.guided_question or "").strip()
 
+    featured_ids = settings.global_featured_product_ids()
     result = DiscoveryStrategyResult(
         mode=mode,
         initial_count=max(1, int(settings.initial_product_count or 3)),
         presentation="discovery_list",
         guided_question=guided_question,
-        preferred_collections=list(settings.preferred_collections or []),
-        featured_product_ids=list(settings.featured_product_ids or []),
+        preferred_collections=list(settings.preferred_collection_labels()),
+        featured_product_ids=featured_ids,
         evidence={
             **evidence,
             "entry_type": entry,
             "commerce_objective": objective,
             "product_count": catalog_context.product_count,
-            "collection_count": catalog_context.collection_count,
+            "collection_count": effective_collection_count,
+            "merchant_default_mode": merchant_mode or "-",
         },
     )
     logger.info(
@@ -161,8 +188,12 @@ def resolve_discovery_strategy(
     return result
 
 
-def strategy_to_decision_args(strategy: DiscoveryStrategyResult) -> Dict[str, Any]:
-    return {
+def strategy_to_decision_args(
+    strategy: DiscoveryStrategyResult,
+    *,
+    merchant_settings: Optional[MerchantDiscoverySettings] = None,
+) -> Dict[str, Any]:
+    args = {
         "discovery_mode": strategy.mode.value,
         "discovery_initial_count": strategy.initial_count,
         "discovery_presentation": strategy.presentation,
@@ -171,6 +202,9 @@ def strategy_to_decision_args(strategy: DiscoveryStrategyResult) -> Dict[str, An
         "discovery_featured_product_ids": list(strategy.featured_product_ids),
         "discovery_strategy_evidence": dict(strategy.evidence),
     }
+    if merchant_settings is not None:
+        args["discovery_settings"] = merchant_settings.to_dict()
+    return args
 
 
 def strategy_from_decision_args(args: Dict[str, Any]) -> DiscoveryStrategyResult:
