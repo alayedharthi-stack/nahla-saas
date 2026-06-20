@@ -354,6 +354,42 @@ def _global_browse_entry(ctx: BrainContext) -> Optional[DiscoveryEntryDecision]:
     )
 
 
+def _discovery_category_followup_entry(ctx: BrainContext) -> Optional[DiscoveryEntryDecision]:
+    """Short category answer while commerce objective remains discovery."""
+    from ..commerce.commerce_objective import (  # noqa: PLC0415
+        COMMERCE_OBJECTIVE_DISCOVERY,
+        get_commerce_objective,
+    )
+    from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+        _is_valid_scope_token,
+        extract_browse_category_scope,
+    )
+
+    if get_commerce_objective(ctx.state) != COMMERCE_OBJECTIVE_DISCOVERY:
+        return None
+
+    msg = (ctx.message or "").strip()
+    if not msg:
+        return None
+
+    scope = extract_browse_category_scope(msg, "")
+    if not scope or not _is_valid_scope_token(scope):
+        return None
+
+    words = [w for w in msg.split() if w.strip()]
+    if len(words) > 3:
+        return None
+
+    return DiscoveryEntryDecision(
+        matched=True,
+        entry_type=CATEGORY_BROWSE,
+        source="category_browse",
+        query=scope,
+        category_scope=scope,
+        reason="discovery objective category follow-up",
+    )
+
+
 def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     """
     Unified classifier for discovery entry turns.
@@ -419,6 +455,10 @@ def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     category_entry = _category_browse_entry(ctx)
     if category_entry is not None:
         return category_entry
+
+    followup_entry = _discovery_category_followup_entry(ctx)
+    if followup_entry is not None:
+        return followup_entry
 
     if _is_top_seller_request(msg):
         scope = _resolve_category_scope(ctx, source="top_products")
@@ -507,13 +547,14 @@ def _discovery_decision(
     merged = dict(args or {})
     merged.update(strategy_args)
     merged["commerce_objective"] = _objective
+    merged["discovery_entry_type"] = entry.entry_type
 
     from ..commerce.discovery_strategy import DiscoveryMode  # noqa: PLC0415
 
     if (
         allow_guided
         and strategy.mode == DiscoveryMode.GUIDED_DISCOVERY
-        and entry.entry_type not in {SHOW_MORE, PRODUCT_SPECIFIC}
+        and entry.entry_type not in {SHOW_MORE, PRODUCT_SPECIFIC, GLOBAL_BROWSE}
         and action == ACTION_SEARCH_PRODUCTS
     ):
         question = str(strategy.guided_question or "").strip() or (

@@ -95,12 +95,12 @@ def resolve_discovery_strategy(
         if catalog_context.collection_count >= 2:
             mode = DiscoveryMode.COLLECTIONS_FIRST
             evidence = {"rule": "global_browse_collections", "collections": catalog_context.collection_count}
-        elif catalog_context.product_count > 20:
-            mode = DiscoveryMode.GUIDED_DISCOVERY
-            evidence = {"rule": "global_browse_large_catalog"}
-        else:
+        elif catalog_context.product_count > 0:
             mode = DiscoveryMode.DIRECT_CATALOG
             evidence = {"rule": "global_browse_direct"}
+        else:
+            mode = DiscoveryMode.GUIDED_DISCOVERY
+            evidence = {"rule": "global_browse_no_catalog"}
     elif entry == TOP_PRODUCTS:
         mode = DiscoveryMode.FEATURED_FIRST
         evidence = {"rule": "top_products_featured_first"}

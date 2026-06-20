@@ -701,6 +701,25 @@ def product_discovery_block_reason(
     if is_price_without_product_context(ctx):
         return "price_without_product_context"
 
+    try:
+        from .commerce.commerce_objective import (  # noqa: PLC0415
+            COMMERCE_OBJECTIVE_DISCOVERY,
+            get_commerce_objective,
+        )
+        from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            _is_valid_scope_token,
+            extract_browse_category_scope,
+        )
+
+        if get_commerce_objective(ctx.state) == COMMERCE_OBJECTIVE_DISCOVERY:
+            scope = extract_browse_category_scope(msg, "")
+            if scope and _is_valid_scope_token(scope):
+                words = [w for w in str(msg or "").split() if w.strip()]
+                if len(words) <= 3:
+                    return None
+    except Exception:
+        logger.exception("[PRODUCT_DISCOVERY_GATE] discovery_category_followup_probe_failed")
+
     if has_explicit_product_inquiry(msg):
         return None
 

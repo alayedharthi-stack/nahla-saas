@@ -58,7 +58,7 @@ class TestDiscoveryStrategyResolver:
         )
         assert strategy.mode == DiscoveryMode.DIRECT_CATALOG
 
-    def test_large_global_browse_guided(self) -> None:
+    def test_large_global_browse_direct_when_products_exist(self) -> None:
         strategy = resolve_discovery_strategy(
             commerce_objective="discovery",
             entry_type=GLOBAL_BROWSE,
@@ -67,8 +67,18 @@ class TestDiscoveryStrategyResolver:
                 collection_count=0,
             ),
         )
+        assert strategy.mode == DiscoveryMode.DIRECT_CATALOG
+
+    def test_global_browse_guided_only_without_catalog(self) -> None:
+        strategy = resolve_discovery_strategy(
+            commerce_objective="discovery",
+            entry_type=GLOBAL_BROWSE,
+            catalog_context=CatalogContextSnapshot(
+                product_count=0,
+                collection_count=0,
+            ),
+        )
         assert strategy.mode == DiscoveryMode.GUIDED_DISCOVERY
-        assert strategy.guided_question
 
     def test_merchant_mode_override(self) -> None:
         strategy = resolve_discovery_strategy(
