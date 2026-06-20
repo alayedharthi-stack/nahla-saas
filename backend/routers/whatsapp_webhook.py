@@ -7782,9 +7782,32 @@ async def _handle_merchant_message(
                             _POReason.BRAIN_SILENT_ACK,
                             owner="brain_silent_ack",
                         )
-                        reply = (
-                            "وصلت رسالتك ✅ خبرني وش تحتاج بالتفصيل وأقدر أساعدك."
-                        )
+                        try:
+                            from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: PLC0415
+                                try_guard_recovery_reply,
+                            )
+
+                            _hist = []
+                            try:
+                                from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+                                _conv_hist, _bs = _load_brain_state(
+                                    db, tenant_id=tenant_id, phone=to,
+                                )
+                                _hist = list(getattr(_conv_hist, "messages", None) or [])
+                            except Exception:  # noqa: BLE001
+                                _hist = []
+                            _recovery = try_guard_recovery_reply(
+                                inbound_text=text or "",
+                                state=(convo.extra_metadata or {}).get("brain_state"),
+                                history=_hist,
+                            )
+                            if _recovery.reply:
+                                reply = _recovery.reply
+                            else:
+                                reply = _empty_reply_fallback()
+                        except Exception:  # noqa: BLE001
+                            reply = _empty_reply_fallback()
 
                 # ── Welcome-gate reply validation (May 2026) ─────────────
                 # Production regression: "السلام عليكم أبي سعر العسل" was
@@ -9977,6 +10000,9 @@ async def _handle_merchant_message(
                         ),
                         conversation_turn=int(_bs_for_nc.get("turn") or 0),
                         conversation_id=getattr(convo, "id", None),
+                        commerce_session=dict(
+                            _bs_for_nc.get("commerce_session") or {}
+                        ),
                     )
                     if _cn.fired and _cn.extra_call_target is not None:
                         _call_targets.append(_cn.extra_call_target)

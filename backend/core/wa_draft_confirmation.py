@@ -143,6 +143,7 @@ def compose_wa_order_flow_reply(
     catalog_resolution: Optional[CartCatalogResolution] = None,
     cart_changed: bool = False,
     existing_reply: str = "",
+    customer_message: str = "",
 ) -> Optional[str]:
     """
     Build a deterministic order-flow reply when the brain did not.
@@ -150,6 +151,19 @@ def compose_wa_order_flow_reply(
     Returns ``None`` when ``existing_reply`` already covers the flow or
     no draft/cart activity occurred this turn.
     """
+    try:
+        from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+            should_block_order_draft_injection,
+        )
+
+        if should_block_order_draft_injection(
+            brain_state=brain_state,
+            customer_message=customer_message or "",
+        ):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint draft block probe must not break order flow
+        pass
+
     prep_dict = order_prep if isinstance(order_prep, dict) else (
         order_prep.to_dict() if hasattr(order_prep, "to_dict") else {}
     )
@@ -222,6 +236,7 @@ def maybe_inject_draft_flow_reply(
     brain_state: Any,
     catalog_resolution: Optional[CartCatalogResolution] = None,
     cart_changed: bool = False,
+    customer_message: str = "",
 ) -> str:
     """Return ``reply`` or an injected order-flow fallback — never silent."""
     bs = brain_state.to_dict() if hasattr(brain_state, "to_dict") else dict(brain_state or {})
@@ -232,6 +247,7 @@ def maybe_inject_draft_flow_reply(
         catalog_resolution=catalog_resolution,
         cart_changed=cart_changed,
         existing_reply=reply or "",
+        customer_message=customer_message or "",
     )
     if injected and not (reply or "").strip():
         return injected

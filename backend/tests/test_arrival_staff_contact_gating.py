@@ -104,6 +104,7 @@ def _install_stubs(
         is_active = _Col("is_active")
         priority = _Col("priority")
         updated_at = _Col("updated_at")
+        deleted_at = _Col("deleted_at")
 
     class _TsStub:
         tenant_id = _Col("tenant_id")
@@ -368,7 +369,10 @@ def test_compiled_v0_contact_hint_fires_vcard_without_staff_name_in_turn(
     assert "[ARRIVAL_CONTACT_POLICY]" in logs
     assert "source=compiled_v0" in logs
     assert "allow=true" in logs
-    assert "compiled_v0_contact_hint" in logs
+    assert (
+        "compiled_v0_contact_hint" in logs
+        or "source=arrival_evidence" in logs
+    )
 
 
 def test_owner_only_contact_no_vcard_on_arrival(

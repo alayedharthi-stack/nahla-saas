@@ -13,6 +13,7 @@ PERSONA_TOPIC_IDENTITY = "persona_identity"
 PERSONA_TOPIC_SOCIAL = "persona_social"
 PERSONA_TOPIC_SOCIAL_PERSONA_ACK = "social_persona_ack"
 PERSONA_TOPIC_NON_SALES_AMBIGUOUS = "non_sales_ambiguous"
+PERSONA_TOPIC_CONVERSATION_RECOVERY = "conversation_recovery"
 
 PERSONA_KIND_GREETING = "greeting"
 
@@ -23,6 +24,7 @@ PERSONA_TOPICS = frozenset({
     PERSONA_TOPIC_SOCIAL,
     PERSONA_TOPIC_SOCIAL_PERSONA_ACK,
     PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+    PERSONA_TOPIC_CONVERSATION_RECOVERY,
 })
 
 # Occasion / safety categories that remain on deterministic templates
@@ -118,7 +120,27 @@ def compose_non_sales_ambiguous_goal() -> str:
         "specification they want when they have not asked to buy. "
         "Do NOT use rigid FAQ phrasing such as «تحت أمرك» as the whole reply. "
         "Do NOT use [PRODUCT:…] or [MEDIA_KEY:…]. "
+        "Never reply with only «حاضر» / «تمام» / «أبشر» / «وصلت رسالتك». "
         f"{_NO_SERVICE_CLOSER}"
+    )
+
+
+def compose_conversation_recovery_goal(
+    *,
+    inbound_text: str = "",
+    last_question: str = "",
+    last_outbound: str = "",
+    recovery_reason: str = "",
+) -> str:
+    from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: PLC0415
+        compose_conversation_recovery_goal as _goal,
+    )
+
+    return _goal(
+        inbound_text=inbound_text,
+        last_question=last_question,
+        last_outbound=last_outbound,
+        recovery_reason=recovery_reason,
     )
 
 
@@ -352,6 +374,7 @@ __all__ = [
     "build_persona_json_footer",
     "build_persona_residual_rules",
     "build_social_courtesy_decision",
+    "compose_conversation_recovery_goal",
     "compose_non_sales_ambiguous_goal",
     "compose_persona_identity_goal",
     "compose_persona_social_goal",

@@ -29,7 +29,6 @@ logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard
 _FALLBACK_AVAILABILITY_AR = "التوفر قيد التحقق."
 _FALLBACK_PRODUCT_UNRESOLVED_AR = "حدّد المنتج أو المقاس المطلوب."
 _FALLBACK_DELIVERY_AR = "التوصيل لمنطقتك قيد التحقق."
-_FALLBACK_SOCIAL_AR = "حياك الله، وصلت رسالتك."
 _FALLBACK_GREETING_AR = "وعليكم السلام، حياك الله."
 
 _MIN_MEANINGFUL_CHARS = 6

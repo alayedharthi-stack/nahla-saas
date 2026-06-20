@@ -189,30 +189,33 @@ class TestSocialThanksRouting:
             ("تسلم", "thanks"),
         ],
     )
-    def test_social_thanks_routes_to_template_not_llm(
+    def test_social_thanks_routes_to_persona_compose_not_template(
         self, message: str, category: str,
     ) -> None:
         decision = DefaultDecisionEngine().decide(
             _social_ctx(message, category),
         )
-        assert decision.action == ACTION_SOCIAL_REPLY
-        assert decision.action != ACTION_LLM_REPLY
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") in {
+            "social_persona_ack",
+            "persona_social",
+        }
 
-    def test_social_compose_does_not_call_llm(self) -> None:
+    def test_social_compose_uses_llm_for_thanks(self) -> None:
         composer = DefaultComposer()
         ctx = _social_ctx("جزاك الله خير", "thanks")
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_SOCIAL_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         result = ActionResult(success=True, data={})
 
         async def _run() -> None:
             with patch.object(
                 composer,
                 "_llm_compose",
-                new=AsyncMock(return_value="يجب ألا يُستدعى"),
+                new=AsyncMock(return_value="وإياك، الله يبارك فيك"),
             ) as mock_llm:
                 reply = await composer.compose(decision, result, ctx)
-            mock_llm.assert_not_called()
+            mock_llm.assert_called_once()
             assert reply.strip()
 
         asyncio.run(_run())

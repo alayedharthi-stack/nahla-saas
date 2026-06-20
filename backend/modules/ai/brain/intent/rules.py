@@ -42,6 +42,7 @@ from ..types import (
     INTENT_EMPLOYEE_NOT_RESPONDING,
     INTENT_PERSONA_INTERACTION,
     INTENT_TRACK_ORDER,
+    INTENT_COMPLAINT_REFUND,
     INTENT_WHO_ARE_YOU,
     Intent,
 )
@@ -84,6 +85,8 @@ _register(RuleSet(
         r"(?:نحله|نحلة)\s*(?:انت|أنت|انتي|أنتِ|هذا|هذي|هي)",
         r"^(?:هل\s*)?(?:تنامين|تنام|ما\s*تنام|تنام\s*ولا|تنام\s*ولا\s*لا)\s*[\?؟]?$",
         r"(?:مو\s*انسان|مو\s*إنسان|مو\s*بشر|هل\s*انت\s*بشر)",
+        # Playful nationality / trait identity probes («انت تركي»).
+        r"^(?:انت|أنت|انتي|أنتِ)\s+\S{2,14}\s*[\?؟]?$",
     ],
     confidence=0.98,
 ))
@@ -807,6 +810,27 @@ def match(message: str) -> Optional[Intent]:
             ),
         ))
 
+    # ── Layer 2a: complaint / refund / fraud (P0 — beats commerce) ───────
+    try:
+        from ..commerce.complaint_refund_topic_guard import classify_complaint_refund  # noqa: PLC0415
+
+        if classify_complaint_refund(message):
+            candidates.append((
+                0.97,
+                Intent(
+                    name=INTENT_COMPLAINT_REFUND,
+                    confidence=0.97,
+                    slots={
+                        "block_commerce_escalation": True,
+                        "block_order_flow": True,
+                    },
+                    raw_message=message,
+                    extraction_method="rules+complaint_refund",
+                ),
+            ))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint layer must not break intent match
+        pass
+
     # ── Layer 2b: need-based advisory product questions ───────────────
     need_based = classify_solution_seeking_commerce(message) or classify_need_based_product_advice(message)
     if need_based is not None:
@@ -1044,6 +1068,7 @@ _PRIORITY_OVER_NEED_BASED: frozenset[str] = frozenset({
     INTENT_TALK_HUMAN,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_LOCATION,
+    INTENT_COMPLAINT_REFUND,
 })
 
 

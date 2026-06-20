@@ -282,11 +282,8 @@ PERSONA_SOCIAL_WARM_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "مبارك 🌷",
         "الف مبروك 🤍",
     ),
-    "informational_only": (
-        "تمام 😊",
-        "حاضر 🌷",
-        "أبشر 🤍",
-    ),
+    # informational_only — no ACK stubs; persona compose handles these turns.
+    "informational_only": (),
     "social_forward": (
         "تسلم 🤍",
         "حاضر 😊",
@@ -469,10 +466,7 @@ def pick_persona_social_reply(
         if not inbound_has_occasion_signal(inbound_text):
             return ""
 
-    bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(cat) or _SOCIAL_REPLIES_BY_CATEGORY.get(
-        "general_courtesy",
-        (),
-    )
+    bucket = _SOCIAL_REPLIES_BY_CATEGORY.get(cat)
     if not bucket:
         return ""
     return pick_persona_variant(bucket, ctx)

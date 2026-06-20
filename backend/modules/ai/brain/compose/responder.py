@@ -662,6 +662,15 @@ class DefaultComposer:
                     category,
                     inbound_text=(ctx.message or ""),
                 )
+                try:
+                    from ..postprocess.conversation_recovery import (  # noqa: PLC0415
+                        is_generic_ack_stub_text,
+                    )
+
+                    if is_generic_ack_stub_text(reply):
+                        reply = ""
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — social stub strip must not break compose
+                    pass
             else:
                 v_main = self._variant_idx(ctx)
                 v_secondary = (len(ctx.history or []) // 3) % 5
@@ -707,6 +716,11 @@ class DefaultComposer:
                         social_category=category or shc.category,
                     )
                     return reply
+                result.data["chosen_path"] = "social_persona_compose_from_ack_stub_avoidance"
+                reply = await self._compose_social_persona_ack(
+                    ctx, result, social_category=category,
+                )
+                return reply
             return self._apply_gender_hint(reply, ctx)
 
         # ── Platform / SaaS inquiry ────────────────────────────────────────
@@ -817,8 +831,15 @@ class DefaultComposer:
             if _sel_price and str((decision.args or {}).get("topic") or "") == "selection_context_price":
                 result.data["chosen_path"] = "selection_context_price"
                 return _sel_price
-            text = await self._llm_compose(ctx, result, decision=decision)
             _topic = str((decision.args or {}).get("topic") or "").strip()
+            if _topic == "support_complaint_refund":
+                from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+                    COMPLAINT_INTAKE_REPLY_AR,
+                )
+
+                result.data["chosen_path"] = "support_complaint_refund"
+                return COMPLAINT_INTAKE_REPLY_AR
+            text = await self._llm_compose(ctx, result, decision=decision)
             if _topic == "social_persona_ack":
                 text = self._social_persona_emergency_fallback_if_needed(
                     text, ctx, result,

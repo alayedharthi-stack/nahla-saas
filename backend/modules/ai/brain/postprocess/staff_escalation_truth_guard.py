@@ -23,8 +23,8 @@ logger = logging.getLogger("nahla.brain.postprocess.staff_escalation_truth_guard
 
 _NORMALISE_AR_RE = re.compile(r"[\u064B-\u065F\u0670]")
 
-# Neutral stub only — no promises, escalation, notification, or
-# follow-up actions. Personality/warmth belongs to persona compose.
+# Deprecated generic stub — guards must use conversation_recovery instead.
+# Kept for test assertions that verify we never emit this string.
 SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR = "تمام 🌷 وصلت رسالتك."
 
 _ESCALATION_CLAIM_MARKERS = (
@@ -385,9 +385,33 @@ def apply_staff_escalation_truth_guard(
                 "[STAFF_ESCALATION_TRUTH_GUARD] staff_rejection fallback failed err=%s",
                 _rej_fb_exc,
             )
+        try:
+            from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: PLC0415
+                try_guard_recovery_reply,
+            )
+
+            recovery = try_guard_recovery_reply(
+                inbound_text=inbound_text,
+                state=state,
+                history=history,
+            )
+            if recovery.reply and not recovery.needs_persona_compose:
+                return StaffEscalationTruthGuardResult(
+                    reply=recovery.reply,
+                    action=f"blocked_false_escalation_{recovery.source}",
+                    replaced=True,
+                    reason=f"conversation_recovery:{recovery.source}",
+                    evidence=evidence,
+                    staff_escalation_claim_blocked=True,
+                )
+        except Exception as _rec_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] conversation_recovery failed err=%s",
+                _rec_exc,
+            )
         return StaffEscalationTruthGuardResult(
-            reply=SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,
-            action="blocked_false_escalation",
+            reply="",
+            action="blocked_false_escalation_needs_recovery",
             replaced=True,
             reason=evidence.reason,
             evidence=evidence,

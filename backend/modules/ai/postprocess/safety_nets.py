@@ -1650,6 +1650,7 @@ def apply_staff_contact_safety_net(
     staff_contacts_sent: Optional[List[Dict[str, Any]]] = None,
     conversation_turn: int = 0,
     conversation_id: Optional[int] = None,
+    commerce_session: Optional[Dict[str, Any]] = None,
 ) -> StaffContactSafetyNetResult:
     """Build a contact-card ``CallTarget`` when the customer asked
     to reach a staff member by name.
@@ -1803,10 +1804,7 @@ def apply_staff_contact_safety_net(
     _policy_allowed = bool(
         _arrival_policy is not None and _arrival_policy.allowed
     )
-    _arrival_signal = bool(
-        is_explicit_arrival_intent is not None
-        and is_explicit_arrival_intent(customer_msg or "")
-    )
+    _arrival_signal = bool(_store_arrival is not None)
     _arrival_gated_intent = _arrival_signal and _policy_allowed
 
     if _location_branch_failure is not None:
@@ -1831,25 +1829,23 @@ def apply_staff_contact_safety_net(
                 policy_allowed=False,
             )
 
-    # Trigger gating: a turn fires the resolver when EITHER side of
-    # the conversation surfaces staff-contact intent.
-    #   * Customer-side: explicit ask ("ابي رقم أمين", "كم رقمه").
-    #   * Customer-side (KB-gated): arrival / on-the-way / branch
-    #     access ONLY when merchant KB opted in via
-    #     ``merchant_allows_arrival_staff_contact``.
-    #   * Reply-side:    bot proactively offers a contact
-    #                    ("تواصل مع أمين عند الوصول") with no digits
-    #                    in the reply yet — also KB-gated; without
-    #                    opt-in the LLM text stands alone (no vCard).
-    explicit_customer_intent = (
-        _has_any(_STAFF_INTENT_TRIGGERS, msg_norm)
-        or _employee_not_responding is not None
-        or bool(_find_staff_name(
-            msg_norm,
-            _alias_candidates,
-            customer_msg_raw=customer_msg or "",
-        ))
-    )
+    # Trigger gating: customer-side evidence only — never attach vCard because
+    # the bot offered contact in the reply without an explicit customer ask.
+    explicit_customer_intent = False
+    if has_explicit_contact_intent is not None:
+        explicit_customer_intent = has_explicit_contact_intent(customer_msg or "")
+    if _employee_not_responding is not None:
+        explicit_customer_intent = True
+    if _location_branch_failure is not None:
+        explicit_customer_intent = True
+    if not explicit_customer_intent:
+        explicit_customer_intent = bool(
+            _find_staff_name(
+                msg_norm,
+                _alias_candidates,
+                customer_msg_raw=customer_msg or "",
+            )
+        )
     customer_intent = explicit_customer_intent or _arrival_gated_intent
 
     reply_offer_verb, reply_offer_name = _reply_offers_staff_contact(
@@ -1866,94 +1862,91 @@ def apply_staff_contact_safety_net(
         reply_offer = False
         reply_offer_verb = ""
         reply_offer_name = ""
-    if not customer_intent:
-        if not reply_offer:
-            if _employee_not_responding is not None:
-                log_contact_escalation(
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    trigger="employee_not_responding",
-                    context="-",
-                    name_source="-",
-                    already_sent=False,
-                    selected_contact="",
-                    contacts_sent_count=len(_contacts_sent),
-                )
-            if _arrival_signal and not _policy_allowed:
-                log_contact_escalation(
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    trigger=_store_arrival.trigger if _store_arrival else "store_arrival",
-                    context=_store_arrival.context if _store_arrival else "-",
-                    name_source="-",
-                    already_sent=False,
-                    selected_contact="",
-                    contacts_sent_count=len(_contacts_sent),
-                    policy_allowed=False,
-                )
+    if (
+        not customer_intent
+        and reply_offer
+        and _arrival_signal
+        and _policy_allowed
+    ):
+        customer_intent = True
+        logger.info(
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+            "source=reply_offer_arrival_gated policy_allowed=true",
+            int(tenant_id or 0),
+        )
+
+    try:
+        from modules.ai.brain.commerce.staff_contact_suppression import (  # noqa: PLC0415
+            customer_allows_staff_vcard,
+        )
+
+        _vcard_allowed, _vcard_skip = customer_allows_staff_vcard(
+            customer_msg=customer_msg or "",
+            commerce_session=commerce_session,
+            customer_intent=bool(customer_intent),
+        )
+        if not _vcard_allowed:
             logger.info(
                 "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
-                "customer_intent=False reply_offer_verb=%r "
-                "reply_has_digits=%s arrival_signal=%s policy_allowed=%s",
+                "reason=%s preview=%r",
                 int(tenant_id or 0),
-                reply_offer_verb or "", reply_has_digits,
-                _arrival_signal, _policy_allowed,
+                _vcard_skip,
+                (customer_msg or "")[:48],
             )
-            result.skipped_reason = (
-                "arrival_policy_denied"
-                if _arrival_signal and not _policy_allowed and not reply_has_digits
-                else "no_staff_intent"
-            )
+            result.skipped_reason = _vcard_skip
             return result
-        if reply_has_digits:
-            logger.info(
-                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-                "source=reply_offer_with_digits verb=%r name_chars=%d",
-                int(tenant_id or 0),
-                reply_offer_verb,
-                len(reply_offer_name),
-            )
-        elif not (_policy_allowed and _arrival_signal):
+    except Exception as _supp_exc:  # noqa: BLE001
+        logger.debug(
+            "[STAFF_CONTACT_SAFETY_NET] suppression_probe_failed err=%s",
+            _supp_exc,
+        )
+
+    if not customer_intent:
+        if _employee_not_responding is not None:
             log_contact_escalation(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
-                trigger="reply_offer",
+                trigger="employee_not_responding",
+                context="-",
+                name_source="-",
+                already_sent=False,
+                selected_contact="",
+                contacts_sent_count=len(_contacts_sent),
+            )
+        if _arrival_signal and not _policy_allowed:
+            log_contact_escalation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                trigger=_store_arrival.trigger if _store_arrival else "store_arrival",
                 context=_store_arrival.context if _store_arrival else "-",
                 name_source="-",
                 already_sent=False,
                 selected_contact="",
                 contacts_sent_count=len(_contacts_sent),
-                policy_allowed=_policy_allowed if _arrival_signal else False,
+                policy_allowed=False,
             )
-            logger.info(
-                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
-                "source=reply_offer arrival_signal=%s policy_allowed=%s",
-                int(tenant_id or 0),
-                _arrival_signal,
-                _policy_allowed,
-            )
-            result.skipped_reason = (
-                "arrival_policy_denied"
-                if _arrival_signal and not _policy_allowed
-                else "no_staff_intent"
-            )
-            return result
-        else:
-            logger.info(
-                "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-                "source=reply_offer verb_chars=%d name_chars=%d policy_allowed=true",
-                int(tenant_id or 0),
-                len(reply_offer_verb), len(reply_offer_name),
-            )
-    else:
         logger.info(
-            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
-            "source=%s arrival_signal=%s policy_allowed=%s",
+            "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=False "
+            "customer_intent=False reply_offer_verb=%r "
+            "reply_has_digits=%s arrival_signal=%s policy_allowed=%s",
             int(tenant_id or 0),
-            "arrival_gated" if _arrival_gated_intent else "customer_msg",
-            _arrival_signal,
-            _policy_allowed if _arrival_signal else "-",
+            reply_offer_verb or "", reply_has_digits,
+            _arrival_signal, _policy_allowed,
         )
+        result.skipped_reason = (
+            "arrival_policy_denied"
+            if _arrival_signal and not _policy_allowed and not reply_has_digits
+            else "no_staff_intent"
+        )
+        return result
+    logger.info(
+        "[STAFF_CONTACT_TRACE] tenant_id=%s stage=trigger hit=True "
+        "source=%s arrival_signal=%s policy_allowed=%s",
+        int(tenant_id or 0),
+        "arrival_gated" if _arrival_gated_intent else "customer_msg",
+        _arrival_signal,
+        _policy_allowed if _arrival_signal else "-",
+    )
 
     # Layer 0: scan the customer message → the LLM reply →
     # the most recent bot/customer turns in history. Pronoun-only
@@ -4069,7 +4062,7 @@ def _extract_delivery_signals(customer_msg: str) -> Dict[str, Any]:
             v = ord_slots.get(k)
             if v not in (None, "", {}, []):
                 slots[k] = v
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — checkout slot merge must not block artifact guard
         logger.debug(
             "safety_nets.delivery_info | extract_ordering_slots failed: %s",
             exc,

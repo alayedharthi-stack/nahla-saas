@@ -231,6 +231,27 @@ def update_commerce_objective(
     return COMMERCE_OBJECTIVE_DISCOVERY
 
 
+def transition_commerce_objective_for_complaint(state: Any) -> str:
+    """Shift active commerce funnel to support when complaint/refund fires."""
+    prev = get_commerce_objective(state)
+    _stamp_objective(
+        state,
+        COMMERCE_OBJECTIVE_SUPPORT,
+        reason="complaint_refund_topic_shift",
+    )
+    try:
+        from ..state.stages import STAGE_SUPPORT  # noqa: PLC0415
+
+        state.stage = STAGE_SUPPORT
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — stage stamp is best-effort on duck-typed state
+        pass
+    logger.info(
+        "[COMMERCE_OBJECTIVE] complaint_shift prev=%s new=support",
+        prev or "-",
+    )
+    return COMMERCE_OBJECTIVE_SUPPORT
+
+
 __all__ = [
     "ALL_COMMERCE_OBJECTIVES",
     "COMMERCE_OBJECTIVE_DISCOVERY",
@@ -240,5 +261,6 @@ __all__ = [
     "COMMERCE_OBJECTIVE_SUPPORT",
     "COMMERCE_OBJECTIVE_TRACKING",
     "get_commerce_objective",
+    "transition_commerce_objective_for_complaint",
     "update_commerce_objective",
 ]

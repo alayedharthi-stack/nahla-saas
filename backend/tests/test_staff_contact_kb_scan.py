@@ -853,6 +853,11 @@ def test_reply_driven_trigger_converts_digits_to_vcard(
         monkeypatch,
         sections=[
             _StubKBSection(
+                section_id=149,
+                kind="escalation_rules",
+                body="عند الوصول للمعرض تواصل مع بائع المعرض على الرقم المسجل.",
+            ),
+            _StubKBSection(
                 section_id=1, kind="branches",
                 body="أمين بائع المعرض: 0541690226",
             ),

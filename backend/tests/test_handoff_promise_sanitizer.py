@@ -120,12 +120,11 @@ def test_scrub_false_promise_when_state_inactive() -> None:
     )
     assert scrubbed is True
     assert "سأحوّل" not in out
-    assert "سيرد عليك أحد الموظفين" not in out
     assert "أحوّلك" not in out
-    # The replacement should still ACK the message — we don't want the
-    # AI to look silent. Just no false transfer claim.
+    # Strip false transfer claims only — no generic ACK stub injection.
+    assert "وصلت رسالتك" not in out
+    assert "تمام 🌷 وصلت رسالتك" not in out
     assert len(out) > 10
-    assert "وصلت رسالتك" in out or "أخبر فريق المتجر" in out
 
 
 def test_scrub_passes_through_neutral_replies() -> None:

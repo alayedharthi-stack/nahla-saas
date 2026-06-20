@@ -66,6 +66,7 @@ from ..types import (
     INTENT_TRACK_ORDER,
     INTENT_GENERAL,
     INTENT_WHO_ARE_YOU,
+    INTENT_COMPLAINT_REFUND,
     INTENT_PICK_LIST_ITEM,
     INTENT_PERSONA_INTERACTION,
 )
@@ -467,6 +468,21 @@ class DefaultDecisionEngine:
                 confidence=0.99,
             )
 
+        # ── -0.45 Complaint / refund / fraud (P0 — beats order mis-route) ──
+        try:
+            from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+                try_complaint_refund_decision,
+            )
+
+            _complaint_dec = try_complaint_refund_decision(ctx)
+            if _complaint_dec is not None:
+                return _complaint_dec
+        except Exception as _complaint_exc:  # noqa: BLE001
+            logger.debug(
+                "[COMPLAINT_REFUND_GUARD] routing skipped err=%s",
+                _complaint_exc,
+            )
+
         # ── -0.5 Pending cart confirmation (P0 gift-order gate) ─────────────
         try:
             from ..commerce.gift_order_gate import try_pending_cart_confirmation_decision  # noqa: PLC0415
@@ -810,7 +826,7 @@ class DefaultDecisionEngine:
             )
             if _short_dec is not None:
                 return _short_dec
-        except Exception as _short_exc:  # noqa: BLE001
+        except Exception as _short_exc:  # noqa: BLE001  # noqa: silent-ok — short continuation probe must not block decide
             logger.debug(
                 "[SHORT_CONTINUATION] skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None), _short_exc,
@@ -2094,6 +2110,15 @@ class DefaultDecisionEngine:
                 reason="identity probe — thin persona compose",
                 confidence=intent.confidence,
             )
+
+        if intent.name == INTENT_COMPLAINT_REFUND:
+            from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+                try_complaint_refund_decision,
+            )
+
+            _complaint_route = try_complaint_refund_decision(ctx)
+            if _complaint_route is not None:
+                return _complaint_route
 
         if intent.name == INTENT_ASK_SHIPPING:
             # ── Shipping intent → ALWAYS the brain (June 2026) ───────────

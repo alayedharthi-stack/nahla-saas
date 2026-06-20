@@ -17,9 +17,11 @@ from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: E402
 from modules.ai.brain.intent.cart_intent_extractor import extract_cart_intents  # noqa: E402
 from modules.ai.brain.intent_priority.types import GOAL_ORDER_REQUEST, GOAL_SOCIAL_ONLY  # noqa: E402
 from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: E402
-    _FALLBACK_SOCIAL_AR,
     apply_commerce_reply_quality_guard,
     select_arabic_commerce_fallback,
+)
+from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: E402
+    is_generic_ack_stub_text,
 )
 from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: E402
     SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR,
@@ -54,7 +56,7 @@ class TestCommerceReplyQualityGuardRegression:
             state=_order_state_with_cart(),
         )
         assert "وصلت رسالتك" not in out.reply
-        assert out.reply != _FALLBACK_SOCIAL_AR
+        assert not is_generic_ack_stub_text(out.reply)
 
     def test_sticker_social_turn_not_receipt_stub(self) -> None:
         out = apply_commerce_reply_quality_guard(
@@ -64,7 +66,7 @@ class TestCommerceReplyQualityGuardRegression:
             primary_customer_goal=GOAL_SOCIAL_ONLY,
             inbound_metadata={"normalized_type": "sticker"},
         )
-        assert out.reply != _FALLBACK_SOCIAL_AR
+        assert not is_generic_ack_stub_text(out.reply)
         assert "وصلت رسالتك" not in out.reply
 
     def test_empty_social_select_fallback_not_receipt_stub(self) -> None:
@@ -73,7 +75,7 @@ class TestCommerceReplyQualityGuardRegression:
             primary_customer_goal=GOAL_SOCIAL_ONLY,
             inbound_text="🌷",
         )
-        assert text != _FALLBACK_SOCIAL_AR
+        assert not is_generic_ack_stub_text(text)
         assert kind in {"social_mirror", "social_suppressed"}
 
     def test_short_honey_order_empty_reply_uses_order_clarify(self) -> None:

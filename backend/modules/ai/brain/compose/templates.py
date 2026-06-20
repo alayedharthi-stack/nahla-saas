@@ -962,7 +962,7 @@ _SOCIAL_REPLIES_BY_CATEGORY: Dict[str, List[str]] = {
     "social_forward":     _SOCIAL_WARM_ACK_VARIANTS,
     "morning_greeting":   _SOCIAL_WARM_ACK_VARIANTS,
     "emotional_personal": _SOCIAL_BLESSING_VARIANTS,
-    "informational_only": _SOCIAL_WARM_ACK_VARIANTS,
+    "informational_only": [],
 }
 
 
