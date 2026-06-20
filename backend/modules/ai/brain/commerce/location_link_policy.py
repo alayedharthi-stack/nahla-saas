@@ -40,12 +40,15 @@ def evaluate_location_link_policy(
     if not location_link_policy_enabled():
         return None
 
+    from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+        LinkIntentType,
+        resolve_link_intent,
+    )
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
         MSG_LOCATION_NOT_CONFIGURED,
-        is_location_query,
     )
 
-    if not is_location_query(message or ""):
+    if resolve_link_intent(message or "") != LinkIntentType.PHYSICAL_LOCATION:
         return None
 
     try:
