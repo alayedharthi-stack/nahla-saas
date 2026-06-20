@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..commerce.discovery_strategy import DiscoveryMode, DiscoveryStrategyResult
+from ..commerce.merchant_discovery_settings import (
+    DiscoveryCollectionConfig,
+    FeaturedProductConfig,
+    MerchantDiscoverySettings,
+)
 from .catalog_provider import CatalogProvider
 
 logger = logging.getLogger("nahla.brain.catalog.intelligence")
@@ -69,6 +74,7 @@ def compute_discovery_score(
     product: Dict[str, Any],
     *,
     featured_product_ids: Optional[Sequence[str]] = None,
+    merchant_priority_map: Optional[Dict[str, float]] = None,
     weights: Optional[Dict[str, float]] = None,
 ) -> float:
     """Generic discovery score — no category/provider-specific logic."""
@@ -96,11 +102,17 @@ def compute_discovery_score(
 
     merchant_priority = 0.0
     ext = str(product.get("external_id") or product.get("id") or "").strip()
+    pid = str(product.get("id") or "").strip()
+    priority_map = dict(merchant_priority_map or {})
     featured_ids = {str(x).strip() for x in (featured_product_ids or []) if str(x).strip()}
-    if ext and ext in featured_ids:
-        merchant_priority = 1.0
-    elif str(product.get("id") or "").strip() in featured_ids:
-        merchant_priority = 1.0
+    for key in (ext, pid):
+        if key and key in priority_map:
+            merchant_priority = max(merchant_priority, float(priority_map[key]))
+    if merchant_priority <= 0.0:
+        if ext and ext in featured_ids:
+            merchant_priority = 1.0
+        elif pid in featured_ids:
+            merchant_priority = 1.0
 
     score = (
         featured_rank * w["featured_rank"]
@@ -116,7 +128,12 @@ class CatalogIntelligence:
     def __init__(self, provider: CatalogProvider) -> None:
         self._provider = provider
 
-    def list_collections(self, *, limit: int = 20) -> List[CatalogGroup]:
+    def list_collections(
+        self,
+        *,
+        limit: int = 20,
+        merchant_settings: Optional[MerchantDiscoverySettings] = None,
+    ) -> List[CatalogGroup]:
         products = self._provider.get_top_products(limit=max(limit * 8, 40))
         counts: Dict[str, int] = {}
         labels: Dict[str, str] = {}
@@ -129,8 +146,46 @@ class CatalogIntelligence:
                 continue
             counts[key] = counts.get(key, 0) + 1
             labels[key] = raw
-        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
         groups: List[CatalogGroup] = []
+        if merchant_settings and merchant_settings.has_merchant_collections():
+            seen_keys: set[str] = set()
+            for cfg in merchant_settings.enabled_collections():
+                match_key = _norm_collection_name(cfg.catalog_match or cfg.label)
+                count = 0
+                display_name = cfg.label
+                for key, cat_count in counts.items():
+                    if key == match_key or match_key in key or key in match_key:
+                        count += cat_count
+                        if not cfg.catalog_match:
+                            display_name = labels.get(key, cfg.label)
+                groups.append(
+                    CatalogGroup(
+                        group_id=cfg.id,
+                        group_name=display_name,
+                        browse_rank=cfg.priority,
+                        product_count=count,
+                    )
+                )
+                seen_keys.add(match_key)
+            for idx, (key, count) in enumerate(
+                sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
+                start=len(groups) + 1,
+            ):
+                if key in seen_keys:
+                    continue
+                groups.append(
+                    CatalogGroup(
+                        group_id=key,
+                        group_name=labels.get(key, key),
+                        browse_rank=idx,
+                        product_count=count,
+                    )
+                )
+            groups.sort(key=lambda g: (g.browse_rank, g.group_name))
+            return groups[: max(1, limit)]
+
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         for idx, (key, count) in enumerate(ranked[: max(1, limit)], start=1):
             groups.append(
                 CatalogGroup(
@@ -147,12 +202,28 @@ class CatalogIntelligence:
         products: List[Dict[str, Any]],
         *,
         strategy: DiscoveryStrategyResult,
+        merchant_settings: Optional[MerchantDiscoverySettings] = None,
+        collection: Optional[DiscoveryCollectionConfig] = None,
     ) -> List[Dict[str, Any]]:
-        featured_ids = list(strategy.featured_product_ids or [])
+        settings = merchant_settings or MerchantDiscoverySettings()
+        featured_ids = list(strategy.featured_product_ids or settings.global_featured_product_ids())
+        priority_map = settings.merchant_priority_map()
+        if collection:
+            for fp in settings.featured_for_collection(collection):
+                key = str(fp.product_id).strip()
+                if not key:
+                    continue
+                norm_priority = max(0.1, 1.0 - (max(0, int(fp.priority) - 1) * 0.05))
+                priority_map[key] = max(priority_map.get(key, 0.0), norm_priority)
+
         scored: List[Dict[str, Any]] = []
         for product in list(products or []):
             row = dict(product)
-            score = compute_discovery_score(row, featured_product_ids=featured_ids)
+            score = compute_discovery_score(
+                row,
+                featured_product_ids=featured_ids,
+                merchant_priority_map=priority_map,
+            )
             row["discovery_score"] = score
             scored.append(row)
         scored.sort(
@@ -161,13 +232,27 @@ class CatalogIntelligence:
                 str(p.get("title") or ""),
             ),
         )
-        if strategy.mode == DiscoveryMode.FEATURED_FIRST and featured_ids:
-            featured: List[Dict[str, Any]] = []
+
+        if collection and collection.featured_products:
+            featured_rows: List[Dict[str, Any]] = []
             rest: List[Dict[str, Any]] = []
+            order = [str(fp.product_id) for fp in settings.featured_for_collection(collection)]
+            order_index = {pid: idx for idx, pid in enumerate(order)}
+            for row in scored:
+                pid = str(row.get("id") or row.get("external_id") or "").strip()
+                if pid in order_index:
+                    featured_rows.append(row)
+                else:
+                    rest.append(row)
+            featured_rows.sort(key=lambda r: order_index.get(str(r.get("id") or r.get("external_id") or ""), 999))
+            scored = featured_rows + rest
+        elif strategy.mode == DiscoveryMode.FEATURED_FIRST and featured_ids:
+            featured: List[Dict[str, Any]] = []
+            rest = []
             id_set = set(featured_ids)
             for row in scored:
                 ext = str(row.get("external_id") or row.get("id") or "").strip()
-                if ext in id_set:
+                if ext in id_set or str(row.get("id") or "") in id_set:
                     featured.append(row)
                 else:
                     rest.append(row)
@@ -181,22 +266,29 @@ class CatalogIntelligence:
         query: str = "",
         source: str = "",
         preferred_collections: Optional[Sequence[str]] = None,
+        merchant_settings: Optional[MerchantDiscoverySettings] = None,
     ) -> DiscoveryPlan:
         mode = strategy.mode
         query_s = str(query or "").strip()
         src = str(source or "").strip().lower()
+        settings = merchant_settings or MerchantDiscoverySettings()
 
         if mode == DiscoveryMode.GUIDED_DISCOVERY:
             return DiscoveryPlan(
                 output_kind="guided",
-                guided_question=strategy.guided_question or "وش نوع المنتج اللي تدور عليه؟",
+                guided_question=strategy.guided_question or settings.guided_question or "وش نوع المنتج اللي تدور عليه؟",
                 presentation=strategy.presentation,
                 evidence={"mode": mode.value, "source": src},
             )
 
+        matched_collection = settings.match_collection(query_s) if query_s else None
+
         if mode == DiscoveryMode.COLLECTIONS_FIRST and not query_s:
-            collections = self.list_collections(limit=10)
-            pref = [str(x).strip() for x in (preferred_collections or strategy.preferred_collections or []) if x]
+            collections = self.list_collections(
+                limit=10,
+                merchant_settings=settings,
+            )
+            pref = [str(x).strip() for x in (preferred_collections or settings.preferred_collection_labels()) if x]
             if pref:
                 pref_norm = {_norm_collection_name(x): x for x in pref}
                 ordered: List[CatalogGroup] = []
@@ -204,7 +296,11 @@ class CatalogIntelligence:
                 for name in pref:
                     key = _norm_collection_name(name)
                     for group in collections:
-                        if _norm_collection_name(group.group_name) == key:
+                        if (
+                            _norm_collection_name(group.group_name) == key
+                            or group.group_id == key
+                            or _norm_collection_name(group.group_id) == key
+                        ):
                             ordered.append(group)
                             seen.add(group.group_id)
                             break
@@ -216,15 +312,29 @@ class CatalogIntelligence:
                 output_kind="collections",
                 collections=collections[: max(1, strategy.initial_count + 2)],
                 presentation=strategy.presentation,
-                evidence={"mode": mode.value, "source": src, "collection_count": len(collections)},
+                evidence={
+                    "mode": mode.value,
+                    "source": src,
+                    "collection_count": len(collections),
+                    "merchant_collections": bool(settings.has_merchant_collections()),
+                },
             )
 
-        if query_s:
-            raw = self._provider.search_products(query_s, limit=max(12, strategy.initial_count * 4))
+        search_query = query_s
+        if matched_collection and not search_query:
+            search_query = matched_collection.catalog_match or matched_collection.label
+
+        if search_query:
+            raw = self._provider.search_products(search_query, limit=max(12, strategy.initial_count * 4))
         else:
             raw = self._provider.get_top_products(limit=max(12, strategy.initial_count * 4))
 
-        ranked = self.rank_products(raw, strategy=strategy)
+        ranked = self.rank_products(
+            raw,
+            strategy=strategy,
+            merchant_settings=settings,
+            collection=matched_collection,
+        )
         return DiscoveryPlan(
             output_kind="products",
             products=ranked[: max(1, strategy.initial_count)],
@@ -234,6 +344,7 @@ class CatalogIntelligence:
                 "source": src,
                 "query": query_s,
                 "ranked_count": len(ranked),
+                "collection_id": matched_collection.id if matched_collection else "",
             },
         )
 

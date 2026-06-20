@@ -1046,6 +1046,18 @@ def build_merchant_context(
         manual_coupons_active = []
         ai_media_active = []
 
+    discovery_settings: Dict[str, Any] = {}
+    try:
+        from services.merchant_discovery_settings_service import get_discovery_settings  # noqa: PLC0415
+
+        discovery_settings = get_discovery_settings(db, tenant_id)
+    except Exception as _disc_exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[MerchantContext] discovery_settings fetch failed tenant=%s err=%s",
+            tenant_id,
+            _disc_exc,
+        )
+
     return {
         "tenant_profile": store_profile,
         "customer": customer_profile,
@@ -1072,6 +1084,7 @@ def build_merchant_context(
             "media_attach_via_marker": True,
         },
         "context_verbosity": context_verbosity,
+        "discovery_settings": discovery_settings,
     }
 
 

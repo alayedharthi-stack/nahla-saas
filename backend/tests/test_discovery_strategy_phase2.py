@@ -85,7 +85,7 @@ class TestDiscoveryStrategyResolver:
             commerce_objective="discovery",
             entry_type=GLOBAL_BROWSE,
             catalog_context=CatalogContextSnapshot(product_count=10, collection_count=3),
-            merchant_settings=MerchantDiscoverySettings(mode_override="direct_catalog"),
+            merchant_settings=MerchantDiscoverySettings(default_mode="direct_catalog"),
         )
         assert strategy.mode == DiscoveryMode.DIRECT_CATALOG
 
