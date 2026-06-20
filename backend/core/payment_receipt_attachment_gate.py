@@ -11,18 +11,20 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from core.payment_media_metadata import flatten_inbound_payment_metadata
+from core.payment_receipt_submission import (
+    PAYMENT_RECEIPT_UNPARSED_ACK_AR,
+    build_payment_submitted_state_patch,
+    parse_inbound_receipt,
+)
 
 logger = logging.getLogger("nahla.payment_receipt_attachment_gate")
 
 ROUTE_PAYMENT_RECEIPT_RECEIVED = "PAYMENT_RECEIPT_RECEIVED"
 
-PAYMENT_RECEIPT_ATTACHMENT_ACK_AR = (
-    "وصل الإيصال، أراجعه لك وأأكد الطلب بعد التحقق من التحويل."
-)
+PAYMENT_RECEIPT_ATTACHMENT_ACK_AR = PAYMENT_RECEIPT_UNPARSED_ACK_AR
 
 PAYMENT_RECEIPT_DUPLICATE_ACK_AR = (
     "سبق واستلمنا الإيصال، فريقنا يراجع التحويل وسيأكد لك الطلب."
@@ -234,46 +236,11 @@ def build_receipt_received_state_patch(
     inbound_metadata: Optional[Dict[str, Any]],
     source: str = "attachment_metadata",
 ) -> Dict[str, Any]:
-    md = flatten_inbound_payment_metadata(inbound_metadata or {})
-    now_iso = datetime.now(timezone.utc).isoformat()
-    kind = str(md.get("pdf_kind") or md.get("image_kind") or "payment_receipt").strip()
-    patch: Dict[str, Any] = {
-        "payment_method": "bank_transfer",
-        "payment_status": "pending_verification",
-        "awaiting_payment_receipt": False,
-        "payment_receipt_received": True,
-        "payment_receipt_at": now_iso,
-        "payment_confirmed": False,
-        "payment_verification_status": "pending",
-        "payment_submission_received": True,
-        "payment_submission_at": now_iso,
-        "payment_submission_type": "receipt",
-        "payment_submission_source": "whatsapp",
-        "order_status": "payment_submitted",
-        "payment_receipt_metadata": {
-            "kind": kind or "payment_receipt",
-            "source": source,
-            "route": ROUTE_PAYMENT_RECEIPT_RECEIVED,
-            "wa_message_id": md.get("wa_message_id"),
-            "filename": md.get("filename"),
-            "mime_type": md.get("mime_type"),
-            "storage_url": md.get("storage_url"),
-            "storage_sha256": md.get("storage_sha256"),
-            "received_at": now_iso,
-            "manual_verification_required": True,
-        },
-    }
-    for key in (
-        "vision_text",
-        "ocr_text",
-        "pdf_text_preview",
-        "pdf_text_full",
-        "caption",
-    ):
-        val = md.get(key)
-        if val not in (None, ""):
-            patch["payment_receipt_metadata"][key] = val
-    return patch
+    return build_payment_submitted_state_patch(
+        inbound_metadata=inbound_metadata,
+        source=source,
+        parse_result=parse_inbound_receipt(inbound_metadata),
+    )
 
 
 @dataclass(frozen=True)
@@ -321,18 +288,20 @@ def assess_payment_receipt_attachment(
         inbound_metadata=inbound_metadata,
         source="attachment_metadata",
     )
+    parsed = parse_inbound_receipt(inbound_metadata)
     logger.info(
         "[PAYMENT_RECEIPT_ATTACHMENT] route=%s reason=metadata_attachment "
-        "product=%r awaiting_was=%s",
+        "product=%r awaiting_was=%s parsed=%s",
         ROUTE_PAYMENT_RECEIPT_RECEIVED,
         s.get("selected_product"),
         bool(s.get("awaiting_payment_receipt")),
+        parsed.parsed,
     )
     return PaymentReceiptAttachmentAssessment(
         route=ROUTE_PAYMENT_RECEIPT_RECEIVED,
-        reply_ar=PAYMENT_RECEIPT_ATTACHMENT_ACK_AR,
+        reply_ar=parsed.reply_ar,
         state_patch=patch,
-        reason="attachment_metadata_gate",
+        reason="attachment_metadata_gate_parsed" if parsed.parsed else "attachment_metadata_gate",
     )
 
 

@@ -149,6 +149,8 @@ def apply_merchant_payment_confirmation(
     meta["verified_by_staff"] = True
     meta["payment_verification_status"] = "confirmed"
     meta["counts_in_revenue"] = True
+    meta.pop("shipping_blocked_reason", None)
+    meta["manual_verification_required"] = False
 
     if has_address:
         meta.pop("merchant_post_confirm_notice", None)

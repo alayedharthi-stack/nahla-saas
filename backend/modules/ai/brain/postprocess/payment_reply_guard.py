@@ -300,12 +300,12 @@ def apply_payment_reply_guard(
 
         try:
             from core.payment_receipt_attachment_gate import (  # noqa: PLC0415
-                PAYMENT_RECEIPT_ATTACHMENT_ACK_AR,
                 PAYMENT_RECEIPT_DUPLICATE_ACK_AR,
                 has_inbound_attachment,
                 is_likely_payment_receipt_attachment,
                 reply_asks_to_send_receipt,
             )
+            from core.payment_receipt_submission import parse_inbound_receipt  # noqa: PLC0415
 
             attachment_present = has_inbound_attachment(
                 str(md.get("normalized_type") or md.get("inbound_type") or ""),
@@ -319,7 +319,7 @@ def apply_payment_reply_guard(
                 ack = (
                     PAYMENT_RECEIPT_DUPLICATE_ACK_AR
                     if payment_receipt_received
-                    else PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
+                    else parse_inbound_receipt(md).reply_ar
                 )
                 if (
                     not evidence.evidence_ok
