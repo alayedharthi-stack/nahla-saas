@@ -98,6 +98,10 @@ class TestCommerceObjectiveEnum:
         assert is_valid_commerce_objective("ordering")
         assert not is_valid_commerce_objective("checkout")
 
+    def test_legacy_post_purchase_not_a_phase2a_objective(self) -> None:
+        assert CommerceObjective.from_value("post_purchase") is None
+        assert not is_valid_commerce_objective("post_purchase")
+
 
 class TestDiscoveryPlanResolverDefaults:
     def test_discovery_plan_alias(self) -> None:
