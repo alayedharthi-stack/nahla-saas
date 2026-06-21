@@ -81,12 +81,18 @@ PAYMENT_EVIDENCE_CONFIRMED            = "confirmed"
 PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW  = "pre_transfer_review"
 PAYMENT_EVIDENCE_NEEDS_CONFIRMATION   = "needs_confirmation"
 PAYMENT_EVIDENCE_NOT_PAYMENT          = "not_payment"
+PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED = "bill_payment_unrelated"
+PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT = "amount_only_insufficient"
+PAYMENT_EVIDENCE_INVALID_RECEIPT = "invalid_receipt"
 
 _ALL_STATUSES = frozenset({
     PAYMENT_EVIDENCE_CONFIRMED,
     PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
     PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
     PAYMENT_EVIDENCE_NOT_PAYMENT,
+    PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    PAYMENT_EVIDENCE_INVALID_RECEIPT,
 })
 
 
@@ -374,6 +380,26 @@ _GENERIC_PAYMENT_HINTS: Tuple[str, ...] = tuple(_normalise(s) for s in (
     "invoice",
 ))
 
+_BILL_PAYMENT_MARKERS: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "تم سداد الفاتوره",
+    "تم سداد الفاتورة",
+    "سداد الفاتوره",
+    "سداد الفاتورة",
+    "سداد فاتوره",
+    "سداد فاتورة",
+    "رقم الفاتوره",
+    "رقم الفاتورة",
+    "bill payment",
+    "bill paid",
+    "invoice paid",
+    "sadad",
+))
+_AMOUNT_ONLY_RE = re.compile(
+    r"(?:\d+(?:[.,]\d{1,2})?\s*(?:ر\.?\s*س|ريال|sar)\b|"
+    r"\b(?:sar|ريال)\s*\d+(?:[.,]\d{1,2})?)",
+    re.IGNORECASE,
+)
+
 # ── Hard-negative lexicon (May 2026 hotfix) ─────────────────────────
 # A regression in production (Kaaba/Hajj greeting card was classified
 # as payment evidence → bot asked the customer for a missing product
@@ -534,6 +560,182 @@ def _scan_phrases(blob: str, phrases: Tuple[str, ...]) -> List[str]:
         if p and p in blob:
             hits.append(p)
     return hits
+
+
+def _has_amount_signal(blob: str) -> bool:
+    return bool(_AMOUNT_ONLY_RE.search(blob or ""))
+
+
+# Currency / price labels alone do not make a product caption payment-like.
+_PRICE_ONLY_CONTEXT_TOKENS = frozenset({
+    "ريال", "sar", "ر.س", "amount", "المبلغ", "transfer amount",
+})
+
+
+# Product / catalog caption markers — platform-wide, not merchant-specific.
+_PRODUCT_CATALOG_PHRASES: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "السعر",
+    "سعر",
+    "price",
+    "صورة",
+    "صوره",
+    "photo",
+    "image",
+    "كيلo",
+    "kg",
+    "جرام",
+    "gram",
+    "منتج",
+    "product",
+    "catalog",
+    "كتalog",
+    "حجم",
+    "size",
+    "لتر",
+    "liter",
+    "ml",
+))
+
+_STRONG_PRODUCT_CATALOG_TOKENS = frozenset({
+    "السعر", "سعر", "price", "صوره", "photo", "image",
+    "منتج", "product", "catalog", "كتalog",
+})
+_PRODUCT_UNIT_TOKENS = frozenset({
+    "كيلo", "kg", "جرام", "gram", "لتر", "liter", "ml", "حجم", "size",
+})
+
+
+def _has_explicit_payment_indicators(
+    *,
+    success_hits: List[str],
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    bill_hits: List[str],
+    context_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+) -> bool:
+    """True when the blob carries receipt/payment-screen language beyond
+    a bare currency amount."""
+    if success_hits or pre_review_hits or generic_hits or bill_hits:
+        return True
+    if iban_present or reference_number_present or filename_signals_receipt:
+        return True
+    if transfer_linkage.get("bank_present") or transfer_linkage.get("beneficiary_present"):
+        return True
+    return bool([
+        h for h in context_hits if h not in _PRICE_ONLY_CONTEXT_TOKENS
+    ])
+
+
+def _is_product_or_catalog_content(
+    blob: str,
+    *,
+    success_hits: List[str],
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    bill_hits: List[str],
+    context_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+) -> bool:
+    """True for product photos, catalog captions, or price-tag OCR that
+    should stay on the vision/brain path even when an amount is present
+    or the funnel is awaiting a receipt."""
+    if _has_explicit_payment_indicators(
+        success_hits=success_hits,
+        pre_review_hits=pre_review_hits,
+        generic_hits=generic_hits,
+        bill_hits=bill_hits,
+        context_hits=context_hits,
+        iban_present=iban_present,
+        reference_number_present=reference_number_present,
+        filename_signals_receipt=filename_signals_receipt,
+        transfer_linkage=transfer_linkage,
+    ):
+        return False
+
+    product_hits = _scan_phrases(blob, _PRODUCT_CATALOG_PHRASES)
+    if not product_hits:
+        return False
+    if any(h in _STRONG_PRODUCT_CATALOG_TOKENS for h in product_hits):
+        return True
+    unit_hits = [h for h in product_hits if h in _PRODUCT_UNIT_TOKENS]
+    return bool(unit_hits and len(product_hits) >= 2)
+
+
+def _is_payment_or_receipt_like_context(
+    *,
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    context_hits: List[str],
+    bill_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when OCR/caption looks like a payment screen or receipt attempt.
+
+    Product photos with a price tag (amount + ``ريال`` only) stay False so
+    they classify as ``not_payment``. ``amount_only_insufficient`` applies
+    only when the blob is already payment-contextual but lacks merchant
+    transfer linkage.
+    """
+    if bill_hits or pre_review_hits:
+        return True
+    if iban_present or reference_number_present or filename_signals_receipt:
+        return True
+    if generic_hits:
+        return True
+    if transfer_linkage.get("bank_present") or transfer_linkage.get("beneficiary_present"):
+        return True
+    non_price_context = [
+        h for h in context_hits if h not in _PRICE_ONLY_CONTEXT_TOKENS
+    ]
+    if non_price_context:
+        return True
+    return False
+
+
+def _bank_transfer_linkage(text: Optional[str], *, filename: Optional[str]) -> Dict[str, Any]:
+    """Return structural receipt signals that can tie an attachment to a transfer.
+
+    This does not verify the tenant account. It only distinguishes a bank-transfer
+    artifact from an unrelated bill-payment or amount-only screenshot.
+    """
+    linked = {
+        "amount_present": _has_amount_signal(_normalise(text)),
+        "beneficiary_present": False,
+        "iban_present": False,
+        "reference_present": False,
+        "bank_present": False,
+        "merchant_linkage_present": False,
+    }
+    try:
+        from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+            extract_bank_receipt_fields,
+        )
+
+        fields = extract_bank_receipt_fields(text, filename=filename)
+        linked["amount_present"] = bool(linked["amount_present"] or fields.amount)
+        linked["beneficiary_present"] = bool(fields.beneficiary_name)
+        linked["iban_present"] = bool(fields.beneficiary_iban)
+        linked["reference_present"] = bool(fields.reference_number)
+        linked["bank_present"] = bool(fields.bank_name)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — receipt resolver probe is advisory
+        pass
+    linked["merchant_linkage_present"] = bool(
+        linked["beneficiary_present"]
+        or linked["iban_present"]
+        or linked["reference_present"]
+    )
+    return linked
 
 
 # ── Filename hints (May 2026 hotfix #2) ────────────────────────────
@@ -755,24 +957,35 @@ def classify_payment_evidence(
         "reference_number_present": reference_number_present,
         "weak_success_present":     bool(weak_success_hits),
     }
+    transfer_linkage = _bank_transfer_linkage(text, filename=filename)
+    transfer_linkage["iban_present"] = bool(
+        transfer_linkage.get("iban_present") or iban_present
+    )
+    transfer_linkage["reference_present"] = bool(
+        transfer_linkage.get("reference_present") or reference_number_present
+    )
+    transfer_linkage["merchant_linkage_present"] = bool(
+        transfer_linkage.get("merchant_linkage_present")
+        or transfer_linkage.get("iban_present")
+        or transfer_linkage.get("reference_present")
+    )
+    bill_hits = _scan_phrases(blob, _BILL_PAYMENT_MARKERS)
+    amount_present = bool(
+        transfer_linkage.get("amount_present")
+        or any(h in context_hits for h in ("ريال", "sar", "المبلغ", "amount"))
+    )
+    signals["bill_payment_hits"] = bill_hits
+    signals["amount_present"] = amount_present
+    signals["bank_transfer_linkage"] = transfer_linkage
 
     # ── Decision tree ───────────────────────────────────────────
     # Priority (top wins):
-    #   1. ANY strong-success phrase → CONFIRMED. This is the only
-    #      verdict that lets downstream code mutate order state.
-    #   2. ANY pre-transfer-review phrase → PRE_TRANSFER_REVIEW.
-    #      Banks NEVER print these labels on a completed-transfer
-    #      receipt, so a hit here is high-confidence "NOT yet
-    #      transferred".
-    #   3. Weak-success token + payment context (IBAN / reference /
-    #      bank brand + amount) → CONFIRMED. Catches the case where
-    #      vision text only carries "Successful" or "ناجحة" without
-    #      the longer phrase.
-    #   4. Reference number rendered + payment context →
-    #      CONFIRMED. Banks only print transaction IDs on the
-    #      final receipt.
-    #   5. Payment-context signals only → NEEDS_CONFIRMATION.
-    #   6. Generic payment hints only → NEEDS_CONFIRMATION.
+    #   1. Product/catalog caption without payment indicators → NOT_PAYMENT.
+    #   2. Bill-payment markers without transfer linkage → BILL_PAYMENT_UNRELATED.
+    #   3. ANY strong-success phrase → CONFIRMED (legacy transfer-success path).
+    #   4. Payment-like amount-only without merchant linkage → AMOUNT_ONLY_INSUFFICIENT.
+    #   5. ANY pre-transfer-review phrase → PRE_TRANSFER_REVIEW.
+    #   6. Weak-success / reference / bank-field evidence → CONFIRMED or NEEDS_CONFIRMATION.
     #   7. Nothing → NOT_PAYMENT.
 
     # Record filename-hint signal for trace logging.
@@ -781,10 +994,60 @@ def classify_payment_evidence(
     signals["filename_signals_receipt"]    = _fname_signals_receipt
     signals["pre_review_imperative_match"] = _body_has_imperative
 
+    if _is_product_or_catalog_content(
+        blob,
+        success_hits=success_hits,
+        pre_review_hits=pre_review_hits,
+        generic_hits=generic_hits,
+        bill_hits=bill_hits,
+        context_hits=context_hits,
+        iban_present=iban_present,
+        reference_number_present=reference_number_present,
+        filename_signals_receipt=_fname_signals_receipt,
+        transfer_linkage=transfer_linkage,
+    ):
+        return {
+            "status":  PAYMENT_EVIDENCE_NOT_PAYMENT,
+            "reason":  "product_or_catalog_content",
+            "signals": {**signals, "product_catalog_hits": _scan_phrases(blob, _PRODUCT_CATALOG_PHRASES)},
+        }
+
+    if bill_hits and not transfer_linkage.get("merchant_linkage_present"):
+        return {
+            "status":  PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+            "reason":  "bill_payment_without_transfer_linkage",
+            "signals": signals,
+        }
+
     if success_hits:
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
             "reason":  "strong_success_phrase",
+            "signals": signals,
+        }
+
+    if (
+        amount_present
+        and not transfer_linkage.get("merchant_linkage_present")
+        and not pre_review_hits
+        and (
+            _is_payment_or_receipt_like_context(
+                pre_review_hits=pre_review_hits,
+                generic_hits=generic_hits,
+                context_hits=context_hits,
+                bill_hits=bill_hits,
+                iban_present=iban_present,
+                reference_number_present=reference_number_present,
+                filename_signals_receipt=_fname_signals_receipt,
+                transfer_linkage=transfer_linkage,
+                extra_context=extra_context,
+            )
+            or bool(extra_context and extra_context.get("awaiting_payment_receipt"))
+        )
+    ):
+        return {
+            "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+            "reason":  "amount_without_merchant_linkage",
             "signals": signals,
         }
 
@@ -846,7 +1109,7 @@ def classify_payment_evidence(
     if _fname_signals_receipt and (
         pre_review_hits or context_hits or iban_present
         or weak_success_hits or generic_hits
-    ):
+    ) and transfer_linkage.get("merchant_linkage_present"):
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
             "reason":  "receipt_filename_with_payment_context",
@@ -875,7 +1138,7 @@ def classify_payment_evidence(
         or (len(context_hits) >= 1 and len(generic_hits) >= 1)
     )
 
-    if weak_success_hits and has_payment_context:
+    if weak_success_hits and has_payment_context and transfer_linkage.get("merchant_linkage_present"):
         # Pair check: "ناجحة"/"Successful" on a screen that ALSO has
         # IBAN/bank/amount → real completed transfer. On its own
         # this token can mean anything ("ناجحة في الاختبار").
@@ -942,6 +1205,10 @@ _NEEDS_CONFIRMATION_REPLY_AR = (
     "وصلني الملف 👍\n"
     "بعد التحويل أرسل لي الإيصال النهائي وأتابع طلبك بإذن الله."
 )
+_INSUFFICIENT_RECEIPT_REPLY_AR = (
+    "وصلتني الصورة، لكن ما فيها بيانات كافية تثبت التحويل لحساب المتجر. "
+    "أرسل إيصال التحويل البنكي النهائي الذي يظهر المستفيد أو الآيبان أو رقم المرجع."
+)
 
 
 def compose_payment_evidence_reply(
@@ -963,6 +1230,12 @@ def compose_payment_evidence_reply(
         return _PRE_TRANSFER_REVIEW_REPLY_AR
     if status == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION:
         return _NEEDS_CONFIRMATION_REPLY_AR
+    if status in (
+        PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+        PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+        PAYMENT_EVIDENCE_INVALID_RECEIPT,
+    ):
+        return _INSUFFICIENT_RECEIPT_REPLY_AR
     return None
 
 
@@ -994,6 +1267,7 @@ def log_payment_evidence_verdict(
             "payment_evidence_status=%s payment_evidence_reason=%s "
             "success_hits=%d pre_review_hits=%d context_hits=%d "
             "generic_hits=%d iban=%s ref=%s weak_success=%s "
+            "payment_attachment_classification=%s receipt_verdict=%s "
             "extra=%s",
             tenant_id, masked_phone, source,
             verdict.get("status"), verdict.get("reason"),
@@ -1004,6 +1278,8 @@ def log_payment_evidence_verdict(
             bool(sig.get("iban_present")),
             bool(sig.get("reference_number_present")),
             bool(sig.get("weak_success_present")),
+            verdict.get("status"),
+            verdict.get("status"),
             extra or {},
         )
     except Exception:  # noqa: silent-ok — telemetry must not block payment classify
@@ -1015,6 +1291,9 @@ __all__ = [
     "PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW",
     "PAYMENT_EVIDENCE_NEEDS_CONFIRMATION",
     "PAYMENT_EVIDENCE_NOT_PAYMENT",
+    "PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED",
+    "PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT",
+    "PAYMENT_EVIDENCE_INVALID_RECEIPT",
     "classify_payment_evidence",
     "compose_payment_evidence_reply",
     "log_payment_evidence_verdict",

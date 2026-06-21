@@ -8,9 +8,12 @@ Maps Arabic customer phrases to structured cart actions consumed by
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("nahla.brain.cart_intent_extractor")
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -21,6 +24,7 @@ _PRODUCT_KEYWORDS = {
     "سمر": "عسل سمر",
     "سدر": "عسل سدر",
     "شوك": "عسل شوك",
+    "صفي": "عسل صفي",
     "صيف": "عسل صيفي",
     "صيفي": "عسل صيفي",
     "الصيفي": "عسل صيفي",
@@ -97,6 +101,11 @@ _QTY_FOUR_RE = re.compile(
 )
 _EDITION_ONLY_RE = re.compile(r"^(?:ال)?جديد(?:\s|$)?$", re.I)
 _QTY_TWO_RE = re.compile(r"^(?:حبتين|اثنين|2\s*(?:حبة|حبات)?)\s*$", re.I)
+_LEADING_QTY_RE = re.compile(
+    r"^\s*(?P<qty>[0-9٠-٩]+|واحد|واحدة|اثنين|إثنين|ثنتين|"
+    r"ثلاث|ثلاثة|تلات|تلاته|اربع|أربع|اربعة|أربعة)\s+",
+    re.I,
+)
 
 _ARABIC_NON_CART_TOKENS = {
     "مرحبا", "اهلا", "أهلا", "السلام", "سلام", "شكرا", "شكراً",
@@ -126,17 +135,44 @@ def _parse_variant(text: str) -> str:
     return ""
 
 
+def _parse_leading_quantity(text: str) -> int:
+    m = _LEADING_QTY_RE.match(text or "")
+    if not m:
+        return 1
+    raw = _norm(m.group("qty") or "")
+    if raw in _AR_NUM_WORDS:
+        return max(int(_AR_NUM_WORDS[raw]), 1)
+    digits = raw.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    try:
+        return max(int(digits), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _resolve_product_name(text: str) -> str:
     norm = _norm(text)
     if "عسل" in norm:
         if "سمر" in norm and "حجاز" in norm:
             return "عسل سمر الحجاز"
+        if "صفي" in norm:
+            return "عسل صفي"
         if "صيف" in norm:
             return "عسل صيفي"
         if "سمر" in norm:
             return "عسل سمر"
         if "طلح" in norm or "نجد" in norm:
             return "عسل طلح"
+        residual = re.sub(
+            r"(?:^|\s)(?:أ?ضف|اضف|حط|حطي|ابغ[ىي]|أبغ[ىي]|اريد|أريد|ابي|ابى|"
+            r"عطني|عطيني|عسل|كilo|كيلو|كيلo|نصف|ربع|حبة|حبتين|واحد|واحدة|"
+            r"\d+\s*(?:kg|g|كilo|كيلo|كيلو)?)(?:\s|$)",
+            " ",
+            norm,
+            flags=re.I,
+        )
+        residual = _WS_RE.sub(" ", residual).strip()
+        if residual:
+            return ""
         return "عسل"
     for key, name in _PRODUCT_KEYWORDS.items():
         if key in norm:
@@ -171,7 +207,7 @@ def _skip_cart_segment(segment: str) -> bool:
     norm = _norm(seg)
     if re.search(r"طلب\s+توصيل", norm):
         if not _parse_variant(seg) and not any(
-            k in norm for k in ("طلح", "سمر", "صيف", "سدر", "شوك")
+            k in norm for k in ("طلح", "سمر", "صيف", "صفي", "سدر", "شوك")
         ):
             return True
     if re.search(r"لهذا\s+الشخص|هدية", norm) and not _parse_variant(seg):
@@ -182,6 +218,16 @@ def _skip_cart_segment(segment: str) -> bool:
         if not _parse_variant(seg) and not any(k in norm for k in _PRODUCT_KEYWORDS):
             if "عسل" not in norm and not _ADD_RE.search(seg):
                 return True
+    return False
+
+
+def _is_probable_line_item_segment(segment: str) -> bool:
+    seg = (segment or "").strip()
+    if not seg or _skip_cart_segment(seg):
+        return False
+    norm = _norm(seg)
+    if any(k in norm for k in _PRODUCT_KEYWORDS) or "عسل" in norm:
+        return bool(_parse_variant(seg) or _LEADING_QTY_RE.match(seg) or _ADD_RE.search(seg))
     return False
 
 
@@ -200,7 +246,7 @@ def _extract_add_segment(segment: str) -> Optional[Dict[str, Any]]:
     if not name:
         return None
     variant = _parse_variant(seg)
-    qty = 1
+    qty = _parse_leading_quantity(seg)
     if "ثاني" in _norm(seg) or "second" in _norm(seg):
         qty = 1
     return {
@@ -325,19 +371,35 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
 
     segments = _split_multi_segments(text)
     if len(segments) > 1:
+        expected = 0
+        unresolved: List[str] = []
         for seg in segments:
             if _skip_cart_segment(seg):
                 continue
+            probable = _is_probable_line_item_segment(seg)
+            if probable:
+                expected += 1
             item = _extract_add_segment(seg)
             if item:
                 intents.append(item)
+            elif probable:
+                unresolved.append(seg)
+        if expected:
+            logger.info(
+                "[COMPOUND_ORDER_PARSE] compound_order_detected=true "
+                "expected_line_items_count=%s extracted_line_items_count=%s "
+                "unresolved_product_mentions=%s",
+                expected,
+                len(intents),
+                unresolved,
+            )
         if intents:
             return intents
 
     item = _extract_add_segment(text)
     if item:
         intents.append(item)
-    elif norm in {"سمر", "طلح", "سدر", "شوك"} or norm in _PRODUCT_KEYWORDS:
+    elif norm in {"سمر", "طلح", "صفي", "سدر", "شوك"} or norm in _PRODUCT_KEYWORDS:
         name = _resolve_product_name(text)
         if name:
             intents.append({

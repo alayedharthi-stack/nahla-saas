@@ -2121,6 +2121,7 @@ async def _process_image(
         base_meta["payment_evidence_status"]  = _ev["status"]
         base_meta["payment_evidence_reason"]  = _ev["reason"]
         base_meta["payment_evidence_signals"] = _ev.get("signals") or {}
+        base_meta["payment_attachment_classification"] = _ev["status"]
         log_payment_evidence_verdict(
             tenant_id=tenant_id, phone=None, source="image_vision",
             verdict=_ev,
@@ -3032,6 +3033,7 @@ async def _process_document(
         base_meta["payment_evidence_status"]  = _ev["status"]
         base_meta["payment_evidence_reason"]  = _ev["reason"]
         base_meta["payment_evidence_signals"] = _ev.get("signals") or {}
+        base_meta["payment_attachment_classification"] = _ev["status"]
         log_payment_evidence_verdict(
             tenant_id=tenant_id, phone=None, source="document_pdf",
             verdict=_ev,
@@ -3060,6 +3062,13 @@ async def _process_document(
                 base_meta["pdf_kind_reasons"]    = (
                     list(base_meta.get("pdf_kind_reasons") or [])
                     + ["payment_evidence_needs_confirmation"]
+                )
+            elif _ev["status"] != PAYMENT_EVIDENCE_CONFIRMED:
+                base_meta["pdf_kind"]            = "payment_pending_evidence"
+                base_meta["pdf_kind_confidence"] = "low"
+                base_meta["pdf_kind_reasons"]    = (
+                    list(base_meta.get("pdf_kind_reasons") or [])
+                    + ["payment_evidence_" + str(_ev["status"])]
                 )
             # When status is CONFIRMED → keep pdf_kind=payment_receipt;
             # this is the only path that lets the deterministic

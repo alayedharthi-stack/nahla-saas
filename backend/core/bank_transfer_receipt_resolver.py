@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
 from core.payment_evidence import (
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
     PAYMENT_EVIDENCE_CONFIRMED,
     PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
     PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
@@ -456,15 +457,17 @@ def resolve_bank_transfer_receipt(
         res.reason = "legacy_pre_transfer"
         return res
 
-    res.payment_state = PAYMENT_EVIDENCE_RECEIVED if extraction.amount else PAYMENT_PENDING_CONFIRMATION
-    res.payment_evidence_status = (
-        PAYMENT_EVIDENCE_NEEDS_CONFIRMATION
-        if res.payment_state != PAYMENT_RECEIVED
-        else PAYMENT_EVIDENCE_CONFIRMED
-    )
-    res.reason = "unclear_receipt"
-    if extraction.amount:
-        res.reply_ar = compose_payment_evidence_received_reply(extraction.amount)
+    res.payment_state = PAYMENT_PENDING_CONFIRMATION
+    if extraction.amount and not (
+        extraction.beneficiary_name
+        or extraction.beneficiary_iban
+        or extraction.reference_number
+    ):
+        res.payment_evidence_status = PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT
+        res.reason = "amount_without_transfer_linkage"
+    else:
+        res.payment_evidence_status = PAYMENT_EVIDENCE_NEEDS_CONFIRMATION
+        res.reason = "unclear_receipt"
     return res
 
 

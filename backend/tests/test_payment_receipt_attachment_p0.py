@@ -25,7 +25,6 @@ from core.order_shipping_policy import can_create_shipment as shipping_can_creat
 from core.payment_receipt_attachment_gate import (  # noqa: E402
     PAYMENT_RECEIPT_ATTACHMENT_ACK_AR,
     PAYMENT_RECEIPT_DUPLICATE_ACK_AR,
-    ROUTE_PAYMENT_RECEIPT_RECEIVED,
     assess_payment_receipt_attachment,
     build_receipt_received_state_patch,
     try_metadata_receipt_short_circuit,
@@ -36,6 +35,12 @@ from core.payment_receipt_submission import (  # noqa: E402
     SHIPPING_BLOCKED_PAYMENT_PENDING_MERCHANT_VERIFICATION,
     compose_parsed_receipt_ack,
     parse_inbound_receipt,
+)
+from core.payment_evidence import (  # noqa: E402
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+    PAYMENT_EVIDENCE_CONFIRMED,
+    classify_payment_evidence,
 )
 from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: E402
     TEXT_CLAIM_NO_EVIDENCE_REPLY_AR,
@@ -91,7 +96,7 @@ def _brain_state_awaiting_receipt(product: str = "عسل سدر") -> dict:
 
 
 class TestReceiptAttachmentShortCircuit:
-    def test_pdf_after_bank_transfer_instructions(self) -> None:
+    def test_pdf_after_bank_transfer_instructions_not_enough_without_evidence(self) -> None:
         summary = _payment_context_summary()
         decision = try_metadata_receipt_short_circuit(
             inbound_normalized_type="document",
@@ -102,13 +107,9 @@ class TestReceiptAttachmentShortCircuit:
             },
             summary=summary,
         )
-        assert decision is not None
-        assert decision["reply_text"] == PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
-        assert decision["route"] == ROUTE_PAYMENT_RECEIPT_RECEIVED
-        assert decision["state_patch"]["payment_receipt_received"] is True
-        assert decision["state_patch"]["order_status"] == "payment_submitted"
+        assert decision is None
 
-    def test_image_after_bank_transfer_instructions(self) -> None:
+    def test_image_after_bank_transfer_instructions_not_enough_without_evidence(self) -> None:
         summary = _payment_context_summary()
         decision = try_metadata_receipt_short_circuit(
             inbound_normalized_type="image",
@@ -118,13 +119,9 @@ class TestReceiptAttachmentShortCircuit:
             },
             summary=summary,
         )
-        assert decision is not None
-        assert decision["reply_text"] == PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
-        assert decision["state_patch"]["payment_verification_status"] == (
-            PAYMENT_VERIFICATION_PENDING_MERCHANT_REVIEW
-        )
+        assert decision is None
 
-    def test_pdf_named_receipt_not_ask_again_via_guard(self) -> None:
+    def test_pdf_named_receipt_without_evidence_does_not_ack_via_guard(self) -> None:
         llm_reply = TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
         metadata = {
             "normalized_type": "document",
@@ -142,9 +139,8 @@ class TestReceiptAttachmentShortCircuit:
             inbound_metadata=metadata,
             payment_receipt_received=False,
         )
-        assert result.replaced is True
-        assert result.reply == PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
-        assert TEXT_CLAIM_NO_EVIDENCE_REPLY_AR not in result.reply
+        assert result.replaced is False
+        assert result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
 
     def test_attachment_sets_review_needed_state(self) -> None:
         patch = build_receipt_received_state_patch(
@@ -228,7 +224,7 @@ class TestReceiptAttachmentShortCircuit:
 
 
 class TestOrderFlowMetadataFallback:
-    def test_maybe_handle_receipt_inbound_without_classifier(self) -> None:
+    def test_maybe_handle_receipt_inbound_without_classifier_does_not_ack(self) -> None:
         db = _mock_db(brain_state=_brain_state_awaiting_receipt())
         decision = maybe_handle_receipt_inbound(
             db=db,
@@ -241,9 +237,7 @@ class TestOrderFlowMetadataFallback:
                 "payment_evidence_status": "not_payment",
             },
         )
-        assert decision is not None
-        assert decision["reply_text"] == PAYMENT_RECEIPT_ATTACHMENT_ACK_AR
-        assert decision["state_patch"]["payment_receipt_received"] is True
+        assert decision is None
 
 
 class TestPreTransferReviewBlocksReceiptAck:
@@ -314,6 +308,80 @@ class TestPreTransferReviewBlocksReceiptAck:
         assert guard_result.reply == TEXT_CLAIM_NO_EVIDENCE_REPLY_AR
         assert guard_result.replaced is False
         assert PAYMENT_RECEIPT_ATTACHMENT_ACK_AR not in guard_result.reply
+
+
+class TestInvalidPaymentAttachmentEvidence:
+    def test_bill_payment_screenshot_does_not_mark_receipt_received(self) -> None:
+        text = "تم سداد الفاتورة\n472.13 ريال"
+        verdict = classify_payment_evidence(
+            text,
+            extra_context={"awaiting_payment_receipt": True},
+        )
+        assert verdict["status"] == PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED
+
+        summary = _payment_context_summary()
+        metadata = {
+            "mime_type": "image/jpeg",
+            "vision_text": text,
+            "payment_evidence_status": verdict["status"],
+            "payment_evidence_reason": verdict["reason"],
+            "image_kind": "payment_pending_evidence",
+        }
+        assert assess_payment_receipt_attachment(
+            inbound_normalized_type="image",
+            inbound_metadata=metadata,
+            summary=summary,
+        ) is None
+
+        result = apply_payment_reply_guard(
+            reply="وصلني إيصال التحويل بمبلغ 472.13 ريال، جاري مراجعته وتأكيده.",
+            inbound_text="[image]",
+            inbound_metadata=metadata,
+            payment_receipt_received=False,
+        )
+        assert result.replaced is True
+        assert "إيصال التحويل" not in result.reply
+
+    def test_amount_only_screenshot_is_insufficient_evidence(self) -> None:
+        verdict = classify_payment_evidence(
+            "472.13 ريال",
+            extra_context={"awaiting_payment_receipt": True},
+        )
+        assert verdict["status"] == PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT
+        assert try_metadata_receipt_short_circuit(
+            inbound_normalized_type="image",
+            inbound_metadata={
+                "mime_type": "image/jpeg",
+                "payment_evidence_status": verdict["status"],
+                "payment_evidence_reason": verdict["reason"],
+            },
+            summary=_payment_context_summary(),
+        ) is None
+
+    def test_bank_transfer_receipt_with_transfer_linkage_can_enter_review(self) -> None:
+        verdict = classify_payment_evidence(
+            RAJHI_FINAL_RECEIPT,
+            extra_context={"awaiting_payment_receipt": True},
+        )
+        assert verdict["status"] == PAYMENT_EVIDENCE_CONFIRMED
+
+        assessment = assess_payment_receipt_attachment(
+            inbound_normalized_type="document",
+            inbound_metadata={
+                "mime_type": "application/pdf",
+                "pdf_text_preview": RAJHI_FINAL_RECEIPT,
+                "payment_evidence_status": verdict["status"],
+                "payment_evidence_reason": verdict["reason"],
+                "pdf_kind": "payment_receipt",
+            },
+            summary=_payment_context_summary(),
+        )
+        assert assessment is not None
+        assert assessment.state_patch["payment_receipt_received"] is True
+        assert assessment.state_patch["payment_confirmed"] is False
+        assert assessment.state_patch["payment_verification_status"] == (
+            PAYMENT_VERIFICATION_PENDING_MERCHANT_REVIEW
+        )
 
 
 class TestParsedReceiptSubmission:

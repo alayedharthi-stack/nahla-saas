@@ -27,6 +27,12 @@ _ORDER_FLOW_MARKERS = (
     "أرسل", "ارسل", "تقصد", "متاح", "السعر", "كيلo", "كيلو",
     "checkout", "ادفع", "رقم الطلب",
 )
+_NON_ORDER_CONTACT_REPLY_MARKERS = (
+    "موقع المعرض",
+    "بيانات التواصل",
+    "رقم التواصل",
+    "زيارة المعرض",
+)
 
 
 def reply_covers_order_flow(reply: str) -> bool:
@@ -35,6 +41,8 @@ def reply_covers_order_flow(reply: str) -> bool:
     if len(text) < 12:
         return False
     blob = text.lower()
+    if any(marker in blob or marker in text for marker in _NON_ORDER_CONTACT_REPLY_MARKERS):
+        return False
     hits = sum(1 for m in _ORDER_FLOW_MARKERS if m in blob or m in text)
     return hits >= 1 and len(text) >= 20
 

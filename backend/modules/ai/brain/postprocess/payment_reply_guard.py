@@ -33,6 +33,8 @@ TEXT_CLAIM_NO_EVIDENCE_REPLY_AR = (
 
 _RECEIPT_CONFIRMATION_REPLY_MARKERS = (
     "وصل الإيصال",
+    "وصلني إيصال التحويل",
+    "وصلني ايصال التحويل",
     "وصلنا إيصال التحويل",
     "تم استلام الإيصال",
     "تم استلام التحويل",
@@ -156,8 +158,13 @@ def inbound_metadata_blocks_receipt_confirmation(
 ) -> tuple[bool, str]:
     md = metadata or {}
     pe = str(md.get("payment_evidence_status") or "").strip()
-    if pe == "not_payment":
-        return True, "payment_evidence_status=not_payment"
+    if pe in {
+        "not_payment",
+        "bill_payment_unrelated",
+        "amount_only_insufficient",
+        "invalid_receipt",
+    }:
+        return True, f"payment_evidence_status={pe}"
     reason = str(md.get("payment_evidence_reason") or "").strip()
     if reason == "semantic_rejected_document":
         return True, "payment_evidence_reason=semantic_rejected_document"
