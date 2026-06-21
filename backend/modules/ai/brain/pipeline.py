@@ -1017,6 +1017,16 @@ class MerchantBrain:
                 _fresh_soc_exc,
             )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
+        try:
+            from .commerce.external_outbound_context import apply_external_outbound_context  # noqa: PLC0415
+
+            apply_external_outbound_context(ctx)
+        except Exception as _ext_out_exc:  # noqa: BLE001  # noqa: silent-ok — outbound context must not block turn
+            logger.debug(
+                "[EXTERNAL_OUTBOUND] apply failed tenant=%s err=%s",
+                tenant_id,
+                _ext_out_exc,
+            )
         if (
             _social_human_context is not None
             and _social_human_context.block_commerce_escalation
@@ -1369,12 +1379,21 @@ class MerchantBrain:
             from .commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
                 apply_complaint_refund_session_flags,
             )
+            from .commerce.post_purchase_feedback_guard import (  # noqa: PLC0415
+                apply_post_purchase_feedback_session_flags,
+            )
             from .commerce.staff_contact_suppression import (  # noqa: PLC0415
                 apply_staff_contact_session_flags,
             )
 
             apply_complaint_refund_session_flags(
                 new_state, ctx.message or "", decision,
+            )
+            apply_post_purchase_feedback_session_flags(
+                new_state,
+                ctx.message or "",
+                decision,
+                history=list(getattr(ctx, "history", None) or []),
             )
             apply_staff_contact_session_flags(
                 new_state, ctx.message or "", decision,
@@ -1961,6 +1980,7 @@ class MerchantBrain:
                 brain_state=new_state,
                 customer_message=ctx.message or "",
                 decision=decision,
+                history=list(getattr(ctx, "history", None) or []),
             ):
                 reply = maybe_inject_draft_flow_reply(
                     reply=reply or "",
@@ -1969,6 +1989,7 @@ class MerchantBrain:
                     catalog_resolution=_catalog_resolution,
                     cart_changed=_cart_changed,
                     customer_message=ctx.message or "",
+                    history=list(getattr(ctx, "history", None) or []),
                 )
             if reply and result.data.get("wa_draft_reply_injected") is None:
                 result.data["wa_draft_reply_injected"] = bool(_cart_changed or _catalog_resolution)

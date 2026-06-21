@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # avoid runtime import cycles
 INTENT_GREETING      = "greeting"
 INTENT_WHO_ARE_YOU   = "who_are_you"
 INTENT_COMPLAINT_REFUND = "complaint_refund"
+INTENT_PRODUCT_FEEDBACK = "product_feedback"
 INTENT_ASK_PRODUCT   = "ask_product"
 INTENT_PRODUCT_VISUAL_REQUEST = "product_visual_request"
 INTENT_ASK_PRICE     = "ask_price"
