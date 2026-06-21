@@ -18,7 +18,6 @@ from modules.ai.brain.commerce.commerce_objective import (  # noqa: E402
     ALL_COMMERCE_OBJECTIVES,
     COMMERCE_OBJECTIVE_DISCOVERY,
     COMMERCE_OBJECTIVE_ORDERING,
-    COMMERCE_OBJECTIVE_POST_PURCHASE,
     COMMERCE_OBJECTIVE_SUPPORT,
     CommerceObjective,
     is_valid_commerce_objective,
@@ -86,8 +85,10 @@ def _ctx(
 
 
 class TestCommerceObjectiveEnum:
-    def test_all_objectives_present(self) -> None:
+    def test_phase2a_objectives_only(self) -> None:
+        assert len(CommerceObjective) == 6
         assert {o.value for o in CommerceObjective} == set(ALL_COMMERCE_OBJECTIVES)
+        assert "post_purchase" not in {o.value for o in CommerceObjective}
 
     def test_from_value_roundtrip(self) -> None:
         assert CommerceObjective.from_value("discovery") == CommerceObjective.DISCOVERY

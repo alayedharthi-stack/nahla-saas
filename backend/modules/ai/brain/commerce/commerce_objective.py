@@ -36,8 +36,10 @@ COMMERCE_OBJECTIVE_SELECTION = "selection"
 COMMERCE_OBJECTIVE_ORDERING = "ordering"
 COMMERCE_OBJECTIVE_PAYMENT = "payment"
 COMMERCE_OBJECTIVE_TRACKING = "tracking"
-COMMERCE_OBJECTIVE_POST_PURCHASE = "post_purchase"
 COMMERCE_OBJECTIVE_SUPPORT = "support"
+
+# Legacy persisted value (pre Phase 2A). New transitions map post-purchase → SUPPORT.
+COMMERCE_OBJECTIVE_POST_PURCHASE = "post_purchase"
 
 ALL_COMMERCE_OBJECTIVES = (
     COMMERCE_OBJECTIVE_DISCOVERY,
@@ -45,20 +47,18 @@ ALL_COMMERCE_OBJECTIVES = (
     COMMERCE_OBJECTIVE_ORDERING,
     COMMERCE_OBJECTIVE_PAYMENT,
     COMMERCE_OBJECTIVE_TRACKING,
-    COMMERCE_OBJECTIVE_POST_PURCHASE,
     COMMERCE_OBJECTIVE_SUPPORT,
 )
 
 
 class CommerceObjective(str, Enum):
-    """Platform commerce funnel objective — separate from conversation stage."""
+    """Platform commerce funnel objective — separate from conversation stage (Phase 2A)."""
 
     DISCOVERY = COMMERCE_OBJECTIVE_DISCOVERY
     SELECTION = COMMERCE_OBJECTIVE_SELECTION
     ORDERING = COMMERCE_OBJECTIVE_ORDERING
     PAYMENT = COMMERCE_OBJECTIVE_PAYMENT
     TRACKING = COMMERCE_OBJECTIVE_TRACKING
-    POST_PURCHASE = COMMERCE_OBJECTIVE_POST_PURCHASE
     SUPPORT = COMMERCE_OBJECTIVE_SUPPORT
 
     @classmethod
@@ -78,8 +78,8 @@ _OBJECTIVE_PRIORITY = {
     COMMERCE_OBJECTIVE_ORDERING: 3,
     COMMERCE_OBJECTIVE_PAYMENT: 4,
     COMMERCE_OBJECTIVE_TRACKING: 5,
-    COMMERCE_OBJECTIVE_POST_PURCHASE: 6,
-    COMMERCE_OBJECTIVE_SUPPORT: 7,
+    COMMERCE_OBJECTIVE_SUPPORT: 6,
+    COMMERCE_OBJECTIVE_POST_PURCHASE: 6,  # legacy persisted — same tier as support
 }
 
 _PAYMENT_STATUSES = frozenset({
@@ -266,11 +266,11 @@ def transition_commerce_objective_for_post_purchase(
     reason: str = "post_purchase_signal",
     order_reference: str = "",
 ) -> str:
-    """Shift commerce funnel to post-purchase after delivery/review context."""
+    """Shift commerce funnel to support after delivery/review context (Phase 2A)."""
     prev = get_commerce_objective(state)
     _stamp_objective(
         state,
-        COMMERCE_OBJECTIVE_POST_PURCHASE,
+        COMMERCE_OBJECTIVE_SUPPORT,
         reason=reason,
     )
     if order_reference:
@@ -281,11 +281,11 @@ def transition_commerce_objective_for_post_purchase(
         except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence stamp is best-effort
             pass
     logger.info(
-        "[COMMERCE_OBJECTIVE] post_purchase_shift prev=%s new=post_purchase reason=%s",
+        "[COMMERCE_OBJECTIVE] post_purchase_shift prev=%s new=support reason=%s",
         prev or "-",
         reason,
     )
-    return COMMERCE_OBJECTIVE_POST_PURCHASE
+    return COMMERCE_OBJECTIVE_SUPPORT
 
 
 def transition_commerce_objective_for_complaint(state: Any) -> str:

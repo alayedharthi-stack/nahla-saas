@@ -308,14 +308,23 @@ def is_post_purchase_context_active(
     try:
         from .commerce_objective import (  # noqa: PLC0415
             COMMERCE_OBJECTIVE_POST_PURCHASE,
+            COMMERCE_OBJECTIVE_SUPPORT,
             COMMERCE_OBJECTIVE_TRACKING,
             get_commerce_objective,
         )
 
         obj = get_commerce_objective(state)
-        if obj in {COMMERCE_OBJECTIVE_POST_PURCHASE, COMMERCE_OBJECTIVE_TRACKING}:
+        cs = _session_dict(state)
+        if obj in {
+            COMMERCE_OBJECTIVE_POST_PURCHASE,
+            COMMERCE_OBJECTIVE_TRACKING,
+        } or (obj == COMMERCE_OBJECTIVE_SUPPORT and cs.get(_POST_PURCHASE_FLAG)):
             status = _order_status(state)
-            if obj == COMMERCE_OBJECTIVE_POST_PURCHASE or status == "delivered":
+            if (
+                obj == COMMERCE_OBJECTIVE_POST_PURCHASE
+                or obj == COMMERCE_OBJECTIVE_SUPPORT
+                or status == "delivered"
+            ):
                 return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — objective probe is best-effort
         pass
