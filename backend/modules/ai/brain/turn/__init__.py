@@ -1,6 +1,9 @@
 """Turn Understanding + Turn Arbiter — Phase 1 shadow / Phase 2A enforce."""
 from .contract import (
     ALL_TURN_OWNERS,
+    COMPOSE_MODE_HYBRID,
+    COMPOSE_MODE_OPERATIONAL,
+    COMPOSE_MODE_PERSONA,
     OWNER_CHECKOUT,
     OWNER_DISCOVERY,
     OWNER_ORDERING,
@@ -10,6 +13,7 @@ from .contract import (
     OWNER_STAFF_ESCALATION,
     OWNER_SUPPORT,
     OWNER_TRACKING,
+    OwnerBrief,
     TurnArbitration,
     TurnShadowTelemetry,
     TurnUnderstanding,
@@ -46,6 +50,9 @@ from .telemetry import (
 
 __all__ = [
     "ALL_TURN_OWNERS",
+    "COMPOSE_MODE_HYBRID",
+    "COMPOSE_MODE_OPERATIONAL",
+    "COMPOSE_MODE_PERSONA",
     "MISMATCH_CHECKOUT_VS_DISCOVERY",
     "MISMATCH_CHECKOUT_VS_PERSONA",
     "MISMATCH_CHECKOUT_VS_SUPPORT",
@@ -62,6 +69,7 @@ __all__ = [
     "OWNER_STAFF_ESCALATION",
     "OWNER_SUPPORT",
     "OWNER_TRACKING",
+    "OwnerBrief",
     "TurnArbitration",
     "TurnEnforceResult",
     "TurnShadowTelemetry",

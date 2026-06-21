@@ -1,10 +1,10 @@
 """
 turn/enforce.py
 ───────────────
-Phase 2A — limited Turn Arbiter enforce for allowlisted tenants.
+Phase 2A — limited Turn Arbiter enforce (platform-wide behind env flag).
 
 Overrides legacy ``Decision`` only when shadow detects an eligible
-``mismatch_type``. Platform-wide logic; tenant scope via env allowlist.
+``mismatch_type``. Routes enforced turns through LLM compose with OwnerBrief.
 """
 from __future__ import annotations
 
@@ -12,22 +12,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-from ..decision.actions import (
-    ACTION_FAQ_REPLY,
-    ACTION_LLM_REPLY,
-    ACTION_SEARCH_PRODUCTS,
-    ACTION_SOCIAL_REPLY,
-    ACTION_SUGGEST_COUPON,
-)
+from ..decision.actions import ACTION_LLM_REPLY
 from ..types import BrainContext, Decision
-from .contract import (
-    OWNER_DISCOVERY,
-    OWNER_PERSONA_SOCIAL,
-    OWNER_POST_PURCHASE,
-    OWNER_SUPPORT,
-    TurnArbitration,
-    TurnUnderstanding,
-)
+from .contract import TurnArbitration, TurnUnderstanding
 from .flags import (
     get_enforce_mismatch_types,
     is_enforce_tenant,
@@ -35,6 +22,7 @@ from .flags import (
 )
 from .legacy_owner import legacy_owner_from_decision
 from .mismatch import MISMATCH_NONE, classify_owner_mismatch
+from .owner_brief import topic_for_owner
 from .telemetry import build_shadow_telemetry
 
 logger = logging.getLogger("nahla.brain.turn_enforce")
@@ -88,93 +76,35 @@ def _apply_suspend_scope(ctx: BrainContext, understanding: TurnUnderstanding) ->
             pass
 
 
-def _decision_for_owner(
-    owner: str,
-    ctx: BrainContext,
+def _decision_for_arbitration(
+    arbitration: TurnArbitration,
     understanding: TurnUnderstanding,
     *,
     mismatch_type: str,
 ) -> Decision:
-    base_args: dict[str, Any] = {
+    """Build LLM compose decision with OwnerBrief — no template reply text."""
+    brief = arbitration.owner_brief
+    brief_dict = brief.to_dict()
+    owner = arbitration.turn_owner
+
+    args: dict[str, Any] = {
         "turn_arbiter_enforced": True,
         "turn_arbiter_mismatch_type": mismatch_type,
-        "block_order_flow": True,
+        "turn_owner": owner,
+        "owner_brief": brief_dict,
+        "compose_mode": brief.compose_mode,
+        "response_goal": brief.reply_goal,
+        "topic": topic_for_owner(owner),
+        "block_order_flow": owner not in {"checkout", "ordering", "payment"},
     }
 
-    if owner in {OWNER_SUPPORT, OWNER_POST_PURCHASE}:
-        try:
-            from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
-                try_complaint_refund_decision,
-            )
-
-            complaint = try_complaint_refund_decision(ctx)
-            if complaint is not None:
-                args = dict(complaint.args or {})
-                args["turn_arbiter_enforced"] = True
-                args["turn_arbiter_mismatch_type"] = mismatch_type
-                return Decision(
-                    action=complaint.action,
-                    args=args,
-                    reason=f"turn_arbiter_enforce:{mismatch_type}",
-                    confidence=complaint.confidence,
-                )
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint route fallback must not block enforce
-            pass
-        topic = (
-            "post_purchase_support"
-            if owner == OWNER_POST_PURCHASE
-            else "support_complaint_refund"
-        )
-        return Decision(
-            action=ACTION_LLM_REPLY,
-            args={
-                **base_args,
-                "topic": topic,
-                "block_commerce_escalation": True,
-            },
-            reason=f"turn_arbiter_enforce:{mismatch_type}",
-            confidence=understanding.confidence,
-        )
-
-    if owner == OWNER_DISCOVERY:
-        facts = ctx.facts
-        if getattr(facts, "has_coupons", False) and understanding.current_topic == "promotion_inquiry":
-            return Decision(
-                action=ACTION_SUGGEST_COUPON,
-                args={**base_args, "topic": "discovery_coupon"},
-                reason=f"turn_arbiter_enforce:{mismatch_type}",
-                confidence=understanding.confidence,
-            )
-        if understanding.current_intent == "product_inquiry":
-            return Decision(
-                action=ACTION_SEARCH_PRODUCTS,
-                args={**base_args, "topic": "discovery"},
-                reason=f"turn_arbiter_enforce:{mismatch_type}",
-                confidence=understanding.confidence,
-            )
-        return Decision(
-            action=ACTION_FAQ_REPLY,
-            args={**base_args, "topic": "discovery_faq"},
-            reason=f"turn_arbiter_enforce:{mismatch_type}",
-            confidence=understanding.confidence,
-        )
-
-    if owner == OWNER_PERSONA_SOCIAL:
-        return Decision(
-            action=ACTION_SOCIAL_REPLY,
-            args={
-                **base_args,
-                "topic": understanding.current_topic or "social_gratitude",
-                "block_commerce_escalation": True,
-            },
-            reason=f"turn_arbiter_enforce:{mismatch_type}",
-            confidence=understanding.confidence,
-        )
+    if owner in {"support", "post_purchase", "persona/social"}:
+        args["block_commerce_escalation"] = True
 
     return Decision(
         action=ACTION_LLM_REPLY,
-        args={**base_args, "topic": owner.replace("/", "_")},
-        reason=f"turn_arbiter_enforce:{mismatch_type}:fallback",
+        args=args,
+        reason=f"turn_arbiter_enforce:{mismatch_type}",
         confidence=understanding.confidence,
     )
 
@@ -218,9 +148,8 @@ def maybe_enforce_turn_decision(
     proposed_owner = arbitration.turn_owner
 
     _apply_suspend_scope(ctx, understanding)
-    enforced_decision = _decision_for_owner(
-        proposed_owner,
-        ctx,
+    enforced_decision = _decision_for_arbitration(
+        arbitration,
         understanding,
         mismatch_type=mismatch_type,
     )
@@ -238,13 +167,15 @@ def maybe_enforce_turn_decision(
     logger.info(
         "[TURN_ARBITER_ENFORCE] tenant=%s enforced=true mismatch_type=%s "
         "proposed_owner=%s legacy_owner=%s legacy_action=%s new_action=%s "
-        "suspend_stale=%s preview=%r",
+        "reply_goal=%s compose_mode=%s suspend_stale=%s preview=%r",
         ctx.tenant_id,
         mismatch_type,
         proposed_owner,
         legacy_owner,
         legacy_action,
         enforced_decision.action,
+        arbitration.owner_brief.reply_goal,
+        arbitration.owner_brief.compose_mode,
         str(understanding.should_suspend_stale_state).lower(),
         (getattr(ctx, "raw_message", None) or ctx.message or "")[:80],
     )

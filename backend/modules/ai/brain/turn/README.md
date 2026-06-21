@@ -1,5 +1,13 @@
 # Turn Understanding + Turn Arbiter
 
+## Architecture (Phase 2B)
+
+1. **Arbiter** selects exactly one turn **owner** per inbound message.
+2. **OwnerBrief** defines compose **goals and constraints** for that owner — not reply text.
+3. **Persona / LLM compose** writes the final reply freely within those bounds.
+
+OwnerBrief is **not** a template and **not** a canned reply. It carries structured fields such as `reply_goal`, `forbidden_objectives`, `required_evidence`, `tone_guidance`, and `compose_mode` (`persona`, `operational_payload`, `hybrid`).
+
 ## Phase 1 — Shadow (default on)
 
 Measure owner mismatch without changing replies. Grep `[TURN_ARBITER_SHADOW]`.
@@ -42,13 +50,14 @@ TURN_ARBITER_ENFORCE_TENANTS=33,44
 ### What enforce does
 
 1. Suspends stale checkout scope when understanding says so (`clear_active_order_context`, clear pending question).
-2. Replaces legacy decision with owner-appropriate action (support LLM, discovery search/coupon, social reply).
-3. Logs `[TURN_ARBITER_ENFORCE] enforced=true`.
+2. Replaces legacy decision with `ACTION_LLM_REPLY` and passes `owner_brief` in `decision.args` for compose.
+3. Logs `[TURN_ARBITER_ENFORCE] enforced=true` with `reply_goal` and `compose_mode`.
 
 ### What enforce does NOT do
 
 - No merchant-specific logic in code.
 - No new guards or regex hotfixes.
+- No template replies in OwnerBrief.
 - No enforce when mismatch type is not allowlisted.
 
 ## Tests
