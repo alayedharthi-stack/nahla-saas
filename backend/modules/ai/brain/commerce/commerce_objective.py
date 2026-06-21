@@ -35,6 +35,7 @@ COMMERCE_OBJECTIVE_SELECTION = "selection"
 COMMERCE_OBJECTIVE_ORDERING = "ordering"
 COMMERCE_OBJECTIVE_PAYMENT = "payment"
 COMMERCE_OBJECTIVE_TRACKING = "tracking"
+COMMERCE_OBJECTIVE_POST_PURCHASE = "post_purchase"
 COMMERCE_OBJECTIVE_SUPPORT = "support"
 
 ALL_COMMERCE_OBJECTIVES = (
@@ -43,6 +44,7 @@ ALL_COMMERCE_OBJECTIVES = (
     COMMERCE_OBJECTIVE_ORDERING,
     COMMERCE_OBJECTIVE_PAYMENT,
     COMMERCE_OBJECTIVE_TRACKING,
+    COMMERCE_OBJECTIVE_POST_PURCHASE,
     COMMERCE_OBJECTIVE_SUPPORT,
 )
 
@@ -52,7 +54,8 @@ _OBJECTIVE_PRIORITY = {
     COMMERCE_OBJECTIVE_ORDERING: 3,
     COMMERCE_OBJECTIVE_PAYMENT: 4,
     COMMERCE_OBJECTIVE_TRACKING: 5,
-    COMMERCE_OBJECTIVE_SUPPORT: 6,
+    COMMERCE_OBJECTIVE_POST_PURCHASE: 6,
+    COMMERCE_OBJECTIVE_SUPPORT: 7,
 }
 
 _PAYMENT_STATUSES = frozenset({
@@ -80,6 +83,8 @@ def _priority(objective: str) -> int:
 
 
 def get_commerce_objective(state: Any) -> str:
+    if isinstance(state, dict):
+        return str(state.get("commerce_objective") or "").strip().lower()
     return str(getattr(state, "commerce_objective", "") or "").strip().lower()
 
 
@@ -231,6 +236,34 @@ def update_commerce_objective(
     return COMMERCE_OBJECTIVE_DISCOVERY
 
 
+def transition_commerce_objective_for_post_purchase(
+    state: Any,
+    *,
+    reason: str = "post_purchase_signal",
+    order_reference: str = "",
+) -> str:
+    """Shift commerce funnel to post-purchase after delivery/review context."""
+    prev = get_commerce_objective(state)
+    _stamp_objective(
+        state,
+        COMMERCE_OBJECTIVE_POST_PURCHASE,
+        reason=reason,
+    )
+    if order_reference:
+        evidence = dict(getattr(state, "commerce_objective_evidence", None) or {})
+        evidence["order_reference"] = str(order_reference).strip()
+        try:
+            state.commerce_objective_evidence = evidence
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence stamp is best-effort
+            pass
+    logger.info(
+        "[COMMERCE_OBJECTIVE] post_purchase_shift prev=%s new=post_purchase reason=%s",
+        prev or "-",
+        reason,
+    )
+    return COMMERCE_OBJECTIVE_POST_PURCHASE
+
+
 def transition_commerce_objective_for_complaint(state: Any) -> str:
     """Shift active commerce funnel to support when complaint/refund fires."""
     prev = get_commerce_objective(state)
@@ -257,10 +290,12 @@ __all__ = [
     "COMMERCE_OBJECTIVE_DISCOVERY",
     "COMMERCE_OBJECTIVE_ORDERING",
     "COMMERCE_OBJECTIVE_PAYMENT",
+    "COMMERCE_OBJECTIVE_POST_PURCHASE",
     "COMMERCE_OBJECTIVE_SELECTION",
     "COMMERCE_OBJECTIVE_SUPPORT",
     "COMMERCE_OBJECTIVE_TRACKING",
     "get_commerce_objective",
     "transition_commerce_objective_for_complaint",
+    "transition_commerce_objective_for_post_purchase",
     "update_commerce_objective",
 ]

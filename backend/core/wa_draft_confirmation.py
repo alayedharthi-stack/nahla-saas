@@ -144,6 +144,7 @@ def compose_wa_order_flow_reply(
     cart_changed: bool = False,
     existing_reply: str = "",
     customer_message: str = "",
+    history: Optional[List[Any]] = None,
 ) -> Optional[str]:
     """
     Build a deterministic order-flow reply when the brain did not.
@@ -159,6 +160,7 @@ def compose_wa_order_flow_reply(
         if should_block_order_draft_injection(
             brain_state=brain_state,
             customer_message=customer_message or "",
+            history=history,
         ):
             return None
     except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint draft block probe must not break order flow
@@ -237,6 +239,7 @@ def maybe_inject_draft_flow_reply(
     catalog_resolution: Optional[CartCatalogResolution] = None,
     cart_changed: bool = False,
     customer_message: str = "",
+    history: Optional[List[Any]] = None,
 ) -> str:
     """Return ``reply`` or an injected order-flow fallback — never silent."""
     bs = brain_state.to_dict() if hasattr(brain_state, "to_dict") else dict(brain_state or {})
@@ -248,6 +251,7 @@ def maybe_inject_draft_flow_reply(
         cart_changed=cart_changed,
         existing_reply=reply or "",
         customer_message=customer_message or "",
+        history=history,
     )
     if injected and not (reply or "").strip():
         return injected

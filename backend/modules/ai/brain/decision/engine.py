@@ -468,6 +468,21 @@ class DefaultDecisionEngine:
                 confidence=0.99,
             )
 
+        # ── -0.46 Post-purchase product feedback (P0 — external outbound context) ──
+        try:
+            from ..commerce.post_purchase_feedback_guard import (  # noqa: PLC0415
+                try_post_purchase_feedback_decision,
+            )
+
+            _pp_feedback = try_post_purchase_feedback_decision(ctx)
+            if _pp_feedback is not None:
+                return _pp_feedback
+        except Exception as _pp_feedback_exc:  # noqa: BLE001  # noqa: silent-ok — post-purchase route probe must not block turn
+            logger.debug(
+                "[POST_PURCHASE_FEEDBACK] routing skipped err=%s",
+                _pp_feedback_exc,
+            )
+
         # ── -0.45 Complaint / refund / fraud (P0 — beats order mis-route) ──
         try:
             from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415

@@ -97,8 +97,21 @@ def should_block_order_draft_injection(
     brain_state: Any = None,
     customer_message: str = "",
     decision: Any = None,
+    history: Any = None,
 ) -> bool:
     """True when WA draft/order-flow injection must not run."""
+    try:
+        from .post_purchase_feedback_guard import should_block_post_purchase_order_flow  # noqa: PLC0415
+
+        if should_block_post_purchase_order_flow(
+            brain_state=brain_state,
+            customer_message=customer_message or "",
+            decision=decision,
+            history=history,
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — post-purchase block probe must not break guard
+        pass
     if classify_complaint_refund(customer_message or ""):
         return True
     if is_complaint_refund_active(brain_state):
