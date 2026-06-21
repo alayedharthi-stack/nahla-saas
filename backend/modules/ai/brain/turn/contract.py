@@ -38,6 +38,37 @@ COMMERCE_OWNERS = frozenset({
     OWNER_PAYMENT,
 })
 
+COMPOSE_MODE_PERSONA = "persona"
+COMPOSE_MODE_OPERATIONAL = "operational_payload"
+COMPOSE_MODE_HYBRID = "hybrid"
+
+
+@dataclass(frozen=True)
+class OwnerBrief:
+    """
+    Structured compose guidance for one turn owner.
+
+    Does NOT contain reply text — only goals, constraints, and compose mode.
+    """
+    owner: str
+    customer_goal: str
+    reply_goal: str
+    forbidden_objectives: Tuple[str, ...] = field(default_factory=tuple)
+    required_evidence: Tuple[str, ...] = field(default_factory=tuple)
+    tone_guidance: str = ""
+    compose_mode: str = COMPOSE_MODE_PERSONA
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "owner": self.owner,
+            "customer_goal": self.customer_goal,
+            "reply_goal": self.reply_goal,
+            "forbidden_objectives": list(self.forbidden_objectives),
+            "required_evidence": list(self.required_evidence),
+            "tone_guidance": self.tone_guidance,
+            "compose_mode": self.compose_mode,
+        }
+
 
 @dataclass(frozen=True)
 class UnderstandingEvidence:
@@ -108,6 +139,7 @@ class TurnArbitration:
     turn_owner: str
     reason: str
     confidence: float
+    owner_brief: OwnerBrief
     slot_replay_approved: bool = False
     approved_proposal: Optional[str] = None
 
@@ -116,6 +148,7 @@ class TurnArbitration:
             "turn_owner": self.turn_owner,
             "reason": self.reason,
             "confidence": round(float(self.confidence), 3),
+            "owner_brief": self.owner_brief.to_dict(),
             "slot_replay_approved": self.slot_replay_approved,
             "approved_proposal": self.approved_proposal,
         }
@@ -141,6 +174,10 @@ class TurnShadowTelemetry:
     suspend_scope: Tuple[str, ...]
     slot_replay_approved: bool
     has_state_conflict: bool
+    reply_goal: str
+    compose_mode: str
+    forbidden_objectives: Tuple[str, ...]
+    required_evidence: Tuple[str, ...]
     # ── Full nested payloads ──
     understanding: Dict[str, Any]
     arbitration: Dict[str, Any]
@@ -163,6 +200,10 @@ class TurnShadowTelemetry:
             "suspend_scope": list(self.suspend_scope),
             "slot_replay_approved": self.slot_replay_approved,
             "has_state_conflict": self.has_state_conflict,
+            "reply_goal": self.reply_goal,
+            "compose_mode": self.compose_mode,
+            "forbidden_objectives": list(self.forbidden_objectives),
+            "required_evidence": list(self.required_evidence),
             "understanding": self.understanding,
             "arbitration": self.arbitration,
             "shadow": True,
@@ -181,6 +222,10 @@ __all__ = [
     "OWNER_STAFF_ESCALATION",
     "OWNER_SUPPORT",
     "OWNER_TRACKING",
+    "COMPOSE_MODE_HYBRID",
+    "COMPOSE_MODE_OPERATIONAL",
+    "COMPOSE_MODE_PERSONA",
+    "OwnerBrief",
     "StateConflict",
     "TurnArbitration",
     "TurnShadowTelemetry",

@@ -1,11 +1,12 @@
 """
 tests/test_turn_arbiter_enforce.py
 ──────────────────────────────────
-Phase 2A — limited Turn Arbiter enforce tests (platform-wide, tenant via env).
+Phase 2A/2B — Turn Arbiter enforce + OwnerBrief compose routing tests.
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +21,6 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_SEARCH_PRODUCTS,
     ACTION_SOCIAL_REPLY,
-    ACTION_SUGGEST_COUPON,
 )
 from modules.ai.brain.intent_priority.types import (  # noqa: E402
     GOAL_PRICE_INQUIRY,
@@ -45,6 +45,8 @@ from modules.ai.brain.types import (  # noqa: E402
     MerchantConversationState,
     OrderPreparationState,
 )
+
+_ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
 
 
 def _ctx(
@@ -109,6 +111,15 @@ def _enable_enforce_allowlist_33(monkeypatch):
     monkeypatch.setenv("TURN_ARBITER_ENFORCE_TENANTS", "33")
 
 
+def _assert_no_template_text_in_brief(brief: dict) -> None:
+    """OwnerBrief must be goals/constraints only — no Arabic reply templates."""
+    for key in ("reply_goal", "customer_goal", "tone_guidance"):
+        value = str(brief.get(key) or "")
+        assert not _ARABIC_RE.search(value), f"{key} must not contain Arabic template text"
+    for obj in brief.get("forbidden_objectives") or ():
+        assert not _ARABIC_RE.search(str(obj)), "forbidden_objectives must not contain Arabic"
+
+
 def test_enforce_disabled_by_default():
     ctx = _ctx("العسل خفيف", intent_name=INTENT_COMPLAINT_REFUND, state=_stale_checkout_state())
     prepare_turn_arbitration(ctx)
@@ -166,7 +177,12 @@ def test_enforce_checkout_vs_support_on_complaint(monkeypatch):
     assert result.enforced is True
     assert result.mismatch_type == MISMATCH_CHECKOUT_VS_SUPPORT
     assert new_decision.action == ACTION_LLM_REPLY
-    assert new_decision.args.get("topic") == "support_complaint_refund"
+    assert new_decision.args.get("turn_owner") in {"support", "post_purchase"}
+    brief = new_decision.args.get("owner_brief") or {}
+    forbidden = set(brief.get("forbidden_objectives") or ())
+    assert {"checkout", "ordering", "product_upsell"}.issubset(forbidden)
+    assert brief.get("compose_mode") == "persona"
+    _assert_no_template_text_in_brief(brief)
     assert ctx.state.last_question_asked == ""
 
 
@@ -186,8 +202,13 @@ def test_enforce_checkout_vs_discovery_on_discount(monkeypatch):
 
     assert result.enforced is True
     assert result.mismatch_type == MISMATCH_CHECKOUT_VS_DISCOVERY
-    assert new_decision.action in {ACTION_SUGGEST_COUPON, ACTION_SEARCH_PRODUCTS, ACTION_LLM_REPLY}
+    assert new_decision.action == ACTION_LLM_REPLY
     assert new_decision.action != ACTION_ORDER_CONTEXT_UPDATE
+    brief = new_decision.args.get("owner_brief") or {}
+    reply_goal = str(brief.get("reply_goal") or "")
+    assert "answer_discount_or_product_question_first" in reply_goal
+    assert brief.get("compose_mode") == "persona"
+    _assert_no_template_text_in_brief(brief)
 
 
 def test_enforce_staff_vs_persona_on_gratitude(monkeypatch):
@@ -203,7 +224,12 @@ def test_enforce_staff_vs_persona_on_gratitude(monkeypatch):
 
     assert result.enforced is True
     assert result.mismatch_type == MISMATCH_STAFF_VS_PERSONA
-    assert new_decision.action == ACTION_SOCIAL_REPLY
+    assert new_decision.action == ACTION_LLM_REPLY
+    assert new_decision.action != ACTION_SOCIAL_REPLY
+    brief = new_decision.args.get("owner_brief") or {}
+    assert brief.get("compose_mode") == "persona"
+    assert new_decision.args.get("compose_mode") == "persona"
+    _assert_no_template_text_in_brief(brief)
 
 
 def test_enforce_noop_when_owners_match(monkeypatch):

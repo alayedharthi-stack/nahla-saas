@@ -140,6 +140,8 @@ def test_complaint_with_stale_checkout_routes_support_not_checkout():
     assert arbitration.turn_owner in {OWNER_SUPPORT, OWNER_POST_PURCHASE}
     assert arbitration.turn_owner != OWNER_CHECKOUT
     assert arbitration.slot_replay_approved is False
+    assert arbitration.owner_brief.owner in {OWNER_SUPPORT, OWNER_POST_PURCHASE}
+    assert "checkout" in arbitration.owner_brief.forbidden_objectives
 
 
 def test_discount_question_routes_discovery_not_checkout_continuation():
@@ -160,6 +162,7 @@ def test_discount_question_routes_discovery_not_checkout_continuation():
     assert arbitration.turn_owner == OWNER_DISCOVERY
     assert arbitration.turn_owner != OWNER_CHECKOUT
     assert arbitration.slot_replay_approved is False
+    assert "answer_discount_or_product_question_first" in arbitration.owner_brief.reply_goal
 
 
 def test_gratitude_routes_persona_not_staff_escalation():
@@ -315,3 +318,6 @@ def test_telemetry_to_dict_includes_flat_fields():
     assert payload["conflicts_with_state_count"] >= 1
     assert payload["slot_replay_approved"] is False
     assert payload["shadow"] is True
+    assert payload["reply_goal"]
+    assert payload["compose_mode"] == "persona"
+    assert "checkout_resume" in payload["forbidden_objectives"]

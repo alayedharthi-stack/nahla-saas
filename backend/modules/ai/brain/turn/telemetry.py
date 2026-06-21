@@ -48,6 +48,10 @@ def build_shadow_telemetry(
         suspend_scope=understanding.suspend_scope,
         slot_replay_approved=arbitration.slot_replay_approved,
         has_state_conflict=bool(understanding.conflicts_with_state),
+        reply_goal=arbitration.owner_brief.reply_goal,
+        compose_mode=arbitration.owner_brief.compose_mode,
+        forbidden_objectives=arbitration.owner_brief.forbidden_objectives,
+        required_evidence=arbitration.owner_brief.required_evidence,
         understanding=understanding.to_dict(),
         arbitration=arbitration.to_dict(),
     )

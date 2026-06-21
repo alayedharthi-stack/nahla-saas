@@ -1198,6 +1198,19 @@ class DefaultComposer:
                 reply_state = self._minimal_reply_state(ctx)
 
             prompt = build_brain_reply_prompt(reply_state)
+            _dec_args = (decision.args if decision is not None else None) or {}
+            _owner_brief = _dec_args.get("owner_brief")
+            if isinstance(_owner_brief, dict) and _owner_brief:
+                try:
+                    from modules.ai.brain.turn.owner_brief import (  # noqa: PLC0415
+                        format_owner_brief_for_compose,
+                    )
+
+                    _brief_overlay = format_owner_brief_for_compose(_owner_brief)
+                    if _brief_overlay:
+                        prompt = f"{prompt}\n\n{_brief_overlay}"
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — brief overlay must not break compose
+                    pass
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(
                 ctx.history,

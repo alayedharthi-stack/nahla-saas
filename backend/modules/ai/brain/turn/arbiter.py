@@ -3,7 +3,7 @@ turn/arbiter.py
 ───────────────
 Phase 1 — deterministic Turn Arbiter over structured TurnUnderstanding.
 
-Selects exactly one turn owner. Does not mutate state or drive replies.
+Selects exactly one turn owner and attaches OwnerBrief for compose.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from .contract import (
     TurnArbitration,
     TurnUnderstanding,
 )
+from .owner_brief import build_owner_brief
 
 _STAFF_ESCALATION_MIN_CONFIDENCE = 0.85
 
@@ -73,6 +74,31 @@ def _payment_aligned(state: Any, state_relevance: Any, understanding: TurnUnders
     return understanding.current_intent == "payment_action"
 
 
+def _make_arbitration(
+    owner: str,
+    reason: str,
+    understanding: TurnUnderstanding,
+    ctx: BrainContext,
+    *,
+    confidence: Optional[float] = None,
+    slot_replay_approved: bool = False,
+    approved_proposal: Optional[str] = None,
+) -> TurnArbitration:
+    return TurnArbitration(
+        turn_owner=owner,
+        reason=reason,
+        confidence=float(confidence if confidence is not None else understanding.confidence),
+        owner_brief=build_owner_brief(
+            owner,
+            understanding,
+            ctx,
+            slot_replay_approved=slot_replay_approved,
+        ),
+        slot_replay_approved=slot_replay_approved,
+        approved_proposal=approved_proposal,
+    )
+
+
 def arbitrate_turn(
     understanding: TurnUnderstanding,
     ctx: BrainContext,
@@ -82,13 +108,13 @@ def arbitrate_turn(
     state_rel = ctx.state_relevance
     intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
 
-    # ── Phase A: stale state suspension blocks checkout/payment continuation ──
     if understanding.should_suspend_stale_state:
         if understanding.current_intent == "complaint_refund":
-            return TurnArbitration(
-                turn_owner=OWNER_SUPPORT,
-                reason="complaint_with_stale_checkout_suspended",
-                confidence=understanding.confidence,
+            return _make_arbitration(
+                OWNER_SUPPORT,
+                "complaint_with_stale_checkout_suspended",
+                understanding,
+                ctx,
             )
         if understanding.current_intent in {"social_gratitude", "social_interaction"}:
             owner = (
@@ -96,25 +122,27 @@ def arbitrate_turn(
                 if _post_purchase_window(ctx)
                 else OWNER_PERSONA_SOCIAL
             )
-            return TurnArbitration(
-                turn_owner=owner,
-                reason="social_turn_stale_checkout_suspended",
-                confidence=understanding.confidence,
+            return _make_arbitration(
+                owner,
+                "social_turn_stale_checkout_suspended",
+                understanding,
+                ctx,
             )
         if understanding.current_intent == "product_inquiry":
-            return TurnArbitration(
-                turn_owner=OWNER_DISCOVERY,
-                reason="discovery_turn_stale_checkout_suspended",
-                confidence=understanding.confidence,
+            return _make_arbitration(
+                OWNER_DISCOVERY,
+                "discovery_turn_stale_checkout_suspended",
+                understanding,
+                ctx,
             )
 
-    # ── Phase B: hard routing from understanding ──
     if understanding.current_intent == "complaint_refund":
         owner = OWNER_POST_PURCHASE if _post_purchase_window(ctx) else OWNER_SUPPORT
-        return TurnArbitration(
-            turn_owner=owner,
-            reason="complaint_refund_intent",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            owner,
+            "complaint_refund_intent",
+            understanding,
+            ctx,
         )
 
     if understanding.current_intent in {"social_gratitude", "social_interaction"}:
@@ -123,57 +151,60 @@ def arbitrate_turn(
             if _post_purchase_window(ctx) and understanding.current_intent == "social_gratitude"
             else OWNER_PERSONA_SOCIAL
         )
-        return TurnArbitration(
-            turn_owner=owner,
-            reason=f"{understanding.current_intent}_detected",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            owner,
+            f"{understanding.current_intent}_detected",
+            understanding,
+            ctx,
         )
 
     if understanding.current_intent == "product_inquiry":
-        return TurnArbitration(
-            turn_owner=OWNER_DISCOVERY,
-            reason="product_or_promotion_inquiry",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_DISCOVERY,
+            "product_or_promotion_inquiry",
+            understanding,
+            ctx,
         )
 
     if understanding.current_intent == "track_order":
-        return TurnArbitration(
-            turn_owner=OWNER_TRACKING,
-            reason="track_order_intent",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_TRACKING,
+            "track_order_intent",
+            understanding,
+            ctx,
         )
 
     if understanding.current_intent == "start_order":
-        return TurnArbitration(
-            turn_owner=OWNER_ORDERING,
-            reason="explicit_start_order",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_ORDERING,
+            "explicit_start_order",
+            understanding,
+            ctx,
         )
 
     if _payment_aligned(state, state_rel, understanding):
-        return TurnArbitration(
-            turn_owner=OWNER_PAYMENT,
-            reason="payment_flow_aligned",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_PAYMENT,
+            "payment_flow_aligned",
+            understanding,
+            ctx,
             slot_replay_approved=True,
             approved_proposal=understanding.active_objective_candidate,
         )
 
     if _checkout_aligned(state_rel, understanding):
         owner = OWNER_CHECKOUT
-        if understanding.active_objective_candidate and "collect" in understanding.active_objective_candidate:
-            owner = OWNER_CHECKOUT
-        elif str(getattr(state, "stage", "") or "") == "ordering":
+        if str(getattr(state, "stage", "") or "") == "ordering":
             owner = OWNER_ORDERING
-        return TurnArbitration(
-            turn_owner=owner,
-            reason="checkout_continuation_approved",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            owner,
+            "checkout_continuation_approved",
+            understanding,
+            ctx,
             slot_replay_approved=True,
             approved_proposal=understanding.active_objective_candidate,
         )
 
-    # Staff escalation — high-trust only (not keyword-only).
     if understanding.current_intent == "reach_staff":
         shc = ctx.social_human_context
         is_pure_social = bool(getattr(shc, "is_pure_social_turn", False))
@@ -183,28 +214,32 @@ def arbitrate_turn(
             and intent_name == "talk_to_human"
         )
         if high_trust:
-            return TurnArbitration(
-                turn_owner=OWNER_STAFF_ESCALATION,
-                reason="explicit_staff_request_high_trust",
-                confidence=understanding.confidence,
+            return _make_arbitration(
+                OWNER_STAFF_ESCALATION,
+                "explicit_staff_request_high_trust",
+                understanding,
+                ctx,
             )
-        return TurnArbitration(
-            turn_owner=OWNER_SUPPORT,
-            reason="staff_request_low_trust_routed_to_support",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_SUPPORT,
+            "staff_request_low_trust_routed_to_support",
+            understanding,
+            ctx,
         )
 
     if understanding.current_intent == "payment_action":
-        return TurnArbitration(
-            turn_owner=OWNER_PAYMENT,
-            reason="payment_action_intent",
-            confidence=understanding.confidence,
+        return _make_arbitration(
+            OWNER_PAYMENT,
+            "payment_action_intent",
+            understanding,
+            ctx,
         )
 
-    # Default — persona/social for general/social turns.
-    return TurnArbitration(
-        turn_owner=OWNER_PERSONA_SOCIAL,
-        reason="default_persona_social",
+    return _make_arbitration(
+        OWNER_PERSONA_SOCIAL,
+        "default_persona_social",
+        understanding,
+        ctx,
         confidence=max(0.5, understanding.confidence * 0.8),
     )
 
