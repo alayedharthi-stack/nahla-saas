@@ -44,7 +44,7 @@ _QUALITY_FEEDBACK_RE = re.compile(
 
 _PRODUCT_MENTION_RE = re.compile(
     r"(?:"
-    r"\bعسل\b|honey|"
+    r"عسل|honey|"
     r"المنتج|الطلب|الشحنة|العبو(?:ة|ه)"
     r")",
     re.UNICODE | re.IGNORECASE,
@@ -108,6 +108,52 @@ def classify_product_quality_feedback(message: str) -> bool:
     return False
 
 
+_QUALITY_COMPARISON_RE = re.compile(
+    r"(?:"
+    r"مو\s*زي|مش\s*زي|مو\s*مثل|مش\s*مثل|مو\s*نفس|مش\s*نفس|"
+    r"مو\s*مثل\s*اول|مش\s*مثل\s*اول|ما\s*عجب(?:ني|تني)|"
+    r"not\s*the\s*same|different\s*taste|lighter|too\s*sweet|"
+    r"الجود(?:ة|ه)|الطعم|تغ(?:ي|)ر|مختلف"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_COMPLETED_ORDER_STATUSES = frozenset({
+    "delivered", "complete", "completed", "fulfilled", "done",
+})
+
+
+def quality_feedback_routing_eligible(ctx: Any, message: str = "") -> bool:
+    """True when quality feedback must preempt fulfillment / ordering."""
+    msg = str(message or getattr(ctx, "message", "") or "")
+    if not classify_product_quality_feedback(msg):
+        return False
+    norm = _norm(msg)
+    if _QUALITY_COMPARISON_RE.search(norm):
+        return True
+    state = getattr(ctx, "state", None)
+    if is_post_purchase_feedback_active(state):
+        return True
+    try:
+        from .external_outbound_context import is_post_purchase_context_active  # noqa: PLC0415
+
+        if is_post_purchase_context_active(
+            state=state,
+            history=list(getattr(ctx, "history", None) or []),
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — context probe is best-effort
+        pass
+    op = getattr(state, "order_prep", None) if state is not None else None
+    status = str(getattr(op, "order_status", "") or "").strip().lower()
+    if status in _COMPLETED_ORDER_STATUSES:
+        return True
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    if stage in {"complete", "support", "closed"}:
+        return True
+    return False
+
+
 def is_post_purchase_feedback_active(state: Any) -> bool:
     cs = _commerce_session(state)
     return bool(cs.get(_SESSION_FLAG))
@@ -141,6 +187,19 @@ def should_block_post_purchase_order_flow(
     history: Any = None,
 ) -> bool:
     """True when order/catalog injection must not run for post-purchase turns."""
+    if customer_message:
+        try:
+            from types import SimpleNamespace
+
+            shim = SimpleNamespace(
+                state=brain_state,
+                history=list(history or []),
+                message=customer_message,
+            )
+            if quality_feedback_routing_eligible(shim, customer_message):
+                return True
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — eligibility probe must not break flow
+            pass
     if is_post_purchase_feedback_active(brain_state):
         return True
     try:
@@ -174,10 +233,15 @@ def apply_post_purchase_feedback_session_flags(
         triggered = True
     elif classify_product_quality_feedback(message or ""):
         try:
-            from .external_outbound_context import is_post_purchase_context_active  # noqa: PLC0415
+            from types import SimpleNamespace
 
-            triggered = is_post_purchase_context_active(state=state, history=history)
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — context probe is best-effort
+            shim = SimpleNamespace(
+                state=state,
+                history=list(history or []),
+                message=message or "",
+            )
+            triggered = quality_feedback_routing_eligible(shim, message or "")
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — eligibility probe is best-effort
             triggered = False
     if not triggered:
         return
@@ -202,18 +266,7 @@ def apply_post_purchase_feedback_session_flags(
 
 def try_post_purchase_feedback_decision(ctx: Any) -> Optional[Decision]:
     msg = str(getattr(ctx, "message", "") or "")
-    if not classify_product_quality_feedback(msg):
-        return None
-
-    try:
-        from .external_outbound_context import is_post_purchase_context_active  # noqa: PLC0415
-
-        if not is_post_purchase_context_active(
-            state=getattr(ctx, "state", None),
-            history=list(getattr(ctx, "history", None) or []),
-        ):
-            return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — context gate must not break routing
+    if not quality_feedback_routing_eligible(ctx, msg):
         return None
 
     topic = "support_product_feedback"
@@ -250,6 +303,7 @@ __all__ = [
     "classify_product_quality_feedback",
     "is_post_purchase_feedback_active",
     "mark_post_purchase_feedback_active",
+    "quality_feedback_routing_eligible",
     "should_block_post_purchase_order_flow",
     "try_post_purchase_feedback_decision",
 ]

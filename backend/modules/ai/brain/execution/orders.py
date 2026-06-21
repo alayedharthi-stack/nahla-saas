@@ -432,6 +432,31 @@ class DraftOrderHandler:
         )
 
         if missing:
+            try:
+                from modules.ai.brain.commerce.post_purchase_feedback_guard import (  # noqa: PLC0415
+                    should_block_post_purchase_order_flow,
+                )
+
+                if should_block_post_purchase_order_flow(
+                    brain_state=ctx.state,
+                    customer_message=str(getattr(ctx, "message", "") or ""),
+                    history=list(getattr(ctx, "history", None) or []),
+                ):
+                    logger.info(
+                        "[ORDER FLOW] skipped needs_collection tenant=%s reason=quality_feedback_owns_turn",
+                        ctx.tenant_id,
+                    )
+                    return ActionResult(
+                        success=False,
+                        data={"skipped": "quality_feedback_owns_turn"},
+                        error="checkout_collection_blocked_by_quality_feedback",
+                    )
+            except Exception as _iso_exc:  # noqa: BLE001  # noqa: silent-ok — isolation must not break order flow
+                logger.debug(
+                    "[ORDER FLOW] checkout isolation probe failed tenant=%s err=%s",
+                    ctx.tenant_id,
+                    _iso_exc,
+                )
             logger.info(
                 "[ORDER FLOW] BLOCKED → needs_collection | tenant=%s product=%r "
                 "missing=%s next_question=%r",

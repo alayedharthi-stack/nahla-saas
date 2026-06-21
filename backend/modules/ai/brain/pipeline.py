@@ -1215,6 +1215,23 @@ class MerchantBrain:
                 _gog_exc,
             )
 
+        # ── 3.95 Conversation state isolation (P0 — current intent owns turn) ─
+        try:
+            from .commerce.conversation_state_isolation import (  # noqa: PLC0415
+                maybe_isolate_conversation_on_topic_break,
+            )
+
+            maybe_isolate_conversation_on_topic_break(
+                message=message or "",
+                state=state,
+            )
+        except Exception as _csi_exc:  # noqa: BLE001
+            logger.debug(
+                "[CONVERSATION_STATE_ISOLATION] pre_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _csi_exc,
+            )
+
         # ── 4. Decision ───────────────────────────────────────────────────
         try:
             from .commerce.commerce_conversation_guard import (  # noqa: PLC0415

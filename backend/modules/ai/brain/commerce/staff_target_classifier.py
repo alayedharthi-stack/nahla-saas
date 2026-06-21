@@ -196,6 +196,20 @@ def classify_staff_target(
     span = (raw_span or "").strip()
     msg = (message or "").strip()
 
+    try:
+        from .staff_ameen_disambiguation import has_explicit_staff_ameen_intent  # noqa: PLC0415
+
+        norm_span = _norm(span or msg)
+        if norm_span == "امين" and has_explicit_staff_ameen_intent(msg):
+            return StaffTargetVerdict(
+                raw_span=span or "امين",
+                tier="generic_role",
+                confidence=0.94,
+                reason="structure:explicit_showroom_ameen",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ameen disambiguation is best-effort
+        pass
+
     # ── 1. Registry evidence ─────────────────────────────────────────────
     if registry is not None and (span or msg):
         if _registry_names_person(registry, message=msg, raw_span=span):

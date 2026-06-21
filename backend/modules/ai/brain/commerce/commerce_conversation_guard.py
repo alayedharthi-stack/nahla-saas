@@ -48,6 +48,15 @@ _SOCIAL_ACK_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Colloquial delivery-received + blessing (e.g. «وصل والله يبيض وجهك»).
+_DELIVERY_SOCIAL_THANKS_RE = re.compile(
+    r"(?:"
+    r"^وصل(?:ت|نا|ني)?\s+.*?(?:بيض|يبيض|بارك|الله|وجه|فيك|لك|شكر|حلال|مال)"
+    r"|(?:^|\s)وصل(?:ت|نا|ني)?(?:\s|$).*(?:الله|بيض|يبيض|بارك)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _COD_RE = re.compile(
     r"(?:"
     r"الدفع\s+عند\s+الاستلام|دفع\s+عند\s+الاستلام|"
@@ -242,10 +251,27 @@ def strip_quoted_bot_echo(
     return customer_addition, stripped_any
 
 
+def is_delivery_social_thanks(text: str) -> bool:
+    """True for post-delivery social thanks — not store arrival."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    norm = _norm(raw)
+    if not _DELIVERY_SOCIAL_THANKS_RE.search(norm):
+        return False
+    productish = any(
+        tok in norm
+        for tok in ("عسل", "كilo", "كيلو", "سدر", "طلح", "ريال", "سعر", "متوفر")
+    )
+    return not productish
+
+
 def is_social_ack_message(text: str) -> bool:
     norm = _norm(text)
     if not norm:
         return False
+    if is_delivery_social_thanks(text):
+        return True
     if _SOCIAL_ACK_RE.search(norm):
         productish = any(
             tok in norm
@@ -589,6 +615,7 @@ __all__ = [
     "catalog_has_honey_skus",
     "detect_ask_cod",
     "filter_catalog_for_active_category",
+    "is_delivery_social_thanks",
     "is_social_ack_message",
     "load_commerce_session",
     "maybe_lock_honey_order_context",
