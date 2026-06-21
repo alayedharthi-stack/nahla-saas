@@ -12,6 +12,7 @@ _SHADOW_FLAG = "TURN_ARBITER_SHADOW_ENABLED"
 _ENFORCE_FLAG = "TURN_ARBITER_ENFORCE_ENABLED"
 _ENFORCE_TENANTS_FLAG = "TURN_ARBITER_ENFORCE_TENANTS"
 _ENFORCE_MISMATCH_TYPES_FLAG = "TURN_ARBITER_ENFORCE_MISMATCH_TYPES"
+_OWNER_BRIEF_COMPOSE_FLAG = "TURN_ARBITER_OWNER_BRIEF_COMPOSE_ENABLED"
 
 _DEFAULT_ENFORCE_MISMATCH_TYPES = frozenset({
     "checkout_vs_support",
@@ -87,15 +88,29 @@ def get_enforce_mismatch_types() -> FrozenSet[str]:
     )
 
 
+def is_owner_brief_native_compose_enabled() -> bool:
+    """
+    Phase 3A — pass OwnerBrief to compose even when enforce did not fire.
+
+    Off by default. Requires shadow/enforce prep (``should_prepare_turn_arbitration``).
+    """
+    return _truthy(os.getenv(_OWNER_BRIEF_COMPOSE_FLAG, "false"))
+
+
 def should_prepare_turn_arbitration() -> bool:
-    """True when shadow or enforce needs pre-decide synthesis."""
-    return is_turn_arbiter_shadow_enabled() or is_turn_arbiter_enforce_enabled()
+    """True when shadow, enforce, or native brief compose needs pre-decide synthesis."""
+    return (
+        is_turn_arbiter_shadow_enabled()
+        or is_turn_arbiter_enforce_enabled()
+        or is_owner_brief_native_compose_enabled()
+    )
 
 
 __all__ = [
     "get_enforce_mismatch_types",
     "get_enforce_tenant_allowlist",
     "is_enforce_tenant",
+    "is_owner_brief_native_compose_enabled",
     "is_turn_arbiter_enforce_enabled",
     "is_turn_arbiter_shadow_enabled",
     "should_prepare_turn_arbitration",

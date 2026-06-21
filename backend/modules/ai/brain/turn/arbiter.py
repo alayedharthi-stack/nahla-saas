@@ -182,6 +182,19 @@ def arbitrate_turn(
             ctx,
         )
 
+    if understanding.current_intent == "checkout_continuation":
+        owner = OWNER_CHECKOUT
+        if str(getattr(state, "stage", "") or "") == "ordering":
+            owner = OWNER_ORDERING
+        return _make_arbitration(
+            owner,
+            "checkout_continuation_current_turn",
+            understanding,
+            ctx,
+            slot_replay_approved=bool(understanding.active_objective_candidate),
+            approved_proposal=understanding.active_objective_candidate,
+        )
+
     if _payment_aligned(state, state_rel, understanding):
         return _make_arbitration(
             OWNER_PAYMENT,
