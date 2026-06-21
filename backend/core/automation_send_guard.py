@@ -62,6 +62,20 @@ def lookup_conversation_for_phone(
     if db is None or not tenant_id or not customer_phone:
         return None
     try:
+        from core.ai_disabled_gate import is_ai_disabled_for_conversation  # noqa: PLC0415
+
+        decision = is_ai_disabled_for_conversation(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            source="automation_send_guard_lookup",
+        )
+        if decision.conversation is not None:
+            return decision.conversation
+    except Exception as exc:  # noqa: silent-ok — fall back to legacy phone lookup
+        logger.debug("[AUTOMATION_BLOCKED] aggregate lookup failed: %s", exc)
+
+    try:
         from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
         norm = normalize_phone(customer_phone) or customer_phone
@@ -221,15 +235,33 @@ def evaluate_automation_send(
     convo = conversation or lookup_conversation_for_phone(
         db, int(tenant_id), customer_phone,
     )
-    log_automation_blocked(
-        reason=decision.reason,
-        tenant_id=tenant_id,
-        customer_id=getattr(convo, "customer_id", None) if convo else None,
-        conversation_id=getattr(convo, "id", None) if convo else None,
-        phone=customer_phone,
-        message_type=message_type,
-        blocked_path=blocked_path,
-    )
+    if decision.reason == REASON_AI_DISABLED:
+        from core.ai_disabled_gate import (  # noqa: PLC0415
+            AIDisabledDecision,
+            log_ai_disabled_send_block,
+        )
+
+        log_ai_disabled_send_block(
+            tenant_id=int(tenant_id),
+            customer_phone=customer_phone,
+            decision=AIDisabledDecision(
+                disabled=True,
+                reason=decision.reason,
+                conversation=convo,
+                source=blocked_path or "unknown",
+            ),
+            blocked_path=blocked_path or "unknown",
+        )
+    else:
+        log_automation_blocked(
+            reason=decision.reason,
+            tenant_id=tenant_id,
+            customer_id=getattr(convo, "customer_id", None) if convo else None,
+            conversation_id=getattr(convo, "id", None) if convo else None,
+            phone=customer_phone,
+            message_type=message_type,
+            blocked_path=blocked_path,
+        )
     return decision
 
 
