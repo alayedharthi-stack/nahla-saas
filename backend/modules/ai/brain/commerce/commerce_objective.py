@@ -9,6 +9,7 @@ on explicit topic shift or higher-priority operational funnel evidence.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import Any, Optional
 
 from ..discovery.entry import (
@@ -47,6 +48,29 @@ ALL_COMMERCE_OBJECTIVES = (
     COMMERCE_OBJECTIVE_POST_PURCHASE,
     COMMERCE_OBJECTIVE_SUPPORT,
 )
+
+
+class CommerceObjective(str, Enum):
+    """Platform commerce funnel objective — separate from conversation stage."""
+
+    DISCOVERY = COMMERCE_OBJECTIVE_DISCOVERY
+    SELECTION = COMMERCE_OBJECTIVE_SELECTION
+    ORDERING = COMMERCE_OBJECTIVE_ORDERING
+    PAYMENT = COMMERCE_OBJECTIVE_PAYMENT
+    TRACKING = COMMERCE_OBJECTIVE_TRACKING
+    POST_PURCHASE = COMMERCE_OBJECTIVE_POST_PURCHASE
+    SUPPORT = COMMERCE_OBJECTIVE_SUPPORT
+
+    @classmethod
+    def from_value(cls, value: str) -> Optional["CommerceObjective"]:
+        try:
+            return cls(str(value or "").strip().lower())
+        except ValueError:
+            return None
+
+
+def is_valid_commerce_objective(value: str) -> bool:
+    return str(value or "").strip().lower() in ALL_COMMERCE_OBJECTIVES
 
 _OBJECTIVE_PRIORITY = {
     COMMERCE_OBJECTIVE_DISCOVERY: 1,
@@ -287,6 +311,7 @@ def transition_commerce_objective_for_complaint(state: Any) -> str:
 
 __all__ = [
     "ALL_COMMERCE_OBJECTIVES",
+    "CommerceObjective",
     "COMMERCE_OBJECTIVE_DISCOVERY",
     "COMMERCE_OBJECTIVE_ORDERING",
     "COMMERCE_OBJECTIVE_PAYMENT",
@@ -295,6 +320,7 @@ __all__ = [
     "COMMERCE_OBJECTIVE_SUPPORT",
     "COMMERCE_OBJECTIVE_TRACKING",
     "get_commerce_objective",
+    "is_valid_commerce_objective",
     "transition_commerce_objective_for_complaint",
     "transition_commerce_objective_for_post_purchase",
     "update_commerce_objective",

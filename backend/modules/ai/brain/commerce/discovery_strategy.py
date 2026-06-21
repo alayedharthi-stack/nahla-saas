@@ -57,6 +57,10 @@ class DiscoveryStrategyResult:
     evidence: Dict[str, Any] = field(default_factory=dict)
 
 
+# Phase 2A foundation alias — same shape, architecture-facing name.
+DiscoveryPlan = DiscoveryStrategyResult
+
+
 def build_catalog_context_snapshot(
     *,
     facts: Any,
@@ -77,13 +81,13 @@ def build_catalog_context_snapshot(
     )
 
 
-def resolve_discovery_strategy(
+def _resolve_discovery_plan(
     *,
     commerce_objective: str,
     entry_type: str,
     catalog_context: CatalogContextSnapshot,
     merchant_settings: Optional[MerchantDiscoverySettings] = None,
-) -> DiscoveryStrategyResult:
+) -> DiscoveryPlan:
     settings = merchant_settings or MerchantDiscoverySettings()
     entry = str(entry_type or NO_DISCOVERY).strip().lower()
     objective = str(commerce_objective or COMMERCE_OBJECTIVE_DISCOVERY).strip().lower()
@@ -188,6 +192,62 @@ def resolve_discovery_strategy(
     return result
 
 
+def resolve_discovery_strategy_for_ctx(
+    ctx: Any,
+    settings: Optional[MerchantDiscoverySettings] = None,
+) -> DiscoveryPlan:
+    """Resolve discovery plan from a brain context (Phase 2A ctx API)."""
+    from ..discovery.entry import (
+        _load_merchant_discovery_settings,
+        resolve_discovery_entry,
+    )
+    from .commerce_objective import get_commerce_objective
+
+    merchant_settings = settings or _load_merchant_discovery_settings(ctx)
+    entry = resolve_discovery_entry(ctx)
+    entry_type = entry.entry_type if entry.matched else NO_DISCOVERY
+    objective = get_commerce_objective(getattr(ctx, "state", None)) or COMMERCE_OBJECTIVE_DISCOVERY
+    facts = getattr(ctx, "facts", None)
+    catalog_context = build_catalog_context_snapshot(
+        facts=facts,
+        collection_count=0,
+        has_featured=bool(merchant_settings.global_featured_product_ids()),
+    )
+    return _resolve_discovery_plan(
+        commerce_objective=objective,
+        entry_type=entry_type,
+        catalog_context=catalog_context,
+        merchant_settings=merchant_settings,
+    )
+
+
+def resolve_discovery_strategy(
+    ctx: Any = None,
+    settings: Optional[MerchantDiscoverySettings] = None,
+    *,
+    commerce_objective: str = "",
+    entry_type: str = "",
+    catalog_context: Optional[CatalogContextSnapshot] = None,
+    merchant_settings: Optional[MerchantDiscoverySettings] = None,
+) -> DiscoveryPlan:
+    """
+    Dual API discovery resolver (Phase 2A).
+
+    - ``resolve_discovery_strategy(ctx, settings=...)`` — context-first.
+    - ``resolve_discovery_strategy(commerce_objective=..., entry_type=..., catalog_context=...)`` — legacy kwargs.
+    """
+    if ctx is not None and hasattr(ctx, "state"):
+        return resolve_discovery_strategy_for_ctx(ctx, settings=settings or merchant_settings)
+    if catalog_context is None:
+        catalog_context = CatalogContextSnapshot()
+    return _resolve_discovery_plan(
+        commerce_objective=commerce_objective,
+        entry_type=entry_type,
+        catalog_context=catalog_context,
+        merchant_settings=merchant_settings or settings,
+    )
+
+
 def strategy_to_decision_args(
     strategy: DiscoveryStrategyResult,
     *,
@@ -227,9 +287,11 @@ def strategy_from_decision_args(args: Dict[str, Any]) -> DiscoveryStrategyResult
 __all__ = [
     "CatalogContextSnapshot",
     "DiscoveryMode",
+    "DiscoveryPlan",
     "DiscoveryStrategyResult",
     "build_catalog_context_snapshot",
     "resolve_discovery_strategy",
+    "resolve_discovery_strategy_for_ctx",
     "strategy_from_decision_args",
     "strategy_to_decision_args",
 ]
