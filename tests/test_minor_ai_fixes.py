@@ -433,6 +433,58 @@ def test_payment_evidence_active_order_promotes_to_confirmed(
            "العنوان" in decision["reply_text"]
 
 
+def test_bill_payment_evidence_active_order_does_not_mark_receipt_received(
+    monkeypatch: Any,
+) -> None:
+    """Bill-payment or amount-only attachments stay unverified even
+    when the conversation is awaiting a receipt for an active order."""
+    from core import order_flow
+    from core.payment_evidence import (
+        PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+        classify_payment_evidence,
+    )
+
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda *_a, **_k: (
+            None,
+            {
+                "current_product_focus": {
+                    "title": "عسل سدر", "price": 360, "currency": "SAR",
+                },
+                "order_prep": {
+                    "awaiting_payment_receipt": True,
+                    "city": "الرياض",
+                },
+            },
+        ),
+    )
+
+    verdict = classify_payment_evidence(
+        "تم سداد الفاتورة\n472.13 ريال",
+        extra_context={"awaiting_payment_receipt": True},
+    )
+    assert verdict["status"] == PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED
+
+    decision = order_flow.maybe_handle_payment_evidence_inbound(
+        db=None,
+        tenant_id=1,
+        phone="+966500000010",
+        inbound_normalized_type="image",
+        inbound_metadata={
+            "payment_evidence_status": verdict["status"],
+            "payment_evidence_reason": verdict["reason"],
+            "image_kind": "payment_pending_evidence",
+            "vision_text": "تم سداد الفاتورة\n472.13 ريال",
+            "wa_message_id": "wamid.bill",
+        },
+    )
+    if decision is not None:
+        sp = decision["state_patch"]
+        assert sp.get("payment_receipt_received") is not True
+        assert sp.get("payment_submission_received") is not True
+
+
 def test_payment_evidence_without_active_order_stays_soft(
     monkeypatch: Any,
 ) -> None:

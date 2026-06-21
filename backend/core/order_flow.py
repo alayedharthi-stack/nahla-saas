@@ -1231,9 +1231,15 @@ def maybe_handle_payment_evidence_inbound(
             # went to the wrong account.
             return None
 
-        if str(pe_status or "").strip().lower() != "confirmed":
+        _pe_norm = str(pe_status or "").strip().lower()
+        if _pe_norm in {
+            "bill_payment_unrelated",
+            "amount_only_insufficient",
+            "invalid_receipt",
+            "not_payment",
+        }:
             reply_text = compose_payment_evidence_reply(
-                str(pe_status or ""),
+                _pe_norm,
                 awaiting_receipt=awaiting,
             )
             if reply_text:
