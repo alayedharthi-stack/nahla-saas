@@ -980,21 +980,12 @@ def classify_payment_evidence(
 
     # ── Decision tree ───────────────────────────────────────────
     # Priority (top wins):
-    #   1. ANY strong-success phrase → CONFIRMED. This is the only
-    #      verdict that lets downstream code mutate order state.
-    #   2. ANY pre-transfer-review phrase → PRE_TRANSFER_REVIEW.
-    #      Banks NEVER print these labels on a completed-transfer
-    #      receipt, so a hit here is high-confidence "NOT yet
-    #      transferred".
-    #   3. Weak-success token + payment context (IBAN / reference /
-    #      bank brand + amount) → CONFIRMED. Catches the case where
-    #      vision text only carries "Successful" or "ناجحة" without
-    #      the longer phrase.
-    #   4. Reference number rendered + payment context →
-    #      CONFIRMED. Banks only print transaction IDs on the
-    #      final receipt.
-    #   5. Payment-context signals only → NEEDS_CONFIRMATION.
-    #   6. Generic payment hints only → NEEDS_CONFIRMATION.
+    #   1. Product/catalog caption without payment indicators → NOT_PAYMENT.
+    #   2. Bill-payment markers without transfer linkage → BILL_PAYMENT_UNRELATED.
+    #   3. ANY strong-success phrase → CONFIRMED (legacy transfer-success path).
+    #   4. Payment-like amount-only without merchant linkage → AMOUNT_ONLY_INSUFFICIENT.
+    #   5. ANY pre-transfer-review phrase → PRE_TRANSFER_REVIEW.
+    #   6. Weak-success / reference / bank-field evidence → CONFIRMED or NEEDS_CONFIRMATION.
     #   7. Nothing → NOT_PAYMENT.
 
     # Record filename-hint signal for trace logging.
@@ -1028,6 +1019,13 @@ def classify_payment_evidence(
             "signals": signals,
         }
 
+    if success_hits:
+        return {
+            "status":  PAYMENT_EVIDENCE_CONFIRMED,
+            "reason":  "strong_success_phrase",
+            "signals": signals,
+        }
+
     if (
         amount_present
         and not transfer_linkage.get("merchant_linkage_present")
@@ -1050,19 +1048,6 @@ def classify_payment_evidence(
         return {
             "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
             "reason":  "amount_without_merchant_linkage",
-            "signals": signals,
-        }
-
-    if success_hits:
-        if not transfer_linkage.get("merchant_linkage_present"):
-            return {
-                "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
-                "reason":  "success_phrase_without_transfer_linkage",
-                "signals": signals,
-            }
-        return {
-            "status":  PAYMENT_EVIDENCE_CONFIRMED,
-            "reason":  "strong_success_phrase",
             "signals": signals,
         }
 
