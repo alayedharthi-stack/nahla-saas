@@ -409,10 +409,53 @@ def apply_staff_escalation_truth_guard(
                 "[STAFF_ESCALATION_TRUTH_GUARD] conversation_recovery failed err=%s",
                 _rec_exc,
             )
+        try:
+            from modules.ai.brain.compose.mirror_replies import mirror_reply  # noqa: PLC0415
+            from modules.ai.brain.commerce.commerce_conversation_guard import (  # noqa: PLC0415
+                is_delivery_social_thanks,
+            )
+
+            if is_delivery_social_thanks(inbound_text):
+                mirrored = (mirror_reply(inbound_text) or "").strip()
+                if mirrored:
+                    return StaffEscalationTruthGuardResult(
+                        reply=mirrored,
+                        action="blocked_false_escalation_delivery_social_mirror",
+                        replaced=True,
+                        reason="delivery_social_thanks_mirror",
+                        evidence=evidence,
+                        staff_escalation_claim_blocked=True,
+                    )
+        except Exception as _dsm_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] delivery social mirror failed err=%s",
+                _dsm_exc,
+            )
+        scrubbed = ""
+        try:
+            from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                strip_escalation_claim_sentences,
+            )
+
+            scrubbed = strip_escalation_claim_sentences(original)
+        except Exception as _scr_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STAFF_ESCALATION_TRUTH_GUARD] scrub fallback failed err=%s",
+                _scr_exc,
+            )
+        if scrubbed and len(scrubbed.strip()) >= 6:
+            return StaffEscalationTruthGuardResult(
+                reply=scrubbed,
+                action="blocked_false_escalation_scrubbed_fallback",
+                replaced=True,
+                reason="escalation_claim_scrubbed_fallback",
+                evidence=evidence,
+                staff_escalation_claim_blocked=True,
+            )
         return StaffEscalationTruthGuardResult(
-            reply="",
-            action="blocked_false_escalation_needs_recovery",
-            replaced=True,
+            reply=scrubbed or original,
+            action="blocked_false_escalation_non_empty_fallback",
+            replaced=bool(scrubbed),
             reason=evidence.reason,
             evidence=evidence,
             staff_escalation_claim_blocked=True,

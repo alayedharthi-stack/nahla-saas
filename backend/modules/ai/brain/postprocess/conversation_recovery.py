@@ -159,6 +159,15 @@ def try_guard_recovery_reply(
         return ConversationRecoveryResult(needs_persona_compose=True, source="empty_inbound")
 
     try:
+        from modules.ai.brain.commerce.conversation_state_isolation import (  # noqa: PLC0415
+            inbound_breaks_fulfillment_ownership,
+            should_replay_pending_question,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — isolation import must not break recovery
+        inbound_breaks_fulfillment_ownership = lambda _m: False  # type: ignore[assignment,misc]
+        should_replay_pending_question = lambda **_: False  # type: ignore[assignment,misc]
+
+    try:
         from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: PLC0415
             is_bare_start_order_phrase,
         )
@@ -206,11 +215,20 @@ def try_guard_recovery_reply(
         pass
 
     last_q = _last_outbound_question(state, history)
-    if last_q:
+    if last_q and should_replay_pending_question(
+        inbound_text=raw,
+        last_question=last_q,
+    ):
         snippet = last_q[:80].rstrip("؟?").strip()
         return ConversationRecoveryResult(
             reply=f"فهمت — بخصوص «{snippet}»، وضّح لي أكثر عشان أكمل معك.",
             source="last_question_clarify",
+        )
+
+    if last_q and inbound_breaks_fulfillment_ownership(raw):
+        return ConversationRecoveryResult(
+            needs_persona_compose=True,
+            source="fulfillment_topic_break",
         )
 
     last_out = _last_outbound_snippet(history)

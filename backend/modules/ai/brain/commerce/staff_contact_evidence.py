@@ -384,6 +384,23 @@ def classify_staff_contact_request(
         return StaffContactRequest(kind="general_channel")
 
     try:
+        from .staff_ameen_disambiguation import has_explicit_staff_ameen_intent  # noqa: PLC0415
+
+        if has_explicit_staff_ameen_intent(raw):
+            return StaffContactRequest(
+                kind="generic_staff",
+                target_tier="generic_role",
+                target_reason="structure:explicit_showroom_ameen",
+                target_confidence=0.95,
+                raw_span="امين",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_EVIDENCE] ameen_disambiguation_failed err=%s",
+            exc,
+        )
+
+    try:
         from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
             has_explicit_contact_intent,
             should_defer_contact_policies_for_commerce,
@@ -523,6 +540,19 @@ def resolve_staff_contact(
             return StaffContactResolution(found=True, record=rec, reason="named_match")
         tier = (request.target_tier or "").strip().lower()
         if tier == "named_person" and _CONTACT_ASK_RE.search(_norm(message)):
+            try:
+                from .staff_ameen_disambiguation import has_explicit_staff_ameen_intent  # noqa: PLC0415
+
+                if has_explicit_staff_ameen_intent(message):
+                    role_rec = registry.first_general_contact()
+                    if role_rec:
+                        return StaffContactResolution(
+                            found=True,
+                            record=role_rec,
+                            reason="explicit_ameen_showroom_fallback",
+                        )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — showroom fallback is best-effort
+                pass
             return StaffContactResolution(
                 found=False,
                 reason="name_not_configured",
