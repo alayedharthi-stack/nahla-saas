@@ -966,6 +966,12 @@ class BrainContext:
     # Phase 1.5 — drop stale summary/history on emoji/status after long gap.
     fresh_social_context: bool = False
     fresh_social_context_reason: str = ""
+    # Turn Understanding + Turn Arbiter — Phase 1 shadow (read-only).
+    # Populated before decide(); telemetry completed after decide().
+    # Never mutates routing or reply in Phase 1.
+    turn_understanding_shadow: Optional[Any] = None
+    turn_arbitration_shadow: Optional[Any] = None
+    turn_shadow_telemetry: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

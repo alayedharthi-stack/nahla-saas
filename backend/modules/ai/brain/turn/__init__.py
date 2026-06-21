@@ -1,0 +1,83 @@
+"""Turn Understanding + Turn Arbiter — Phase 1 shadow / Phase 2A enforce."""
+from .contract import (
+    ALL_TURN_OWNERS,
+    OWNER_CHECKOUT,
+    OWNER_DISCOVERY,
+    OWNER_ORDERING,
+    OWNER_PAYMENT,
+    OWNER_PERSONA_SOCIAL,
+    OWNER_POST_PURCHASE,
+    OWNER_STAFF_ESCALATION,
+    OWNER_SUPPORT,
+    OWNER_TRACKING,
+    TurnArbitration,
+    TurnShadowTelemetry,
+    TurnUnderstanding,
+)
+from .enforce import TurnEnforceResult, maybe_enforce_turn_decision
+from .flags import (
+    get_enforce_mismatch_types,
+    get_enforce_tenant_allowlist,
+    is_enforce_tenant,
+    is_turn_arbiter_enforce_enabled,
+    is_turn_arbiter_shadow_enabled,
+    should_prepare_turn_arbitration,
+)
+from .mismatch import (
+    MISMATCH_CHECKOUT_VS_DISCOVERY,
+    MISMATCH_CHECKOUT_VS_PERSONA,
+    MISMATCH_CHECKOUT_VS_SUPPORT,
+    MISMATCH_NONE,
+    MISMATCH_STAFF_VS_PERSONA,
+    MISMATCH_SUPPORT_VS_ORDERING,
+    MISMATCH_UNKNOWN,
+    classify_owner_mismatch,
+)
+from .shadow import (
+    complete_turn_shadow_telemetry,
+    prepare_turn_arbitration,
+    run_turn_shadow_before_decide,
+)
+from .telemetry import (
+    build_shadow_telemetry,
+    telemetry_from_context,
+    telemetry_to_log_dict,
+)
+
+__all__ = [
+    "ALL_TURN_OWNERS",
+    "MISMATCH_CHECKOUT_VS_DISCOVERY",
+    "MISMATCH_CHECKOUT_VS_PERSONA",
+    "MISMATCH_CHECKOUT_VS_SUPPORT",
+    "MISMATCH_NONE",
+    "MISMATCH_STAFF_VS_PERSONA",
+    "MISMATCH_SUPPORT_VS_ORDERING",
+    "MISMATCH_UNKNOWN",
+    "OWNER_CHECKOUT",
+    "OWNER_DISCOVERY",
+    "OWNER_ORDERING",
+    "OWNER_PAYMENT",
+    "OWNER_PERSONA_SOCIAL",
+    "OWNER_POST_PURCHASE",
+    "OWNER_STAFF_ESCALATION",
+    "OWNER_SUPPORT",
+    "OWNER_TRACKING",
+    "TurnArbitration",
+    "TurnEnforceResult",
+    "TurnShadowTelemetry",
+    "TurnUnderstanding",
+    "build_shadow_telemetry",
+    "classify_owner_mismatch",
+    "complete_turn_shadow_telemetry",
+    "get_enforce_mismatch_types",
+    "get_enforce_tenant_allowlist",
+    "is_enforce_tenant",
+    "is_turn_arbiter_enforce_enabled",
+    "is_turn_arbiter_shadow_enabled",
+    "maybe_enforce_turn_decision",
+    "prepare_turn_arbitration",
+    "run_turn_shadow_before_decide",
+    "should_prepare_turn_arbitration",
+    "telemetry_from_context",
+    "telemetry_to_log_dict",
+]
