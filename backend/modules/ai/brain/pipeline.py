@@ -468,6 +468,38 @@ class MerchantBrain:
             # this into a user-facing error.
             raise
 
+        # ── P0 AI disabled kill switch (before intent / arbiter / compose) ──
+        try:
+            from core.ai_disabled_gate import is_ai_disabled_for_conversation  # noqa: PLC0415
+
+            _ai_disabled = is_ai_disabled_for_conversation(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=customer_phone,
+                source="brain_process_entry",
+            )
+            if _ai_disabled.disabled:
+                logger.info(
+                    "[AI_DISABLED_GATE] brain_suppressed tenant=%s phone=%s "
+                    "conversation_id=%s reason=%s",
+                    tenant_id,
+                    customer_phone,
+                    conversation_id,
+                    _ai_disabled.reason,
+                )
+                return {
+                    "reply": None,
+                    "skipped": True,
+                    "reason": "ai_disabled_gate",
+                    "ai_disabled_reason": _ai_disabled.reason,
+                }
+        except Exception as _brain_gate_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.warning(
+                "[AI_DISABLED_GATE] brain entry check failed tenant=%s err=%s",
+                tenant_id,
+                _brain_gate_exc,
+            )
+
         # ── 1. Intent ────────────────────────────────────────────────────
         state_for_classify = self._state_store.load(db, tenant_id, customer_phone)
 

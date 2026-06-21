@@ -5482,6 +5482,58 @@ async def _handle_merchant_message(
     def _sync_persona_observability() -> None:
         _sync_po_trace(_trace, _persona_ownership)
 
+    # ── P0 AI disabled kill switch (before ANY outbound / brain path) ───────
+    try:
+        from core.ai_disabled_gate import (  # noqa: PLC0415
+            is_ai_disabled_for_conversation,
+            log_ai_disabled_gate,
+            persist_inbound_for_suppressed_turn,
+        )
+
+        _ai_off = is_ai_disabled_for_conversation(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=to,
+            source="merchant_webhook_entry",
+        )
+        if _ai_off.disabled:
+            _suppressed_convo = persist_inbound_for_suppressed_turn(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                inbound_body=(inbound_persist_body or text or "").strip(),
+                wa_msg_id=wa_msg_id,
+                wa_message_ts=wa_message_ts,
+                inbound_metadata=inbound_metadata,
+            )
+            log_ai_disabled_gate(
+                tenant_id=tenant_id,
+                customer_phone=to,
+                decision=_ai_off,
+                source="merchant_webhook_entry",
+            )
+            try:
+                _trace.paused = True
+                _trace.fallback_source = "ai_disabled_gate"
+                _trace.response_goal = "suppressed"
+                _trace.reply_source = _TS.SOURCE_PAUSED
+            except Exception:  # noqa: silent-ok — trace stamp must not block suppression
+                pass
+            try:
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            _sync_persona_observability()
+            return
+    except Exception as _ai_gate_exc:  # noqa: BLE001  # noqa: silent-ok — gate must not open on error
+        logger.warning(
+            "[AI_DISABLED_GATE] entry check failed tenant=%s to=%s err=%s",
+            tenant_id, to, _ai_gate_exc,
+        )
+
     # ── Structured admin / L3 direct contact (Operations Center) ────────
     # Must run BEFORE generic handoff so «أبي الإدارة» delivers configured
     # admin contacts instead of owner_vague clarifier or Brain/KB refusal.
@@ -12752,6 +12804,28 @@ async def _post_wa(
             )
             _stamp_throttled("burst_60s")
             return False
+
+        if _db is not None and _tenant_id and recipient and not _allow_manual:
+            try:
+                from core.ai_disabled_gate import (  # noqa: PLC0415
+                    evaluate_ai_disabled_send_block,
+                )
+
+                _send_blocked, _ = evaluate_ai_disabled_send_block(
+                    _db,
+                    tenant_id=int(_tenant_id),
+                    customer_phone=recipient,
+                    blocked_path=_blocked_path or "post_wa",
+                    allow_manual=_allow_manual,
+                )
+                if _send_blocked:
+                    return False
+            except Exception as _send_gate_exc:  # noqa: BLE001  # noqa: silent-ok
+                logger.warning(
+                    "[AI_DISABLED_SEND_BLOCK] pre_send check failed tenant=%s err=%s",
+                    _tenant_id,
+                    _send_gate_exc,
+                )
 
         # ── Outbound idempotency guard ──────────────────────────────────
         # Stops the same logical AI reply from reaching Meta twice
