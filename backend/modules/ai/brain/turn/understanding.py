@@ -1,10 +1,10 @@
 """
 turn/understanding.py
 ─────────────────────
-Phase 1 — synthesize TurnUnderstanding from existing pipeline signals.
+Phase 1/3B — synthesize TurnUnderstanding from existing pipeline signals.
 
-Read-only: consumes intent, intent_priority, state_relevance, social_human_context,
-and persisted state. Does NOT add new regex patterns.
+Current-turn message has highest authority. Persisted workflow state is
+evidence, not automatic owner. Read-only: no new regex patterns.
 """
 from __future__ import annotations
 
@@ -27,6 +27,41 @@ from ..types import (
 from .contract import StateConflict, TurnUnderstanding, UnderstandingEvidence
 
 _CHECKOUT_STAGES = frozenset({"ordering", "deciding", "checkout"})
+_SEMANTIC_AUTHORITY_MIN_CONFIDENCE = 0.72
+
+# Semantic interpreter intents → turn understanding (current-turn authority).
+_SEMANTIC_TO_UNDERSTANDING = {
+    "fulfillment_location_update": (
+        "checkout_continuation",
+        "fulfillment",
+        "provide_delivery_location",
+    ),
+    "select_list_option": (
+        "checkout_continuation",
+        "option_selection",
+        "select_listed_option",
+    ),
+    "show_all_variants_or_prices": (
+        "product_inquiry",
+        "catalog_inquiry",
+        "learn_product_or_pricing",
+    ),
+    "ask_price_specific_variant": (
+        "product_inquiry",
+        "catalog_inquiry",
+        "learn_product_or_pricing",
+    ),
+    "refer_last_product": (
+        "product_inquiry",
+        "catalog_inquiry",
+        "refer_last_product",
+    ),
+    "clarify_variants_natural": (
+        "product_inquiry",
+        "catalog_inquiry",
+        "clarify_variants",
+    ),
+}
 
 
 def _evidence(
@@ -172,6 +207,80 @@ def _derive_semantics(
     return ("general_inquiry", "general", "get_help", evidence)
 
 
+def _apply_current_turn_authority(
+    *,
+    current_intent: str,
+    current_topic: str,
+    customer_goal: str,
+    evidence: List[UnderstandingEvidence],
+    semantic_interpretation: Any,
+    state_relevance: Any,
+    active_objective: Optional[str],
+) -> Tuple[str, str, str, List[UnderstandingEvidence], Optional[str]]:
+    """
+    Current inbound message wins over stale workflow when semantic evidence is strong.
+
+    Returns possibly updated intent/topic/goal, evidence, and demoted objective.
+    """
+    if semantic_interpretation is None:
+        return current_intent, current_topic, customer_goal, evidence, active_objective
+
+    si_conf = float(getattr(semantic_interpretation, "confidence", 0.0) or 0.0)
+    interpreted = str(getattr(semantic_interpretation, "interpreted_intent", "") or "")
+    topic_shift = bool(getattr(semantic_interpretation, "topic_shift", False))
+    override_social = bool(getattr(semantic_interpretation, "should_override_social", False))
+
+    if si_conf >= _SEMANTIC_AUTHORITY_MIN_CONFIDENCE and interpreted in _SEMANTIC_TO_UNDERSTANDING:
+        mapped = _SEMANTIC_TO_UNDERSTANDING[interpreted]
+        evidence = list(evidence)
+        evidence.append(_evidence(
+            "current_turn_authority",
+            "semantic_turn_interpreter",
+            interpreted,
+            f"current_turn_semantic_override confidence={si_conf:.2f}",
+            weight=si_conf,
+        ))
+        demoted_objective = active_objective
+        if interpreted == "fulfillment_location_update" and active_objective:
+            demoted_objective = active_objective
+        elif topic_shift and active_objective:
+            demoted_objective = None
+        return mapped[0], mapped[1], mapped[2], evidence, demoted_objective
+
+    if override_social and si_conf >= 0.65 and interpreted:
+        evidence = list(evidence)
+        evidence.append(_evidence(
+            "current_turn_authority",
+            "semantic_turn_interpreter",
+            interpreted,
+            "semantic_override_social",
+            weight=si_conf,
+        ))
+        if interpreted in _SEMANTIC_TO_UNDERSTANDING:
+            mapped = _SEMANTIC_TO_UNDERSTANDING[interpreted]
+            return mapped[0], mapped[1], mapped[2], evidence, active_objective
+
+    if topic_shift and state_relevance is not None:
+        if bool(getattr(state_relevance, "detected_topic_shift", False)):
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "state_relevance",
+                "topic_shift",
+                "current_message_topic_shift_over_stale_workflow",
+                weight=0.85,
+            ))
+            if current_intent in {
+                "social_interaction",
+                "social_gratitude",
+                "product_inquiry",
+                "complaint_refund",
+            }:
+                return current_intent, current_topic, customer_goal, evidence, None
+
+    return current_intent, current_topic, customer_goal, evidence, active_objective
+
+
 def _derive_conflicts(
     *,
     state: MerchantConversationState,
@@ -199,6 +308,11 @@ def _derive_conflicts(
         "general_inquiry",
         "reach_staff",
     })
+
+    checkout_continuation = current_intent == "checkout_continuation"
+
+    if checkout_continuation and active_objective:
+        return tuple(conflicts), tuple(suspend_scope), False
 
     if current_intent in {"complaint_refund", "social_gratitude", "social_interaction"}:
         conflicts.append(StateConflict(
@@ -271,6 +385,20 @@ def synthesize_turn_understanding(ctx: BrainContext) -> TurnUnderstanding:
     )
     evidence.extend(sem_evidence)
 
+    active_objective = _derive_active_objective_candidate(state, state_rel)
+
+    current_intent, current_topic, customer_goal, evidence, active_objective = (
+        _apply_current_turn_authority(
+            current_intent=current_intent,
+            current_topic=current_topic,
+            customer_goal=customer_goal,
+            evidence=evidence,
+            semantic_interpretation=ctx.semantic_interpretation,
+            state_relevance=state_rel,
+            active_objective=active_objective,
+        )
+    )
+
     if state_rel is not None:
         evidence.append(_evidence(
             "state_relevance",
@@ -294,14 +422,21 @@ def synthesize_turn_understanding(ctx: BrainContext) -> TurnUnderstanding:
             weight=float(getattr(si, "confidence", 0.5) or 0.5),
         ))
 
-    active_objective = _derive_active_objective_candidate(state, state_rel)
     if active_objective:
         evidence.append(_evidence(
             "persisted_workflow",
             "conversation_state",
             active_objective,
             f"active_objective_candidate={active_objective}",
-            weight=0.4,
+            weight=0.35,
+        ))
+    elif _has_active_checkout_workflow(state):
+        evidence.append(_evidence(
+            "persisted_workflow",
+            "conversation_state",
+            "stale_checkout_context",
+            "checkout_state_present_but_not_current_turn_owner",
+            weight=0.25,
         ))
 
     conflicts, suspend_scope, should_suspend = _derive_conflicts(

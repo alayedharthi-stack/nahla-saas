@@ -1198,8 +1198,20 @@ class DefaultComposer:
                 reply_state = self._minimal_reply_state(ctx)
 
             prompt = build_brain_reply_prompt(reply_state)
-            _dec_args = (decision.args if decision is not None else None) or {}
-            _owner_brief = _dec_args.get("owner_brief")
+            _owner_brief = None
+            try:
+                from modules.ai.brain.turn.compose_bridge import (  # noqa: PLC0415
+                    resolve_owner_brief_dict,
+                )
+
+                _owner_brief = resolve_owner_brief_dict(
+                    decision if decision is not None else Decision(action="", args={}),
+                    ctx,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — brief resolve must not break compose
+                _dec_args = (decision.args if decision is not None else None) or {}
+                _owner_brief = _dec_args.get("owner_brief")
+
             if isinstance(_owner_brief, dict) and _owner_brief:
                 try:
                     from modules.ai.brain.turn.owner_brief import (  # noqa: PLC0415

@@ -2038,8 +2038,54 @@ class MerchantBrain:
             merchant_context=slim_merchant_ctx,
         )
 
+        # ── 6.99 OwnerBrief native compose (Phase 3A) ─────────────────────
+        _owner_brief_attached = False
+        try:
+            from .turn.compose_bridge import maybe_attach_owner_brief_for_compose  # noqa: PLC0415
+
+            decision, _owner_brief_attached = maybe_attach_owner_brief_for_compose(
+                decision, ctx,
+            )
+            if _owner_brief_attached:
+                logger.info(
+                    "[TURN_OWNER_BRIEF_COMPOSE] tenant=%s attached=true "
+                    "owner=%s compose_mode=%s",
+                    tenant_id,
+                    (decision.args or {}).get("turn_owner"),
+                    (decision.args or {}).get("compose_mode"),
+                )
+        except Exception as _obc_exc:  # noqa: BLE001  # noqa: silent-ok — brief attach must not block compose
+            logger.debug(
+                "[TURN_OWNER_BRIEF_COMPOSE] skipped tenant=%s err=%s",
+                tenant_id,
+                _obc_exc,
+            )
+
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        try:
+            from .turn.observability import log_turn_outcome  # noqa: PLC0415
+
+            _telemetry = getattr(ctx, "turn_shadow_telemetry", None)
+            _enforced = bool(getattr(getattr(ctx, "turn_enforce_result", None), "enforced", False))
+            if _telemetry is not None:
+                log_turn_outcome(
+                    logger,
+                    tenant_id=tenant_id,
+                    telemetry=_telemetry,
+                    enforced=_enforced,
+                    compose_used_brief=_owner_brief_attached or bool(
+                        (decision.args or {}).get("owner_brief")
+                    ),
+                    reply_preview=reply or "",
+                )
+        except Exception as _outcome_exc:  # noqa: BLE001  # noqa: silent-ok — outcome log must not block reply
+            logger.debug(
+                "[TURN_ARBITER_OUTCOME] skipped tenant=%s err=%s",
+                tenant_id,
+                _outcome_exc,
+            )
 
         try:
             from core.wa_draft_confirmation import maybe_inject_draft_flow_reply  # noqa: PLC0415

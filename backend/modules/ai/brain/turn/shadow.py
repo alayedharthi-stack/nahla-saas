@@ -86,6 +86,7 @@ def complete_turn_shadow_telemetry(
             "[TURN_ARBITER_SHADOW] tenant=%s proposed_owner=%s legacy_owner=%s "
             "legacy_action=%s mismatch=%s mismatch_type=%s enforced=%s suspend_stale=%s "
             "conflicts=%d slot_replay=%s confidence=%.2f "
+            "reply_goal=%s compose_mode=%s forbidden=%s "
             "intent=%s topic=%s goal=%s candidate=%r reason=%s preview=%r",
             getattr(ctx, "tenant_id", None),
             payload["proposed_owner"],
@@ -98,6 +99,9 @@ def complete_turn_shadow_telemetry(
             payload["conflicts_with_state_count"],
             str(payload["slot_replay_approved"]).lower(),
             payload["confidence"],
+            payload.get("reply_goal", ""),
+            payload.get("compose_mode", ""),
+            ",".join(payload.get("forbidden_objectives") or [])[:120],
             payload["current_intent"],
             payload["current_topic"],
             payload["customer_goal"],
