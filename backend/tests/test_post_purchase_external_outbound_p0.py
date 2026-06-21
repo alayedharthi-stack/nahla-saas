@@ -133,7 +133,7 @@ class TestProductionConversationTrace:
         ctx = _ctx(_CUSTOMER_FEEDBACK, history=history[:-1], state=state)
 
         apply_external_outbound_context(ctx)
-        assert get_commerce_objective(ctx.state) == COMMERCE_OBJECTIVE_POST_PURCHASE
+        assert get_commerce_objective(ctx.state) == COMMERCE_OBJECTIVE_SUPPORT
 
         dec = try_post_purchase_feedback_decision(ctx)
         assert dec is not None
@@ -167,7 +167,7 @@ class TestProductionConversationTrace:
 
 
 class TestPostPurchaseObjectiveTransition:
-    def test_feedback_shifts_ordering_to_post_purchase_then_support_on_complaint(self) -> None:
+    def test_feedback_shifts_ordering_to_support_then_support_on_complaint(self) -> None:
         from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: E402
             try_complaint_refund_decision,
         )

@@ -1233,6 +1233,19 @@ class MerchantBrain:
                 _hlock_exc,
             )
 
+        try:
+            from .commerce.commerce_discovery_shadow import (  # noqa: PLC0415
+                trace_commerce_discovery_shadow,
+            )
+
+            trace_commerce_discovery_shadow(ctx)
+        except Exception as _cds_exc:  # noqa: BLE001
+            logger.debug(
+                "[COMMERCE_DISCOVERY_SHADOW] trace skipped tenant=%s err=%s",
+                tenant_id,
+                _cds_exc,
+            )
+
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
 
