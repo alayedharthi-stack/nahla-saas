@@ -1225,7 +1225,7 @@ class MerchantBrain:
                 message=message or "",
                 state=state,
             )
-        except Exception as _csi_exc:  # noqa: BLE001
+        except Exception as _csi_exc:  # noqa: BLE001  # noqa: silent-ok — isolation must not block decide
             logger.debug(
                 "[CONVERSATION_STATE_ISOLATION] pre_decide skipped tenant=%s err=%s",
                 tenant_id,
