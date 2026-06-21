@@ -655,6 +655,34 @@ def test_bare_amount_without_payment_context_is_not_payment() -> None:
     assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
 
 
+def test_product_caption_while_awaiting_is_not_payment() -> None:
+    """Product/catalog captions must stay not_payment even when the
+    funnel is awaiting a bank-transfer receipt."""
+    from core.payment_evidence import (
+        classify_payment_evidence,
+        PAYMENT_EVIDENCE_NOT_PAYMENT,
+    )
+
+    caption = "صورة عسل سدر طبيعي 1 كيلو السعر 360 ريال"
+    v = classify_payment_evidence(
+        caption,
+        extra_context={"awaiting_payment_receipt": True},
+    )
+    assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+
+def test_transfer_receipt_phrase_amount_only_is_insufficient() -> None:
+    """Payment-like wording with an amount but no merchant linkage is
+    insufficient evidence — not a valid transfer receipt."""
+    from core.payment_evidence import (
+        classify_payment_evidence,
+        PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    )
+
+    v = classify_payment_evidence("إيصال تحويل 360 ريال")
+    assert v["status"] == PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT
+
+
 def test_real_receipt_still_classifies_as_confirmed() -> None:
     """Lock-in: tightening the noise floor must NOT block actual
     completed-transfer screenshots from firing."""

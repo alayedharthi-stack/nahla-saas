@@ -572,6 +572,102 @@ _PRICE_ONLY_CONTEXT_TOKENS = frozenset({
 })
 
 
+# Product / catalog caption markers — platform-wide, not merchant-specific.
+_PRODUCT_CATALOG_PHRASES: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "السعر",
+    "سعر",
+    "price",
+    "صورة",
+    "صوره",
+    "photo",
+    "image",
+    "كيلo",
+    "kg",
+    "جرام",
+    "gram",
+    "منتج",
+    "product",
+    "catalog",
+    "كتalog",
+    "حجم",
+    "size",
+    "لتر",
+    "liter",
+    "ml",
+))
+
+_STRONG_PRODUCT_CATALOG_TOKENS = frozenset({
+    "السعر", "سعر", "price", "صوره", "photo", "image",
+    "منتج", "product", "catalog", "كتalog",
+})
+_PRODUCT_UNIT_TOKENS = frozenset({
+    "كيلo", "kg", "جرام", "gram", "لتر", "liter", "ml", "حجم", "size",
+})
+
+
+def _has_explicit_payment_indicators(
+    *,
+    success_hits: List[str],
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    bill_hits: List[str],
+    context_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+) -> bool:
+    """True when the blob carries receipt/payment-screen language beyond
+    a bare currency amount."""
+    if success_hits or pre_review_hits or generic_hits or bill_hits:
+        return True
+    if iban_present or reference_number_present or filename_signals_receipt:
+        return True
+    if transfer_linkage.get("bank_present") or transfer_linkage.get("beneficiary_present"):
+        return True
+    return bool([
+        h for h in context_hits if h not in _PRICE_ONLY_CONTEXT_TOKENS
+    ])
+
+
+def _is_product_or_catalog_content(
+    blob: str,
+    *,
+    success_hits: List[str],
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    bill_hits: List[str],
+    context_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+) -> bool:
+    """True for product photos, catalog captions, or price-tag OCR that
+    should stay on the vision/brain path even when an amount is present
+    or the funnel is awaiting a receipt."""
+    if _has_explicit_payment_indicators(
+        success_hits=success_hits,
+        pre_review_hits=pre_review_hits,
+        generic_hits=generic_hits,
+        bill_hits=bill_hits,
+        context_hits=context_hits,
+        iban_present=iban_present,
+        reference_number_present=reference_number_present,
+        filename_signals_receipt=filename_signals_receipt,
+        transfer_linkage=transfer_linkage,
+    ):
+        return False
+
+    product_hits = _scan_phrases(blob, _PRODUCT_CATALOG_PHRASES)
+    if not product_hits:
+        return False
+    if any(h in _STRONG_PRODUCT_CATALOG_TOKENS for h in product_hits):
+        return True
+    unit_hits = [h for h in product_hits if h in _PRODUCT_UNIT_TOKENS]
+    return bool(unit_hits and len(product_hits) >= 2)
+
+
 def _is_payment_or_receipt_like_context(
     *,
     pre_review_hits: List[str],
@@ -603,8 +699,6 @@ def _is_payment_or_receipt_like_context(
         h for h in context_hits if h not in _PRICE_ONLY_CONTEXT_TOKENS
     ]
     if non_price_context:
-        return True
-    if extra_context and bool(extra_context.get("awaiting_payment_receipt")):
         return True
     return False
 
@@ -909,6 +1003,24 @@ def classify_payment_evidence(
     signals["filename_signals_receipt"]    = _fname_signals_receipt
     signals["pre_review_imperative_match"] = _body_has_imperative
 
+    if _is_product_or_catalog_content(
+        blob,
+        success_hits=success_hits,
+        pre_review_hits=pre_review_hits,
+        generic_hits=generic_hits,
+        bill_hits=bill_hits,
+        context_hits=context_hits,
+        iban_present=iban_present,
+        reference_number_present=reference_number_present,
+        filename_signals_receipt=_fname_signals_receipt,
+        transfer_linkage=transfer_linkage,
+    ):
+        return {
+            "status":  PAYMENT_EVIDENCE_NOT_PAYMENT,
+            "reason":  "product_or_catalog_content",
+            "signals": {**signals, "product_catalog_hits": _scan_phrases(blob, _PRODUCT_CATALOG_PHRASES)},
+        }
+
     if bill_hits and not transfer_linkage.get("merchant_linkage_present"):
         return {
             "status":  PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
@@ -920,16 +1032,19 @@ def classify_payment_evidence(
         amount_present
         and not transfer_linkage.get("merchant_linkage_present")
         and not pre_review_hits
-        and _is_payment_or_receipt_like_context(
-            pre_review_hits=pre_review_hits,
-            generic_hits=generic_hits,
-            context_hits=context_hits,
-            bill_hits=bill_hits,
-            iban_present=iban_present,
-            reference_number_present=reference_number_present,
-            filename_signals_receipt=_fname_signals_receipt,
-            transfer_linkage=transfer_linkage,
-            extra_context=extra_context,
+        and (
+            _is_payment_or_receipt_like_context(
+                pre_review_hits=pre_review_hits,
+                generic_hits=generic_hits,
+                context_hits=context_hits,
+                bill_hits=bill_hits,
+                iban_present=iban_present,
+                reference_number_present=reference_number_present,
+                filename_signals_receipt=_fname_signals_receipt,
+                transfer_linkage=transfer_linkage,
+                extra_context=extra_context,
+            )
+            or bool(extra_context and extra_context.get("awaiting_payment_receipt"))
         )
     ):
         return {
