@@ -51,8 +51,11 @@ def _norm(text: str) -> str:
 
 
 def _session_dict(state: Any) -> dict:
-    raw = getattr(state, "commerce_session", None) or {}
-    return dict(raw) if isinstance(raw, dict) else {}
+    if isinstance(state, dict):
+        raw = state.get("commerce_session")
+    else:
+        raw = getattr(state, "commerce_session", None)
+    return dict(raw or {}) if isinstance(raw, dict) else {}
 
 
 def _write_session(state: Any, session: Mapping[str, Any]) -> None:
@@ -238,6 +241,10 @@ def customer_allows_staff_vcard(
     employee_not_responding: Any = None,
     location_branch_failure: Any = None,
     customer_intent: bool = False,
+    store_arrival: Any = None,
+    policy_allowed: bool = False,
+    explicit_contact_intent: bool = False,
+    history: Any = None,
 ) -> tuple[bool, str]:
     """Return (allowed, skip_reason) for vCard attachment."""
     blocked, reason = staff_vcard_delivery_blocked(
@@ -248,6 +255,33 @@ def customer_allows_staff_vcard(
     )
     if blocked:
         return False, reason
+
+    try:
+        from .staff_escalation_decision_guard import validate_staff_contact_action  # noqa: PLC0415
+
+        verdict = validate_staff_contact_action(
+            customer_msg=customer_msg or "",
+            commerce_session=commerce_session,
+            state=state,
+            history=history,
+            store_arrival=store_arrival,
+            policy_allowed=policy_allowed,
+            employee_not_responding=employee_not_responding,
+            location_branch_failure=location_branch_failure,
+            explicit_contact_intent=explicit_contact_intent or customer_intent,
+        )
+        if not verdict.allowed:
+            return False, verdict.evidence or verdict.reason
+        return True, verdict.evidence or "customer_intent_evidence"
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — escalation guard must not block legacy allow path
+        logger.debug("[STAFF_CONTACT] escalation_guard_failed err=%s", exc)
+
+    if not (
+        customer_intent
+        or explicit_contact_intent
+        or has_explicit_staff_contact_request(customer_msg or "")
+    ):
+        return False, "no_staff_intent_evidence"
     return True, "customer_intent_evidence"
 
 

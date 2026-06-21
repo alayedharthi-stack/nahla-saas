@@ -1884,6 +1884,12 @@ def apply_staff_contact_safety_net(
             customer_msg=customer_msg or "",
             commerce_session=commerce_session,
             customer_intent=bool(customer_intent),
+            store_arrival=_store_arrival,
+            policy_allowed=_policy_allowed,
+            explicit_contact_intent=bool(explicit_customer_intent),
+            employee_not_responding=_employee_not_responding,
+            location_branch_failure=_location_branch_failure,
+            history=_history_list,
         )
         if not _vcard_allowed:
             logger.info(

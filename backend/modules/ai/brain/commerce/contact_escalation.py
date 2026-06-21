@@ -219,9 +219,37 @@ class StoreArrivalVerdict:
 _STORE_ARRIVAL_RE = re.compile(
     r"(?:"
     r"(?:^|\s)(?:انا|أنا)\s*(?:جاي|جا(?:ي|يك)(?:كم|ك|ين)?|في\s*الطريق)"
-    r"|(?:^|\s)وصل(?:ت|نا|وا)?(?:\s*(?:ل|ال)?(?:المعرض|الفرع|المحل|الباب))?"
+    r"|(?:^|\s)وصل(?:ت|نا|وا)?\s*(?:ل(?:ل)?(?:معرض|فرع|محل|باب)|(?:ل\s*)?(?:المعرض|الفرع|المحل|الباب))"
+    r"|(?:^|\s)(?:انا|أنا)\s*وصل(?:ت|نا|وا)?\s*(?:ل(?:ل)?(?:معرض|فرع|محل|باب)|(?:ل\s*)?(?:المعرض|الفرع|المحل|الباب))"
     r"|(?:^|\s)عند\s*(?:ال)?(?:ب(?:و)?اب(?:ة)?|باب)(?:\s*(?:ال)?(?:المعرض|الفرع|المحل))?"
     r"|(?:^|\s)عند\s*(?:ال)?(?:المعرض|الفرع|المحل|الباب)"
+    r"|(?:^|\s)(?:انا|أنا)\s*(?:عند|بر(?:ا|ه))\s*(?:المعرض|الفرع|الباب|البواب|الحوش)"
+    r"|عندكم\s*(?:في)?\s*المعرض"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Store-visit destination markers — when present, bare «وصل» means arrival not delivery.
+_STORE_VISIT_DESTINATION_RE = re.compile(
+    r"(?:"
+    r"ل(?:ل)?(?:معرض|فرع|محل|باب)|"
+    r"(?:ل\s*)?(?:المعرض|الفرع|المحل|الباب)|"
+    r"عند\s*(?:ال)?(?:ب(?:و)?اب(?:ة)?|باب|المعرض|الفرع|المحل)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Delivery received / thanks — NOT in-store arrival.
+_DELIVERY_RECEIVED_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"^(?:وصل|وصلت|وصلني|وصلنا)(?:\s|$|[،,.!?])"
+    r"|(?:^|\s)وصل(?:\s|$)\s*الله"
+    r"|(?:^|\s)وصل(?:\s|$).*?(?:بيض|بارك|الله|وجه|شكر|حلال|مال)"
+    r"|(?:^|\s)وصل(?:ت|نا|ني)?\s*(?:ال)?(?:عسل|منتج|طلب|شحن(?:ة|ه)?|الطلب)"
+    r"|(?:ال)?(?:عسل|منتج|طلب|شحن(?:ة|ه)?|الطلب(?:ية)?)\s*وصل(?:ت|نا|ني)?"
+    r"|بيض\s*الله|"
+    r"الله\s*يبارك|"
+    r"بارك\s*(?:ال)?(?:لك|كم|في)"
     r")",
     re.IGNORECASE | re.UNICODE,
 )
@@ -257,6 +285,9 @@ def classify_store_arrival(
     norm = _norm(message)
     if not norm:
         return None
+    if _DELIVERY_RECEIVED_CONTEXT_RE.search(norm):
+        if not _STORE_VISIT_DESTINATION_RE.search(norm):
+            return None
     if _SHIPPING_STATUS_ARRIVAL_RE.search(norm):
         return None
     if _COMPETING_INTENT_RE.search(norm):
