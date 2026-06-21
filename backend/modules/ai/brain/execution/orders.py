@@ -1647,25 +1647,26 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
 
     slots = dict(slots or {})
 
-    if not (
-        slots.get("customer_first_name")
-        or slots.get("customer_name")
-        or slots.get("full_name")
-        or slots.get("first_name")
+    extracted = extract_ordering_slots(message) or {}
+    for key in (
+        "customer_name",
+        "customer_first_name",
+        "customer_last_name",
+        "customer_phone",
+        "city",
+        "short_address_code",
+        "google_maps_url",
+        "latitude",
+        "longitude",
+        "address_line",
+        "street",
+        "district",
+        "postal_code",
+        "building_number",
+        "additional_number",
     ):
-        extracted = extract_ordering_slots(message) or {}
-        for key in (
-            "customer_name",
-            "customer_first_name",
-            "customer_last_name",
-            "city",
-            "short_address_code",
-            "google_maps_url",
-            "latitude",
-            "longitude",
-        ):
-            if extracted.get(key) and not slots.get(key):
-                slots[key] = extracted[key]
+        if extracted.get(key) and not slots.get(key):
+            slots[key] = extracted[key]
 
     quantity = _to_int(slots.get("quantity"))
     if quantity:
@@ -1677,6 +1678,7 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     city = str(slots.get("city") or "").strip()
     country = str(slots.get("country") or "").strip()
     email = str(slots.get("customer_email") or slots.get("email") or "").strip()
+    phone = str(slots.get("customer_phone") or slots.get("phone") or "").strip()
     short_code = str(slots.get("short_address_code") or "").strip().upper()
     maps_url = str(slots.get("google_maps_url") or slots.get("location_url") or "").strip()
     address_line = str(slots.get("address_line") or slots.get("address") or "").strip()
@@ -1713,6 +1715,8 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
         prep.country = country
     if email:
         prep.customer_email = email
+    if phone:
+        prep.customer_phone = phone
     if short_code:
         prep.short_address_code = short_code
     if maps_url:

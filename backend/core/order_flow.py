@@ -953,6 +953,9 @@ def maybe_handle_payment_evidence_inbound(
     if pe_status not in (
         "pre_transfer_review",
         "needs_confirmation",
+        "bill_payment_unrelated",
+        "amount_only_insufficient",
+        "invalid_receipt",
     ):
         return None
 
@@ -1226,6 +1229,25 @@ def maybe_handle_payment_evidence_inbound(
             # shipping a hardcoded "send the final receipt" line
             # that would confuse a customer whose receipt simply
             # went to the wrong account.
+            return None
+
+        if str(pe_status or "").strip().lower() != "confirmed":
+            reply_text = compose_payment_evidence_reply(
+                str(pe_status or ""),
+                awaiting_receipt=awaiting,
+            )
+            if reply_text:
+                logger.info(
+                    "[PAYMENT_EVIDENCE] active-order promotion skipped "
+                    "tenant=%s phone=*%s pe_status=%s reason=%s",
+                    tenant_id, (phone[-4:] if phone else ""),
+                    pe_status, md.get("payment_evidence_reason"),
+                )
+                return {
+                    "reply_text": reply_text,
+                    "summary": summary,
+                    "state_patch": {},
+                }
             return None
 
         logger.info(

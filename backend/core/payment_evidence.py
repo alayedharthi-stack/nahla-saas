@@ -81,12 +81,18 @@ PAYMENT_EVIDENCE_CONFIRMED            = "confirmed"
 PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW  = "pre_transfer_review"
 PAYMENT_EVIDENCE_NEEDS_CONFIRMATION   = "needs_confirmation"
 PAYMENT_EVIDENCE_NOT_PAYMENT          = "not_payment"
+PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED = "bill_payment_unrelated"
+PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT = "amount_only_insufficient"
+PAYMENT_EVIDENCE_INVALID_RECEIPT = "invalid_receipt"
 
 _ALL_STATUSES = frozenset({
     PAYMENT_EVIDENCE_CONFIRMED,
     PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
     PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
     PAYMENT_EVIDENCE_NOT_PAYMENT,
+    PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    PAYMENT_EVIDENCE_INVALID_RECEIPT,
 })
 
 
@@ -374,6 +380,26 @@ _GENERIC_PAYMENT_HINTS: Tuple[str, ...] = tuple(_normalise(s) for s in (
     "invoice",
 ))
 
+_BILL_PAYMENT_MARKERS: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "تم سداد الفاتوره",
+    "تم سداد الفاتورة",
+    "سداد الفاتوره",
+    "سداد الفاتورة",
+    "سداد فاتوره",
+    "سداد فاتورة",
+    "رقم الفاتوره",
+    "رقم الفاتورة",
+    "bill payment",
+    "bill paid",
+    "invoice paid",
+    "sadad",
+))
+_AMOUNT_ONLY_RE = re.compile(
+    r"(?:\d+(?:[.,]\d{1,2})?\s*(?:ر\.?\s*س|ريال|sar)\b|"
+    r"\b(?:sar|ريال)\s*\d+(?:[.,]\d{1,2})?)",
+    re.IGNORECASE,
+)
+
 # ── Hard-negative lexicon (May 2026 hotfix) ─────────────────────────
 # A regression in production (Kaaba/Hajj greeting card was classified
 # as payment evidence → bot asked the customer for a missing product
@@ -534,6 +560,45 @@ def _scan_phrases(blob: str, phrases: Tuple[str, ...]) -> List[str]:
         if p and p in blob:
             hits.append(p)
     return hits
+
+
+def _has_amount_signal(blob: str) -> bool:
+    return bool(_AMOUNT_ONLY_RE.search(blob or ""))
+
+
+def _bank_transfer_linkage(text: Optional[str], *, filename: Optional[str]) -> Dict[str, Any]:
+    """Return structural receipt signals that can tie an attachment to a transfer.
+
+    This does not verify the tenant account. It only distinguishes a bank-transfer
+    artifact from an unrelated bill-payment or amount-only screenshot.
+    """
+    linked = {
+        "amount_present": _has_amount_signal(_normalise(text)),
+        "beneficiary_present": False,
+        "iban_present": False,
+        "reference_present": False,
+        "bank_present": False,
+        "merchant_linkage_present": False,
+    }
+    try:
+        from core.bank_transfer_receipt_resolver import (  # noqa: PLC0415
+            extract_bank_receipt_fields,
+        )
+
+        fields = extract_bank_receipt_fields(text, filename=filename)
+        linked["amount_present"] = bool(linked["amount_present"] or fields.amount)
+        linked["beneficiary_present"] = bool(fields.beneficiary_name)
+        linked["iban_present"] = bool(fields.beneficiary_iban)
+        linked["reference_present"] = bool(fields.reference_number)
+        linked["bank_present"] = bool(fields.bank_name)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — receipt resolver probe is advisory
+        pass
+    linked["merchant_linkage_present"] = bool(
+        linked["beneficiary_present"]
+        or linked["iban_present"]
+        or linked["reference_present"]
+    )
+    return linked
 
 
 # ── Filename hints (May 2026 hotfix #2) ────────────────────────────
@@ -755,6 +820,26 @@ def classify_payment_evidence(
         "reference_number_present": reference_number_present,
         "weak_success_present":     bool(weak_success_hits),
     }
+    transfer_linkage = _bank_transfer_linkage(text, filename=filename)
+    transfer_linkage["iban_present"] = bool(
+        transfer_linkage.get("iban_present") or iban_present
+    )
+    transfer_linkage["reference_present"] = bool(
+        transfer_linkage.get("reference_present") or reference_number_present
+    )
+    transfer_linkage["merchant_linkage_present"] = bool(
+        transfer_linkage.get("merchant_linkage_present")
+        or transfer_linkage.get("iban_present")
+        or transfer_linkage.get("reference_present")
+    )
+    bill_hits = _scan_phrases(blob, _BILL_PAYMENT_MARKERS)
+    amount_present = bool(
+        transfer_linkage.get("amount_present")
+        or any(h in context_hits for h in ("ريال", "sar", "المبلغ", "amount"))
+    )
+    signals["bill_payment_hits"] = bill_hits
+    signals["amount_present"] = amount_present
+    signals["bank_transfer_linkage"] = transfer_linkage
 
     # ── Decision tree ───────────────────────────────────────────
     # Priority (top wins):
@@ -781,7 +866,31 @@ def classify_payment_evidence(
     signals["filename_signals_receipt"]    = _fname_signals_receipt
     signals["pre_review_imperative_match"] = _body_has_imperative
 
+    if bill_hits and not transfer_linkage.get("merchant_linkage_present"):
+        return {
+            "status":  PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+            "reason":  "bill_payment_without_transfer_linkage",
+            "signals": signals,
+        }
+
+    if (
+        amount_present
+        and not transfer_linkage.get("merchant_linkage_present")
+        and not pre_review_hits
+    ):
+        return {
+            "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+            "reason":  "amount_without_merchant_linkage",
+            "signals": signals,
+        }
+
     if success_hits:
+        if not transfer_linkage.get("merchant_linkage_present"):
+            return {
+                "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+                "reason":  "success_phrase_without_transfer_linkage",
+                "signals": signals,
+            }
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
             "reason":  "strong_success_phrase",
@@ -846,7 +955,7 @@ def classify_payment_evidence(
     if _fname_signals_receipt and (
         pre_review_hits or context_hits or iban_present
         or weak_success_hits or generic_hits
-    ):
+    ) and transfer_linkage.get("merchant_linkage_present"):
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
             "reason":  "receipt_filename_with_payment_context",
@@ -875,7 +984,7 @@ def classify_payment_evidence(
         or (len(context_hits) >= 1 and len(generic_hits) >= 1)
     )
 
-    if weak_success_hits and has_payment_context:
+    if weak_success_hits and has_payment_context and transfer_linkage.get("merchant_linkage_present"):
         # Pair check: "ناجحة"/"Successful" on a screen that ALSO has
         # IBAN/bank/amount → real completed transfer. On its own
         # this token can mean anything ("ناجحة في الاختبار").
@@ -942,6 +1051,10 @@ _NEEDS_CONFIRMATION_REPLY_AR = (
     "وصلني الملف 👍\n"
     "بعد التحويل أرسل لي الإيصال النهائي وأتابع طلبك بإذن الله."
 )
+_INSUFFICIENT_RECEIPT_REPLY_AR = (
+    "وصلتني الصورة، لكن ما فيها بيانات كافية تثبت التحويل لحساب المتجر. "
+    "أرسل إيصال التحويل البنكي النهائي الذي يظهر المستفيد أو الآيبان أو رقم المرجع."
+)
 
 
 def compose_payment_evidence_reply(
@@ -963,6 +1076,12 @@ def compose_payment_evidence_reply(
         return _PRE_TRANSFER_REVIEW_REPLY_AR
     if status == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION:
         return _NEEDS_CONFIRMATION_REPLY_AR
+    if status in (
+        PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+        PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+        PAYMENT_EVIDENCE_INVALID_RECEIPT,
+    ):
+        return _INSUFFICIENT_RECEIPT_REPLY_AR
     return None
 
 
@@ -994,6 +1113,7 @@ def log_payment_evidence_verdict(
             "payment_evidence_status=%s payment_evidence_reason=%s "
             "success_hits=%d pre_review_hits=%d context_hits=%d "
             "generic_hits=%d iban=%s ref=%s weak_success=%s "
+            "payment_attachment_classification=%s receipt_verdict=%s "
             "extra=%s",
             tenant_id, masked_phone, source,
             verdict.get("status"), verdict.get("reason"),
@@ -1004,6 +1124,8 @@ def log_payment_evidence_verdict(
             bool(sig.get("iban_present")),
             bool(sig.get("reference_number_present")),
             bool(sig.get("weak_success_present")),
+            verdict.get("status"),
+            verdict.get("status"),
             extra or {},
         )
     except Exception:  # noqa: silent-ok — telemetry must not block payment classify
@@ -1015,6 +1137,9 @@ __all__ = [
     "PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW",
     "PAYMENT_EVIDENCE_NEEDS_CONFIRMATION",
     "PAYMENT_EVIDENCE_NOT_PAYMENT",
+    "PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED",
+    "PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT",
+    "PAYMENT_EVIDENCE_INVALID_RECEIPT",
     "classify_payment_evidence",
     "compose_payment_evidence_reply",
     "log_payment_evidence_verdict",

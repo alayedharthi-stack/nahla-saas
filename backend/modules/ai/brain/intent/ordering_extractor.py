@@ -119,7 +119,9 @@ _ARABIC_NON_NAME_TOKENS = {
     "ابغى", "ابي", "ابى", "اريد", "أرغب", "ممكن", "لو سمحت", "وش",
     "وين", "كيف", "متى", "كم", "ليش", "ليه", "حقي", "ذا", "هذا",
     "هذه", "هذي", "ذي", "هاد", "بدي", "اشتري", "أرسل", "ارسل",
-    "موقعي", "موقع", "هنا",
+    "موقعي", "موقع", "هنا", "العنوان", "عنوان", "العنوان الوطني",
+    "العنوان المختصر", "رقم المبنى", "الشارع", "الحي", "الرمز البريدي",
+    "المدينة", "رقم الجوال", "طلح", "صفي", "سمر", "سدر", "شوك",
     # ── Arrival / presence verbs (May 2026 hotfix) ───────────────────
     # Production bug: "وصلت" / "أنا وصلت" / "جايه الحين" were being
     # captured as the customer's name in the order funnel, producing
@@ -154,11 +156,56 @@ _LABEL_CITY_RE = re.compile(
     r"(?:^|[\n/،,\-|])\s*(?:المدينة|المدينه|مدينة التوصيل|مدينة الشحن|مدينة|المنطقة)\s*[:/\-]?\s*([^\n/،,\-|]{2,30})",
     re.IGNORECASE | re.UNICODE | re.MULTILINE,
 )
+_LABEL_PHONE_RE = re.compile(
+    r"(?:^|[\n/،,\-|])\s*(?:رقم\s*الجوال|الجوال|رقم\s*التواصل|الهاتف|phone|mobile)"
+    r"\s*[:/\-]?\s*([+\d٠-٩\s().-]{7,24})",
+    re.IGNORECASE | re.UNICODE | re.MULTILINE,
+)
+_ADDRESS_FIELD_RES = {
+    "building_number": re.compile(
+        r"(?:^|[\n/،,\-|])\s*(?:رقم\s*المبنى|المبنى|building\s*number)"
+        r"\s*[:/\-]?\s*([0-9٠-٩]{3,8})",
+        re.IGNORECASE | re.UNICODE | re.MULTILINE,
+    ),
+    "additional_number": re.compile(
+        r"(?:^|[\n/،,\-|])\s*(?:الرقم\s*الفرعي|الرقم\s*الإضافي|additional\s*number)"
+        r"\s*[:/\-]?\s*([0-9٠-٩]{3,8})",
+        re.IGNORECASE | re.UNICODE | re.MULTILINE,
+    ),
+    "street": re.compile(
+        r"(?:^|[\n/،,\-|])\s*(?:الشارع|شارع|street)\s*[:/\-]?\s*([^\n/،,\-|]{2,60})",
+        re.IGNORECASE | re.UNICODE | re.MULTILINE,
+    ),
+    "district": re.compile(
+        r"(?:^|[\n/،,\-|])\s*(?:الحي|حي|district|neighborhood)\s*[:/\-]?\s*([^\n/،,\-|]{2,60})",
+        re.IGNORECASE | re.UNICODE | re.MULTILINE,
+    ),
+    "postal_code": re.compile(
+        r"(?:^|[\n/،,\-|])\s*(?:الرمز\s*البريدي|postal\s*code|zip)"
+        r"\s*[:/\-]?\s*([0-9٠-٩]{4,8})",
+        re.IGNORECASE | re.UNICODE | re.MULTILINE,
+    ),
+}
 
 # Strip list prefixes like "1- ", "2.", "١- " before name heuristics.
 _NUMBERED_LINE_PREFIX_RE = re.compile(
     r"^\s*(?:[1-9][0-9]?|[١٢٣٤٥٦٧٨٩][٠-٩]{0,2})\s*[-–—.)]\s*",
     re.UNICODE,
+)
+_NON_NAME_LINE_PREFIXES = (
+    "العنوان",
+    "العنوان الوطني",
+    "العنوان المختصر",
+    "رقم المبنى",
+    "الرقم الفرعي",
+    "الرقم الإضافي",
+    "الشارع",
+    "شارع",
+    "الحي",
+    "حي",
+    "الرمز البريدي",
+    "المدينة",
+    "رقم الجوال",
 )
 
 
@@ -168,7 +215,8 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
 
     Returns a (possibly empty) dict with any of:
       customer_name, customer_first_name, customer_last_name,
-      city, short_address_code, google_maps_url, latitude, longitude.
+      city, customer_phone, short_address_code, google_maps_url,
+      latitude, longitude, and structured national-address fields.
 
     Priority order:
       1. Labeled fields ("الاسم X", "المدينة X") — highest precision
@@ -206,6 +254,10 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
     if labeled_city:
         slots["city"] = labeled_city
 
+    labeled_phone = _extract_labeled_phone(text)
+    if labeled_phone:
+        slots["customer_phone"] = labeled_phone
+
     # ── Layer 2: Address: short code + maps URL + GPS coords ──────────
     address_signals = extract_address_signals(text)
     if address_signals.get("short_address_code"):
@@ -216,6 +268,7 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
         slots["latitude"] = address_signals["latitude"]
     if address_signals.get("longitude") is not None:
         slots["longitude"] = address_signals["longitude"]
+    slots.update(_extract_structured_address_fields(text))
 
     # ── Layer 3: Lexicon-based city detection (if not already found) ──
     if not slots.get("city"):
@@ -291,6 +344,46 @@ def _extract_labeled_city(text: str) -> str:
     return _SAUDI_CITIES.get(normalized, raw)
 
 
+def _digits_to_western(text: str) -> str:
+    return (text or "").translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+
+
+def _extract_labeled_phone(text: str) -> str:
+    m = _LABEL_PHONE_RE.search(text)
+    if not m:
+        return ""
+    raw = _digits_to_western(m.group(1))
+    cleaned = re.sub(r"[^\d+]", "", raw)
+    digits = re.sub(r"\D", "", cleaned)
+    if len(digits) < 9:
+        return ""
+    return cleaned
+
+
+def _extract_structured_address_fields(text: str) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+    for key, pattern in _ADDRESS_FIELD_RES.items():
+        m = pattern.search(text or "")
+        if not m:
+            continue
+        value = _digits_to_western((m.group(1) or "").strip())
+        value = re.sub(r"[/،,\-|:]+$", "", value).strip()
+        if value:
+            fields[key] = value
+    if any(fields.get(k) for k in ("street", "district", "postal_code", "building_number")):
+        fields["address_line"] = "، ".join(
+            v for v in (
+                fields.get("street"),
+                fields.get("district"),
+                fields.get("building_number"),
+                fields.get("additional_number"),
+                fields.get("postal_code"),
+            )
+            if v
+        )
+    return fields
+
+
 # ── Internals ───────────────────────────────────────────────────────────
 
 def _detect_city(text: str) -> str:
@@ -329,6 +422,15 @@ def _detect_name(text: str, already_extracted: Dict[str, Any]) -> tuple[str, str
         normalized = _normalize_arabic(line)
         if normalized in _SAUDI_CITIES:
             continue  # this line is a city, not a name
+        if normalized in {_normalize_arabic(t) for t in _ARABIC_NON_NAME_TOKENS}:
+            continue
+        if any(
+            normalized.startswith(_normalize_arabic(prefix))
+            for prefix in _NON_NAME_LINE_PREFIXES
+        ):
+            continue
+        if "كيلو" in normalized or "كيلo" in normalized or "عسل" in normalized:
+            continue
         # Reject lines that still contain address codes (4 letters + 4 digits).
         if re.search(r"[A-Za-z]{4}\d{4}", line.upper()):
             continue

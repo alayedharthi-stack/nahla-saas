@@ -34,7 +34,9 @@ from modules.ai.brain.intent.cart_intent_extractor import (  # noqa: E402
     extract_cart_intents,
     extract_cart_intents_with_context,
 )
+from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots  # noqa: E402
 from modules.ai.brain.types import OrderPreparationState  # noqa: E402
+from modules.ai.brain.execution.orders import _merge_message_details  # noqa: E402
 from services.product_resolver import ProductResolution  # noqa: E402
 
 
@@ -63,6 +65,154 @@ def _resolution(**kwargs) -> ProductResolution:
     )
     defaults.update(kwargs)
     return ProductResolution(**defaults)
+
+
+COMPOUND_ORDER_MESSAGE = """ابي طلب شحن للخبر
+2 كيلو طلح
+1 كيلو صفي
+العنوان
+العنوان المختصر ECDA4350
+رقم المبنى 4350
+الشارع تهامة
+الرقم الفرعي 6516
+الحي/ حي الصواري
+الرمز البريدي 34726
+المدينة/ الخبر
+رقم الجوال: +966 55 683 0483
+سعد خطر الحارثي"""
+
+
+def test_compound_multiline_order_preserves_all_items_and_delivery_slots() -> None:
+    intents = extract_cart_intents(COMPOUND_ORDER_MESSAGE)
+    assert len(intents) == 2
+
+    by_name = {item["product_name"]: item for item in intents}
+    assert by_name["عسل طلح"]["quantity"] == 2
+    assert by_name["عسل طلح"]["variant"] == "1kg"
+    assert by_name["عسل صفي"]["quantity"] == 1
+    assert by_name["عسل صفي"]["variant"] == "1kg"
+
+    slots = extract_ordering_slots(COMPOUND_ORDER_MESSAGE)
+    assert slots["city"] == "الخبر"
+    assert slots["short_address_code"] == "ECDA4350"
+    assert slots["customer_phone"] == "+966556830483"
+    assert slots["customer_name"] == "سعد خطر الحارثي"
+    assert slots["building_number"] == "4350"
+    assert slots["additional_number"] == "6516"
+    assert slots["street"] == "تهامة"
+    assert slots["district"] == "حي الصواري"
+    assert slots["postal_code"] == "34726"
+
+    state = SimpleNamespace(cart_items=[], current_product_focus={})
+    prep = OrderPreparationState()
+    cart, _, changed = maybe_apply_cart_message(
+        state=state,
+        prep=prep,
+        message=COMPOUND_ORDER_MESSAGE,
+    )
+    _merge_message_details(prep, {}, COMPOUND_ORDER_MESSAGE)
+
+    assert changed
+    assert len(cart) == 2
+    assert prep.line_items == cart
+    assert prep.city == "الخبر"
+    assert prep.short_address_code == "ECDA4350"
+    assert prep.customer_phone == "+966556830483"
+    assert prep.customer_first_name == "سعد"
+    assert prep.customer_last_name == "خطر الحارثي"
+
+
+def test_delivery_followup_does_not_reset_compound_order_cart() -> None:
+    state = SimpleNamespace(cart_items=[], current_product_focus={})
+    prep = OrderPreparationState()
+    cart, _, changed = maybe_apply_cart_message(
+        state=state,
+        prep=prep,
+        message=COMPOUND_ORDER_MESSAGE,
+    )
+    assert changed
+    before = [dict(item) for item in cart]
+
+    after, deltas, followup_changed = maybe_apply_cart_message(
+        state=state,
+        prep=prep,
+        message="طلب توصيل",
+    )
+    assert followup_changed is False
+    assert deltas == []
+    assert after == before
+
+
+def test_showroom_contact_reply_is_not_kept_for_compound_order_progress() -> None:
+    prep = OrderPreparationState(
+        line_items=[
+            {"product_name": "عسل طلح", "variant": "1kg", "quantity": 2},
+            {"product_name": "عسل صفي", "variant": "1kg", "quantity": 1},
+        ],
+        cart_deltas=[{"op": "add"}],
+    )
+    state = SimpleNamespace(
+        cart_items=prep.line_items,
+        stage="ordering",
+        to_dict=lambda: {"stage": "ordering", "cart_items": prep.line_items},
+    )
+    reply = maybe_inject_draft_flow_reply(
+        reply="هل تفضل أرسل لك موقع المعرض أو بيانات التواصل؟",
+        order_prep=prep,
+        brain_state=state,
+        cart_changed=True,
+        customer_message=COMPOUND_ORDER_MESSAGE,
+    )
+    assert "موقع المعرض" not in reply
+    assert "بيانات التواصل" not in reply
+
+
+def test_unresolved_compound_order_item_blocks_payment_prompt() -> None:
+    prep = OrderPreparationState(
+        line_items=[
+            {
+                "product_name": "عسل طلح",
+                "product_id": "ext-1",
+                "variant": "1kg",
+                "quantity": 2,
+                "match_status": ITEM_STATUS_CONFIRMED,
+                "unit_price": "120",
+            },
+            {
+                "product_name": "عسل صفي",
+                "variant": "1kg",
+                "quantity": 1,
+                "match_status": ITEM_STATUS_CUSTOM_UNMATCHED,
+            },
+        ],
+        cart_deltas=[{"op": "add"}],
+        city="الخبر",
+        short_address_code="ECDA4350",
+    )
+    reply = compose_wa_order_flow_reply(
+        order_prep=prep,
+        brain_state={"cart_items": prep.line_items},
+        cart_changed=True,
+        existing_reply="",
+    )
+    assert reply
+    assert "ادفع" not in reply
+    assert "الدفع" not in reply
+
+
+def test_safi_alias_survives_catalog_miss_as_review_item() -> None:
+    with patch("services.product_resolver.resolve_best_effort", return_value=None):
+        with patch("core.wa_cart_catalog_resolver._find_catalog_candidates", return_value=[]):
+            out = resolve_cart_line_items(
+                MagicMock(),
+                33,
+                [{"product_name": "عسل صفي", "query_hint": "عسل صفي", "quantity": 1}],
+            )
+    assert out.items[0]["product_name"] == "عسل صفي"
+    assert out.items[0]["match_status"] in (
+        ITEM_STATUS_CUSTOM_UNMATCHED,
+        ITEM_STATUS_NEEDS_REVIEW,
+    )
 
 
 # ── Scenario 1: طلح أسود → كبير → ٤ حبات ────────────────────────────────

@@ -14,6 +14,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from core.payment_media_metadata import flatten_inbound_payment_metadata
+from core.payment_evidence import (
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+    PAYMENT_EVIDENCE_CONFIRMED,
+    PAYMENT_EVIDENCE_INVALID_RECEIPT,
+    PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
+    PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+)
 from core.payment_receipt_submission import (
     PAYMENT_RECEIPT_UNPARSED_ACK_AR,
     build_payment_submitted_state_patch,
@@ -64,8 +72,11 @@ _EXCLUDED_KINDS = frozenset({
 })
 
 _PRE_TRANSFER_PE_STATUSES = frozenset({
-    "pre_transfer_review",
-    "needs_confirmation",
+    PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+    PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
+    PAYMENT_EVIDENCE_BILL_PAYMENT_UNRELATED,
+    PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+    PAYMENT_EVIDENCE_INVALID_RECEIPT,
 })
 
 _PAYMENT_FLOW_STATUSES = frozenset({
@@ -169,6 +180,15 @@ def blocks_receipt_received_ack(
     return False
 
 
+def _metadata_has_receipt_evidence(metadata: Optional[Dict[str, Any]]) -> bool:
+    md = flatten_inbound_payment_metadata(metadata or {})
+    pe = str(md.get("payment_evidence_status") or "").strip().lower()
+    if pe == PAYMENT_EVIDENCE_CONFIRMED:
+        return True
+    parsed = parse_inbound_receipt(md)
+    return bool(parsed.parsed)
+
+
 def is_excluded_non_receipt_attachment(
     metadata: Optional[Dict[str, Any]],
     *,
@@ -180,9 +200,11 @@ def is_excluded_non_receipt_attachment(
         return True
     if blocks_receipt_received_ack(metadata, summary=summary):
         return True
+    if _metadata_has_receipt_evidence(metadata):
+        return False
     s = summary or {}
     if bool(s.get("awaiting_payment_receipt")):
-        return False
+        return True
     md = flatten_inbound_payment_metadata(metadata or {})
     pe = str(md.get("payment_evidence_status") or "").strip().lower()
     reason = str(md.get("payment_evidence_reason") or "").strip().lower()
@@ -193,8 +215,8 @@ def is_excluded_non_receipt_attachment(
     if kind in _EXCLUDED_KINDS and not filename_suggests_receipt(md):
         return True
     if pe == "not_payment" and not filename_suggests_receipt(md):
-        if mime_suggests_receipt(md) and payment_context:
-            return False
+        return True
+    if pe == "not_payment":
         return True
     return False
 
@@ -220,14 +242,10 @@ def is_likely_payment_receipt_attachment(
 
     md = flatten_inbound_payment_metadata(metadata or {})
     kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip().lower()
+    if _metadata_has_receipt_evidence(md):
+        return True
     if kind == "payment_receipt":
-        return True
-    if filename_suggests_receipt(md):
-        return True
-    if mime_suggests_receipt(md):
-        return True
-    if bool(summary and summary.get("awaiting_payment_receipt")):
-        return True
+        return str(md.get("payment_evidence_status") or "").strip().lower() == PAYMENT_EVIDENCE_CONFIRMED
     return False
 
 
