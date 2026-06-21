@@ -1263,8 +1263,49 @@ class MerchantBrain:
                 _cds_exc,
             )
 
+        # ── 3.99 Turn Understanding + Turn Arbiter (Phase 1 shadow / 2A enforce prep)
+        try:
+            from .turn.shadow import prepare_turn_arbitration  # noqa: PLC0415
+
+            prepare_turn_arbitration(ctx)
+        except Exception as _tas_exc:  # noqa: BLE001  # noqa: silent-ok — turn arbiter prep must not block decide
+            logger.debug(
+                "[TURN_ARBITER_SHADOW] pre_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _tas_exc,
+            )
+
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
+        _legacy_decision_for_shadow = decision
+        _enforce_result = None
+
+        try:
+            from .turn.enforce import maybe_enforce_turn_decision  # noqa: PLC0415
+
+            decision, _enforce_result = maybe_enforce_turn_decision(ctx, decision)
+        except Exception as _tae_exc:  # noqa: BLE001  # noqa: silent-ok — turn arbiter enforce must not block decide
+            logger.debug(
+                "[TURN_ARBITER_ENFORCE] skipped tenant=%s err=%s",
+                tenant_id,
+                _tae_exc,
+            )
+            _enforce_result = None
+
+        try:
+            from .turn.shadow import complete_turn_shadow_telemetry  # noqa: PLC0415
+
+            complete_turn_shadow_telemetry(
+                ctx,
+                _legacy_decision_for_shadow,
+                enforce_result=_enforce_result,
+            )
+        except Exception as _tas_post_exc:  # noqa: BLE001  # noqa: silent-ok — turn shadow telemetry must not block decide
+            logger.debug(
+                "[TURN_ARBITER_SHADOW] post_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _tas_post_exc,
+            )
 
         try:
             from modules.ai.brain.commerce.gift_order_gate import (  # noqa: PLC0415
@@ -1277,7 +1318,7 @@ class MerchantBrain:
                 message=message or "",
                 intent_name=str(getattr(intent, "name", "") or ""),
             )
-        except Exception as _pcc_clear_exc:  # noqa: BLE001
+        except Exception as _pcc_clear_exc:  # noqa: BLE001  # noqa: silent-ok — pending cart clear must not block decide
             logger.debug(
                 "[GIFT_ORDER_GATE] pending_cart clear skipped tenant=%s err=%s",
                 tenant_id,
