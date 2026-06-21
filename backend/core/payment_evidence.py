@@ -566,6 +566,49 @@ def _has_amount_signal(blob: str) -> bool:
     return bool(_AMOUNT_ONLY_RE.search(blob or ""))
 
 
+# Currency / price labels alone do not make a product caption payment-like.
+_PRICE_ONLY_CONTEXT_TOKENS = frozenset({
+    "ريال", "sar", "ر.س", "amount", "المبلغ", "transfer amount",
+})
+
+
+def _is_payment_or_receipt_like_context(
+    *,
+    pre_review_hits: List[str],
+    generic_hits: List[str],
+    context_hits: List[str],
+    bill_hits: List[str],
+    iban_present: bool,
+    reference_number_present: bool,
+    filename_signals_receipt: bool,
+    transfer_linkage: Dict[str, Any],
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when OCR/caption looks like a payment screen or receipt attempt.
+
+    Product photos with a price tag (amount + ``ريال`` only) stay False so
+    they classify as ``not_payment``. ``amount_only_insufficient`` applies
+    only when the blob is already payment-contextual but lacks merchant
+    transfer linkage.
+    """
+    if bill_hits or pre_review_hits:
+        return True
+    if iban_present or reference_number_present or filename_signals_receipt:
+        return True
+    if generic_hits:
+        return True
+    if transfer_linkage.get("bank_present") or transfer_linkage.get("beneficiary_present"):
+        return True
+    non_price_context = [
+        h for h in context_hits if h not in _PRICE_ONLY_CONTEXT_TOKENS
+    ]
+    if non_price_context:
+        return True
+    if extra_context and bool(extra_context.get("awaiting_payment_receipt")):
+        return True
+    return False
+
+
 def _bank_transfer_linkage(text: Optional[str], *, filename: Optional[str]) -> Dict[str, Any]:
     """Return structural receipt signals that can tie an attachment to a transfer.
 
@@ -877,6 +920,17 @@ def classify_payment_evidence(
         amount_present
         and not transfer_linkage.get("merchant_linkage_present")
         and not pre_review_hits
+        and _is_payment_or_receipt_like_context(
+            pre_review_hits=pre_review_hits,
+            generic_hits=generic_hits,
+            context_hits=context_hits,
+            bill_hits=bill_hits,
+            iban_present=iban_present,
+            reference_number_present=reference_number_present,
+            filename_signals_receipt=_fname_signals_receipt,
+            transfer_linkage=transfer_linkage,
+            extra_context=extra_context,
+        )
     ):
         return {
             "status":  PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,

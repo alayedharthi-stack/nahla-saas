@@ -643,6 +643,18 @@ def test_general_product_image_caption_is_not_payment() -> None:
     assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
 
 
+def test_bare_amount_without_payment_context_is_not_payment() -> None:
+    """A lone currency amount outside an awaiting-receipt funnel is not
+    payment-like — it must not escalate to amount_only_insufficient."""
+    from core.payment_evidence import (
+        classify_payment_evidence,
+        PAYMENT_EVIDENCE_NOT_PAYMENT,
+    )
+
+    v = classify_payment_evidence("472.13 ريال")
+    assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
+
+
 def test_real_receipt_still_classifies_as_confirmed() -> None:
     """Lock-in: tightening the noise floor must NOT block actual
     completed-transfer screenshots from firing."""
