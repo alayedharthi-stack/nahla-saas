@@ -1268,7 +1268,7 @@ class MerchantBrain:
             from .turn.shadow import prepare_turn_arbitration  # noqa: PLC0415
 
             prepare_turn_arbitration(ctx)
-        except Exception as _tas_exc:  # noqa: BLE001
+        except Exception as _tas_exc:  # noqa: BLE001  # noqa: silent-ok — turn arbiter prep must not block decide
             logger.debug(
                 "[TURN_ARBITER_SHADOW] pre_decide skipped tenant=%s err=%s",
                 tenant_id,
@@ -1284,7 +1284,7 @@ class MerchantBrain:
             from .turn.enforce import maybe_enforce_turn_decision  # noqa: PLC0415
 
             decision, _enforce_result = maybe_enforce_turn_decision(ctx, decision)
-        except Exception as _tae_exc:  # noqa: BLE001
+        except Exception as _tae_exc:  # noqa: BLE001  # noqa: silent-ok — turn arbiter enforce must not block decide
             logger.debug(
                 "[TURN_ARBITER_ENFORCE] skipped tenant=%s err=%s",
                 tenant_id,
@@ -1300,7 +1300,7 @@ class MerchantBrain:
                 _legacy_decision_for_shadow,
                 enforce_result=_enforce_result,
             )
-        except Exception as _tas_post_exc:  # noqa: BLE001
+        except Exception as _tas_post_exc:  # noqa: BLE001  # noqa: silent-ok — turn shadow telemetry must not block decide
             logger.debug(
                 "[TURN_ARBITER_SHADOW] post_decide skipped tenant=%s err=%s",
                 tenant_id,
@@ -1318,7 +1318,7 @@ class MerchantBrain:
                 message=message or "",
                 intent_name=str(getattr(intent, "name", "") or ""),
             )
-        except Exception as _pcc_clear_exc:  # noqa: BLE001
+        except Exception as _pcc_clear_exc:  # noqa: BLE001  # noqa: silent-ok — pending cart clear must not block decide
             logger.debug(
                 "[GIFT_ORDER_GATE] pending_cart clear skipped tenant=%s err=%s",
                 tenant_id,

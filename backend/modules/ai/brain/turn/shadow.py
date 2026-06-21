@@ -33,7 +33,7 @@ def prepare_turn_arbitration(ctx: BrainContext) -> Optional[TurnUnderstanding]:
         ctx.turn_understanding_shadow = understanding  # type: ignore[attr-defined]
         ctx.turn_arbitration_shadow = arbitration  # type: ignore[attr-defined]
         return understanding
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — turn arbiter prep must not block decide
         logger.debug(
             "[TURN_ARBITER_SHADOW] pre_decide failed tenant=%s err=%s",
             getattr(ctx, "tenant_id", None),
@@ -107,7 +107,7 @@ def complete_turn_shadow_telemetry(
         )
         ctx.turn_shadow_telemetry = telemetry  # type: ignore[attr-defined]
         return telemetry
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — turn shadow telemetry must not block decide
         logger.debug(
             "[TURN_ARBITER_SHADOW] post_decide failed tenant=%s err=%s",
             getattr(ctx, "tenant_id", None),

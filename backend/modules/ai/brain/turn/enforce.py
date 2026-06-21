@@ -74,7 +74,7 @@ def _apply_suspend_scope(ctx: BrainContext, understanding: TurnUnderstanding) ->
             )
 
             clear_active_order_context(state, reason="turn_arbiter_enforce_suspend")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — stale checkout suspend is best-effort
         logger.debug(
             "[TURN_ARBITER_ENFORCE] clear_active_order_context failed tenant=%s err=%s",
             ctx.tenant_id,
@@ -84,7 +84,7 @@ def _apply_suspend_scope(ctx: BrainContext, understanding: TurnUnderstanding) ->
         try:
             state.last_question_asked = ""
             state.last_question_answered = True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — duck-typed state patch is best-effort
             pass
 
 
@@ -118,7 +118,7 @@ def _decision_for_owner(
                     reason=f"turn_arbiter_enforce:{mismatch_type}",
                     confidence=complaint.confidence,
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint route fallback must not block enforce
             pass
         topic = (
             "post_purchase_support"
