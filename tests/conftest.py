@@ -49,3 +49,39 @@ except Exception:  # noqa: BLE001
     # Tests that don't need this import still run — failure here only
     # means the conftest priming was a best-effort.
     pass
+
+
+# ── Conversation quota stub for unit tests ────────────────────────────────────
+# Brain / webhook unit tests pass MagicMock DB sessions. ``check_limit`` needs
+# real SQLAlchemy rows — without this stub, ``MagicMock >= int`` raises
+# TypeError across many pipeline tests. Real quota enforcement is covered in
+# ``test_wa_usage_conversation_limit_enforcement.py`` (excluded below).
+
+import pytest  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+_QUOTA_ENFORCEMENT_MODULE = "test_wa_usage_conversation_limit_enforcement"
+
+
+@pytest.fixture(autouse=True)
+def _stub_conversation_quota_for_mock_db_tests(request):
+    mod = getattr(request.node, "module", None)
+    mod_name = getattr(mod, "__name__", "") or ""
+    if mod_name.endswith(_QUOTA_ENFORCEMENT_MODULE):
+        yield
+        return
+    if request.node.get_closest_marker("conversation_quota"):
+        yield
+        return
+
+    from core.wa_usage import AllowResult  # noqa: PLC0415
+
+    stub = AllowResult(
+        allowed=True,
+        reason="ok",
+        used_total=0,
+        limit=1000,
+        pct=0.0,
+    )
+    with patch("core.wa_usage.check_limit", return_value=stub):
+        yield

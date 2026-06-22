@@ -6554,6 +6554,27 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
+        # ── Conversation quota guard: silent outbound block at plan limit ───────
+        from core.wa_usage import check_limit as _check_conv_limit  # noqa: PLC0415
+
+        _conv_quota = _check_conv_limit(db, tenant_id, category="service")
+        if not _conv_quota.allowed:
+            _persona_ownership.mark_bypass(_POReason.BILLING_DENIED, owner="conversation_quota_guard")
+            _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
+            _trace.response_goal   = "silent"
+            _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
+            logger.info(
+                "[CONVERSATION_LIMIT] inbound recorded, outbound suppressed (silent) | "
+                "tenant=%s to=%s used=%s limit=%s reason=%s",
+                tenant_id,
+                to,
+                _conv_quota.used_total,
+                _conv_quota.limit,
+                _conv_quota.reason,
+            )
+            _sync_persona_observability()
+            return
+
         # Pure greetings (cold or established) route through Brain persona_social
         # compose — no PRE_BRAIN_FAST_PATH / render_identity_reply shortcut.
         if (
@@ -12825,6 +12846,30 @@ async def _post_wa(
                     "[AI_DISABLED_SEND_BLOCK] pre_send check failed tenant=%s err=%s",
                     _tenant_id,
                     _send_gate_exc,
+                )
+
+        if _db is not None and _tenant_id and not _allow_manual:
+            try:
+                from core.wa_usage import check_limit as _check_conv_quota  # noqa: PLC0415
+
+                _quota = _check_conv_quota(_db, int(_tenant_id), category="service")
+                if not _quota.allowed:
+                    logger.info(
+                        "[CONVERSATION_LIMIT] post_wa blocked tenant=%s to=%s "
+                        "used=%s limit=%s reason=%s path=%s",
+                        _tenant_id,
+                        recipient,
+                        _quota.used_total,
+                        _quota.limit,
+                        _quota.reason,
+                        _blocked_path or "post_wa",
+                    )
+                    return False
+            except Exception as _quota_exc:  # noqa: BLE001  # noqa: silent-ok
+                logger.warning(
+                    "[CONVERSATION_LIMIT] pre_send check failed tenant=%s err=%s",
+                    _tenant_id,
+                    _quota_exc,
                 )
 
         # ── Outbound idempotency guard ──────────────────────────────────

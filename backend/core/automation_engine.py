@@ -926,6 +926,20 @@ async def _execute_action(
             "error_label": "الاشتراك منتهٍ أو التجربة مستخدمة — لا يمكن إرسال رسائل",
         }
 
+    from core.wa_usage import check_limit as _check_quota  # noqa: PLC0415
+
+    _quota = _check_quota(db, tenant_id, category="marketing")
+    if not _quota.allowed:
+        return False, {
+            "error":       _quota.reason,
+            "error_code":  _quota.reason,
+            "error_label": (
+                f"تم تجاوز حد المحادثات الشهري ({_quota.used_total}/{_quota.limit})"
+            ),
+            "quota_used":  _quota.used_total,
+            "quota_limit": _quota.limit,
+        }
+
     customer_id = event.customer_id
     if not customer_id:
         return False, {
