@@ -12320,7 +12320,11 @@ async def _handle_merchant_message(
                         "[PRESENTATION_MODE_SHADOW] tenant=%s skipped: %s",
                         tenant_id, _pm_shadow_exc,
                     )
-                if _wants and not _mode_ok(_final_mode):
+                if _wants and not _mode_ok(
+                    _final_mode,
+                    audit=_delivery_audit,
+                    brain_action=_br_action or "",
+                ):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
                         "mode=%s reason=product_intent_without_rich_content "
@@ -12374,7 +12378,11 @@ async def _handle_merchant_message(
                     _br_action or "?",
                     _delivery_audit,
                 )
-                if _wants and not _mode_ok(_final_mode):
+                if _wants and not _mode_ok(
+                    _final_mode,
+                    audit=_delivery_audit,
+                    brain_action=_br_action or "",
+                ):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
                         "mode=%s reason=product_intent_send_failed "

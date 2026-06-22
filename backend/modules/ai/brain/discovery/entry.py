@@ -426,7 +426,37 @@ def _apply_catalog_group_scope(
             active_category=active_category_from_state(ctx.state),
         )
         if not resolution.matched:
+            try:
+                from ..catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                    emit_catalog_intelligence_event,
+                )
+
+                if entry.entry_type == GLOBAL_BROWSE:
+                    emit_catalog_intelligence_event(
+                        "global_browse",
+                        tenant_id=int(tenant_id),
+                        group=None,
+                        reason="no_scope_match",
+                        entry_type=entry.entry_type,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break routing
+                pass
             return entry
+        try:
+            from ..catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                emit_catalog_intelligence_event,
+            )
+
+            emit_catalog_intelligence_event(
+                "browse_scope",
+                tenant_id=int(tenant_id),
+                group=resolution.group_slug,
+                group_id=resolution.group_id,
+                match_source=resolution.match_source,
+                entry_type=entry.entry_type,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break routing
+            pass
         stamp_catalog_group_session(ctx.state, resolution)
         return DiscoveryEntryDecision(
             matched=entry.matched,

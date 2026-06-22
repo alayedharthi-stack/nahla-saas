@@ -298,7 +298,10 @@ def _derive_conflicts(
         return tuple(conflicts), tuple(suspend_scope), False
 
     try:
-        from ..catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+        from ..catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
+            is_catalog_browse_turn,
+            is_fresh_start_order_turn,
+        )
 
         if is_catalog_browse_turn(
             message or "",
@@ -309,6 +312,16 @@ def _derive_conflicts(
                 state_field="order_prep",
                 persisted_objective=active_objective or "active_checkout",
                 conflict_reason="catalog_browse_turn_isolates_stale_checkout",
+                severity="hard",
+            ))
+            suspend_scope.extend(["order_prep", "last_question_asked", "stage"])
+            return tuple(conflicts), tuple(dict.fromkeys(suspend_scope)), True
+
+        if is_fresh_start_order_turn(message or ""):
+            conflicts.append(StateConflict(
+                state_field="order_prep",
+                persisted_objective=active_objective or "active_checkout",
+                conflict_reason="fresh_start_order_isolates_stale_checkout",
                 severity="hard",
             ))
             suspend_scope.extend(["order_prep", "last_question_asked", "stage"])

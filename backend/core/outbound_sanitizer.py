@@ -686,6 +686,23 @@ _PROMISE_PATTERNS: Dict[str, tuple] = {
     ASSET_LOCATION: (_compile_pair(_LOCATION_NOUN),),
 }
 
+# Product-list prompts use «رقم الخيار/المنتج» — not contact-phone promises.
+_PRODUCT_OPTION_NUMBER_RE = re.compile(
+    r"(?:"
+    r"اختر\s+رقم\s+(?:ال)?(?:خيار|منتج)"
+    r"|اكتب\s+رقم\s+(?:ال)?(?:خيار|منتج)"
+    r"|(?:^|[\s\n])رقم\s+(?:ال)?(?:خيار|منتج)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_product_option_number_context(text: str) -> bool:
+    """True when «رقم» refers to a catalog option index, not a contact phone."""
+    if not text:
+        return False
+    return bool(_PRODUCT_OPTION_NUMBER_RE.search(text))
+
 
 # Phone shape — Saudi mobile (05XXXXXXXX / +9665XXXXXXXX / 9665XXXXXXXX),
 # plus generic international (+\d{7,15}) as a permissive fallback.
@@ -756,12 +773,15 @@ def contains_promised_asset(text: str) -> Optional[str]:
     """
     if not text or not isinstance(text, str):
         return None
+    skip_phone = _is_product_option_number_context(text)
     for asset_class, patterns in _PROMISE_PATTERNS.items():
+        if skip_phone and asset_class == ASSET_PHONE:
+            continue
         for pattern in patterns:
             if pattern.search(text):
                 return asset_class
     m = _STANDALONE_INTRO.search(text)
-    if m:
+    if m and not skip_phone:
         token = (m.group("class") or "").strip()
         if token in ("الرابط", "اللينك"):
             return ASSET_LINK

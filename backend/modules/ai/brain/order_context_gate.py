@@ -310,13 +310,23 @@ def is_fulfillment_discovery_unlock(
     if has_explicit_commerce_topic_change(message):
         return True
     try:
-        from .catalog.catalog_browse_turn_policy import is_catalog_browse_message  # noqa: PLC0415
+        from .catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
 
-        if is_catalog_browse_message(message, intent_name=str(intent_name or "")):
+        if is_catalog_browse_turn(message, intent_name=str(intent_name or "")):
             return True
     except Exception:  # noqa: BLE001
         logger.exception(
             "[ORDER_CONTEXT_GATE] catalog browse unlock check failed msg=%r",
+            (message or "")[:80],
+        )
+    try:
+        from .commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+
+        if is_bare_start_order_phrase(message or ""):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ORDER_CONTEXT_GATE] fresh start-order unlock check failed msg=%r",
             (message or "")[:80],
         )
     if str(intent_name or "").strip() == "product_visual_request":

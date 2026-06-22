@@ -52,7 +52,7 @@ Design notes
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,7 +387,12 @@ def customer_wants_product_or_image(
 # Guard — was this an acceptable mode for the inferred intent?
 # ─────────────────────────────────────────────────────────────────────────────
 
-def is_acceptable_mode_for_product_intent(mode: str) -> bool:
+def is_acceptable_mode_for_product_intent(
+    mode: str,
+    *,
+    audit: Optional[DeliveryAudit] = None,
+    brain_action: str = "",
+) -> bool:
     """``True`` when *mode* satisfies a product / image request.
 
     May 2026 #10 — ``catalog`` / ``image_cta`` / ``media_only`` /
@@ -397,8 +402,22 @@ def is_acceptable_mode_for_product_intent(mode: str) -> bool:
     is the explicit fallback contract from the visual-product
     enforcement layer. ``text_only`` and ``failed`` are the only
     modes that flip the [DELIVERY_GUARD_FAIL] alarm.
+
+    Browse product lists: interactive reply buttons listing selectable
+    SKUs are rich enough when ``brain_action`` is a product-discovery
+    action (``search_products``, etc.).
     """
-    return mode in _PRODUCT_INTENT_OK_MODES
+    if mode in _PRODUCT_INTENT_OK_MODES:
+        return True
+    action = (brain_action or "").strip()
+    if (
+        mode == DELIVERY_MODE_TEXT_ONLY
+        and isinstance(audit, dict)
+        and audit.get("interactive_buttons_sent")
+        and action in _PRODUCT_BRAIN_ACTIONS
+    ):
+        return True
+    return False
 
 
 __all__ = [

@@ -1419,7 +1419,7 @@ class DefaultDecisionEngine:
                         reason="picked product not orderable — suggest alternatives",
                         confidence=0.92,
                     )
-                if facts.orderable:
+                if _prod_orderable and _matched_product.get("external_id"):
                     return Decision(
                         action=ACTION_PROPOSE_DRAFT_ORDER,
                         args={
@@ -1571,7 +1571,11 @@ class DefaultDecisionEngine:
                             reason=f"picked product #{idx} not orderable — suggest alternatives",
                             confidence=0.95,
                         )
-                    if facts.orderable:
+                    _can_start_order = _prod_orderable and (
+                        bool(product.get("external_id"))
+                        or _candidate_source == "last_recommended_products"
+                    )
+                    if _can_start_order:
                         # CRITICAL: pass the FULL chosen product as
                         # `forced_product` (not just `product`).  The
                         # executor MUST honour `forced_product` over
@@ -2559,7 +2563,38 @@ class DefaultDecisionEngine:
 
         # ── 6. Start order — product in focus ──────────────────────────────
         if intent.name == INTENT_START_ORDER:
-            if state.current_product_focus and facts.has_products:
+            from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+
+            _bare_start_order = is_bare_start_order_phrase(ctx.message or "")
+            if _bare_start_order:
+                try:
+                    from ..order_context_gate import is_fulfillment_session_locked  # noqa: PLC0415
+
+                    if is_fulfillment_session_locked(ctx):
+                        from ..commerce.conversation_context_reset import (  # noqa: PLC0415
+                            clear_active_order_context,
+                        )
+
+                        clear_active_order_context(
+                            state,
+                            reason="fresh_start_order_opener",
+                        )
+                        logger.info(
+                            "[ORDER FLOW] fresh start-order cleared stale focus tenant=%s preview=%r",
+                            ctx.tenant_id,
+                            (ctx.message or "")[:80],
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[ORDER FLOW] fresh start-order clear failed tenant=%s",
+                        ctx.tenant_id,
+                    )
+
+            if (
+                not _bare_start_order
+                and state.current_product_focus
+                and facts.has_products
+            ):
                 # Only propose order if store can actually fulfil it
                 if facts.orderable:
                     return Decision(

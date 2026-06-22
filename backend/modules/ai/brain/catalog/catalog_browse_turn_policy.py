@@ -112,6 +112,88 @@ def is_catalog_browse_turn(
     return False
 
 
+def is_fresh_start_order_turn(message: str) -> bool:
+    """Bare purchase-intent opener (e.g. «ابي اطلب») — fresh order, not checkout resume."""
+    try:
+        from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+
+        return is_bare_start_order_phrase(message or "")
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_TURN] fresh_start_order_probe_failed")
+        return False
+
+
+def should_suspend_stale_checkout_for_turn(
+    message: str,
+    *,
+    intent_name: str = "",
+    ctx: Any = None,
+) -> bool:
+    """True when browse or bare start-order must isolate stale checkout for this turn."""
+    if is_catalog_browse_turn(message, intent_name=intent_name, ctx=ctx):
+        return True
+    return is_fresh_start_order_turn(message)
+
+
+def _has_stale_checkout_state(state: Any) -> bool:
+    if state is None:
+        return False
+    op = getattr(state, "order_prep", None)
+    if getattr(state, "current_product_focus", None):
+        return True
+    if op is None:
+        return False
+    if str(getattr(op, "product_id", "") or "").strip():
+        return True
+    if list(getattr(op, "missing_fields", None) or []):
+        return True
+    if str(getattr(state, "draft_order_id", "") or "").strip():
+        return True
+    return False
+
+
+def maybe_suspend_stale_checkout_for_turn(
+    ctx: Any,
+    *,
+    message: str = "",
+    intent_name: str = "",
+) -> bool:
+    """
+    Clear stale checkout when browse or fresh start-order owns the turn.
+
+    Platform-wide operational isolation — must run before ``decide()``.
+    """
+    msg = message or getattr(ctx, "message", "") or ""
+    intent = intent_name or str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    state = getattr(ctx, "state", None)
+    if not should_suspend_stale_checkout_for_turn(msg, intent_name=intent, ctx=ctx):
+        return False
+    if not _has_stale_checkout_state(state):
+        return False
+    try:
+        from ..commerce.conversation_context_reset import clear_active_order_context  # noqa: PLC0415
+
+        reason = (
+            "fresh_start_order_isolation"
+            if is_fresh_start_order_turn(msg)
+            else "catalog_browse_turn_isolation"
+        )
+        clear_active_order_context(state, reason=reason)
+        logger.info(
+            "[CATALOG_BROWSE_TURN] suspended stale checkout tenant=%s reason=%s preview=%r",
+            getattr(ctx, "tenant_id", None),
+            reason,
+            msg[:80],
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[CATALOG_BROWSE_TURN] suspend_stale_checkout_failed tenant=%s",
+            getattr(ctx, "tenant_id", None),
+        )
+        return False
+
+
 def stamp_catalog_browse_scope_for_turn(
     ctx: Any,
     *,
@@ -154,5 +236,8 @@ def stamp_catalog_browse_scope_for_turn(
 __all__ = [
     "is_catalog_browse_message",
     "is_catalog_browse_turn",
+    "is_fresh_start_order_turn",
+    "maybe_suspend_stale_checkout_for_turn",
+    "should_suspend_stale_checkout_for_turn",
     "stamp_catalog_browse_scope_for_turn",
 ]
