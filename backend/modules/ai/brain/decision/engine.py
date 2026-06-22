@@ -1571,7 +1571,11 @@ class DefaultDecisionEngine:
                             reason=f"picked product #{idx} not orderable — suggest alternatives",
                             confidence=0.95,
                         )
-                    if _prod_orderable and product.get("external_id"):
+                    _can_start_order = _prod_orderable and (
+                        bool(product.get("external_id"))
+                        or _candidate_source == "last_recommended_products"
+                    )
+                    if _can_start_order:
                         # CRITICAL: pass the FULL chosen product as
                         # `forced_product` (not just `product`).  The
                         # executor MUST honour `forced_product` over
