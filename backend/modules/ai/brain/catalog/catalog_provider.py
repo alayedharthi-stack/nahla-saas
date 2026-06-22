@@ -59,10 +59,12 @@ class LocalCatalogProvider(CatalogProvider):
         return list(self._builder.get_top_products(limit=limit) or [])
 
     def list_collections(self, *, limit: int = 20) -> List[Dict[str, Any]]:
+        from .catalog_browse_scope_resolver import load_merchant_catalog_groups  # noqa: PLC0415
         from .catalog_intelligence import CatalogIntelligence  # noqa: PLC0415
 
+        groups = load_merchant_catalog_groups(self._db, self._tenant_id)
         intel = CatalogIntelligence(self)
-        return [g.to_dict() for g in intel.list_collections(limit=limit)]
+        return [g.to_dict() for g in intel.list_collections(limit=limit, merchant_catalog_groups=groups)]
 
     def get_collection_products(
         self,
@@ -70,9 +72,36 @@ class LocalCatalogProvider(CatalogProvider):
         *,
         limit: int = 12,
     ) -> List[Dict[str, Any]]:
+        from .catalog_browse_scope_resolver import (  # noqa: PLC0415
+            hydrate_group_products,
+            load_merchant_catalog_groups,
+            match_group_by_collection_name,
+            resolve_browse_scope,
+        )
+
         name = str(collection_name or "").strip()
         if not name:
             return []
+
+        groups = load_merchant_catalog_groups(self._db, self._tenant_id)
+        group = match_group_by_collection_name(groups, name)
+        if group is not None:
+            resolution = resolve_browse_scope(
+                self._db,
+                self._tenant_id,
+                name,
+                name,
+                active_group_slug=str(group.get("slug") or ""),
+            )
+            if resolution.matched and resolution.product_ids:
+                hydrated = hydrate_group_products(
+                    self._builder,
+                    resolution.product_ids,
+                    limit=limit,
+                )
+                if hydrated:
+                    return hydrated
+
         return self.search_products(name, limit=limit)
 
 

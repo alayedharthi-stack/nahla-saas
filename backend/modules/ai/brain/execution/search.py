@@ -95,6 +95,8 @@ class ProductSearchHandler:
                 source=source,
                 last_browse_query=str(getattr(state, "last_browse_query", "") or ""),
                 state=state,
+                db=getattr(ctx, "_db", None),
+                tenant_id=getattr(ctx, "tenant_id", None),
             )
 
         def _format_result(
@@ -503,13 +505,16 @@ def _apply_discovery_strategy(
             ctx.tenant_id,
             integration_platform=platform,
         )
+        from ..catalog.catalog_browse_scope_resolver import load_merchant_catalog_groups  # noqa: PLC0415
         intel = CatalogIntelligence(provider)
+        catalog_groups = load_merchant_catalog_groups(db, ctx.tenant_id)
         plan = intel.build_discovery_plan(
             strategy=strategy,
             query=query,
             source=source,
             preferred_collections=args.get("discovery_preferred_collections"),
             merchant_settings=merchant_settings,
+            merchant_catalog_groups=catalog_groups,
         )
         composer = DiscoveryPresentationComposer()
         entry_type = str(args.get("discovery_entry_type") or "").strip().lower()

@@ -462,6 +462,8 @@ def filter_products_for_browse_turn(
     last_browse_query: str = "",
     active_category: str = "",
     state: Any = None,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Shared entry for search, compose, pipeline, and replay paths."""
     locked_category = str(active_category or active_category_from_state(state) or "").strip()
@@ -471,21 +473,47 @@ def filter_products_for_browse_turn(
         and not str(message or "").strip()
         and not locked_category
     ):
-        return [dict(p) for p in (products or []) if isinstance(p, Mapping)]
+        base = [dict(p) for p in (products or []) if isinstance(p, Mapping)]
+    else:
+        base = filter_products_to_browse_category(
+            products,
+            message=message or "",
+            query=effective_query,
+            source=source,
+            active_category=locked_category,
+        )
 
-    scoped = filter_products_to_browse_category(
-        products,
-        message=message or "",
-        query=effective_query,
-        source=source,
-        active_category=locked_category,
-    )
+    try:
+        from ..catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+            active_catalog_group_slug_from_state,
+            filter_products_to_merchant_group,
+            resolve_browse_scope,
+        )
+
+        if db is not None and tenant_id is not None:
+            resolution = resolve_browse_scope(
+                db,
+                int(tenant_id),
+                message or "",
+                effective_query,
+                active_group_slug=active_catalog_group_slug_from_state(state),
+                active_category=locked_category,
+            )
+            if resolution.matched and resolution.product_ids:
+                grouped = filter_products_to_merchant_group(
+                    base,
+                    product_ids=resolution.product_ids,
+                )
+                if grouped:
+                    base = grouped
+    except Exception:  # noqa: BLE001
+        logger.exception("[BROWSE_CATEGORY_GUARD] merchant_group_filter_failed")
 
     try:
         from .honey_browse_strategy import apply_honey_browse_strategy  # noqa: PLC0415
 
         return apply_honey_browse_strategy(
-            scoped,
+            base,
             message=message or "",
             query=effective_query,
             active_category=locked_category,
@@ -493,7 +521,7 @@ def filter_products_for_browse_turn(
         )
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] honey browse strategy failed")
-        return scoped
+        return base
 
 
 __all__ = [
