@@ -87,6 +87,18 @@ class ProductSearchHandler:
         source = str(decision.args.get("source") or "").strip().lower()
         state = getattr(ctx, "state", None)
 
+        try:
+            from ..catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
+                stamp_catalog_browse_scope_for_turn,
+            )
+
+            stamp_catalog_browse_scope_for_turn(
+                ctx,
+                query=str(decision.args.get("query") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[PRODUCT_SEARCH] early_browse_scope_failed")
+
         def _apply_category_scope(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             return filter_products_for_browse_turn(
                 products,
@@ -179,6 +191,7 @@ class ProductSearchHandler:
                 message=ctx.message or "",
                 query=str(query or ""),
                 state=state,
+                group_id=decision.args.get("catalog_group_id"),
                 limit=fetch_limit,
             )
             if best_sellers:

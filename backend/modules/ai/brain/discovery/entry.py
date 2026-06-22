@@ -53,6 +53,7 @@ _TOP_SELLER_PATTERNS = (
     "الاكثر طلبًا",
     "best sellers",
     "top products",
+    "top sellers",
 )
 
 _DIA = r"[\u064B-\u065F\u0640]"
@@ -218,7 +219,13 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
         from ..order_context_gate import should_block_product_discovery  # noqa: PLC0415
 
         if should_block_product_discovery(ctx, msg):
-            return "active_fulfillment"
+            try:
+                from ..catalog.catalog_browse_turn_policy import is_catalog_browse_message  # noqa: PLC0415
+
+                if not is_catalog_browse_message(msg, intent_name=intent_name):
+                    return "active_fulfillment"
+            except Exception:  # noqa: BLE001
+                return "active_fulfillment"
     except Exception:
         logger.exception("[DISCOVERY_ENTRY] fulfillment_lock_probe_failed")
 

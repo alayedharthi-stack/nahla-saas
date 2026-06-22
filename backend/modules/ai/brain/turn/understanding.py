@@ -287,12 +287,34 @@ def _derive_conflicts(
     state_relevance: Any,
     current_intent: str,
     active_objective: Optional[str],
+    message: str = "",
+    intent_name: str = "",
+    ctx: Any = None,
 ) -> Tuple[Tuple[StateConflict, ...], Tuple[str, ...], bool]:
     conflicts: List[StateConflict] = []
     suspend_scope: List[str] = []
 
     if not _has_active_checkout_workflow(state):
         return tuple(conflicts), tuple(suspend_scope), False
+
+    try:
+        from ..catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+
+        if is_catalog_browse_turn(
+            message or "",
+            intent_name=intent_name,
+            ctx=ctx,
+        ):
+            conflicts.append(StateConflict(
+                state_field="order_prep",
+                persisted_objective=active_objective or "active_checkout",
+                conflict_reason="catalog_browse_turn_isolates_stale_checkout",
+                severity="hard",
+            ))
+            suspend_scope.extend(["order_prep", "last_question_asked", "stage"])
+            return tuple(conflicts), tuple(dict.fromkeys(suspend_scope)), True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy probe
+        pass
 
     sr = state_relevance
     topic_shift = bool(getattr(sr, "detected_topic_shift", False))
@@ -387,6 +409,27 @@ def synthesize_turn_understanding(ctx: BrainContext) -> TurnUnderstanding:
 
     active_objective = _derive_active_objective_candidate(state, state_rel)
 
+    try:
+        from ..catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+
+        if is_catalog_browse_turn(
+            ctx.message or "",
+            intent_name=intent_name,
+            ctx=ctx,
+        ):
+            current_intent = "product_inquiry"
+            current_topic = "catalog_inquiry"
+            customer_goal = "learn_product_or_pricing"
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "catalog_browse_turn_policy",
+                "catalog_browse",
+                "catalog_browse_turn_overrides_stale_checkout",
+                weight=0.9,
+            ))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy probe
+        pass
+
     current_intent, current_topic, customer_goal, evidence, active_objective = (
         _apply_current_turn_authority(
             current_intent=current_intent,
@@ -444,6 +487,9 @@ def synthesize_turn_understanding(ctx: BrainContext) -> TurnUnderstanding:
         state_relevance=state_rel,
         current_intent=current_intent,
         active_objective=active_objective,
+        message=ctx.message or "",
+        intent_name=intent_name,
+        ctx=ctx,
     )
 
     confidence = intent_confidence

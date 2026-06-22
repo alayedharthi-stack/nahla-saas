@@ -306,29 +306,17 @@ def is_fulfillment_discovery_unlock(
     *,
     intent_name: Optional[str] = None,
 ) -> bool:
-    """Deterministic unlock for broad browse / explicit product visual during fulfillment lock."""
+    """Deterministic unlock for catalog browse / product visual during fulfillment lock."""
     if has_explicit_commerce_topic_change(message):
         return True
     try:
-        from .commerce.product_breadth_policy import (  # noqa: PLC0415
-            global_availability_browse_requested,
-        )
+        from .catalog.catalog_browse_turn_policy import is_catalog_browse_message  # noqa: PLC0415
 
-        if global_availability_browse_requested(message):
+        if is_catalog_browse_message(message, intent_name=str(intent_name or "")):
             return True
     except Exception:  # noqa: BLE001
         logger.exception(
-            "[ORDER_CONTEXT_GATE] global browse unlock check failed msg=%r",
-            (message or "")[:80],
-        )
-    try:
-        from .commerce.product_visual import is_product_visual_request  # noqa: PLC0415
-
-        if is_product_visual_request(message):
-            return True
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "[ORDER_CONTEXT_GATE] product visual unlock check failed msg=%r",
+            "[ORDER_CONTEXT_GATE] catalog browse unlock check failed msg=%r",
             (message or "")[:80],
         )
     if str(intent_name or "").strip() == "product_visual_request":
