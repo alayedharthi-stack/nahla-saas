@@ -1927,7 +1927,12 @@ export interface Translations {
         saleLabel:         string
         retailerIdLabel:   string
         storePage:         string
-        phase1Note:        string
+        autoSaveNote:      string
+        autoSaveIdle:      string
+        autoSavePending:   string
+        autoSaveSaving:    string
+        autoSaveSaved:     string
+        autoSaveFailed:    string
         variantsTitle:     string
         variantsPhase2Note: string
         fields: {

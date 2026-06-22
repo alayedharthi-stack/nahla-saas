@@ -9,7 +9,7 @@
  *   • The product grid — thumbnail-first table with search +
  *     filters + per-row source/readiness badges.
  *   • The product detail drawer — opens on row click, edits with
- *     live counters + readiness panel.
+ *     live counters + autosave + readiness panel.
  *   • The channel-spec registry cache — loaded once, drives
  *     live counter limits + tooltips across every drawer mount.
  *
@@ -24,18 +24,12 @@
  * 3. Readiness preview is debounced at 280ms on every keystroke
  *    so the live counters/colors are interactive without flooding
  *    the API.
- * 4. The drawer renders gracefully on draft products (no `id` yet)
- *    AND on persisted rows (with `id`) — same component, different
- *    save action wired by the parent.
+ * 4. The drawer autosaves persisted rows into the central Nahla
+ *    catalog while keeping readiness preview debounced separately.
  *
  * Phase 1 scope (this file):
  *   ✅ Grid + filters + pagination
- *   ✅ Drawer (read + live counters + readiness panel)
- *   ⛔ Write path (Save changes) — Phase 1 ships as a read-only
- *      studio. Manual products still go through the existing
- *      `POST /products/manual` form in WhatsAppCatalog.tsx;
- *      editing existing rows is Phase 2 once we promote JSONB
- *      fields to top-level columns.
+ *   ✅ Drawer (read + live counters + readiness panel + autosave)
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -854,6 +848,8 @@ function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
 // Product Detail Drawer
 // ─────────────────────────────────────────────────────────────────────
 
+type AutoSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error'
+
 function ProductDrawer(props: {
   productId: number
   onClose: () => void
@@ -869,12 +865,35 @@ function ProductDrawer(props: {
   const [draft, setDraft]     = useState<ReadinessPreviewBody>({})
   const [perChannel, setPerChannel] = useState<ChannelReadiness[]>([])
   const [actionBusy, setActionBusy] = useState(false)
+  const [saveStatus, setSaveStatus] = useState<AutoSaveStatus>('idle')
   const previewTimer = useRef<number | null>(null)
+  const saveTimer = useRef<number | null>(null)
+  const saveVersion = useRef(0)
+  const pendingSaveDraft = useRef<ReadinessPreviewBody | null>(null)
+  const activeProductId = useRef(props.productId)
+
+  useEffect(() => {
+    activeProductId.current = props.productId
+    return () => {
+      if (previewTimer.current) window.clearTimeout(previewTimer.current)
+      if (saveTimer.current) window.clearTimeout(saveTimer.current)
+      const pending = pendingSaveDraft.current
+      pendingSaveDraft.current = null
+      if (pending) {
+        void catalogApi.updateProduct(props.productId, pending)
+          .then(() => props.onMutated())
+          .catch(() => { /* close should not block on a late autosave */ })
+      }
+    }
+  }, [props.productId, props.onMutated])
 
   // Initial load.
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setSaveStatus('idle')
+    pendingSaveDraft.current = null
+    saveVersion.current += 1
     catalogApi.productDetail(props.productId)
       .then(d => {
         if (cancelled) return
@@ -919,13 +938,43 @@ function ProductDrawer(props: {
     }, 280)
   }, [])
 
+  const persistDraft = useCallback(async (d: ReadinessPreviewBody, version: number) => {
+    const productId = props.productId
+    pendingSaveDraft.current = null
+    setSaveStatus('saving')
+    try {
+      const saved = await catalogApi.updateProduct(productId, d)
+      if (version !== saveVersion.current || activeProductId.current !== productId) return
+      setData(saved)
+      setPerChannel(saved.per_channel)
+      setSaveStatus('saved')
+      props.onMutated()
+    } catch {
+      if (version !== saveVersion.current || activeProductId.current !== productId) return
+      setSaveStatus('error')
+    }
+  }, [props])
+
+  const scheduleSave = useCallback((d: ReadinessPreviewBody) => {
+    if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    const version = saveVersion.current + 1
+    saveVersion.current = version
+    pendingSaveDraft.current = d
+    setSaveStatus('pending')
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null
+      void persistDraft(d, version)
+    }, 700)
+  }, [persistDraft])
+
   const update = useCallback(<K extends keyof ReadinessPreviewBody>(k: K, v: ReadinessPreviewBody[K]) => {
     setDraft(prev => {
       const next = { ...prev, [k]: v }
       recompute(next)
+      scheduleSave(next)
       return next
     })
-  }, [recompute])
+  }, [recompute, scheduleSave])
 
   // Escape closes the drawer.
   useEffect(() => {
@@ -938,6 +987,18 @@ function ProductDrawer(props: {
   const isMerchantHidden =
     catalogStatus === 'merchant_hidden' || Boolean(data?.product.merchant_hidden_at)
   const isRemovedMeta = catalogStatus === 'removed_from_meta'
+  const autoSaveLabel =
+    saveStatus === 'pending' ? dr.autoSavePending
+    : saveStatus === 'saving' ? dr.autoSaveSaving
+    : saveStatus === 'saved' ? dr.autoSaveSaved
+    : saveStatus === 'error' ? dr.autoSaveFailed
+    : dr.autoSaveIdle
+  const autoSaveTone =
+    saveStatus === 'error'
+      ? 'text-rose-700 bg-rose-50 border-rose-100'
+      : saveStatus === 'saved'
+        ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
+        : 'text-slate-500 bg-slate-50 border-slate-100'
 
   const onHide = async () => {
     if (!window.confirm(dr.hideConfirm)) return
@@ -1072,15 +1133,18 @@ function ProductDrawer(props: {
               <ReadinessPanel perChannel={perChannel} />
             </div>
 
-            {/* Form — live counters drive feedback. Phase 1 = read-mostly.
-                Inputs are wired so the merchant can experiment with edits
-                and see counters update live, but Save is deferred to
-                Phase 2 (after JSONB → columns migration). */}
+            {/* Form — live counters drive feedback; autosave persists the central catalog row. */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
-              <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
-                <Package className="w-4 h-4 text-emerald-600" />
-                {dr.productDataTitle}
-              </h3>
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <Package className="w-4 h-4 text-emerald-600" />
+                  {dr.productDataTitle}
+                </h3>
+                <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${autoSaveTone}`}>
+                  {saveStatus === 'saving' && <Loader2 className="w-3 h-3 animate-spin" />}
+                  {autoSaveLabel}
+                </span>
+              </div>
               <FieldShell
                 fieldName="title" label={fld.title} required
                 value={draft.title ?? ''} onChange={v => update('title', v)}
@@ -1158,7 +1222,7 @@ function ProductDrawer(props: {
               </div>
 
               <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-100 rounded-lg p-2 leading-relaxed">
-                {dr.phase1Note}
+                {dr.autoSaveNote}
               </div>
             </div>
 

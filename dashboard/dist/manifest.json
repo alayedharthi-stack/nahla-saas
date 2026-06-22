@@ -2,7 +2,7 @@
   "name": "نحلة — طيار المبيعات الآلي",
   "short_name": "نحلة",
   "description": "مساعد مبيعات ذكي لمتجرك عبر واتساب",
-  "start_url": "/",
+  "start_url": "/overview",
   "display": "standalone",
   "background_color": "#0f172a",
   "theme_color": "#f59e0b",

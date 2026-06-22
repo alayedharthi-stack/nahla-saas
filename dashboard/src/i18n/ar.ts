@@ -2054,7 +2054,12 @@ const ar: Translations = {
         saleLabel:          'عرض:',
         retailerIdLabel:    'retailer_id:',
         storePage:          'صفحة المتجر',
-        phase1Note:         'ℹ️ هذا المعاينة (Phase 1): العدّادات والـ readiness تتحدّث مباشرة، لكن حفظ التعديلات في الكتالوج المركزي يصبح متاحًا بعد ترقية المخطط في Phase 2.',
+        autoSaveNote:       'يتم حفظ التعديلات تلقائياً في الكتالوج المركزي بعد التوقف عن الكتابة لثوانٍ قليلة.',
+        autoSaveIdle:       'الحفظ تلقائي',
+        autoSavePending:    'بانتظار الحفظ...',
+        autoSaveSaving:     'جاري الحفظ...',
+        autoSaveSaved:      'تم الحفظ',
+        autoSaveFailed:     'تعذّر الحفظ',
         variantsTitle:      'الاختلافات (Variants)',
         variantsPhase2Note: '{count} variant — نظام الـ variants الكامل يأتي في Phase 2.',
         fields: {

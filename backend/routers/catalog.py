@@ -2290,6 +2290,99 @@ def _serialise_studio_product(p: "Product") -> Dict[str, Any]:
     }
 
 
+class _StudioProductPatch(BaseModel):
+    """Persisted Studio drawer patch.
+
+    Mirrors the drawer's draft shape, but unlike readiness preview this
+    body is a partial patch: only supplied keys are written. The route
+    deliberately works for every catalog source because Product Studio
+    edits the central Nahla catalog row, not only dashboard-created
+    manual rows.
+    """
+    title:            Optional[str]  = Field(None, min_length=1, max_length=512)
+    description:      Optional[str]  = None
+    price:            Optional[str]  = Field(None, max_length=128)
+    sale_price:       Optional[str]  = Field(None, max_length=128)
+    currency:         Optional[str]  = Field(None, max_length=8)
+    sku:              Optional[str]  = Field(None, max_length=128)
+    external_id:      Optional[str]  = Field(None, max_length=128)
+    meta_retailer_id: Optional[str]  = Field(None, max_length=255)
+    image_url:        Optional[str]  = Field(None, max_length=2048)
+    product_url:      Optional[str]  = Field(None, max_length=2048)
+    additional_images: Optional[List[str]] = None
+    availability:     Optional[str]  = None
+    brand:            Optional[str]  = Field(None, max_length=255)
+    category:         Optional[str]  = Field(None, max_length=255)
+    condition:        Optional[str]  = None
+    gtin:             Optional[str]  = Field(None, max_length=64)
+    mpn:              Optional[str]  = Field(None, max_length=64)
+    in_stock:         Optional[bool] = None
+    stock_quantity:   Optional[int]  = Field(None, ge=0)
+
+
+def _clean_optional_text(value: Any, *, upper: bool = False) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    return s.upper() if upper else s
+
+
+def _apply_studio_product_patch(
+    p: "Product",
+    payload: "_StudioProductPatch",
+) -> List[str]:
+    """Apply a Product Studio patch to a Product instance.
+
+    Top-level operational columns stay as columns. Channel/feed-only
+    fields remain in ``extra_metadata`` and are merged so autosave
+    never drops unrelated sidecar data such as variants or source
+    provenance.
+    """
+    data = payload.model_dump(exclude_unset=True)
+
+    if "title" in data:
+        title = _clean_optional_text(data["title"])
+        if not title:
+            raise HTTPException(status_code=422, detail="title_required")
+        p.title = title
+
+    for col in ("description", "price", "sku", "external_id", "meta_retailer_id"):
+        if col in data:
+            setattr(p, col, _clean_optional_text(data[col]))
+
+    if "in_stock" in data:
+        p.in_stock = bool(data["in_stock"])
+    if "stock_quantity" in data:
+        p.stock_quantity = data["stock_quantity"]
+
+    metadata_fields = {
+        "image_url", "product_url", "additional_images", "sale_price",
+        "currency", "availability", "brand", "category", "condition",
+        "gtin", "mpn",
+    }
+    if any(k in data for k in metadata_fields):
+        meta = dict(p.extra_metadata or {})
+        for key in metadata_fields:
+            if key not in data:
+                continue
+            if key == "additional_images":
+                raw = data.get(key) or []
+                meta[key] = [
+                    s for s in (_clean_optional_text(v) for v in raw)
+                    if s
+                ]
+            else:
+                meta[key] = _clean_optional_text(
+                    data[key],
+                    upper=(key == "currency"),
+                )
+        p.extra_metadata = meta
+
+    return sorted(data.keys())
+
+
 def _compute_per_channel(product_or_draft: Any) -> List[Dict[str, Any]]:
     """Run the readiness engine and return JSON-friendly dicts.
 
@@ -2322,6 +2415,40 @@ async def merchant_catalog_product_detail(
     )
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
+    return {
+        "product":     _serialise_studio_product(p),
+        "per_channel": _compute_per_channel(p),
+    }
+
+
+@merchant_router.patch("/products/{product_id}")
+async def merchant_catalog_update_product(
+    product_id: int,
+    payload: _StudioProductPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Autosave Product Studio edits into the central catalog row."""
+    tenant_id = resolve_tenant_id(request)
+    p = (
+        db.query(Product)
+          .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+          .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+
+    fields = _apply_studio_product_patch(p, payload)
+    db.commit()
+    db.refresh(p)
+    audit(
+        "merchant_catalog_update_product",
+        tenant_id=tenant_id,
+        product_id=int(p.id),
+        source=product_source(p),
+        fields=fields,
+    )
     return {
         "product":     _serialise_studio_product(p),
         "per_channel": _compute_per_channel(p),
