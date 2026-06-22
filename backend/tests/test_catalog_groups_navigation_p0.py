@@ -26,6 +26,7 @@ from modules.ai.brain.commerce.collection_navigation import (  # noqa: E402
 from modules.ai.brain.commerce.discovery_strategy import DiscoveryMode  # noqa: E402
 from modules.ai.brain.commerce.product_media import detect_product_media_turn  # noqa: E402
 from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
     ACTION_LLM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
@@ -160,28 +161,29 @@ class TestDiscoveryDecisionCollectionsFirst:
         db = _mock_db_groups()
         ctx = _ctx(MSG_START, db=db)
         with patch(
-            "modules.ai.brain.catalog.catalog_browse_scope_resolver.load_merchant_catalog_groups",
+            "modules.ai.brain.catalog.navigation._load_catalog_groups",
             return_value=[
                 {"slug": "honey", "label": "Honey", "priority": 1, "is_active": True, "product_count": 4},
                 {"slug": "oils", "label": "Oils", "priority": 2, "is_active": True, "product_count": 2},
             ],
         ):
             decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.action == ACTION_CATALOG_NAVIGATE
         assert decision.action != ACTION_LLM_REPLY
-        assert decision.args.get("discovery_mode") == DiscoveryMode.COLLECTIONS_FIRST.value
+        assert decision.args.get("owner_locked") is True
+        assert decision.args.get("chosen_path") == "catalog_navigation_groups"
 
     def test_wesh_aindakom_decision_is_search_not_llm(self) -> None:
         ctx = _ctx(MSG_BROWSE, db=_mock_db_groups())
         with patch(
-            "modules.ai.brain.catalog.catalog_browse_scope_resolver.load_merchant_catalog_groups",
+            "modules.ai.brain.catalog.navigation._load_catalog_groups",
             return_value=[
                 {"slug": "a", "label": "A", "priority": 1, "is_active": True, "product_count": 3},
                 {"slug": "b", "label": "B", "priority": 2, "is_active": True, "product_count": 2},
             ],
         ):
             decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.action == ACTION_CATALOG_NAVIGATE
         assert decision.action != ACTION_LLM_REPLY
 
 
@@ -348,7 +350,7 @@ class TestProductSelectionAfterGroup:
 
 
 class TestDiscoveryEntryGlobalBrowse:
-    def test_details_availability_is_global_browse_entry(self) -> None:
+    def test_details_availability_is_owned_by_navigator_not_discovery(self) -> None:
         entry = resolve_discovery_entry(_ctx(MSG_DETAILS))
-        assert entry.matched is True
-        assert entry.entry_type == "global_browse"
+        assert entry.matched is False
+        assert entry.reason == "catalog_navigator_owned"

@@ -40,6 +40,9 @@ _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "catalog_product_list",
     "catalog_miss_resolved_subject",
     "rule",
+    "catalog_navigation_groups",
+    "catalog_navigation_group_products",
+    "catalog_navigation_top_products_fallback",
 })
 
 _HONEY_PRODUCT_MENTION_RE = re.compile(

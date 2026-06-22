@@ -63,6 +63,9 @@ _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "product_card_send",
     "notify_me_back_in_stock_ack",
     "catalog_product_list",
+    "catalog_navigation_groups",
+    "catalog_navigation_group_products",
+    "catalog_navigation_top_products_fallback",
 })
 
 _MEDICAL_MARKERS = (

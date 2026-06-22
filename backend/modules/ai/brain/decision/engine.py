@@ -803,18 +803,18 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
-        # ── 0a.52 Collection navigation (catalog groups — P0) ─────────────
+        # ── 0a.52 CatalogNavigator ownership (before discovery/search) ────
         try:
-            from ..commerce.collection_navigation import try_collection_navigation_decision  # noqa: PLC0415
+            from ..catalog.navigation import try_catalog_navigation_decision  # noqa: PLC0415
 
-            _collection_nav_dec = try_collection_navigation_decision(ctx)
-            if _collection_nav_dec is not None:
-                return _collection_nav_dec
-        except Exception as _coll_nav_exc:  # noqa: BLE001  # noqa: silent-ok — collection nav hook must not block decide
+            _catalog_nav_dec = try_catalog_navigation_decision(ctx)
+            if _catalog_nav_dec is not None:
+                return _catalog_nav_dec
+        except Exception as _cat_nav_exc:  # noqa: BLE001  # noqa: silent-ok — catalog navigator hook must not block decide
             logger.debug(
-                "[COLLECTION_NAV] skipped tenant=%s err=%s",
+                "[CATALOG_NAVIGATOR] skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
-                _coll_nav_exc,
+                _cat_nav_exc,
             )
 
         # ── 0a.535 Selection context follow-up (Phase 4B) ─────────────────

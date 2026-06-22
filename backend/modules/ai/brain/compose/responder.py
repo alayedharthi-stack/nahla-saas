@@ -44,6 +44,7 @@ logger = logging.getLogger("nahla.brain.responder")
 
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
+    ACTION_CATALOG_NAVIGATE,
     ACTION_CLARIFY,
     ACTION_FAQ_REPLY,
     ACTION_GREET,
@@ -236,6 +237,31 @@ class DefaultComposer:
                 )
                 return self._with_follow_up(cod.reply_text, ctx)
             return T.generic_fallback(variant=self._variant_idx(ctx))
+
+        # ── Catalog Navigator (owned presentation) ───────────────────────
+        if action == ACTION_CATALOG_NAVIGATE:
+            discovery_text = str(data.get("discovery_presentation_text") or data.get("product_lines") or "").strip()
+            chosen_path = str(data.get("chosen_path") or (decision.args or {}).get("chosen_path") or "").strip()
+            discovery_kind = str(data.get("discovery_output_kind") or "").strip().lower()
+            if discovery_text and chosen_path:
+                result.data["chosen_path"] = chosen_path
+                result.data["turn_owner"] = str(data.get("turn_owner") or "catalog_navigation")
+                result.data["owner_locked"] = bool(data.get("owner_locked"))
+                result.data["owner_replaced"] = False
+                result.data["navigator_owner"] = True
+                if discovery_kind == "products":
+                    raw_products = list(data.get("products") or [])
+                    from ..commerce.product_breadth_policy import (  # noqa: PLC0415
+                        apply_display_slice,
+                        resolve_product_breadth_from_context,
+                    )
+                    breadth = resolve_product_breadth_from_context(ctx, decision)
+                    candidates, breadth_meta = apply_display_slice(raw_products, breadth)
+                    result.data["product_breadth"] = breadth.to_log_dict()
+                    result.data["product_breadth_meta"] = breadth_meta
+                    result.data["pending_candidates"] = candidates
+                return discovery_text
+            return discovery_text or "ما ظهر عندي أقسام واضحة حالياً."
 
         # ── Search ─────────────────────────────────────────────────────────
         if action == ACTION_SEARCH_PRODUCTS:
