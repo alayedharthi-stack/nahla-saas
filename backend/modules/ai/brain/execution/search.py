@@ -174,6 +174,20 @@ class ProductSearchHandler:
 
         source = str(decision.args.get("source") or "").strip().lower()
         entry_type = str((decision.args or {}).get("discovery_entry_type") or "").strip().lower()
+        discovery_mode = str((decision.args or {}).get("discovery_mode") or "").strip().lower()
+        query_s = str(query or "").strip()
+
+        if discovery_mode == "collections_first" and source != "show_more":
+            strategy_result = _apply_discovery_strategy(
+                [],
+                decision=decision,
+                ctx=ctx,
+                query=query_s,
+                source=source or "browse_catalog_groups",
+            )
+            if strategy_result is not None:
+                return strategy_result
+
         if (
             source in {
                 "top_products",

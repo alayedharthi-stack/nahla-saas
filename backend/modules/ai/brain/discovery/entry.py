@@ -526,8 +526,16 @@ def _classify_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
         )
 
     product_query = extract_order_product_query(ctx)
+    _global_browse_msg = False
+    try:
+        from ..commerce.product_breadth_policy import global_availability_browse_requested  # noqa: PLC0415
+
+        _global_browse_msg = global_availability_browse_requested(msg)
+    except Exception:  # noqa: BLE001
+        _global_browse_msg = False
     if (
         product_query
+        and not _global_browse_msg
         and intent_name
         not in {
             INTENT_NEED_BASED_PRODUCT_ADVICE,

@@ -1600,6 +1600,9 @@ class MerchantBrain:
             except Exception:  # noqa: BLE001
                 pass
         _sel_patch = (decision.args or {}).get("selection_context_patch")
+        _coll_patch = (decision.args or {}).get("collection_navigation_patch")
+        if isinstance(_coll_patch, dict):
+            _sel_patch = {**(_sel_patch or {}), **_coll_patch}
         if isinstance(_sel_patch, dict):
             try:
                 from .commerce.selection_context import apply_selection_context_patch  # noqa: PLC0415
@@ -1607,6 +1610,9 @@ class MerchantBrain:
                 apply_selection_context_patch(new_state, _sel_patch)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — selection context patch is best-effort
                 logger.debug("[SELECTION_CONTEXT] patch apply failed", exc_info=True)
+        _discovery_mode = str((decision.args or {}).get("discovery_mode") or "").strip()
+        if _discovery_mode:
+            new_state.last_discovery_mode = _discovery_mode
         _variant_binding = result.data.get("variant_binding")
         if isinstance(_variant_binding, dict) and _variant_binding.get("price") is not None:
             new_state.selected_variant = _variant_binding
@@ -1810,6 +1816,28 @@ class MerchantBrain:
             # Successful pick → decision engine already consumed the chosen
             # product into ACTION_PROPOSE_DRAFT_ORDER. Clear candidates.
             new_state.last_search_candidates = []
+        elif str(result.data.get("discovery_output_kind") or "").strip().lower() == "collections":
+            _collections = list(result.data.get("collections") or [])
+            new_state.last_search_candidates = []
+            try:
+                from .commerce.selection_context import stamp_selection_context_from_products  # noqa: PLC0415
+
+                stamp_selection_context_from_products(
+                    new_state,
+                    products=[],
+                    collections=_collections,
+                    discovery_mode=_discovery_mode or str(
+                        getattr(new_state, "last_discovery_mode", "") or ""
+                    ),
+                    selected_collection="",
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — selection context stamp is best-effort
+                logger.debug("[SELECTION_CONTEXT] collections stamp failed", exc_info=True)
+            logger.info(
+                "[ORDER FLOW] collection list displayed | collections=%d action=%s",
+                len(_collections),
+                decision.action,
+            )
         elif _search_products:
             # Must match numbered list shown to the customer (breadth policy).
             new_state.last_search_candidates = list(_search_products)[:_breadth_cap]
@@ -1820,7 +1848,9 @@ class MerchantBrain:
                     new_state,
                     products=new_state.last_search_candidates,
                     collections=result.data.get("collections"),
-                    discovery_mode=str(getattr(new_state, "last_discovery_mode", "") or ""),
+                    discovery_mode=_discovery_mode or str(
+                        getattr(new_state, "last_discovery_mode", "") or ""
+                    ),
                     selected_collection=str(
                         (new_state.commerce_session or {}).get("active_category")
                         or getattr(new_state, "selected_collection", "")

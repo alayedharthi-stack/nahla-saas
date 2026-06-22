@@ -803,6 +803,20 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
+        # ── 0a.52 Collection navigation (catalog groups — P0) ─────────────
+        try:
+            from ..commerce.collection_navigation import try_collection_navigation_decision  # noqa: PLC0415
+
+            _collection_nav_dec = try_collection_navigation_decision(ctx)
+            if _collection_nav_dec is not None:
+                return _collection_nav_dec
+        except Exception as _coll_nav_exc:  # noqa: BLE001  # noqa: silent-ok — collection nav hook must not block decide
+            logger.debug(
+                "[COLLECTION_NAV] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _coll_nav_exc,
+            )
+
         # ── 0a.535 Selection context follow-up (Phase 4B) ─────────────────
         try:
             from ..commerce.selection_context import try_selection_context_decision  # noqa: PLC0415
