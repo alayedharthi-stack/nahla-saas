@@ -53,19 +53,15 @@ def _product_title(row: Any) -> str:
     return str(row.get("title") or "").strip()
 
 
-def collect_verified_catalog_titles(
+def _catalog_product_sources(
     *,
     state: Any = None,
     facts: Any = None,
     candidates: Optional[Sequence[Dict[str, Any]]] = None,
     recommended: Optional[Sequence[Dict[str, Any]]] = None,
     top_products: Optional[Sequence[Dict[str, Any]]] = None,
-    limit: int = 8,
-) -> List[str]:
-    """Merge unique product titles from verified catalog evidence sources."""
-    seen: List[str] = []
+) -> List[Sequence[Any]]:
     sources: List[Sequence[Any]] = []
-
     if candidates is not None:
         sources.append(candidates)
     if recommended is not None:
@@ -80,6 +76,51 @@ def collect_verified_catalog_titles(
         ])
     if facts is not None:
         sources.append(list(getattr(facts, "top_products", None) or []))
+    return sources
+
+
+def _scope_products_for_ctx(
+    ctx: BrainContext,
+    products: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is None or tenant_id is None:
+        return [dict(p) for p in products if isinstance(p, dict)]
+    try:
+        from .commerce_browse_category_guard import filter_products_for_browse_turn  # noqa: PLC0415
+
+        return filter_products_for_browse_turn(
+            products,
+            message=getattr(ctx, "message", "") or "",
+            query=str(getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""),
+            source="catalog_grounding",
+            state=getattr(ctx, "state", None),
+            db=db,
+            tenant_id=int(tenant_id),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — grounding scope fallback must not block reply
+        return [dict(p) for p in products if isinstance(p, dict)]
+
+
+def collect_verified_catalog_titles(
+    *,
+    state: Any = None,
+    facts: Any = None,
+    candidates: Optional[Sequence[Dict[str, Any]]] = None,
+    recommended: Optional[Sequence[Dict[str, Any]]] = None,
+    top_products: Optional[Sequence[Dict[str, Any]]] = None,
+    limit: int = 8,
+) -> List[str]:
+    """Merge unique product titles from verified catalog evidence sources."""
+    seen: List[str] = []
+    sources = _catalog_product_sources(
+        state=state,
+        facts=facts,
+        candidates=candidates,
+        recommended=recommended,
+        top_products=top_products,
+    )
 
     for source in sources:
         for prod in source:
@@ -90,6 +131,19 @@ def collect_verified_catalog_titles(
 
 
 def collect_verified_catalog_titles_from_ctx(ctx: BrainContext, *, limit: int = 8) -> List[str]:
+    products: List[Dict[str, Any]] = []
+    for source in _catalog_product_sources(
+        state=getattr(ctx, "state", None),
+        facts=getattr(ctx, "facts", None),
+    ):
+        for prod in source:
+            if isinstance(prod, dict):
+                products.append(dict(prod))
+    scoped = _scope_products_for_ctx(ctx, products)
+    if getattr(ctx, "_db", None) is not None and getattr(ctx, "tenant_id", None) is not None:
+        return collect_verified_catalog_titles(candidates=scoped, limit=limit)
+    if scoped:
+        return collect_verified_catalog_titles(candidates=scoped, limit=limit)
     return collect_verified_catalog_titles(
         state=getattr(ctx, "state", None),
         facts=getattr(ctx, "facts", None),

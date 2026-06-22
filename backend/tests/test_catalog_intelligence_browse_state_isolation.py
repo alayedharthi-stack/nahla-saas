@@ -30,6 +30,10 @@ from modules.ai.brain.catalog.catalog_product_card_filter import (  # noqa: E402
 from modules.ai.brain.catalog.catalog_ranking_runtime import (  # noqa: E402
     load_best_seller_catalog_products,
 )
+from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: E402
+    apply_complaint_refund_session_flags,
+    should_block_order_draft_injection,
+)
 from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.order_context_gate import (  # noqa: E402
@@ -281,3 +285,31 @@ class TestCatalogBrowseTurnPolicy:
     def test_is_catalog_browse_turn_with_discovery_entry(self) -> None:
         ctx = _ctx("الاكثر مبيعا", state=MerchantConversationState())
         assert is_catalog_browse_turn("الاكثر مبيعا", ctx=ctx) is True
+
+
+class TestComplaintStateDoesNotOwnBrowseOrCheckout:
+    def test_stale_complaint_flag_does_not_block_address_slot(self) -> None:
+        state = _checkout_state(missing=["address", "short_address_code"])
+        state.commerce_session = {"complaint_refund_active": True}
+        message = (
+            "علي الشمري\n"
+            "0505360205\n"
+            "ينبع الصناعية الجابرية6 شارع المفرق منزل 34\n"
+            "العنوان الوطني :YAMA2745\n"
+        )
+
+        assert should_block_order_draft_injection(
+            brain_state=state.to_dict(),
+            customer_message=message,
+        ) is False
+
+        apply_complaint_refund_session_flags(state, message)
+        assert state.commerce_session.get("complaint_refund_active") is None
+
+    def test_current_complaint_still_blocks_order_flow(self) -> None:
+        state = _checkout_state(missing=["address"])
+        state.commerce_session = {"complaint_refund_active": True}
+        assert should_block_order_draft_injection(
+            brain_state=state.to_dict(),
+            customer_message="المنتج مغشوش وأبغى استرجاع",
+        ) is True
