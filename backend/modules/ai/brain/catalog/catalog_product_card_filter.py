@@ -222,7 +222,7 @@ def filter_product_card_attachments(
                 group=resolution.group_slug or "",
                 source=source,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break product card filter
             pass
 
     evidence = {

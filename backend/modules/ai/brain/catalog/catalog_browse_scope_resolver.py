@@ -255,7 +255,7 @@ def resolve_browse_scope(
                 source=resolution.match_source,
                 products=len(resolution.product_ids),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break browse scope
             pass
     return resolution
 

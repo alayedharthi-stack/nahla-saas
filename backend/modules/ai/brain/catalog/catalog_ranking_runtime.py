@@ -147,7 +147,7 @@ def load_best_seller_catalog_products(
                 count=len(products),
                 mode=settings.best_seller_mode,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break best-seller runtime
             pass
     return products
 
@@ -273,7 +273,7 @@ def resolve_orderable_alternatives(
                 count=len(alts),
                 merchant_first=merchant_count > 0,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break best-seller runtime
             pass
     return alts
 
