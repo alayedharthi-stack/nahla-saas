@@ -164,6 +164,19 @@ def detect_product_media_turn(
     if _is_social_only_media(hints, raw):
         return ProductMediaVerdict(matched=False, reason="social_only_media")
 
+    try:
+        from ..state.product_information_topic import (  # noqa: PLC0415
+            detect_product_information_topic_shift,
+        )
+
+        if detect_product_information_topic_shift(raw):
+            return ProductMediaVerdict(
+                matched=False,
+                reason="product_attribute_or_usage_question",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product info topic import
+        pass
+
     has_media_origin = _is_customer_media_origin(raw, meta)
     has_product_signal = has_product_commerce_signal(raw, topic_hints=hints)
     has_pm_hints = _has_product_media_topic_hints(hints)

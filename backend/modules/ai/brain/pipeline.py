@@ -1570,10 +1570,23 @@ class MerchantBrain:
             new_state.stage = "checkout"
         if result.data.get("order_id"):
             new_state.draft_order_id = str(result.data["order_id"])
-        if result.data.get("product") and (
-            decision.action == "search_products"
-            or decision.action == ACTION_PROPOSE_DRAFT_ORDER
-            or not new_state.current_product_focus
+        _suppress_focus_pin = False
+        try:
+            from .state.product_information_topic import (  # noqa: PLC0415
+                should_suppress_product_focus_pin,
+            )
+
+            _suppress_focus_pin = should_suppress_product_focus_pin(ctx.message or "")
+        except Exception:  # noqa: BLE001
+            _suppress_focus_pin = False
+        if (
+            result.data.get("product")
+            and not _suppress_focus_pin
+            and (
+                decision.action == "search_products"
+                or decision.action == ACTION_PROPOSE_DRAFT_ORDER
+                or not new_state.current_product_focus
+            )
         ):
             new_state.current_product_focus = result.data["product"]
             try:
