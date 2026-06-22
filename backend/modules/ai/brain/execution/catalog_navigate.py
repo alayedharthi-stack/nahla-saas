@@ -8,7 +8,7 @@ Renders groups / group products / top fallback without search fallback or LLM.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..catalog.navigation import (
     PATH_GROUPS,
@@ -72,42 +72,90 @@ class CatalogNavigateHandler:
             return ActionResult(success=False, error=str(exc))
 
     async def _render_groups(self, decision: Decision, ctx: BrainContext) -> Dict[str, Any]:
+        from ..catalog.collections_pagination import (  # noqa: PLC0415
+            COLLECTIONS_BUTTON_PAGE_SIZE,
+            normalize_collections_page,
+        )
+        from ..catalog.catalog_intelligence import DiscoveryPlan  # noqa: PLC0415
+
+        args = getattr(decision, "args", None) or {}
+        state = ctx.state
+        offset = int(
+            args.get("collections_offset")
+            if args.get("collections_offset") is not None
+            else getattr(state, "collections_offset", 0)
+            or 0
+        )
+        reuse_pool = bool(args.get("reuse_collections_pool"))
+        pool = list(
+            args.get("collections_pool")
+            or (getattr(state, "collections_pool", None) if reuse_pool else [])
+            or []
+        )
+        collections_at_end = bool(args.get("collections_at_end"))
+
         plan, strategy, merchant_settings = self._build_plan(
             decision,
             ctx,
             query="",
             source="browse_catalog_groups",
         )
+        full_collections = [
+            c.to_dict() if hasattr(c, "to_dict") else dict(c)
+            for c in list(plan.collections or [])
+        ]
+        if not pool:
+            pool = full_collections
+
+        page_size = COLLECTIONS_BUTTON_PAGE_SIZE
+        shown_raw = pool[offset: offset + page_size]
+        shown = normalize_collections_page(shown_raw, offset=offset)
+        collections_next_available = (offset + page_size) < len(pool)
+
+        page_plan = DiscoveryPlan(
+            output_kind="collections",
+            collections=shown,
+            presentation=plan.presentation,
+            evidence={**dict(plan.evidence or {}), "collections_offset": offset},
+        )
         from ..catalog.discovery_presenter import DiscoveryPresentationComposer  # noqa: PLC0415
 
         composer = DiscoveryPresentationComposer()
         presentation = composer.compose(
-            plan=plan,
+            plan=page_plan,
             strategy=strategy,
             entry_source="browse_catalog_groups",
             entry_type="global_browse",
             merchant_settings=merchant_settings,
             query="",
         )
-        collections = [
-            c.to_dict() if hasattr(c, "to_dict") else dict(c)
-            for c in list(presentation.collections or plan.collections or [])
-        ]
+        discovery_text = str(presentation.text or "")
+        if collections_at_end:
+            discovery_text = f"{discovery_text}\n\nهذي آخر الأقسام."
+
         return {
             "products": [],
-            "collections": collections,
-            "product_lines": presentation.text,
-            "discovery_presentation_text": presentation.text,
+            "collections": shown,
+            "product_lines": discovery_text,
+            "discovery_presentation_text": discovery_text,
             "discovery_output_kind": presentation.output_kind,
             "chosen_path": PATH_GROUPS,
-            "count": 0,
+            "count": len(shown),
             "query": "",
+            "collections_next_available": collections_next_available,
+            "collections_at_end": collections_at_end or (
+                not collections_next_available and offset > 0
+            ),
             "discovery_plan": dict(getattr(plan, "evidence", None) or {}),
             "navigation_state_patch": self._navigation_patch(
                 decision,
-                collections=collections,
+                collections=shown,
                 products=[],
                 source="groups",
+                collections_pool=pool,
+                collections_offset=offset,
+                collections_page_size=page_size,
+                collections_next_available=collections_next_available,
             ),
         }
 
@@ -115,6 +163,7 @@ class CatalogNavigateHandler:
         args = getattr(decision, "args", None) or {}
         query = str(args.get("query") or "").strip()
         group_id = args.get("catalog_group_id")
+        state = ctx.state
         plan, strategy, merchant_settings = self._build_plan(
             decision,
             ctx,
@@ -125,22 +174,54 @@ class CatalogNavigateHandler:
         from ..catalog.discovery_presenter import DiscoveryPresentationComposer  # noqa: PLC0415
         from ..catalog.catalog_intelligence import attach_discovery_signals_from_db  # noqa: PLC0415
         from ..catalog.presentation_contract import validate_discovery_products  # noqa: PLC0415
+        from ..commerce.selection_context import normalize_presented_product  # noqa: PLC0415
 
         db = getattr(ctx, "_db", None)
+        page_size = int(
+            args.get("group_products_page_size")
+            or getattr(state, "group_products_page_size", 0)
+            or max(1, strategy.initial_count)
+        )
+        offset = int(
+            args.get("group_products_offset")
+            if args.get("group_products_offset") is not None
+            else getattr(state, "group_products_offset", 0)
+            or 0
+        )
+        reuse_pool = bool(args.get("reuse_group_pool"))
+        pool = list(
+            args.get("group_products_pool")
+            or (getattr(state, "group_products_pool", None) if reuse_pool else [])
+            or []
+        )
+
         products = list(plan.products or [])
-        if db is not None and products:
-            products = validate_discovery_products(
-                attach_discovery_signals_from_db(products, db=db, tenant_id=ctx.tenant_id),
-            )
-            shown = products[: max(1, strategy.initial_count)]
-            plan = type(plan)(
-                output_kind="products",
-                products=shown,
-                collections=list(plan.collections or []),
-                guided_question=plan.guided_question,
-                presentation=plan.presentation,
-                evidence={**dict(plan.evidence), "group_products": query},
-            )
+        if not pool:
+            if db is not None and products:
+                products = validate_discovery_products(
+                    attach_discovery_signals_from_db(products, db=db, tenant_id=ctx.tenant_id),
+                )
+            ranked = list(products)
+            if db is not None and not ranked:
+                ranked = list(plan.products or [])
+            pool_limit = max(12, page_size * 4)
+            pool = ranked[:pool_limit] if ranked else []
+
+        shown = pool[offset: offset + page_size] if pool else []
+        next_page_available = (offset + page_size) < len(pool)
+        shown = [
+            normalize_presented_product(p, list_index=i)
+            for i, p in enumerate(shown, start=1)
+        ]
+
+        plan = type(plan)(
+            output_kind="products",
+            products=shown,
+            collections=list(plan.collections or []),
+            guided_question=plan.guided_question,
+            presentation=plan.presentation,
+            evidence={**dict(plan.evidence), "group_products": query, "offset": offset},
+        )
 
         composer = DiscoveryPresentationComposer()
         presentation = composer.compose(
@@ -151,7 +232,7 @@ class CatalogNavigateHandler:
             merchant_settings=merchant_settings,
             query=query,
         )
-        products_out = list(presentation.products or plan.products or [])
+        products_out = list(presentation.products or shown or [])
         current_group = (args.get("navigation_state_patch") or {}).get("current_catalog_group")
         if not current_group:
             current_group = {
@@ -168,6 +249,7 @@ class CatalogNavigateHandler:
             "chosen_path": PATH_GROUP_PRODUCTS,
             "count": len(products_out),
             "query": query,
+            "next_page_available": next_page_available,
             "discovery_plan": dict(getattr(plan, "evidence", None) or {}),
             "navigation_state_patch": self._navigation_patch(
                 decision,
@@ -176,6 +258,10 @@ class CatalogNavigateHandler:
                 source="group_products",
                 current_catalog_group=current_group,
                 selected_collection=str(args.get("catalog_group_id") or args.get("catalog_group_slug") or ""),
+                group_products_pool=pool,
+                group_products_offset=offset,
+                group_products_page_size=page_size,
+                next_page_available=next_page_available,
             ),
         }
 
@@ -309,7 +395,7 @@ class CatalogNavigateHandler:
             )
             plan = DiscoveryPlan(
                 output_kind="products",
-                products=ranked[: max(1, strategy.initial_count)],
+                products=list(ranked),
                 presentation=strategy.presentation,
                 evidence={
                     "group_id": str(catalog_group_id or ""),
@@ -338,6 +424,14 @@ class CatalogNavigateHandler:
         source: str,
         current_catalog_group: Any = None,
         selected_collection: str = "",
+        group_products_pool: Optional[List[Dict[str, Any]]] = None,
+        group_products_offset: int = 0,
+        group_products_page_size: int = 0,
+        next_page_available: bool = False,
+        collections_pool: Optional[List[Dict[str, Any]]] = None,
+        collections_offset: int = 0,
+        collections_page_size: int = 0,
+        collections_next_available: bool = False,
     ) -> Dict[str, Any]:
         args_patch = dict((getattr(decision, "args", None) or {}).get("navigation_state_patch") or {})
         patch = {
@@ -349,6 +443,16 @@ class CatalogNavigateHandler:
             "catalog_navigation_source": source,
             "selection_context_turn": None,
         }
+        if group_products_pool is not None:
+            patch["group_products_pool"] = list(group_products_pool)
+            patch["group_products_offset"] = int(group_products_offset or 0)
+            patch["group_products_page_size"] = int(group_products_page_size or 0)
+            patch["next_page_available"] = bool(next_page_available)
+        if collections_pool is not None:
+            patch["collections_pool"] = list(collections_pool)
+            patch["collections_offset"] = int(collections_offset or 0)
+            patch["collections_page_size"] = int(collections_page_size or 0)
+            patch["collections_next_available"] = bool(collections_next_available)
         patch.update({k: v for k, v in args_patch.items() if k not in patch or patch[k] in (None, "", [])})
         return patch
 

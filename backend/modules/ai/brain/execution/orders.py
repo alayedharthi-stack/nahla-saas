@@ -226,6 +226,8 @@ class DraftOrderHandler:
 
         await _ensure_product_options_loaded(prep, ctx, external_id)
 
+        _maybe_prefill_navigator_product_options(prep, product_info, decision)
+
         if prep.product_unsyncable:
             logger.error(
                 "[ORDER FLOW] aborting order — product not found on Salla | "
@@ -2353,6 +2355,155 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
         )
 
     return captured
+
+
+def _apply_variant_options_to_prep(
+    prep: OrderPreparationState,
+    variant: Dict[str, Any],
+) -> bool:
+    """Map a Salla raw variant's related_options onto prep.product_options."""
+    options = variant.get("related_options") or []
+    values = variant.get("related_option_values") or []
+    if not isinstance(options, list) or not isinstance(values, list):
+        return False
+    if len(options) != len(values):
+        return False
+    variant_map = {str(o): str(v) for o, v in zip(options, values)}
+    captured = False
+    for group in prep.product_options_meta or []:
+        gid = str(group.get("id") or "")
+        if gid not in variant_map:
+            continue
+        wanted_value_id = variant_map[gid]
+        gname = str(group.get("name") or "").strip()
+        gkey = gname.lower()
+        if not gkey or gkey in (prep.product_options or {}):
+            continue
+        for val in group.get("values") or []:
+            if str(val.get("id") or "") == wanted_value_id:
+                prep.product_options[gkey] = {
+                    "option_id": group.get("id"),
+                    "option_name": gname,
+                    "value_id": val.get("id"),
+                    "value_name": str(val.get("name") or "").strip(),
+                }
+                captured = True
+                break
+    return captured
+
+
+def _match_option_values_from_label(
+    prep: OrderPreparationState,
+    *,
+    label_blob: str,
+    option_prefill: Optional[Dict[str, Any]] = None,
+) -> bool:
+    from modules.ai.brain.commerce.variant_pricing import normalize_text, parse_unit_from_text  # noqa: PLC0415
+
+    norm_blob = normalize_text(label_blob or "")
+    requested_unit = parse_unit_from_text(label_blob or "")
+    captured = False
+    for group in prep.product_options_meta or []:
+        gname = str(group.get("name") or "").strip()
+        gkey = gname.lower()
+        if not gkey or gkey in (prep.product_options or {}):
+            continue
+        matched = False
+        for val in group.get("values") or []:
+            value_name = str(val.get("name") or "").strip()
+            if not value_name:
+                continue
+            norm_value = normalize_text(value_name)
+            if norm_value and norm_value in norm_blob:
+                prep.product_options[gkey] = {
+                    "option_id": group.get("id"),
+                    "option_name": gname,
+                    "value_id": val.get("id"),
+                    "value_name": value_name,
+                }
+                matched = True
+                captured = True
+                break
+            if requested_unit:
+                val_unit = parse_unit_from_text(value_name)
+                if val_unit and requested_unit.kind == val_unit.kind:
+                    mag_ok = (
+                        requested_unit.magnitude is not None
+                        and val_unit.magnitude is not None
+                        and abs(requested_unit.magnitude - val_unit.magnitude) < 1e-4
+                    )
+                    if mag_ok or requested_unit.normalized_key == val_unit.normalized_key:
+                        prep.product_options[gkey] = {
+                            "option_id": group.get("id"),
+                            "option_name": gname,
+                            "value_id": val.get("id"),
+                            "value_name": value_name,
+                        }
+                        matched = True
+                        captured = True
+                        break
+        if matched:
+            continue
+    return captured
+
+
+def _maybe_prefill_navigator_product_options(
+    prep: OrderPreparationState,
+    product_info: Dict[str, Any],
+    decision: Decision,
+) -> None:
+    source = str(decision.args.get("source") or "")
+    candidate_source = str(
+        product_info.get("candidate_source")
+        or decision.args.get("candidate_source")
+        or ""
+    )
+    if (
+        source != "catalog_navigation_product_pick"
+        and candidate_source != "catalog_navigation_group_products"
+    ):
+        return
+
+    variant_id = str(
+        product_info.get("variant_id")
+        or product_info.get("default_variant_id")
+        or ""
+    ).strip()
+    if variant_id and prep.product_variants_raw:
+        for variant in prep.product_variants_raw:
+            if not isinstance(variant, dict):
+                continue
+            if str(variant.get("id") or "") == variant_id:
+                if _apply_variant_options_to_prep(prep, variant):
+                    logger.info(
+                        "[ORDER FLOW] navigator pick prefilled options from variant_id=%s",
+                        variant_id,
+                    )
+                    return
+
+    label_blob = " ".join(
+        str(product_info.get(key) or "")
+        for key in (
+            "title",
+            "display_label",
+            "size",
+            "weight",
+            "unit",
+            "variant_name",
+            "option_label",
+        )
+    )
+    option_prefill = product_info.get("option_prefill")
+    if _match_option_values_from_label(
+        prep,
+        label_blob=label_blob,
+        option_prefill=option_prefill if isinstance(option_prefill, dict) else None,
+    ):
+        logger.info(
+            "[ORDER FLOW] navigator pick prefilled options from label | product=%r selected=%s",
+            product_info.get("title"),
+            {k: v.get("value_name") for k, v in (prep.product_options or {}).items()},
+        )
 
 
 def _missing_product_options(prep: OrderPreparationState) -> List[Dict[str, Any]]:
