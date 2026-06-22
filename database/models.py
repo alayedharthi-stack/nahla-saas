@@ -3513,3 +3513,157 @@ class BranchArrivalKeyword(Base):
     )
 
     branch = relationship("MerchantBranch", back_populates="arrival_keywords")
+
+
+class ProductGroup(Base):
+    """Merchant-defined catalog group — platform-wide taxonomy (Phase 1)."""
+
+    __tablename__ = "product_groups"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="uq_product_groups_tenant_slug"),
+        Index("ix_product_groups_tenant_active", "tenant_id", "is_active"),
+        Index("ix_product_groups_tenant_priority", "tenant_id", "priority"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    slug = Column(String(64), nullable=False)
+    label = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    catalog_match = Column(String(255), nullable=True)
+    priority = Column(Integer, nullable=False, default=100, server_default="100")
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    source = Column(String(32), nullable=False, default="manual", server_default="manual")
+    metadata_json = Column(JSONB, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    tenant = relationship("Tenant")
+    items = relationship(
+        "ProductGroupItem",
+        back_populates="group",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+
+class ProductGroupItem(Base):
+    """Product membership inside a catalog group."""
+
+    __tablename__ = "product_group_items"
+    __table_args__ = (
+        UniqueConstraint("group_id", "product_id", name="uq_product_group_items_group_product"),
+        Index("ix_product_group_items_group_priority", "group_id", "priority"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    group_id = Column(
+        Integer,
+        ForeignKey("product_groups.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    variant_id = Column(
+        Integer,
+        ForeignKey("product_variants.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    priority = Column(Integer, nullable=False, default=0, server_default="0")
+    label_override = Column(String(255), nullable=False, default="", server_default="")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    group = relationship("ProductGroup", back_populates="items")
+    product = relationship("Product")
+    variant = relationship("ProductVariant")
+
+
+class ProductRelation(Base):
+    """Directed product relationship — alternatives, related, upsell, cross-sell."""
+
+    __tablename__ = "product_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "source_product_id",
+            "target_product_id",
+            "relation_type",
+            name="uq_product_relations_tenant_pair_type",
+        ),
+        Index("ix_product_relations_tenant_source", "tenant_id", "source_product_id"),
+        Index("ix_product_relations_tenant_target", "tenant_id", "target_product_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation_type = Column(String(32), nullable=False)
+    priority = Column(Integer, nullable=False, default=0, server_default="0")
+    source = Column(String(32), nullable=False, default="manual", server_default="manual")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+    source_product = relationship("Product", foreign_keys=[source_product_id])
+    target_product = relationship("Product", foreign_keys=[target_product_id])
+
+
+class ProductRanking(Base):
+    """Merchant catalog ranking signals — best seller flags and scores."""
+
+    __tablename__ = "product_rankings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "product_id", name="uq_product_rankings_tenant_product"),
+        Index("ix_product_rankings_tenant_best_seller", "tenant_id", "is_best_seller"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    is_best_seller = Column(Boolean, nullable=False, default=False, server_default="false")
+    sales_rank = Column(Integer, nullable=True)
+    sales_score = Column(Float, nullable=True)
+    merchant_priority = Column(Integer, nullable=False, default=0, server_default="0")
+    stats_source = Column(String(32), nullable=False, default="manual", server_default="manual")
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+    product = relationship("Product")
