@@ -160,6 +160,38 @@ class ProductSearchHandler:
 
         query = decision.args.get("query", ctx.message)
 
+        source = str(decision.args.get("source") or "").strip().lower()
+        entry_type = str((decision.args or {}).get("discovery_entry_type") or "").strip().lower()
+        if (
+            source in {
+                "top_products",
+                "top_products_start_order",
+                "top_products_replay_fallback",
+                "top_products_numeric_fallback",
+            }
+            or entry_type == "top_products"
+        ):
+            from ..catalog.catalog_ranking_runtime import load_best_seller_catalog_products  # noqa: PLC0415
+
+            best_sellers = load_best_seller_catalog_products(
+                getattr(ctx, "_db", None),
+                ctx.tenant_id,
+                message=ctx.message or "",
+                query=str(query or ""),
+                state=state,
+                limit=fetch_limit,
+            )
+            if best_sellers:
+                products = _apply_category_scope(_apply_affinity_boost(best_sellers, ctx))
+                return _format_result(
+                    products,
+                    query=str(query or ""),
+                    attach_discovery_presentation=bool(
+                        getattr(state, "last_discovery_mode", None)
+                        or (decision.args or {}).get("discovery_mode")
+                    ),
+                )
+
         # Progressive browse — next unseen slice, never repeat last turn.
         if source == "show_more":
             pool = _apply_category_scope(list(getattr(state, "catalog_browse_pool", None) or []))
