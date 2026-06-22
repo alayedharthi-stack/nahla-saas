@@ -291,6 +291,19 @@ class TestCatalogNavigatorEngine:
         assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
         assert decision.action == ACTION_CATALOG_NAVIGATE
 
+    @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
+    def test_start_order_with_product_focus_not_navigator(self, _mock_groups):
+        state = MerchantConversationState(
+            greeted=True,
+            stage="deciding",
+            turn=3,
+            current_product_focus={"id": 1, "external_id": "ext-1", "title": "Sample"},
+        )
+        ctx = _ctx(MSG_START, state=state)
+        ctx.intent = Intent(name="start_order", confidence=0.9, raw_message=MSG_START)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+
 
 class TestCatalogNavigateHandler:
     def test_handler_sets_owner_metadata(self):

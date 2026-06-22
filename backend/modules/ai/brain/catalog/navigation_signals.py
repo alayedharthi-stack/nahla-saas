@@ -248,16 +248,25 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
             evidence["product_query"] = product_query
 
     order_without_target = False
+    has_product_focus = bool(getattr(getattr(ctx, "state", None), "current_product_focus", None))
     try:
         from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
             is_bare_start_order_phrase,
         )
 
-        order_without_target = is_bare_start_order_phrase(msg) or (
-            intent_name == INTENT_START_ORDER and not specific_product_target
+        order_without_target = (
+            not has_product_focus
+            and (
+                is_bare_start_order_phrase(msg)
+                or (intent_name == INTENT_START_ORDER and not specific_product_target)
+            )
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional start-order probe
-        order_without_target = intent_name == INTENT_START_ORDER and not specific_product_target
+        order_without_target = (
+            not has_product_focus
+            and intent_name == INTENT_START_ORDER
+            and not specific_product_target
+        )
 
     intent_browse = intent_name in _BROWSE_INTENTS and not specific_product_target
 
@@ -328,6 +337,11 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         catalog_browse_intent = False
         if not hard_blocked:
             exit_reason = exit_reason or "ordering_continuation"
+
+    if has_product_focus and intent_name == INTENT_START_ORDER:
+        catalog_browse_intent = False
+        if not hard_blocked:
+            exit_reason = exit_reason or "start_order_with_product_focus"
 
     confidence = min(0.99, max(0.0, score if score else (0.72 if catalog_browse_intent else 0.0)))
 
