@@ -1391,12 +1391,15 @@ class DefaultDecisionEngine:
                     ctx.tenant_id,
                 )
                 if not _prod_orderable or not _matched_product.get("external_id"):
-                    _alts = [
-                        c for c in _candidates
-                        if c.get("can_checkout", c.get("orderable", True))
-                        and c.get("external_id")
-                        and c.get("id") != _matched_product.get("id")
-                    ][:3]
+                    from ..catalog.catalog_ranking_runtime import resolve_orderable_alternatives  # noqa: PLC0415
+
+                    _alts = resolve_orderable_alternatives(
+                        getattr(ctx, "_db", None),
+                        ctx.tenant_id,
+                        source_product_id=_matched_product.get("id"),
+                        fallback_candidates=_candidates,
+                        limit=3,
+                    )
                     logger.warning(
                         "[ORDER FLOW] picked product NOT orderable (by name) — "
                         "suggesting %d alternatives | name=%r external_id=%s "
@@ -1538,14 +1541,15 @@ class DefaultDecisionEngine:
                     )
 
                     if _strict_reject:
-                        # A product that was shown in the numbered list is
-                        # now failing validation — this is a catalog/state bug.
-                        _alts = [
-                            c for c in candidates
-                            if c.get("can_checkout", c.get("orderable", True))
-                            and c.get("external_id")
-                            and c.get("id") != product.get("id")
-                        ][:3]
+                        from ..catalog.catalog_ranking_runtime import resolve_orderable_alternatives  # noqa: PLC0415
+
+                        _alts = resolve_orderable_alternatives(
+                            getattr(ctx, "_db", None),
+                            ctx.tenant_id,
+                            source_product_id=product.get("id"),
+                            fallback_candidates=candidates,
+                            limit=3,
+                        )
                         logger.error(
                             "[ORDER FLOW] selected product mismatch | "
                             "expected=%r (index=%d) can_checkout=%s external_id=%s "

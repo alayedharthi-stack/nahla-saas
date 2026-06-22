@@ -109,7 +109,12 @@ def compute_discovery_score(
         if key and key in priority_map:
             merchant_priority = max(merchant_priority, float(priority_map[key]))
     if merchant_priority <= 0.0:
-        if ext and ext in featured_ids:
+        if meta.get("is_best_seller"):
+            merchant_priority = max(
+                merchant_priority,
+                float(meta.get("merchant_priority", 1.0) or 1.0),
+            )
+        elif ext and ext in featured_ids:
             merchant_priority = 1.0
         elif pid in featured_ids:
             merchant_priority = 1.0
@@ -415,6 +420,18 @@ def attach_discovery_signals_from_db(
         .all()
     )
     by_id = {row.id: row for row in rows}
+    rankings_by_id: Dict[int, Any] = {}
+    try:
+        from database.models import ProductRanking  # noqa: PLC0415
+
+        ranking_rows = (
+            db.query(ProductRanking)
+            .filter(ProductRanking.tenant_id == tenant_id, ProductRanking.product_id.in_(ids))
+            .all()
+        )
+        rankings_by_id = {int(r.product_id): r for r in ranking_rows}
+    except Exception:  # noqa: BLE001
+        rankings_by_id = {}
     now = time.time()
     enriched: List[Dict[str, Any]] = []
     for product in products:
@@ -430,10 +447,19 @@ def attach_discovery_signals_from_db(
                 freshness = max(0.0, 1.0 - min((now - updated_at.timestamp()) / (86400 * 30), 1.0))
             except Exception:  # noqa: BLE001
                 freshness = 0.0
+        ranking = rankings_by_id.get(int(row.get("id") or 0))
+        is_best_seller = bool(getattr(ranking, "is_best_seller", False)) if ranking else False
+        merchant_priority = float(getattr(ranking, "merchant_priority", 0) or 0) if ranking else 0.0
         row["discovery_signals"] = {
             "featured_rank": float(meta.get("featured_rank", meta.get("merchant_priority", 0)) or 0),
-            "sales_score": float(meta.get("sales_score", meta.get("stats_converted", 0)) or 0),
+            "sales_score": float(
+                meta.get("sales_score", meta.get("stats_converted", 0))
+                or (getattr(ranking, "sales_score", 0) if ranking else 0)
+                or 0,
+            ),
             "freshness": freshness,
+            "is_best_seller": is_best_seller,
+            "merchant_priority": merchant_priority,
         }
         enriched.append(row)
     return enriched
