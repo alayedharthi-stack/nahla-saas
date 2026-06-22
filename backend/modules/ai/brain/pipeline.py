@@ -41,6 +41,7 @@ from .types import (
     INTENT_PICK_LIST_ITEM,
 )
 from .decision.actions import (
+    ACTION_CATALOG_NAVIGATE,
     ACTION_GREET,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
@@ -1579,9 +1580,12 @@ class MerchantBrain:
             _suppress_focus_pin = should_suppress_product_focus_pin(ctx.message or "")
         except Exception:  # noqa: BLE001
             _suppress_focus_pin = False
+        if decision.action == ACTION_CATALOG_NAVIGATE:
+            _suppress_focus_pin = True
         if (
             result.data.get("product")
             and not _suppress_focus_pin
+            and decision.action != ACTION_CATALOG_NAVIGATE
             and (
                 decision.action == "search_products"
                 or decision.action == ACTION_PROPOSE_DRAFT_ORDER
@@ -1601,8 +1605,15 @@ class MerchantBrain:
                 pass
         _sel_patch = (decision.args or {}).get("selection_context_patch")
         _coll_patch = (decision.args or {}).get("collection_navigation_patch")
+        _nav_patch = (decision.args or {}).get("navigation_state_patch")
+        if isinstance(result.data.get("navigation_state_patch"), dict):
+            _nav_patch = {**(_nav_patch or {}), **result.data.get("navigation_state_patch")}
         if isinstance(_coll_patch, dict):
             _sel_patch = {**(_sel_patch or {}), **_coll_patch}
+        if isinstance(_nav_patch, dict):
+            _sel_patch = {**(_sel_patch or {}), **_nav_patch}
+            if _nav_patch.get("selection_context_turn") is None:
+                _sel_patch["selection_context_turn"] = int(getattr(new_state, "turn", 0) or 0)
         if isinstance(_sel_patch, dict):
             try:
                 from .commerce.selection_context import apply_selection_context_patch  # noqa: PLC0415
@@ -2577,6 +2588,14 @@ class MerchantBrain:
             )
 
         _chosen_path = str(result.data.get("chosen_path") or "")
+        _navigator_owner_locked = bool(
+            result.data.get("owner_locked")
+            and str(result.data.get("turn_owner") or "") == "catalog_navigation"
+        )
+        _owned_reply_snapshot = reply or ""
+        _owned_path_snapshot = _chosen_path
+        _owned_kind_snapshot = str(result.data.get("discovery_output_kind") or "")
+        _owned_hash_snapshot = str(result.data.get("owner_reply_hash") or "")
         _fallback_used = bool(
             "fallback" in _chosen_path
             or "timeout" in _chosen_path
@@ -2740,7 +2759,7 @@ class MerchantBrain:
                 apply_product_claim_grounding_guard,
                 product_claim_grounding_guard_mode,
             )
-            if product_claim_grounding_guard_mode() != "off":
+            if product_claim_grounding_guard_mode() != "off" and not _navigator_owner_locked:
                 if _availability_ctx is None:
                     from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
                         build_availability_context,
@@ -2785,7 +2804,7 @@ class MerchantBrain:
                 apply_catalog_product_grounding_guard,
                 catalog_product_grounding_guard_mode,
             )
-            if catalog_product_grounding_guard_mode() != "off":
+            if catalog_product_grounding_guard_mode() != "off" and not _navigator_owner_locked:
                 _cpgg_category = str((decision.args or {}).get("category_hint") or "").strip()
                 if not _cpgg_category:
                     from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
@@ -2819,6 +2838,33 @@ class MerchantBrain:
                 "[CATALOG_PRODUCT_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _cpgg_exc,
             )
+
+        if _navigator_owner_locked:
+            from .catalog.navigation import owner_reply_hash  # noqa: PLC0415
+
+            _reply_changed = (reply or "") != _owned_reply_snapshot
+            _path_changed = str(result.data.get("chosen_path") or "") != _owned_path_snapshot
+            _kind_changed = str(result.data.get("discovery_output_kind") or "") != _owned_kind_snapshot
+            if _reply_changed or _path_changed or _kind_changed:
+                logger.warning(
+                    "[CATALOG_NAVIGATOR] owner_replacement_blocked tenant=%s path=%s "
+                    "reply_changed=%s path_changed=%s kind_changed=%s",
+                    tenant_id,
+                    _owned_path_snapshot,
+                    _reply_changed,
+                    _path_changed,
+                    _kind_changed,
+                )
+                reply = _owned_reply_snapshot
+                result.data["chosen_path"] = _owned_path_snapshot
+                if _owned_kind_snapshot:
+                    result.data["discovery_output_kind"] = _owned_kind_snapshot
+                result.data["owner_replacement_blocked"] = True
+            result.data["navigator_owner"] = True
+            result.data["owner_locked"] = True
+            result.data["owner_replaced"] = False
+            if not result.data.get("owner_reply_hash"):
+                result.data["owner_reply_hash"] = owner_reply_hash(reply or "")
 
         try:
             from modules.ai.brain.postprocess.commerce_tail_guard import (  # noqa: PLC0415
@@ -3243,6 +3289,8 @@ def _resolve_chosen_path(decision: Decision, result: ActionResult) -> str:
     chosen = str(result.data.get("chosen_path") or "").strip()
     if chosen:
         return chosen
+    if decision.action == ACTION_CATALOG_NAVIGATE:
+        return str((decision.args or {}).get("chosen_path") or "catalog_navigation")
     if decision.action == "llm_reply":
         return "llm"
     if decision.action in {"greet", "faq_reply", "clarify", "narrow_choices"}:

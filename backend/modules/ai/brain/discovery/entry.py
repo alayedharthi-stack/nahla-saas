@@ -229,6 +229,20 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
     except Exception:
         logger.exception("[DISCOVERY_ENTRY] fulfillment_lock_probe_failed")
 
+    try:
+        from ..catalog.navigation_signals import evaluate_catalog_navigation_signals  # noqa: PLC0415
+
+        _nav_signals = evaluate_catalog_navigation_signals(ctx)
+        if _nav_signals.catalog_browse_intent:
+            return "catalog_navigator_owned"
+        if _nav_signals.navigation_state and not _nav_signals.advisory_or_comparison:
+            from ..commerce.collection_navigation import is_collection_navigation_message  # noqa: PLC0415
+
+            if is_collection_navigation_message(msg):
+                return "catalog_navigator_owned"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional navigator suppression probe
+        pass
+
     return None
 
 

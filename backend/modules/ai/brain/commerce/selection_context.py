@@ -180,6 +180,12 @@ def apply_selection_context_patch(state: Any, patch: Dict[str, Any]) -> None:
         state.last_presented_products = list(patch.get("last_presented_products") or [])
     if patch.get("last_presented_collections") is not None:
         state.last_presented_collections = list(patch.get("last_presented_collections") or [])
+    if patch.get("last_presented_group_products") is not None:
+        state.last_presented_group_products = list(patch.get("last_presented_group_products") or [])
+    if patch.get("current_catalog_group") is not None:
+        state.current_catalog_group = patch.get("current_catalog_group")
+    if patch.get("catalog_navigation_source") is not None:
+        state.catalog_navigation_source = str(patch.get("catalog_navigation_source") or "")
     if patch.get("selection_context_turn") is not None:
         state.selection_context_turn = int(patch.get("selection_context_turn") or 0)
     if str(getattr(state, "selected_product_id", "") or "").strip():

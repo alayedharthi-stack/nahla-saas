@@ -16,6 +16,7 @@ from typing import Dict, Type, Any
 
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
+    ACTION_CATALOG_NAVIGATE,
     ACTION_CLARIFY,
     ACTION_FAQ_REPLY,
     ACTION_GREET,
@@ -401,6 +402,7 @@ class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
     def __init__(self) -> None:
+        from .catalog_navigate import CatalogNavigateHandler
         from .faq import FAQReplyHandler
         from .search import ProductSearchHandler
         from .orders import DraftOrderHandler, TrackOrderHandler
@@ -409,6 +411,7 @@ class DefaultActionExecutor:
             ACTION_GREET:               _GreetHandler(),
             ACTION_FAQ_REPLY:           FAQReplyHandler(),
             ACTION_SEARCH_PRODUCTS:     ProductSearchHandler(),
+            ACTION_CATALOG_NAVIGATE:    CatalogNavigateHandler(),
             ACTION_PROPOSE_DRAFT_ORDER: DraftOrderHandler(),
             ACTION_SEND_PAYMENT_LINK:   _SendPaymentLinkHandler(),
             ACTION_SUGGEST_COUPON:      _SuggestCouponHandler(),

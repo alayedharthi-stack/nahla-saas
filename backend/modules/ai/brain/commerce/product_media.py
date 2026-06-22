@@ -188,6 +188,17 @@ def detect_product_media_turn(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy import
         pass
 
+    try:
+        from ..catalog.navigation_signals import message_indicates_catalog_browse  # noqa: PLC0415
+
+        if message_indicates_catalog_browse(raw, intent_name=name):
+            return ProductMediaVerdict(
+                matched=False,
+                reason="catalog_navigator_browse",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional navigator browse probe
+        pass
+
     has_media_origin = _is_customer_media_origin(raw, meta)
     has_product_signal = has_product_commerce_signal(raw, topic_hints=hints)
     has_pm_hints = _has_product_media_topic_hints(hints)

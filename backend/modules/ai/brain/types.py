@@ -526,6 +526,9 @@ class MerchantConversationState:
     selected_variant_id: str = ""
     selected_collection: str = ""
     selection_context_turn: int = 0
+    current_catalog_group: Optional[Dict[str, Any]] = None
+    last_presented_group_products: List[Dict[str, Any]] = field(default_factory=list)
+    catalog_navigation_source: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -597,6 +600,9 @@ class MerchantConversationState:
             "selected_variant_id": self.selected_variant_id,
             "selected_collection": self.selected_collection,
             "selection_context_turn": self.selection_context_turn,
+            "current_catalog_group": self.current_catalog_group,
+            "last_presented_group_products": self.last_presented_group_products,
+            "catalog_navigation_source": self.catalog_navigation_source,
         }
 
     @staticmethod
@@ -678,6 +684,9 @@ class MerchantConversationState:
             selected_variant_id=str(d.get("selected_variant_id", "") or ""),
             selected_collection=str(d.get("selected_collection", "") or ""),
             selection_context_turn=int(d.get("selection_context_turn") or 0),
+            current_catalog_group=d.get("current_catalog_group"),
+            last_presented_group_products=list(d.get("last_presented_group_products") or []),
+            catalog_navigation_source=str(d.get("catalog_navigation_source", "") or ""),
         )
 
 
