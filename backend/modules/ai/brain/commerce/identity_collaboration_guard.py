@@ -43,7 +43,7 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
 
         if detect_product_information_topic_shift(msg):
             return None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product info topic import
         pass
     if not is_identity_collaboration_without_purchase(msg):
         return None

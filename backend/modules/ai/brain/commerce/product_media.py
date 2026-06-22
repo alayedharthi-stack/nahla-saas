@@ -174,7 +174,7 @@ def detect_product_media_turn(
                 matched=False,
                 reason="product_attribute_or_usage_question",
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product info topic import
         pass
 
     has_media_origin = _is_customer_media_origin(raw, meta)

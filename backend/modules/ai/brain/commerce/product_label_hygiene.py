@@ -141,7 +141,7 @@ def looks_like_sentence_not_product(text: str) -> bool:
 
         if detect_product_information_topic_shift(text):
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product info topic import
         pass
     words = [w for w in norm.split() if w]
     has_identity_signal = bool(
