@@ -75,6 +75,22 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _brain_pipeline_quota_patch():
+    """Stub quota gate for brain unit tests that use MagicMock DB sessions."""
+    from core.wa_usage import AllowResult  # noqa: PLC0415
+
+    return patch(
+        "core.wa_usage.check_limit",
+        return_value=AllowResult(
+            allowed=True,
+            reason="ok",
+            used_total=0,
+            limit=1000,
+            pct=0.0,
+        ),
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Intent rules
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +610,10 @@ class TestThinLLMComposer:
 class TestBrainPipeline:
     """End-to-end pipeline tests with all external I/O mocked."""
 
+    def _quota_allowed_patch(self):
+        """Brain unit tests use MagicMock DB — stub quota gate."""
+        return _brain_pipeline_quota_patch()
+
     def _build_brain(self, mock_classify, mock_facts, mock_state):
         from modules.ai.brain.pipeline import MerchantBrain
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
@@ -691,7 +711,7 @@ class TestBrainPipeline:
             memory_updater=memory_updater,
         )
 
-        with patch(
+        with _brain_pipeline_quota_patch(), patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
             llm_mock,
         ):
@@ -748,7 +768,7 @@ class TestBrainPipeline:
 
         # When no products, DecisionEngine → ACTION_LLM_REPLY
         # DefaultComposer._llm_compose will fail (no DB/API) → generic_fallback
-        with patch("modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
+        with _brain_pipeline_quota_patch(), patch("modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
                    new_callable=AsyncMock, return_value="fallback reply"):
             reply = _run(b.process(
                 db=self._db(),
@@ -1081,7 +1101,7 @@ class TestStateDrivenSimplification:
         ]
 
         llm_mock = AsyncMock(return_value="must not call llm")
-        with patch(
+        with _brain_pipeline_quota_patch(), patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
             llm_mock,
         ):
