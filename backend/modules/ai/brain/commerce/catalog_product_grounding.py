@@ -157,15 +157,17 @@ def build_catalog_grounded_list_reply(
     prefix = f"{greeting} " if greeting else ""
     label = category_hint.strip() or "المنتجات"
 
+    bullet_joined = joined.replace(" و", "\n- ") if joined else ""
+
     if is_honey_category_hint(category_hint) or (
         names and all(is_honey_category_hint(t) for t in names)
     ):
-        if joined:
-            body = f"المتوفر حاليًا عندنا من العسل:\n- {joined.replace(' و', '\n- ')}"
+        if bullet_joined:
+            body = f"المتوفر حاليًا عندنا من العسل:\n- {bullet_joined}"
         else:
             return _SAFE_NO_CATALOG_AR
-    elif joined:
-        body = f"المتوفر حاليًا عندنا من {label}:\n- {joined.replace(' و', '\n- ')}"
+    elif bullet_joined:
+        body = f"المتوفر حاليًا عندنا من {label}:\n- {bullet_joined}"
     else:
         return _SAFE_NO_CATALOG_AR
 

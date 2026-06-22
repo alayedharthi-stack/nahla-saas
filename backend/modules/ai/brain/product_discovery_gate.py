@@ -688,6 +688,14 @@ def product_discovery_block_reason(
     if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
         return None
 
+    try:
+        from .catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+
+        if is_catalog_browse_turn(msg, intent_name=intent_name, ctx=ctx):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy probe
+        pass
+
     intent_conf = float(getattr(ctx.intent, "confidence", 0.0) or 0.0)
 
     try:
