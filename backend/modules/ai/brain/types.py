@@ -528,6 +528,14 @@ class MerchantConversationState:
     selection_context_turn: int = 0
     current_catalog_group: Optional[Dict[str, Any]] = None
     last_presented_group_products: List[Dict[str, Any]] = field(default_factory=list)
+    collections_pool: List[Dict[str, Any]] = field(default_factory=list)
+    collections_offset: int = 0
+    collections_page_size: int = 0
+    collections_next_available: bool = False
+    group_products_pool: List[Dict[str, Any]] = field(default_factory=list)
+    group_products_offset: int = 0
+    group_products_page_size: int = 0
+    next_page_available: bool = False
     catalog_navigation_source: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -602,6 +610,14 @@ class MerchantConversationState:
             "selection_context_turn": self.selection_context_turn,
             "current_catalog_group": self.current_catalog_group,
             "last_presented_group_products": self.last_presented_group_products,
+            "collections_pool": self.collections_pool,
+            "collections_offset": self.collections_offset,
+            "collections_page_size": self.collections_page_size,
+            "collections_next_available": self.collections_next_available,
+            "group_products_pool": self.group_products_pool,
+            "group_products_offset": self.group_products_offset,
+            "group_products_page_size": self.group_products_page_size,
+            "next_page_available": self.next_page_available,
             "catalog_navigation_source": self.catalog_navigation_source,
         }
 
@@ -686,6 +702,14 @@ class MerchantConversationState:
             selection_context_turn=int(d.get("selection_context_turn") or 0),
             current_catalog_group=d.get("current_catalog_group"),
             last_presented_group_products=list(d.get("last_presented_group_products") or []),
+            collections_pool=list(d.get("collections_pool") or []),
+            collections_offset=int(d.get("collections_offset") or 0),
+            collections_page_size=int(d.get("collections_page_size") or 0),
+            collections_next_available=bool(d.get("collections_next_available", False)),
+            group_products_pool=list(d.get("group_products_pool") or []),
+            group_products_offset=int(d.get("group_products_offset") or 0),
+            group_products_page_size=int(d.get("group_products_page_size") or 0),
+            next_page_available=bool(d.get("next_page_available", False)),
             catalog_navigation_source=str(d.get("catalog_navigation_source", "") or ""),
         )
 

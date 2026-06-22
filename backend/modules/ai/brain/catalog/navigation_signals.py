@@ -406,11 +406,51 @@ def message_indicates_catalog_browse(message: str, *, intent_name: str = "") -> 
     return score >= HIGH_BROWSE_THRESHOLD or inventory_frame or general_store_browse or order_without_target
 
 
+_MORE_FRAME_RE = re.compile(
+    r"(?:"
+    r"^(?:المزيد|اكثر|أكثر|more|next|continue|كمل|كمان|باقي|غيرهم|غيرها|غيره)"
+    r"|(?:ودي|ابي|ابغ|أبي|أبغ|show|list)\s*(?:المزيد|more|next|باقي|others?)"
+    r"|(?:products?|options?|choices?|items?)\s*(?:more|next)"
+    r"|(?:ورني|اعرض)\s*(?:باقي|المزيد|more)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def is_group_products_more_request(message: str) -> bool:
+    """Morphological 'show more in this group' — not a closed phrase whitelist."""
+    norm = _normalize_ar(message or "")
+    if not norm or len(norm.split()) > 6:
+        return False
+    return bool(_MORE_FRAME_RE.search(norm))
+
+
+is_navigation_more_request = is_group_products_more_request
+
+
+_START_OVER_RE = re.compile(
+    r"(?:"
+    r"^(?:البدا(?:ية|يه)|من\s*البدا(?:ية|يه)|back\s*to\s*start|start\s*over|الصف(?:حة|ه)\s*الاول(?:ى|ي))$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def is_collections_start_over_request(message: str) -> bool:
+    norm = _normalize_ar(message or "")
+    if not norm:
+        return False
+    return bool(_START_OVER_RE.search(norm))
+
+
 __all__ = [
     "CatalogNavigationSignals",
     "HIGH_BROWSE_THRESHOLD",
     "MEDIUM_BROWSE_THRESHOLD",
     "evaluate_catalog_navigation_signals",
+    "is_collections_start_over_request",
+    "is_group_products_more_request",
+    "is_navigation_more_request",
     "is_phantom_category_scope",
     "message_indicates_catalog_browse",
 ]

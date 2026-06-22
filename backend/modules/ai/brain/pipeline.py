@@ -1696,6 +1696,21 @@ class MerchantBrain:
                 new_state.pending_google_maps_url = ""
                 new_state.pending_city = ""
 
+        if decision.action == ACTION_PROPOSE_DRAFT_ORDER:
+            try:
+                from .catalog.navigator_exit import (  # noqa: PLC0415
+                    clear_navigator_state_for_order_handoff,
+                    is_catalog_navigation_order_handoff_decision,
+                )
+
+                if is_catalog_navigation_order_handoff_decision(decision):
+                    clear_navigator_state_for_order_handoff(
+                        new_state,
+                        tenant_id=tenant_id,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — navigator exit is best-effort
+                logger.debug("[CATALOG_NAVIGATOR] order handoff exit failed", exc_info=True)
+
         try:
             from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noqa: PLC0415
 
@@ -1849,6 +1864,26 @@ class MerchantBrain:
                 len(_collections),
                 decision.action,
             )
+        elif (
+            str(getattr(new_state, "catalog_navigation_source", "") or "").strip() == "group_products"
+            or (
+                decision.action == ACTION_CATALOG_NAVIGATE
+                and str(result.data.get("chosen_path") or "") == "catalog_navigation_group_products"
+            )
+        ):
+            try:
+                from .catalog.numeric_ownership import sync_group_products_single_source  # noqa: PLC0415
+
+                _gp_page = sync_group_products_single_source(new_state)
+                logger.info(
+                    "[NUMERIC_OWNERSHIP] group_products_single_source tenant=%s "
+                    "presented_count=%d action=%s",
+                    tenant_id,
+                    len(_gp_page),
+                    decision.action,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — sync is best-effort
+                logger.debug("[NUMERIC_OWNERSHIP] group_products sync failed", exc_info=True)
         elif _search_products:
             # Must match numbered list shown to the customer (breadth policy).
             new_state.last_search_candidates = list(_search_products)[:_breadth_cap]
@@ -2286,7 +2321,9 @@ class MerchantBrain:
         # to a DIFFERENT product than the one shown. Overwrite with the exact
         # displayed list whenever the composer set pending_candidates.
         _pending_after_compose = result.data.get("pending_candidates")
-        if _pending_after_compose:
+        if _pending_after_compose and str(
+            getattr(new_state, "catalog_navigation_source", "") or ""
+        ).strip() != "group_products":
             _first_before = (
                 (new_state.last_search_candidates[0] or {}).get("title")
                 if new_state.last_search_candidates else None
@@ -2342,6 +2379,21 @@ class MerchantBrain:
                     _cand.get("stock_qty"), _cand.get("in_stock"),
                     _cand.get("status"),
                 )
+        elif (
+            _pending_after_compose
+            and str(getattr(new_state, "catalog_navigation_source", "") or "").strip() == "group_products"
+        ):
+            try:
+                from .catalog.numeric_ownership import sync_group_products_single_source  # noqa: PLC0415
+
+                sync_group_products_single_source(new_state)
+                logger.info(
+                    "[NUMERIC_OWNERSHIP] skipped compose candidate overwrite tenant=%s "
+                    "reason=group_products_single_source",
+                    tenant_id,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — sync is best-effort
+                logger.debug("[NUMERIC_OWNERSHIP] post-compose sync failed", exc_info=True)
 
         # ── 7b-2. Progressive browse pool for "باقي الخيارات" ─────────────
         _src = str((decision.args or {}).get("source") or "").strip().lower()

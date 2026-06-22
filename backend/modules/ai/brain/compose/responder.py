@@ -249,17 +249,49 @@ class DefaultComposer:
                 result.data["owner_locked"] = bool(data.get("owner_locked"))
                 result.data["owner_replaced"] = False
                 result.data["navigator_owner"] = True
-                if discovery_kind == "products":
+                from ..catalog.navigation import PATH_GROUP_PRODUCTS, PATH_GROUPS  # noqa: PLC0415
+
+                if discovery_kind == "collections" and chosen_path == PATH_GROUPS:
+                    page_collections = list(data.get("collections") or [])
+                    from ..catalog.collections_pagination import build_collection_quick_buttons  # noqa: PLC0415
+
+                    buttons = build_collection_quick_buttons(
+                        page_collections,
+                        collections_next_available=bool(data.get("collections_next_available")),
+                        collections_at_end=bool(data.get("collections_at_end")),
+                    )
+                    if buttons:
+                        result.data["pending_buttons"] = buttons
+                    result.data["pending_collections"] = page_collections
+                elif discovery_kind == "products":
                     raw_products = list(data.get("products") or [])
                     from ..commerce.product_breadth_policy import (  # noqa: PLC0415
                         apply_display_slice,
                         resolve_product_breadth_from_context,
                     )
+                    from ..catalog.collections_pagination import (  # noqa: PLC0415
+                        BUTTON_BACK_GROUPS,
+                        BUTTON_MORE_PRODUCTS,
+                    )
+
                     breadth = resolve_product_breadth_from_context(ctx, decision)
                     candidates, breadth_meta = apply_display_slice(raw_products, breadth)
                     result.data["product_breadth"] = breadth.to_log_dict()
                     result.data["product_breadth_meta"] = breadth_meta
                     result.data["pending_candidates"] = candidates
+                    if chosen_path == PATH_GROUP_PRODUCTS:
+                        nav_buttons: list[dict[str, Any]] = []
+                        if bool(data.get("next_page_available")):
+                            nav_buttons.append({
+                                "type": "reply",
+                                "reply": {"id": BUTTON_MORE_PRODUCTS, "title": "المزيد"},
+                            })
+                        nav_buttons.append({
+                            "type": "reply",
+                            "reply": {"id": BUTTON_BACK_GROUPS, "title": "رجوع للأقسام"},
+                        })
+                        if nav_buttons:
+                            result.data["pending_buttons"] = nav_buttons[:3]
                 return discovery_text
             return discovery_text or "ما ظهر عندي أقسام واضحة حالياً."
 

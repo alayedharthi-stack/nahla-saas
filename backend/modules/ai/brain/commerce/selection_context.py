@@ -180,8 +180,24 @@ def apply_selection_context_patch(state: Any, patch: Dict[str, Any]) -> None:
         state.last_presented_products = list(patch.get("last_presented_products") or [])
     if patch.get("last_presented_collections") is not None:
         state.last_presented_collections = list(patch.get("last_presented_collections") or [])
+    if patch.get("collections_pool") is not None:
+        state.collections_pool = list(patch.get("collections_pool") or [])
+    if patch.get("collections_offset") is not None:
+        state.collections_offset = int(patch.get("collections_offset") or 0)
+    if patch.get("collections_page_size") is not None:
+        state.collections_page_size = int(patch.get("collections_page_size") or 0)
+    if patch.get("collections_next_available") is not None:
+        state.collections_next_available = bool(patch.get("collections_next_available"))
     if patch.get("last_presented_group_products") is not None:
         state.last_presented_group_products = list(patch.get("last_presented_group_products") or [])
+    if patch.get("group_products_pool") is not None:
+        state.group_products_pool = list(patch.get("group_products_pool") or [])
+    if patch.get("group_products_offset") is not None:
+        state.group_products_offset = int(patch.get("group_products_offset") or 0)
+    if patch.get("group_products_page_size") is not None:
+        state.group_products_page_size = int(patch.get("group_products_page_size") or 0)
+    if patch.get("next_page_available") is not None:
+        state.next_page_available = bool(patch.get("next_page_available"))
     if patch.get("current_catalog_group") is not None:
         state.current_catalog_group = patch.get("current_catalog_group")
     if patch.get("catalog_navigation_source") is not None:

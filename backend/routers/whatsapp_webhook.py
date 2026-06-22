@@ -3766,6 +3766,19 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        inbound_metadata={"button_id": btn_id, "button_provenance": btn_id},
+                    )
+                    return
+
+                # CatalogNavigator collection buttons — page-local index pick
+                if btn_id.startswith("coll_") and not _is_platform_tenant(db, resolved_tenant_id):
+                    pick_num = btn_id.split("_", 1)[-1]
+                    await _handle_merchant_message(
+                        phone_id=used_pid, to=sender, text=pick_num,
+                        tenant_id=resolved_tenant_id, db=db,
+                        wa_message_ts=_wa_msg_ts,
+                        wa_msg_id=msg_id or None,
+                        inbound_metadata={"button_id": btn_id, "button_provenance": btn_id},
                     )
                     return
 

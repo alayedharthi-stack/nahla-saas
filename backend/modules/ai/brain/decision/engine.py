@@ -817,6 +817,34 @@ class DefaultDecisionEngine:
                 _cat_nav_exc,
             )
 
+        # ── 0a.515 CatalogNavigator group-product pick (before selection_context) ─
+        try:
+            from ..catalog.product_pick import try_catalog_navigation_product_pick_decision  # noqa: PLC0415
+
+            _nav_product_pick = try_catalog_navigation_product_pick_decision(ctx)
+            if _nav_product_pick is not None:
+                return _nav_product_pick
+        except Exception as _nav_pick_exc:  # noqa: BLE001  # noqa: silent-ok — navigator pick hook must not block decide
+            logger.debug(
+                "[CATALOG_NAVIGATOR] product_pick skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _nav_pick_exc,
+            )
+
+        # ── 0a.516 Group products numeric hard guard (block legacy collection pick) ─
+        try:
+            from ..catalog.numeric_ownership import try_group_products_numeric_guard_decision  # noqa: PLC0415
+
+            _gp_numeric_guard = try_group_products_numeric_guard_decision(ctx)
+            if _gp_numeric_guard is not None:
+                return _gp_numeric_guard
+        except Exception as _gp_guard_exc:  # noqa: BLE001  # noqa: silent-ok — numeric guard must not block decide
+            logger.debug(
+                "[NUMERIC_OWNERSHIP] group_products guard skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _gp_guard_exc,
+            )
+
         # ── 0a.535 Selection context follow-up (Phase 4B) ─────────────────
         try:
             from ..commerce.selection_context import try_selection_context_decision  # noqa: PLC0415
@@ -1470,6 +1498,20 @@ class DefaultDecisionEngine:
             # orders.py._merge_message_options handles it correctly.
             _pending_opts = list(getattr(state, "pending_option_groups", None) or [])
             if _pending_opts and state.current_product_focus and facts.orderable:
+                try:
+                    from ..catalog.numeric_ownership import (  # noqa: PLC0415
+                        NUMERIC_OWNER_ORDER_OPTIONS,
+                        log_numeric_ownership,
+                    )
+
+                    log_numeric_ownership(
+                        ctx,
+                        numeric_owner=NUMERIC_OWNER_ORDER_OPTIONS,
+                        action="order_option_pick",
+                        intent_name=intent.name,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry optional
+                    pass
                 logger.info(
                     "[ORDER FLOW] numeric pick → option selection (not product pick) | "
                     "pending_options=%s product=%r",
@@ -1487,13 +1529,33 @@ class DefaultDecisionEngine:
             # context. Mixing the two lists causes the customer to see
             # "1. بنطلون" (from search_candidates) but get "بلوزة" (from
             # last_recommended_products) at index 0.
-            _search_cands = list(state.last_search_candidates or [])
-            _rec_cands = list(state.last_recommended_products or [])
-            candidates = _search_cands or _rec_cands
-            _candidate_source = (
-                "last_search_candidates" if _search_cands
-                else ("last_recommended_products" if _rec_cands else "none")
-            )
+            try:
+                from ..catalog.numeric_ownership import (  # noqa: PLC0415
+                    group_products_candidate_list,
+                    is_group_products_navigation_source,
+                    log_numeric_ownership,
+                    resolve_numeric_owner,
+                )
+
+                if is_group_products_navigation_source(state):
+                    candidates = group_products_candidate_list(state)
+                    _candidate_source = "catalog_navigation_group_products"
+                else:
+                    _search_cands = list(state.last_search_candidates or [])
+                    _rec_cands = list(state.last_recommended_products or [])
+                    candidates = _search_cands or _rec_cands
+                    _candidate_source = (
+                        "last_search_candidates" if _search_cands
+                        else ("last_recommended_products" if _rec_cands else "none")
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership helpers optional
+                _search_cands = list(state.last_search_candidates or [])
+                _rec_cands = list(state.last_recommended_products or [])
+                candidates = _search_cands or _rec_cands
+                _candidate_source = (
+                    "last_search_candidates" if _search_cands
+                    else ("last_recommended_products" if _rec_cands else "none")
+                )
 
             # ── Diagnostic: log numeric pick state before resolution ──────────
             _pick_msg = (ctx.message or "").strip()
@@ -1600,6 +1662,19 @@ class DefaultDecisionEngine:
                         or _candidate_source == "last_recommended_products"
                     )
                     if _can_start_order:
+                        try:
+                            from ..catalog.numeric_ownership import log_numeric_ownership, resolve_numeric_owner  # noqa: PLC0415
+
+                            log_numeric_ownership(
+                                ctx,
+                                numeric_owner=resolve_numeric_owner(ctx, intent_name=intent.name),
+                                action="list_pick",
+                                intent_name=intent.name,
+                                candidate_source=_candidate_source,
+                                extra={"list_index": idx},
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry optional
+                            pass
                         # CRITICAL: pass the FULL chosen product as
                         # `forced_product` (not just `product`).  The
                         # executor MUST honour `forced_product` over
@@ -1774,10 +1849,24 @@ class DefaultDecisionEngine:
         # Candidate priority: last_search_candidates (exact displayed list)
         # then last_recommended_products (previous recommendation list).
         _msg_text = (ctx.message or "").strip()
-        _active_candidates = (
-            list(state.last_search_candidates or [])
-            or list(state.last_recommended_products or [])
-        )
+        try:
+            from ..catalog.numeric_ownership import (  # noqa: PLC0415
+                group_products_candidate_list,
+                is_group_products_navigation_source,
+            )
+
+            if is_group_products_navigation_source(state):
+                _active_candidates = group_products_candidate_list(state)
+            else:
+                _active_candidates = (
+                    list(state.last_search_candidates or [])
+                    or list(state.last_recommended_products or [])
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership helpers optional
+            _active_candidates = (
+                list(state.last_search_candidates or [])
+                or list(state.last_recommended_products or [])
+            )
 
         # Log numeric pick state for ALL digit messages (even INTENT_PICK_LIST_ITEM
         # cases already handled above) so we can diagnose state at entry.

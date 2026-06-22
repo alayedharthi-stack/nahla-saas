@@ -17,6 +17,17 @@ from ..types import BrainContext, Decision
 from .navigation_signals import (
     HIGH_BROWSE_THRESHOLD,
     evaluate_catalog_navigation_signals,
+    is_collections_start_over_request,
+    is_navigation_more_request,
+)
+from .collections_pagination import (
+    COLLECTIONS_BUTTON_PAGE_SIZE,
+    get_collections_pool,
+    has_active_collections_browse_context,
+)
+from .product_pick import (
+    has_active_group_products_context,
+    is_group_product_pick_message,
 )
 
 logger = logging.getLogger("nahla.brain.catalog.navigation")
@@ -170,6 +181,16 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     if not getattr(getattr(ctx, "facts", None), "has_products", False):
         return None
 
+    from .navigator_exit import navigator_should_yield_to_order_flow  # noqa: PLC0415
+
+    if navigator_should_yield_to_order_flow(ctx.state):
+        _log_navigator_event(
+            ctx,
+            navigator_owner=False,
+            owner_exit_reason="order_flow_yield",
+        )
+        return None
+
     signals = evaluate_catalog_navigation_signals(ctx)
     msg = ctx.message or ""
 
@@ -194,7 +215,11 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     state = ctx.state
 
     if is_back_to_collections_request(msg) or is_switch_collection_request(msg):
-        if get_presented_collections(state) or has_active_collection_navigation_context(state):
+        if (
+            get_presented_collections(state)
+            or has_active_collection_navigation_context(state)
+            or has_active_group_products_context(state)
+        ):
             _log_navigator_event(
                 ctx,
                 navigator_owner=True,
@@ -211,16 +236,276 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                     "navigation_state_patch": {
                         "selected_collection": "",
                         "current_catalog_group": None,
+                        "collections_pool": [],
+                        "collections_offset": 0,
+                        "collections_page_size": COLLECTIONS_BUTTON_PAGE_SIZE,
+                        "collections_next_available": False,
+                        "group_products_pool": [],
+                        "group_products_offset": 0,
+                        "group_products_page_size": 0,
+                        "next_page_available": False,
+                        "last_presented_group_products": [],
                         "catalog_navigation_source": "groups",
                     },
                 },
             )
         return None
 
+    if has_active_collections_browse_context(state):
+        if is_collections_start_over_request(msg):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=True,
+                owner_step=OWNER_STEP_BROWSE_GROUPS,
+                chosen_path=PATH_GROUPS,
+                owner_exit_reason="collections_start_over",
+            )
+            return _owned_decision(
+                navigator_step=STEP_SHOW_GROUPS,
+                owner_step=OWNER_STEP_BROWSE_GROUPS,
+                chosen_path=PATH_GROUPS,
+                reason="catalog navigation — collections back to start",
+                confidence=0.92,
+                extra_args={
+                    "collections_offset": 0,
+                    "reuse_collections_pool": True,
+                    "collections_pool": get_collections_pool(state),
+                    "navigation_state_patch": {
+                        "selected_collection": "",
+                        "current_catalog_group": None,
+                        "catalog_navigation_source": "groups",
+                    },
+                },
+            )
+
+        if is_navigation_more_request(msg):
+            pool = get_collections_pool(state)
+            offset = int(getattr(state, "collections_offset", 0) or 0)
+            page_size = COLLECTIONS_BUTTON_PAGE_SIZE
+            next_offset = offset + page_size
+            if not pool or next_offset >= len(pool):
+                last_offset = max(0, len(pool) - page_size) if pool else 0
+                _log_navigator_event(
+                    ctx,
+                    navigator_owner=True,
+                    owner_step=OWNER_STEP_BROWSE_GROUPS,
+                    chosen_path=PATH_GROUPS,
+                    owner_exit_reason="collections_exhausted",
+                )
+                return _owned_decision(
+                    navigator_step=STEP_SHOW_GROUPS,
+                    owner_step=OWNER_STEP_BROWSE_GROUPS,
+                    chosen_path=PATH_GROUPS,
+                    reason="catalog navigation — collections exhausted",
+                    confidence=0.9,
+                    extra_args={
+                        "collections_offset": last_offset,
+                        "collections_pool": pool,
+                        "reuse_collections_pool": True,
+                        "collections_at_end": True,
+                        "navigation_state_patch": {
+                            "selected_collection": "",
+                            "current_catalog_group": None,
+                            "catalog_navigation_source": "groups",
+                        },
+                    },
+                )
+            _log_navigator_event(
+                ctx,
+                navigator_owner=True,
+                owner_step=OWNER_STEP_BROWSE_GROUPS,
+                chosen_path=PATH_GROUPS,
+                extra={"collections_offset": next_offset, "pool_size": len(pool)},
+            )
+            return _owned_decision(
+                navigator_step=STEP_SHOW_GROUPS,
+                owner_step=OWNER_STEP_BROWSE_GROUPS,
+                chosen_path=PATH_GROUPS,
+                reason="catalog navigation — next collections page",
+                confidence=0.92,
+                extra_args={
+                    "collections_offset": next_offset,
+                    "collections_pool": pool,
+                    "reuse_collections_pool": True,
+                    "navigation_state_patch": {
+                        "selected_collection": "",
+                        "current_catalog_group": None,
+                        "catalog_navigation_source": "groups",
+                    },
+                },
+            )
+
+        if is_collection_pick_message(msg) or _looks_like_group_name_pick(
+            msg, get_presented_collections(state),
+        ):
+            resolution = resolve_collection_pick(msg, get_presented_collections(state))
+            if resolution is None:
+                resolution = _resolve_direct_group_name(msg, get_collections_pool(state))
+            if resolution is not None:
+                try:
+                    from .numeric_ownership import (  # noqa: PLC0415
+                        NUMERIC_OWNER_COLLECTIONS_PAGE,
+                        log_numeric_ownership,
+                    )
+
+                    log_numeric_ownership(
+                        ctx,
+                        numeric_owner=NUMERIC_OWNER_COLLECTIONS_PAGE,
+                        action="collection_pick",
+                        candidate_source="catalog_navigation_collections",
+                        extra={"group_name": resolution.group_name},
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry optional
+                    pass
+                _log_navigator_event(
+                    ctx,
+                    navigator_owner=True,
+                    owner_step=OWNER_STEP_GROUP_SELECTION,
+                    chosen_path=PATH_GROUP_PRODUCTS,
+                )
+                return _owned_decision(
+                    navigator_step=STEP_SHOW_GROUP_PRODUCTS,
+                    owner_step=OWNER_STEP_GROUP_SELECTION,
+                    chosen_path=PATH_GROUP_PRODUCTS,
+                    reason=f"catalog navigation — selected group {resolution.group_name!r}",
+                    confidence=0.94,
+                    extra_args={
+                        "catalog_group_id": resolution.group_id,
+                        "catalog_group_slug": resolution.group_slug,
+                        "query": resolution.group_name,
+                        "group_products_offset": 0,
+                        "reuse_group_pool": False,
+                        "navigation_state_patch": {
+                            "selected_collection": resolution.group_id or resolution.group_slug,
+                            "current_catalog_group": {
+                                "group_id": resolution.group_id,
+                                "group_slug": resolution.group_slug,
+                                "group_name": resolution.group_name,
+                            },
+                            "group_products_pool": [],
+                            "group_products_offset": 0,
+                            "group_products_page_size": 0,
+                            "next_page_available": False,
+                            "catalog_navigation_source": "group_products",
+                        },
+                    },
+                )
+
+        _log_navigator_event(
+            ctx,
+            navigator_owner=False,
+            owner_exit_reason="collections_browse_context_active",
+        )
+        return None
+
+    if has_active_group_products_context(state):
+        from ..commerce.selection_context import get_presented_products  # noqa: PLC0415
+
+        if is_navigation_more_request(msg):
+            pool = list(getattr(state, "group_products_pool", None) or [])
+            offset = int(getattr(state, "group_products_offset", 0) or 0)
+            page_size = int(getattr(state, "group_products_page_size", 0) or 0)
+            if page_size <= 0:
+                page_size = max(1, len(get_presented_products(state) or []))
+            next_offset = offset + page_size
+            current_group = getattr(state, "current_catalog_group", None) or {}
+            group_name = str(
+                current_group.get("group_name")
+                or current_group.get("name")
+                or getattr(state, "selected_collection", "")
+                or ""
+            ).strip()
+            if not pool or next_offset >= len(pool):
+                _log_navigator_event(
+                    ctx,
+                    navigator_owner=True,
+                    owner_step=OWNER_STEP_BROWSE_GROUPS,
+                    chosen_path=PATH_GROUPS,
+                    owner_exit_reason="group_products_exhausted",
+                )
+                return _owned_decision(
+                    navigator_step=STEP_SHOW_GROUPS,
+                    owner_step=OWNER_STEP_BROWSE_GROUPS,
+                    chosen_path=PATH_GROUPS,
+                    reason="catalog navigation — no more products in group",
+                    confidence=0.9,
+                    extra_args={
+                        "navigation_state_patch": {
+                            "selected_collection": "",
+                            "current_catalog_group": None,
+                            "group_products_pool": [],
+                            "group_products_offset": 0,
+                            "group_products_page_size": 0,
+                            "next_page_available": False,
+                            "last_presented_group_products": [],
+                            "catalog_navigation_source": "groups",
+                        },
+                    },
+                )
+            _log_navigator_event(
+                ctx,
+                navigator_owner=True,
+                owner_step=OWNER_STEP_GROUP_PRODUCTS,
+                chosen_path=PATH_GROUP_PRODUCTS,
+                extra={"offset": next_offset, "pool_size": len(pool)},
+            )
+            return _owned_decision(
+                navigator_step=STEP_SHOW_GROUP_PRODUCTS,
+                owner_step=OWNER_STEP_GROUP_PRODUCTS,
+                chosen_path=PATH_GROUP_PRODUCTS,
+                reason=f"catalog navigation — next page for group {group_name!r}",
+                confidence=0.92,
+                extra_args={
+                    "catalog_group_id": current_group.get("group_id") or current_group.get("id"),
+                    "catalog_group_slug": current_group.get("group_slug") or current_group.get("slug"),
+                    "query": group_name,
+                    "group_products_offset": next_offset,
+                    "group_products_pool": pool,
+                    "group_products_page_size": page_size,
+                    "reuse_group_pool": True,
+                    "navigation_state_patch": {
+                        "selected_collection": str(
+                            current_group.get("group_id")
+                            or current_group.get("group_slug")
+                            or getattr(state, "selected_collection", "")
+                            or ""
+                        ),
+                        "current_catalog_group": current_group,
+                        "catalog_navigation_source": "group_products",
+                    },
+                },
+            )
+
+        if is_group_product_pick_message(msg):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="group_product_pick_handoff",
+            )
+            return None
+
+        _log_navigator_event(
+            ctx,
+            navigator_owner=False,
+            owner_exit_reason="group_products_context_active",
+        )
+        return None
+
     if (
         has_active_collection_navigation_context(state)
         and get_presented_collections(state)
+        and not has_active_group_products_context(state)
     ):
+        from ..catalog.numeric_ownership import is_group_products_navigation_source  # noqa: PLC0415
+
+        if is_group_products_navigation_source(state) and is_collection_pick_message(msg):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="group_products_numeric_guard_deferred",
+            )
+            return None
+
         from ..commerce.selection_context import get_presented_products  # noqa: PLC0415
 
         if (
@@ -244,6 +529,21 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
             if resolution is None:
                 resolution = _resolve_direct_group_name(msg, get_presented_collections(state))
             if resolution is not None:
+                try:
+                    from .numeric_ownership import (  # noqa: PLC0415
+                        NUMERIC_OWNER_COLLECTIONS_PAGE,
+                        log_numeric_ownership,
+                    )
+
+                    log_numeric_ownership(
+                        ctx,
+                        numeric_owner=NUMERIC_OWNER_COLLECTIONS_PAGE,
+                        action="collection_pick",
+                        candidate_source="catalog_navigation_collections",
+                        extra={"group_name": resolution.group_name},
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry optional
+                    pass
                 _log_navigator_event(
                     ctx,
                     navigator_owner=True,
@@ -260,6 +560,8 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                         "catalog_group_id": resolution.group_id,
                         "catalog_group_slug": resolution.group_slug,
                         "query": resolution.group_name,
+                        "group_products_offset": 0,
+                        "reuse_group_pool": False,
                         "navigation_state_patch": {
                             "selected_collection": resolution.group_id or resolution.group_slug,
                             "current_catalog_group": {
@@ -267,6 +569,10 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                                 "group_slug": resolution.group_slug,
                                 "group_name": resolution.group_name,
                             },
+                            "group_products_pool": [],
+                            "group_products_offset": 0,
+                            "group_products_page_size": 0,
+                            "next_page_available": False,
                             "catalog_navigation_source": "group_products",
                         },
                     },
@@ -332,6 +638,10 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
             "navigation_state_patch": {
                 "selected_collection": "",
                 "current_catalog_group": None,
+                "collections_pool": [],
+                "collections_offset": 0,
+                "collections_page_size": COLLECTIONS_BUTTON_PAGE_SIZE,
+                "collections_next_available": False,
                 "catalog_navigation_source": "groups",
             },
         },
