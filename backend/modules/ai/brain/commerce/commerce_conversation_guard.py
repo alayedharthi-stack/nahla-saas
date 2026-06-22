@@ -26,6 +26,10 @@ from .commerce_browse_category_guard import (
     filter_products_to_browse_category,
     should_exclude_cross_category_product,
 )
+from .commerce_inquiry_boundary import (
+    has_explicit_order_select_signal,
+    is_commerce_inquiry_turn,
+)
 
 logger = logging.getLogger("nahla.brain.commerce.conversation_guard")
 
@@ -160,6 +164,7 @@ class CommerceInboundPrep:
     session: CommerceSession = field(default_factory=CommerceSession)
     availability_note: str = ""
     order_summary_hint: str = ""
+    is_browse_inquiry: bool = False
 
 
 def _norm(text: str) -> str:
@@ -448,6 +453,9 @@ def detect_variant_order_selection(
     if not norm:
         return {}
 
+    if is_commerce_inquiry_turn(text) and not has_explicit_order_select_signal(text):
+        return {}
+
     variant = ""
     if _VARIANT_WEIGHT_RE.search(norm):
         variant = _VARIANT_WEIGHT_RE.search(norm).group(0).strip()
@@ -560,6 +568,9 @@ def prepare_commerce_inbound(
         )
 
     scope = _detect_honey_scope(classify_text)
+    browse_inquiry = is_commerce_inquiry_turn(classify_text) and not has_explicit_order_select_signal(
+        classify_text,
+    )
     if scope:
         session.active_category = scope
         session.stage = session.stage or "category_browse"
@@ -567,13 +578,25 @@ def prepare_commerce_inbound(
     if scope and "سدر" in _norm(classify_text):
         avail = catalog_availability_for_name("سدر", catalog)
         session.availability_status = avail
-        if avail == "unavailable":
+        if avail == "unavailable" and has_explicit_order_select_signal(classify_text):
             session.active_product = session.active_product or "عسل سدر"
+
+    if browse_inquiry:
+        session.order_intent = False
+        if state is not None:
+            try:
+                state.last_browse_query = classify_text
+                if getattr(state, "stage", "") == "ordering":
+                    state.stage = "exploring"
+                if getattr(state, "pending_action", "") == "collect_delivery_info":
+                    state.pending_action = ""
+            except Exception:  # noqa: silent-ok - state patch is best-effort on duck-typed state
+                pass
 
     variant_patch = detect_variant_order_selection(
         classify_text, session=session, catalog=catalog,
     )
-    if variant_patch:
+    if variant_patch and not browse_inquiry:
         session.active_product = str(variant_patch.get("active_product") or session.active_product)
         session.active_variant = str(variant_patch.get("active_variant") or session.active_variant)
         price = variant_patch.get("active_price")
@@ -603,6 +626,7 @@ def prepare_commerce_inbound(
         session=session,
         availability_note=availability_note,
         order_summary_hint=build_order_summary_hint(session),
+        is_browse_inquiry=browse_inquiry,
     )
 
 

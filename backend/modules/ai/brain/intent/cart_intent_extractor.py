@@ -235,6 +235,16 @@ def _extract_add_segment(segment: str) -> Optional[Dict[str, Any]]:
     seg = segment.strip()
     if not seg:
         return None
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            has_explicit_order_select_signal,
+            is_commerce_inquiry_turn,
+        )
+
+        if is_commerce_inquiry_turn(seg) and not has_explicit_order_select_signal(seg):
+            return None
+    except Exception:  # noqa: silent-ok - inquiry guard is best-effort
+        pass
     is_add = bool(_ADD_RE.search(seg)) or not (
         _REMOVE_RE.search(seg) or _QTY_SET_RE.search(seg) or _VARIANT_CHANGE_RE.search(seg)
     )
@@ -271,6 +281,16 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     norm = _norm(text)
     if norm in _ARABIC_NON_CART_TOKENS:
         return []
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            has_explicit_order_select_signal,
+            is_commerce_inquiry_turn,
+        )
+
+        if is_commerce_inquiry_turn(text) and not has_explicit_order_select_signal(text):
+            return []
+    except Exception:  # noqa: silent-ok - inquiry guard is best-effort
+        pass
     has_product_hint = any(k in norm for k in _PRODUCT_KEYWORDS) or "عسل" in norm
     has_cart_verb = bool(
         _ADD_RE.search(text)
@@ -400,6 +420,16 @@ def extract_cart_intents(message: str) -> List[Dict[str, Any]]:
     if item:
         intents.append(item)
     elif norm in {"سمر", "طلح", "صفي", "سدر", "شوك"} or norm in _PRODUCT_KEYWORDS:
+        try:
+            from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+                has_explicit_order_select_signal,
+                is_commerce_inquiry_turn,
+            )
+
+            if is_commerce_inquiry_turn(text) and not has_explicit_order_select_signal(text):
+                return intents
+        except Exception:  # noqa: silent-ok - inquiry guard is best-effort
+            pass
         name = _resolve_product_name(text)
         if name:
             intents.append({

@@ -69,6 +69,7 @@ _CROSS_FORM_MARKERS = frozenset({
     "كريم", "cream", "زيت", "oil", "lotion", "serum", "صابون", "soap",
     "shampoo", "شامبو", "balm", "مرهم", "ointment", "gel", "جل",
     "mask", "ماسك", "tonic", "تونيك",
+    "عكبر", "propolis", "بروبوليس", "pollen", "حبوب لقاح", "لقاح",
 })
 
 # Shared hive/bee tokens must NOT satisfy a honey scope on their own.
@@ -365,6 +366,10 @@ def _identity_has_cross_form(product: Mapping[str, Any]) -> Optional[str]:
     identity = _product_identity_blob(product)
     for marker in _CROSS_FORM_MARKERS:
         marker_norm = _norm(marker)
+        if not marker_norm:
+            continue
+        if marker_norm in identity:
+            return marker_norm
         if marker_norm in _tokens(identity) or marker_norm in identity.split():
             return marker_norm
         if re.search(rf"(?<!\w){re.escape(marker_norm)}(?!\w)", identity):
