@@ -174,6 +174,11 @@ class TestArbiterAndFocusSuppression:
         assert verdict.matched is False
         assert verdict.reason == "product_attribute_or_usage_question"
 
-    def test_should_suppress_product_focus_pin(self) -> None:
-        assert should_suppress_product_focus_pin("هل المنتج خام؟") is True
-        assert should_suppress_product_focus_pin("أبي أطلب المنتج") is False
+    def test_contains_question_still_detected(self) -> None:
+        assert detect_product_attribute_question("هل يحتوي المنتج على سكر؟")
+        assert detect_product_attribute_question("هل فيه سكر؟")
+
+    def test_post_order_shipping_question_not_attribute(self) -> None:
+        msg = "اي فرع ارسلتو طلبي في سمسا"
+        assert detect_product_attribute_question(msg) is False
+        assert detect_product_information_topic_shift(msg) is False

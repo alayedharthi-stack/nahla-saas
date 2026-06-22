@@ -31,7 +31,8 @@ _PRODUCT_ATTRIBUTE_RE = re.compile(
     r"(?:هل\s+)?(?:هو|هي|هذا|هذه|المنتج|هذا\s+المنتج|ال(?:ماده|مادة))?\s*"
     r"(?:مب(?:ستر|سط)|خام|طبيع(?:ي|يه|ية)?|معال[جه]|مصن(?:ع|عة)|عضوي|عضويه|عضوية)"
     r"|(?:pasteurized|pasteurised|raw|natural|processed|unprocessed|organic|artificial|synthetic|manufactured)"
-    r"|(?:هل\s+)?(?:ي)?(?:حتو(?:ي|ى)|ف(?:ي|يه))\s+(?:على|عند)?"
+    r"|(?:هل\s+)?(?:ي)?حتو(?:ي|ى)(?:\s+(?:على|عند))?"
+    r"|(?:هل\s+)?ف(?:ي|يه)(?:ه|ا)\b"
     r"|(?:ما|ماذا|وش)\s+(?:مكون(?:ات)?(?:ه|ها)?|محتو(?:ى|يات)(?:ه|ها)?)"
     r"|(?:contains?|made\s+(?:of|from)|composition|ingredients?)"
     r")",
