@@ -140,13 +140,23 @@ def load_best_seller_catalog_products(
                 emit_catalog_intelligence_event,
             )
 
-            emit_catalog_intelligence_event(
-                "best_sellers",
-                tenant_id=tenant_id,
-                group=effective_group,
-                count=len(products),
-                mode=settings.best_seller_mode,
-            )
+            if effective_group is None:
+                emit_catalog_intelligence_event(
+                    "best_sellers",
+                    tenant_id=tenant_id,
+                    group=None,
+                    count=len(products),
+                    mode=settings.best_seller_mode,
+                    reason="global_browse",
+                )
+            else:
+                emit_catalog_intelligence_event(
+                    "best_sellers",
+                    tenant_id=tenant_id,
+                    group=effective_group,
+                    count=len(products),
+                    mode=settings.best_seller_mode,
+                )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break best-seller runtime
             pass
     return products

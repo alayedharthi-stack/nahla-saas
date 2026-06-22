@@ -1331,6 +1331,19 @@ class MerchantBrain:
                 _tas_exc,
             )
 
+        try:
+            from .catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
+                maybe_suspend_stale_checkout_for_turn,
+            )
+
+            maybe_suspend_stale_checkout_for_turn(ctx)
+        except Exception as _cbt_exc:  # noqa: BLE001  # noqa: silent-ok — browse isolation must not block decide
+            logger.debug(
+                "[CATALOG_BROWSE_TURN] pre_decide suspend skipped tenant=%s err=%s",
+                tenant_id,
+                _cbt_exc,
+            )
+
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
         _legacy_decision_for_shadow = decision
