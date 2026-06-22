@@ -438,6 +438,30 @@ class MerchantBrain:
                 "reason":  "billing_access_denied",
             }
 
+        # ── Conversation quota guard ──────────────────────────────────────────
+        from core.wa_usage import check_limit  # noqa: PLC0415
+
+        _quota = check_limit(db, tenant_id, category="service")
+        if not _quota.allowed:
+            logger.info(
+                "[Brain] conversation_limit_exceeded — skipping AI reply | "
+                "tenant=%s used=%s limit=%s reason=%s",
+                tenant_id,
+                _quota.used_total,
+                _quota.limit,
+                _quota.reason,
+            )
+            return {
+                "reply":   None,
+                "skipped": True,
+                "reason":  _quota.reason,
+                "conversation_quota": {
+                    "used":  _quota.used_total,
+                    "limit": _quota.limit,
+                    "pct":   _quota.pct,
+                },
+            }
+
         # ── 0. Tenant isolation context (single source of truth for the turn) ─
         # Built once here. Every downstream layer (sales context loader,
         # handlers/runtime, memory updater, signal emitter) MUST reuse this

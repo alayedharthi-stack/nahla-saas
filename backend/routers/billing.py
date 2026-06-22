@@ -1283,26 +1283,20 @@ async def get_billing_entitlements(request: Request, db: Session = Depends(get_d
     ent = get_entitlements(db, tenant_id)
 
     # ── Monthly usage counters ────────────────────────────────────────────────
-    from datetime import datetime, timezone  # noqa: PLC0415
-    from models import Conversation, Campaign  # noqa: PLC0415
-
-    now     = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    from core.wa_usage import get_current_period_usage  # noqa: PLC0415
 
     try:
-        conv_count = (
-            db.query(Conversation)
-            .filter(
-                Conversation.tenant_id >= tenant_id,
-                Conversation.tenant_id == tenant_id,
-                Conversation.created_at >= month_start.replace(tzinfo=None),
-            )
-            .count()
-        )
+        _usage = get_current_period_usage(db, tenant_id)
+        conv_count = int(_usage.get("conversations_used") or 0)
     except Exception:
         conv_count = 0
 
     try:
+        from models import Campaign  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         camp_count = (
             db.query(Campaign)
             .filter(

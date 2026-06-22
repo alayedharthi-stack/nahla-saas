@@ -37,16 +37,14 @@ be blocked — stopping them harms the merchant's customers and degrades their
 experience.  Only merchant-initiated marketing traffic is throttled.
 
   used < limit                    → allow ALL messages
-  used >= limit                   → block MARKETING only; allow SERVICE
+  used >= limit                   → block ALL outbound (AI service replies,
+                                    marketing, templates, automations).
+                                    Inbound is still ingested for inbox visibility.
   used >= limit × SERVICE_EMERGENCY_STOP (3 ×)
                                   → emergency hard-stop ALL (extreme abuse /
                                     runaway automation protection only)
 
-Why no "soft" hard-stop for service?
-  Service conversations are inbound-triggered (customer sent a message first).
-  Blocking these would violate Meta's policy and ruin the merchant's customer
-  experience.  We allow them freely and only bill the overage to the merchant
-  at end-of-month if the plan limit is exceeded.
+Manual staff replies from the dashboard bypass this gate via ``allow_manual``.
 
 Public API
 ----------
@@ -92,10 +90,12 @@ WINDOW_HOURS              = 24      # Meta billing window
 ALERT_PCT_LOW             = 70      # first warning threshold
 ALERT_PCT_HIGH            = 90      # urgent red alert threshold
 
-# SERVICE conversations (customer-initiated) are never blocked at 100%.
-# Only a true runaway-automation emergency triggers this hard stop.
 # At 3× the plan limit we assume a bug or serious misuse — stop everything.
 SERVICE_EMERGENCY_STOP    = 3.0     # 300 % → emergency block all
+
+REASON_CONVERSATION_LIMIT = "conversation_limit_exceeded"
+REASON_MARKETING_BLOCKED  = "marketing_blocked"
+REASON_EMERGENCY_STOP     = "emergency_stop"
 
 ConvCategory = Literal["service", "marketing"]
 ConvSource   = Literal["inbound", "campaign", "template", "api"]
@@ -116,9 +116,10 @@ class TrackResult:
 @dataclass
 class AllowResult:
     allowed:     bool
-    # "ok"                → message allowed
-    # "marketing_blocked" → limit reached; marketing is blocked
-    # "emergency_stop"    → 300 %+ overage; ALL messages stopped
+    # "ok"                          → message allowed
+    # "conversation_limit_exceeded" → plan limit reached; service/AI blocked
+    # "marketing_blocked"           → plan limit reached; marketing blocked
+    # "emergency_stop"              → 300 %+ overage; ALL messages stopped
     reason:      str
     used_total:  int
     limit:       int
@@ -887,18 +888,16 @@ def check_limit(
 
     Blocking policy
     ───────────────
-    SERVICE conversations (customer-initiated inbound replies):
-      ✅  Always allowed — until the emergency stop threshold (3 × plan limit).
-      Reason: blocking service replies damages merchant–customer relationships
-      and violates Meta's messaging guidelines.
-
-    MARKETING messages (campaigns, abandoned cart, broadcast templates):
-      ✅  Allowed while usage < plan limit.
+    All automated outbound (AI service replies, marketing, templates):
+      ✅  Allowed while usage < plan limit (or plan is unlimited).
       ❌  Blocked once usage >= plan limit.
 
     Emergency stop (all categories):
       ❌  Triggered only at ≥ 300 % of the plan limit.
       Purpose: protect the platform from runaway automations or API abuse.
+
+    Manual dashboard replies bypass enforcement via ``allow_manual`` at the
+    send layer — not through this function.
 
     Parameters
     ----------
@@ -912,16 +911,23 @@ def check_limit(
     usage = _get_or_create_usage(db, tenant_id, ctx)
 
     used  = usage.service_conversations_used + usage.marketing_conversations_used
-    limit = usage.conversations_limit
-    pct   = round((used / limit) * 100, 1) if limit > 0 else 0.0
+    limit = int(usage.conversations_limit or 0)
+    is_unlimited = limit >= UNLIMITED_LIMIT_SENTINEL
+    pct   = (
+        0.0 if is_unlimited
+        else (round((used / limit) * 100, 1) if limit > 0 else 0.0)
+    )
 
-    # No limit configured (should not happen, but guard anyway)
-    if limit <= 0:
-        return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=0.0)
+    if is_unlimited or limit <= 0:
+        return AllowResult(
+            allowed=True,
+            reason="ok",
+            used_total=used,
+            limit=(-1 if is_unlimited else limit),
+            pct=0.0,
+        )
 
     # ── Emergency stop — runaway automation / abuse (300 % threshold) ─────────
-    # Only ever triggered by a serious bug or intentional abuse; normal SaaS
-    # merchants will never approach this.
     if used >= int(limit * SERVICE_EMERGENCY_STOP):
         logger.warning(
             "[WaUsage] EMERGENCY STOP | tenant=%s used=%d limit=%d (%.0f%%)",
@@ -929,27 +935,40 @@ def check_limit(
         )
         return AllowResult(
             allowed    = False,
-            reason     = "emergency_stop",
+            reason     = REASON_EMERGENCY_STOP,
             used_total = used,
             limit      = limit,
             pct        = pct,
         )
 
-    # ── Marketing blocked at 100 % ────────────────────────────────────────────
-    if used >= limit and category == "marketing":
+    # ── Plan limit reached — block all automated outbound ─────────────────────
+    if used >= limit:
+        reason = (
+            REASON_MARKETING_BLOCKED
+            if category == "marketing"
+            else REASON_CONVERSATION_LIMIT
+        )
+        logger.info(
+            "[WaUsage] OUTBOUND BLOCKED | tenant=%s category=%s used=%d limit=%d reason=%s",
+            tenant_id, category, used, limit, reason,
+        )
         return AllowResult(
             allowed    = False,
-            reason     = "marketing_blocked",
+            reason     = reason,
             used_total = used,
             limit      = limit,
             pct        = pct,
         )
 
-    # ── All other cases — allow ───────────────────────────────────────────────
-    # Includes:
-    #   • service conversations at any usage level below emergency stop
-    #   • all messages while usage < plan limit
     return AllowResult(allowed=True, reason="ok", used_total=used, limit=limit, pct=pct)
+
+
+def conversation_quota_category_for_operation(operation: str) -> ConvCategory:
+    """Map a provider operation name to the quota category."""
+    op = (operation or "").strip().lower()
+    if op in {"send_template"}:
+        return "marketing"
+    return "service"
 
 
 # Meta phone-number `messaging_limit_tier` enum → numeric cap + Arabic-leaning

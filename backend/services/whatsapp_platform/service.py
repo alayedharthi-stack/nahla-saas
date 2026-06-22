@@ -725,6 +725,56 @@ async def provider_send_message(
                     _guard_exc,
                 )
 
+        if not allow_manual and db is not None and tenant_id:
+            try:
+                from core.wa_usage import (  # noqa: PLC0415
+                    check_limit,
+                    conversation_quota_category_for_operation,
+                )
+
+                _category = conversation_quota_category_for_operation(operation)
+                _quota = check_limit(db, int(tenant_id), category=_category)
+                if not _quota.allowed:
+                    logger.info(
+                        "[CONVERSATION_LIMIT] provider_send blocked tenant=%s op=%s "
+                        "used=%s limit=%s reason=%s",
+                        tenant_id,
+                        operation,
+                        _quota.used_total,
+                        _quota.limit,
+                        _quota.reason,
+                    )
+                    return (
+                        {
+                            "error": {
+                                "code": _quota.reason,
+                                "type": "ConversationQuotaExceeded",
+                                "message": (
+                                    "Outbound send blocked: monthly conversation "
+                                    "plan limit reached"
+                                ),
+                            },
+                            "_nahla_classification": "conversation_quota_blocked",
+                            "_nahla_block_reason": _quota.reason,
+                            "_nahla_quota_used": _quota.used_total,
+                            "_nahla_quota_limit": _quota.limit,
+                        },
+                        WhatsAppTokenContext(
+                            token="",
+                            source="conversation_quota_guard",
+                            token_status="skipped",
+                            expires_at=None,
+                            oauth_session_status="",
+                            oauth_session_message=None,
+                        ),
+                    )
+            except Exception as _quota_exc:  # noqa: BLE001
+                logger.warning(
+                    "[CONVERSATION_LIMIT] provider pre_send check failed tenant=%s err=%s",
+                    tenant_id,
+                    _quota_exc,
+                )
+
     ctx = await get_token_for_operation(
         db,
         conn,

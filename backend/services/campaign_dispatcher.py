@@ -363,6 +363,31 @@ async def dispatch_campaign(
         db.commit()
         return _empty_result(error=err)
 
+    from core.wa_usage import check_limit  # noqa: PLC0415
+
+    _quota = check_limit(db, tenant_id, category="marketing")
+    if not _quota.allowed:
+        err = _quota.reason
+        logger.info(
+            "[campaign_dispatcher] campaign=%d tenant=%d: outbound blocked (%s) "
+            "used=%s limit=%s",
+            campaign_id,
+            tenant_id,
+            err,
+            _quota.used_total,
+            _quota.limit,
+        )
+        campaign.status = "failed"
+        _persist_dispatch_result(
+            campaign,
+            0,
+            0,
+            0,
+            [f"تم تجاوز حد المحادثات الشهري ({_quota.used_total}/{_quota.limit})"],
+        )
+        db.commit()
+        return _empty_result(error=err)
+
     template = _load_template(db, campaign)
     if not template:
         err = "لم يتم العثور على القالب أو لم تتم الموافقة عليه"

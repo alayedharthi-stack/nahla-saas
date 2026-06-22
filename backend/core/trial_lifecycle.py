@@ -30,6 +30,21 @@ TRIAL_STATUS_EXPIRED = "trial_expired"
 SUBSCRIPTION_PERIOD_DAYS = 30
 
 
+def _conversation_quota_allows_service(db: Session, tenant_id: int) -> bool:
+    """True when the tenant still has automated service-reply quota."""
+    try:
+        from core.wa_usage import check_limit  # noqa: PLC0415
+
+        return bool(check_limit(db, int(tenant_id), category="service").allowed)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[trial_lifecycle] conversation quota check failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return True
+
+
 def init_new_tenant_trial_state(tenant) -> None:
     """Apply to every newly created tenant — trial must not start yet."""
     tenant.subscription_status = TRIAL_STATUS_PENDING_WHATSAPP
@@ -547,7 +562,10 @@ def resolve_billing_lifecycle(
         "last_payment_amount":         last_payment.get("amount_sar") if last_payment else 0,
         "payment_provider":            payment_provider,
         "payment_history":             get_payment_history(db, tenant_id),
-        "ai_auto_replies_allowed":     has_billing_access(db, tenant_id),
+        "ai_auto_replies_allowed":     (
+            has_billing_access(db, tenant_id)
+            and _conversation_quota_allows_service(db, tenant_id)
+        ),
         "manual_replies_allowed":      True,
         "whatsapp_connected":          _tenant_has_connected_whatsapp(db, tenant_id),
         "record_sub":                  record_sub,
