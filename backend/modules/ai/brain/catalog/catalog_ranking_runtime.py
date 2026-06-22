@@ -135,6 +135,20 @@ def load_best_seller_catalog_products(
             len(products),
             settings.best_seller_mode,
         )
+        try:
+            from modules.ai.brain.catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                emit_catalog_intelligence_event,
+            )
+
+            emit_catalog_intelligence_event(
+                "best_sellers",
+                tenant_id=tenant_id,
+                group=effective_group,
+                count=len(products),
+                mode=settings.best_seller_mode,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return products
 
 
@@ -247,6 +261,20 @@ def resolve_orderable_alternatives(
             len(alts),
             merchant_count > 0,
         )
+        try:
+            from modules.ai.brain.catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                emit_catalog_intelligence_event,
+            )
+
+            emit_catalog_intelligence_event(
+                "alternatives",
+                tenant_id=tenant_id,
+                source=source_product_id,
+                count=len(alts),
+                merchant_first=merchant_count > 0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return alts
 
 

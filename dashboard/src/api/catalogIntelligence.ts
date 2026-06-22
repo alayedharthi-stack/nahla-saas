@@ -80,9 +80,36 @@ export interface ProductRelationInput {
   source?: string
 }
 
+export interface CatalogValidationIssue {
+  severity: 'error' | 'warning' | 'info'
+  code: string
+  message: string
+  context: Record<string, unknown>
+}
+
+export interface CatalogValidationReport {
+  ok: boolean
+  ready: boolean
+  summary: {
+    active_groups: number
+    total_groups: number
+    grouped_products: number
+    uncategorized_products: number
+    best_sellers: number
+    errors: number
+    warnings: number
+    info: number
+  }
+  issues: CatalogValidationIssue[]
+}
+
 export const catalogIntelligenceApi = {
   getSettings(): Promise<{ tenant_id: number; catalog_intelligence: CatalogIntelligenceSettings }> {
     return apiCall('/settings/catalog-intelligence')
+  },
+
+  getValidation(): Promise<{ tenant_id: number } & CatalogValidationReport> {
+    return apiCall('/catalog-intelligence/validation')
   },
 
   saveSettings(body: Partial<CatalogIntelligenceSettings>): Promise<{ status: string; catalog_intelligence: CatalogIntelligenceSettings }> {

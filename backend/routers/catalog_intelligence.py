@@ -16,6 +16,9 @@ from sqlalchemy.orm import Session
 from core.auth import require_not_support_impersonation
 from core.database import get_db
 from core.tenant import resolve_tenant_id
+from modules.ai.brain.catalog.catalog_intelligence_telemetry import (
+    emit_catalog_intelligence_event,
+)
 from services.catalog_intelligence_service import (
     add_group_item,
     create_product_group,
@@ -34,6 +37,7 @@ from services.catalog_intelligence_service import (
     save_product_ranking,
     update_group_item,
     update_product_group,
+    validate_catalog_intelligence_setup,
 )
 
 router = APIRouter()
@@ -129,6 +133,24 @@ async def put_merchant_catalog_intelligence_settings(
         "tenant_id": tenant_id,
         "catalog_intelligence": saved,
     }
+
+
+@router.get("/catalog-intelligence/validation")
+async def get_catalog_intelligence_validation(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    tenant_id = resolve_tenant_id(request)
+    report = validate_catalog_intelligence_setup(db, tenant_id)
+    emit_catalog_intelligence_event(
+        "validation",
+        tenant_id=tenant_id,
+        ok=report.get("ok"),
+        ready=report.get("ready"),
+        warnings=report.get("summary", {}).get("warnings"),
+        uncategorized=report.get("summary", {}).get("uncategorized_products"),
+    )
+    return {"tenant_id": tenant_id, **report}
 
 
 @router.get("/catalog-intelligence/groups")
