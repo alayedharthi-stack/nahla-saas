@@ -381,6 +381,57 @@ def test_readiness_preview_body_bounds_image_url_length():
         _ReadinessPreviewBody(image_url="x" * 5000)
 
 
+def test_studio_product_patch_merges_metadata_without_dropping_sidecar():
+    """Autosave should persist drawer fields without wiping source,
+    variants, or any other sidecar data the sync/import layers wrote."""
+    from routers.catalog import (  # noqa: PLC0415
+        _StudioProductPatch,
+        _apply_studio_product_patch,
+    )
+
+    p = _p(
+        title="قديم",
+        price="10",
+        source="meta",
+        extra_metadata={
+            "source": "meta",
+            "thumbnail": "https://cdn/legacy.jpg",
+            "variants": [{"id": "v1"}],
+        },
+    )
+    fields = _apply_studio_product_patch(
+        p,
+        _StudioProductPatch(
+            title="  عسل سدر  ",
+            price=" 95 ",
+            currency="sar",
+            image_url=" https://cdn/new.jpg ",
+            additional_images=[" https://cdn/2.jpg ", ""],
+        ),
+    )
+
+    assert fields == ["additional_images", "currency", "image_url", "price", "title"]
+    assert p.title == "عسل سدر"
+    assert p.price == "95"
+    assert p.extra_metadata["currency"] == "SAR"
+    assert p.extra_metadata["image_url"] == "https://cdn/new.jpg"
+    assert p.extra_metadata["additional_images"] == ["https://cdn/2.jpg"]
+    assert p.extra_metadata["source"] == "meta"
+    assert p.extra_metadata["variants"] == [{"id": "v1"}]
+
+
+def test_studio_product_patch_can_clear_optional_metadata_field():
+    from routers.catalog import (  # noqa: PLC0415
+        _StudioProductPatch,
+        _apply_studio_product_patch,
+    )
+
+    p = _p(extra_metadata={"brand": "Old Brand", "source": "manual"})
+    _apply_studio_product_patch(p, _StudioProductPatch(brand=""))
+    assert p.extra_metadata["brand"] is None
+    assert p.extra_metadata["source"] == "manual"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7.  Studio filters helper — pure SQL chain, smoke-test the predicate map
 # ─────────────────────────────────────────────────────────────────────────────

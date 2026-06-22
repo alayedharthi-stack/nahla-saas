@@ -547,6 +547,12 @@ export const catalogApi = {
   productDetail(id: number): Promise<ProductDetailResponse> {
     return apiCall<ProductDetailResponse>(`/merchant/catalog/products/${id}`)
   },
+  updateProduct(id: number, draft: ReadinessPreviewBody): Promise<ProductDetailResponse> {
+    return apiCall<ProductDetailResponse>(`/merchant/catalog/products/${id}`, {
+      method: 'PATCH',
+      body:   JSON.stringify(draft),
+    })
+  },
   readinessPreview(draft: ReadinessPreviewBody): Promise<ReadinessPreviewResponse> {
     return apiCall<ReadinessPreviewResponse>('/merchant/catalog/readiness/preview', {
       method: 'POST',

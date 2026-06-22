@@ -2050,7 +2050,12 @@ const en: Translations = {
         saleLabel:          'Sale:',
         retailerIdLabel:    'retailer_id:',
         storePage:          'Store page',
-        phase1Note:         'ℹ️ Phase 1 preview: counters and readiness update live, but saving edits to the central catalog becomes available after the Phase 2 schema upgrade.',
+        autoSaveNote:       'Changes are saved automatically to the central catalog a few moments after you stop typing.',
+        autoSaveIdle:       'Autosave on',
+        autoSavePending:    'Waiting to save...',
+        autoSaveSaving:     'Saving...',
+        autoSaveSaved:      'Saved',
+        autoSaveFailed:     'Could not save',
         variantsTitle:      'Variants',
         variantsPhase2Note: '{count} variant(s) — full variant system arrives in Phase 2.',
         fields: {
