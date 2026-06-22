@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +18,7 @@ from modules.ai.brain.commerce.catalog_product_grounding import (  # noqa: E402
     build_catalog_grounded_list_reply,
     build_uncertain_catalog_reply,
     collect_verified_catalog_titles,
+    collect_verified_catalog_titles_from_ctx,
     extract_seasonal_product_subject,
     is_seasonal_availability_ask,
     seasonal_subject_in_catalog,
@@ -105,6 +107,50 @@ class TestCatalogProductGroundingHelpers:
             top_products=[{"title": "عسل طلح نجد"}],
         )
         assert titles == ["عسل طلح نجد", "عسل سمر الحجاز"]
+
+    def test_collect_titles_from_ctx_uses_browse_scope_filter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        products = [
+            {"id": 10, "title": "Group A Product"},
+            {"id": 20, "title": "Group B Product"},
+        ]
+        ctx = _ctx("وش عندكم من المجموعة؟", candidates=products)
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+
+        def _filter(products_in, **kwargs):
+            assert kwargs["source"] == "catalog_grounding"
+            assert kwargs["tenant_id"] == 33
+            return [p for p in products_in if p.get("id") == 10]
+
+        monkeypatch.setattr(
+            "modules.ai.brain.commerce.commerce_browse_category_guard."
+            "filter_products_for_browse_turn",
+            _filter,
+        )
+
+        titles = collect_verified_catalog_titles_from_ctx(ctx)
+        assert titles == ["Group A Product"]
+
+    def test_collect_titles_from_ctx_does_not_fallback_when_scope_drops_all(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        products = [
+            {"id": 10, "title": "Group A Product"},
+            {"id": 20, "title": "Group B Product"},
+        ]
+        ctx = _ctx("وش عندكم من المجموعة؟", candidates=products)
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(
+            "modules.ai.brain.commerce.commerce_browse_category_guard."
+            "filter_products_for_browse_turn",
+            lambda *_a, **_k: [],
+        )
+
+        assert collect_verified_catalog_titles_from_ctx(ctx) == []
 
     def test_build_catalog_grounded_list_only_catalog_names(self) -> None:
         reply = build_catalog_grounded_list_reply(

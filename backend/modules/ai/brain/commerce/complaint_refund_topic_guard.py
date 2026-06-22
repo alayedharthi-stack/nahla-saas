@@ -80,6 +80,32 @@ def is_complaint_refund_active(state: Any) -> bool:
     return False
 
 
+def _current_turn_exits_complaint_session(state: Any, message: str) -> bool:
+    """Current-turn evidence that a stale complaint flag should not own routing."""
+    if classify_complaint_refund(message or ""):
+        return False
+    try:
+        from ..catalog.catalog_browse_turn_policy import is_catalog_browse_message  # noqa: PLC0415
+
+        if is_catalog_browse_message(message or ""):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse probe
+        pass
+    try:
+        from .checkout_slot_contact_guard import message_fulfills_checkout_slot  # noqa: PLC0415
+
+        order_prep = None
+        if isinstance(state, dict):
+            order_prep = state.get("order_prep")
+        else:
+            order_prep = getattr(state, "order_prep", None)
+        if message_fulfills_checkout_slot(message or "", order_prep=order_prep):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional checkout slot probe
+        pass
+    return False
+
+
 def mark_complaint_refund_active(state: Any, *, active: bool = True) -> None:
     cs = dict(getattr(state, "commerce_session", None) or {})
     if active:
@@ -114,7 +140,10 @@ def should_block_order_draft_injection(
         pass
     if classify_complaint_refund(customer_message or ""):
         return True
-    if is_complaint_refund_active(brain_state):
+    if is_complaint_refund_active(brain_state) and not _current_turn_exits_complaint_session(
+        brain_state,
+        customer_message or "",
+    ):
         return True
     args = getattr(decision, "args", None) or {}
     if str(args.get("topic") or "") == "support_complaint_refund":
@@ -129,6 +158,13 @@ def apply_complaint_refund_session_flags(
     message: str,
     decision: Any = None,
 ) -> None:
+    if is_complaint_refund_active(state) and _current_turn_exits_complaint_session(
+        state,
+        message or "",
+    ):
+        mark_complaint_refund_active(state, active=False)
+        return
+
     triggered = False
     if classify_complaint_refund(message or ""):
         triggered = True
