@@ -84,6 +84,8 @@ class DiscoveryEntryDecision:
     query: Optional[str]
     category_scope: Optional[str]
     reason: str
+    catalog_group_slug: Optional[str] = None
+    catalog_group_id: Optional[int] = None
 
     @classmethod
     def no_match(cls, reason: str = "not_discovery") -> "DiscoveryEntryDecision":
@@ -94,6 +96,8 @@ class DiscoveryEntryDecision:
             query=None,
             category_scope=None,
             reason=reason,
+            catalog_group_slug=None,
+            catalog_group_id=None,
         )
 
 
@@ -390,6 +394,51 @@ def _discovery_category_followup_entry(ctx: BrainContext) -> Optional[DiscoveryE
     )
 
 
+def _apply_catalog_group_scope(
+    ctx: BrainContext,
+    entry: DiscoveryEntryDecision,
+) -> DiscoveryEntryDecision:
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is None or tenant_id is None:
+        return entry
+    try:
+        from ..catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+            active_catalog_group_slug_from_state,
+            resolve_browse_scope,
+            stamp_catalog_group_session,
+        )
+        from ..commerce.commerce_browse_category_guard import active_category_from_state  # noqa: PLC0415
+
+        resolution = resolve_browse_scope(
+            db,
+            int(tenant_id),
+            ctx.message or "",
+            str(entry.query or entry.category_scope or ""),
+            active_group_slug=active_catalog_group_slug_from_state(ctx.state),
+            active_category=active_category_from_state(ctx.state),
+        )
+        if not resolution.matched:
+            return entry
+        stamp_catalog_group_session(ctx.state, resolution)
+        return DiscoveryEntryDecision(
+            matched=entry.matched,
+            entry_type=entry.entry_type,
+            source=entry.source,
+            query=resolution.scope_query or entry.query,
+            category_scope=resolution.group_label or entry.category_scope,
+            reason=f"{entry.reason}; catalog_group={resolution.group_slug}",
+            catalog_group_slug=resolution.group_slug,
+            catalog_group_id=resolution.group_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[DISCOVERY_ENTRY] catalog_group_scope_failed tenant=%s",
+            getattr(ctx, "tenant_id", None),
+        )
+        return entry
+
+
 def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     """
     Unified classifier for discovery entry turns.
@@ -397,6 +446,13 @@ def resolve_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     Returns ``matched=False`` when the turn is not a discovery entry or must
     not be hijacked (identity, checkout slot answers, fulfillment lock).
     """
+    entry = _classify_discovery_entry(ctx)
+    if not entry.matched:
+        return entry
+    return _apply_catalog_group_scope(ctx, entry)
+
+
+def _classify_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
     suppressed = _discovery_suppressed(ctx)
     if suppressed:
         return DiscoveryEntryDecision.no_match(suppressed)
@@ -514,6 +570,7 @@ def _resolve_strategy_layer(
         strategy_to_decision_args,
     )
     from ..catalog.catalog_intelligence import CatalogIntelligence  # noqa: PLC0415
+    from ..catalog.catalog_browse_scope_resolver import load_merchant_catalog_groups  # noqa: PLC0415
     from ..catalog.catalog_provider import get_catalog_provider  # noqa: PLC0415
 
     objective = update_commerce_objective(ctx, entry)
@@ -532,6 +589,7 @@ def _resolve_strategy_layer(
                 CatalogIntelligence(provider).list_collections(
                     limit=20,
                     merchant_settings=settings,
+                    merchant_catalog_groups=load_merchant_catalog_groups(db, ctx.tenant_id),
                 )
             )
         except Exception:
@@ -573,6 +631,10 @@ def _discovery_decision(
     merged.update(strategy_args)
     merged["commerce_objective"] = _objective
     merged["discovery_entry_type"] = entry.entry_type
+    if entry.catalog_group_slug:
+        merged["catalog_group_slug"] = entry.catalog_group_slug
+    if entry.catalog_group_id is not None:
+        merged["catalog_group_id"] = entry.catalog_group_id
 
     from ..commerce.discovery_strategy import DiscoveryMode  # noqa: PLC0415
 

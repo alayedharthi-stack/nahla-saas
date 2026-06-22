@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..commerce.discovery_strategy import DiscoveryMode, DiscoveryStrategyResult
 from ..commerce.merchant_discovery_settings import (
@@ -133,7 +133,28 @@ class CatalogIntelligence:
         *,
         limit: int = 20,
         merchant_settings: Optional[MerchantDiscoverySettings] = None,
+        merchant_catalog_groups: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> List[CatalogGroup]:
+        db_groups = [
+            g for g in (merchant_catalog_groups or [])
+            if isinstance(g, Mapping) and g.get("is_active", True)
+        ]
+        if db_groups:
+            ranked: List[CatalogGroup] = []
+            for group in sorted(
+                db_groups,
+                key=lambda g: (int(g.get("priority") or 100), str(g.get("label") or "")),
+            ):
+                ranked.append(
+                    CatalogGroup(
+                        group_id=str(group.get("slug") or group.get("id") or ""),
+                        group_name=str(group.get("label") or group.get("slug") or ""),
+                        browse_rank=int(group.get("priority") or 100),
+                        product_count=int(group.get("product_count") or 0),
+                    )
+                )
+            return ranked[: max(1, limit)]
+
         products = self._provider.get_top_products(limit=max(limit * 8, 40))
         counts: Dict[str, int] = {}
         labels: Dict[str, str] = {}
@@ -267,6 +288,7 @@ class CatalogIntelligence:
         source: str = "",
         preferred_collections: Optional[Sequence[str]] = None,
         merchant_settings: Optional[MerchantDiscoverySettings] = None,
+        merchant_catalog_groups: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> DiscoveryPlan:
         mode = strategy.mode
         query_s = str(query or "").strip()
@@ -287,6 +309,7 @@ class CatalogIntelligence:
             collections = self.list_collections(
                 limit=10,
                 merchant_settings=settings,
+                merchant_catalog_groups=merchant_catalog_groups,
             )
             pref = [str(x).strip() for x in (preferred_collections or settings.preferred_collection_labels()) if x]
             if pref:
@@ -324,7 +347,22 @@ class CatalogIntelligence:
         if matched_collection and not search_query:
             search_query = matched_collection.catalog_match or matched_collection.label
 
-        if search_query:
+        group_match = None
+        if merchant_catalog_groups and query_s:
+            from .catalog_browse_scope_resolver import match_catalog_group  # noqa: PLC0415
+
+            group_match = match_catalog_group(
+                merchant_catalog_groups,
+                message=query_s,
+                query=query_s,
+            )
+
+        if group_match and group_match.group_slug:
+            raw = self._provider.get_collection_products(
+                group_match.group_label or group_match.group_slug,
+                limit=max(12, strategy.initial_count * 4),
+            )
+        elif search_query:
             raw = self._provider.search_products(search_query, limit=max(12, strategy.initial_count * 4))
         else:
             raw = self._provider.get_top_products(limit=max(12, strategy.initial_count * 4))
@@ -335,17 +373,21 @@ class CatalogIntelligence:
             merchant_settings=settings,
             collection=matched_collection,
         )
+        evidence = {
+            "mode": mode.value,
+            "source": src,
+            "query": query_s,
+            "ranked_count": len(ranked),
+            "collection_id": matched_collection.id if matched_collection else "",
+        }
+        if group_match and group_match.group_slug:
+            evidence["catalog_group_slug"] = group_match.group_slug
+            evidence["catalog_group_id"] = group_match.group_id
         return DiscoveryPlan(
             output_kind="products",
             products=ranked[: max(1, strategy.initial_count)],
             presentation=strategy.presentation,
-            evidence={
-                "mode": mode.value,
-                "source": src,
-                "query": query_s,
-                "ranked_count": len(ranked),
-                "collection_id": matched_collection.id if matched_collection else "",
-            },
+            evidence=evidence,
         )
 
 

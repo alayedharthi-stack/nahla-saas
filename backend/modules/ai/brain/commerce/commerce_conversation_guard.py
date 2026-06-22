@@ -113,6 +113,7 @@ _VENOM_DRIFT_MARKERS = frozenset({
 @dataclass
 class CommerceSession:
     active_category: str = ""
+    active_catalog_group_slug: str = ""
     active_product: str = ""
     active_variant: str = ""
     active_price: Optional[float] = None
@@ -123,6 +124,7 @@ class CommerceSession:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "active_category": self.active_category,
+            "active_catalog_group_slug": self.active_catalog_group_slug,
             "active_product": self.active_product,
             "active_variant": self.active_variant,
             "active_price": self.active_price,
@@ -141,6 +143,7 @@ class CommerceSession:
             price_val = None
         return CommerceSession(
             active_category=str(d.get("active_category") or ""),
+            active_catalog_group_slug=str(d.get("active_catalog_group_slug") or ""),
             active_product=str(d.get("active_product") or ""),
             active_variant=str(d.get("active_variant") or ""),
             active_price=price_val,
