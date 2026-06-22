@@ -74,6 +74,7 @@ import Customers from './pages/Customers'
 import CustomersImport from './pages/CustomersImport'
 import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
 import WhatsAppCatalog from './pages/WhatsAppCatalog'
+import CatalogIntelligence from './pages/CatalogIntelligence'
 import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 
@@ -164,6 +165,7 @@ export default function App() {
                   component. */}
             <Route path="catalog"            element={<WhatsAppCatalog />} />
             <Route path="whatsapp-catalog"   element={<WhatsAppCatalog />} />
+            <Route path="catalog-intelligence" element={<CatalogIntelligence />} />
             <Route path="wa-usage"           element={<WaUsage />} />
             <Route path="delivery-quality"   element={<DeliveryQuality />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />

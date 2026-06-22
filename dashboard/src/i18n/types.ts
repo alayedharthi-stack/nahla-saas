@@ -44,8 +44,9 @@ export interface Translations {
       integrations:     string
       storeIntegration: string
       whatsappConnect:  string
-      whatsappCatalog:  string
-      manualSetup:      string
+      whatsappCatalog:      string
+      catalogIntelligence:  string
+      manualSetup:          string
       widgets:          string
       systemStatus:     string
       deliveryQuality:  string
@@ -123,6 +124,37 @@ export interface Translations {
     systemStatus:     { title: string; subtitle: string }
     storeIntegration: { title: string; subtitle: string }
     whatsappConnect:  { title: string; subtitle: string }
+    catalogIntelligence: {
+      title: string
+      subtitle: string
+      refresh: string
+      tabs: { groups: string; settings: string; uncategorized: string }
+      groupsTitle: string
+      newGroupPlaceholder: string
+      noGroups: string
+      selectGroupHint: string
+      catalogMatchPlaceholder: string
+      saveGroup: string
+      saved: string
+      confirmDeleteGroup: string
+      inactive: string
+      productsInGroup: string
+      alternatives: string
+      alternativesFor: string
+      bestSeller: string
+      searchProductPlaceholder: string
+      pickProduct: string
+      pickAlternative: string
+      addAlternative: string
+      settingsTitle: string
+      bestSellerMode: string
+      defaultGroupSlug: string
+      maxRelations: string
+      saveSettings: string
+      uncategorizedHint: string
+      uncategorizedCount: string
+      allCategorized: string
+    }
   }
 
   /** Admin-only page titles */
