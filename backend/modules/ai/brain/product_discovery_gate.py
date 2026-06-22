@@ -261,7 +261,13 @@ def extract_types_overview_query(message: str) -> str:
         candidate,
         flags=re.UNICODE | re.IGNORECASE,
     )
-    return candidate.strip(" ؟?!.")
+    candidate = candidate.strip(" ؟?!.")
+    norm_candidate = _normalize_ar(candidate)
+    if not norm_candidate or norm_candidate in _TYPES_SUBJECT_STOPWORDS:
+        return ""
+    if len(norm_candidate.split()) == 1 and norm_candidate in _TYPES_SUBJECT_STOPWORDS:
+        return ""
+    return candidate
 
 
 def log_inquiry_class(

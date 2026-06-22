@@ -43,6 +43,20 @@ _COMMERCE_THREAD_STAGES = frozenset({
     "collecting_address",
 })
 
+_COLLECTIONS_FIRST_SOURCES = frozenset({
+    "browse_catalog_groups",
+    "collections_first",
+    "collections_first_group",
+    "global_browse",
+    "top_products",
+    "top_products_start_order",
+})
+
+_COLLECTIONS_FIRST_ENTRIES = frozenset({
+    "global_browse",
+    "start_order_bare",
+})
+
 
 def _norm_token(text: str) -> str:
     t = (text or "").strip().lower()
@@ -204,6 +218,21 @@ def is_explicit_customer_visual_product_ask(message: str) -> bool:
     return _customer_visual_ask_present(norm)
 
 
+def _is_collections_first_browse(decision: Optional[Decision]) -> bool:
+    """Structured discovery plan must reach the presenter — not LLM fallback."""
+    args = dict(getattr(decision, "args", None) or {})
+    mode = str(args.get("discovery_mode") or "").strip().lower()
+    if mode == "collections_first":
+        return True
+    source = str(args.get("source") or "").strip().lower()
+    if source in _COLLECTIONS_FIRST_SOURCES:
+        return True
+    entry = str(args.get("discovery_entry_type") or "").strip().lower()
+    if entry in _COLLECTIONS_FIRST_ENTRIES and mode == "collections_first":
+        return True
+    return False
+
+
 def has_catalog_search_evidence(
     ctx: BrainContext,
     query: str,
@@ -213,13 +242,16 @@ def has_catalog_search_evidence(
     args = dict(getattr(decision, "args", None) or {})
     q = (query or "").strip()
 
+    if _is_collections_first_browse(decision):
+        return True
+
     if args.get("rejected_product") or args.get("selected_product"):
         return True
     if args.get("alternatives"):
         return True
 
     source = str(args.get("source") or "").strip().lower()
-    if source in {"top_products", "show_more", "global_browse"}:
+    if source in {"top_products", "show_more", "global_browse", "browse_catalog_groups", "collections_first"}:
         return True
 
     if not q:
@@ -360,6 +392,14 @@ def apply_catalog_search_evidence_gate(
         return decision
 
     query = str((decision.args or {}).get("query") or "").strip()
+
+    if _is_collections_first_browse(decision):
+        logger.info(
+            "[CATALOG_SEARCH_GATE] collections_first tenant=%s source=%r → presenter",
+            getattr(ctx, "tenant_id", None),
+            str((decision.args or {}).get("source") or "")[:40],
+        )
+        return decision
 
     if _should_route_customer_media_to_llm(ctx, query, decision):
         logger.info(

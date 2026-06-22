@@ -177,6 +177,17 @@ def detect_product_media_turn(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product info topic import
         pass
 
+    try:
+        from .product_breadth_policy import global_availability_browse_requested  # noqa: PLC0415
+
+        if global_availability_browse_requested(raw):
+            return ProductMediaVerdict(
+                matched=False,
+                reason="global_availability_browse",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy import
+        pass
+
     has_media_origin = _is_customer_media_origin(raw, meta)
     has_product_signal = has_product_commerce_signal(raw, topic_hints=hints)
     has_pm_hints = _has_product_media_topic_hints(hints)
