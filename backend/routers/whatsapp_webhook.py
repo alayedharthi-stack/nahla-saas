@@ -11566,6 +11566,38 @@ async def _handle_merchant_message(
                     "failed: %s", tenant_id, _vp_exc,
                 )
 
+            # Catalog intelligence Phase 4 — scope product cards to merchant groups.
+            if _product_attachments:
+                try:
+                    from modules.ai.brain.catalog.catalog_product_card_filter import (  # noqa: PLC0415
+                        filter_product_card_attachments as _filter_product_cards,
+                    )
+
+                    _card_filter = _filter_product_cards(
+                        _product_attachments,
+                        db=db,
+                        tenant_id=tenant_id,
+                        message=text or "",
+                        query=str((_bs_for_nc or {}).get("last_browse_query") or ""),
+                        source=str(_br_action or ""),
+                        brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else None,
+                    )
+                    if _card_filter.dropped:
+                        logger.info(
+                            "[PRODUCT_CARD_FILTER] tenant=%s dropped=%d kept=%d evidence=%s",
+                            tenant_id,
+                            _card_filter.dropped,
+                            len(_card_filter.attachments),
+                            _card_filter.evidence,
+                        )
+                    _product_attachments = _card_filter.attachments
+                except Exception as _pcf_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PRODUCT_CARD_FILTER] tenant=%s skipped err=%s",
+                        tenant_id,
+                        _pcf_exc,
+                    )
+
             # LIMIT_RECOMMENDATION_BREADTH — cap stacked catalog cards per turn.
             if (
                 _product_attachments
