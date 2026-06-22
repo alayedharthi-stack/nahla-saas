@@ -34,7 +34,18 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
     from modules.ai.brain.types import Decision  # noqa: PLC0415
 
     msg = (getattr(ctx, "message", None) or "").strip()
-    if not msg or not is_identity_collaboration_without_purchase(msg):
+    if not msg:
+        return None
+    try:
+        from modules.ai.brain.state.product_information_topic import (  # noqa: PLC0415
+            detect_product_information_topic_shift,
+        )
+
+        if detect_product_information_topic_shift(msg):
+            return None
+    except Exception:  # noqa: BLE001
+        pass
+    if not is_identity_collaboration_without_purchase(msg):
         return None
 
     logger.info(

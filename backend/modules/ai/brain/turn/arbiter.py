@@ -46,6 +46,8 @@ def _checkout_aligned(state_relevance: Any, understanding: TurnUnderstanding) ->
     sr = state_relevance
     if sr is None:
         return False
+    if getattr(sr, "product_information_topic_shift", False):
+        return False
     if getattr(sr, "detected_topic_shift", False):
         return False
     if not getattr(sr, "safe_to_resume_state", True):

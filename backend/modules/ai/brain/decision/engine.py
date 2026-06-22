@@ -1072,27 +1072,37 @@ class DefaultDecisionEngine:
 
         try:
             from ..state.product_information_topic import (  # noqa: PLC0415
+                TOPIC_PRODUCT_ATTRIBUTE_INFORMATION,
                 detect_product_information_topic_shift,
                 product_information_blocks_checkout,
+                resolve_product_information_llm_topic,
             )
 
             if (
                 detect_product_information_topic_shift(ctx.message or "")
                 or product_information_blocks_checkout(ctx)
             ):
+                _info_topic = resolve_product_information_llm_topic(ctx.message or "")
+                _response_goal = (
+                    "Answer the customer's product attribute, processing, composition, "
+                    "or ingredient question before continuing checkout."
+                    if _info_topic == TOPIC_PRODUCT_ATTRIBUTE_INFORMATION
+                    else (
+                        "Answer the customer's product usage, dosage, ingredients, "
+                        "benefits, or suitability question before continuing checkout."
+                    )
+                )
                 logger.info(
-                    "[PRODUCT_INFORMATION] tenant=%s answer before checkout preview=%r",
+                    "[PRODUCT_INFORMATION] tenant=%s topic=%s answer before checkout preview=%r",
                     ctx.tenant_id,
+                    _info_topic,
                     (ctx.message or "")[:80],
                 )
                 return Decision(
                     action=ACTION_LLM_REPLY,
                     args={
-                        "topic": "product_usage_information",
-                        "response_goal": (
-                            "Answer the customer's product usage, dosage, ingredients, "
-                            "benefits, or suitability question before continuing checkout."
-                        ),
+                        "topic": _info_topic,
+                        "response_goal": _response_goal,
                         "suppress_checkout": True,
                     },
                     reason="product_information_topic_shift — answer before checkout",

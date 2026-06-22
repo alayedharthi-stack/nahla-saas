@@ -1,7 +1,7 @@
 """
 brain/state/product_information_topic.py
 ────────────────────────────────────────
-Detect product usage / information questions that must block checkout
+Detect product usage / attribute / information questions that must block checkout
 continuation until answered.
 """
 from __future__ import annotations
@@ -9,7 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, List, Sequence
 
-_PRODUCT_INFO_RE = re.compile(
+# Usage, dosage, benefits, suitability (existing coverage).
+_PRODUCT_USAGE_RE = re.compile(
     r"(?:"
     r"طريق(?:ه|ة)\s*(?:ال)?(?:استخدام|استعمال|الاستخدام|الاستعمال)"
     r"|(?:كيف|وش|متى|هل)\s+(?:استخدم|استعمل|اخذ|آخذ|أخذ|اشرب|آكل|استعمال|الاستخدام)"
@@ -19,9 +20,36 @@ _PRODUCT_INFO_RE = re.compile(
     r"|(?:متى\s*(?:ي|ت)?(?:ؤخذ|اخذ|آخذ|أخذ|يؤخذ|تؤخذ))"
     r"|(?:هل\s*(?:يناسب|يصلح|ينفع|يفيد|مسموح))"
     r"|(?:وش\s*(?:فائد(?:ت(?:ه|ها))?|فايد(?:ت(?:ه|ها))?|فائدة|فايدة))"
-    r"|(?:مكون(?:ات)?(?:ه|ها)?|محتو(?:ى|يات)(?:ه|ها)?)"
-    r"|how\s+(?:to\s+)?use|usage|dosage|ingredients?"
+    r"|how\s+(?:to\s+)?use|usage|dosage|benefits?"
     r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Processing state, composition, ingredients — platform-wide attribute questions.
+_PRODUCT_ATTRIBUTE_RE = re.compile(
+    r"(?:"
+    r"(?:هل\s+)?(?:هو|هي|هذا|هذه|المنتج|هذا\s+المنتج|ال(?:ماده|مادة))?\s*"
+    r"(?:مب(?:ستر|سط)|خام|طبيع(?:ي|يه|ية)?|معال[جه]|مصن(?:ع|عة)|عضوي|عضويه|عضوية)"
+    r"|(?:pasteurized|pasteurised|raw|natural|processed|unprocessed|organic|artificial|synthetic|manufactured)"
+    r"|(?:هل\s+)?(?:ي)?(?:حتو(?:ي|ى)|ف(?:ي|يه))\s+(?:على|عند)?"
+    r"|(?:ما|ماذا|وش)\s+(?:مكون(?:ات)?(?:ه|ها)?|محتو(?:ى|يات)(?:ه|ها)?)"
+    r"|(?:contains?|made\s+(?:of|from)|composition|ingredients?)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CUSTOMER_OWNED_PRODUCT_RE = re.compile(
+    r"(?:"
+    r"(?:ال)?(?:لي|ل(?:ي|ـي))\s+(?:عند(?:ي|ه)|مع(?:ي|ه))"
+    r"|(?:^|\s)(?:عند(?:ي|ه)|مع(?:ي|ه))\s+\S"
+    r"|(?:منتج(?:ي|اتي))"
+    r"|my\s+product"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PRODUCT_INFO_RE = re.compile(
+    rf"(?:{_PRODUCT_USAGE_RE.pattern}|{_PRODUCT_ATTRIBUTE_RE.pattern})",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -33,6 +61,9 @@ _FULFILLMENT_ONLY_RE = re.compile(
     r")",
     re.UNICODE | re.IGNORECASE,
 )
+
+TOPIC_PRODUCT_ATTRIBUTE_INFORMATION = "product_attribute_information"
+TOPIC_PRODUCT_USAGE_INFORMATION = "product_usage_information"
 
 
 def _normalize(text: str) -> str:
@@ -48,13 +79,43 @@ def _join(parts: Iterable[str]) -> str:
     return "\n".join(str(p or "").strip() for p in parts if str(p or "").strip())
 
 
+def detect_customer_owned_product_reference(message: str) -> bool:
+    """True when the customer refers to a product they already have — not a purchase."""
+    norm = _normalize(message or "")
+    if not norm:
+        return False
+    return bool(_CUSTOMER_OWNED_PRODUCT_RE.search(norm))
+
+
+def detect_product_attribute_question(message: str) -> bool:
+    """True for processing/composition/ingredient attribute questions."""
+    norm = _normalize(message or "")
+    if not norm:
+        return False
+    if _FULFILLMENT_ONLY_RE.search(norm) and not _PRODUCT_ATTRIBUTE_RE.search(norm):
+        return False
+    return bool(_PRODUCT_ATTRIBUTE_RE.search(norm))
+
+
 def detect_product_information_topic_shift(message: str) -> bool:
     norm = _normalize(message or "")
     if not norm:
         return False
     if _FULFILLMENT_ONLY_RE.search(norm) and not _PRODUCT_INFO_RE.search(norm):
         return False
+    if detect_product_attribute_question(message):
+        return True
+    if detect_customer_owned_product_reference(message) and (
+        _PRODUCT_ATTRIBUTE_RE.search(norm) or _PRODUCT_USAGE_RE.search(norm)
+    ):
+        return True
     return bool(_PRODUCT_INFO_RE.search(norm))
+
+
+def resolve_product_information_llm_topic(message: str) -> str:
+    if detect_product_attribute_question(message):
+        return TOPIC_PRODUCT_ATTRIBUTE_INFORMATION
+    return TOPIC_PRODUCT_USAGE_INFORMATION
 
 
 def recent_unresolved_product_information(
@@ -113,6 +174,11 @@ def product_information_blocks_checkout(ctx: Any) -> bool:
     return False
 
 
+def should_suppress_product_focus_pin(message: str) -> bool:
+    """Do not pin catalog/search focus when the turn is informational only."""
+    return detect_product_information_topic_shift(message or "")
+
+
 def collect_product_information_context(ctx: Any) -> str:
     chunks: List[str] = []
     for row in (getattr(ctx, "history", None) or [])[-6:]:
@@ -124,8 +190,14 @@ def collect_product_information_context(ctx: Any) -> str:
 
 
 __all__ = [
+    "TOPIC_PRODUCT_ATTRIBUTE_INFORMATION",
+    "TOPIC_PRODUCT_USAGE_INFORMATION",
     "collect_product_information_context",
+    "detect_customer_owned_product_reference",
+    "detect_product_attribute_question",
     "detect_product_information_topic_shift",
     "product_information_blocks_checkout",
     "recent_unresolved_product_information",
+    "resolve_product_information_llm_topic",
+    "should_suppress_product_focus_pin",
 ]

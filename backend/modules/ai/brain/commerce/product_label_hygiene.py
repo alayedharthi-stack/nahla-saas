@@ -134,6 +134,15 @@ def looks_like_sentence_not_product(text: str) -> bool:
     norm = normalize_label_text(text)
     if not norm:
         return False
+    try:
+        from ..state.product_information_topic import (  # noqa: PLC0415
+            detect_product_information_topic_shift,
+        )
+
+        if detect_product_information_topic_shift(text):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
     words = [w for w in norm.split() if w]
     has_identity_signal = bool(
         _IDENTITY_PRONOUN_LEAD_RE.search(norm)
