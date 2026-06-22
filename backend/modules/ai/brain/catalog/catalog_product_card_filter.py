@@ -208,6 +208,22 @@ def filter_product_card_attachments(
             drop_reasons,
             source,
         )
+        try:
+            from modules.ai.brain.catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                emit_catalog_intelligence_event,
+            )
+
+            emit_catalog_intelligence_event(
+                "product_card_filter",
+                tenant_id=tenant_id,
+                in_count=len(items),
+                out_count=len(kept),
+                dropped=dropped,
+                group=resolution.group_slug or "",
+                source=source,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break product card filter
+            pass
 
     evidence = {
         "merchant_groups": len(groups),

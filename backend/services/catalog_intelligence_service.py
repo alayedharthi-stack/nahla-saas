@@ -674,6 +674,170 @@ def read_best_sellers(
     return [_serialize_ranking(r) for r in rows]
 
 
+# ── Setup validation (Phase 6) ────────────────────────────────────────────────
+
+def _active_product_ids(db: Session, tenant_id: int) -> Set[int]:
+    try:
+        from database.models import Product  # noqa: PLC0415
+        from core.catalog import apply_active_catalog_query_filters  # noqa: PLC0415
+    except Exception:
+        logger.exception("[CATALOG_INTELLIGENCE] Product model import failed")
+        return set()
+    q = db.query(Product.id).filter(Product.tenant_id == tenant_id)
+    q = apply_active_catalog_query_filters(q, Product)
+    rows = q.all()
+    return {int(row[0]) for row in rows}
+
+
+def _catalog_match_tokens(catalog_match: str) -> List[str]:
+    raw = str(catalog_match or "").replace("،", ",")
+    return [t.strip().lower() for t in raw.split(",") if t.strip()]
+
+
+def validate_catalog_intelligence_setup(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Deterministic merchant setup validation for dashboard and ops."""
+    from database.models import ProductGroup, ProductGroupItem, ProductRanking  # noqa: PLC0415
+
+    settings = parse_merchant_catalog_settings(get_catalog_settings(db, tenant_id))
+    issues: List[Dict[str, Any]] = []
+
+    groups = (
+        db.query(ProductGroup)
+        .filter(
+            ProductGroup.tenant_id == tenant_id,
+            ProductGroup.deleted_at.is_(None),
+        )
+        .order_by(ProductGroup.priority.asc(), ProductGroup.label.asc())
+        .all()
+    )
+    active_groups = [g for g in groups if g.is_active]
+
+    if not active_groups:
+        issues.append({
+            "severity": "warning",
+            "code": "no_active_groups",
+            "message": "No active product groups configured.",
+            "context": {},
+        })
+
+    grouped_ids: Set[int] = set()
+    empty_groups: List[Dict[str, Any]] = []
+    groups_without_match: List[str] = []
+
+    for group in active_groups:
+        item_count = len(group.items or [])
+        if item_count == 0:
+            empty_groups.append({"id": group.id, "slug": group.slug, "label": group.label})
+        for item in group.items or []:
+            grouped_ids.add(int(item.product_id))
+        if not str(group.catalog_match or "").strip():
+            groups_without_match.append(group.slug)
+
+    for row in empty_groups:
+        issues.append({
+            "severity": "warning",
+            "code": "empty_group",
+            "message": f"Group '{row['label']}' has no products.",
+            "context": row,
+        })
+
+    if groups_without_match and len(active_groups) > 1:
+        issues.append({
+            "severity": "info",
+            "code": "groups_without_catalog_match",
+            "message": "Some groups lack catalog_match keywords; browse matching may rely on slug/label only.",
+            "context": {"slugs": groups_without_match},
+        })
+
+    active_product_ids = _active_product_ids(db, tenant_id)
+    uncategorized = sorted(active_product_ids - grouped_ids)
+    if uncategorized:
+        issues.append({
+            "severity": "warning" if len(uncategorized) > settings.small_catalog_threshold else "info",
+            "code": "uncategorized_products",
+            "message": f"{len(uncategorized)} active catalog product(s) are not in any group.",
+            "context": {
+                "count": len(uncategorized),
+                "product_ids": uncategorized[:20],
+            },
+        })
+
+    best_seller_count = (
+        db.query(ProductRanking.id)
+        .filter(
+            ProductRanking.tenant_id == tenant_id,
+            ProductRanking.is_best_seller.is_(True),
+        )
+        .count()
+    )
+    if settings.best_seller_mode in {"manual", "hybrid"} and best_seller_count == 0:
+        issues.append({
+            "severity": "warning",
+            "code": "no_best_sellers",
+            "message": "No products flagged as best seller; top-products browse will fall back to catalog defaults.",
+            "context": {"best_seller_mode": settings.best_seller_mode},
+        })
+    if settings.best_seller_mode == "auto":
+        issues.append({
+            "severity": "info",
+            "code": "best_seller_auto_not_implemented",
+            "message": "best_seller_mode=auto is not active yet; use manual or hybrid.",
+            "context": {},
+        })
+
+    default_slug = normalize_group_slug(settings.default_group_slug)
+    if default_slug:
+        default_group = next((g for g in groups if g.slug == default_slug), None)
+        if default_group is None:
+            issues.append({
+                "severity": "warning",
+                "code": "default_group_not_found",
+                "message": f"default_group_slug '{default_slug}' does not match any group.",
+                "context": {"default_group_slug": default_slug},
+            })
+        elif not default_group.is_active:
+            issues.append({
+                "severity": "warning",
+                "code": "default_group_inactive",
+                "message": f"default_group_slug '{default_slug}' points to an inactive group.",
+                "context": {"default_group_slug": default_slug, "group_id": default_group.id},
+            })
+
+    token_to_slugs: Dict[str, List[str]] = {}
+    for group in active_groups:
+        for token in _catalog_match_tokens(group.catalog_match or ""):
+            token_to_slugs.setdefault(token, []).append(group.slug)
+    duplicate_tokens = {tok: slugs for tok, slugs in token_to_slugs.items() if len(slugs) > 1}
+    if duplicate_tokens:
+        issues.append({
+            "severity": "warning",
+            "code": "duplicate_catalog_match",
+            "message": "Duplicate catalog_match keywords across groups may cause ambiguous browse scope.",
+            "context": {"tokens": duplicate_tokens},
+        })
+
+    error_count = sum(1 for i in issues if i.get("severity") == "error")
+    warning_count = sum(1 for i in issues if i.get("severity") == "warning")
+    info_count = sum(1 for i in issues if i.get("severity") == "info")
+
+    return {
+        "ok": error_count == 0 and warning_count == 0,
+        "ready": error_count == 0 and not empty_groups and bool(active_groups),
+        "summary": {
+            "active_groups": len(active_groups),
+            "total_groups": len(groups),
+            "grouped_products": len(grouped_ids),
+            "uncategorized_products": len(uncategorized),
+            "best_sellers": best_seller_count,
+            "errors": error_count,
+            "warnings": warning_count,
+            "info": info_count,
+        },
+        "settings": settings.to_dict(),
+        "issues": issues,
+    }
+
+
 __all__ = [
     "add_group_item",
     "create_product_group",
@@ -697,4 +861,5 @@ __all__ = [
     "save_product_ranking",
     "update_group_item",
     "update_product_group",
+    "validate_catalog_intelligence_setup",
 ]

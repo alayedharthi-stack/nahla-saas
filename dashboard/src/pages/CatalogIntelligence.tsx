@@ -27,6 +27,7 @@ import { catalogApi } from '../api/catalog'
 import {
   catalogIntelligenceApi,
   type CatalogIntelligenceSettings,
+  type CatalogValidationReport,
   type ProductGroup,
   type ProductGroupItem,
   type ProductRelation,
@@ -48,6 +49,7 @@ export default function CatalogIntelligence() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [selectedGroup, setSelectedGroup] = useState<ProductGroup | null>(null)
   const [settings, setSettings] = useState<CatalogIntelligenceSettings | null>(null)
+  const [validation, setValidation] = useState<CatalogValidationReport | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
@@ -81,8 +83,12 @@ export default function CatalogIntelligence() {
   }, [])
 
   const loadSettings = useCallback(async () => {
-    const res = await catalogIntelligenceApi.getSettings()
-    setSettings(res.catalog_intelligence)
+    const [settingsRes, validationRes] = await Promise.all([
+      catalogIntelligenceApi.getSettings(),
+      catalogIntelligenceApi.getValidation(),
+    ])
+    setSettings(settingsRes.catalog_intelligence)
+    setValidation(validationRes)
   }, [])
 
   const loadGroupedProductIds = useCallback(async (groupList: ProductGroup[]) => {
@@ -318,6 +324,8 @@ export default function CatalogIntelligence() {
     try {
       const res = await catalogIntelligenceApi.saveSettings(settings)
       setSettings(res.catalog_intelligence)
+      const validationRes = await catalogIntelligenceApi.getValidation()
+      setValidation(validationRes)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
@@ -585,6 +593,50 @@ export default function CatalogIntelligence() {
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             {t(tr => tr.pages.catalogIntelligence.saveSettings)}
           </button>
+
+          {validation && (
+            <div className="border-t border-slate-100 pt-4 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                {validation.ok ? (
+                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-amber-600" />
+                )}
+                {t(tr => tr.pages.catalogIntelligence.validationTitle)}
+              </div>
+              <p className="text-xs text-slate-500">
+                {t(tr => tr.pages.catalogIntelligence.validationSummary)
+                  .replace('{groups}', String(validation.summary.active_groups))
+                  .replace('{grouped}', String(validation.summary.grouped_products))
+                  .replace('{uncategorized}', String(validation.summary.uncategorized_products))
+                  .replace('{bestSellers}', String(validation.summary.best_sellers))}
+              </p>
+              {validation.issues.length > 0 ? (
+                <ul className="space-y-2 max-h-56 overflow-y-auto">
+                  {validation.issues.map(issue => (
+                    <li
+                      key={`${issue.code}-${issue.message}`}
+                      className="text-xs p-2 rounded bg-slate-50 text-slate-700 flex gap-2"
+                    >
+                      <Badge
+                        label={issue.severity}
+                        variant={
+                          issue.severity === 'warning'
+                            ? 'amber'
+                            : issue.severity === 'error'
+                              ? 'red'
+                              : 'slate'
+                        }
+                      />
+                      <span>{issue.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-emerald-700">{t(tr => tr.pages.catalogIntelligence.validationOk)}</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

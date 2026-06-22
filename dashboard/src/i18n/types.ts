@@ -151,6 +151,9 @@ export interface Translations {
       defaultGroupSlug: string
       maxRelations: string
       saveSettings: string
+      validationTitle: string
+      validationSummary: string
+      validationOk: string
       uncategorizedHint: string
       uncategorizedCount: string
       allCategorized: string

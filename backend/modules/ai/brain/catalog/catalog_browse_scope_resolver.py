@@ -243,6 +243,20 @@ def resolve_browse_scope(
             len(resolution.product_ids),
             (message or query or "")[:80],
         )
+        try:
+            from modules.ai.brain.catalog.catalog_intelligence_telemetry import (  # noqa: PLC0415
+                emit_catalog_intelligence_event,
+            )
+
+            emit_catalog_intelligence_event(
+                "browse_scope",
+                tenant_id=tenant_id,
+                slug=resolution.group_slug,
+                source=resolution.match_source,
+                products=len(resolution.product_ids),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break browse scope
+            pass
     return resolution
 
 

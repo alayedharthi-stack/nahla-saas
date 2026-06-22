@@ -56,6 +56,7 @@ class TestGroupSlugNormalization:
 class TestCatalogIntelligenceRouterWiring:
     EXPECTED_PATHS = {
         "/settings/catalog-intelligence",
+        "/catalog-intelligence/validation",
         "/catalog-intelligence/groups",
         "/catalog-intelligence/groups/reorder",
         "/catalog-intelligence/groups/{group_id}",
