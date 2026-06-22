@@ -729,6 +729,18 @@ def extract_visual_product_query(message: str) -> str:
     )
     if m2:
         cand = (m2.group(1) or "").strip()
+        if cand.startswith("ل") and len(cand) > 1:
+            cand = cand[1:]
+        if not _is_vision_stoplist_query(cand):
+            return cand
+    m_group = re.search(
+        r"(?:صور|صوره|صورة)\s*(?:ل|لـ|ال|لل)([\w\u0600-\u06FF][\w\u0600-\u06FF\s\-]{1,40})",
+        norm,
+    )
+    if m_group:
+        cand = (m_group.group(1) or "").strip()
+        if cand.startswith("ل") and len(cand) > 1:
+            cand = cand[1:]
         if not _is_vision_stoplist_query(cand):
             return cand
     m_carousel = re.search(
@@ -797,6 +809,19 @@ def attachment_matches_turn_request(
 
     explicit = extract_visual_product_query(inbound)
     if explicit:
+        try:
+            from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                should_exclude_cross_category_product,
+            )
+
+            if should_exclude_cross_category_product(
+                {"title": title, "category": ""},
+                scope=explicit,
+                message=inbound,
+            ):
+                return False, "explicit_scope_cross_form"
+        except Exception:  # noqa: silent-ok - scope guard is best-effort
+            pass
         if _fuzzy_title_match(explicit, title):
             return True, "explicit_query_match"
         return False, "explicit_query_mismatch"

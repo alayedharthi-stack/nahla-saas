@@ -174,6 +174,21 @@ def compose_wa_order_flow_reply(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint draft block probe must not break order flow
         pass
 
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            is_browse_availability_inquiry,
+        )
+        from modules.ai.brain.commerce.product_visual import is_product_visual_request  # noqa: PLC0415
+
+        msg = (customer_message or "").strip()
+        if msg and (
+            is_browse_availability_inquiry(msg)
+            or is_product_visual_request(msg)
+        ):
+            return None
+    except Exception:  # noqa: silent-ok - inquiry draft block is best-effort
+        pass
+
     prep_dict = order_prep if isinstance(order_prep, dict) else (
         order_prep.to_dict() if hasattr(order_prep, "to_dict") else {}
     )
