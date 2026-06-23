@@ -171,6 +171,41 @@ def build_single_product_payload(
     }
 
 
+def build_catalog_message_payload(
+    *,
+    to: str,
+    thumbnail_product_retailer_id: str,
+    body_text: str,
+    footer_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct the JSON body for a full-catalog ``catalog_message``.
+
+    Opens the merchant's linked Meta catalog inside WhatsApp. Requires a
+    ``thumbnail_product_retailer_id`` — Meta uses it for the card preview.
+    """
+    body = _truncate(body_text, MAX_BODY_LEN) or "تفضّل، اختر من الكتالوج 👇"
+    interactive: Dict[str, Any] = {
+        "type": "catalog_message",
+        "body": {"text": body},
+        "action": {
+            "name": "catalog_message",
+            "parameters": {
+                "thumbnail_product_retailer_id": str(thumbnail_product_retailer_id),
+            },
+        },
+    }
+    footer = _truncate(footer_text, MAX_FOOTER_LEN)
+    if footer:
+        interactive["footer"] = {"text": footer}
+    return {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+
 def build_product_list_payload(
     *,
     to: str,
@@ -383,6 +418,105 @@ async def send_single_product_message(
     )
 
 
+async def send_catalog_message(
+    db: Session,
+    connection: Any,
+    *,
+    tenant_id: Optional[int],
+    to: str,
+    phone_id: str,
+    thumbnail_product_retailer_id: str,
+    body_text: str,
+    footer_text: Optional[str] = None,
+    timeout: float = 20.0,
+) -> CatalogSendResult:
+    """Send a full-catalog entry via ``interactive.type=catalog_message``."""
+    thumbnail = (thumbnail_product_retailer_id or "").strip()
+    if not thumbnail:
+        return _eligibility_to_result(
+            CatalogEligibility(ok=False, reason="no_retailer_id"),
+            tenant_id=tenant_id,
+            to=to,
+        )
+    elig = is_catalog_eligible(connection, products=None)
+    if not elig.ok:
+        return _eligibility_to_result(elig, tenant_id=tenant_id, to=to)
+
+    payload = build_catalog_message_payload(
+        to=to,
+        thumbnail_product_retailer_id=thumbnail,
+        body_text=body_text,
+        footer_text=footer_text,
+    )
+
+    logger.info(
+        "[CATALOG_SEND_ATTEMPT] tenant=%s to=*%s kind=catalog_message "
+        "thumbnail_retailer_id=%s body_len=%d",
+        tenant_id,
+        _phone_suffix(to),
+        thumbnail,
+        len(payload["interactive"]["body"]["text"]),
+    )
+
+    try:
+        resp, _ctx = await provider_send_message(
+            db,
+            connection,
+            tenant_id=tenant_id,
+            operation="send_catalog_message",
+            phone_id=phone_id,
+            payload=payload,
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[CATALOG_SEND_FAILED] tenant=%s to=*%s kind=catalog_message "
+            "reason=transport_error err=%s",
+            tenant_id,
+            _phone_suffix(to),
+            exc,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="transport_error",
+            error=str(exc),
+        )
+
+    message_id = _extract_message_id(resp)
+    if not message_id:
+        logger.error(
+            "[CATALOG_SEND_FAILED] tenant=%s to=*%s kind=catalog_message "
+            "reason=provider_error response=%r",
+            tenant_id,
+            _phone_suffix(to),
+            (resp or {}).get("error") or resp,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="provider_error",
+            raw_response=resp or {},
+            error=str((resp or {}).get("error") or ""),
+        )
+
+    logger.info(
+        "[NATIVE_CATALOG] native_catalog_entry_sent tenant=%s to=*%s "
+        "wamid=...%s thumbnail_retailer_id=%s",
+        tenant_id,
+        _phone_suffix(to),
+        message_id[-8:],
+        thumbnail,
+    )
+    return CatalogSendResult(
+        success=True,
+        fallback_recommended=False,
+        reason="sent",
+        message_id=message_id,
+        raw_response=resp or {},
+    )
+
+
 async def send_multi_product_message(
     db: Session,
     connection: Any,
@@ -545,9 +679,11 @@ __all__: List[str] = [
     "CatalogSendResult",
     "MAX_PRODUCTS_TOTAL",
     "MAX_SECTIONS",
+    "build_catalog_message_payload",
     "build_product_list_payload",
     "build_single_product_payload",
     "products_to_section",
+    "send_catalog_message",
     "send_multi_product_message",
     "send_single_product_message",
 ]

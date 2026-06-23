@@ -37,21 +37,25 @@ TURN_OWNER = "catalog_navigation"
 PATH_GROUPS = "catalog_navigation_groups"
 PATH_GROUP_PRODUCTS = "catalog_navigation_group_products"
 PATH_TOP_FALLBACK = "catalog_navigation_top_products_fallback"
+PATH_NATIVE_CATALOG = "catalog_navigation_native_catalog"
 
 NAVIGATOR_PROTECTED_PATHS = frozenset({
     PATH_GROUPS,
     PATH_GROUP_PRODUCTS,
     PATH_TOP_FALLBACK,
+    PATH_NATIVE_CATALOG,
 })
 
 STEP_SHOW_GROUPS = "show_groups"
 STEP_SHOW_GROUP_PRODUCTS = "show_group_products"
 STEP_TOP_FALLBACK = "top_products_fallback"
+STEP_NATIVE_CATALOG_ENTRY = "native_catalog_entry"
 
 OWNER_STEP_BROWSE_GROUPS = "browse_groups"
 OWNER_STEP_GROUP_SELECTION = "group_selection"
 OWNER_STEP_GROUP_PRODUCTS = "group_products"
 OWNER_STEP_TOP_FALLBACK = "top_products_fallback"
+OWNER_STEP_NATIVE_CATALOG = "native_catalog_entry"
 
 
 def is_navigator_protected_path(path: str) -> bool:
@@ -177,6 +181,65 @@ def _looks_like_group_name_pick(message: str, collections: List[Dict[str, Any]])
     if norm.isdigit():
         return False
     return bool(collections)
+
+
+def _try_native_catalog_entry_decision(
+    ctx: BrainContext,
+    *,
+    owner_step: str,
+    fallback_path: str,
+    reason: str,
+    confidence: float,
+) -> Optional[Decision]:
+    """Return native catalog browse entry when the tenant is eligible."""
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is None or not tenant_id:
+        return None
+    try:
+        from core.native_catalog_capability import evaluate_native_catalog_capability  # noqa: PLC0415
+
+        cap = evaluate_native_catalog_capability(db, int(tenant_id))
+        if not cap.eligible:
+            logger.info(
+                "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=%s",
+                tenant_id,
+                cap.reason,
+            )
+            return None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[NATIVE_CATALOG] gate skipped tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return None
+
+    _log_navigator_event(
+        ctx,
+        navigator_owner=True,
+        owner_step=OWNER_STEP_NATIVE_CATALOG,
+        chosen_path=PATH_NATIVE_CATALOG,
+        extra={"thumbnail_retailer_id": cap.thumbnail_retailer_id},
+    )
+    return _owned_decision(
+        navigator_step=STEP_NATIVE_CATALOG_ENTRY,
+        owner_step=owner_step,
+        chosen_path=PATH_NATIVE_CATALOG,
+        reason=reason,
+        confidence=confidence,
+        extra_args={
+            "native_catalog_entry": {
+                "thumbnail_product_retailer_id": cap.thumbnail_retailer_id,
+                "matchable_product_count": cap.matchable_product_count,
+            },
+            "navigation_state_patch": {
+                "selected_collection": "",
+                "current_catalog_group": None,
+                "catalog_navigation_source": "native_catalog",
+            },
+        },
+    )
 
 
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
@@ -606,6 +669,15 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
 
     groups = _load_catalog_groups(ctx)
     if not groups:
+        native_no_groups = _try_native_catalog_entry_decision(
+            ctx,
+            owner_step=OWNER_STEP_TOP_FALLBACK,
+            fallback_path=PATH_TOP_FALLBACK,
+            reason="catalog navigation — native catalog entry (no groups)",
+            confidence=0.88,
+        )
+        if native_no_groups is not None:
+            return native_no_groups
         _log_navigator_event(
             ctx,
             navigator_owner=True,
@@ -628,6 +700,16 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                 },
             },
         )
+
+    native_dec = _try_native_catalog_entry_decision(
+        ctx,
+        owner_step=OWNER_STEP_BROWSE_GROUPS,
+        fallback_path=PATH_GROUPS,
+        reason="catalog navigation — native catalog browse entry",
+        confidence=max(signals.confidence, 0.91),
+    )
+    if native_dec is not None:
+        return native_dec
 
     _log_navigator_event(
         ctx,
@@ -661,9 +743,11 @@ __all__ = [
     "PATH_GROUPS",
     "PATH_GROUP_PRODUCTS",
     "PATH_TOP_FALLBACK",
+    "PATH_NATIVE_CATALOG",
     "STEP_SHOW_GROUPS",
     "STEP_SHOW_GROUP_PRODUCTS",
     "STEP_TOP_FALLBACK",
+    "STEP_NATIVE_CATALOG_ENTRY",
     "TURN_OWNER",
     "is_navigator_owned_result",
     "is_navigator_protected_path",
