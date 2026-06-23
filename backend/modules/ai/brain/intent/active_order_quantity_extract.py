@@ -224,7 +224,7 @@ def message_looks_like_address_delivery(message: str) -> bool:
 
         if is_accepted_maps_url(text):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional maps URL helper must not block qty guard
         pass
     try:
         from services.address_resolution import extract_address_signals  # noqa: PLC0415
@@ -232,7 +232,7 @@ def message_looks_like_address_delivery(message: str) -> bool:
         signals = extract_address_signals(text)
         if signals.get("short_address_code") or signals.get("google_maps_url"):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional address signals must not block qty guard
         pass
     return bool(_ADDRESS_DELIVERY_HINT_RE.search(text))
 

@@ -40,6 +40,40 @@ def _count(text: str) -> int:
     return len(_EMOJI_RE.findall(text or ""))
 
 
+def _assert_protected_span_intact(reply: str, span: str) -> None:
+    assert span in reply
+    start = reply.index(span)
+    end = start + len(span)
+    assert not _EMOJI_RE.search(reply[start:end])
+
+
+def _assert_append_only_first_line(result_reply: str, original: str) -> None:
+    orig_lines = original.split("\n", 1)
+    new_lines = result_reply.split("\n", 1)
+    orig_first = orig_lines[0].rstrip()
+    new_first = new_lines[0]
+    assert new_first.startswith(orig_first)
+    tail = new_first[len(orig_first):].lstrip()
+    if tail:
+        assert _EMOJI_RE.sub("", tail).strip() == ""
+    if len(orig_lines) > 1:
+        assert new_lines[1] == orig_lines[1]
+
+
+def _checkout_ctx(**kwargs) -> MarketingEmojiContext:
+    base = {
+        "policy_enabled": True,
+        "audit_only": False,
+        "locale": "ar",
+        "style_mode": "light",
+        "reply_instruction_path": "order_slot_prompt",
+        "decision_action": "propose_draft_order",
+        "inbound_text": "مكة",
+    }
+    base.update(kwargs)
+    return MarketingEmojiContext(**base)
+
+
 def _ctx(**kwargs) -> MarketingEmojiContext:
     base = {
         "policy_enabled": True,
@@ -173,6 +207,32 @@ class TestProtectedSpans:
         )
         result = apply_marketing_emoji_policy(reply, ctx)
         assert "SA03" in result.reply
+
+
+class TestCheckoutProtectedSpansAppendOnly:
+    """Checkout replies: protected tokens stay intact; emoji append-only at line end."""
+
+    def test_short_address_code_append_only(self) -> None:
+        code = "MDQA5061"
+        reply = f"تمام، رمز عنوانك {code} محفوظ عندنا"
+        result = apply_marketing_emoji_policy(reply, _checkout_ctx())
+        _assert_protected_span_intact(result.reply, code)
+        _assert_append_only_first_line(result.reply, reply)
+
+    def test_google_maps_url_append_only(self) -> None:
+        url = "https://maps.app.goo.gl/abc123xyz"
+        reply = f"تمام، شاركنا موقعك عبر {url}"
+        result = apply_marketing_emoji_policy(reply, _checkout_ctx())
+        _assert_protected_span_intact(result.reply, url)
+        _assert_append_only_first_line(result.reply, reply)
+
+    def test_price_append_only_within_light_cap(self) -> None:
+        price = "319 ر.س"
+        reply = f"تمام، إجمالي طلبك {price} قبل الشحن"
+        result = apply_marketing_emoji_policy(reply, _checkout_ctx())
+        _assert_protected_span_intact(result.reply, price)
+        _assert_append_only_first_line(result.reply, reply)
+        assert _count(result.reply) <= 1
 
 
 class TestFeatureAndStyleGates:
