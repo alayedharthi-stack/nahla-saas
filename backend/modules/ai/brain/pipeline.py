@@ -1451,6 +1451,19 @@ class MerchantBrain:
             _enforce_result = None
 
         try:
+            from .commerce.catalog_order_checkout import (  # noqa: PLC0415
+                maybe_enforce_catalog_order_continue_checkout,
+            )
+
+            decision = maybe_enforce_catalog_order_continue_checkout(ctx, decision)
+        except Exception as _coc_exc:  # noqa: BLE001  # noqa: silent-ok — catalog-order enforce must not block checkout
+            logger.debug(
+                "[WA_NATIVE_ORDER] continue_checkout_enforce skipped tenant=%s err=%s",
+                tenant_id,
+                _coc_exc,
+            )
+
+        try:
             from .turn.shadow import complete_turn_shadow_telemetry  # noqa: PLC0415
 
             complete_turn_shadow_telemetry(
