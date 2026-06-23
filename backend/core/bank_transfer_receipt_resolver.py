@@ -25,6 +25,8 @@ from core.payment_evidence import (
     PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
     PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
     _body_has_pre_review_imperative,
+    _filename_signals_receipt,
+    _filename_signals_statement,
     _normalise,
 )
 from core.tenant_payment_accounts import (
@@ -197,7 +199,12 @@ def _detect_bank(blob: str) -> str:
 def _normalise_blob(text: Optional[str]) -> str:
     if not text:
         return ""
-    t = str(text).strip()
+    try:
+        from core.arabic_ocr_normalization import normalize_arabic_presentation_forms  # noqa: PLC0415
+
+        t = normalize_arabic_presentation_forms(text)
+    except Exception:  # noqa: BLE001
+        t = str(text).strip()
     t = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", t)
     return re.sub(r"\s+", " ", t)
 
@@ -250,6 +257,9 @@ def extract_bank_receipt_fields(
     norm = _normalise(blob)
     ext.has_pre_review_imperative = _body_has_pre_review_imperative(norm)
 
+    fname_receipt = _filename_signals_receipt(filename)
+    fname_statement = _filename_signals_statement(filename)
+
     score = 0.0
     if ext.bank_name:
         score += 0.15
@@ -264,10 +274,13 @@ def extract_bank_receipt_fields(
     if any(m in lower for m in _SUCCESS_MARKERS):
         score += 0.1
 
-    has_completion_signal = bool(
-        ext.reference_number
-        or ext.transfer_datetime
-        or any(m in lower for m in _SUCCESS_MARKERS)
+    has_completion_signal = any(m in lower for m in _SUCCESS_MARKERS) or (
+        not fname_statement
+        and fname_receipt
+        and ext.reference_number
+        and ext.amount
+        and (ext.beneficiary_name or ext.beneficiary_iban)
+        and ext.bank_name
     )
 
     if ext.has_pre_review_imperative and not ext.reference_number:

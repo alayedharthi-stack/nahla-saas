@@ -298,7 +298,12 @@ def classify_inbound_document(
     """
     fn  = (filename or "").lower()
     cap = (caption or "").lower()
-    txt = (extracted_text or "").lower()
+    try:
+        from core.arabic_ocr_normalization import normalize_arabic_ocr_text  # noqa: PLC0415
+
+        txt = normalize_arabic_ocr_text(extracted_text or "")
+    except Exception:  # noqa: BLE001
+        txt = (extracted_text or "").lower()
     blob = f"{fn}  {cap}  {txt}"
 
     reasons: list = []
@@ -2989,12 +2994,19 @@ async def _process_document(
                 )
 
     # ── Heuristic classification ─────────────────────────────────
+    try:
+        from core.arabic_ocr_normalization import normalize_arabic_ocr_text  # noqa: PLC0415
+
+        classification_text = normalize_arabic_ocr_text(extracted_text) or extracted_text
+    except Exception:  # noqa: BLE001
+        classification_text = extracted_text
+
     verdict = classify_inbound_document(
         filename=filename,
         caption=caption,
         mime_type=actual_mime,
         order_context=order_context,
-        extracted_text=extracted_text,
+        extracted_text=classification_text,
     )
     base_meta["pdf_kind"]            = verdict.get("category") or "unknown"
     base_meta["pdf_kind_confidence"] = verdict.get("confidence") or "low"
@@ -3019,7 +3031,7 @@ async def _process_document(
         _ev_blob = "\n".join(filter(None, [
             filename or "",
             caption or "",
-            extracted_text or "",
+            classification_text or extracted_text or "",
         ]))
         _ev = classify_payment_evidence(
             _ev_blob,

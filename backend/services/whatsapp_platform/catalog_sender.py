@@ -278,11 +278,6 @@ def build_product_list_payload(
 # Send wrappers (eligibility + dispatch + structured result)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _phone_suffix(to: str) -> str:
-    s = str(to or "")
-    return s[-4:] if len(s) >= 4 else "****"
-
-
 def _extract_message_id(resp: Dict[str, Any]) -> Optional[str]:
     """Pull the wamid out of the provider response.
 
@@ -299,6 +294,46 @@ def _extract_message_id(resp: Dict[str, Any]) -> Optional[str]:
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def _phone_suffix(to: str) -> str:
+    s = str(to or "")
+    return s[-4:] if len(s) >= 4 else "****"
+
+
+def _classify_catalog_provider_failure(resp: Dict[str, Any]) -> tuple[str, str]:
+    """Map Meta provider rejection to a stable catalog send reason."""
+    err = (resp or {}).get("error")
+    parts: List[str] = []
+    code: Any = None
+    if isinstance(err, dict):
+        code = err.get("code")
+        for key in ("message", "error_user_msg", "error_user_title", "type"):
+            val = err.get(key)
+            if val:
+                parts.append(str(val))
+        details = err.get("error_data")
+        if isinstance(details, dict):
+            for val in details.values():
+                if val:
+                    parts.append(str(val))
+    elif err:
+        parts.append(str(err))
+    msg = " ".join(parts).strip().lower()
+    raw = str(resp or "").lower()
+    haystack = f"{msg} {raw}".strip()
+    if (
+        code == 131009
+        or "131009" in haystack
+        or "parameter value is not valid" in haystack
+    ) and (
+        "products not found" in haystack
+        or "fb catalog" in haystack
+        or "product_retailer_id" in haystack
+        or "thumbnail_product_retailer_id" in haystack
+    ):
+        return "meta_products_not_found", " ".join(parts) or raw[:200]
+    return "provider_error", " ".join(parts) or str(err or resp or "")
 
 
 def _eligibility_to_result(
@@ -485,19 +520,26 @@ async def send_catalog_message(
 
     message_id = _extract_message_id(resp)
     if not message_id:
+        reason, err_text = _classify_catalog_provider_failure(resp or {})
         logger.error(
             "[CATALOG_SEND_FAILED] tenant=%s to=*%s kind=catalog_message "
-            "reason=provider_error response=%r",
+            "reason=%s response=%r",
             tenant_id,
             _phone_suffix(to),
+            reason,
             (resp or {}).get("error") or resp,
         )
+        if reason == "meta_products_not_found":
+            logger.info(
+                "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=meta_products_not_found",
+                tenant_id,
+            )
         return CatalogSendResult(
             success=False,
             fallback_recommended=True,
-            reason="provider_error",
+            reason=reason,
             raw_response=resp or {},
-            error=str((resp or {}).get("error") or ""),
+            error=err_text,
         )
 
     logger.info(

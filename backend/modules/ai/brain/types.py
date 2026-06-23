@@ -253,9 +253,6 @@ class OrderPreparationState:
     pending_variant_product_id: str = ""
     selected_variant_id:          str = ""
     selected_variant_retailer_id: str = ""
-    # Checkout channel ownership — whatsapp_fast | store_link | showroom_visit
-    checkout_channel: str = ""
-    awaiting_checkout_channel: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -313,8 +310,6 @@ class OrderPreparationState:
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
             "selected_variant_retailer_id": self.selected_variant_retailer_id,
-            "checkout_channel":           str(self.checkout_channel or ""),
-            "awaiting_checkout_channel":  bool(self.awaiting_checkout_channel),
         }
 
     @staticmethod
@@ -382,8 +377,6 @@ class OrderPreparationState:
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),
             selected_variant_retailer_id=str(raw.get("selected_variant_retailer_id", "") or ""),
-            checkout_channel=str(raw.get("checkout_channel", "") or ""),
-            awaiting_checkout_channel=bool(raw.get("awaiting_checkout_channel", False)),
         )
 
 
@@ -544,6 +537,7 @@ class MerchantConversationState:
     group_products_page_size: int = 0
     next_page_available: bool = False
     catalog_navigation_source: str = ""
+    native_catalog_send_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -626,6 +620,7 @@ class MerchantConversationState:
             "group_products_page_size": self.group_products_page_size,
             "next_page_available": self.next_page_available,
             "catalog_navigation_source": self.catalog_navigation_source,
+            "native_catalog_send_failed": self.native_catalog_send_failed,
         }
 
     @staticmethod
@@ -718,6 +713,7 @@ class MerchantConversationState:
             group_products_page_size=int(d.get("group_products_page_size") or 0),
             next_page_available=bool(d.get("next_page_available", False)),
             catalog_navigation_source=str(d.get("catalog_navigation_source", "") or ""),
+            native_catalog_send_failed=bool(d.get("native_catalog_send_failed", False)),
         )
 
 
