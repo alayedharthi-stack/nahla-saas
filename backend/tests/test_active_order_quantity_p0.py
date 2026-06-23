@@ -17,6 +17,7 @@ from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noq
 from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: E402
     extract_active_order_quantity_fallback,
     message_has_bare_quantity_or_variant_signal,
+    message_looks_like_address_delivery,
     resolve_active_order_quantity_reply,
 )
 from modules.ai.brain.intent.cart_intent_extractor import (  # noqa: E402
@@ -54,6 +55,11 @@ class TestBareQuantitySignal:
 
     def test_detects_variant_detail(self) -> None:
         assert message_has_bare_quantity_or_variant_signal("فيه نص كيلo بالشمع والعكبر")
+
+    def test_national_address_not_bare_quantity(self) -> None:
+        addr = "عنوان قريب: 5061 MDQA5061 محمد الكناني، 6684، حي بطحاء قريش، مكة 24352"
+        assert message_looks_like_address_delivery(addr)
+        assert not message_has_bare_quantity_or_variant_signal(addr)
 
 
 class TestActiveOrderSplitQuantity:

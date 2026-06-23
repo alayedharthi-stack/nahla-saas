@@ -32,11 +32,32 @@ _BARE_QTY_SIGNAL_RE = re.compile(
     r"(?:نصف|نص|ربع)\s*(?:كilo|كيلo|كيلo|ك)?|"
     r"(?:كilo|كيلo|كيلo|1\s*kg|1\s*كilo)\b|"
     r"\b500\s*g\b|\b250\s*g\b|"
-    r"حبتين|حبة\s*واحدة?|(?:٤|4|اربع|أربع)\s*(?:حبة|حبات)?|"
-    r"(?:٤|4|اربع|أربع|حبتين|اثنين|2)\s*(?:حبة|حبات|قطعة|قطع)?"
+    r"حبتين|حبة\s*واحدة?|"
+    r"(?<![0-9٠-٩])(?:٤|4|اربع|أربع)(?![0-9٠-٩])\s*(?:حبة|حبات)?|"
+    r"(?<![0-9٠-٩])(?:٤|4|اربع|أربع|حبتين|اثنين|2)(?![0-9٠-٩])\s*(?:حبة|حبات|قطعة|قطع)?"
     r")",
     re.I | re.UNICODE,
 )
+
+_ADDRESS_DELIVERY_HINT_RE = re.compile(
+    r"(?:"
+    r"عنوان\s*(?:قريب|وطني|الوطني|القومي)?|"
+    r"العنوان\s*(?:الوطني|القومي|الوطني)?|"
+    r"حي\s+\S+|"
+    r"شارع\s|"
+    r"رمز\s*(?:بريدي|العنوان)?"
+    r")",
+    re.I | re.UNICODE,
+)
+
+_PRODUCT_VARIANT_MISSING = frozenset({
+    "variant",
+    "size",
+    "product",
+    "product_id",
+    "sku",
+    "quantity",
+})
 
 _VARIANT_DETAIL_RE = re.compile(
     r"(?:بال|مع|in)\s*(.+?)(?:\s*$|(?:\s+و\s+))",
@@ -193,9 +214,63 @@ def _segment_has_product_hint(segment: str) -> bool:
     return True
 
 
+def message_looks_like_address_delivery(message: str) -> bool:
+    """True when the inbound text is address evidence, not a qty/variant turn."""
+    text = str(message or "").strip()
+    if not text:
+        return False
+    try:
+        from core.wa_address_ingestion import is_accepted_maps_url  # noqa: PLC0415
+
+        if is_accepted_maps_url(text):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from services.address_resolution import extract_address_signals  # noqa: PLC0415
+
+        signals = extract_address_signals(text)
+        if signals.get("short_address_code") or signals.get("google_maps_url"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return bool(_ADDRESS_DELIVERY_HINT_RE.search(text))
+
+
+def _prep_has_catalog_sku_without_variant_gap(order_prep: Any) -> bool:
+    """Catalog line with product_id + quantity — size ask only if variant truly missing."""
+    if order_prep is None:
+        return False
+    if isinstance(order_prep, dict):
+        line_items = list(order_prep.get("line_items") or order_prep.get("cart_items") or [])
+        missing = list(order_prep.get("missing_fields") or [])
+    else:
+        line_items = list(getattr(order_prep, "line_items", None) or [])
+        missing = list(getattr(order_prep, "missing_fields", None) or [])
+    if not line_items:
+        return False
+    first = next((li for li in line_items if isinstance(li, dict)), None)
+    if not isinstance(first, dict):
+        return False
+    if not str(first.get("product_id") or "").strip():
+        return False
+    try:
+        qty = int(first.get("quantity") or 0)
+    except (TypeError, ValueError):
+        return False
+    if qty <= 0:
+        return False
+    if not missing:
+        return True
+    missing_set = {str(m).strip().lower() for m in missing if str(m).strip()}
+    return not (missing_set & _PRODUCT_VARIANT_MISSING)
+
+
 def message_has_bare_quantity_or_variant_signal(message: str) -> bool:
     text = (message or "").strip()
     if not text:
+        return False
+    if message_looks_like_address_delivery(message):
         return False
     for seg in _split_segments(text):
         if _is_commerce_segment(seg):
@@ -394,6 +469,9 @@ def resolve_active_order_quantity_reply(
         if stored:
             return stored
 
+    if message_looks_like_address_delivery(message):
+        return None
+
     if not message_has_bare_quantity_or_variant_signal(message):
         return None
 
@@ -409,6 +487,8 @@ def resolve_active_order_quantity_reply(
             return result.clarification_reply
         if result.intents:
             return _ACTIVE_ORDER_QTY_CONTINUE_AR
+        if _prep_has_catalog_sku_without_variant_gap(prep):
+            return None
         return "تمام، أكمل معك الطلب — وش الحجم أو التفاصيل اللي تبغاها؟"
 
     return _OUTSIDE_ORDER_QTY_AR
@@ -418,5 +498,6 @@ __all__ = [
     "ActiveOrderQuantityResult",
     "extract_active_order_quantity_fallback",
     "message_has_bare_quantity_or_variant_signal",
+    "message_looks_like_address_delivery",
     "resolve_active_order_quantity_reply",
 ]
