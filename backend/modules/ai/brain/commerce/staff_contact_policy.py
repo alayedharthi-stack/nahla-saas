@@ -160,6 +160,22 @@ def evaluate_staff_contact_policy(
         return None
 
     if request.kind == "general_channel":
+        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+            should_yield_prebrain_to_order_flow,
+        )
+
+        if should_yield_prebrain_to_order_flow(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            message=message or "",
+        ):
+            logger.info(
+                "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=order_flow_arbiter",
+                tenant_id,
+            )
+            return None
+
         from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
             general_contact_reply_for_message,
         )
@@ -279,9 +295,22 @@ def evaluate_generic_handoff_contact_policy(
     tenant_id: int,
     message: str = "",
     store_contact_phone: str = "",
+    customer_phone: str = "",
 ) -> Optional[StaffContactPolicyDecision]:
     """Contact delivery or honest not-configured for generic handoff asks."""
     if not staff_contact_policy_enabled():
+        return None
+
+    from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+        should_yield_prebrain_to_order_flow,
+    )
+
+    if should_yield_prebrain_to_order_flow(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
         return None
 
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
