@@ -202,6 +202,8 @@ def apply_selection_context_patch(state: Any, patch: Dict[str, Any]) -> None:
         state.current_catalog_group = patch.get("current_catalog_group")
     if patch.get("catalog_navigation_source") is not None:
         state.catalog_navigation_source = str(patch.get("catalog_navigation_source") or "")
+    if patch.get("native_catalog_send_failed") is not None:
+        state.native_catalog_send_failed = bool(patch.get("native_catalog_send_failed"))
     if patch.get("selection_context_turn") is not None:
         state.selection_context_turn = int(patch.get("selection_context_turn") or 0)
     if str(getattr(state, "selected_product_id", "") or "").strip():
