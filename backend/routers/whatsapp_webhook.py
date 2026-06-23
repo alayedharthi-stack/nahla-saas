@@ -11501,9 +11501,13 @@ async def _handle_merchant_message(
                 except Exception:  # noqa: BLE001
                     pass
             else:
+                _nc_fallback = None
                 try:
+                    from core.native_catalog_capability import (  # noqa: PLC0415
+                        invalidate_meta_catalog_publish_for_retailer_id,
+                    )
                     from core.native_catalog_fallback import (  # noqa: PLC0415
-                        compose_native_catalog_failure_reply,
+                        compose_native_catalog_failure_decision,
                     )
                     from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
                         apply_selection_context_patch,
@@ -11520,28 +11524,71 @@ async def _handle_merchant_message(
                         },
                     )
                     _nc_store.save(db, tenant_id, to, _nc_state)
-                    reply = compose_native_catalog_failure_reply(
+                    if _native_send_result.reason == "meta_products_not_found":
+                        invalidate_meta_catalog_publish_for_retailer_id(
+                            db,
+                            int(tenant_id),
+                            str(_native_catalog_entry.get("thumbnail_product_retailer_id") or ""),
+                        )
+                    _nc_fallback = compose_native_catalog_failure_decision(
                         db,
                         tenant_id,
+                        failure_reason=_native_send_result.reason,
                         customer_message=text or reply or "",
                     )
+                    reply = str(_nc_fallback.text or "").strip()
                 except Exception as _nc_fb_exc:  # noqa: BLE001  # noqa: silent-ok — honest fallback must not block webhook reply
                     logger.debug(
                         "[NATIVE_CATALOG] honest_fallback_failed tenant=%s err=%s",
                         tenant_id,
                         _nc_fb_exc,
                     )
+                    _nc_fallback = None
+                    reply = ""
                 if reply:
-                    _send_ok = await _send_whatsapp_message(
-                        phone_id=phone_id,
-                        to=to,
-                        text=reply,
-                        _tenant_id=tenant_id,
-                        _db=db,
+                    _cta_url = (
+                        str(getattr(_nc_fallback, "cta_url", "") or "").strip()
+                        if _nc_fallback is not None
+                        else ""
                     )
+                    _cta_label = (
+                        str(getattr(_nc_fallback, "cta_label", "") or "").strip()
+                        or "فتح المتجر الإلكتروني"
+                    )
+                    if _cta_url:
+                        _send_ok = await _send_cta_url(
+                            phone_id=phone_id,
+                            to=to,
+                            body_text=reply,
+                            btn_label=_cta_label,
+                            btn_url=_cta_url,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
+                        if not _send_ok:
+                            reply = f"{reply}\n{_cta_url}"
+                            _send_ok = await _send_whatsapp_message(
+                                phone_id=phone_id,
+                                to=to,
+                                text=reply,
+                                _tenant_id=tenant_id,
+                                _db=db,
+                            )
+                    else:
+                        _send_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=reply,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
                     if _send_ok and isinstance(_delivery_audit, dict):
                         _delivery_audit["text_sent"] = True
                         _delivery_audit["native_catalog_fallback_text"] = True
+                        if _cta_url:
+                            _delivery_audit["cta_url_sent_count"] = (
+                                int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
+                            )
         elif _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,

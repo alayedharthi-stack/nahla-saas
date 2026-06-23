@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ if _BACKEND not in sys.path:
 
 from core.native_catalog_capability import (  # noqa: E402
     NativeCatalogCapability,
+    REASON_META_CATALOG_UNPUBLISHED,
     REASON_SKU_ONLY_RETAILER_ID,
     REASON_SYNTHETIC_RETAILER_ID,
     _ineligibility_reason_from_inventory,
@@ -69,6 +71,9 @@ class _Product:
     in_stock: bool = True
     catalog_status: str = "active"
     default_variant_id: Optional[int] = None
+    meta_catalog_published_at: Any = field(
+        default_factory=lambda: datetime(2026, 5, 30, tzinfo=timezone.utc)
+    )
 
 
 @dataclass
