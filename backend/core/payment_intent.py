@@ -881,10 +881,22 @@ def maybe_handle_payment_claim(
             tenant_id, (phone or "")[-4:],
             selected_product, awaiting_receipt,
         )
-        return {
-            "reply_text":  reply_text,
-            "state_patch": state_patch,
-        }
+        from core.reply_instruction import (  # noqa: PLC0415
+            attach_instruction_to_decision,
+            build_payment_claim_instruction,
+        )
+
+        return attach_instruction_to_decision(
+            {
+                "reply_text":  reply_text,
+                "state_patch": state_patch,
+            },
+            build_payment_claim_instruction(
+                legacy_copy=reply_text,
+                summary=s,
+                inbound_text=inbound_text,
+            ),
+        )
 
     reply_text = compose_payment_claim_ack(
         selected_product=selected_product,
@@ -908,10 +920,22 @@ def maybe_handle_payment_claim(
         selected_product, awaiting_receipt, receipt_received,
         order_status,
     )
-    return {
-        "reply_text":  reply_text,
-        "state_patch": state_patch,
-    }
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_payment_claim_instruction,
+    )
+
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  reply_text,
+            "state_patch": state_patch,
+        },
+        build_payment_claim_instruction(
+            legacy_copy=reply_text,
+            summary=s,
+            inbound_text=inbound_text,
+        ),
+    )
 
 
 def rewrite_generic_reply_for_payment_context(

@@ -138,31 +138,52 @@ class DefaultComposer:
 
                 text = pick_persona_greeting(ctx, re_greet=re_greet_requested)
             else:
-                variant = self._variant_idx(ctx)
-                if re_greet_requested:
-                    text = T.re_greeting(
-                        store_name=ctx.facts.store_name,
-                        assistant_name=persona,
-                        variant=variant,
+                from ..persona_expression import (  # noqa: PLC0415
+                    PERSONA_KIND_GREETING,
+                    PERSONA_TOPIC_SOCIAL,
+                    is_established_greet_persona_compose_enabled,
+                )
+
+                if is_established_greet_persona_compose_enabled():
+                    _greet_decision = Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={
+                            "topic": PERSONA_TOPIC_SOCIAL,
+                            "persona_kind": PERSONA_KIND_GREETING,
+                            "block_commerce_escalation": True,
+                        },
+                        reason="greet — persona_social compose (default path)",
                     )
-                    if self._is_duplicate(text, ctx):
+                    result.data["chosen_path"] = "greet_persona_compose"
+                    text = await self._llm_compose(
+                        ctx, result, decision=_greet_decision,
+                    )
+                else:
+                    variant = self._variant_idx(ctx)
+                    if re_greet_requested:
                         text = T.re_greeting(
                             store_name=ctx.facts.store_name,
                             assistant_name=persona,
-                            variant=(variant + 1) % 3,
+                            variant=variant,
                         )
-                else:
-                    text = T.greeting(
-                        store_name=ctx.facts.store_name,
-                        assistant_name=persona,
-                        variant=variant,
-                    )
-                    if self._is_duplicate(text, ctx):
+                        if self._is_duplicate(text, ctx):
+                            text = T.re_greeting(
+                                store_name=ctx.facts.store_name,
+                                assistant_name=persona,
+                                variant=(variant + 1) % 3,
+                            )
+                    else:
                         text = T.greeting(
                             store_name=ctx.facts.store_name,
                             assistant_name=persona,
-                            variant=(variant + 1) % 3,
+                            variant=variant,
                         )
+                        if self._is_duplicate(text, ctx):
+                            text = T.greeting(
+                                store_name=ctx.facts.store_name,
+                                assistant_name=persona,
+                                variant=(variant + 1) % 3,
+                            )
             return apply_greeting_etiquette(
                 text,
                 customer_message_for_etiquette(ctx),
@@ -598,12 +619,54 @@ class DefaultComposer:
                     code=data.get("salla_address_code", ""),
                 )
             if data.get("needs_collection"):
-                return T.collect_order_details(
+                legacy_reply = T.collect_order_details(
                     product=data.get("product", {}),
                     question=data.get("question", ""),
                     missing_fields=data.get("missing_fields", []),
                     is_first_ask=data.get("is_first_ask", True),
                 )
+                from core.reply_instruction import (  # noqa: PLC0415
+                    build_order_slot_instruction,
+                    is_operational_constrained_compose_enabled,
+                )
+
+                if is_operational_constrained_compose_enabled():
+                    from core.constrained_operational_compose import (  # noqa: PLC0415
+                        compose_constrained_operational_reply,
+                    )
+
+                    _missing = list(data.get("missing_fields") or [])
+                    _slot = str(_missing[0] if _missing else "")
+                    _instr = build_order_slot_instruction(
+                        slot=_slot,
+                        legacy_copy=legacy_reply,
+                        product=data.get("product", {}),
+                        is_first_ask=bool(data.get("is_first_ask", True)),
+                        inbound_text=(ctx.message or ""),
+                    )
+                    _hist: list = []
+                    for _row in (ctx.history or [])[-6:]:
+                        _body = str(_row.get("body") or "").strip()
+                        if not _body:
+                            continue
+                        _dir = str(_row.get("direction") or "inbound")
+                        _role = (
+                            "assistant"
+                            if _dir in ("out", "outbound")
+                            else "user"
+                        )
+                        _hist.append({"role": _role, "content": _body})
+                    _slot_reply, _slot_meta = await compose_constrained_operational_reply(
+                        db=None,
+                        tenant_id=ctx.tenant_id,
+                        phone=ctx.customer_phone,
+                        instruction=_instr,
+                        inbound_text=(ctx.message or ""),
+                        history=_hist,
+                    )
+                    result.data["constrained_compose_meta"] = _slot_meta
+                    return _slot_reply
+                return legacy_reply
             if data.get("intent_only"):
                 return T.order_intent_captured(product=data.get("product", {}))
             _order_ref = str(
@@ -721,9 +784,19 @@ class DefaultComposer:
         # ── Social / courtesy — occasion/safety templates only (P1-F) ─────
         if action == ACTION_SOCIAL_REPLY:
             category = str((decision.args or {}).get("social_category") or "general_courtesy")
+            from ..persona_expression import is_template_only_social_category  # noqa: PLC0415
             from ..cost.intent_cost_policy import is_routine_llm_avoid_enabled  # noqa: PLC0415
 
-            if is_routine_llm_avoid_enabled():
+            if is_template_only_social_category(category):
+                v_main = self._variant_idx(ctx)
+                v_secondary = (len(ctx.history or []) // 3) % 5
+                reply = T.social_reply(
+                    category=category,
+                    variant=v_main,
+                    sub_variant=v_secondary,
+                    inbound_text=(ctx.message or ""),
+                )
+            elif is_routine_llm_avoid_enabled():
                 from .persona_template_engine import pick_persona_social_reply  # noqa: PLC0415
 
                 reply = pick_persona_social_reply(
@@ -741,14 +814,11 @@ class DefaultComposer:
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — social stub strip must not break compose
                     pass
             else:
-                v_main = self._variant_idx(ctx)
-                v_secondary = (len(ctx.history or []) // 3) % 5
-                reply = T.social_reply(
-                    category=category,
-                    variant=v_main,
-                    sub_variant=v_secondary,
-                    inbound_text=(ctx.message or ""),
+                result.data["chosen_path"] = "social_persona_compose"
+                reply = await self._compose_social_persona_ack(
+                    ctx, result, social_category=category,
                 )
+                return self._apply_gender_hint(reply, ctx)
             try:
                 from ..postprocess.social_reply_context_guard import (  # noqa: PLC0415
                     apply_social_reply_context_guard,

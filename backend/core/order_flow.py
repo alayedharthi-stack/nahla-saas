@@ -907,11 +907,22 @@ def maybe_handle_receipt_inbound(
         summary.get("short_address_code"),
         awaiting,
     )
-    return {
-        "reply_text":  reply_text,
-        "summary":     summary,
-        "state_patch": state_patch,
-    }
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_payment_receipt_instruction,
+    )
+
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  reply_text,
+            "summary":     summary,
+            "state_patch": state_patch,
+        },
+        build_payment_receipt_instruction(
+            legacy_copy=reply_text,
+            summary=summary,
+        ),
+    )
 
 
 def maybe_handle_payment_evidence_inbound(
@@ -1029,19 +1040,30 @@ def maybe_handle_payment_evidence_inbound(
                 **_receipt_text_fields(md),
                 **_resolver.to_metadata_patch(),
             }
-            return {
-                "reply_text":  reply_text,
-                "summary":     summary,
-                "state_patch": _compose_payment_state_patch(
-                    db=db,
-                    tenant_id=tenant_id,
-                    phone=phone,
-                    conversation=_conv,
+            from core.reply_instruction import (  # noqa: PLC0415
+                attach_instruction_to_decision,
+                build_payment_receipt_instruction,
+            )
+
+            return attach_instruction_to_decision(
+                {
+                    "reply_text":  reply_text,
+                    "summary":     summary,
+                    "state_patch": _compose_payment_state_patch(
+                        db=db,
+                        tenant_id=tenant_id,
+                        phone=phone,
+                        conversation=_conv,
+                        summary=summary,
+                        payment_state=_resolver.payment_state,
+                        receipt_metadata=receipt_meta,
+                    ),
+                },
+                build_payment_receipt_instruction(
+                    legacy_copy=reply_text,
                     summary=summary,
-                    payment_state=_resolver.payment_state,
-                    receipt_metadata=receipt_meta,
                 ),
-            }
+            )
         if _resolver.payment_state != PAYMENT_PENDING_CONFIRMATION:
             logger.debug(
                 "[PAYMENT_EVIDENCE] resolver=no_short_circuit tenant=%s "
@@ -1349,14 +1371,31 @@ def maybe_handle_payment_evidence_inbound(
         md.get("payment_evidence_reason"), kind, awaiting,
         summary.get("selected_product"),
     )
-    return {
-        "reply_text":  reply_text,
-        "summary":     summary,
-        # Empty state_patch — no order-status mutation, no
-        # awaiting_payment_receipt flip. This branch is informational
-        # only; the customer hasn't completed anything yet.
-        "state_patch": {},
-    }
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_payment_evidence_instruction,
+    )
+
+    caption_or_text = str(
+        md.get("caption") or md.get("vision_text") or md.get("ocr_text") or ""
+    ).strip()
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  reply_text,
+            "summary":     summary,
+            # Empty state_patch — no order-status mutation, no
+            # awaiting_payment_receipt flip. This branch is informational
+            # only; the customer hasn't completed anything yet.
+            "state_patch": {},
+        },
+        build_payment_evidence_instruction(
+            pe_status=str(pe_status or ""),
+            pe_reason=str(md.get("payment_evidence_reason") or ""),
+            legacy_copy=reply_text,
+            summary=summary,
+            inbound_text=caption_or_text,
+        ),
+    )
 
 
 def maybe_handle_map_image_inbound(
@@ -1451,11 +1490,22 @@ def maybe_handle_map_image_inbound(
             "إذا تغيّر الموقع، أرسل لنا رابط قوقل ماب أو "
             "العنوان الوطني نصياً."
         )
-        return {
-            "reply_text":  reply_text,
-            "summary":     summary,
-            "state_patch": {},
-        }
+        from core.reply_instruction import (  # noqa: PLC0415
+            attach_instruction_to_decision,
+            build_map_image_instruction,
+        )
+
+        return attach_instruction_to_decision(
+            {
+                "reply_text":  reply_text,
+                "summary":     summary,
+                "state_patch": {},
+            },
+            build_map_image_instruction(
+                legacy_copy=reply_text,
+                summary=summary,
+            ),
+        )
 
     reply_lines = [
         "وصلتنا لقطة الخريطة، شكراً 🌷",
@@ -1472,11 +1522,23 @@ def maybe_handle_map_image_inbound(
         tenant_id, (phone or "")[-4:],
         summary.get("selected_product"), receipt_received,
     )
-    return {
-        "reply_text":  "\n".join(reply_lines),
-        "summary":     summary,
-        "state_patch": state_patch,
-    }
+    _map_reply = "\n".join(reply_lines)
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_map_image_instruction,
+    )
+
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  _map_reply,
+            "summary":     summary,
+            "state_patch": state_patch,
+        },
+        build_map_image_instruction(
+            legacy_copy=_map_reply,
+            summary=summary,
+        ),
+    )
 
 
 def maybe_handle_wa_address_inbound(
@@ -1585,11 +1647,25 @@ def maybe_handle_wa_address_inbound(
         inbound_normalized_type,
         address_patch.get("delivery_address_type"),
     )
-    return {
-        "reply_text":  reply_text,
-        "summary":     summary,
-        "state_patch": state_patch,
-    }
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_address_instruction,
+    )
+
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  reply_text,
+            "summary":     summary,
+            "state_patch": state_patch,
+            "deterministic_path": "address_ingest_ack",
+        },
+        build_address_instruction(
+            legacy_copy=reply_text,
+            summary=summary,
+            address_type=str(address_patch.get("delivery_address_type") or ""),
+            inbound_text=str(inbound_text or ""),
+        ),
+    )
 
 
 def maybe_handle_payment_method_selection_inbound(
@@ -1663,11 +1739,25 @@ def maybe_handle_payment_method_selection_inbound(
         (phone or "")[-4:],
         chosen,
     )
-    return {
-        "reply_text":  reply_text,
-        "summary":     summary,
-        "state_patch": state_patch,
-    }
+    from core.reply_instruction import (  # noqa: PLC0415
+        attach_instruction_to_decision,
+        build_payment_method_instruction,
+    )
+
+    return attach_instruction_to_decision(
+        {
+            "reply_text":  reply_text,
+            "summary":     summary,
+            "state_patch": state_patch,
+            "deterministic_path": "payment_method_ack",
+        },
+        build_payment_method_instruction(
+            legacy_copy=reply_text,
+            payment_method=str(chosen or ""),
+            summary=summary,
+            inbound_text=text,
+        ),
+    )
 
 
 def _name_field_looks_like_phone(text: str) -> bool:

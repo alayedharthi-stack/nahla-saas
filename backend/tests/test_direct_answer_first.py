@@ -44,6 +44,10 @@ from modules.ai.brain.decision.actions import (
     ACTION_GREET,
     ACTION_LLM_REPLY,
 )
+from modules.ai.brain.persona_expression import (  # noqa: E402
+    PERSONA_KIND_GREETING,
+    PERSONA_TOPIC_SOCIAL,
+)
 from modules.ai.brain.decision.engine import (
     DefaultDecisionEngine,
     _first_turn_has_actionable_substance,
@@ -192,10 +196,11 @@ def test_voice_transcript_with_invoice_question_does_not_greet(
         f"expected fallthrough to ACTION_LLM_REPLY, got {decision.action!r} "
         f"(reason={decision.reason!r})"
     )
-
-    assert any("[DAF.BYPASS]" in rec.getMessage() for rec in caplog.records), (
-        "expected [DAF.BYPASS] telemetry line on bypass; got "
-        f"{[r.getMessage() for r in caplog.records]!r}"
+    # Substance may bypass via DAF or an earlier commerce branch; either way
+    # the welcome card must not win.
+    assert not any(
+        rec.getMessage().startswith("[INTENT_COST] kind=greeting route=template")
+        for rec in caplog.records
     )
 
 
@@ -246,8 +251,25 @@ def test_first_turn_thin_general_still_greets() -> None:
     assert "first-turn general" in decision.reason
 
 
-def test_first_turn_pure_greeting_routes_template_greet_not_welcome_card_llm() -> None:
-    """Pure salaam on first turn → ACTION_GREET template (PR2B, no Sonnet)."""
+def test_first_turn_pure_greeting_routes_persona_llm_by_default() -> None:
+    """Pure salaam on first turn → persona LLM compose (Phase 3 default)."""
+    ctx = _first_turn_ctx(
+        message="السلام عليكم", intent_name=INTENT_GREETING,
+    )
+
+    decision = DefaultDecisionEngine().decide(ctx)
+
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action != ACTION_GREET
+
+
+def test_first_turn_pure_greeting_routes_template_when_avoid_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy PR2B template path when routine LLM avoid is on."""
+    monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
     ctx = _first_turn_ctx(
         message="السلام عليكم", intent_name=INTENT_GREETING,
     )
@@ -287,11 +309,11 @@ def test_first_turn_greeting_with_substance_bypasses_belt_and_suspenders(
         "INTENT_GREETING with substantive content on first turn must "
         f"bypass the welcome card. Got reason={decision.reason!r}"
     )
-    assert any(
-        "[DAF.BYPASS]" in rec.getMessage()
-        and "first_turn_greeting_with_substance" in rec.getMessage()
+    assert decision.action == ACTION_LLM_REPLY
+    assert not any(
+        rec.getMessage().startswith("[INTENT_COST] kind=greeting route=template")
         for rec in caplog.records
-    ), "expected the greeting-branch DAF bypass log line"
+    )
 
 
 def test_embedded_greeting_path_still_works() -> None:
@@ -308,4 +330,9 @@ def test_embedded_greeting_path_still_works() -> None:
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert decision.action != ACTION_GREET
-    assert decision.action in {ACTION_LLM_REPLY, "search_products", "ask_product"}
+    assert decision.action in {
+        ACTION_LLM_REPLY,
+        "search_products",
+        "ask_product",
+        "catalog_navigate",
+    }

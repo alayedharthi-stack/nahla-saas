@@ -1,4 +1,4 @@
-"""Established pure greetings → persona_social + persona_kind=greeting."""
+"""Established pure greetings → persona_social + persona_kind=greeting by default."""
 from __future__ import annotations
 
 import os
@@ -104,19 +104,22 @@ def _ctx(
     )
 
 
+def _assert_persona_greeting_llm(decision: Decision) -> None:
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+
+
 @pytest.mark.parametrize("msg", ["هلا", "مرحبا", "السلام عليكم ورحمة الله"])
-def test_established_pure_greeting_routes_template_not_llm(msg: str) -> None:
+def test_established_pure_greeting_routes_persona_llm(msg: str) -> None:
     decision = DefaultDecisionEngine().decide(_ctx(msg, greeted=True))
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("re_greet") is True
-    assert decision.action != ACTION_LLM_REPLY
+    _assert_persona_greeting_llm(decision)
 
 
-def test_first_turn_greeting_routes_template_not_llm() -> None:
-    """PR2B: cold first turn pure greeting → ACTION_GREET (no Sonnet)."""
+def test_first_turn_greeting_routes_persona_llm() -> None:
+    """Default: cold first turn pure greeting → persona LLM compose."""
     decision = DefaultDecisionEngine().decide(_ctx("هلا", greeted=False))
-    assert decision.action == ACTION_GREET
-    assert decision.action != ACTION_LLM_REPLY
+    _assert_persona_greeting_llm(decision)
 
 
 def test_greeting_locked_during_ordering() -> None:
@@ -173,8 +176,17 @@ def test_persona_compose_restored_when_routine_avoid_disabled(
 ) -> None:
     monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "false")
     decision = DefaultDecisionEngine().decide(_ctx("هلا", greeted=True))
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    _assert_persona_greeting_llm(decision)
+
+
+def test_established_greeting_routes_template_when_avoid_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
+    decision = DefaultDecisionEngine().decide(_ctx("هلا", greeted=True))
+    assert decision.action == ACTION_GREET
+    assert decision.args.get("re_greet") is True
+    assert decision.action != ACTION_LLM_REPLY
 
 
 def test_greeting_kind_goal_includes_phatic_and_no_reintro() -> None:
@@ -209,10 +221,9 @@ def test_marhaba_classifies_as_greeting_not_persona_interaction() -> None:
     assert classify_persona_interaction("مرحبا") is None
 
 
-def test_pure_hala_intent_routes_template_when_greeted() -> None:
-    """Bare «هلا» classifies as GREETING and routes to template re-greet."""
+def test_pure_hala_intent_routes_persona_llm_when_greeted() -> None:
+    """Bare «هلا» classifies as GREETING and routes to persona LLM by default."""
     ctx = _ctx("هلا", greeted=True)
     assert ctx.intent.name == INTENT_GREETING
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("re_greet") is True
+    _assert_persona_greeting_llm(decision)

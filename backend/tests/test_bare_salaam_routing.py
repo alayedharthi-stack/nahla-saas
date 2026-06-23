@@ -196,7 +196,29 @@ def test_pure_hala_slim_eligible_after_reset() -> None:
 # ── 9. Established turn routes persona — not loop-prone clarify path ────────
 
 def test_reset_shaped_hala_avoids_contextual_clarify_decision() -> None:
-    """Pure greeting must take ACTION_GREET — not loop-prone clarify/LLM path."""
+    """Pure greeting must take persona LLM compose — not loop-prone clarify path."""
+    state = _reset_state()
+    intent = rules.match("هلا")
+    assert intent is not None
+    ctx = BrainContext(
+        tenant_id=7,
+        customer_phone="966500000001",
+        message="هلا",
+        intent=intent,
+        state=state,
+        facts=_facts(),
+    )
+    decision = DefaultDecisionEngine().decide(ctx)
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    assert decision.action != ACTION_GREET
+    assert decision.args.get("topic") != COMPOSE_TOPIC_CONTEXTUAL_CLARIFY
+
+
+def test_reset_shaped_hala_routes_template_when_avoid_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
     state = _reset_state()
     intent = rules.match("هلا")
     assert intent is not None
@@ -211,7 +233,6 @@ def test_reset_shaped_hala_avoids_contextual_clarify_decision() -> None:
     decision = DefaultDecisionEngine().decide(ctx)
     assert decision.action == ACTION_GREET
     assert decision.action != ACTION_LLM_REPLY
-    assert decision.args.get("topic") != COMPOSE_TOPIC_CONTEXTUAL_CLARIFY
 
 
 # ── 10. Commerce paths preserved ────────────────────────────────────────────
