@@ -19,14 +19,18 @@ from core.wa_address_ingestion import (  # noqa: E402
     resolve_address_state_patch,
 )
 from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
+    CHECKOUT_CHANNEL_INQUIRY,
     CHECKOUT_CHANNEL_SHOWROOM,
     CHECKOUT_CHANNEL_STORE,
     CHECKOUT_CHANNEL_WHATSAPP,
     CheckoutChannelCapabilities,
     available_channels,
+    build_channel_choice_buttons,
     build_channel_choice_prompt,
     evaluate_checkout_route_owner,
+    has_checkout_entry_intent,
     has_checkout_route_intent,
+    is_catalog_visibility_question,
     parse_checkout_channel_choice,
     should_defer_staff_location_for_checkout_route,
 )
@@ -62,16 +66,29 @@ class _StubDB:
 class TestCheckoutRouteIntent:
     def test_price_question_is_checkout_intent(self) -> None:
         assert has_checkout_route_intent("كم سعر العسل؟")
+        assert not has_checkout_entry_intent("كم سعر العسل؟")
 
     def test_payment_question_is_checkout_intent(self) -> None:
         assert has_checkout_route_intent("وش طرق الدفع؟")
+        assert not has_checkout_entry_intent("وش طرق الدفع؟")
+
+    def test_start_order_is_checkout_entry_intent(self) -> None:
+        assert has_checkout_entry_intent("ابي اطلب")
+        assert has_checkout_entry_intent("أبغى أطلب")
+        assert has_checkout_entry_intent("كيف أطلب")
 
     def test_greeting_is_not_checkout_intent(self) -> None:
         assert not has_checkout_route_intent("مرحبا")
+        assert not has_checkout_entry_intent("مرحبا")
+
+    def test_catalog_visibility_questions_are_detected(self) -> None:
+        assert is_catalog_visibility_question("وين هي")
+        assert is_catalog_visibility_question("؟")
+        assert is_catalog_visibility_question("ما ظهر")
 
 
 class TestChannelChoicePrompt:
-    def test_prompt_includes_store_and_showroom_when_configured(self) -> None:
+    def test_prompt_includes_checkout_entry_options_when_configured(self) -> None:
         caps = CheckoutChannelCapabilities(
             whatsapp_fast=True,
             store_link=True,
@@ -79,9 +96,17 @@ class TestChannelChoicePrompt:
             store_url="https://shop.example",
         )
         prompt = build_channel_choice_prompt(caps)
-        assert "طلب سريع من واتساب" in prompt
-        assert "رابط المتجر" in prompt
-        assert "زيارة المعرض" in prompt
+        assert "طلب سريع عبر واتساب" in prompt
+        assert "الطلب من المتجر الإلكتروني" in prompt
+        assert "لدي استفسار" in prompt
+        assert "زيارة المعرض" not in prompt
+
+        buttons = build_channel_choice_buttons(caps)
+        assert [b["reply"]["title"] for b in buttons] == [
+            "طلب سريع واتساب",
+            "فتح المتجر",
+            "عندي استفسار",
+        ]
 
     def test_prompt_omits_showroom_when_not_configured(self) -> None:
         caps = CheckoutChannelCapabilities(
@@ -95,7 +120,43 @@ class TestChannelChoicePrompt:
 
 
 class TestCheckoutRouteOwnerPreBrain:
-    def test_price_ask_prompts_channel_choice(
+    def test_start_order_prompts_channel_choice(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(monkeypatch, {"stage": "discovery", "order_prep": {}})
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=CheckoutChannelCapabilities(
+                whatsapp_fast=True,
+                store_link=True,
+                showroom_visit=False,
+                store_url="https://shop.example",
+                store_name="متجر",
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ) as persist:
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                message="ابي اطلب",
+            )
+
+        assert decision is not None
+        assert decision.reason == "ask_checkout_channel"
+        assert "كيف تحب تكمل؟" in decision.reply_text
+        assert "طلب سريع عبر واتساب" in decision.reply_text
+        assert "الطلب من المتجر الإلكتروني" in decision.reply_text
+        assert "لدي استفسار" in decision.reply_text
+        assert len(decision.buttons) == 3
+        persist.assert_called_once()
+
+    def test_price_ask_defers_to_brain_not_channel_choice(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -122,10 +183,8 @@ class TestCheckoutRouteOwnerPreBrain:
                 message="كم سعر العسل؟",
             )
 
-        assert decision is not None
-        assert decision.reason == "ask_checkout_channel"
-        assert "كيف تحب تكمل طلبك؟" in decision.reply_text
-        persist.assert_called_once()
+        assert decision is None
+        persist.assert_not_called()
 
     def test_store_link_choice_sends_link(
         self,
@@ -164,8 +223,10 @@ class TestCheckoutRouteOwnerPreBrain:
         assert decision is not None
         assert decision.checkout_channel == CHECKOUT_CHANNEL_STORE
         assert "https://shop.example" in decision.reply_text
+        assert decision.cta_url == "https://shop.example"
+        assert decision.cta_label == "فتح المتجر الإلكتروني"
 
-    def test_whatsapp_fast_defers_to_brain(
+    def test_whatsapp_fast_asks_for_product(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -198,7 +259,159 @@ class TestCheckoutRouteOwnerPreBrain:
                 message="طلب سريع من واتساب",
             )
 
+        assert decision is not None
+        assert decision.checkout_channel == CHECKOUT_CHANNEL_WHATSAPP
+        assert decision.reason == "whatsapp_fast_selected"
+        assert "وش المنتج" in decision.reply_text
+
+    def test_inquiry_choice_defers_to_brain(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            {
+                "stage": "discovery",
+                "order_prep": {"awaiting_checkout_channel": True},
+            },
+        )
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+        caps = CheckoutChannelCapabilities(
+            whatsapp_fast=True,
+            store_link=True,
+            showroom_visit=False,
+            store_url="https://shop.example",
+        )
+
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=caps,
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ) as persist:
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                message="لدي استفسار",
+            )
+
         assert decision is None
+        persist.assert_called_once()
+        assert parse_checkout_channel_choice("3", caps=caps) == CHECKOUT_CHANNEL_INQUIRY
+
+    def test_catalog_missing_question_repeats_help_with_buttons(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            {
+                "stage": "discovery",
+                "order_prep": {"awaiting_checkout_channel": True},
+            },
+        )
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+        caps = CheckoutChannelCapabilities(
+            whatsapp_fast=True,
+            store_link=True,
+            showroom_visit=False,
+            store_url="https://shop.example",
+        )
+
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=caps,
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ):
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                message="وين هي",
+            )
+
+        assert decision is not None
+        assert decision.reason == "catalog_visibility_help"
+        assert "إذا ما ظهر لك الكتالوج" in decision.reply_text
+        assert "عكبر" not in decision.reply_text
+        assert "هلا قولي" not in decision.reply_text
+        assert len(decision.buttons) == 3
+
+    def test_question_mark_after_catalog_missing_not_broken_reply(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            {
+                "stage": "discovery",
+                "order_prep": {"awaiting_checkout_channel": True},
+            },
+        )
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=CheckoutChannelCapabilities(
+                whatsapp_fast=True,
+                store_link=True,
+                showroom_visit=False,
+                store_url="https://shop.example",
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ):
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                message="؟",
+            )
+
+        assert decision is not None
+        assert decision.reason == "catalog_visibility_help"
+        assert "إذا ما ظهر لك الكتالوج" in decision.reply_text
+        assert "هلا قولي" not in decision.reply_text
+
+    def test_product_question_after_prompt_defers_to_brain(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            {
+                "stage": "discovery",
+                "order_prep": {"awaiting_checkout_channel": True},
+            },
+        )
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=CheckoutChannelCapabilities(
+                whatsapp_fast=True,
+                store_link=True,
+                showroom_visit=False,
+                store_url="https://shop.example",
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ) as persist:
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                message="عندكم طلح؟",
+            )
+
+        assert decision is None
+        persist.assert_called_once()
 
     def test_showroom_channel_allows_staff_policies(
         self,
@@ -221,7 +434,7 @@ class TestCheckoutRouteOwnerPreBrain:
 
 
 class TestPurchaseIntentBlocksStaff:
-    def test_staff_deferred_for_price_without_channel(
+    def test_staff_deferred_for_start_order_without_channel(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -231,7 +444,7 @@ class TestPurchaseIntentBlocksStaff:
             _StubDB(),
             tenant_id=10,
             customer_phone="966500000001",
-            message="كم سعر العسل؟",
+            message="ابي اطلب",
         )
 
     @patch("modules.ai.brain.commerce.staff_contact_evidence.load_staff_contact_registry")

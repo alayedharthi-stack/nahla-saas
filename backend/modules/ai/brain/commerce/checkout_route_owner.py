@@ -26,6 +26,7 @@ _FLAG_FALSY = frozenset({"0", "false", "no", "off"})
 CHECKOUT_CHANNEL_WHATSAPP = "whatsapp_fast"
 CHECKOUT_CHANNEL_STORE = "store_link"
 CHECKOUT_CHANNEL_SHOWROOM = "showroom_visit"
+CHECKOUT_CHANNEL_INQUIRY = "inquiry"
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -57,8 +58,36 @@ _PAYMENT_ASK_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_CHECKOUT_ENTRY_RE = re.compile(
+    r"(?:"
+    r"\b(?:ابي|ابغي|ابغى|أبي|أبغى|بغيت|ودي|اريد|أريد)\s*(?:اطلب|أطلب|اشتري|أشتري)\b|"
+    r"\bكيف\s*(?:اطلب|أطلب|اشتري|أشتري)\b|"
+    r"^\s*(?:اطلب|أطلب|طلب|اشتري|أشتري|شراء)\s*$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CHANNEL_INQUIRY_RE = re.compile(
+    r"(?:checkout_inquiry|^\s*3\s*$|استفسار|سؤال|عندي\s*استفسار|لدي\s*استفسار)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CATALOG_HELP_RE = re.compile(
+    r"(?:"
+    r"^\s*[\?؟]+\s*$|"
+    r"وين\s*(?:هي|هو|ه|ها)?|"
+    r"ما\s*(?:ظهر|وصل|طلع)|"
+    r"كيف\s*(?:اختار|أختار)|"
+    r"ابي\s*اشوف\s*المنتجات|أبي\s*أشوف\s*المنتجات|"
+    r"ابغى\s*اشوف\s*المنتجات|أبغى\s*أشوف\s*المنتجات|"
+    r"الكتالوج|كتالوج|catalog"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _CHANNEL_WHATSAPP_RE = re.compile(
     r"(?:"
+    r"checkout_whatsapp_fast|"
     r"^\s*1\s*$|"
     r"واتس(?:اب|)|whatsapp|"
     r"طلب\s*سريع|"
@@ -71,6 +100,7 @@ _CHANNEL_WHATSAPP_RE = re.compile(
 
 _CHANNEL_STORE_RE = re.compile(
     r"(?:"
+    r"checkout_store_link|"
     r"^\s*2\s*$|"
     r"المتجر|متجر(?:ي|كم|ك)?|"
     r"رابط\s*(?:المتجر|الموقع|الشراء|الطلب)|"
@@ -127,6 +157,9 @@ class CheckoutRouteDecision:
     checkout_channel: str = ""
     persist_awaiting_channel: bool = False
     clear_awaiting_channel: bool = False
+    buttons: Sequence[Dict[str, Any]] = field(default_factory=tuple)
+    cta_label: str = ""
+    cta_url: str = ""
     metadata_path: str = "checkout_route_owner"
 
 
@@ -150,6 +183,9 @@ def load_checkout_route_context(
         op = bs.get("order_prep") or {}
         if not isinstance(op, dict):
             op = {}
+        op = dict(op)
+        op["_catalog_navigation_source"] = str(bs.get("catalog_navigation_source") or "")
+        op["_native_catalog_send_failed"] = bool(bs.get("native_catalog_send_failed"))
         return stage, op
     except Exception as exc:  # noqa: BLE001
         logger.debug(
@@ -290,6 +326,26 @@ def has_checkout_route_intent(message: str) -> bool:
     return False
 
 
+def has_checkout_entry_intent(message: str) -> bool:
+    """True for explicit order-entry phrases that should ask channel first."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.brain.intent.rules import is_pure_greeting_without_commerce  # noqa: PLC0415
+
+        if is_pure_greeting_without_commerce(raw):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional greeting filter must not block route intent
+        pass
+    return bool(_CHECKOUT_ENTRY_RE.search(_norm(raw)))
+
+
+def is_catalog_visibility_question(message: str) -> bool:
+    """Customer is asking where the promised catalog/options are."""
+    return bool(_CATALOG_HELP_RE.search(_norm(message or "")))
+
+
 def parse_checkout_channel_choice(
     message: str,
     *,
@@ -302,15 +358,17 @@ def parse_checkout_channel_choice(
     norm = _norm(raw)
 
     channels = available_channels(caps)
-    if len(channels) == 1:
-        return channels[0]
-
     if CHECKOUT_CHANNEL_WHATSAPP in channels and _CHANNEL_WHATSAPP_RE.search(norm):
         return CHECKOUT_CHANNEL_WHATSAPP
     if CHECKOUT_CHANNEL_STORE in channels and _CHANNEL_STORE_RE.search(norm):
         return CHECKOUT_CHANNEL_STORE
+    if _CHANNEL_INQUIRY_RE.search(norm):
+        return CHECKOUT_CHANNEL_INQUIRY
     if CHECKOUT_CHANNEL_SHOWROOM in channels and _CHANNEL_SHOWROOM_RE.search(norm):
         return CHECKOUT_CHANNEL_SHOWROOM
+
+    if len(channels) == 1 and not re.fullmatch(r"\d+", norm):
+        return channels[0]
 
     if re.fullmatch(r"\d+", norm):
         idx = int(norm) - 1
@@ -323,22 +381,51 @@ def build_channel_choice_prompt(caps: CheckoutChannelCapabilities) -> str:
     """Deterministic channel-choice question based on tenant capabilities."""
     lines: List[str] = []
     options: List[str] = []
-    idx = 1
     if caps.whatsapp_fast:
-        options.append(f"{idx}- طلب سريع من واتساب")
-        idx += 1
+        options.append("1- طلب سريع عبر واتساب")
     if caps.store_link:
-        options.append(f"{idx}- رابط المتجر الإلكتروني")
-        idx += 1
-    if caps.showroom_visit:
-        options.append(f"{idx}- زيارة المعرض / استلام من الفرع")
+        options.append("2- الطلب من المتجر الإلكتروني")
+    options.append("3- لدي استفسار")
 
     if not options:
-        options.append("1- طلب سريع من واتساب")
+        options.append("1- طلب سريع عبر واتساب")
 
-    lines.append("كيف تحب تكمل طلبك؟")
+    lines.append("كيف تحب تكمل؟")
     lines.extend(options)
     return "\n".join(lines)
+
+
+def build_channel_choice_buttons(caps: CheckoutChannelCapabilities) -> Tuple[Dict[str, Any], ...]:
+    buttons: List[Dict[str, Any]] = []
+    if caps.whatsapp_fast:
+        buttons.append({
+            "type": "reply",
+            "reply": {"id": "checkout_whatsapp_fast", "title": "طلب سريع واتساب"},
+        })
+    if caps.store_link:
+        buttons.append({
+            "type": "reply",
+            "reply": {"id": "checkout_store_link", "title": "فتح المتجر"},
+        })
+    buttons.append({
+        "type": "reply",
+        "reply": {"id": "checkout_inquiry", "title": "عندي استفسار"},
+    })
+    return tuple(buttons[:3])
+
+
+def build_catalog_visibility_reply(caps: CheckoutChannelCapabilities) -> str:
+    if caps.store_link:
+        return (
+            "إذا ما ظهر لك الكتالوج، اختر الطريقة اللي تناسبك:\n"
+            "1- أكمل طلبك هنا بالواتساب\n"
+            "2- افتح المتجر الإلكتروني\n"
+            "3- عندك استفسار"
+        )
+    return (
+        "إذا ما ظهر لك الكتالوج، نكمل طلبك هنا بالواتساب.\n"
+        "قل لي المنتج اللي تبيه، أو اختر عندك استفسار."
+    )
 
 
 def build_store_link_reply(caps: CheckoutChannelCapabilities) -> str:
@@ -380,6 +467,7 @@ def persist_checkout_route_state(
             op["checkout_channel"] = checkout_channel
         if awaiting_checkout_channel is not None:
             op["awaiting_checkout_channel"] = bool(awaiting_checkout_channel)
+            op["checkout_route_prompt_sent"] = bool(awaiting_checkout_channel)
         bs["order_prep"] = op
         meta = dict(getattr(conv, "extra_metadata", None) or {})
         meta["brain_state"] = bs
@@ -475,7 +563,7 @@ def should_defer_staff_location_for_checkout_route(
         if channel == CHECKOUT_CHANNEL_STORE:
             return True
 
-    if not channel and has_checkout_route_intent(raw):
+    if not channel and has_checkout_entry_intent(raw):
         return True
 
     if _active_whatsapp_checkout(stage=stage, order_prep=order_prep):
@@ -514,10 +602,25 @@ def evaluate_checkout_route_owner(
     if _awaiting_channel(order_prep):
         picked = parse_checkout_channel_choice(raw, caps=caps)
         if not picked:
+            catalog_help = is_catalog_visibility_question(raw)
+            if not catalog_help and has_checkout_route_intent(raw):
+                persist_checkout_route_state(
+                    db,
+                    tenant_id=tenant_id,
+                    phone=customer_phone,
+                    checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                    awaiting_checkout_channel=False,
+                )
+                return None
             return CheckoutRouteDecision(
-                reply_text=build_channel_choice_prompt(caps),
-                reason="channel_choice_repeat",
+                reply_text=(
+                    build_catalog_visibility_reply(caps)
+                    if catalog_help
+                    else build_channel_choice_prompt(caps)
+                ),
+                reason="catalog_visibility_help" if catalog_help else "channel_choice_repeat",
                 persist_awaiting_channel=True,
+                buttons=build_channel_choice_buttons(caps),
             )
         if picked == CHECKOUT_CHANNEL_STORE:
             persist_checkout_route_state(
@@ -532,7 +635,17 @@ def evaluate_checkout_route_owner(
                 reason="store_link_delivered",
                 checkout_channel=picked,
                 clear_awaiting_channel=True,
+                cta_label="فتح المتجر الإلكتروني",
+                cta_url=caps.store_url,
             )
+        if picked == CHECKOUT_CHANNEL_INQUIRY:
+            persist_checkout_route_state(
+                db,
+                tenant_id=tenant_id,
+                phone=customer_phone,
+                awaiting_checkout_channel=False,
+            )
+            return None
         persist_checkout_route_state(
             db,
             tenant_id=tenant_id,
@@ -541,7 +654,12 @@ def evaluate_checkout_route_owner(
             awaiting_checkout_channel=False,
         )
         if picked == CHECKOUT_CHANNEL_WHATSAPP:
-            return None
+            return CheckoutRouteDecision(
+                reply_text="تمام، نكمل طلبك هنا بالواتساب. وش المنتج اللي تبي تطلبه؟",
+                reason="whatsapp_fast_selected",
+                checkout_channel=picked,
+                clear_awaiting_channel=True,
+            )
         if picked == CHECKOUT_CHANNEL_SHOWROOM:
             return None
         return None
@@ -550,6 +668,12 @@ def evaluate_checkout_route_owner(
         return None
 
     if channel == CHECKOUT_CHANNEL_WHATSAPP:
+        if is_catalog_visibility_question(raw):
+            return CheckoutRouteDecision(
+                reply_text=build_catalog_visibility_reply(caps),
+                reason="catalog_visibility_help_active_whatsapp",
+                buttons=build_channel_choice_buttons(caps),
+            )
         return None
 
     try:
@@ -564,20 +688,16 @@ def evaluate_checkout_route_owner(
         return None
 
     channels = available_channels(caps)
-    if len(channels) == 1:
-        only = channels[0]
-        persist_checkout_route_state(
-            db,
-            tenant_id=tenant_id,
-            phone=customer_phone,
-            checkout_channel=only,
-            awaiting_checkout_channel=False,
-        )
-        if only == CHECKOUT_CHANNEL_STORE:
+    if not has_checkout_entry_intent(raw):
+        if is_catalog_visibility_question(raw) and (
+            bool(order_prep.get("checkout_route_prompt_sent"))
+            or str(order_prep.get("_catalog_navigation_source") or "").strip()
+            or bool(order_prep.get("_native_catalog_send_failed"))
+        ):
             return CheckoutRouteDecision(
-                reply_text=build_store_link_reply(caps),
-                reason="single_channel_store_link",
-                checkout_channel=only,
+                reply_text=build_catalog_visibility_reply(caps),
+                reason="catalog_visibility_help_prior_catalog",
+                buttons=build_channel_choice_buttons(caps),
             )
         return None
 
@@ -597,20 +717,26 @@ def evaluate_checkout_route_owner(
         reply_text=build_channel_choice_prompt(caps),
         reason="ask_checkout_channel",
         persist_awaiting_channel=True,
+        buttons=build_channel_choice_buttons(caps),
     )
 
 
 __all__ = [
+    "CHECKOUT_CHANNEL_INQUIRY",
     "CHECKOUT_CHANNEL_SHOWROOM",
     "CHECKOUT_CHANNEL_STORE",
     "CHECKOUT_CHANNEL_WHATSAPP",
     "CheckoutChannelCapabilities",
     "CheckoutRouteDecision",
     "available_channels",
+    "build_catalog_visibility_reply",
+    "build_channel_choice_buttons",
     "build_channel_choice_prompt",
     "checkout_route_owner_enabled",
     "evaluate_checkout_route_owner",
+    "has_checkout_entry_intent",
     "has_checkout_route_intent",
+    "is_catalog_visibility_question",
     "load_channel_capabilities",
     "load_checkout_route_context",
     "parse_checkout_channel_choice",

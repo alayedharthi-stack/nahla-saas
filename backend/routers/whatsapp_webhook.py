@@ -6563,6 +6563,8 @@ async def _handle_merchant_message(
         _brain_nc_category: str = ""
         _nc_turn = None
         _br_action: str = ""  # brain last_action — used by final dispatch guard
+        _br_dec_action: str = ""
+        _br_dec_args: dict = {}
         # Tenant 33 #49 (Commit 3): empty string when the relational
         # layer is disabled or no moment was identified — guarantees
         # the safety-net suppression gate stays inert.
@@ -6659,6 +6661,130 @@ async def _handle_merchant_message(
                 _conv_quota.limit,
                 _conv_quota.reason,
             )
+            _sync_persona_observability()
+            return
+
+        # ── Checkout route owner: explicit order-entry channel choice ───────
+        # Operational routing happens before Brain/staff/location/FAQ owners.
+        # This prevents bare turns like "ابي اطلب" from being interpreted as
+        # free-form catalog browse text, and gives the customer visible WA
+        # controls for WhatsApp checkout / store link / inquiry.
+        _checkout_route_decision = None
+        try:
+            from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+                evaluate_checkout_route_owner,
+            )
+
+            _checkout_route_decision = evaluate_checkout_route_owner(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                message=text or "",
+            )
+        except Exception:
+            logger.exception(
+                "[CHECKOUT_ROUTE] pre-brain owner failed tenant=%s to=%s",
+                tenant_id,
+                to,
+            )
+            _checkout_route_decision = None
+
+        if _checkout_route_decision is not None:
+            _checkout_reply = str(_checkout_route_decision.reply_text or "").strip()
+            if _checkout_reply and _trace.outbound_lock_acquired():
+                _persona_ownership.mark_bypass(
+                    _POReason.PRE_BRAIN_FAST_PATH,
+                    owner=f"checkout_route_owner:{_checkout_route_decision.reason}",
+                )
+                _checkout_ok = False
+                _checkout_delivery = "text"
+                _buttons = list(getattr(_checkout_route_decision, "buttons", None) or [])
+                _cta_url = str(getattr(_checkout_route_decision, "cta_url", "") or "").strip()
+                _cta_label = (
+                    str(getattr(_checkout_route_decision, "cta_label", "") or "").strip()
+                    or "فتح المتجر الإلكتروني"
+                )
+                if _cta_url:
+                    _checkout_delivery = "cta_url"
+                    _checkout_ok = await _send_cta_url(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_checkout_reply,
+                        btn_label=_cta_label,
+                        btn_url=_cta_url,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    if not _checkout_ok:
+                        _checkout_reply = f"{_checkout_reply}\n{_cta_url}"
+                        _checkout_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_checkout_reply,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
+                        _checkout_delivery = "text"
+                elif _buttons:
+                    _checkout_delivery = "interactive"
+                    _checkout_ok = await _send_interactive_reply(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_checkout_reply,
+                        buttons=_buttons,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    if not _checkout_ok:
+                        _checkout_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_checkout_reply,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
+                        _checkout_delivery = "text"
+                else:
+                    _checkout_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=_checkout_reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+
+                if _checkout_ok:
+                    StateManager.save_message(
+                        db,
+                        to,
+                        _checkout_reply,
+                        "outbound",
+                        conversation_id=convo.id,
+                        tenant_id=tenant_id,
+                        extra_metadata={
+                            **_persona_ownership.to_metadata(),
+                            "reply_owner": "checkout_route_owner",
+                            "checkout_route_reason": _checkout_route_decision.reason,
+                            "checkout_route_delivery": _checkout_delivery,
+                        },
+                    )
+                    _trace.response_goal = "checkout_route"
+                    _trace.delivery = (
+                        _TS.DELIVERY_INTERACTIVE
+                        if _checkout_delivery in {"interactive", "cta_url"}
+                        else _TS.DELIVERY_TEXT
+                    )
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_LAYER0,
+                        length=len(_checkout_reply),
+                    )
+                    logger.info(
+                        "[CHECKOUT_ROUTE] sent tenant=%s to=%s reason=%s delivery=%s",
+                        tenant_id,
+                        to,
+                        _checkout_route_decision.reason,
+                        _checkout_delivery,
+                    )
             _sync_persona_observability()
             return
 
@@ -6855,7 +6981,7 @@ async def _handle_merchant_message(
                         flag_modified(convo, "extra_metadata")
                         db.add(convo)
                         db.flush()
-                    except Exception as _stamp_exc:
+                    except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — cooldown stamp is best-effort
                         logger.debug("[handoff] cooldown stamp failed: %s", _stamp_exc)
                 else:
                     logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
@@ -11076,6 +11202,121 @@ async def _handle_merchant_message(
                 logger.debug(
                     "[ASSET_PROMISE_SCRUB] evaluate failed (open): %s",
                     _ap_exc,
+                )
+
+        # ── Marketing emoji policy (text-only polish) ─────────────────
+        # Runs after truth guards and scrubs; does not touch buttons,
+        # payloads, or attachments — only the outbound body string.
+        if reply:
+            try:
+                from core.active_order_context import (  # noqa: PLC0415
+                    load_commerce_bundle as _mep_load_bundle,
+                )
+                from core.order_flow import (  # noqa: PLC0415
+                    _focus_summary as _mep_focus,
+                    _load_brain_state as _mep_load,
+                )
+                from core.tenant import get_or_create_settings as _mep_settings  # noqa: PLC0415
+                from modules.ai.brain.postprocess.shipment_evidence import (  # noqa: PLC0415
+                    evaluate_shipment_evidence as _mep_ship_ev,
+                )
+                from modules.ai.postprocess.marketing_emoji_policy import (  # noqa: PLC0415
+                    apply_marketing_emoji_policy as _apply_mep,
+                    build_marketing_emoji_context as _build_mep_ctx,
+                )
+
+                _mep_meta = (
+                    dict(inbound_metadata or {})
+                    if isinstance(inbound_metadata, dict)
+                    else {}
+                )
+                _, _mep_bs = _mep_load(db, tenant_id=tenant_id, phone=to)
+                _mep_bs_dict = (
+                    _mep_bs if isinstance(_mep_bs, dict)
+                    else (_bs_for_nc if isinstance(_bs_for_nc, dict) else {})
+                )
+                _mep_summary = _mep_focus(_mep_bs_dict)
+                _mep_bundle = _mep_load_bundle(
+                    dict(getattr(convo, "extra_metadata", None) or {})
+                )
+                _mep_pe = str(
+                    _mep_meta.get("payment_evidence_status")
+                    or _mep_summary.get("payment_evidence_status")
+                    or ""
+                )
+                _mep_prep = _mep_bs_dict.get("order_prep") or {}
+                if not isinstance(_mep_prep, dict):
+                    _mep_prep = {}
+                _mep_ship = _mep_ship_ev(
+                    commerce_bundle=_mep_bundle,
+                    inbound_metadata=_mep_meta,
+                    payment_receipt_received=bool(
+                        _mep_summary.get("payment_receipt_received")
+                    ),
+                )
+                _mep_settings_obj = _mep_settings(db, tenant_id)
+                _mep_ai = dict(
+                    getattr(_mep_settings_obj, "ai_settings", None) or {}
+                )
+                _mep_chosen = str(
+                    _mep_meta.get("deterministic_path")
+                    or _mep_prep.get("chosen_path")
+                    or (_br_dec_args or {}).get("chosen_path")
+                    or ""
+                )
+                _mep_ctx = _build_mep_ctx(
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                    inbound_text=text or "",
+                    intent_name=str(
+                        _mep_meta.get("intent_name")
+                        or (_bs_for_nc or {}).get("last_intent")
+                        or ""
+                    ),
+                    decision_action=_br_dec_action or _br_action or "",
+                    decision_args=_br_dec_args or {},
+                    chosen_path=_mep_chosen,
+                    reply_instruction_path=str(
+                        _mep_meta.get("deterministic_path") or ""
+                    ),
+                    stage=str(_mep_prep.get("stage") or ""),
+                    owner=str(_mep_bs_dict.get("turn_owner") or ""),
+                    navigator_step=str(
+                        (_br_dec_args or {}).get("navigator_step") or ""
+                    ),
+                    catalog_navigation_source=str(
+                        _mep_meta.get("catalog_navigation_source") or ""
+                    ),
+                    order_status=str(
+                        _mep_summary.get("order_status")
+                        or (_mep_bundle.get("active_order_context") or {}).get(
+                            "order_status"
+                        )
+                        or ""
+                    ),
+                    awaiting_payment_receipt=bool(
+                        _mep_summary.get("awaiting_payment_receipt")
+                    ),
+                    payment_receipt_received=bool(
+                        _mep_summary.get("payment_receipt_received")
+                    ),
+                    payment_evidence_status=_mep_pe,
+                    shipment_evidence_ok=bool(_mep_ship.evidence_ok),
+                    social_category=str(
+                        (_br_dec_args or {}).get("social_category") or ""
+                    ),
+                    human_priority=bool(_brain_handoff),
+                    locale="ar",
+                    ai_settings=_mep_ai,
+                    reply_text=reply or "",
+                )
+                _mep_result = _apply_mep(reply or "", _mep_ctx)
+                if _mep_result.changed:
+                    reply = _mep_result.reply
+            except Exception as _mep_exc:  # noqa: BLE001 — never break send
+                logger.debug(
+                    "[MARKETING_EMOJI_POLICY] webhook hook failed tenant=%s err=%s",
+                    tenant_id, _mep_exc,
                 )
 
         # ── Sync persisted body to post-safety-net reply ────────────
