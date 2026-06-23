@@ -197,7 +197,11 @@ def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabil
             if not store_name:
                 store_name = clean_store_name(store_cfg.get("store_name") or "")
     except Exception as exc:  # noqa: BLE001
-        logger.debug("[CHECKOUT_ROUTE] capabilities load skipped err=%s", exc)
+        logger.exception(
+            "[CHECKOUT_ROUTE] capabilities load skipped tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
 
     showroom = False
     try:
@@ -208,7 +212,7 @@ def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabil
 
         if structured_branch_contacts_enabled():
             showroom = tenant_has_structured_branch_data(db, int(tenant_id or 0))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional branch capability probe must not block route owner
         showroom = False
 
     return CheckoutChannelCapabilities(
@@ -250,7 +254,7 @@ def has_checkout_route_intent(message: str) -> bool:
         intent = match_intent(raw)
         if intent and intent.name in {INTENT_GREETING, INTENT_SOCIAL}:
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional greeting filter must not block route intent
         pass
 
     try:
@@ -260,7 +264,7 @@ def has_checkout_route_intent(message: str) -> bool:
 
         if has_explicit_order_select_signal(raw):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional order-select probe must not block route intent
         pass
 
     norm = _norm(raw)
@@ -280,7 +284,7 @@ def has_checkout_route_intent(message: str) -> bool:
             "add_to_cart",
         }:
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional intent rules probe must not block route intent
         pass
 
     return False
@@ -409,7 +413,7 @@ def _active_whatsapp_checkout(
         )
 
         return is_active_order_flow(stage=stage, order_prep=order_prep)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional active-order probe must not block defer decision
         return False
 
 
@@ -451,7 +455,7 @@ def should_defer_staff_location_for_checkout_route(
             message=raw,
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional arbiter probe must not block defer decision
         pass
 
     if channel == CHECKOUT_CHANNEL_SHOWROOM:
@@ -467,7 +471,7 @@ def should_defer_staff_location_for_checkout_route(
 
         if channel == CHECKOUT_CHANNEL_STORE and not _strong_contact(raw):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional strong-contact probe must not block store defer
         if channel == CHECKOUT_CHANNEL_STORE:
             return True
 
@@ -555,10 +559,8 @@ def evaluate_checkout_route_owner(
 
         if is_active_order_flow(stage=stage, order_prep=order_prep):
             return None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional active-order probe must not block channel ask
         pass
-
-    if not has_checkout_route_intent(raw):
         return None
 
     channels = available_channels(caps)

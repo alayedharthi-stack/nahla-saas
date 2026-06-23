@@ -366,7 +366,7 @@ def message_fulfills_awaited_checkout_slot(
 
             if is_bare_short_address_code(message or "") or is_accepted_maps_url(message or ""):
                 return True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional address probe must not block arbiter
             pass
 
     if "payment_method" in missing and _PAYMENT_CHOICE_RE.search(_norm(message or "")):
