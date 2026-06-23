@@ -752,6 +752,8 @@ def evaluate_loop_pre_send(
     tenant_id: int,
     candidate_reply: str,
     inbound_text: str | None,
+    checkout_active: bool = False,
+    checkout_recovery_reply: str | None = None,
 ) -> LoopDecision:
     """Score the (history, inbound, candidate) triple for repetition.
 
@@ -799,6 +801,18 @@ def evaluate_loop_pre_send(
     progressed = False
     progress_reasons: list[str] = []
     decay = 0
+    if checkout_active:
+        try:
+            from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
+                is_checkout_continue_inbound,
+            )
+
+            if is_checkout_continue_inbound(inbound_text or ""):
+                decay += 2
+                progressed = True
+                progress_reasons.append("checkout_continue")
+        except Exception:  # noqa: BLE001
+            pass
     if _has_sales_intent(inbound_text):
         decay += 2
         progressed = True
@@ -892,6 +906,13 @@ def evaluate_loop_pre_send(
     similarity_trigger = similarity >= SIMILARITY_HIGH and not progressed
     if (log_score >= LOOP_SCORE_RECOVERY or similarity_trigger) and not cooldown_active:
         reason_tag = "+".join(increments) or ("similarity_high" if similarity >= SIMILARITY_HIGH else "score")
+        recovery_text = _build_recovery_text()
+        if checkout_active:
+            slot_reply = (checkout_recovery_reply or "").strip()
+            if slot_reply:
+                recovery_text = slot_reply
+            elif candidate:
+                recovery_text = candidate
         logger.info(
             "[LOOP_GUARD] tenant=%s convo=%s score=%d similarity=%.2f reason=%s "
             "action=recovery repeat_strikes=%d",
@@ -906,7 +927,7 @@ def evaluate_loop_pre_send(
             score=log_score,
             reason=reason_tag,
             similarity=similarity,
-            recovery_text=_build_recovery_text(),
+            recovery_text=recovery_text,
         )
 
     # Continue — log compactly so we can see the score evolve.
