@@ -274,7 +274,9 @@ class DefaultComposer:
                 result.data["owner_locked"] = bool(data.get("owner_locked"))
                 result.data["owner_replaced"] = False
                 result.data["navigator_owner"] = True
-                return discovery_text or "تفضّل، اختر من الكتالوج 👇"
+                # Customer-facing catalog copy is sent only after Meta accepts
+                # ``catalog_message`` in the webhook wire layer.
+                return ""
             if discovery_text and chosen_path:
                 result.data["chosen_path"] = chosen_path
                 result.data["turn_owner"] = str(data.get("turn_owner") or "catalog_navigation")

@@ -92,19 +92,20 @@ class CatalogNavigateHandler:
             except Exception:  # noqa: BLE001
                 thumbnail = ""
 
-        discovery_text = "تفضّل، اختر من الكتالوج 👇"
+        from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+
         return {
             "products": [],
             "collections": [],
-            "product_lines": discovery_text,
-            "discovery_presentation_text": discovery_text,
+            "product_lines": "",
+            "discovery_presentation_text": "",
             "discovery_output_kind": "native_catalog",
             "chosen_path": PATH_NATIVE_CATALOG,
             "count": 0,
             "query": "",
             "native_catalog_entry": {
                 "thumbnail_product_retailer_id": thumbnail,
-                "body_text": discovery_text,
+                "body_text": NATIVE_CATALOG_SUCCESS_BODY_AR,
             },
             "navigation_state_patch": self._navigation_patch(
                 decision,
