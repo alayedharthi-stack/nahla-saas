@@ -40,13 +40,23 @@ from modules.ai.brain.catalog.navigation import (  # noqa: E402
     STEP_SHOW_GROUPS,
     try_catalog_navigation_decision,
 )
-from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE  # noqa: E402
+from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: E402
+    maybe_enforce_catalog_order_continue_checkout,
+)
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_HANDOFF,
+    ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEARCH_PRODUCTS,
+)
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    Decision,
     Intent,
     MerchantConversationState,
 )
+from services.nahla_order_bridge import nahla_wa_external_id  # noqa: E402
 from services.whatsapp_platform import catalog_sender as cs  # noqa: E402
 
 
@@ -494,3 +504,175 @@ class TestNativeOrderDoesNotReaskProduct:
         assert state.order_prep.product_id == "10"
         assert state.current_product_focus is not None
         assert state.order_prep.order_status == "awaiting_address"
+
+    def test_catalog_order_submitted_overrides_catalog_navigation(self, monkeypatch):
+        monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "true")
+        state = MerchantConversationState()
+        state.stage = "ordering"
+        state.current_product_focus = {
+            "id": 10,
+            "external_id": "ext-10",
+            "title": "عسل طلح",
+            "from_native_catalog_order": True,
+        }
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966551308005",
+            message="[طلب كتالوج من العميل]",
+            history=[],
+            state=state,
+            intent=Intent(name="start_order", confidence=0.9),
+            facts=CommerceFacts(orderable=True),
+            profile={
+                "inbound_metadata": {
+                    "source_type": "catalog_order",
+                    "product_items": [
+                        {
+                            "product_retailer_id": "ext-10",
+                            "quantity": 1,
+                            "item_price": 69,
+                            "currency": "SAR",
+                        },
+                    ],
+                },
+            },
+        )
+        decision = Decision(
+            action=ACTION_CATALOG_NAVIGATE,
+            args={"chosen_path": "global_browse"},
+            reason="legacy browse drift",
+        )
+
+        enforced = maybe_enforce_catalog_order_continue_checkout(ctx, decision)
+
+        assert enforced.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert enforced.args["source"] == "catalog_order_submitted"
+        assert enforced.args["continue_checkout"] is True
+        assert enforced.args["native_catalog_order"]["event_type"] == "catalog_order_submitted"
+        assert enforced.args["native_catalog_order"]["phone_source"] == "whatsapp"
+        assert enforced.args["product"]["external_id"] == "ext-10"
+
+    def test_catalog_order_submitted_overrides_product_search(self, monkeypatch):
+        monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "true")
+        state = MerchantConversationState()
+        state.current_product_focus = {
+            "id": 10,
+            "external_id": "rid-10",
+            "title": "عسل سدر",
+            "from_native_catalog_order": True,
+        }
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966551308005",
+            message="[طلب كتالوج من العميل]",
+            history=[],
+            state=state,
+            intent=Intent(name="ask_product", confidence=0.9),
+            facts=CommerceFacts(orderable=True),
+            profile={
+                "inbound_metadata": {
+                    "source_type": "catalog_order",
+                    "product_items": [
+                        {"product_retailer_id": "rid-10", "quantity": 2},
+                    ],
+                },
+            },
+        )
+
+        enforced = maybe_enforce_catalog_order_continue_checkout(
+            ctx,
+            Decision(action=ACTION_SEARCH_PRODUCTS, args={"query": "المنتجات"}),
+        )
+
+        assert enforced.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert enforced.reason == "catalog_order_submitted → continue_checkout"
+
+    def test_catalog_order_enforce_does_not_inject_canned_reply_or_sections(self, monkeypatch):
+        monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "true")
+        state = MerchantConversationState()
+        state.current_product_focus = {
+            "id": 10,
+            "external_id": "rid-10",
+            "title": "عسل طلح",
+            "from_native_catalog_order": True,
+        }
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966551308005",
+            message="[طلب كتالوج من العميل]",
+            history=[],
+            state=state,
+            intent=Intent(name="ask_product", confidence=0.9),
+            facts=CommerceFacts(orderable=True),
+            profile={
+                "inbound_metadata": {
+                    "source_type": "catalog_order",
+                    "product_items": [{"product_retailer_id": "rid-10"}],
+                },
+            },
+        )
+
+        enforced = maybe_enforce_catalog_order_continue_checkout(
+            ctx,
+            Decision(action=ACTION_CATALOG_NAVIGATE, args={"chosen_path": "show_groups"}),
+        )
+
+        serialized_args = str(enforced.args)
+        assert "reply_text" not in enforced.args
+        assert "template" not in enforced.args
+        assert "الأكثر مبيع" not in serialized_args
+        assert "العسل بالكيلو" not in serialized_args
+        assert "شنو" not in serialized_args
+        assert "عايز" not in serialized_args
+
+    def test_catalog_order_enforce_does_not_touch_staff_handoff(self, monkeypatch):
+        monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "true")
+        state = MerchantConversationState()
+        state.current_product_focus = {"external_id": "rid-10", "title": "عسل"}
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966551308005",
+            message="[طلب كتالوج من العميل]",
+            history=[],
+            state=state,
+            intent=Intent(name="talk_to_human", confidence=0.9),
+            facts=CommerceFacts(orderable=True),
+            profile={
+                "inbound_metadata": {
+                    "source_type": "catalog_order",
+                    "product_items": [{"product_retailer_id": "rid-10"}],
+                },
+            },
+        )
+        handoff = Decision(action=ACTION_HANDOFF, args={"reason": "explicit_staff"})
+
+        assert maybe_enforce_catalog_order_continue_checkout(ctx, handoff) is handoff
+
+    def test_catalog_order_flag_can_disable_enforce(self, monkeypatch):
+        monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "false")
+        state = MerchantConversationState()
+        state.current_product_focus = {"external_id": "rid-10", "title": "عسل"}
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966551308005",
+            message="[طلب كتالوج من العميل]",
+            history=[],
+            state=state,
+            intent=Intent(name="ask_product", confidence=0.9),
+            facts=CommerceFacts(orderable=True),
+            profile={
+                "inbound_metadata": {
+                    "source_type": "catalog_order",
+                    "product_items": [{"product_retailer_id": "rid-10"}],
+                },
+            },
+        )
+        browse = Decision(action=ACTION_CATALOG_NAVIGATE)
+
+        assert maybe_enforce_catalog_order_continue_checkout(ctx, browse) is browse
+
+    def test_repeated_catalog_order_keeps_same_nahla_draft_external_id(self):
+        first = nahla_wa_external_id(33, 9063)
+        second = nahla_wa_external_id(33, 9063)
+
+        assert first == second == "nahla-wa-33-9063"
