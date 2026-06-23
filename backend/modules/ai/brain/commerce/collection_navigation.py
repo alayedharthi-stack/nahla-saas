@@ -133,10 +133,20 @@ def _collection_label(row: Dict[str, Any]) -> str:
     ).strip()
 
 
+def _collection_db_id(row: Dict[str, Any]) -> Optional[int]:
+    raw = row.get("group_db_id", row.get("db_id"))
+    if raw is None:
+        raw = row.get("id")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _collection_id(row: Dict[str, Any]) -> str:
     return str(
-        row.get("group_id")
-        or row.get("id")
+        row.get("group_slug")
+        or row.get("group_id")
         or row.get("slug")
         or _collection_label(row)
     ).strip()
@@ -164,7 +174,19 @@ class CollectionResolution:
     group_id: str
     group_slug: str
     group_name: str
+    group_db_id: Optional[int] = None
     list_index: int = 0
+
+
+def _resolution_from_row(row: Dict[str, Any], *, list_index: int) -> CollectionResolution:
+    slug = str(row.get("group_slug") or row.get("group_id") or row.get("slug") or "").strip()
+    return CollectionResolution(
+        group_id=_collection_id(row),
+        group_slug=slug,
+        group_name=_collection_label(row),
+        group_db_id=_collection_db_id(row),
+        list_index=list_index,
+    )
 
 
 def resolve_collection_pick(
@@ -184,23 +206,13 @@ def resolve_collection_pick(
             idx = int(token)
         if idx is not None and 1 <= idx <= len(rows):
             row = rows[idx - 1]
-            return CollectionResolution(
-                group_id=_collection_id(row),
-                group_slug=str(row.get("group_id") or row.get("slug") or "").strip(),
-                group_name=_collection_label(row),
-                list_index=idx,
-            )
+            return _resolution_from_row(row, list_index=idx)
 
     if len(norm.split()) == 1 and norm in _ORDINAL_INDEX:
         idx = _ORDINAL_INDEX[norm]
         if 1 <= idx <= len(rows):
             row = rows[idx - 1]
-            return CollectionResolution(
-                group_id=_collection_id(row),
-                group_slug=str(row.get("group_id") or row.get("slug") or "").strip(),
-                group_name=_collection_label(row),
-                list_index=idx,
-            )
+            return _resolution_from_row(row, list_index=idx)
 
     name_m = _NAME_PICK_RE.match(norm)
     name = (name_m.group(1) if name_m else norm).strip(" ؟?!.")
@@ -210,10 +222,8 @@ def resolve_collection_pick(
     hits = _match_collection_by_name(name, rows)
     if len(hits) == 1:
         row = hits[0]
-        return CollectionResolution(
-            group_id=_collection_id(row),
-            group_slug=str(row.get("group_id") or row.get("slug") or "").strip(),
-            group_name=_collection_label(row),
+        return _resolution_from_row(
+            row,
             list_index=int(row.get("list_index") or 0),
         )
     return None
@@ -269,10 +279,17 @@ def _collection_products_decision(
         "source": "collections_first",
         "catalog_group_id": resolution.group_id,
         "catalog_group_slug": resolution.group_slug,
+        "catalog_group_db_id": resolution.group_db_id,
         "discovery_entry_type": GLOBAL_BROWSE,
         "collection_navigation_patch": {
             "selected_collection": resolution.group_id or resolution.group_slug,
             "last_presented_products": [],
+            "current_catalog_group": {
+                "group_db_id": resolution.group_db_id,
+                "group_id": resolution.group_id,
+                "group_slug": resolution.group_slug,
+                "group_name": resolution.group_name,
+            },
         },
     })
     return Decision(
