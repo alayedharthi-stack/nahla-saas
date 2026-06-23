@@ -11248,14 +11248,15 @@ async def _handle_merchant_message(
                     from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
                         apply_selection_context_patch,
                     )
-                    from modules.ai.brain.state_manager import StateManager  # noqa: PLC0415
+                    from modules.ai.brain.state.store import DefaultStateStore  # noqa: PLC0415
 
-                    _nc_state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+                    _nc_store = DefaultStateStore()
+                    _nc_state = _nc_store.load(db, tenant_id, to)
                     apply_selection_context_patch(
                         _nc_state,
                         {"native_catalog_send_failed": False},
                     )
-                    StateManager.save(db, _nc_state, tenant_id=tenant_id)
+                    _nc_store.save(db, tenant_id, to, _nc_state)
                 except Exception:  # noqa: BLE001
                     pass
             else:
@@ -11266,9 +11267,10 @@ async def _handle_merchant_message(
                     from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
                         apply_selection_context_patch,
                     )
-                    from modules.ai.brain.state_manager import StateManager  # noqa: PLC0415
+                    from modules.ai.brain.state.store import DefaultStateStore  # noqa: PLC0415
 
-                    _nc_state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+                    _nc_store = DefaultStateStore()
+                    _nc_state = _nc_store.load(db, tenant_id, to)
                     apply_selection_context_patch(
                         _nc_state,
                         {
@@ -11276,7 +11278,7 @@ async def _handle_merchant_message(
                             "catalog_navigation_source": "top_fallback",
                         },
                     )
-                    StateManager.save(db, _nc_state, tenant_id=tenant_id)
+                    _nc_store.save(db, tenant_id, to, _nc_state)
                     reply = compose_native_catalog_failure_reply(
                         db,
                         tenant_id,
