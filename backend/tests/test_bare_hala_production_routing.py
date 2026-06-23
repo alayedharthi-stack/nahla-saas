@@ -1,9 +1,9 @@
 """
-Production-shaped routing — bare salaam vs template greeting (PR2B).
+Production-shaped routing — bare salaam vs persona greeting (Phase 3).
 
 Pure salaam (no commerce residue) must classify as ``INTENT_GREETING`` and
-reach ``ACTION_GREET`` (template variants) when routine LLM avoid is enabled.
-Mixed salaam+commerce turns still demote via the welcome gate.
+reach persona LLM compose by default. Template ``ACTION_GREET`` remains
+available only when routine LLM avoid is explicitly enabled.
 """
 from __future__ import annotations
 
@@ -65,16 +65,20 @@ def _established_ctx(msg: str) -> BrainContext:
     )
 
 
-def test_production_bare_hala_routes_template_re_greet() -> None:
+def _assert_persona_greeting_llm(decision) -> None:
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+
+
+def test_production_bare_hala_routes_persona_llm_re_greet() -> None:
     assert is_established_greet_persona_compose_enabled()
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert ctx.intent.name == INTENT_GREETING
     assert not (ctx.intent.slots or {}).get("embedded_greeting")
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("re_greet") is True
-    assert decision.action != ACTION_LLM_REPLY
+    _assert_persona_greeting_llm(decision)
 
 
 def test_production_bare_hala_rules_classify_greeting() -> None:
@@ -85,21 +89,30 @@ def test_production_bare_hala_rules_classify_greeting() -> None:
     assert intent.extraction_method == "rules"
 
 
-def test_production_bare_hala_decision_is_template_re_greet_branch() -> None:
+def test_production_bare_hala_decision_is_persona_llm_branch() -> None:
     ctx = _established_ctx("هلا")
     decision = DefaultDecisionEngine().decide(ctx)
 
     assert ctx.intent.name == INTENT_GREETING
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("re_greet") is True
+    _assert_persona_greeting_llm(decision)
 
 
 @pytest.mark.parametrize("msg", ["مرحبا", "السلام عليكم"])
-def test_production_common_greetings_route_template_re_greet(msg: str) -> None:
+def test_production_common_greetings_route_persona_llm(msg: str) -> None:
     ctx = _established_ctx(msg)
     assert ctx.intent.name == INTENT_GREETING
     assert not (ctx.intent.slots or {}).get("embedded_greeting")
 
+    decision = DefaultDecisionEngine().decide(ctx)
+    _assert_persona_greeting_llm(decision)
+
+
+@pytest.mark.parametrize("msg", ["مرحبا", "السلام عليكم", "هلا"])
+def test_production_common_greetings_route_template_when_avoid_enabled(
+    msg: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
+    ctx = _established_ctx(msg)
     decision = DefaultDecisionEngine().decide(ctx)
     assert decision.action == ACTION_GREET
     assert decision.args.get("re_greet") is True

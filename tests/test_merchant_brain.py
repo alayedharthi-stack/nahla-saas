@@ -41,6 +41,16 @@ from modules.ai.brain.decision.actions import (
     ACTION_FAQ_REPLY, ACTION_GREET, ACTION_SEARCH_PRODUCTS, ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_ORDER_CONTEXT_UPDATE, ACTION_LLM_REPLY,
 )
+from modules.ai.brain.persona_expression import (  # noqa: E402
+    PERSONA_KIND_GREETING,
+    PERSONA_TOPIC_SOCIAL,
+)
+
+
+def _assert_persona_greeting_llm(decision: Decision) -> None:
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,16 +180,29 @@ class TestDecisionEngine:
         return ctx
 
     def test_greeting_decision(self):
+        """Phase 3 — pure first-turn greeting routes to persona LLM by default."""
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
         ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
-        # Thin pure greeting — DAF bypasses only actionable substance.
         ctx.message = "مرحبا"
         ctx.intent.raw_message = "مرحبا"
         ctx.intent.slots = {}
         d = eng.decide(ctx)
         assert not (d.args or {}).get("embedded_greeting")
         assert not (ctx.intent.slots or {}).get("embedded_greeting")
+        _assert_persona_greeting_llm(d)
+
+    def test_greeting_decision_uses_template_when_avoid_enabled(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        eng = DefaultDecisionEngine()
+        ctx = self._ctx(INTENT_GREETING, _make_state(greeted=False), _make_facts())
+        ctx.message = "مرحبا"
+        ctx.intent.raw_message = "مرحبا"
+        ctx.intent.slots = {}
+        d = eng.decide(ctx)
         assert d.action == ACTION_GREET
         assert d.action != ACTION_LLM_REPLY
 
@@ -662,14 +685,7 @@ class TestBrainPipeline:
         return db
 
     def test_greeting_scenario(self):
-        """Cold pure greeting → ACTION_GREET + warm persona template (PR2B)."""
-        from modules.ai.brain.compose.persona_template_engine import (
-            PERSONA_ALLOWED_EMOJI,
-            PERSONA_GREETING_COLD,
-            persona_reply_has_light_emoji,
-            persona_reply_is_warm_greeting,
-        )
-
+        """Cold pure greeting → persona LLM compose by default (Phase 3)."""
         intent = Intent(
             name=INTENT_GREETING,
             confidence=0.95,
@@ -698,7 +714,7 @@ class TestBrainPipeline:
         from modules.ai.brain.compose.responder import DefaultComposer
 
         memory_updater = self._mock_memory_updater()
-        llm_mock = AsyncMock(return_value="must not call llm")
+        llm_mock = AsyncMock(return_value="ياهلا 🌷")
 
         b = MerchantBrain(
             classifier=classifier,
@@ -724,22 +740,18 @@ class TestBrainPipeline:
                 profile={},
             ))
 
-        llm_mock.assert_not_called()
+        llm_mock.assert_called_once()
         assert isinstance(reply, dict)
         text = reply.get("reply")
         assert isinstance(text, str)
-        assert text.strip()
+        assert text.strip() == "ياهلا 🌷"
         assert not (intent.slots or {}).get("embedded_greeting")
-        assert text in PERSONA_GREETING_COLD or persona_reply_is_warm_greeting(text)
-        assert persona_reply_has_light_emoji(text)
-        assert sum(text.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
         assert "المنتج" not in text
         assert "السعر" not in text
 
         decision = captured.get("decision")
         assert decision is not None
-        assert decision.action == ACTION_GREET
-        assert decision.action != ACTION_LLM_REPLY
+        _assert_persona_greeting_llm(decision)
 
     def test_no_products_scenario(self):
         intent = Intent(name=INTENT_ASK_PRODUCT, confidence=0.90, raw_message="عندكم منتج؟",
@@ -932,9 +944,11 @@ class TestStateDrivenSimplification:
 
     # --- Composer: defense-in-depth greet guard ---
 
-    def test_composer_downgrades_greet_when_already_greeted(self):
-        """PR2B — when greeted=True, Composer uses warm re-greet template
-        instead of full onboarding greet or LLM downgrade."""
+    def test_composer_downgrades_greet_when_already_greeted(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Legacy template re-greet when routine LLM avoid is enabled."""
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         from modules.ai.brain.compose.persona_template_engine import (
             PERSONA_ALLOWED_EMOJI,
             PERSONA_GREETING_REGREET,
@@ -966,8 +980,11 @@ class TestStateDrivenSimplification:
         assert decision.action == ACTION_GREET
         assert decision.action != ACTION_LLM_REPLY
 
-    def test_composer_downgrades_greet_when_mid_order(self):
-        """Mid-order greet → order-aware local template, not generic cold greet."""
+    def test_composer_downgrades_greet_when_mid_order(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Mid-order greet → order-aware local template when avoid is on."""
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         from modules.ai.brain.compose.persona_template_engine import (
             PERSONA_ALLOWED_EMOJI,
             PERSONA_GREETING_ORDER_AWARE,
@@ -999,10 +1016,11 @@ class TestStateDrivenSimplification:
         assert decision.action == ACTION_GREET
         assert decision.action != ACTION_LLM_REPLY
 
-    def test_composer_first_greet_still_fires_template(self):
-        """Sanity: a fresh customer (greeted=False, stage=discovery)
-        must still receive the greeting template — we didn't break the
-        happy path."""
+    def test_composer_first_greet_still_fires_template(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Legacy ACTION_GREET template path when routine LLM avoid is enabled."""
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         from modules.ai.brain.compose.responder import DefaultComposer
         composer = DefaultComposer()
         state = _make_state(greeted=False, stage="discovery")
@@ -1051,13 +1069,9 @@ class TestStateDrivenSimplification:
     # --- Pipeline: greeted inferred from history (catches proactive sends) ---
 
     def test_pipeline_infers_greeted_from_outbound_history(self):
-        """When the cart-recovery path forgot to stamp brain_state, the
-        next inbound MUST still be treated as 'already greeted' because
-        history shows we already talked to the customer."""
+        """History showing prior outbound → established persona re-greet via LLM."""
         from modules.ai.brain.compose.persona_template_engine import (
             PERSONA_ALLOWED_EMOJI,
-            PERSONA_GREETING_COLD,
-            PERSONA_GREETING_REGREET,
             persona_reply_has_light_emoji,
             persona_reply_is_warm_greeting,
         )
@@ -1100,7 +1114,7 @@ class TestStateDrivenSimplification:
             {"direction": "out", "body": "صبحًا خصمك جاهز — اضغط الزر تحت لإكمال الطلب"},
         ]
 
-        llm_mock = AsyncMock(return_value="must not call llm")
+        llm_mock = AsyncMock(return_value="ياهلا 🌷")
         with _brain_pipeline_quota_patch(), patch(
             "modules.ai.brain.compose.responder.DefaultComposer._llm_compose",
             llm_mock,
@@ -1110,14 +1124,12 @@ class TestStateDrivenSimplification:
                 message="هلا", history=history, profile={},
             ))
 
-        llm_mock.assert_not_called()
+        llm_mock.assert_called_once()
         text = reply["reply"]
         assert isinstance(text, str)
-        assert text.strip()
+        assert text.strip() == "ياهلا 🌷"
         assert persona_reply_is_warm_greeting(text)
         assert persona_reply_has_light_emoji(text)
         assert sum(text.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
-        assert text not in PERSONA_GREETING_COLD
-        assert text in PERSONA_GREETING_REGREET or persona_reply_is_warm_greeting(text)
         assert "المنتج" not in text
         assert "السعر" not in text
