@@ -196,6 +196,12 @@ def _try_native_catalog_entry_decision(
     tenant_id = getattr(ctx, "tenant_id", None)
     if db is None or not tenant_id:
         return None
+    if bool(getattr(getattr(ctx, "state", None), "native_catalog_send_failed", False)):
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=prior_send_failed",
+            tenant_id,
+        )
+        return None
     try:
         from core.native_catalog_capability import evaluate_native_catalog_capability  # noqa: PLC0415
 
@@ -668,6 +674,30 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
         return None
 
     groups = _load_catalog_groups(ctx)
+    if bool(getattr(getattr(ctx, "state", None), "native_catalog_send_failed", False)):
+        _log_navigator_event(
+            ctx,
+            navigator_owner=True,
+            owner_step=OWNER_STEP_TOP_FALLBACK,
+            chosen_path=PATH_TOP_FALLBACK,
+            extra={"native_catalog_prior_send_failed": True},
+        )
+        return _owned_decision(
+            navigator_step=STEP_TOP_FALLBACK,
+            owner_step=OWNER_STEP_TOP_FALLBACK,
+            chosen_path=PATH_TOP_FALLBACK,
+            reason="catalog navigation — native catalog prior failure fallback",
+            confidence=max(signals.confidence, 0.88),
+            extra_args={
+                "native_catalog_prior_send_failed": True,
+                "navigation_state_patch": {
+                    "selected_collection": "",
+                    "current_catalog_group": None,
+                    "catalog_navigation_source": "top_fallback",
+                },
+            },
+        )
+
     if not groups:
         native_no_groups = _try_native_catalog_entry_decision(
             ctx,

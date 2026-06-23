@@ -19,7 +19,12 @@ if _BACKEND not in sys.path:
 
 from core.native_catalog_capability import (  # noqa: E402
     NativeCatalogCapability,
+    REASON_SKU_ONLY_RETAILER_ID,
+    REASON_SYNTHETIC_RETAILER_ID,
+    _ineligibility_reason_from_inventory,
+    _inventory_from_products,
     evaluate_native_catalog_capability,
+    pick_thumbnail_retailer_id,
 )
 from core.wa_native_catalog_order import (  # noqa: E402
     NativeCatalogOrderPayload,
@@ -119,6 +124,54 @@ class TestNativeCatalogCapability:
         assert cap.eligible is False
         assert cap.reason == "catalog_disabled"
 
+    def test_ineligible_when_only_synthetic_retailer_id(self):
+        inv = _inventory_from_products([
+            _Product(id=10, title="Item", meta_retailer_id="nahla_p_10"),
+        ])
+        assert _ineligibility_reason_from_inventory(inv) == REASON_SYNTHETIC_RETAILER_ID
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            _Product(id=10, title="Item", meta_retailer_id="nahla_p_10"),
+        ]
+        variant_q = db.query.return_value.join.return_value.filter.return_value
+        variant_q.order_by.return_value.limit.return_value.all.return_value = []
+        cap = evaluate_native_catalog_capability(db, 1, connection=_Conn())
+        assert cap.eligible is False
+        assert cap.reason == REASON_SYNTHETIC_RETAILER_ID
+
+    def test_ineligible_when_sku_only_retailer_id(self):
+        inv = _inventory_from_products([
+            _Product(id=11, title="Item", sku="local-sku-only"),
+        ])
+        assert _ineligibility_reason_from_inventory(inv) == REASON_SKU_ONLY_RETAILER_ID
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [
+            _Product(id=11, title="Item", sku="local-sku-only"),
+        ]
+        variant_q = db.query.return_value.join.return_value.filter.return_value
+        variant_q.order_by.return_value.limit.return_value.all.return_value = []
+        cap = evaluate_native_catalog_capability(db, 1, connection=_Conn())
+        assert cap.eligible is False
+        assert cap.reason == REASON_SKU_ONLY_RETAILER_ID
+
+    def test_pick_thumbnail_skips_synthetic_variant_before_valid_variant(self):
+        db = MagicMock()
+        good_parent = _Product(id=11, title="Good", catalog_status="active")
+        good_variant = _Variant(
+            id=2,
+            product_id=11,
+            retailer_id="real-rid-11",
+            product=good_parent,
+        )
+        variant_q = db.query.return_value.join.return_value.filter.return_value
+        variant_q.order_by.return_value.limit.return_value.all.return_value = [good_variant]
+        db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
+
+        rid = pick_thumbnail_retailer_id(db, 1)
+        assert rid == "real-rid-11"
+
 
 class TestNativeCatalogNavigation:
     def test_eligible_browse_routes_native_entry(self):
@@ -174,6 +227,38 @@ class TestNativeCatalogNavigation:
             decision = try_catalog_navigation_decision(ctx)
         assert decision is not None
         assert decision.args.get("navigator_step") == STEP_SHOW_GROUPS
+
+    def test_prior_native_failure_routes_top_fallback_not_native(self):
+        ctx = _browse_ctx(db=MagicMock())
+        ctx.state.native_catalog_send_failed = True
+        cap = NativeCatalogCapability(
+            eligible=True,
+            reason="ok",
+            thumbnail_retailer_id="rid-1",
+            matchable_product_count=3,
+        )
+        with patch(
+            "core.native_catalog_capability.evaluate_native_catalog_capability",
+            return_value=cap,
+        ), patch(
+            "modules.ai.brain.catalog.navigation._load_catalog_groups",
+            return_value=[{"group_name": "A"}],
+        ), patch(
+            "modules.ai.brain.catalog.navigation.evaluate_catalog_navigation_signals",
+        ) as sig:
+            sig.return_value = MagicMock(
+                hard_blocked=False,
+                advisory_or_comparison=False,
+                catalog_browse_score=0.9,
+                catalog_browse_intent=True,
+                confidence=0.92,
+                evidence={},
+            )
+            decision = try_catalog_navigation_decision(ctx)
+        assert decision is not None
+        from modules.ai.brain.catalog.navigation import STEP_TOP_FALLBACK  # noqa: PLC0415
+
+        assert decision.args.get("navigator_step") == STEP_TOP_FALLBACK
 
 
 class TestNativeCatalogDoesNotStealOtherFlows:
@@ -348,6 +433,35 @@ class TestCatalogMessageSender:
         )
         assert result.success is True
         assert result.reason == "sent"
+
+    def test_send_catalog_message_meta_products_not_found(self, monkeypatch):
+        async def _fake_send(*args, **kwargs):
+            return {
+                "error": {
+                    "message": "(#131009) Parameter value is not valid",
+                    "type": "OAuthException",
+                    "code": 131009,
+                    "error_data": {
+                        "details": "Products not found in FB Catalog",
+                    },
+                }
+            }, {}
+
+        monkeypatch.setattr(cs, "provider_send_message", _fake_send)
+        result = _run(
+            cs.send_catalog_message(
+                MagicMock(),
+                _Conn(),
+                tenant_id=1,
+                to="966500000000",
+                phone_id="PHONE1",
+                thumbnail_product_retailer_id="missing-rid",
+                body_text="تفضّل",
+            )
+        )
+        assert result.success is False
+        assert result.reason == "meta_products_not_found"
+        assert result.fallback_recommended is True
 
 
 class TestNativeOrderDoesNotReaskProduct:

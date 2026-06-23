@@ -1558,12 +1558,16 @@ def maybe_handle_wa_address_inbound(
     from core.wa_address_ingestion import (  # noqa: PLC0415
         compose_address_reply,
         is_accepted_maps_url,
+        is_bare_short_address_code,
         resolve_address_state_patch,
     )
 
     if inbound_normalized_type == "location":
         pass
-    elif inbound_normalized_type == "text" and is_accepted_maps_url(inbound_text):
+    elif inbound_normalized_type == "text" and (
+        is_accepted_maps_url(inbound_text)
+        or is_bare_short_address_code(inbound_text)
+    ):
         pass
     else:
         return None

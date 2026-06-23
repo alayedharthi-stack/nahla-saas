@@ -96,6 +96,33 @@ def _decision_with_target(
     )
 
 
+def _staff_vcard_already_sent(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    name: str = "",
+    contact_phone: str = "",
+) -> bool:
+    from modules.ai.brain.commerce.contact_escalation import (  # noqa: PLC0415
+        contact_already_sent,
+        parse_staff_contacts_sent,
+    )
+
+    try:
+        from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+        _conv, bs = _load_brain_state(
+            db,
+            tenant_id=int(tenant_id or 0),
+            phone=str(customer_phone or ""),
+        )
+        sent = parse_staff_contacts_sent((bs or {}).get("staff_contacts_sent"))
+        return contact_already_sent(sent, name=name, phone=contact_phone)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def evaluate_staff_contact_policy(
     db: Any,
     *,
@@ -120,6 +147,22 @@ def evaluate_staff_contact_policy(
     ):
         logger.info(
             "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_slot",
+            tenant_id,
+        )
+        return None
+
+    from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+        should_defer_staff_location_for_checkout_route,
+    )
+
+    if should_defer_staff_location_for_checkout_route(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_route_owner",
             tenant_id,
         )
         return None
@@ -237,6 +280,32 @@ def evaluate_staff_contact_policy(
                 ),
                 deliver_contact=False,
                 reason="phone_normalize_failed",
+                evidence_source=resolution.record.source,
+            )
+        contact_phone = (
+            getattr(target, "raw_phone", "")
+            or getattr(target, "wa_id", "")
+            or getattr(resolution.record, "phone", "")
+        )
+        already_sent = _staff_vcard_already_sent(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            name=getattr(resolution.record, "lookup_name", "") or "",
+            contact_phone=contact_phone,
+        )
+        if already_sent:
+            _log_target_trace(
+                tenant_id=tenant_id,
+                request=request,
+                resolution_reason="contact_already_sent",
+                deliver=False,
+            )
+            return _decision_with_target(
+                request,
+                reply_text=build_deliver_reply_text(resolution.record),
+                deliver_contact=False,
+                reason="contact_already_sent",
                 evidence_source=resolution.record.source,
             )
         _log_target_trace(

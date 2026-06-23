@@ -11231,7 +11231,7 @@ async def _handle_merchant_message(
                 reason="skip_wire_send",
             )
         elif _native_catalog_entry.get("thumbnail_product_retailer_id"):
-            _send_ok = await _try_send_native_catalog_entry(
+            _native_send_result = await _try_send_native_catalog_entry(
                 db=db,
                 tenant_id=tenant_id,
                 phone_id=phone_id,
@@ -11239,19 +11239,66 @@ async def _handle_merchant_message(
                 entry=_native_catalog_entry,
                 fallback_body=reply or "",
             )
-            if _send_ok and isinstance(_delivery_audit, dict):
-                _delivery_audit["native_catalog_sent"] = True
-                _delivery_audit["text_sent"] = True
-            elif reply:
-                _send_ok = await _send_whatsapp_message(
-                    phone_id=phone_id,
-                    to=to,
-                    text=reply,
-                    _tenant_id=tenant_id,
-                    _db=db,
-                )
-                if _send_ok and isinstance(_delivery_audit, dict):
+            if _native_send_result.success:
+                _send_ok = True
+                if isinstance(_delivery_audit, dict):
+                    _delivery_audit["native_catalog_sent"] = True
                     _delivery_audit["text_sent"] = True
+                try:
+                    from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
+                        apply_selection_context_patch,
+                    )
+                    from modules.ai.brain.state_manager import StateManager  # noqa: PLC0415
+
+                    _nc_state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+                    apply_selection_context_patch(
+                        _nc_state,
+                        {"native_catalog_send_failed": False},
+                    )
+                    StateManager.save(db, _nc_state, tenant_id=tenant_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                try:
+                    from core.native_catalog_fallback import (  # noqa: PLC0415
+                        compose_native_catalog_failure_reply,
+                    )
+                    from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
+                        apply_selection_context_patch,
+                    )
+                    from modules.ai.brain.state_manager import StateManager  # noqa: PLC0415
+
+                    _nc_state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+                    apply_selection_context_patch(
+                        _nc_state,
+                        {
+                            "native_catalog_send_failed": True,
+                            "catalog_navigation_source": "top_fallback",
+                        },
+                    )
+                    StateManager.save(db, _nc_state, tenant_id=tenant_id)
+                    reply = compose_native_catalog_failure_reply(
+                        db,
+                        tenant_id,
+                        customer_message=text or reply or "",
+                    )
+                except Exception as _nc_fb_exc:  # noqa: BLE001  # noqa: silent-ok — honest fallback must not block webhook reply
+                    logger.debug(
+                        "[NATIVE_CATALOG] honest_fallback_failed tenant=%s err=%s",
+                        tenant_id,
+                        _nc_fb_exc,
+                    )
+                if reply:
+                    _send_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    if _send_ok and isinstance(_delivery_audit, dict):
+                        _delivery_audit["text_sent"] = True
+                        _delivery_audit["native_catalog_fallback_text"] = True
         elif _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
@@ -13389,21 +13436,34 @@ async def _try_send_native_catalog_entry(
     to: str,
     entry: Dict[str, Any],
     fallback_body: str = "",
-) -> bool:
+):
     """Send WhatsApp ``interactive.type=catalog_message`` for browse entry."""
+    from services.whatsapp_platform.catalog_sender import (  # noqa: PLC0415
+        CatalogSendResult,
+        send_catalog_message,
+    )
+
     thumbnail = str(entry.get("thumbnail_product_retailer_id") or "").strip()
     if not thumbnail or tenant_id is None:
-        return False
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="no_retailer_id",
+        )
     try:
         from core.native_catalog_capability import load_whatsapp_connection  # noqa: PLC0415
-        from services.whatsapp_platform.catalog_sender import send_catalog_message  # noqa: PLC0415
     except Exception as imp_exc:  # noqa: BLE001
         logger.debug(
             "[NATIVE_CATALOG] send helpers unavailable tenant=%s err=%s",
             tenant_id,
             imp_exc,
         )
-        return False
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="connection_missing",
+            error=str(imp_exc),
+        )
 
     connection = load_whatsapp_connection(db, int(tenant_id))
     if connection is None:
@@ -13411,7 +13471,11 @@ async def _try_send_native_catalog_entry(
             "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=connection_missing",
             tenant_id,
         )
-        return False
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="connection_missing",
+        )
 
     body_text = str(entry.get("body_text") or fallback_body or "").strip()
     if not body_text:
@@ -13432,8 +13496,7 @@ async def _try_send_native_catalog_entry(
             tenant_id,
             result.reason,
         )
-        return False
-    return True
+    return result
 
 
 async def _try_send_catalog_product(

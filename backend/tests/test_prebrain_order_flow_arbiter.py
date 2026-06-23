@@ -244,6 +244,36 @@ class TestRealisticCheckoutSequence:
             message="الطايف",
         )
 
+    def test_short_address_code_yields_with_delivery_address_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            _active_order_state(missing_fields=["delivery_address"]),
+        )
+        assert should_yield_prebrain_to_order_flow(
+            object(),
+            tenant_id=10,
+            customer_phone="966542189781",
+            message="RQWB3094",
+        )
+
+    def test_maps_url_yields_with_location_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            _active_order_state(missing_fields=["location"]),
+        )
+        assert should_yield_prebrain_to_order_flow(
+            object(),
+            tenant_id=10,
+            customer_phone="966542189781",
+            message="https://maps.google.com/?q=24.7,46.6",
+        )
+
 
 class TestContactFamilyPoliciesUseArbiter:
     def test_branch_trigger_defers_during_checkout(

@@ -229,9 +229,11 @@ class TestPaymentEvidenceClassifier:
         v = classify_payment_evidence("Successful! You won the round.")
         assert v["status"] == PAYMENT_EVIDENCE_NOT_PAYMENT
 
-    def test_reference_number_with_context_promotes_to_confirmed(self):
+    def test_reference_number_with_context_stays_needs_confirmation_without_success(self):
         from core.payment_evidence import (
-            classify_payment_evidence, PAYMENT_EVIDENCE_CONFIRMED,
+            classify_payment_evidence,
+            PAYMENT_EVIDENCE_CONFIRMED,
+            PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
         )
         text = (
             "Al Rajhi\n"
@@ -240,7 +242,9 @@ class TestPaymentEvidenceClassifier:
             "Reference Number: TXN-9981234"
         )
         v = classify_payment_evidence(text)
-        assert v["status"] == PAYMENT_EVIDENCE_CONFIRMED
+        assert v["status"] == PAYMENT_EVIDENCE_NEEDS_CONFIRMATION
+        assert v["status"] != PAYMENT_EVIDENCE_CONFIRMED
+        assert v["reason"] == "payment_context_no_success_marker"
 
     def test_two_generic_hints_with_awaiting_context_is_needs_confirmation(self):
         """Tightened May 2026: a SINGLE generic word ("تحويل") on its

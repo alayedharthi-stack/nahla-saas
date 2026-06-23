@@ -127,6 +127,12 @@ def extract_payment_evidence_hints(
     blob = (internal_text or "").strip()
     if not blob:
         return {"payment_evidence_status": status} if status else {}
+    try:
+        from core.arabic_ocr_normalization import normalize_arabic_presentation_forms  # noqa: PLC0415
+
+        blob = normalize_arabic_presentation_forms(blob) or blob
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ocr normalize is optional enhancement
+        pass
 
     hints: Dict[str, str] = {}
     if status:

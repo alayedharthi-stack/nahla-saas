@@ -97,28 +97,16 @@ _ALL_STATUSES = frozenset({
 
 
 # ── Arabic normalisation (mirrors core.payment_intent) ──────────────
-_AR_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670]")
+from core.arabic_ocr_normalization import normalize_arabic_ocr_text
 
 
 def _normalise(text: Optional[str]) -> str:
-    """Light Arabic normalisation: strip diacritics + tatweel,
-    collapse alef/ya/ta-marbuta variants, lowercase the whole blob.
-    Returns empty string for falsy input. Never raises."""
-    if not text:
-        return ""
-    try:
-        t = _AR_DIACRITICS.sub("", str(text))
-        t = t.replace("ـ", "")
-        t = (
-            t.replace("أ", "ا")
-             .replace("إ", "ا")
-             .replace("آ", "ا")
-             .replace("ى", "ي")
-             .replace("ة", "ه")
-        )
-        return t.lower()
-    except Exception:
-        return ""
+    """Light Arabic normalisation for payment-evidence matching.
+
+    Delegates to :func:`core.arabic_ocr_normalization.normalize_arabic_ocr_text`
+    so OCR/PDF Presentation Forms normalize consistently platform-wide.
+    """
+    return normalize_arabic_ocr_text(text)
 
 
 # ── Lexicons ────────────────────────────────────────────────────────
@@ -182,30 +170,6 @@ _STRONG_SUCCESS_PHRASES: Tuple[str, ...] = tuple(_normalise(s) for s in (
     "successfully paid",
     "transaction approved",
     "approved transaction",
-    # Reference / execution time fields rendered by banks only AFTER
-    # the transfer is committed.
-    "رقم مرجع العمليه",
-    "رقم مرجع العملية",
-    "رقم العمليه:",
-    "رقم العملية:",
-    "مرجع العمليه:",
-    "مرجع العملية:",
-    "رقم مرجع التحويل",
-    "رقم التحويل:",
-    "reference number",
-    "reference no",
-    "ref no",
-    "ref number",
-    "transaction reference",
-    "txn ref",
-    # Execution timestamps banks print only on the final receipt.
-    "وقت تنفيذ العمليه",
-    "وقت تنفيذ العملية",
-    "تاريخ ووقت العمليه",
-    "تاريخ ووقت العملية",
-    "execution time",
-    "executed on",
-    "executed at",
 ))
 
 # Weaker — single tokens that, on their own, only hint at success.
@@ -781,6 +745,24 @@ _RECEIPT_FILENAME_PATTERNS: Tuple[str, ...] = tuple(s.lower() for s in (
     "stcpay-receipt",
 ))
 
+_STATEMENT_FILENAME_PATTERNS: Tuple[str, ...] = tuple(s.lower() for s in (
+    "statement",
+    "account-statement",
+    "account_statement",
+    "bank-statement",
+    "bank_statement",
+    "كشف",
+    "kashf",
+    "statement.pdf",
+))
+
+# Passive completion headers on final bank receipts — not pre-transfer imperatives.
+_RECEIPT_COMPLETION_HEADERS: Tuple[str, ...] = tuple(_normalise(s) for s in (
+    "transfer confirmation",
+    "transaction confirmation",
+    "payment confirmation",
+))
+
 # Strict pre-review IMPERATIVES — these are call-to-action verbs that
 # appear ONLY on the pre-transfer button screen, never on a completed
 # transfer receipt. Hits here override the receipt-filename hint.
@@ -817,6 +799,17 @@ def _filename_signals_receipt(filename: Optional[str]) -> bool:
         return False
     fn = str(filename).lower()
     for pat in _RECEIPT_FILENAME_PATTERNS:
+        if pat and pat in fn:
+            return True
+    return False
+
+
+def _filename_signals_statement(filename: Optional[str]) -> bool:
+    """Return True when the filename looks like an account statement export."""
+    if not filename:
+        return False
+    fn = str(filename).lower()
+    for pat in _STATEMENT_FILENAME_PATTERNS:
         if pat and pat in fn:
             return True
     return False
@@ -1062,12 +1055,22 @@ def classify_payment_evidence(
         )
 
         _ext = extract_bank_receipt_fields(text, filename=filename)
+        completion_headers = _scan_phrases(blob, _RECEIPT_COMPLETION_HEADERS)
         if (
             _ext.amount
             and (_ext.beneficiary_name or iban_present)
             and _ext.bank_name
             and not _ext.has_pre_review_imperative
-            and _ext.receipt_type == "final_receipt"
+            and not _filename_signals_statement(filename)
+            and (
+                success_hits
+                or weak_success_hits
+                or completion_headers
+                or (
+                    _fname_signals_receipt
+                    and _ext.receipt_type == "final_receipt"
+                )
+            )
         ):
             return {
                 "status":  PAYMENT_EVIDENCE_CONFIRMED,
@@ -1145,13 +1148,6 @@ def classify_payment_evidence(
         return {
             "status":  PAYMENT_EVIDENCE_CONFIRMED,
             "reason":  "weak_success_with_context",
-            "signals": signals,
-        }
-
-    if reference_number_present and has_payment_context:
-        return {
-            "status":  PAYMENT_EVIDENCE_CONFIRMED,
-            "reason":  "reference_number_with_context",
             "signals": signals,
         }
 

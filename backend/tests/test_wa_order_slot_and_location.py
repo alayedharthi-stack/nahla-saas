@@ -17,6 +17,7 @@ from core.wa_address_ingestion import (  # noqa: E402
     build_whatsapp_location_patch,
     compose_address_reply,
     is_accepted_maps_url,
+    is_bare_short_address_code,
     is_city_only_address_text,
     resolve_address_state_patch,
 )
@@ -213,6 +214,17 @@ def test_city_only_not_accepted() -> None:
     assert resolve_address_state_patch(
         inbound_normalized_type="text", inbound_text="الرياض",
     ) is None
+
+
+def test_short_address_code_accepted() -> None:
+    assert is_bare_short_address_code("RQWB3094")
+    patch = resolve_address_state_patch(
+        inbound_normalized_type="text",
+        inbound_text="RQWB3094",
+    )
+    assert patch is not None
+    assert patch["short_address_code"] == "RQWB3094"
+    assert patch["delivery_address_type"] == "short_address_code"
 
 
 def test_maps_url_not_payment_path_guard() -> None:
