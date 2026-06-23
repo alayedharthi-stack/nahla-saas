@@ -15,6 +15,8 @@ logger = logging.getLogger("nahla.native_catalog")
 
 _CATALOG_CLAIM_PHRASE = "تفضّل، اختر من الكتالوج"
 
+NATIVE_CATALOG_SUCCESS_BODY_AR = f"{_CATALOG_CLAIM_PHRASE} 👇"
+
 _WHATSAPP_QUICK_ORDER_FALLBACK_AR = (
     "ما ظهر الكتالوج هنا، أقدر أكمّل طلبك بالواتساب. "
     "اكتب اسم المنتج أو النوع اللي تبيه."
@@ -25,6 +27,28 @@ _STORE_FALLBACK_INTRO_AR = (
 )
 
 _STORE_CTA_LABEL_AR = "فتح المتجر الإلكتروني"
+
+
+def is_native_catalog_claim_text(text: str) -> bool:
+    """True when *text* tells the customer the native catalog already appeared."""
+    body = str(text or "").strip()
+    if not body:
+        return False
+    return _CATALOG_CLAIM_PHRASE in body
+
+
+def defer_native_catalog_customer_reply(
+    reply: str,
+    *,
+    native_catalog_entry: Optional[dict] = None,
+) -> str:
+    """Drop pre-send catalog-claim copy until Meta accepts ``catalog_message``."""
+    entry = native_catalog_entry if isinstance(native_catalog_entry, dict) else {}
+    if not str(entry.get("thumbnail_product_retailer_id") or "").strip():
+        return str(reply or "")
+    if is_native_catalog_claim_text(reply):
+        return ""
+    return str(reply or "")
 
 
 @dataclass(frozen=True)
@@ -103,7 +127,10 @@ def compose_native_catalog_failure_reply(
 
 
 __all__ = [
+    "NATIVE_CATALOG_SUCCESS_BODY_AR",
     "NativeCatalogFallbackDecision",
     "compose_native_catalog_failure_decision",
     "compose_native_catalog_failure_reply",
+    "defer_native_catalog_customer_reply",
+    "is_native_catalog_claim_text",
 ]

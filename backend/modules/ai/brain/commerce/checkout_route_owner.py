@@ -79,8 +79,16 @@ _CATALOG_HELP_RE = re.compile(
     r"ما\s*(?:ظهر|وصل|طلع)|"
     r"كيف\s*(?:اختار|أختار)|"
     r"ابي\s*اشوف\s*المنتجات|أبي\s*أشوف\s*المنتجات|"
-    r"ابغى\s*اشوف\s*المنتجات|أبغى\s*أشوف\s*المنتجات|"
-    r"الكتالوج|كتالوج|catalog"
+    r"ابغى\s*اشوف\s*المنتجات|أبغى\s*أشوف\s*المنتجات"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CATALOG_SEND_REQUEST_RE = re.compile(
+    r"(?:"
+    r"(?:ارسل|أرسل|ابعث|أبعث|ورني|ورّني|أرني|ارني|ابي|أبي|ابغ|أبغ)\s*(?:لي\s*)?"
+    r"(?:ال)?(?:كتالوج|catalog)|"
+    r"(?:كتالوج|catalog)\s*(?:ارسل|أرسل|ابعث|أبعث)"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -343,7 +351,44 @@ def has_checkout_entry_intent(message: str) -> bool:
 
 def is_catalog_visibility_question(message: str) -> bool:
     """Customer is asking where the promised catalog/options are."""
-    return bool(_CATALOG_HELP_RE.search(_norm(message or "")))
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if is_catalog_send_request(raw):
+        return False
+    return bool(_CATALOG_HELP_RE.search(_norm(raw)))
+
+
+def is_catalog_send_request(message: str) -> bool:
+    """Explicit ask to send/show the native catalog again."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    return bool(_CATALOG_SEND_REQUEST_RE.search(_norm(raw)))
+
+
+def _compose_prior_catalog_fallback_decision(
+    db: Any,
+    tenant_id: int,
+    *,
+    failure_reason: str = "prior_native_catalog_failed",
+) -> "CheckoutRouteDecision":
+    from core.native_catalog_fallback import compose_native_catalog_failure_decision  # noqa: PLC0415
+
+    fb = compose_native_catalog_failure_decision(
+        db,
+        int(tenant_id or 0),
+        failure_reason=failure_reason,
+    )
+    caps = load_channel_capabilities(db, int(tenant_id or 0))
+    buttons = () if fb.cta_url else build_channel_choice_buttons(caps)
+    return CheckoutRouteDecision(
+        reply_text=str(fb.text or "").strip(),
+        reason="catalog_visibility_help_prior_catalog",
+        cta_url=str(fb.cta_url or "").strip(),
+        cta_label=str(fb.cta_label or "").strip() or "فتح المتجر الإلكتروني",
+        buttons=buttons,
+    )
 
 
 def parse_checkout_channel_choice(
@@ -668,6 +713,8 @@ def evaluate_checkout_route_owner(
         return None
 
     if channel == CHECKOUT_CHANNEL_WHATSAPP:
+        if is_catalog_send_request(raw):
+            return None
         if is_catalog_visibility_question(raw):
             return CheckoutRouteDecision(
                 reply_text=build_catalog_visibility_reply(caps),
@@ -689,15 +736,16 @@ def evaluate_checkout_route_owner(
 
     channels = available_channels(caps)
     if not has_checkout_entry_intent(raw):
+        if is_catalog_send_request(raw):
+            return None
         if is_catalog_visibility_question(raw) and (
             bool(order_prep.get("checkout_route_prompt_sent"))
             or str(order_prep.get("_catalog_navigation_source") or "").strip()
             or bool(order_prep.get("_native_catalog_send_failed"))
         ):
-            return CheckoutRouteDecision(
-                reply_text=build_catalog_visibility_reply(caps),
-                reason="catalog_visibility_help_prior_catalog",
-                buttons=build_channel_choice_buttons(caps),
+            return _compose_prior_catalog_fallback_decision(
+                db,
+                int(tenant_id or 0),
             )
         return None
 
@@ -736,6 +784,7 @@ __all__ = [
     "evaluate_checkout_route_owner",
     "has_checkout_entry_intent",
     "has_checkout_route_intent",
+    "is_catalog_send_request",
     "is_catalog_visibility_question",
     "load_channel_capabilities",
     "load_checkout_route_context",

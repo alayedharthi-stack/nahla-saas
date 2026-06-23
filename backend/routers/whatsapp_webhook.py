@@ -7842,6 +7842,18 @@ async def _handle_merchant_message(
                         _native_catalog_entry = dict(
                             brain_result.get("native_catalog_entry") or {}
                         )
+                        try:
+                            from core.native_catalog_fallback import (  # noqa: PLC0415
+                                defer_native_catalog_customer_reply,
+                            )
+
+                            reply = defer_native_catalog_customer_reply(
+                                reply,
+                                native_catalog_entry=_native_catalog_entry,
+                            )
+                            _brain_reply_candidate = (reply or "").strip()
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — defer must not block brain reply
+                            pass
                         _brain_handoff = bool(brain_result.get("handoff"))
                         # Tenant 33 #49 (Commit 3): the brain pipeline
                         # surfaces the relational moment when the
@@ -9533,6 +9545,16 @@ async def _handle_merchant_message(
                 logger.debug("[loop_guard] evaluate failed (open): %s", _loop_exc)
 
         # Save outbound reply after generation (skip empty — P0 wire suppress).
+        try:
+            from core.native_catalog_fallback import defer_native_catalog_customer_reply  # noqa: PLC0415
+
+            reply = defer_native_catalog_customer_reply(
+                reply,
+                native_catalog_entry=_native_catalog_entry,
+            )
+            _brain_reply_candidate = (reply or "").strip()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — defer must not block persist gate
+            pass
         if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
             if not _outbound_abort_audited:
                 _maybe_log_outbound_candidate_abort(
@@ -11482,6 +11504,12 @@ async def _handle_merchant_message(
             )
             if _native_send_result.success:
                 _send_ok = True
+                try:
+                    from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+
+                    reply = NATIVE_CATALOG_SUCCESS_BODY_AR
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — success body for trace only
+                    pass
                 if isinstance(_delivery_audit, dict):
                     _delivery_audit["native_catalog_sent"] = True
                     _delivery_audit["text_sent"] = True
@@ -11499,6 +11527,20 @@ async def _handle_merchant_message(
                     )
                     _nc_store.save(db, tenant_id, to, _nc_state)
                 except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    from core.outbound_send_status import (  # noqa: PLC0415
+                        sync_outbound_body_to_final as _sync_nc_body,
+                    )
+
+                    _sync_nc_body(
+                        db,
+                        tenant_id=tenant_id,
+                        recipient=to,
+                        final_body=reply,
+                        reason="native_catalog_sent",
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
                     pass
             else:
                 _nc_fallback = None
@@ -11589,6 +11631,21 @@ async def _handle_merchant_message(
                             _delivery_audit["cta_url_sent_count"] = (
                                 int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
                             )
+                    if _send_ok and reply:
+                        try:
+                            from core.outbound_send_status import (  # noqa: PLC0415
+                                sync_outbound_body_to_final as _sync_nc_body,
+                            )
+
+                            _sync_nc_body(
+                                db,
+                                tenant_id=tenant_id,
+                                recipient=to,
+                                final_body=reply,
+                                reason="native_catalog_failure_fallback",
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
+                            pass
         elif _brain_buttons and reply:
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
@@ -13769,7 +13826,9 @@ async def _try_send_native_catalog_entry(
 
     body_text = str(entry.get("body_text") or fallback_body or "").strip()
     if not body_text:
-        body_text = "تفضّل، اختر من الكتالوج 👇"
+        from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+
+        body_text = NATIVE_CATALOG_SUCCESS_BODY_AR
 
     result = await send_catalog_message(
         db,
