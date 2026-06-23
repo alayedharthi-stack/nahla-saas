@@ -6,8 +6,11 @@ or loop guard must avoid generic recovery inside active checkout.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("nahla.brain.commerce.checkout_slot_fallback")
 
 _CHECKOUT_CONTINUE_RE = re.compile(
     r"^(?:"
@@ -66,8 +69,8 @@ def _order_prep_dict(state: Any) -> Dict[str, Any]:
     try:
         if hasattr(prep, "to_dict"):
             return dict(prep.to_dict() or {})
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional to_dict must not block slot fallback
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] order_prep to_dict failed")
     return {}
 
 
@@ -79,8 +82,8 @@ def _brain_state_dict(state: Any) -> Dict[str, Any]:
     try:
         if hasattr(state, "to_dict"):
             return dict(state.to_dict() or {})
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional to_dict must not block slot fallback
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] brain_state to_dict failed")
     return {}
 
 
@@ -107,7 +110,8 @@ def _resolve_missing_fields(state: Any) -> List[str]:
                 line_items=line_items,
             )
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing-field compute is best-effort fallback
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] compute_wa_missing_fields failed")
         return stored
 
 
@@ -125,7 +129,8 @@ def build_checkout_slot_fallback_reply(
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             has_active_commerce_from_state,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — stub guard import optional at fallback boundary
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] has_active_commerce import failed")
         return None
 
     if not has_active_commerce_from_state(state):
@@ -150,7 +155,6 @@ def build_checkout_slot_fallback_reply(
                 "باقي تحدد المنتج أو الكمية عشان نكمل الطلب."
             )
 
-    # Unknown missing token — still better than a broken generic stub.
     if is_checkout_continue_inbound(inbound_text):
         return _PROMPT_REVIEW
     return _PROMPT_REVIEW

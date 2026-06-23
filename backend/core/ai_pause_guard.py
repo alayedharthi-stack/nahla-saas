@@ -811,8 +811,8 @@ def evaluate_loop_pre_send(
                 decay += 2
                 progressed = True
                 progress_reasons.append("checkout_continue")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional checkout continue probe must not block loop guard
+            logger.exception("[LOOP_GUARD] checkout continue probe skipped")
     if _has_sales_intent(inbound_text):
         decay += 2
         progressed = True

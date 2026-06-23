@@ -9451,8 +9451,11 @@ async def _handle_merchant_message(
                             )
                             or ""
                         )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — loop checkout brain-state load is best-effort
+                    logger.exception(
+                        "[Merchant/LOOP] checkout brain-state load skipped tenant=%s",
+                        tenant_id,
+                    )
                 _decision = _eval_loop(
                     db, convo,
                     tenant_id=tenant_id,
