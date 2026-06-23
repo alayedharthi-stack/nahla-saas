@@ -1008,11 +1008,11 @@ def _product_diag_rows(
 
     ``publish_status`` is the three-state token operators read:
 
-      * ``published``    — has ``meta_catalog_published_at``
-                           (catalog send chain has fired at least once
-                           successfully against this row).
-      * ``ready``        — has a usable retailer id but the catalog
-                           send chain has not been exercised yet.
+      * ``published``    — has ``meta_catalog_published_at`` set by the
+                           Meta Graph reconcile job (retailer id verified
+                           live in the tenant's linked catalog).
+      * ``ready``        — has a usable retailer id locally but is not
+                           Meta Graph verified yet (run reconcile).
       * ``needs_mapping``— missing both ``meta_retailer_id`` AND
                            ``external_id``. The resync endpoint will
                            assign a synthetic id so the row at least
@@ -1223,12 +1223,9 @@ def _product_diag_rows(
             pass
         variants_total, variants_in_stock, wa_ready_variants = 0, 0, 0
 
-    # Meta-ready ≈ variants whose parent has been stamped
-    # ``meta_catalog_published_at``. We can't (yet) introspect the
-    # exact Meta export, so we approximate: a variant is meta-ready
-    # if its parent has been published AND the variant carries a
-    # retailer id. Google-ready uses the same readiness signal —
-    # the feed itself short-circuits malformed rows on emit.
+    # Meta-ready ≈ variants whose parent carries a Meta Graph verified
+    # publish stamp (``meta_catalog_reconcile``). A variant is meta-ready
+    # when its parent is stamped AND the variant carries a retailer id.
     try:
         from models import ProductVariant as _PV2  # noqa: PLC0415
         meta_ready_variants = (
@@ -1293,8 +1290,7 @@ def _product_diag_rows(
 
 
 def _run_catalog_resync(db: Session, tenant_id: int) -> Dict[str, Any]:
-    """Backfill ``meta_retailer_id`` (and stamp
-    ``meta_catalog_published_at``) for every product belonging to
+    """Backfill ``meta_retailer_id`` for every product belonging to
     *tenant_id*. Returns a structured report:
 
       {
@@ -1302,17 +1298,14 @@ def _run_catalog_resync(db: Session, tenant_id: int) -> Dict[str, Any]:
         "retailer_id_set":    int,    # rows that gained a retailer id
         "already_set":        int,    # rows that already had one
         "synthetic_assigned": int,    # rows that got nahla_p_<id>
-        "published_stamped":  int,    # meta_catalog_published_at updated
+        "published_stamped":  int,    # always 0 — use meta_catalog_reconcile
         "errors":             int,
       }
 
-    The operation is idempotent — running it twice in a row yields
-    zeros for ``retailer_id_set`` and ``synthetic_assigned`` and the
-    ``published_stamped`` count covers only rows whose stamp was
-    older than the start of the run.
+    ``meta_catalog_published_at`` is **not** set here. Publish stamps are
+    reconciled against Meta Graph membership via
+    ``services.meta_catalog_reconcile.reconcile_meta_catalog_publish_stamps``.
     """
-    from datetime import datetime, timezone  # noqa: PLC0415
-
     from models import Product as _Product  # noqa: PLC0415
 
     counters = {
@@ -1323,7 +1316,6 @@ def _run_catalog_resync(db: Session, tenant_id: int) -> Dict[str, Any]:
         "published_stamped":  0,
         "errors":             0,
     }
-    now = datetime.now(timezone.utc)
 
     rows = (
         db.query(_Product)
@@ -1348,17 +1340,6 @@ def _run_catalog_resync(db: Session, tenant_id: int) -> Dict[str, Any]:
                     new_val = str(p.meta_retailer_id or "")
                     if new_val.startswith("nahla_p_"):
                         counters["synthetic_assigned"] += 1
-
-            # Stamp publish marker only when we actually have a
-            # usable retailer id. The webhook send path is the
-            # canonical place to mark success on real Meta sends,
-            # but we mirror it here so the dashboard's "published"
-            # counter starts useful before the first chat happens.
-            if getattr(p, "meta_retailer_id", None) and getattr(
-                p, "meta_catalog_published_at", None,
-            ) is None:
-                p.meta_catalog_published_at = now
-                counters["published_stamped"] += 1
         except Exception as exc:  # noqa: BLE001
             counters["errors"] += 1
             logger.warning(
