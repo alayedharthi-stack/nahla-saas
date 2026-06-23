@@ -373,6 +373,87 @@ def _maybe_pin_catalog_focus(
     )
 
 
+def _maybe_apply_native_catalog_order(
+    *,
+    db: Any,
+    tenant_id: int,
+    message: Optional[str],
+    state: MerchantConversationState,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Parse WhatsApp native catalog orders into ``order_prep.line_items``."""
+    meta = dict(inbound_metadata or {})
+    if meta.get("source_type") != "catalog_order":
+        return
+    if not message:
+        return
+
+    logger.info(
+        "[WA_NATIVE_ORDER] wa_order_received tenant=%s item_count=%s",
+        tenant_id,
+        meta.get("item_count"),
+    )
+
+    try:
+        from core.wa_native_catalog_order import (  # noqa: PLC0415
+            apply_native_order_to_state,
+            parse_native_catalog_order,
+        )
+
+        payload = parse_native_catalog_order(
+            {
+                "catalog_id": meta.get("catalog_id"),
+                "text": meta.get("customer_note"),
+                "product_items": meta.get("product_items") or [],
+            },
+            metadata=meta,
+        )
+        if not payload.items:
+            return
+
+        resolution = apply_native_order_to_state(
+            db=db,
+            tenant_id=tenant_id,
+            state=state,
+            payload=payload,
+        )
+        logger.info(
+            "[WA_NATIVE_ORDER] native_order_items_count=%d line_items_matched=%d "
+            "line_items_unmatched=%d needs_review_count=%d tenant=%s",
+            len(payload.items),
+            resolution.matched_count,
+            resolution.unmatched_count,
+            resolution.needs_review_count,
+            tenant_id,
+        )
+
+        first = next(
+            (
+                li
+                for li in resolution.line_items
+                if li.get("product_id")
+            ),
+            resolution.line_items[0] if resolution.line_items else None,
+        )
+        if first and not state.current_product_focus:
+            state.current_product_focus = {
+                "id": first.get("product_id") or first.get("product_retailer_id"),
+                "external_id": first.get("product_retailer_id") or "",
+                "title": first.get("product_name") or first.get("title") or "",
+                "price": first.get("unit_price") or first.get("price"),
+                "currency": first.get("currency") or meta.get("currency") or "",
+                "from_catalog_order": True,
+                "from_native_catalog_order": True,
+                "line_items_count": len(resolution.line_items),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WA_NATIVE_ORDER] apply failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+
+
 class MerchantBrain:
     """
     Orchestrates all Brain layers for a single customer turn.
@@ -640,6 +721,13 @@ class MerchantBrain:
             tenant_id=tenant_id,
             message=message,
             state=state_for_classify,
+        )
+        _maybe_apply_native_catalog_order(
+            db=db,
+            tenant_id=tenant_id,
+            message=message,
+            state=state_for_classify,
+            inbound_metadata=(profile or {}).get("inbound_metadata"),
         )
 
         # ── 1a-pre. Commerce conversation guard (P0 drift prevention) ─────
@@ -3291,6 +3379,7 @@ class MerchantBrain:
             "social_human_context_category": str(
                 getattr(_social_human_context, "category", "") or ""
             ),
+            "native_catalog_entry": dict(result.data.get("native_catalog_entry") or {}),
         }
 
 

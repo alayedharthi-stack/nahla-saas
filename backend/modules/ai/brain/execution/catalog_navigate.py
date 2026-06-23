@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Optional
 from ..catalog.navigation import (
     PATH_GROUPS,
     PATH_GROUP_PRODUCTS,
+    PATH_NATIVE_CATALOG,
     PATH_TOP_FALLBACK,
+    STEP_NATIVE_CATALOG_ENTRY,
     STEP_SHOW_GROUP_PRODUCTS,
     STEP_SHOW_GROUPS,
     STEP_TOP_FALLBACK,
@@ -35,7 +37,9 @@ class CatalogNavigateHandler:
         owner_step = str(args.get("owner_step") or "").strip()
 
         try:
-            if step == STEP_SHOW_GROUPS:
+            if step == STEP_NATIVE_CATALOG_ENTRY:
+                payload = await self._render_native_catalog_entry(decision, ctx)
+            elif step == STEP_SHOW_GROUPS:
                 payload = await self._render_groups(decision, ctx)
             elif step == STEP_SHOW_GROUP_PRODUCTS:
                 payload = await self._render_group_products(decision, ctx)
@@ -70,6 +74,45 @@ class CatalogNavigateHandler:
                 exc,
             )
             return ActionResult(success=False, error=str(exc))
+
+    async def _render_native_catalog_entry(
+        self,
+        decision: Decision,
+        ctx: BrainContext,
+    ) -> Dict[str, Any]:
+        args = getattr(decision, "args", None) or {}
+        entry = dict(args.get("native_catalog_entry") or {})
+        db = getattr(ctx, "_db", None)
+        thumbnail = str(entry.get("thumbnail_product_retailer_id") or "").strip()
+        if not thumbnail and db is not None:
+            try:
+                from core.native_catalog_capability import pick_thumbnail_retailer_id  # noqa: PLC0415
+
+                thumbnail = pick_thumbnail_retailer_id(db, ctx.tenant_id)
+            except Exception:  # noqa: BLE001
+                thumbnail = ""
+
+        discovery_text = "تفضّل، اختر من الكتالوج 👇"
+        return {
+            "products": [],
+            "collections": [],
+            "product_lines": discovery_text,
+            "discovery_presentation_text": discovery_text,
+            "discovery_output_kind": "native_catalog",
+            "chosen_path": PATH_NATIVE_CATALOG,
+            "count": 0,
+            "query": "",
+            "native_catalog_entry": {
+                "thumbnail_product_retailer_id": thumbnail,
+                "body_text": discovery_text,
+            },
+            "navigation_state_patch": self._navigation_patch(
+                decision,
+                collections=[],
+                products=[],
+                source="native_catalog",
+            ),
+        }
 
     async def _render_groups(self, decision: Decision, ctx: BrainContext) -> Dict[str, Any]:
         from ..catalog.collections_pagination import (  # noqa: PLC0415
