@@ -328,10 +328,11 @@ class StaffContactRequest:
 
 
 def _request_from_target_verdict(verdict: Any) -> StaffContactRequest:
+    if getattr(verdict, "tier", "") == "ambiguous":
+        return StaffContactRequest(kind="none")
     kind_map = {
         "named_person": "named",
         "generic_role": "generic_staff",
-        "ambiguous": "generic_staff",
     }
     return StaffContactRequest(
         kind=kind_map.get(verdict.tier, "generic_staff"),
@@ -498,6 +499,8 @@ def classify_staff_contact_request(
             registry=registry,
             role_graph=role_graph,
         )
+        if verdict.tier == "ambiguous":
+            return StaffContactRequest(kind="none")
         return _request_from_target_verdict(verdict)
 
     return StaffContactRequest(kind="none")

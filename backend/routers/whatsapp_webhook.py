@@ -6894,6 +6894,75 @@ async def _handle_merchant_message(
                 tenant_id, _pbr_exc,
             )
 
+        # ── Checkout route owner (pre-brain) ───────────────────────────────
+        # Purchase/payment intent must choose checkout channel before staff/
+        # location policies unless an active WhatsApp order already owns slots.
+        _cro_decision = None
+        try:
+            from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+                evaluate_checkout_route_owner as _evaluate_checkout_route_owner,
+            )
+            _cro_decision = _evaluate_checkout_route_owner(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to or "",
+                message=_pre_brain_customer_msg,
+            )
+        except Exception as _cro_exc:  # noqa: BLE001
+            logger.warning(
+                "[CHECKOUT_ROUTE] pre-brain check failed tenant=%s err=%s",
+                tenant_id, _cro_exc,
+            )
+            _cro_decision = None
+
+        if _cro_decision is not None:
+            _persona_ownership.mark_bypass(
+                _POReason.PRE_BRAIN_FAST_PATH,
+                owner="checkout_route_owner",
+            )
+            _cro_reply = _cro_decision.reply_text
+            _cro_ok = False
+            try:
+                _cro_ok = await _send_whatsapp_message(
+                    phone_id=phone_id, to=to, text=_cro_reply,
+                    _tenant_id=tenant_id, _db=db,
+                )
+                StateManager.save_message(
+                    db, to, _cro_reply, "outbound",
+                    conversation_id=convo.id, tenant_id=tenant_id,
+                    extra_metadata={
+                        **_persona_ownership.to_metadata(),
+                        "deterministic_path": _cro_decision.metadata_path,
+                        "checkout_route_reason": _cro_decision.reason,
+                        "checkout_channel": _cro_decision.checkout_channel or "",
+                    },
+                )
+            except Exception as _cro_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[CHECKOUT_ROUTE] send failed tenant=%s err=%s",
+                    tenant_id, _cro_send_exc,
+                )
+            logger.info(
+                "[CHECKOUT_ROUTE] short_circuit tenant=%s reason=%s "
+                "channel=%s ok=%s skip_brain=true",
+                tenant_id,
+                _cro_decision.reason,
+                _cro_decision.checkout_channel or "-",
+                _cro_ok,
+            )
+            try:
+                _trace.fallback_source = "checkout_route_owner"
+                _trace.response_goal = "checkout_channel_choice"
+                if _cro_ok:
+                    _trace.mark_outbound_sent(
+                        source=_TS.SOURCE_BRAIN,
+                        length=len(_cro_reply or ""),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            _sync_persona_observability()
+            return
+
         # ── Branch trigger router (pre-brain, PR-C structured keywords) ───
         _btr_decision = None
         try:

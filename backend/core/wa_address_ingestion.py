@@ -83,6 +83,41 @@ def build_whatsapp_location_patch(location: Dict[str, Any]) -> Dict[str, Any]:
     return patch
 
 
+def is_bare_short_address_code(text: str) -> bool:
+    """True when ``text`` is essentially a Saudi national short address code."""
+    raw = str(text or "").strip()
+    if not raw or is_accepted_maps_url(raw):
+        return False
+    signals = extract_address_signals(raw)
+    code = str(signals.get("short_address_code") or "").strip().upper()
+    if not code:
+        return False
+    compact = re.sub(r"\s+", "", raw).upper()
+    return compact == code
+
+
+def build_short_address_patch(text: str) -> Dict[str, Any]:
+    signals = extract_address_signals(text)
+    code = str(signals.get("short_address_code") or "").strip().upper()
+    patch: Dict[str, Any] = {
+        "delivery_address_status": "accepted",
+        "delivery_address_type":   "short_address_code",
+        "short_address_code":      code,
+    }
+    lat = signals.get("latitude")
+    lng = signals.get("longitude")
+    if lat is not None:
+        patch["latitude"] = lat
+        patch["delivery_location_lat"] = str(lat)
+    if lng is not None:
+        patch["longitude"] = lng
+        patch["delivery_location_lng"] = str(lng)
+    url = str(signals.get("google_maps_url") or "").strip()
+    if url:
+        patch["google_maps_url"] = url
+    return patch
+
+
 def build_maps_url_patch(text: str) -> Dict[str, Any]:
     signals = extract_address_signals(text)
     url = str(signals.get("google_maps_url") or "").strip()
@@ -146,6 +181,8 @@ def resolve_address_state_patch(
         return None
     if is_city_only_address_text(text):
         return None
+    if is_bare_short_address_code(text):
+        return build_short_address_patch(text)
     if is_accepted_maps_url(text):
         return build_maps_url_patch(text)
     return None
@@ -153,9 +190,11 @@ def resolve_address_state_patch(
 
 __all__ = [
     "build_maps_url_patch",
+    "build_short_address_patch",
     "build_whatsapp_location_patch",
     "compose_address_reply",
     "is_accepted_maps_url",
+    "is_bare_short_address_code",
     "is_city_only_address_text",
     "resolve_address_state_patch",
 ]

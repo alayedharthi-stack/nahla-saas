@@ -26,6 +26,8 @@ _ADDRESS_MISSING = frozenset({
     "address_line",
     "short_address_code",
     "google_maps_url",
+    "delivery_address",
+    "location",
     "city",
     "district",
     "street",

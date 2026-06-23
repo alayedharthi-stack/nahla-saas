@@ -352,6 +352,18 @@ def evaluate_branch_trigger_routing(
     if should_defer_contact_policies_for_commerce(message or ""):
         return None
 
+    from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+        should_defer_staff_location_for_checkout_route,
+    )
+
+    if should_defer_staff_location_for_checkout_route(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        return None
+
     _pickup_confirm_re = None
     try:
         import re as _re  # noqa: PLC0415

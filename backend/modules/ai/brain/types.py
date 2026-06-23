@@ -253,6 +253,9 @@ class OrderPreparationState:
     pending_variant_product_id: str = ""
     selected_variant_id:          str = ""
     selected_variant_retailer_id: str = ""
+    # Checkout channel ownership — whatsapp_fast | store_link | showroom_visit
+    checkout_channel: str = ""
+    awaiting_checkout_channel: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -310,6 +313,8 @@ class OrderPreparationState:
             "pending_variant_product_id": self.pending_variant_product_id,
             "selected_variant_id":        self.selected_variant_id,
             "selected_variant_retailer_id": self.selected_variant_retailer_id,
+            "checkout_channel":           str(self.checkout_channel or ""),
+            "awaiting_checkout_channel":  bool(self.awaiting_checkout_channel),
         }
 
     @staticmethod
@@ -377,6 +382,8 @@ class OrderPreparationState:
             pending_variant_product_id=str(raw.get("pending_variant_product_id", "") or ""),
             selected_variant_id=str(raw.get("selected_variant_id", "") or ""),
             selected_variant_retailer_id=str(raw.get("selected_variant_retailer_id", "") or ""),
+            checkout_channel=str(raw.get("checkout_channel", "") or ""),
+            awaiting_checkout_channel=bool(raw.get("awaiting_checkout_channel", False)),
         )
 
 

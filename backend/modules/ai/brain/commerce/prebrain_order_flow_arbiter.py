@@ -39,6 +39,8 @@ _ADDRESS_SLOTS = frozenset({
     "address_line",
     "short_address_code",
     "google_maps_url",
+    "delivery_address",
+    "location",
     "city",
     "district",
     "street",
@@ -346,9 +348,26 @@ def message_fulfills_awaited_checkout_slot(
     if "city" in missing and slots.get("city"):
         return True
 
-    if missing & {"address", "short_address_code", "google_maps_url", "address_location"}:
+    if missing & {
+        "address",
+        "short_address_code",
+        "google_maps_url",
+        "address_location",
+        "delivery_address",
+        "location",
+    }:
         if slots.get("short_address_code") or slots.get("google_maps_url"):
             return True
+        try:
+            from core.wa_address_ingestion import (  # noqa: PLC0415
+                is_accepted_maps_url,
+                is_bare_short_address_code,
+            )
+
+            if is_bare_short_address_code(message or "") or is_accepted_maps_url(message or ""):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
 
     if "payment_method" in missing and _PAYMENT_CHOICE_RE.search(_norm(message or "")):
         return True
