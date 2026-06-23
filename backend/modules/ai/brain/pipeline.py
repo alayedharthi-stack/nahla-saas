@@ -2937,6 +2937,8 @@ class MerchantBrain:
                     executor_products=list(result.data.get("products") or []),
                     chosen_path=_chosen_path,
                     history=history,
+                    order_state=new_state,
+                    inbound_metadata=(profile or {}).get("inbound_metadata") or {},
                 )
                 if _pcgg.replaced:
                     reply = _pcgg.reply

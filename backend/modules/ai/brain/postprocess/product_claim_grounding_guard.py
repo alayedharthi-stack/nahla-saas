@@ -66,6 +66,8 @@ _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "catalog_navigation_groups",
     "catalog_navigation_group_products",
     "catalog_navigation_top_products_fallback",
+    "order_slot_prompt",
+    "checkout_slot_prompt",
 })
 
 _MEDICAL_MARKERS = (
@@ -320,6 +322,8 @@ def apply_product_claim_grounding_guard(
     executor_products: Optional[Sequence[Dict[str, Any]]] = None,
     chosen_path: str = "",
     history: Optional[Sequence[Any]] = None,
+    order_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> ProductClaimGroundingGuardResult:
     mode = product_claim_grounding_guard_mode()
     original = str(reply or "")
@@ -342,6 +346,8 @@ def apply_product_claim_grounding_guard(
             executor_products=executor_products,
             chosen_path=path,
             history=history,
+            order_state=order_state,
+            inbound_metadata=inbound_metadata,
         )
         violations = _detect_violations(original, evidence)
         if not violations:

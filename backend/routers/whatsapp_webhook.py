@@ -9430,11 +9430,39 @@ async def _handle_merchant_message(
                     pause_ai as _loop_pause_ai,
                     REASON_BOT_LOOP as _R_LOOP,
                 )
+                _loop_checkout_active = False
+                _loop_checkout_recovery = ""
+                try:
+                    from core.order_flow import _load_brain_state as _loop_load_bs  # noqa: PLC0415
+                    from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
+                        build_checkout_slot_fallback_reply,
+                    )
+                    from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                        has_active_commerce_from_state,
+                    )
+
+                    _, _loop_bs = _loop_load_bs(db, tenant_id=tenant_id, phone=to)
+                    _loop_checkout_active = has_active_commerce_from_state(_loop_bs)
+                    if _loop_checkout_active:
+                        _loop_checkout_recovery = (
+                            build_checkout_slot_fallback_reply(
+                                state=_loop_bs,
+                                inbound_text=text or "",
+                            )
+                            or ""
+                        )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — loop checkout brain-state load is best-effort
+                    logger.exception(
+                        "[Merchant/LOOP] checkout brain-state load skipped tenant=%s",
+                        tenant_id,
+                    )
                 _decision = _eval_loop(
                     db, convo,
                     tenant_id=tenant_id,
                     candidate_reply=reply,
                     inbound_text=text,
+                    checkout_active=_loop_checkout_active,
+                    checkout_recovery_reply=_loop_checkout_recovery or None,
                 )
                 if _decision.action == "pause":
                     # ── Promote loop-pause to REAL handoff (May 2026 P1) ────

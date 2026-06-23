@@ -324,7 +324,16 @@ def select_arabic_commerce_fallback(
             if is_staff_route_rejection_message(inbound_text):
                 return resolve_staff_rejection_commerce_resume(state), "staff_route_rejected_resume"
             if has_active_commerce_from_state(state):
-                return "تمام، أكمل معك الطلب — وش تحتاج؟", "active_order_continue"
+                from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
+                    build_checkout_slot_fallback_reply,
+                )
+
+                slot_reply = build_checkout_slot_fallback_reply(
+                    state=state,
+                    inbound_text=inbound_text,
+                )
+                if slot_reply:
+                    return slot_reply, "checkout_slot_prompt"
         except Exception:  # noqa: silent-ok
             pass
 

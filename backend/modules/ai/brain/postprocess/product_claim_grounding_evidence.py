@@ -41,6 +41,28 @@ _KB_CLAIM_KINDS = frozenset({
 
 _PRICE_PARSE_RE = re.compile(r"(\d{2,5})")
 
+_CURRENCY_TOKEN_RE = re.compile(
+    r"(?:ريال|r\.?\s?س\.?|sar)\b",
+    re.UNICODE | re.IGNORECASE,
+)
+_PRICE_CONTEXT_RE = re.compile(
+    r"(?:السعر|سعر|اسعار|أسعار|الاجمالي|الإجمالي|اجمالي|إجمالي|المبلغ|مبلغ|"
+    r"تكلف|قيمة|ب(?:كم|ـكم))",
+    re.UNICODE | re.IGNORECASE,
+)
+_ADDRESS_CONTEXT_RE = re.compile(
+    r"(?:عنوان|العنوان|حي|شارع|طريق|رمز|الوطني|المختصر|"
+    r"maps\.|goo\.gl|deliver|delivery|address|location|"
+    r"محمد|الكارز|بطحاء|قريش|مكه|مكة|المدين)",
+    re.UNICODE | re.IGNORECASE,
+)
+_SHORT_ADDRESS_TOKEN_RE = re.compile(
+    r"[A-Za-z]{4}\d{4}",
+)
+_NUMERIC_CANDIDATE_RE = re.compile(
+    r"(\d{2,5})(?:\.\d{1,2})?",
+)
+
 
 def _norm(text: Optional[str]) -> str:
     if not text or not isinstance(text, str):
@@ -69,20 +91,128 @@ def parse_price_amount(value: Any) -> Optional[int]:
         return None
 
 
+def _span_in_short_address_token(text: str, start: int, end: int) -> bool:
+    for token in _SHORT_ADDRESS_TOKEN_RE.finditer(text or ""):
+        if token.start() <= start and end <= token.end():
+            return True
+    return False
+
+
 def extract_reply_prices(reply: str) -> Set[int]:
-    """Return SAR-like amounts mentioned in outbound reply text."""
+    """Return explicit price claims in outbound text (not address digits)."""
     prices: Set[int] = set()
-    if not reply:
+    text = reply or ""
+    if not text.strip():
         return prices
-    for match in re.finditer(
-        r"(\d{2,5})\s*(?:ريال|r(?:iyal)?|sar|ر\.?\s?س\.?)?",
-        reply,
-        re.UNICODE | re.IGNORECASE,
-    ):
+
+    for match in _NUMERIC_CANDIDATE_RE.finditer(text):
+        start, end = match.span()
+        if _span_in_short_address_token(text, start, end):
+            continue
+
+        window_before = text[max(0, start - 48):start]
+        window_after = text[end: min(len(text), end + 24)]
+        local = f"{window_before}{match.group(0)}{window_after}"
+
+        has_currency = bool(_CURRENCY_TOKEN_RE.search(window_after))
+        has_price_context = bool(_PRICE_CONTEXT_RE.search(window_before))
+        if not has_currency and not has_price_context:
+            continue
+
+        if _ADDRESS_CONTEXT_RE.search(local) and not has_price_context:
+            continue
+
+        raw_num = match.group(0).replace(",", "")
         try:
-            prices.add(int(match.group(1)))
+            val = float(raw_num)
+            prices.add(int(val))
+            if "." in raw_num:
+                whole, frac = raw_num.split(".", 1)
+                if frac:
+                    prices.add(int(whole))
         except (TypeError, ValueError):
             continue
+    return prices
+
+
+def collect_whatsapp_catalog_grounded_prices(
+    *,
+    order_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Set[int]:
+    """Trusted WA native catalog prices from metadata and checkout line_items."""
+    prices: Set[int] = set()
+    meta = dict(inbound_metadata or {})
+    if meta.get("source_type") == "catalog_order":
+        tp = parse_price_amount(meta.get("total_price"))
+        if tp is not None:
+            prices.add(tp)
+        try:
+            total_f = float(meta.get("total_price"))
+            if total_f > 0:
+                prices.add(int(total_f))
+        except (TypeError, ValueError):
+            pass
+        for item in meta.get("product_items") or []:
+            if not isinstance(item, dict):
+                continue
+            qty = 1
+            try:
+                qty = max(1, int(float(item.get("quantity") or 1)))
+            except (TypeError, ValueError):
+                qty = 1
+            unit = parse_price_amount(item.get("item_price"))
+            if unit is not None:
+                prices.add(unit)
+                prices.add(unit * qty)
+
+    prep: Dict[str, Any] = {}
+    cart_items: List[Any] = []
+    if order_state is not None:
+        if isinstance(order_state, dict):
+            prep = dict(order_state.get("order_prep") or {})
+            cart_items = list(
+                prep.get("line_items")
+                or prep.get("cart_items")
+                or order_state.get("cart_items")
+                or []
+            )
+        else:
+            op = getattr(order_state, "order_prep", None)
+            if op is not None:
+                if isinstance(op, dict):
+                    prep = dict(op)
+                elif hasattr(op, "to_dict"):
+                    prep = dict(op.to_dict() or {})
+            cart_items = list(getattr(order_state, "cart_items", None) or [])
+            if not cart_items and prep:
+                cart_items = list(prep.get("line_items") or prep.get("cart_items") or [])
+
+    for item in cart_items:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").lower()
+        trusted_item = bool(
+            item.get("product_retailer_id")
+            or item.get("from_catalog_order")
+            or "catalog" in source
+            or "whatsapp" in source
+        )
+        if not trusted_item:
+            continue
+        for key in ("unit_price", "price"):
+            p = parse_price_amount(item.get(key))
+            if p is not None:
+                prices.add(p)
+        qty = 1
+        try:
+            qty = max(1, int(item.get("quantity") or 1))
+        except (TypeError, ValueError):
+            qty = 1
+        unit = parse_price_amount(item.get("unit_price") or item.get("price"))
+        if unit is not None and qty > 1:
+            prices.add(unit * qty)
+
     return prices
 
 
@@ -155,6 +285,7 @@ class ProductClaimGroundingEvidence:
     recent_catalog_miss: bool = False
     recent_no_synced: bool = False
     has_checkout_catalog: bool = False
+    whatsapp_catalog_trusted: bool = False
     executor_product_ids: frozenset[int] = frozenset()
     kb_section_ids: frozenset[int] = frozenset()
     reason: str = ""
@@ -168,6 +299,8 @@ def build_product_claim_grounding_evidence(
     executor_products: Optional[Sequence[Dict[str, Any]]] = None,
     chosen_path: str = "",
     history: Optional[Sequence[Any]] = None,
+    order_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> ProductClaimGroundingEvidence:
     """Build evidence bundle for product claim grounding guard."""
     ctx = availability_context or {}
@@ -194,6 +327,14 @@ def build_product_claim_grounding_evidence(
             unavailable.append(item)
 
     grounded_prices: Set[int] = set()
+    wa_prices = collect_whatsapp_catalog_grounded_prices(
+        order_state=order_state,
+        inbound_metadata=inbound_metadata,
+    )
+    grounded_prices.update(wa_prices)
+    whatsapp_catalog_trusted = bool(wa_prices) or (
+        str((inbound_metadata or {}).get("source_type") or "") == "catalog_order"
+    )
     corpus_parts: List[str] = []
     kb_ids: Set[int] = set()
     executor_ids: Set[int] = set()
@@ -292,6 +433,7 @@ def build_product_claim_grounding_evidence(
         recent_catalog_miss=recent_miss,
         recent_no_synced=recent_no_sync,
         has_checkout_catalog=bool(available),
+        whatsapp_catalog_trusted=whatsapp_catalog_trusted,
         executor_product_ids=frozenset(executor_ids),
         kb_section_ids=frozenset(kb_ids),
     )
