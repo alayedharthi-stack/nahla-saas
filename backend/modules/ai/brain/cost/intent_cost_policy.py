@@ -71,7 +71,7 @@ _DEFAULT_POLICY = IntentCostPolicy(
 
 
 def is_routine_llm_avoid_enabled() -> bool:
-    return os.getenv(_FLAG, "true").strip().lower() in {
+    return os.getenv(_FLAG, "false").strip().lower() in {
         "1", "true", "yes", "on",
     }
 

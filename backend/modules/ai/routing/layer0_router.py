@@ -64,7 +64,7 @@ class Layer0RouteDecision:
 
 
 def layer0_router_enabled() -> bool:
-    return os.getenv(_FLAG, "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv(_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _faq_mixed_commerce_blocks(message: str) -> bool:

@@ -1,9 +1,9 @@
 """
-Greeting routing — PR2B intent cost policy uses template greet for pure turns.
+Greeting routing — default persona LLM compose for pure turns.
 
-Pure greetings route to ACTION_GREET (variant templates) when
-``NAHLA_ROUTINE_LLM_AVOID_ENABLED=true`` (default). Persona LLM compose
-remains available when the kill switch is off.
+Pure greetings route to ACTION_LLM_REPLY (persona_kind=greeting) when
+``NAHLA_ROUTINE_LLM_AVOID_ENABLED=false`` (default). Template ACTION_GREET
+remains available only when the avoid flag is explicitly enabled.
 """
 from __future__ import annotations
 
@@ -111,6 +111,15 @@ def _persona_greeting_decision(*, re_greet: bool = False) -> Decision:
     )
 
 
+def _assert_persona_greeting_llm(decision: Decision) -> None:
+    assert decision.action == ACTION_LLM_REPLY, (
+        f"expected persona LLM greeting, got {decision.action!r} "
+        f"(reason={decision.reason!r})"
+    )
+    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+
+
 def _webhook_greeting_fast_path_block() -> str:
     """Return the webhook source slice for the greeting fast-path gate."""
     webhook_src = (
@@ -125,14 +134,10 @@ def _webhook_greeting_fast_path_block() -> str:
 
 
 @pytest.mark.parametrize("msg", [_COLD_PURE_GREETING, "هلا", "مرحبا"])
-def test_cold_first_turn_pure_greeting_routes_template_greet(msg: str) -> None:
-    """First inbound pure greeting uses ACTION_GREET (no Sonnet)."""
+def test_cold_first_turn_pure_greeting_routes_persona_llm(msg: str) -> None:
+    """First inbound pure greeting uses persona LLM compose by default."""
     decision = DefaultDecisionEngine().decide(_cold_greeting_ctx(msg))
-    assert decision.action == ACTION_GREET, (
-        f"expected ACTION_GREET for cold pure greeting, got {decision.action!r} "
-        f"(reason={decision.reason!r})"
-    )
-    assert decision.action != ACTION_LLM_REPLY
+    _assert_persona_greeting_llm(decision)
 
 
 def test_cold_first_turn_salaam_intent_is_greeting_not_commerce() -> None:
@@ -142,12 +147,12 @@ def test_cold_first_turn_salaam_intent_is_greeting_not_commerce() -> None:
     assert intent.name == INTENT_GREETING
 
 
-# ── 2. Established re-greeting — preserve persona_social ──────────────────
+# ── 2. Established re-greeting — persona_social by default ────────────────
 
 
 @pytest.mark.parametrize("msg", ["هلا", "مرحبا", "السلام عليكم ورحمة الله"])
-def test_established_pure_greeting_routes_template_re_greet(msg: str) -> None:
-    """Established re-greetings use short template re-greet (no LLM)."""
+def test_established_pure_greeting_routes_persona_llm(msg: str) -> None:
+    """Established re-greetings use persona LLM compose by default."""
     state = MerchantConversationState()
     state.greeted = True
     ctx = BrainContext(
@@ -165,9 +170,7 @@ def test_established_pure_greeting_routes_template_re_greet(msg: str) -> None:
         facts=_facts(),
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_GREET
-    assert decision.args.get("re_greet") is True
-    assert decision.action != ACTION_LLM_REPLY
+    _assert_persona_greeting_llm(decision)
 
 
 # ── 3. Mixed greeting + commerce — no persona greeting short-circuit ──────
@@ -256,17 +259,17 @@ def test_render_identity_greeting_variants_contain_banned_cs_phrases() -> None:
     )
 
 
-# ── 6. Regression — first-greeting path must not use template greet ───────
+# ── 6. Default LLM vs legacy template when avoid flag on ──────────────────
 
 
-def test_cold_first_turn_uses_action_greet_template_path() -> None:
+def test_cold_first_turn_uses_persona_llm_by_default() -> None:
     decision = DefaultDecisionEngine().decide(_cold_greeting_ctx())
-    assert decision.action == ACTION_GREET
+    _assert_persona_greeting_llm(decision)
 
 
 def test_greeting_templates_pool_phatic_only_no_cs_closers() -> None:
     """Rollback templates.greeting are phatic-only (ARCH-KB-001)."""
-    from modules.ai.brain.compose import templates as T  # noqa: PLC0415
+    from modules.ai.brain.compose import templates as T  # noqa: E402
 
     texts = [
         T.greeting(store_name="متجر تجريبي", assistant_name="", variant=v)
@@ -278,10 +281,19 @@ def test_greeting_templates_pool_phatic_only_no_cs_closers() -> None:
     ), "rollback greeting templates must not carry CS opener/closer phrasing"
 
 
-def test_pure_greeting_selects_template_greet_for_cold_turn() -> None:
-    """PR2B: cold pure greeting selects templates.greeting (no LLM)."""
+def test_pure_greeting_selects_persona_llm_for_cold_turn() -> None:
+    """Default: cold pure greeting selects persona LLM compose."""
+    decision = DefaultDecisionEngine().decide(_cold_greeting_ctx())
+    _assert_persona_greeting_llm(decision)
+
+
+def test_pure_greeting_selects_template_greet_when_avoid_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
     decision = DefaultDecisionEngine().decide(_cold_greeting_ctx())
     assert decision.action == ACTION_GREET
+    assert decision.action != ACTION_LLM_REPLY
 
 
 def test_persona_compose_restored_when_routine_avoid_disabled(
@@ -289,6 +301,4 @@ def test_persona_compose_restored_when_routine_avoid_disabled(
 ) -> None:
     monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "false")
     decision = DefaultDecisionEngine().decide(_cold_greeting_ctx())
-    assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == PERSONA_TOPIC_SOCIAL
-    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
+    _assert_persona_greeting_llm(decision)

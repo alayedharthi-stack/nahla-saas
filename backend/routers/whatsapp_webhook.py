@@ -4416,18 +4416,30 @@ async def _dispatch_message(
                         "failed tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _sc_inb_exc,
                     )
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _pc_reply_text, _pc_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_payment_claim_decision,
+                    inbound_text=text or "",
+                )
                 try:
                     StateManager.save_message(
                         db,
                         phone=sender,
                         direction="outbound",
-                        body=_payment_claim_decision["reply_text"],
+                        body=_pc_reply_text,
                         event_type="whatsapp_message",
                         conversation_id=_w203_conv_id_pc,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
                             "deterministic_path": "payment_claim_ack",
+                            **_pc_compose_meta,
                         },
                     )
                 except Exception as _sc_out_exc:  # noqa: BLE001
@@ -4443,7 +4455,7 @@ async def _dispatch_message(
                         "to": sender,
                         "type": "text",
                         "text": {
-                            "body": _payment_claim_decision["reply_text"],
+                            "body": _pc_reply_text,
                         },
                     },
                     _tenant_id=resolved_tenant_id,
@@ -4566,12 +4578,23 @@ async def _dispatch_message(
                 #    stamping, and wamid surfacing all work. Persist
                 #    the outbound row with ``is_ai=True`` so it
                 #    surfaces in admin AI metrics.
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _rc_reply_text, _rc_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_receipt_decision,
+                    inbound_text=persist_body or text or "",
+                )
                 try:
                     StateManager.save_message(
                         db,
                         phone=sender,
                         direction="outbound",
-                        body=_receipt_decision["reply_text"],
+                        body=_rc_reply_text,
                         event_type="whatsapp_message",
                         conversation_id=_w203_conv_id_rc,
                         tenant_id=resolved_tenant_id,
@@ -4579,6 +4602,7 @@ async def _dispatch_message(
                             "is_ai": True,
                             "deterministic_path": "payment_receipt_ack",
                             "order_summary": _receipt_decision.get("summary"),
+                            **_rc_compose_meta,
                         },
                     )
                 except Exception as _save_out_exc:  # noqa: BLE001
@@ -4594,7 +4618,7 @@ async def _dispatch_message(
                         "to": sender,
                         "type": "text",
                         "text": {
-                            "body": _receipt_decision["reply_text"],
+                            "body": _rc_reply_text,
                         },
                     },
                     _tenant_id=resolved_tenant_id,
@@ -4697,18 +4721,30 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _mp_in_exc,
                     )
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _mp_reply_text, _mp_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_map_image_decision,
+                    inbound_text=persist_body or text or "",
+                )
                 try:
                     StateManager.save_message(
                         db,
                         phone=sender,
                         direction="outbound",
-                        body=_map_image_decision["reply_text"],
+                        body=_mp_reply_text,
                         event_type="whatsapp_message",
                         conversation_id=_w203_conv_id_mp,
                         tenant_id=resolved_tenant_id,
                         extra_metadata={
                             "is_ai": True,
                             "deterministic_path": "map_image_ack",
+                            **_mp_compose_meta,
                         },
                     )
                 except Exception as _mp_out_exc:  # noqa: BLE001
@@ -4724,7 +4760,7 @@ async def _dispatch_message(
                         "to": sender,
                         "type": "text",
                         "text": {
-                            "body": _map_image_decision["reply_text"],
+                            "body": _mp_reply_text,
                         },
                     },
                     _tenant_id=resolved_tenant_id,
@@ -4746,13 +4782,24 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _addr_patch_exc,
                     )
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _addr_reply_text, _addr_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_address_decision,
+                    inbound_text=persist_body or text or "",
+                )
                 await _post_wa(
                     used_pid,
                     {
                         "messaging_product": "whatsapp",
                         "to": sender,
                         "type": "text",
-                        "text": {"body": _address_decision["reply_text"]},
+                        "text": {"body": _addr_reply_text},
                     },
                     _tenant_id=resolved_tenant_id,
                     _db=db,
@@ -4774,13 +4821,24 @@ async def _dispatch_message(
                             "tenant=%s phone=%s err=%s",
                             resolved_tenant_id, sender, _pm_patch_exc,
                         )
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _pm_reply_text, _pm_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_payment_method_decision,
+                    inbound_text=text or "",
+                )
                 await _post_wa(
                     used_pid,
                     {
                         "messaging_product": "whatsapp",
                         "to": sender,
                         "type": "text",
-                        "text": {"body": _payment_method_decision["reply_text"]},
+                        "text": {"body": _pm_reply_text},
                     },
                     _tenant_id=resolved_tenant_id,
                     _db=db,
@@ -4894,12 +4952,23 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _ev_in_exc,
                     )
+                from core.constrained_operational_compose import (  # noqa: PLC0415
+                    resolve_prebrain_reply_text,
+                )
+
+                _ev_reply_text, _ev_compose_meta = await resolve_prebrain_reply_text(
+                    db=db,
+                    tenant_id=resolved_tenant_id,
+                    phone=sender,
+                    decision=_evidence_decision,
+                    inbound_text=persist_body or text or "",
+                )
                 try:
                     StateManager.save_message(
                         db,
                         phone=sender,
                         direction="outbound",
-                        body=_evidence_decision["reply_text"],
+                        body=_ev_reply_text,
                         event_type="whatsapp_message",
                         conversation_id=_w203_conv_id_ev,
                         tenant_id=resolved_tenant_id,
@@ -4908,6 +4977,7 @@ async def _dispatch_message(
                             "deterministic_path": "payment_evidence_soft_ack",
                             "payment_evidence_status": _pe_status,
                             "payment_evidence_reason": _pe_reason,
+                            **_ev_compose_meta,
                         },
                     )
                 except Exception as _ev_out_exc:  # noqa: BLE001
@@ -4923,7 +4993,7 @@ async def _dispatch_message(
                         "to": sender,
                         "type": "text",
                         "text": {
-                            "body": _evidence_decision["reply_text"],
+                            "body": _ev_reply_text,
                         },
                     },
                     _tenant_id=resolved_tenant_id,
@@ -10454,7 +10524,35 @@ async def _handle_merchant_message(
                     reply_text=reply or "",
                 )
                 if _ci.fired and _ci.new_reply:
-                    reply = _ci.new_reply
+                    from core.reply_instruction import (  # noqa: PLC0415
+                        build_clear_intent_instruction,
+                        is_operational_constrained_compose_enabled,
+                    )
+
+                    if is_operational_constrained_compose_enabled():
+                        from core.constrained_operational_compose import (  # noqa: PLC0415
+                            resolve_prebrain_reply_text,
+                        )
+
+                        _ci_decision = {
+                            "reply_text": _ci.new_reply,
+                            "deterministic_path": "clear_intent_fallback",
+                            "reply_instruction": build_clear_intent_instruction(
+                                intent=_ci.customer_intent,
+                                legacy_copy=_ci.new_reply,
+                                inbound_text=text or "",
+                            ).to_dict(),
+                        }
+                        _ci_reply, _ci_meta = await resolve_prebrain_reply_text(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone=sender,
+                            decision=_ci_decision,
+                            inbound_text=text or "",
+                        )
+                        reply = _ci_reply
+                    else:
+                        reply = _ci.new_reply
                 if _ci.fired or _ci.skipped_reason not in {
                     "flag_disabled",
                     "reply_not_generic_fallback",

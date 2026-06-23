@@ -88,16 +88,15 @@ def _mock_brain_state_store():
 
 
 class TestLayer0PureTurns:
-    def test_greeting_does_not_need_brain(self):
+    def test_greeting_defers_to_brain(self):
+        """Pure greetings defer to Brain persona compose (Phase 3 migration)."""
         decision = evaluate_layer0_route(
             _mock_db(),
             tenant_id=101,
             customer_phone="966500000001",
             message="السلام عليكم",
         )
-        assert decision is not None
-        assert decision.matched == "greeting"
-        assert decision.reply_text.strip()
+        assert decision is None
 
     def test_thanks_does_not_need_brain(self):
         decision = evaluate_layer0_route(
@@ -141,7 +140,11 @@ class TestLayer0PureTurns:
             message="رابط المتجر الإلكتروني",
         )
         assert decision is not None
-        assert "لم يتم ربط رابط المتجر" in decision.reply_text
+        from modules.ai.brain.compose.templates import (  # noqa: PLC0415
+            MSG_STORE_LINK_NOT_CONFIGURED,
+        )
+
+        assert MSG_STORE_LINK_NOT_CONFIGURED in decision.reply_text
 
     def test_working_hours_does_not_need_brain(self):
         decision = evaluate_layer0_route(
@@ -253,7 +256,7 @@ class TestLayer0NoBrainOrLlm:
                     _mock_db(),
                     tenant_id=301,
                     customer_phone="966500000201",
-                    message="مرحبا",
+                    message="شكراً",
                 )
         assert decision is not None
         mock_brain.assert_not_called()

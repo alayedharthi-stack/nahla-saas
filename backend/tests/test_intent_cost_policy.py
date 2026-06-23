@@ -90,7 +90,16 @@ def _social_ctx(message: str, category: str = "thanks") -> BrainContext:
 
 
 class TestIntentCostPolicyModule:
-    def test_routine_intents_avoid_llm_by_default(self) -> None:
+    def test_routine_intents_allow_llm_by_default(self) -> None:
+        for name in ("greeting", "social", "thanks", "farewell"):
+            policy = get_intent_cost_policy(name)
+            assert policy.llm_mode == "allow"
+            assert policy.allow_kb is True
+
+    def test_routine_intents_avoid_llm_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         for name in ("greeting", "social", "thanks", "farewell"):
             policy = get_intent_cost_policy(name)
             assert policy.llm_mode == "avoid"
@@ -103,7 +112,7 @@ class TestIntentCostPolicyModule:
         assert policy.llm_mode == "allow"
 
     def test_no_tenant_specific_logic_in_policy(self) -> None:
-        assert should_avoid_llm_for_intent("greeting") is True
+        assert should_avoid_llm_for_intent("greeting") is False
         policy_t7 = get_intent_cost_policy("greeting")
         policy_t33 = get_intent_cost_policy("greeting")
         assert policy_t7 == policy_t33
@@ -120,31 +129,39 @@ class TestIntentCostPolicyModule:
 
 class TestPureGreetingRouting:
     @pytest.mark.parametrize("msg", ["هلا", "مرحبا", "السلام عليكم"])
-    def test_pure_greeting_decision_is_action_greet_not_llm(self, msg: str) -> None:
+    def test_pure_greeting_decision_uses_persona_llm_by_default(self, msg: str) -> None:
         decision = DefaultDecisionEngine().decide(_greeting_ctx(msg, greeted=False))
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("persona_kind") == "greeting"
+
+    def test_pure_greeting_decision_uses_template_when_avoid_on(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
+        decision = DefaultDecisionEngine().decide(_greeting_ctx("هلا", greeted=False))
         assert decision.action == ACTION_GREET
         assert decision.action != ACTION_LLM_REPLY
 
-    def test_established_pure_greeting_uses_re_greet_template(self) -> None:
+    def test_established_pure_greeting_uses_persona_llm_by_default(self) -> None:
         decision = DefaultDecisionEngine().decide(_greeting_ctx("هلا", greeted=True))
-        assert decision.action == ACTION_GREET
-        assert decision.args.get("re_greet") is True
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("persona_kind") == "greeting"
 
-    def test_pure_greeting_compose_does_not_call_llm(self) -> None:
+    def test_pure_greeting_compose_calls_llm_by_default(self) -> None:
         composer = DefaultComposer()
         ctx = _greeting_ctx("هلا", greeted=False)
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_GREET
+        assert decision.action == ACTION_LLM_REPLY
         result = ActionResult(success=True, data={})
 
         async def _run() -> None:
             with patch.object(
                 composer,
                 "_llm_compose",
-                new=AsyncMock(return_value="يجب ألا يُستدعى"),
+                new=AsyncMock(return_value="ياهلا 🌷"),
             ) as mock_llm:
                 reply = await composer.compose(decision, result, ctx)
-            mock_llm.assert_not_called()
+            mock_llm.assert_called_once()
             assert reply.strip()
 
         asyncio.run(_run())
@@ -237,7 +254,10 @@ class TestAvoidableCallWarning:
         assert "[LLM_AVOIDABLE_CALL]" in joined
         assert secret not in joined
 
-    def test_llm_compose_logs_avoidable_for_greeting_intent(self, caplog) -> None:
+    def test_llm_compose_logs_avoidable_for_greeting_intent(
+        self, caplog, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         caplog.set_level(logging.WARNING, logger="nahla.ai.brain.cost")
         composer = DefaultComposer()
         ctx = BrainContext(
@@ -283,11 +303,16 @@ class TestPersonaWarmCompose:
         composer = DefaultComposer()
         ctx = _greeting_ctx("هلا", greeted=False)
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_GREET
+        assert decision.action == ACTION_LLM_REPLY
         result = ActionResult(success=True, data={})
 
         async def _run() -> str:
-            return await composer.compose(decision, result, ctx)
+            with patch.object(
+                composer,
+                "_llm_compose",
+                new=AsyncMock(return_value="ياهلا ومرحبا! كيف الحال؟ 😊"),
+            ):
+                return await composer.compose(decision, result, ctx)
 
         reply = asyncio.run(_run())
         assert persona_reply_is_warm_greeting(reply)
@@ -295,7 +320,10 @@ class TestPersonaWarmCompose:
 
 
 class TestPureGreetingNoKbPrompt:
-    def test_greeting_avoid_policy_blocks_kb_in_prompt_when_built(self) -> None:
+    def test_greeting_avoid_policy_blocks_kb_in_prompt_when_built(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         state = BrainReplyState(
             store_name="متجر",
             intent_name=INTENT_GREETING,

@@ -83,13 +83,11 @@ def should_pre_commerce_shortcut(
         if slots.get("embedded_greeting"):
             return False
         try:
-            from .cost.intent_cost_policy import should_avoid_llm_for_intent  # noqa: PLC0415
             from .decision.engine import _first_turn_has_actionable_substance  # noqa: PLC0415
 
-            if (
-                should_avoid_llm_for_intent(INTENT_GREETING)
-                and not _first_turn_has_actionable_substance(message)
-            ):
+            # Pure greetings must skip catalog preload regardless of whether
+            # compose uses LLM or legacy templates (Doctrine: gate ≠ wording).
+            if not _first_turn_has_actionable_substance(message):
                 return True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
