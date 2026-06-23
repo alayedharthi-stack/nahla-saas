@@ -624,6 +624,19 @@ MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS = max(
     float(os.environ.get("MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS", "2.0") or "2.0"),
 )
 
+# ── Outbound marketing emoji polish (WhatsApp text-only) ────────────────────
+# Light contextual emoji on checkout/catalog replies. Runs in whatsapp_webhook
+# after truth guards and before sync_outbound_body_to_final. Set to false to
+# disable platform-wide without code changes.
+MARKETING_EMOJI_POLICY_ENABLED = (
+    os.environ.get("MARKETING_EMOJI_POLICY_ENABLED", "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+MARKETING_EMOJI_POLICY_AUDIT_ONLY = (
+    os.environ.get("MARKETING_EMOJI_POLICY_AUDIT_ONLY", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
+
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message
 # handler used to fall back to a free-form `generate_ai_reply()` call. The
