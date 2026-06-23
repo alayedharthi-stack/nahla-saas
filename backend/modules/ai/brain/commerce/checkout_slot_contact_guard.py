@@ -2,10 +2,10 @@
 checkout_slot_contact_guard.py
 ──────────────────────────────
 Defer pre-brain contact/showroom routing when the customer is answering
-an active checkout slot (city / address), not requesting staff or pickup.
+an active checkout slot — not requesting staff or pickup.
 
-Platform-wide: persisted ``order_prep.missing_fields`` + ordering slots —
-no tenant hardcoding.
+Delegates to :mod:`prebrain_order_flow_arbiter` for platform-wide slot
+ownership. Legacy helpers remain for city/showroom probes.
 """
 from __future__ import annotations
 
@@ -107,68 +107,17 @@ def is_bare_city_token_message(message: str) -> bool:
     return False
 
 
-def _order_prep_awaiting_address(op: Any) -> bool:
-    if op is None:
-        return False
-    if isinstance(op, dict):
-        missing = {str(x).strip().lower() for x in (op.get("missing_fields") or []) if x}
-        has_product = bool(str(op.get("product_id") or op.get("product_name") or "").strip())
-        has_city = bool(str(op.get("city") or "").strip())
-        status = str(op.get("order_status") or "").strip().lower()
-    else:
-        missing = {
-            str(x).strip().lower()
-            for x in (getattr(op, "missing_fields", None) or [])
-            if x
-        }
-        has_product = bool(
-            str(getattr(op, "product_id", "") or getattr(op, "product_name", "") or "").strip()
-        )
-        has_city = bool(str(getattr(op, "city", "") or "").strip())
-        status = str(getattr(op, "order_status", "") or "").strip().lower()
-
-    if missing & _ADDRESS_MISSING:
-        return True
-    if has_product and not has_city:
-        return True
-    if status in {
-        "awaiting_address",
-        "awaiting_product",
-        "awaiting_payment",
-        "awaiting_payment_receipt",
-    }:
-        return True
-    return False
-
-
 def message_fulfills_checkout_slot(message: str, *, order_prep: Any) -> bool:
     """True when inbound text satisfies an awaited checkout slot."""
-    if not _order_prep_awaiting_address(order_prep):
-        return False
-    if isinstance(order_prep, dict):
-        missing = {str(x).strip().lower() for x in (order_prep.get("missing_fields") or []) if x}
-    else:
-        missing = {
-            str(x).strip().lower()
-            for x in (getattr(order_prep, "missing_fields", None) or [])
-            if x
-        }
+    from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+        message_fulfills_awaited_checkout_slot,
+    )
 
-    try:
-        from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots  # noqa: PLC0415
-
-        slots = extract_ordering_slots(message or "")
-    except Exception:  # noqa: BLE001
-        slots = {}
-
-    if "city" in missing and slots.get("city"):
-        return True
-    if missing & {"address", "short_address_code", "google_maps_url"}:
-        if slots.get("short_address_code") or slots.get("google_maps_url"):
-            return True
-    if is_bare_city_token_message(message or ""):
-        return True
-    return False
+    return message_fulfills_awaited_checkout_slot(
+        message or "",
+        order_prep=order_prep,
+        customer_phone="",
+    )
 
 
 def should_defer_contact_routing_for_checkout_slot(
@@ -179,49 +128,24 @@ def should_defer_contact_routing_for_checkout_slot(
     message: str,
 ) -> bool:
     """Return True when contact/showroom pre-brain paths must yield to Brain."""
+    from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+        should_yield_prebrain_to_order_flow,
+    )
+
+    if should_yield_prebrain_to_order_flow(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone or "",
+        message=message or "",
+    ):
+        return True
+
+    # Fallback when brain state is unavailable: bare city token still yields.
     if not (message or "").strip():
         return False
     if has_explicit_showroom_pickup_intent(message):
         return False
-    try:
-        from core.order_flow import _load_brain_state  # noqa: PLC0415
-
-        _, brain_state = _load_brain_state(
-            db,
-            tenant_id=int(tenant_id or 0),
-            phone=str(customer_phone or ""),
-        )
-        op = (brain_state or {}).get("order_prep") or {}
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[CHECKOUT_SLOT_GUARD] brain_state load skipped tenant=%s err=%s",
-            tenant_id,
-            exc,
-        )
-        return is_bare_city_token_message(message)
-
-    if not _order_prep_awaiting_address(op):
-        return False
-
-    if message_fulfills_checkout_slot(message, order_prep=op):
-        logger.info(
-            "[CHECKOUT_SLOT_GUARD] defer=contact_routing tenant=%s "
-            "reason=slot_fulfillment preview=%r missing=%s",
-            tenant_id,
-            (message or "")[:80],
-            list((op.get("missing_fields") if isinstance(op, dict) else []) or [])[:6],
-        )
-        return True
-
-    if is_bare_city_token_message(message):
-        logger.info(
-            "[CHECKOUT_SLOT_GUARD] defer=contact_routing tenant=%s "
-            "reason=bare_city_token preview=%r",
-            tenant_id,
-            (message or "")[:80],
-        )
-        return True
-    return False
+    return is_bare_city_token_message(message)
 
 
 __all__ = [

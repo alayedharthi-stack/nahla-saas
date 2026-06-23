@@ -5834,7 +5834,10 @@ async def _handle_merchant_message(
                     evaluate_generic_handoff_contact_policy as _eval_gh_policy,
                 )
                 _gh_policy = _eval_gh_policy(
-                    db, tenant_id=tenant_id, message=text or "",
+                    db,
+                    tenant_id=tenant_id,
+                    message=text or "",
+                    customer_phone=to or "",
                 )
                 if _gh_policy is not None:
                     _HANDOFF_ACK_TEXT = _gh_policy.reply_text
