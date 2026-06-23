@@ -148,6 +148,7 @@ def _resolve_direct_group_name(
 ) -> Optional[Any]:
     from ..commerce.collection_navigation import (  # noqa: PLC0415
         CollectionResolution,
+        _collection_db_id,
         _collection_id,
         _collection_label,
         _match_collection_by_name,
@@ -157,10 +158,12 @@ def _resolve_direct_group_name(
     if len(hits) != 1:
         return None
     row = hits[0]
+    slug = str(row.get("group_slug") or row.get("group_id") or row.get("slug") or "").strip()
     return CollectionResolution(
         group_id=_collection_id(row),
-        group_slug=str(row.get("group_id") or row.get("slug") or "").strip(),
+        group_slug=slug,
         group_name=_collection_label(row),
+        group_db_id=_collection_db_id(row),
         list_index=int(row.get("list_index") or 0),
     )
 
@@ -372,12 +375,14 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                     extra_args={
                         "catalog_group_id": resolution.group_id,
                         "catalog_group_slug": resolution.group_slug,
+                        "catalog_group_db_id": resolution.group_db_id,
                         "query": resolution.group_name,
                         "group_products_offset": 0,
                         "reuse_group_pool": False,
                         "navigation_state_patch": {
                             "selected_collection": resolution.group_id or resolution.group_slug,
                             "current_catalog_group": {
+                                "group_db_id": resolution.group_db_id,
                                 "group_id": resolution.group_id,
                                 "group_slug": resolution.group_slug,
                                 "group_name": resolution.group_name,
@@ -458,6 +463,7 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                 extra_args={
                     "catalog_group_id": current_group.get("group_id") or current_group.get("id"),
                     "catalog_group_slug": current_group.get("group_slug") or current_group.get("slug"),
+                    "catalog_group_db_id": current_group.get("group_db_id"),
                     "query": group_name,
                     "group_products_offset": next_offset,
                     "group_products_pool": pool,
@@ -559,12 +565,14 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
                     extra_args={
                         "catalog_group_id": resolution.group_id,
                         "catalog_group_slug": resolution.group_slug,
+                        "catalog_group_db_id": resolution.group_db_id,
                         "query": resolution.group_name,
                         "group_products_offset": 0,
                         "reuse_group_pool": False,
                         "navigation_state_patch": {
                             "selected_collection": resolution.group_id or resolution.group_slug,
                             "current_catalog_group": {
+                                "group_db_id": resolution.group_db_id,
                                 "group_id": resolution.group_id,
                                 "group_slug": resolution.group_slug,
                                 "group_name": resolution.group_name,

@@ -37,10 +37,14 @@ class CatalogGroup:
     group_name: str
     browse_rank: int
     product_count: int = 0
+    group_db_id: Optional[int] = None
+    group_slug: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "group_db_id": self.group_db_id,
             "group_id": self.group_id,
+            "group_slug": self.group_slug or self.group_id,
             "group_name": self.group_name,
             "browse_rank": self.browse_rank,
             "product_count": self.product_count,
@@ -150,10 +154,14 @@ class CatalogIntelligence:
                 db_groups,
                 key=lambda g: (int(g.get("priority") or 100), str(g.get("label") or "")),
             ):
+                slug = str(group.get("slug") or "")
+                db_id = group.get("id")
                 ranked.append(
                     CatalogGroup(
-                        group_id=str(group.get("slug") or group.get("id") or ""),
-                        group_name=str(group.get("label") or group.get("slug") or ""),
+                        group_db_id=int(db_id) if db_id is not None else None,
+                        group_id=slug or str(db_id or ""),
+                        group_slug=slug,
+                        group_name=str(group.get("label") or slug or ""),
                         browse_rank=int(group.get("priority") or 100),
                         product_count=int(group.get("product_count") or 0),
                     )

@@ -170,6 +170,7 @@ class CatalogNavigateHandler:
             query=query,
             source="collections_first",
             catalog_group_id=group_id,
+            catalog_group_db_id=args.get("catalog_group_db_id"),
         )
         from ..catalog.discovery_presenter import DiscoveryPresentationComposer  # noqa: PLC0415
         from ..catalog.catalog_intelligence import attach_discovery_signals_from_db  # noqa: PLC0415
@@ -236,6 +237,7 @@ class CatalogNavigateHandler:
         current_group = (args.get("navigation_state_patch") or {}).get("current_catalog_group")
         if not current_group:
             current_group = {
+                "group_db_id": args.get("catalog_group_db_id"),
                 "group_id": str(args.get("catalog_group_id") or ""),
                 "group_slug": str(args.get("catalog_group_slug") or ""),
                 "group_name": query,
@@ -352,6 +354,7 @@ class CatalogNavigateHandler:
         query: str,
         source: str,
         catalog_group_id: Any = None,
+        catalog_group_db_id: Any = None,
     ):
         from ..commerce.merchant_discovery_settings import parse_merchant_discovery_settings  # noqa: PLC0415
         from ..catalog.catalog_intelligence import CatalogIntelligence, DiscoveryPlan  # noqa: PLC0415
@@ -376,12 +379,40 @@ class CatalogNavigateHandler:
         intel = CatalogIntelligence(provider)
 
         if source == "collections_first" and query:
-            raw = provider.get_collection_products(
-                query,
-                limit=max(12, strategy.initial_count * 4),
-            )
+            group_db_id = catalog_group_db_id
+            if group_db_id is None:
+                group_db_id = args.get("catalog_group_db_id")
+            group_slug = str(args.get("catalog_group_slug") or catalog_group_id or "").strip()
+            fetch = None
+            try:
+                resolved_db_id = int(group_db_id) if group_db_id is not None else None
+            except (TypeError, ValueError):
+                resolved_db_id = None
+
+            if resolved_db_id is not None:
+                fetch = provider.get_collection_products_by_id(
+                    resolved_db_id,
+                    limit=max(12, strategy.initial_count * 4),
+                    allow_search_fallback=False,
+                    group_slug=group_slug,
+                    group_name=query,
+                )
+                raw = list(fetch.products or [])
+            else:
+                fetch = None
+                raw = []
+                logger.info(
+                    "[CATALOG_NAVIGATOR] group_products tenant=%s product_source=scoped_empty "
+                    "group_db_id=%s group_slug=%r group_name=%r membership_count=0 "
+                    "orderable_count=0 products_returned=0 empty_reason=missing_group_db_id",
+                    getattr(ctx, "tenant_id", None),
+                    group_db_id,
+                    group_slug,
+                    query,
+                )
+
             enriched = attach_discovery_signals_from_db(
-                list(raw or []),
+                raw,
                 db=db,
                 tenant_id=ctx.tenant_id,
             )
@@ -393,15 +424,34 @@ class CatalogNavigateHandler:
                     collection=merchant_settings.match_collection(query),
                 ),
             )
+            evidence = {
+                "group_id": str(catalog_group_id or ""),
+                "group_db_id": resolved_db_id,
+                "group_slug": group_slug,
+                "group_name": query,
+                "source": source,
+            }
+            if fetch is not None:
+                evidence.update({
+                    "product_source": fetch.product_source,
+                    "membership_count": fetch.membership_count,
+                    "orderable_count": fetch.orderable_count,
+                    "products_returned": fetch.products_returned,
+                    "empty_reason": fetch.empty_reason,
+                })
+            elif not resolved_db_id:
+                evidence.update({
+                    "product_source": "scoped_empty",
+                    "membership_count": 0,
+                    "orderable_count": 0,
+                    "products_returned": 0,
+                    "empty_reason": "missing_group_db_id",
+                })
             plan = DiscoveryPlan(
                 output_kind="products",
                 products=list(ranked),
                 presentation=strategy.presentation,
-                evidence={
-                    "group_id": str(catalog_group_id or ""),
-                    "group_name": query,
-                    "source": source,
-                },
+                evidence=evidence,
             )
             return plan, strategy, merchant_settings
 

@@ -112,6 +112,28 @@ def _group_by_slug(groups: Sequence[Mapping[str, Any]], slug: str) -> Optional[D
     return None
 
 
+def group_by_db_id(groups: Sequence[Mapping[str, Any]], group_id: int) -> Optional[Dict[str, Any]]:
+    """Resolve a merchant group by integer ProductGroup.id — no fuzzy name match."""
+    try:
+        target = int(group_id)
+    except (TypeError, ValueError):
+        return None
+    for group in groups:
+        if not group.get("is_active", True):
+            continue
+        try:
+            if int(group.get("id")) == target:
+                return dict(group)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def read_group_membership_ids(db: Any, tenant_id: int, group_id: int) -> Tuple[int, ...]:
+    """ProductGroupItem membership for a group — identity lookup only."""
+    return _group_product_ids(db, tenant_id, int(group_id))
+
+
 def _group_product_ids(db: Any, tenant_id: int, group_id: int) -> Tuple[int, ...]:
     try:
         from services.catalog_intelligence_service import read_group_products  # noqa: PLC0415
@@ -355,10 +377,12 @@ __all__ = [
     "BrowseScopeResolution",
     "active_catalog_group_slug_from_state",
     "filter_products_to_merchant_group",
+    "group_by_db_id",
     "hydrate_group_products",
     "load_merchant_catalog_groups",
     "match_catalog_group",
     "match_group_by_collection_name",
+    "read_group_membership_ids",
     "resolve_browse_scope",
     "stamp_catalog_group_session",
 ]

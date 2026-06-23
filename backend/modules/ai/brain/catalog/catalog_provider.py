@@ -11,9 +11,23 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.brain.catalog.provider")
+
+
+@dataclass(frozen=True)
+class GroupProductsFetchResult:
+    products: List[Dict[str, Any]]
+    product_source: str
+    group_db_id: Optional[int] = None
+    group_slug: str = ""
+    group_name: str = ""
+    membership_count: int = 0
+    orderable_count: int = 0
+    products_returned: int = 0
+    empty_reason: str = ""
 
 
 class CatalogProvider(ABC):
@@ -36,6 +50,17 @@ class CatalogProvider(ABC):
         *,
         limit: int = 12,
     ) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    def get_collection_products_by_id(
+        self,
+        group_id: int,
+        *,
+        limit: int = 12,
+        allow_search_fallback: bool = False,
+        group_slug: str = "",
+        group_name: str = "",
+    ) -> GroupProductsFetchResult:
         raise NotImplementedError
 
 
@@ -104,6 +129,135 @@ class LocalCatalogProvider(CatalogProvider):
 
         return self.search_products(name, limit=limit)
 
+    def get_collection_products_by_id(
+        self,
+        group_id: int,
+        *,
+        limit: int = 12,
+        allow_search_fallback: bool = False,
+        group_slug: str = "",
+        group_name: str = "",
+    ) -> GroupProductsFetchResult:
+        from .catalog_browse_scope_resolver import (  # noqa: PLC0415
+            group_by_db_id,
+            hydrate_group_products,
+            load_merchant_catalog_groups,
+            read_group_membership_ids,
+        )
+
+        try:
+            db_id = int(group_id)
+        except (TypeError, ValueError):
+            result = GroupProductsFetchResult(
+                products=[],
+                product_source="scoped_empty",
+                group_db_id=None,
+                group_slug=str(group_slug or ""),
+                group_name=str(group_name or ""),
+                empty_reason="invalid_group_id",
+            )
+            self._log_group_products_fetch(result)
+            return result
+
+        groups = load_merchant_catalog_groups(self._db, self._tenant_id)
+        group = group_by_db_id(groups, db_id)
+        slug = str(group_slug or (group or {}).get("slug") or "").strip()
+        label = str(group_name or (group or {}).get("label") or slug or "").strip()
+
+        if group is None:
+            result = GroupProductsFetchResult(
+                products=[],
+                product_source="scoped_empty",
+                group_db_id=db_id,
+                group_slug=slug,
+                group_name=label,
+                empty_reason="group_not_found",
+            )
+            self._log_group_products_fetch(result)
+            return result
+
+        product_ids = read_group_membership_ids(self._db, self._tenant_id, db_id)
+        membership_count = len(product_ids)
+        if not product_ids:
+            result = GroupProductsFetchResult(
+                products=[],
+                product_source="scoped_empty",
+                group_db_id=db_id,
+                group_slug=slug or str(group.get("slug") or ""),
+                group_name=label or str(group.get("label") or ""),
+                membership_count=0,
+                orderable_count=0,
+                empty_reason="no_group_items",
+            )
+            self._log_group_products_fetch(result)
+            return result
+
+        hydrated = hydrate_group_products(
+            self._builder,
+            product_ids,
+            limit=limit,
+        )
+        orderable_count = len(hydrated or [])
+        if hydrated:
+            result = GroupProductsFetchResult(
+                products=list(hydrated),
+                product_source="group_items",
+                group_db_id=db_id,
+                group_slug=slug or str(group.get("slug") or ""),
+                group_name=label or str(group.get("label") or ""),
+                membership_count=membership_count,
+                orderable_count=orderable_count,
+                products_returned=orderable_count,
+            )
+            self._log_group_products_fetch(result)
+            return result
+
+        if allow_search_fallback:
+            fallback_query = label or slug
+            searched = self.search_products(fallback_query, limit=limit) if fallback_query else []
+            result = GroupProductsFetchResult(
+                products=list(searched or []),
+                product_source="blocked_search_fallback" if searched else "scoped_empty",
+                group_db_id=db_id,
+                group_slug=slug or str(group.get("slug") or ""),
+                group_name=label or str(group.get("label") or ""),
+                membership_count=membership_count,
+                orderable_count=0,
+                products_returned=len(searched or []),
+                empty_reason="no_orderable_members" if not searched else "search_fallback_used",
+            )
+            self._log_group_products_fetch(result)
+            return result
+
+        result = GroupProductsFetchResult(
+            products=[],
+            product_source="scoped_empty",
+            group_db_id=db_id,
+            group_slug=slug or str(group.get("slug") or ""),
+            group_name=label or str(group.get("label") or ""),
+            membership_count=membership_count,
+            orderable_count=0,
+            empty_reason="no_orderable_members",
+        )
+        self._log_group_products_fetch(result)
+        return result
+
+    def _log_group_products_fetch(self, result: GroupProductsFetchResult) -> None:
+        logger.info(
+            "[CATALOG_PROVIDER] group_products tenant=%s product_source=%s "
+            "group_db_id=%s group_slug=%r group_name=%r membership_count=%s "
+            "orderable_count=%s products_returned=%s empty_reason=%r",
+            self._tenant_id,
+            result.product_source,
+            result.group_db_id,
+            result.group_slug,
+            result.group_name,
+            result.membership_count,
+            result.orderable_count,
+            result.products_returned,
+            result.empty_reason,
+        )
+
 
 class MetaCatalogProvider(LocalCatalogProvider):
     """Alias — Meta-synced rows are read from the local hub."""
@@ -154,6 +308,7 @@ def get_catalog_provider(
 
 __all__ = [
     "CatalogProvider",
+    "GroupProductsFetchResult",
     "LocalCatalogProvider",
     "ManualCatalogProvider",
     "MetaCatalogProvider",
