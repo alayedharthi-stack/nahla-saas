@@ -249,6 +249,45 @@ def _max_outbound_overlap(new_reply: str, history: list) -> float:
     return best
 
 
+def _otp_apply_reply(
+    tracker: Any,
+    current: str,
+    new: str,
+    *,
+    layer: str,
+    op: str = "replace",
+) -> str:
+    """Apply a postprocess reply change and record it on the tracker."""
+    new = str(new or "")
+    if tracker is None:
+        return new
+    try:
+        tracker.record_mutation(
+            layer=layer,
+            op=op,
+            before=current or "",
+            after=new,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy must not block send
+        pass
+    return new
+
+
+def _otp_merge_save_metadata(
+    tracker: Any,
+    persona_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    from core.outbound_text_policy import merge_policy_into_extra_metadata  # noqa: PLC0415
+
+    base = dict(persona_meta or {})
+    if tracker is None:
+        return base
+    try:
+        return merge_policy_into_extra_metadata(base, tracker.to_metadata())
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def _is_repeat_reply(
     new_reply: str,
     history: list,
@@ -6564,6 +6603,7 @@ async def _handle_merchant_message(
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}
+        _outbound_text_tracker = None
         _brain_handoff: bool = False  # set True only by the brain handoff branch
         _brain_nc_block: bool = False
         _brain_nc_category: str = ""
@@ -7955,6 +7995,16 @@ async def _handle_merchant_message(
                         _brain_nc_category = str(
                             brain_result.get("non_commerce_category") or ""
                         ).strip()
+                        try:
+                            from core.outbound_text_policy import (  # noqa: PLC0415
+                                OutboundTextTracker,
+                            )
+
+                            _outbound_text_tracker = OutboundTextTracker.from_brain_result(
+                                brain_result,
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — policy init must not block send
+                            _outbound_text_tracker = None
                         try:
                             from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
                                 SocialReplySelection,
@@ -9698,7 +9748,10 @@ async def _handle_merchant_message(
             StateManager.save_message(
                 db, to, reply, "outbound",
                 conversation_id=convo.id, tenant_id=tenant_id,
-                extra_metadata=_persona_ownership.to_metadata(),
+                extra_metadata=_otp_merge_save_metadata(
+                    _outbound_text_tracker,
+                    _persona_ownership.to_metadata(),
+                ),
             )
 
         latency_ms = 0
@@ -10291,6 +10344,9 @@ async def _handle_merchant_message(
         # and increments ``_marker_resolved`` so the
         # ``[MARKER_RESOLUTION]`` line below reflects post-net state.
         _po_reply_before_safety_nets = reply or ""
+        if _outbound_text_tracker is not None:
+            _outbound_text_tracker.pre_postprocess_body = _po_reply_before_safety_nets
+            _outbound_text_tracker.postprocess_body = _po_reply_before_safety_nets
         try:
             from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
                 apply_product_safety_net as _sn_product,
@@ -10506,7 +10562,13 @@ async def _handle_merchant_message(
                         history=history if isinstance(history, list) else None,
                     )
                     if _sl.fired and _sl.rewrote_reply and _sl.new_reply:
-                        reply = _sl.new_reply
+                        reply = _otp_apply_reply(
+                            _outbound_text_tracker,
+                            reply,
+                            _sl.new_reply,
+                            layer="store_link_safety_net",
+                            op="reconcile" if getattr(_sl, "reconciled", False) else "replace",
+                        )
                     if _sl.fired or _sl.skipped_reason not in {
                         "no_store_link_intent", "url_already_in_reply",
                     }:
@@ -10573,7 +10635,13 @@ async def _handle_merchant_message(
                         reply_text=reply or "",
                     )
                     if _ll.fired and _ll.rewrote_reply and _ll.new_reply:
-                        reply = _ll.new_reply
+                        reply = _otp_apply_reply(
+                            _outbound_text_tracker,
+                            reply,
+                            _ll.new_reply,
+                            layer="location_safety_net",
+                            op="replace",
+                        )
                     if _ll.fired or _ll.skipped_reason not in {
                         "no_location_intent", "maps_url_already_in_reply",
                     }:
@@ -10610,7 +10678,13 @@ async def _handle_merchant_message(
                     history=history,
                 )
                 if _dlv.fired and _dlv.new_reply:
-                    reply = _dlv.new_reply
+                    reply = _otp_apply_reply(
+                        _outbound_text_tracker,
+                        reply,
+                        _dlv.new_reply,
+                        layer="delivery_info_context_net",
+                        op="replace",
+                    )
                 if _dlv.fired or _dlv.skipped_reason not in {
                     "flag_disabled",
                     "bot_not_awaiting_delivery",
@@ -10651,7 +10725,13 @@ async def _handle_merchant_message(
                     history=history,
                 )
                 if _prg.fired and _prg.new_reply:
-                    reply = _prg.new_reply
+                    reply = _otp_apply_reply(
+                        _outbound_text_tracker,
+                        reply,
+                        _prg.new_reply,
+                        layer="product_reask_guard",
+                        op="replace",
+                    )
                 if _prg.fired or _prg.skipped_reason not in {
                     "flag_disabled",
                     "empty_reply",
@@ -10754,7 +10834,13 @@ async def _handle_merchant_message(
                     conversation_id=getattr(convo, "id", None),
                 )
                 if _ag.fired and _ag.rewrote_reply and _ag.new_reply:
-                    reply = _ag.new_reply
+                    reply = _otp_apply_reply(
+                        _outbound_text_tracker,
+                        reply,
+                        _ag.new_reply,
+                        layer="outbound_artifact_guard",
+                        op="replace",
+                    )
                 # Always log the outcome — including the
                 # ``action="pass"`` path — so production triage
                 # can chart how often each artifact class actually
@@ -10817,9 +10903,21 @@ async def _handle_merchant_message(
                             decision=_ci_decision,
                             inbound_text=text or "",
                         )
-                        reply = _ci_reply
+                        reply = _otp_apply_reply(
+                            _outbound_text_tracker,
+                            reply,
+                            _ci_reply,
+                            layer="clear_intent_fallback_net",
+                            op="replace",
+                        )
                     else:
-                        reply = _ci.new_reply
+                        reply = _otp_apply_reply(
+                            _outbound_text_tracker,
+                            reply,
+                            _ci.new_reply,
+                            layer="clear_intent_fallback_net",
+                            op="replace",
+                        )
                 if _ci.fired or _ci.skipped_reason not in {
                     "flag_disabled",
                     "reply_not_generic_fallback",
@@ -11480,13 +11578,28 @@ async def _handle_merchant_message(
                 from core.outbound_send_status import (  # noqa: PLC0415
                     sync_outbound_body_to_final as _sync_body,
                 )
+                if _outbound_text_tracker is not None:
+                    _outbound_text_tracker.postprocess_body = reply or ""
                 _sync_body(
                     db,
                     tenant_id=tenant_id,
                     recipient=to,
                     final_body=reply,
                     reason="post_safety_nets_pre_send",
+                    outbound_text_policy=(
+                        _outbound_text_tracker.to_metadata()
+                        if _outbound_text_tracker is not None
+                        else None
+                    ),
                 )
+                if _outbound_text_tracker is not None:
+                    from core.outbound_text_policy import log_outbound_text_policy  # noqa: PLC0415
+
+                    log_outbound_text_policy(
+                        _outbound_text_tracker,
+                        tenant_id=tenant_id,
+                        to=to,
+                    )
             except Exception as _sync_exc:  # noqa: BLE001 — never break send
                 logger.debug(
                     "[OUTBOUND_BODY_SYNC] evaluate failed (open): %s",
@@ -11637,6 +11750,8 @@ async def _handle_merchant_message(
                 if isinstance(_delivery_audit, dict):
                     _delivery_audit["native_catalog_sent"] = True
                     _delivery_audit["text_sent"] = True
+                if _outbound_text_tracker is not None:
+                    _outbound_text_tracker.set_native_catalog(body=reply or "")
                 try:
                     from modules.ai.brain.commerce.selection_context import (  # noqa: PLC0415
                         apply_selection_context_patch,
@@ -11663,6 +11778,11 @@ async def _handle_merchant_message(
                         recipient=to,
                         final_body=reply,
                         reason="native_catalog_sent",
+                        outbound_text_policy=(
+                            _outbound_text_tracker.to_metadata()
+                            if _outbound_text_tracker is not None
+                            else None
+                        ),
                     )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
                     pass
@@ -11901,6 +12021,13 @@ async def _handle_merchant_message(
                     # version so the dashboard transcript matches what
                     # the customer saw on WhatsApp.
                     reply = _msg.body or reply
+                    if _outbound_text_tracker is not None:
+                        _outbound_text_tracker.set_cta_delivery(
+                            pre_cta_body=_reply_before_cta or "",
+                            body_after_cta=_msg.body or "",
+                            cta_url=_cls.url,
+                            cta_label=_cls.button_title,
+                        )
                     try:
                         from core.outbound_send_status import (  # noqa: PLC0415
                             sync_outbound_body_to_final as _sync_cta_body,
@@ -11919,6 +12046,11 @@ async def _handle_merchant_message(
                                 "pre_cta_body": _reply_before_cta,
                                 "url_type": _cls.kind,
                             },
+                            outbound_text_policy=(
+                                _outbound_text_tracker.to_metadata()
+                                if _outbound_text_tracker is not None
+                                else None
+                            ),
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
                         pass

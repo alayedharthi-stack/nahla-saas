@@ -3391,10 +3391,12 @@ class MerchantBrain:
             ),
             "decision_action": str(getattr(decision, "action", "") or ""),
             "decision_args": dict(getattr(decision, "args", None) or {}),
+            "intent": str(getattr(intent, "name", "") or ""),
             "social_human_context_category": str(
                 getattr(_social_human_context, "category", "") or ""
             ),
             "native_catalog_entry": dict(result.data.get("native_catalog_entry") or {}),
+            "outbound_text_policy": dict(result.data.get("outbound_text_policy") or {}),
         }
 
 

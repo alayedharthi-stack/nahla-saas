@@ -87,6 +87,21 @@ class DefaultComposer:
         result: ActionResult,
         ctx: BrainContext,
     ) -> str:
+        text = await self._compose_impl(decision, result, ctx)
+        try:
+            from core.outbound_text_policy import attach_compose_provenance  # noqa: PLC0415
+
+            attach_compose_provenance(result, decision=decision, ctx=ctx, text=text)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block compose
+            pass
+        return text
+
+    async def _compose_impl(
+        self,
+        decision: Decision,
+        result: ActionResult,
+        ctx: BrainContext,
+    ) -> str:
         action = decision.action
         data   = result.data or {}
 
@@ -193,7 +208,12 @@ class DefaultComposer:
 
         # ── FAQ ────────────────────────────────────────────────────────────
         if action == ACTION_FAQ_REPLY:
-            payload = data.get("payload", {}) or {}
+            try:
+                from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
+
+                mark_compose_template(result, layer="faq_template")
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block FAQ compose
+                pass
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
                 return self._with_follow_up(
@@ -202,6 +222,7 @@ class DefaultComposer:
                         assistant_name=getattr(ctx.facts, "assistant_name", "") or "",
                     ),
                     ctx,
+                    result=result,
                 )
             if topic == TOPIC_SHIPPING:
                 return self._with_follow_up(
@@ -212,6 +233,7 @@ class DefaultComposer:
                         support_hours=payload.get("support_hours", ""),
                     ),
                     ctx,
+                    result=result,
                 )
             if topic == TOPIC_STORE_INFO:
                 return self._with_follow_up(
@@ -221,6 +243,7 @@ class DefaultComposer:
                         store_description=payload.get("store_description", ""),
                     ),
                     ctx,
+                    result=result,
                 )
             if topic == TOPIC_LOCATION:
                 return self._with_follow_up(
@@ -230,6 +253,7 @@ class DefaultComposer:
                     ),
                     ctx,
                     topic=TOPIC_LOCATION,
+                    result=result,
                 )
             if topic == TOPIC_OWNER_CONTACT:
                 return self._with_follow_up(
@@ -239,6 +263,7 @@ class DefaultComposer:
                         store_url=payload.get("store_url", ""),
                     ),
                     ctx,
+                    result=result,
                 )
             if topic == "cash_on_delivery":
                 from ..commerce.cod_policy_evidence import (  # noqa: PLC0415
@@ -256,7 +281,7 @@ class DefaultComposer:
                     evidence,
                     continue_order=bool(session.order_intent),
                 )
-                return self._with_follow_up(cod.reply_text, ctx)
+                return self._with_follow_up(cod.reply_text, ctx, result=result)
             return T.generic_fallback(variant=self._variant_idx(ctx))
 
         # ── Catalog Navigator (owned presentation) ───────────────────────
@@ -841,9 +866,8 @@ class DefaultComposer:
                     tenant_id=getattr(ctx, "tenant_id", None),
                 )
                 reply = _srcg.reply
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — social context guard best-effort
                 pass
-            if not (reply or "").strip() and self._understood_social_religious_media(ctx):
                 result.data["chosen_path"] = "social_persona_compose_from_empty_template"
                 reply = await self._compose_social_persona_ack(
                     ctx, result, social_category=category,
@@ -1185,6 +1209,7 @@ class DefaultComposer:
         ctx: BrainContext,
         *,
         topic: str = "",
+        result: ActionResult | None = None,
     ) -> str:
         # Order-flow resume hint takes priority over generic suggestion
         # follow-ups: when the customer asks a side question ("كم
@@ -1201,7 +1226,13 @@ class DefaultComposer:
             resume = self._order_resume_hint(ctx)
             if resume and resume not in text:
                 text = f"{text}\n\n{resume}"
-                return text
+                if result is not None:
+                    try:
+                        from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
+
+                        mark_compose_template(result, layer="order_resume_hint")
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block resume hint
+                        pass
 
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
@@ -1325,6 +1356,12 @@ class DefaultComposer:
 
         _TIMEOUT = 25  # seconds
         reply_state = None
+        try:
+            from core.outbound_text_policy import mark_compose_llm  # noqa: PLC0415
+
+            mark_compose_llm(result)
+        except Exception:  # noqa: BLE001
+            pass
 
         try:
             _BACKEND = os.path.abspath(
