@@ -514,6 +514,7 @@ def sync_outbound_body_to_final(
     final_body: str,
     reason: str = "post_safety_nets",
     cta_metadata: Optional[Dict[str, Any]] = None,
+    outbound_text_policy: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Update the body of the most recent queued outbound MessageEvent
     for ``(tenant_id, recipient)`` so the dashboard sees what the
@@ -624,6 +625,8 @@ def sync_outbound_body_to_final(
             meta["body_sync_history"] = history[-3:]
             if cta_metadata:
                 meta["cta_delivery"] = dict(cta_metadata)
+            if outbound_text_policy:
+                meta["outbound_text_policy"] = dict(outbound_text_policy)
             row.extra_metadata = meta
             flag_modified(row, "extra_metadata")
             db.add(row)
