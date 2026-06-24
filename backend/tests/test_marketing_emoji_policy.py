@@ -274,6 +274,16 @@ class TestPurposeBuckets:
         result = apply_marketing_emoji_policy(reply, ctx)
         assert result.purpose == PURPOSE_CATALOG_BROWSE
 
+    def test_pure_greeting_with_stale_checkout_stage_gets_no_cart_emoji(self) -> None:
+        reply = "وعليكم السلام"
+        ctx = _ctx(
+            inbound_text="السلام عليكم",
+            decision_action="llm_reply",
+            stage="checkout",
+        )
+        result = apply_marketing_emoji_policy(reply, ctx)
+        assert "🛒" not in result.reply
+
     def test_address_request(self) -> None:
         reply = "شاركنا موقعك"
         ctx = _ctx(reply_instruction_path="map_image_ack")

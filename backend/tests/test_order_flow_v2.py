@@ -16,6 +16,13 @@ if _BACKEND not in sys.path:
 from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: E402
     resolve_active_order_quantity_reply,
 )
+from modules.ai.brain.commerce.conversation_state_isolation import (  # noqa: E402
+    inbound_breaks_fulfillment_ownership,
+    should_replay_pending_question,
+)
+from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: E402
+    try_guard_recovery_reply,
+)
 from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: E402
     select_arabic_commerce_fallback,
 )
@@ -28,8 +35,17 @@ from modules.ai.order_flow_v2.replies import build_next_field_reply  # noqa: E40
 from modules.ai.order_flow_v2.shipping import evaluate_v2_shipping_readiness  # noqa: E402
 from modules.ai.order_flow_v2.triggers import (  # noqa: E402
     is_catalog_order_inbound,
+    is_checkout_escape_inquiry,
     is_inquiry_message,
     should_not_start_checkout,
+)
+
+_STALE_CHECKOUT_PROMPT = "ممتاز، ما اسمك الأول لإكمال الطلب؟"
+_LEGACY_FORBIDDEN = (
+    "أرسل أي رسالة وسأتابع معك الطلب",
+    "ما ظهر عندي سعر مؤكد من الكتالوج الآن",
+    "تمام، أكمل معك الطلب —",
+    "أحس أني كرّرت نفس الإجابة",
 )
 
 
@@ -64,6 +80,12 @@ class TestTriggers:
     def test_types_inquiry_not_checkout(self):
         assert is_inquiry_message("وش الأنواع؟")
 
+    def test_live_transcript_inquiry_is_checkout_escape(self):
+        assert is_checkout_escape_inquiry("ابي استفسر عن العسل")
+        assert is_checkout_escape_inquiry("وش الأنواع المتوفرة؟")
+        assert is_checkout_escape_inquiry("وش الأحجام المتوفرة؟")
+        assert should_not_start_checkout("وش الأنواع المتوفرة؟")
+
     def test_catalog_sent_not_order(self):
         assert not is_catalog_order_inbound({"native_catalog_sent": True})
         assert should_not_start_checkout("مرحبا", {"catalog_sent": True})
@@ -74,6 +96,49 @@ class TestTriggers:
             "product_items": [{"product_retailer_id": "p1", "quantity": 1}],
         }
         assert is_catalog_order_inbound(meta)
+
+    def test_catalog_order_alternate_order_metadata(self):
+        meta = {
+            "source_type": "order",
+            "order": {
+                "product_items": [{
+                    "product_retailer_id": "86bqzca62a",
+                    "quantity": 2,
+                    "item_price": 182.75,
+                    "currency": "SAR",
+                }],
+            },
+        }
+        assert is_catalog_order_inbound(meta)
+
+
+class TestLiveTranscriptStateIsolation:
+    def test_inquiry_does_not_replay_stale_checkout_prompt(self):
+        assert inbound_breaks_fulfillment_ownership("ابي استفسر عن العسل")
+        assert not should_replay_pending_question(
+            inbound_text="ابي استفسر عن العسل",
+            last_question=_STALE_CHECKOUT_PROMPT,
+        )
+
+        state = SimpleNamespace(
+            last_question_asked=_STALE_CHECKOUT_PROMPT,
+            last_question_answered=False,
+        )
+        result = try_guard_recovery_reply(
+            inbound_text="ابي استفسر عن العسل",
+            state=state,
+            history=[],
+        )
+
+        assert result.source != "last_question_clarify"
+        assert _STALE_CHECKOUT_PROMPT not in result.reply
+
+    def test_browse_does_not_replay_stale_checkout_prompt(self):
+        assert inbound_breaks_fulfillment_ownership("وش الأنواع المتوفرة؟")
+        assert not should_replay_pending_question(
+            inbound_text="وش الأنواع المتوفرة؟",
+            last_question=_STALE_CHECKOUT_PROMPT,
+        )
 
 
 class TestLegacyIsolation:
@@ -181,6 +246,95 @@ class TestOrderFlowV2Owner:
             message="كم سعر العكبر؟",
         )
         assert not result.handled
+
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_live_transcript_inquiry_escapes_even_with_active_checkout(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [{"product_id": "p1", "product_name": "عسل", "quantity": 1}],
+        }
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="ابي استفسر عن العسل",
+        )
+
+        assert not result.handled
+        assert result.reason == "inquiry_escape"
+        assert _STALE_CHECKOUT_PROMPT not in result.reply
+
+    @patch("modules.ai.order_flow_v2.owner.build_line_items_from_payload")
+    @patch("modules.ai.order_flow_v2.owner.apply_state_patch")
+    def test_catalog_order_event_priority_over_browse_shapes(self, _patch, _items, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        _items.return_value = SimpleNamespace(
+            line_items=[{
+                "product_id": "86",
+                "product_name": "86bqzca62a",
+                "quantity": 2,
+                "catalog_price": 182.75,
+                "price_source": "whatsapp_catalog",
+            }],
+        )
+        db = self._db_with_prep({})
+
+        result = try_handle_order_flow_v2(
+            db,
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="[طلب كتالوج من العميل]\nعدد المنتجات: 2\nالإجمالي: 365.5 SAR\nرمز المنتج (SKU): 86bqzca62a",
+            inbound_metadata={
+                "source_type": "order",
+                "order": {
+                    "product_items": [{
+                        "product_retailer_id": "86bqzca62a",
+                        "quantity": 2,
+                        "item_price": 182.75,
+                        "currency": "SAR",
+                    }],
+                },
+            },
+        )
+
+        assert result.handled
+        assert result.reason == "catalog_order_start"
+        assert result.state_patch.get("order_flow_v2_active") is True
+        assert not any(phrase in result.reply for phrase in _LEGACY_FORBIDDEN)
+        assert "تفضّل، اختر من الكتالوج" not in result.reply
+
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_confirmation_after_catalog_order_continues_only_with_catalog_evidence(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = {
+            "order_flow_v2_active": True,
+            "order_flow_v2_trusted_price": True,
+            "line_items": [{
+                "product_id": "86",
+                "product_name": "86bqzca62a",
+                "quantity": 2,
+                "catalog_price": 182.75,
+                "price_source": "whatsapp_catalog",
+            }],
+        }
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="ابغى هذا",
+        )
+
+        assert result.handled
+        assert result.reason != "inquiry_escape"
+        assert not any(phrase in result.reply for phrase in _LEGACY_FORBIDDEN)
 
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
     def test_resume_pending_checkout(self, _load, monkeypatch):

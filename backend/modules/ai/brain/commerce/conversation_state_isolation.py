@@ -71,6 +71,15 @@ def inbound_breaks_fulfillment_ownership(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    try:
+        from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
+            is_checkout_escape_inquiry,
+        )
+
+        if is_checkout_escape_inquiry(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — isolation must not depend on V2 availability
+        pass
     norm = _norm(raw)
     if _FULFILLMENT_OWNERSHIP_BREAK_RE.search(norm):
         return True
@@ -119,6 +128,15 @@ def should_replay_pending_question(
     raw = (inbound_text or "").strip()
     if not raw:
         return False
+    try:
+        from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
+            is_checkout_escape_inquiry,
+        )
+
+        if is_checkout_escape_inquiry(raw):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — replay guard must fail closed locally
+        pass
     if inbound_breaks_fulfillment_ownership(raw):
         return False
     if not _pending_question_is_checkout_slot(last_q):

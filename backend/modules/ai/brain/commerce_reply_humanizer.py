@@ -851,6 +851,13 @@ def should_apply_commerce_humanizer(
         return False
     intent = (intent_name or "").strip().lower()
     goal = (primary_customer_goal or "").strip().lower()
+    try:
+        from modules.ai.order_flow_v2.triggers import is_greeting_message  # noqa: PLC0415
+
+        if is_greeting_message(inbound_text or ""):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — humanizer guard is best-effort
+        pass
     if intent not in _COMMERCE_INTENTS and goal not in {
         GOAL_PRODUCT_AVAILABILITY,
         GOAL_PRICE_INQUIRY,

@@ -24,8 +24,20 @@ _INQUIRY_RE = re.compile(
     r"كم\s*(?:سعر|ب(?:ك|ق)م)|ب(?:ك|ق)م|"
     r"متوفر|موجود|متاح|"
     r"وش\s*(?:ال)?(?:أ?نواع|انواع|فرق|الفرق)|"
+    r"وش\s*(?:ال)?(?:أ?حجام|احجام|مقاسات)|"
     r"ما\s*(?:هو|هي)\s*(?:ال)?(?:فرق|أ?نواع)|"
-    r"price|available|availability|compare|difference"
+    r"(?:وصف|تفاصيل|مكونات|فوائد)\s*(?:ال)?(?:منتج|عسل|منتجات)?|"
+    r"price|available|availability|compare|difference|description|details"
+    r")",
+    re.I | re.UNICODE,
+)
+_BROWSE_ESCAPE_RE = re.compile(
+    r"(?:"
+    r"وش\s*(?:عندكم|المتوفر|الموجود)\s*(?:من\s*)?(?:منتجات|عسل|أ?نواع|احجام|أ?حجام)?|"
+    r"(?:وش|ايش|ما)\s*(?:ال)?(?:منتجات|كتالوج|أ?نواع|انواع|أ?حجام|احجام|مقاسات)\s*(?:المتوفر(?:ة)?|عندكم)?|"
+    r"(?:اعرض|ورني|ارسل|أرسل)\s*(?:لي\s*)?(?:ال)?(?:منتجات|كتالوج|أ?نواع|احجام|أ?حجام)|"
+    r"(?:تصفح|استعراض|اشوف|أشوف)\s*(?:ال)?(?:منتجات|كتالوج|أ?نواع)|"
+    r"products|catalog|browse|sizes|variants"
     r")",
     re.I | re.UNICODE,
 )
@@ -82,13 +94,30 @@ def is_resume_order_command(message: str) -> bool:
     return bool(_RESUME_RE.search(_norm(message)))
 
 
-def is_catalog_order_inbound(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
+def is_catalog_order_inbound(
+    inbound_metadata: Optional[Dict[str, Any]],
+    message: str = "",
+) -> bool:
     meta = dict(inbound_metadata or {})
-    source = str(meta.get("source_type") or meta.get("inbound_source") or "").strip().lower()
+    source = str(
+        meta.get("source_type")
+        or meta.get("inbound_source")
+        or meta.get("normalized_type")
+        or ""
+    ).strip().lower()
     if source in _CATALOG_ORDER_SOURCE:
         return bool(meta.get("product_items") or meta.get("order") or meta.get("catalog_order"))
+    if source == "order":
+        order = meta.get("order") if isinstance(meta.get("order"), dict) else {}
+        return bool(meta.get("product_items") or order.get("product_items"))
     if meta.get("catalog_order_submitted"):
         return True
+    if "[طلب كتالوج من العميل]" in str(message or ""):
+        return bool(
+            meta.get("product_items")
+            or meta.get("order")
+            or "رمز المنتج (SKU):" in str(message or "")
+        )
     return False
 
 
@@ -102,8 +131,24 @@ def is_catalog_sent_only(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
 def should_not_start_checkout(message: str, inbound_metadata: Optional[Dict[str, Any]] = None) -> bool:
     if is_greeting_message(message):
         return True
-    if is_inquiry_message(message):
+    if is_checkout_escape_inquiry(message, inbound_metadata):
         return True
     if is_catalog_sent_only(inbound_metadata):
         return True
     return False
+
+
+def is_checkout_escape_inquiry(
+    message: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Current-turn inquiry/browse evidence that must not inherit checkout."""
+    meta = dict(inbound_metadata or {})
+    text = _norm(message)
+    if not text:
+        return False
+    if is_catalog_order_inbound(meta, text):
+        return False
+    if is_explicit_purchase_intent(text) or is_resume_order_command(text):
+        return False
+    return bool(is_inquiry_message(text) or _BROWSE_ESCAPE_RE.search(text))
