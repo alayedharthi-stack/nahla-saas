@@ -637,6 +637,23 @@ MARKETING_EMOJI_POLICY_AUDIT_ONLY = (
     in {"1", "true", "yes", "on"}
 )
 
+# ── OrderFlowV2 (deterministic checkout/shipping owner) ─────────────────────
+# When ORDER_FLOW_V2_ENABLED=true, legacy checkout owners/guards must not
+# produce final order/shipping replies. Shadow logs V2 decisions without
+# sending when V2 is disabled but shadow is on.
+ORDER_FLOW_V2_ENABLED = (
+    os.environ.get("ORDER_FLOW_V2_ENABLED", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
+LEGACY_ORDER_FLOW_DISABLED = (
+    os.environ.get("LEGACY_ORDER_FLOW_DISABLED", "false").lower()
+    in {"1", "true", "yes", "on"}
+)
+ORDER_FLOW_V2_SHADOW_ENABLED = (
+    os.environ.get("ORDER_FLOW_V2_SHADOW_ENABLED", "true").lower()
+    in {"1", "true", "yes", "on"}
+)
+
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message
 # handler used to fall back to a free-form `generate_ai_reply()` call. The

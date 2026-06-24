@@ -267,15 +267,17 @@ def select_arabic_commerce_fallback(
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             has_active_commerce_from_state,
         )
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
 
-        if message_has_bare_quantity_or_variant_signal(inbound_text):
-            qty_reply = resolve_active_order_quantity_reply(
-                inbound_text,
-                state=state,
-                active_commerce=has_active_commerce_from_state(state),
-            )
-            if qty_reply:
-                return qty_reply, "active_order_quantity"
+        if not should_skip_legacy_order_flow_reply():
+            if message_has_bare_quantity_or_variant_signal(inbound_text):
+                qty_reply = resolve_active_order_quantity_reply(
+                    inbound_text,
+                    state=state,
+                    active_commerce=has_active_commerce_from_state(state),
+                )
+                if qty_reply:
+                    return qty_reply, "active_order_quantity"
     except Exception:  # noqa: silent-ok — qty fallback must not break commerce guard
         pass
 
@@ -324,16 +326,26 @@ def select_arabic_commerce_fallback(
             if is_staff_route_rejection_message(inbound_text):
                 return resolve_staff_rejection_commerce_resume(state), "staff_route_rejected_resume"
             if has_active_commerce_from_state(state):
-                from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
-                    build_checkout_slot_fallback_reply,
-                )
+                _skip_legacy_checkout = False
+                try:
+                    from modules.ai.order_flow_v2.flags import (  # noqa: PLC0415
+                        should_skip_legacy_order_flow_reply,
+                    )
 
-                slot_reply = build_checkout_slot_fallback_reply(
-                    state=state,
-                    inbound_text=inbound_text,
-                )
-                if slot_reply:
-                    return slot_reply, "checkout_slot_prompt"
+                    _skip_legacy_checkout = should_skip_legacy_order_flow_reply()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break checkout fallback
+                    pass
+                if not _skip_legacy_checkout:
+                    from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
+                        build_checkout_slot_fallback_reply,
+                    )
+
+                    slot_reply = build_checkout_slot_fallback_reply(
+                        state=state,
+                        inbound_text=inbound_text,
+                    )
+                    if slot_reply:
+                        return slot_reply, "checkout_slot_prompt"
         except Exception:  # noqa: silent-ok
             pass
 

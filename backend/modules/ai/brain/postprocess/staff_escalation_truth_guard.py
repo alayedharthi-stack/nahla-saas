@@ -295,32 +295,40 @@ def apply_staff_escalation_truth_guard(
                         staff_escalation_claim_blocked=True,
                     )
             if _suppress_stub or _active_commerce:
+                _skip_legacy_checkout = False
                 try:
-                    from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
-                        message_has_bare_quantity_or_variant_signal,
-                        resolve_active_order_quantity_reply,
-                    )
+                    from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
 
-                    if message_has_bare_quantity_or_variant_signal(inbound_text):
-                        qty_reply = resolve_active_order_quantity_reply(
-                            inbound_text,
-                            state=state,
-                            active_commerce=_active_commerce,
+                    _skip_legacy_checkout = should_skip_legacy_order_flow_reply()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break staff guard
+                    pass
+                if not _skip_legacy_checkout:
+                    try:
+                        from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+                            message_has_bare_quantity_or_variant_signal,
+                            resolve_active_order_quantity_reply,
                         )
-                        if qty_reply:
-                            return StaffEscalationTruthGuardResult(
-                                reply=qty_reply,
-                                action="blocked_false_escalation_active_order_quantity",
-                                replaced=True,
-                                reason="active_order_quantity_input",
-                                evidence=evidence,
-                                staff_escalation_claim_blocked=True,
+
+                        if message_has_bare_quantity_or_variant_signal(inbound_text):
+                            qty_reply = resolve_active_order_quantity_reply(
+                                inbound_text,
+                                state=state,
+                                active_commerce=_active_commerce,
                             )
-                except Exception as _qty_exc:  # noqa: BLE001  # noqa: silent-ok
-                    logger.debug(
-                        "[STAFF_ESCALATION_TRUTH_GUARD] qty reply failed err=%s",
-                        _qty_exc,
-                    )
+                            if qty_reply:
+                                return StaffEscalationTruthGuardResult(
+                                    reply=qty_reply,
+                                    action="blocked_false_escalation_active_order_quantity",
+                                    replaced=True,
+                                    reason="active_order_quantity_input",
+                                    evidence=evidence,
+                                    staff_escalation_claim_blocked=True,
+                                )
+                    except Exception as _qty_exc:  # noqa: BLE001  # noqa: silent-ok
+                        logger.debug(
+                            "[STAFF_ESCALATION_TRUTH_GUARD] qty reply failed err=%s",
+                            _qty_exc,
+                        )
                 scrubbed = strip_escalation_claim_sentences(original)
                 if scrubbed and len(scrubbed.strip()) >= 6:
                     return StaffEscalationTruthGuardResult(
@@ -331,14 +339,15 @@ def apply_staff_escalation_truth_guard(
                         evidence=evidence,
                         staff_escalation_claim_blocked=True,
                     )
-                return StaffEscalationTruthGuardResult(
-                    reply="تمام، أكمل معك الطلب — وش تحتاج؟",
-                    action="blocked_false_escalation_order_continue",
-                    replaced=True,
-                    reason="active_commerce_continue",
-                    evidence=evidence,
-                    staff_escalation_claim_blocked=True,
-                )
+                if not _skip_legacy_checkout:
+                    return StaffEscalationTruthGuardResult(
+                        reply="تمام، أكمل معك الطلب — وش تحتاج؟",
+                        action="blocked_false_escalation_order_continue",
+                        replaced=True,
+                        reason="active_commerce_continue",
+                        evidence=evidence,
+                        staff_escalation_claim_blocked=True,
+                    )
         except Exception as _stub_ctx_exc:  # noqa: BLE001  # noqa: silent-ok — stub context enrich must not break guard
             logger.debug(
                 "[STAFF_ESCALATION_TRUTH_GUARD] stub context failed err=%s",

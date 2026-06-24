@@ -265,6 +265,14 @@ def maybe_inject_draft_flow_reply(
     history: Optional[List[Any]] = None,
 ) -> str:
     """Return ``reply`` or an injected order-flow fallback — never silent."""
+    try:
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
+
+        if should_skip_legacy_order_flow_reply():
+            return reply or ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block legacy inject
+        pass
+
     bs = brain_state.to_dict() if hasattr(brain_state, "to_dict") else dict(brain_state or {})
     prep = order_prep
     injected = compose_wa_order_flow_reply(

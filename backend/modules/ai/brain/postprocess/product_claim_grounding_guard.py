@@ -339,6 +339,18 @@ def apply_product_claim_grounding_guard(
         return ProductClaimGroundingGuardResult(reply=original, action="allowed")
 
     try:
+        from modules.ai.order_flow_v2.flags import is_v2_checkout_scope_active  # noqa: PLC0415
+        from modules.ai.order_flow_v2.state import prep_dict, trusted_catalog_price  # noqa: PLC0415
+
+        prep = prep_dict(getattr(order_state, "order_prep", None) if order_state is not None else {})
+        if not prep and isinstance(order_state, dict):
+            prep = prep_dict((order_state or {}).get("order_prep"))
+        if is_v2_checkout_scope_active(prep) and trusted_catalog_price(prep, {}):
+            return ProductClaimGroundingGuardResult(reply=original, action="allowed_v2_trusted_price")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 scope gate must not break grounding guard
+        pass
+
+    try:
         evidence = build_product_claim_grounding_evidence(
             db,
             tenant_id,

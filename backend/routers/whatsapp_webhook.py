@@ -6664,6 +6664,69 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
+        # ── OrderFlowV2 deterministic checkout owner ─────────────────────
+        try:
+            from modules.ai.order_flow_v2.owner import (  # noqa: PLC0415
+                persist_order_flow_v2_result,
+                try_handle_order_flow_v2,
+            )
+
+            _of2_result = try_handle_order_flow_v2(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                message=text or "",
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+                inbound_normalized_type=str(inbound_type or "text"),
+            )
+            if _of2_result.handled and _of2_result.reply and _trace.outbound_lock_acquired():
+                persist_order_flow_v2_result(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    result=_of2_result,
+                )
+                _persona_ownership.mark_bypass(
+                    _POReason.PRE_BRAIN_FAST_PATH,
+                    owner=f"order_flow_v2:{_of2_result.reason}",
+                )
+                _of2_ok = await _send_whatsapp_message(
+                    phone_id=phone_id,
+                    to=to,
+                    text=_of2_result.reply,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+                if _of2_ok:
+                    StateManager.save_message(
+                        db,
+                        to,
+                        _of2_result.reply,
+                        "outbound",
+                        conversation_id=convo.id,
+                        tenant_id=tenant_id,
+                        extra_metadata={
+                            **_persona_ownership.to_metadata(),
+                            "reply_owner": "order_flow_v2",
+                            "order_flow_v2_reason": _of2_result.reason,
+                        },
+                    )
+                    try:
+                        db.commit()
+                    except Exception:
+                        try:
+                            db.rollback()
+                        except Exception:  # noqa: silent-ok — rollback best-effort after commit failure
+                            pass
+                    _sync_persona_observability()
+                    return
+        except Exception:
+            logger.exception(
+                "[ORDER_FLOW_V2] pre-brain owner failed tenant=%s to=%s",
+                tenant_id,
+                to,
+            )
+
         # ── Checkout route owner: explicit order-entry channel choice ───────
         # Operational routing happens before Brain/staff/location/FAQ owners.
         # This prevents bare turns like "ابي اطلب" from being interpreted as
@@ -9443,7 +9506,16 @@ async def _handle_merchant_message(
 
                     _, _loop_bs = _loop_load_bs(db, tenant_id=tenant_id, phone=to)
                     _loop_checkout_active = has_active_commerce_from_state(_loop_bs)
-                    if _loop_checkout_active:
+                    _skip_legacy_loop = False
+                    try:
+                        from modules.ai.order_flow_v2.flags import (  # noqa: PLC0415
+                            should_skip_legacy_order_flow_reply,
+                        )
+
+                        _skip_legacy_loop = should_skip_legacy_order_flow_reply()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break loop guard
+                        pass
+                    if _loop_checkout_active and not _skip_legacy_loop:
                         _loop_checkout_recovery = (
                             build_checkout_slot_fallback_reply(
                                 state=_loop_bs,

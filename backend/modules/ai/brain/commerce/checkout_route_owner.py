@@ -632,6 +632,14 @@ def evaluate_checkout_route_owner(
     message: str,
 ) -> Optional[CheckoutRouteDecision]:
     """Pre-brain checkout channel owner — ask channel or deliver store link."""
+    try:
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
+
+        if should_skip_legacy_order_flow_reply():
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block legacy when import fails
+        pass
+
     if not checkout_route_owner_enabled():
         return None
 
