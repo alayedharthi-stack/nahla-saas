@@ -52,10 +52,16 @@ def _inbound_metadata(ctx: BrainContext) -> Dict[str, Any]:
 def is_current_catalog_order_submitted(ctx: BrainContext) -> bool:
     """True only for the current inbound WhatsApp native catalog order event."""
     meta = _inbound_metadata(ctx)
-    if meta.get("source_type") != "catalog_order":
-        return False
-    items = meta.get("product_items") or []
-    return isinstance(items, list) and bool(items)
+    try:
+        from modules.ai.order_flow_v2.triggers import is_catalog_order_inbound  # noqa: PLC0415
+
+        return is_catalog_order_inbound(meta)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — local fallback below keeps legacy behavior
+        pass
+    source = str(meta.get("source_type") or "").strip().lower()
+    order = meta.get("order") if isinstance(meta.get("order"), dict) else {}
+    items = meta.get("product_items") or order.get("product_items") or []
+    return source in {"catalog_order", "order"} and isinstance(items, list) and bool(items)
 
 
 def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
@@ -98,13 +104,6 @@ def maybe_enforce_catalog_order_continue_checkout(
     """
     if not catalog_order_continue_checkout_enabled():
         return decision
-    try:
-        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
-
-        if should_skip_legacy_order_flow_reply():
-            return decision
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block catalog ingest
-        pass
     if not is_current_catalog_order_submitted(ctx):
         return decision
 

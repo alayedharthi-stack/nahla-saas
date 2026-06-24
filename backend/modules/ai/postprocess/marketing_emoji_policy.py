@@ -331,6 +331,24 @@ def resolve_message_purpose(ctx: MarketingEmojiContext, reply: str) -> str:
     if _payment_confirmed(ctx):
         return PURPOSE_CONFIRMED_SUCCESS
 
+    try:
+        from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
+            is_catalog_order_inbound,
+            is_explicit_purchase_intent,
+            is_greeting_message,
+            is_resume_order_command,
+        )
+
+        if (
+            is_greeting_message(ctx.inbound_text or "")
+            and not is_catalog_order_inbound(ctx.decision_args)
+            and not is_explicit_purchase_intent(ctx.inbound_text or "")
+            and not is_resume_order_command(ctx.inbound_text or "")
+        ):
+            return PURPOSE_GREETING
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — purpose resolver must never block replies
+        pass
+
     # Secondary text hints — only when metadata is thin.
     text = (reply or "").lower()
     if any(k in text for k in ("موقع", "العنوان", "الرمز المختصر", "خرائط")):

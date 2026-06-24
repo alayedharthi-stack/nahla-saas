@@ -27,6 +27,16 @@ def is_catalog_browse_message(message: str, *, intent_name: str = "") -> bool:
     msg = message or ""
     intent = str(intent_name or "").strip()
 
+    try:
+        from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
+            is_checkout_escape_inquiry,
+        )
+
+        if is_checkout_escape_inquiry(msg):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — browse policy must remain best-effort
+        pass
+
     if intent == "product_visual_request":
         return True
 

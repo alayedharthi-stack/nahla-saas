@@ -32,9 +32,9 @@ from .state import (
 )
 from .triggers import (
     is_catalog_order_inbound,
+    is_checkout_escape_inquiry,
     is_explicit_purchase_intent,
     is_greeting_message,
-    is_inquiry_message,
     is_resume_order_command,
     should_not_start_checkout,
 )
@@ -159,7 +159,7 @@ def try_handle_order_flow_v2(
     bs = dict(brain_state or {})
     patch: Dict[str, Any] = {}
 
-    if is_catalog_order_inbound(meta):
+    if is_catalog_order_inbound(meta, text):
         patch.update(_catalog_order_patch(db, tenant_id=tenant_id, inbound_metadata=meta))
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
@@ -190,8 +190,8 @@ def try_handle_order_flow_v2(
             )
         return OrderFlowV2Result(handled=False, reason="greeting_no_pending")
 
-    if is_inquiry_message(text) and not checkout_active_now(order_prep):
-        return OrderFlowV2Result(handled=False, reason="inquiry")
+    if is_checkout_escape_inquiry(text, meta):
+        return OrderFlowV2Result(handled=False, reason="inquiry_escape")
 
     if is_resume_order_command(text) and pending_order_exists(order_prep, bs):
         patch.update(activate_checkout_patch())
