@@ -56,6 +56,7 @@ from core.catalog import (
     effective_retailer_id,
     is_catalog_eligible,
 )
+from modules.ai.brain.commerce.catalog_body_policy import resolve_catalog_body_text
 
 from .service import provider_send_message
 
@@ -150,7 +151,10 @@ def build_single_product_payload(
     when the caller passes an empty string so we don't 400 on edge
     cases. ``footer`` is optional and capped at 60 chars by Meta.
     """
-    body = _truncate(body_text, MAX_BODY_LEN) or "تفضّل المنتج 👇"
+    body = _truncate(
+        resolve_catalog_body_text(body_text),
+        MAX_BODY_LEN,
+    ) or "."
     interactive: Dict[str, Any] = {
         "type": "product",
         "body": {"text": body},
@@ -183,7 +187,10 @@ def build_catalog_message_payload(
     Opens the merchant's linked Meta catalog inside WhatsApp. Requires a
     ``thumbnail_product_retailer_id`` — Meta uses it for the card preview.
     """
-    body = _truncate(body_text, MAX_BODY_LEN) or "تفضّل، اختر من الكتالوج 👇"
+    body = _truncate(
+        resolve_catalog_body_text(body_text),
+        MAX_BODY_LEN,
+    ) or "."
     interactive: Dict[str, Any] = {
         "type": "catalog_message",
         "body": {"text": body},
@@ -250,7 +257,10 @@ def build_product_list_payload(
             "caller must pre-filter or route to single-product send."
         )
 
-    body = _truncate(body_text, MAX_BODY_LEN) or "اخترلك أنسب الخيارات 👇"
+    body = _truncate(
+        resolve_catalog_body_text(body_text),
+        MAX_BODY_LEN,
+    ) or "."
     interactive: Dict[str, Any] = {
         "type": "product_list",
         "body": {"text": body},

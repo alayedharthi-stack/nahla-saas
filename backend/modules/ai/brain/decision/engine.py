@@ -56,6 +56,7 @@ from ..types import (
     INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
+    INTENT_ONLINE_STORE_INQUIRY,
     INTENT_START_ORDER,
     INTENT_PAY_NOW,
     INTENT_HESITATION,
@@ -1418,6 +1419,7 @@ class DefaultDecisionEngine:
         )
         if _candidates and not _in_data_collection and intent.name not in (
             INTENT_TALK_HUMAN, INTENT_ASK_SHIPPING, INTENT_ASK_STORE_INFO,
+            INTENT_ONLINE_STORE_INQUIRY,
             INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
         ):
             if _block_stale_resume("pending_candidates"):
@@ -2324,7 +2326,7 @@ class DefaultDecisionEngine:
                 ),
             )
 
-        if intent.name == INTENT_ASK_STORE_INFO:
+        if intent.name in {INTENT_ASK_STORE_INFO, INTENT_ONLINE_STORE_INQUIRY}:
             return Decision(
                 action=ACTION_FAQ_REPLY,
                 args={"topic": "store_info"},

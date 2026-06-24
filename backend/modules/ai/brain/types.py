@@ -31,6 +31,7 @@ INTENT_START_ORDER   = "start_order"
 INTENT_PAY_NOW       = "pay_now"
 INTENT_ASK_SHIPPING  = "ask_shipping"
 INTENT_ASK_STORE_INFO = "ask_store_info"
+INTENT_ONLINE_STORE_INQUIRY = "online_store_inquiry"
 # Working-hours / open-closed inquiries — Layer 0 deterministic reply when
 # ``support_hours`` / ``working_hours`` is configured on the tenant.
 INTENT_ASK_WORKING_HOURS = "ask_working_hours"

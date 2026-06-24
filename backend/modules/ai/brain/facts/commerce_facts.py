@@ -214,6 +214,18 @@ class DefaultFactsLoader:
         except Exception:
             pass   # working hours / persona are optional — never block a turn
 
+        # ── 5b. Unified store URL resolver ───────────────────────────────
+        try:
+            from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+                resolve_store_url,
+            )
+
+            resolved = resolve_store_url(db, tenant_id)
+            if resolved.found:
+                facts.store_url = resolved.url
+        except Exception:
+            pass
+
         # ── 6. KB free-text fallback for maps_url (May 2026 #38) ────────
         # Parity with :func:`modules.ai.postprocess.safety_nets.
         # _lookup_tenant_maps_url`. Pre-fix the LLM-facing facts only

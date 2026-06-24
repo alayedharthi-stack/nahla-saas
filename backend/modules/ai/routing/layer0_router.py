@@ -18,6 +18,7 @@ from modules.ai.brain.types import (
     BrainContext,
     CommerceFacts,
     INTENT_ASK_STORE_INFO,
+    INTENT_ONLINE_STORE_INQUIRY,
     INTENT_ASK_WORKING_HOURS,
     INTENT_FAREWELL,
     INTENT_GREETING,
@@ -35,6 +36,7 @@ _LAYER0_INTENTS = frozenset({
     INTENT_GREETING,
     INTENT_SOCIAL,
     INTENT_ASK_STORE_INFO,
+    INTENT_ONLINE_STORE_INQUIRY,
     INTENT_ASK_WORKING_HOURS,
     INTENT_FAREWELL,
 })
@@ -68,7 +70,13 @@ def layer0_router_enabled() -> bool:
 
 
 def _faq_mixed_commerce_blocks(message: str) -> bool:
+    from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+        is_online_store_inquiry,
+    )
     from modules.ai.brain.intent.rules import _normalize_residue_text  # noqa: PLC0415
+
+    if is_online_store_inquiry(message or ""):
+        return False
 
     norm = _normalize_residue_text(message or "")
     if not norm:
@@ -115,7 +123,12 @@ def _intent_blocks_layer0(message: str, intent: Intent) -> bool:
         return _greeting_blocks_layer0(message)
     if name == INTENT_SOCIAL:
         return _social_turn_blocks_layer0(message)
-    if name in {INTENT_ASK_STORE_INFO, INTENT_ASK_WORKING_HOURS, INTENT_FAREWELL}:
+    if name in {
+        INTENT_ASK_STORE_INFO,
+        INTENT_ONLINE_STORE_INQUIRY,
+        INTENT_ASK_WORKING_HOURS,
+        INTENT_FAREWELL,
+    }:
         return _faq_mixed_commerce_blocks(message)
     if intent.slots.get("embedded_greeting"):
         return True
@@ -126,6 +139,9 @@ def _load_layer0_facts(db: Any, tenant_id: int) -> CommerceFacts:
     """Lightweight tenant facts for Layer 0 templates — no catalog preload."""
     from database.models import StoreKnowledgeSnapshot, TenantSettings  # noqa: PLC0415
     from core.store_display import clean_store_name  # noqa: PLC0415
+    from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+        resolve_store_url,
+    )
 
     facts = CommerceFacts()
     try:
@@ -164,6 +180,10 @@ def _load_layer0_facts(db: Any, tenant_id: int) -> CommerceFacts:
             assistant = str(ai_cfg.get("assistant_name") or "").strip()
             if assistant:
                 facts.assistant_name = assistant
+
+        resolved = resolve_store_url(db, tenant_id)
+        if resolved.found:
+            facts.store_url = resolved.url
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "[LAYER0_ROUTER] facts load skipped tenant=%s err=%s",
@@ -343,7 +363,7 @@ def evaluate_layer0_route(
         if not (reply or "").strip():
             return None
         matched = f"thanks:{category}"
-    elif intent.name == INTENT_ASK_STORE_INFO:
+    elif intent.name in {INTENT_ASK_STORE_INFO, INTENT_ONLINE_STORE_INQUIRY}:
         reply = _compose_store_link(facts)
         matched = "store_link"
     elif intent.name == INTENT_ASK_WORKING_HOURS:

@@ -5687,6 +5687,9 @@ async def _handle_merchant_message(
                     phone_id=phone_id, to=to,
                     payload=_sac_payload,
                     _tenant_id=tenant_id, _db=db,
+                    customer_message=text or "",
+                    delivery_path="structured_admin_contact",
+                    policy_deliver_contact=bool(_sac_decision.deliver_contact),
                 )
                 if _sac_contacts_ok:
                     try:
@@ -6001,6 +6004,9 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_ho_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="handoff",
+                        escalation_reason="handoff",
                     )
                 except Exception as _ho_card_exc:  # noqa: BLE001
                     logger.warning(
@@ -7145,6 +7151,9 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_btr_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="branch_trigger_router",
+                        policy_deliver_contact=True,
                     )
                     if _btr_vcard_ok and _btr_decision.persist_contact:
                         try:
@@ -7368,6 +7377,9 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_acd_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="arrival_contact_delivery",
+                        policy_deliver_contact=bool(_acd_decision.deliver_contact),
                     )
                     if _acd_contacts_ok:
                         try:
@@ -7522,6 +7534,10 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_scp_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="staff_contact_policy",
+                        intent_name=_scp_decision.request_kind or "",
+                        policy_deliver_contact=bool(_scp_decision.deliver_contact),
                     )
                     if _scp_contacts_ok:
                         try:
@@ -7626,6 +7642,9 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_scr_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="staff_contact_recovery",
+                        policy_deliver_contact=bool(_scr_decision.deliver_contact),
                     )
                     if _scr_contacts_ok:
                         try:
@@ -11605,9 +11624,14 @@ async def _handle_merchant_message(
             if _native_send_result.success:
                 _send_ok = True
                 try:
-                    from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+                    from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+                        resolve_catalog_body_text,
+                    )
 
-                    reply = NATIVE_CATALOG_SUCCESS_BODY_AR
+                    reply = resolve_catalog_body_text(
+                        str(_native_catalog_entry.get("body_text") or ""),
+                        context_reply=reply or "",
+                    )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — success body for trace only
                     pass
                 if isinstance(_delivery_audit, dict):
@@ -12686,6 +12710,8 @@ async def _handle_merchant_message(
                         phone_id=phone_id, to=to,
                         payload=_contacts_payload,
                         _tenant_id=tenant_id, _db=db,
+                        customer_message=text or "",
+                        delivery_path="call_marker",
                     )
                     if _contacts_ok and isinstance(_delivery_audit, dict):
                         _delivery_audit["contacts_sent"] = True
@@ -13926,9 +13952,11 @@ async def _try_send_native_catalog_entry(
 
     body_text = str(entry.get("body_text") or fallback_body or "").strip()
     if not body_text:
-        from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+        from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+            resolve_catalog_body_text,
+        )
 
-        body_text = NATIVE_CATALOG_SUCCESS_BODY_AR
+        body_text = resolve_catalog_body_text("", context_reply=fallback_body or "")
 
     result = await send_catalog_message(
         db,
@@ -14228,7 +14256,35 @@ async def _send_cta_url(
 async def _send_contacts_message(
     phone_id: str, to: str, payload: Dict[str, Any],
     _tenant_id: Optional[int] = None, _db=None,
+    *,
+    customer_message: str = "",
+    delivery_path: str = "",
+    intent_name: str = "",
+    reply_mentions_staff: bool = False,
+    escalation_reason: str = "",
+    policy_deliver_contact: bool = False,
 ) -> bool:
+    from modules.ai.brain.commerce.contact_delivery_gate import (  # noqa: PLC0415
+        evaluate_contact_delivery_gate,
+    )
+
+    gate = evaluate_contact_delivery_gate(
+        customer_message=customer_message,
+        delivery_path=delivery_path,
+        intent_name=intent_name,
+        reply_mentions_staff=reply_mentions_staff,
+        escalation_reason=escalation_reason,
+        policy_deliver_contact=policy_deliver_contact,
+    )
+    if not gate.allow:
+        logger.info(
+            "[CONTACT_DELIVERY_GATE] blocked path=%s reason=%s preview=%r",
+            delivery_path or "-",
+            gate.reason,
+            (customer_message or "")[:80],
+        )
+        return False
+
     # vCard paths must not treat dedup ``already_sent`` as a fresh
     # provider POST — upstream uses this bool for ``vcard_ok`` evidence.
     return await _post_wa(
