@@ -233,6 +233,9 @@ class OrderPreparationState:
     # PR-4 — multi-item WhatsApp cart mirror (consumed by nahla_order_bridge).
     line_items: List[Dict[str, Any]] = field(default_factory=list)
     cart_deltas: List[Dict[str, Any]] = field(default_factory=list)
+    # Native catalog checkout total (session-only until DB draft exists).
+    catalog_checkout_total: Optional[float] = None
+    catalog_checkout_currency: str = ""
     # Gift / recipient delivery (P0 gift-order gate)
     recipient_name: str = ""
     fulfillment_kind: str = ""
@@ -302,6 +305,8 @@ class OrderPreparationState:
             "payment_claim_text_preview":  self.payment_claim_text_preview,
             "line_items": list(self.line_items or []),
             "cart_deltas": list(self.cart_deltas or []),
+            "catalog_checkout_total": self.catalog_checkout_total,
+            "catalog_checkout_currency": str(self.catalog_checkout_currency or ""),
             "recipient_name": str(self.recipient_name or ""),
             "fulfillment_kind": str(self.fulfillment_kind or ""),
             "pending_cart_confirmation": dict(self.pending_cart_confirmation or {}),
@@ -367,6 +372,8 @@ class OrderPreparationState:
             payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),
             line_items=list(raw.get("line_items") or []),
             cart_deltas=list(raw.get("cart_deltas") or []),
+            catalog_checkout_total=_as_optional_float(raw.get("catalog_checkout_total")),
+            catalog_checkout_currency=str(raw.get("catalog_checkout_currency") or ""),
             recipient_name=str(raw.get("recipient_name", "") or ""),
             fulfillment_kind=str(raw.get("fulfillment_kind", "") or ""),
             pending_cart_confirmation=dict(raw.get("pending_cart_confirmation") or {}),

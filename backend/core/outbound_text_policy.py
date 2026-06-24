@@ -98,6 +98,24 @@ class OutboundTextTracker:
     catalog_sent: bool = False
     vcard_sent: bool = False
     contact_gate: Dict[str, Any] = field(default_factory=dict)
+    fallback_reason: str = ""
+    fallback_kind: str = ""
+
+    def mark_fallback(
+        self,
+        *,
+        reason: str,
+        kind: str,
+        intent: str = "",
+        decision_action: str = "",
+    ) -> None:
+        self.fallback_reason = str(reason or "")
+        self.fallback_kind = str(kind or "")
+        if intent:
+            self.intent = intent
+        if decision_action:
+            self.decision_action = decision_action
+        self.note(f"fallback:{self.fallback_reason}:{self.fallback_kind}")
 
     def note(self, msg: str) -> None:
         if msg and msg not in self.audit_notes:
@@ -189,8 +207,18 @@ class OutboundTextTracker:
         self.final_delivery_type = OutboundDeliveryType.NATIVE_CATALOG
         self.catalog_sent = True
         self.technical_body_reason = technical_reason
-        if (body or "").strip() in (".", ""):
-            self.note("native_catalog_minimal_body")
+        try:
+            from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+                is_minimal_catalog_body,
+            )
+
+            if is_minimal_catalog_body(body):
+                self.text_source = OutboundTextSource.TECHNICAL
+                self.technical_body_reason = "meta_native_catalog_minimal_body"
+                self.note("native_catalog_minimal_body")
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — policy annotation must not block send
+            if (body or "").strip() in (".", ""):
+                self.note("native_catalog_minimal_body")
 
     def set_vcard_delivery(self, *, gate: Optional[Dict[str, Any]] = None) -> None:
         self.final_delivery_type = OutboundDeliveryType.VCARD
@@ -219,6 +247,8 @@ class OutboundTextTracker:
             "decision_action": self.decision_action,
             "audit_notes": list(self.audit_notes),
             "contact_gate": dict(self.contact_gate) if self.contact_gate else {},
+            "fallback_reason": self.fallback_reason,
+            "fallback_kind": self.fallback_kind,
         }
 
     @classmethod

@@ -369,6 +369,17 @@ def apply_native_order_to_state(
     if payload.customer_note and not getattr(prep, "address_line", ""):
         prep.address_line = payload.customer_note
 
+    total = 0.0
+    currency = ""
+    for item in payload.items or []:
+        if item.item_price is not None:
+            total += float(item.item_price) * int(item.quantity or 1)
+        if item.currency:
+            currency = item.currency
+    if total > 0:
+        prep.catalog_checkout_total = total
+        prep.catalog_checkout_currency = currency or "SAR"
+
     if not getattr(state, "stage", "") or str(getattr(state, "stage", "") or "") in {
         "",
         "discovery",

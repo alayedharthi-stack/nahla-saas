@@ -28,6 +28,13 @@ def is_forbidden_catalog_intro(text: str) -> bool:
     return any(m in body for m in FORBIDDEN_CATALOG_INTRO_MARKERS)
 
 
+MINIMAL_CATALOG_BODY = "."
+
+
+def is_minimal_catalog_body(text: str) -> bool:
+    return str(text or "").strip() in ("", MINIMAL_CATALOG_BODY)
+
+
 def resolve_catalog_body_text(
     body_text: str = "",
     *,
@@ -44,7 +51,24 @@ def resolve_catalog_body_text(
             return c[: MAX_CATALOG_BODY_LEN - 1] + "…"
         return c
     # Meta requires non-empty body — neutral placeholder, not a scripted intro.
-    return "."
+    return MINIMAL_CATALOG_BODY
+
+
+def resolve_native_catalog_body_text(
+    *,
+    context_reply: str = "",
+    inbound_customer_message: str = "",
+) -> str:
+    """Native catalog send body — never echo inbound customer text."""
+    inbound = str(inbound_customer_message or "").strip()
+    reply = str(context_reply or "").strip()
+    if inbound and reply and _norm_body(inbound) == _norm_body(reply):
+        reply = ""
+    return resolve_catalog_body_text("", context_reply=reply)
+
+
+def _norm_body(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip())
 
 
 def has_fixed_catalog_pointer(text: str) -> bool:
@@ -53,7 +77,10 @@ def has_fixed_catalog_pointer(text: str) -> bool:
 
 __all__ = [
     "FORBIDDEN_CATALOG_INTRO_MARKERS",
+    "MINIMAL_CATALOG_BODY",
     "has_fixed_catalog_pointer",
     "is_forbidden_catalog_intro",
+    "is_minimal_catalog_body",
     "resolve_catalog_body_text",
+    "resolve_native_catalog_body_text",
 ]
