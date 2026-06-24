@@ -311,12 +311,14 @@ def test_online_store_inquiry_does_not_resume_order_size_prompt() -> None:
         history=[],
     )
     composer = DefaultComposer()
-    hint = composer._order_resume_hint(ctx)
-    assert "الحجم" in hint
+    meta = composer._order_resume_hint_metadata(ctx)
+    assert meta.get("pending_options") == ["الحجم"]
+    result = _types.SimpleNamespace(data={})
     faq_body = _NO_URL_CLAIM
-    combined = composer._with_follow_up(faq_body, ctx, topic=TOPIC_STORE_INFO)
+    combined = composer._with_follow_up(faq_body, ctx, topic=TOPIC_STORE_INFO, result=result)
     assert combined == faq_body
     assert "نكمل اختيار" not in combined
+    assert result.data.get("order_resume_hint") is None
 
 
 # ── 6. Outbound sync stores CTA metadata ─────────────────────────────────

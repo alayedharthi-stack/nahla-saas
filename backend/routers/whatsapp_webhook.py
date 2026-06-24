@@ -256,6 +256,7 @@ def _otp_apply_reply(
     *,
     layer: str,
     op: str = "replace",
+    text_written: Optional[bool] = None,
 ) -> str:
     """Apply a postprocess reply change and record it on the tracker."""
     new = str(new or "")
@@ -267,10 +268,34 @@ def _otp_apply_reply(
             op=op,
             before=current or "",
             after=new,
+            text_written=text_written,
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — policy must not block send
         pass
     return new
+
+
+def _otp_record_metadata_mutation(
+    tracker: Any,
+    current: str,
+    *,
+    layer: str,
+    op: str = "noop",
+) -> None:
+    """Record a postprocess layer that emitted facts/metadata only."""
+    if tracker is None:
+        return
+    try:
+        tracker.record_mutation(
+            layer=layer,
+            op=op,
+            before=current or "",
+            after=current or "",
+            text_written=False,
+        )
+        tracker.note(f"{layer}:metadata_only")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy must not block send
+        pass
 
 
 def _otp_merge_save_metadata(
@@ -10880,60 +10905,24 @@ async def _handle_merchant_message(
                 )
 
             # ── Clear-intent fallback safety net (May 2026) ──────────
-            # Catches the "عذرًا، تأخّر الرد قليلًا. هل يمكنك إعادة
-            # سؤالك؟" LLM-timeout copy AND generic "I didn't
-            # understand" replies when the customer's message had
-            # an obvious intent (offers / price / honey product /
-            # store_link / shipping / payment / order). Replaces
-            # the apology with a short intent-aware nudge so the
-            # conversation moves forward instead of bouncing the
-            # question back at the customer.
+            # Phase 2 P0: detect clear intent on generic LLM fallback but
+            # do NOT replace outbound text — record facts/metadata only.
             try:
                 _ci = _sn_clear_intent(
                     customer_msg=text or "",
                     reply_text=reply or "",
                 )
-                if _ci.fired and _ci.new_reply:
-                    from core.reply_instruction import (  # noqa: PLC0415
-                        build_clear_intent_instruction,
-                        is_operational_constrained_compose_enabled,
+                if _ci.fired:
+                    _otp_record_metadata_mutation(
+                        _outbound_text_tracker,
+                        reply or "",
+                        layer="clear_intent_fallback_net",
+                        op="noop",
                     )
-
-                    if is_operational_constrained_compose_enabled():
-                        from core.constrained_operational_compose import (  # noqa: PLC0415
-                            resolve_prebrain_reply_text,
-                        )
-
-                        _ci_decision = {
-                            "reply_text": _ci.new_reply,
-                            "deterministic_path": "clear_intent_fallback",
-                            "reply_instruction": build_clear_intent_instruction(
-                                intent=_ci.customer_intent,
-                                legacy_copy=_ci.new_reply,
-                                inbound_text=text or "",
-                            ).to_dict(),
-                        }
-                        _ci_reply, _ci_meta = await resolve_prebrain_reply_text(
-                            db=db,
-                            tenant_id=tenant_id,
-                            phone=sender,
-                            decision=_ci_decision,
-                            inbound_text=text or "",
-                        )
-                        reply = _otp_apply_reply(
-                            _outbound_text_tracker,
-                            reply,
-                            _ci_reply,
-                            layer="clear_intent_fallback_net",
-                            op="replace",
-                        )
-                    else:
-                        reply = _otp_apply_reply(
-                            _outbound_text_tracker,
-                            reply,
-                            _ci.new_reply,
-                            layer="clear_intent_fallback_net",
-                            op="replace",
+                    if _outbound_text_tracker is not None and _ci.metadata:
+                        _outbound_text_tracker.note(
+                            "clear_intent_fallback:"
+                            + str(_ci.customer_intent or "")
                         )
                 if _ci.fired or _ci.skipped_reason not in {
                     "flag_disabled",
@@ -10947,6 +10936,8 @@ async def _handle_merchant_message(
                         "conversation_id":   getattr(convo, "id", None),
                         "customer_intent":   _ci.customer_intent,
                         "reason":            _ci.reason or _ci.skipped_reason,
+                        "text_written":      _ci.text_written,
+                        "facts":             _ci.facts,
                     }
                     logger.info(
                         "[SAFETY_NET:clear_intent_fallback] "

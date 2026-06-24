@@ -66,8 +66,8 @@ import logging
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -289,6 +289,44 @@ class FallbackDecision:
     kind:          str        # one of FALLBACK_KIND_*
     response_goal: str        # one of GOAL_*
     rationale:     str = ""   # human-readable diagnostic (logged only)
+    metadata:      Dict[str, Any] = field(default_factory=dict)
+
+
+def handoff_promise_allowed(
+    *,
+    store_has_live_agent: bool = False,
+    escalation_evidence_ok: bool = False,
+) -> bool:
+    """Human handoff promises require live agent or structured escalation evidence."""
+    return bool(store_has_live_agent or escalation_evidence_ok)
+
+
+def _assert_no_handoff_promise_without_evidence(
+    text: str,
+    *,
+    store_has_live_agent: bool,
+    escalation_evidence_ok: bool,
+) -> tuple[str, dict]:
+    """Return safe text + metadata when a template would over-promise."""
+    meta: dict = {}
+    if handoff_promise_allowed(
+        store_has_live_agent=store_has_live_agent,
+        escalation_evidence_ok=escalation_evidence_ok,
+    ):
+        return text, meta
+    try:
+        from core.outbound_sanitizer import contains_handoff_promise  # noqa: PLC0415
+
+        if contains_handoff_promise(text):
+            meta = {
+                "handoff_promise_blocked": True,
+                "escalation_evidence_ok": False,
+                "fallback_text_sanitized": True,
+            }
+            return _TEXT_NEUTRAL_RETRY, meta
+    except Exception:  # noqa: BLE001
+        pass
+    return text, meta
 
 
 def choose_safe_fallback(
@@ -296,6 +334,7 @@ def choose_safe_fallback(
     *,
     reason: str,
     store_has_live_agent: bool = False,
+    escalation_evidence_ok: bool = False,
 ) -> FallbackDecision:
     """Choose a fallback reply that is honest about the situation.
 
@@ -315,6 +354,10 @@ def choose_safe_fallback(
         are AI-only, and promising a human we don't have is the
         original bug. Wired in from tenant settings; the webhook
         passes it in.
+    escalation_evidence_ok:
+        When True structured escalation evidence exists (handoff
+        session, notification, pre-brain handoff path). Human promises
+        are allowed only with this flag or ``store_has_live_agent``.
 
     Returns
     -------
@@ -323,11 +366,21 @@ def choose_safe_fallback(
 
     # ── Special-case: no API key / AI fully disabled ─────────────
     if reason == FALLBACK_REASON_NO_API_KEY:
+        safe_text, meta = _assert_no_handoff_promise_without_evidence(
+            _TEXT_NO_AI,
+            store_has_live_agent=store_has_live_agent,
+            escalation_evidence_ok=escalation_evidence_ok,
+        )
         return FallbackDecision(
-            text          = _TEXT_NO_AI,
+            text          = safe_text,
             kind          = FALLBACK_KIND_NO_AI,
-            response_goal = GOAL_ACK,
-            rationale     = "AI disabled — informing customer the team will reach out",
+            response_goal = GOAL_ACK if safe_text == _TEXT_NO_AI else GOAL_RETRY,
+            rationale     = (
+                "AI disabled — informing customer the team will reach out"
+                if safe_text == _TEXT_NO_AI
+                else "AI disabled — human promise blocked without escalation evidence"
+            ),
+            metadata      = meta,
         )
 
     # ── Explicit handoff request → honest handoff ack ────────────
@@ -338,15 +391,41 @@ def choose_safe_fallback(
                 kind          = FALLBACK_KIND_HANDOFF_ACK,
                 response_goal = GOAL_HANDOFF,
                 rationale     = "customer asked for human + tenant has live agent",
+                metadata      = {"escalation_evidence_ok": True, "handoff_requested": True},
             )
-        # Customer asked for a human but the tenant has no live
-        # team. Still acknowledge — but soften the wording so we
-        # don't promise an immediate human reply.
+        if escalation_evidence_ok:
+            softened = "وصلت رسالتك 🌷 راح نتواصل معك في أقرب وقت ممكن."
+            safe_text, meta = _assert_no_handoff_promise_without_evidence(
+                softened,
+                store_has_live_agent=False,
+                escalation_evidence_ok=True,
+            )
+            return FallbackDecision(
+                text          = safe_text,
+                kind          = FALLBACK_KIND_HANDOFF_ACK,
+                response_goal = GOAL_HANDOFF,
+                rationale     = "customer asked for human + escalation evidence present",
+                metadata      = {**meta, "handoff_requested": True, "escalation_evidence_ok": True},
+            )
+        safe_text, meta = _assert_no_handoff_promise_without_evidence(
+            "وصلت رسالتك 🌷 راح نتواصل معك في أقرب وقت ممكن.",
+            store_has_live_agent=False,
+            escalation_evidence_ok=False,
+        )
         return FallbackDecision(
-            text          = "وصلت رسالتك 🌷 راح نتواصل معك في أقرب وقت ممكن.",
+            text          = safe_text,
             kind          = FALLBACK_KIND_HANDOFF_ACK,
-            response_goal = GOAL_HANDOFF,
-            rationale     = "customer asked for human, tenant has no live agent → softened",
+            response_goal = GOAL_RETRY,
+            rationale     = (
+                "customer asked for human but no escalation evidence → "
+                "neutral retry, no human promise"
+            ),
+            metadata      = {
+                **meta,
+                "handoff_requested": True,
+                "handoff_promise_blocked": True,
+                "escalation_evidence_ok": False,
+            },
         )
 
     # ── Informational question + LLM failure → soft retry ────────
@@ -488,6 +567,7 @@ def choose_intent_aware_fallback(
     *,
     reason: str,
     store_has_live_agent: bool = False,
+    escalation_evidence_ok: bool = False,
     shipping_info: dict | None = None,
     min_confidence: float = INTENT_AWARE_MIN_CONFIDENCE,
 ) -> FallbackDecision:
@@ -541,6 +621,7 @@ def choose_intent_aware_fallback(
         return choose_safe_fallback(
             inbound_text, reason=reason,
             store_has_live_agent=store_has_live_agent,
+            escalation_evidence_ok=escalation_evidence_ok,
         )
 
     # Always defer the no-API-key path to the standard policy — no
@@ -550,6 +631,7 @@ def choose_intent_aware_fallback(
         return choose_safe_fallback(
             inbound_text, reason=reason,
             store_has_live_agent=store_has_live_agent,
+            escalation_evidence_ok=escalation_evidence_ok,
         )
 
     try:
@@ -599,6 +681,7 @@ def choose_intent_aware_fallback(
     return choose_safe_fallback(
         inbound_text, reason=reason,
         store_has_live_agent=store_has_live_agent,
+        escalation_evidence_ok=escalation_evidence_ok,
     )
 
 
@@ -766,6 +849,7 @@ __all__ = [
     "choose_safe_fallback",
     "emit_temp_error_fallback_log",
     "fallback_text",
+    "handoff_promise_allowed",
     "is_explicit_handoff_request",
     "is_informational_question",
 ]
