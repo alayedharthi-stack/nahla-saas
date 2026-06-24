@@ -223,7 +223,7 @@ class DefaultFactsLoader:
             resolved = resolve_store_url(db, tenant_id)
             if resolved.found:
                 facts.store_url = resolved.url
-        except Exception:
+        except Exception:  # noqa: silent-ok — unified store URL probe must not break facts loader
             pass
 
         # ── 6. KB free-text fallback for maps_url (May 2026 #38) ────────
@@ -250,10 +250,7 @@ class DefaultFactsLoader:
                 kb_maps_url, _kb_src = _lookup_tenant_maps_url(db, tenant_id)
                 if kb_maps_url:
                     facts.maps_url = kb_maps_url
-            except Exception:
-                # KB scan errors must never break the facts loader —
-                # the LLM still gets a usable result with whatever
-                # the snapshot/settings layers populated.
+            except Exception:  # noqa: silent-ok — KB scan errors must not break facts loader
                 pass
 
         logger.debug(

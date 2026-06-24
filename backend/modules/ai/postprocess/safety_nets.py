@@ -2482,7 +2482,7 @@ def _looks_like_store_link_request(
         )
         if is_online_store_inquiry(customer_msg or ""):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — online store probe must not block phrase match
         pass
     try:
         from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
@@ -2528,7 +2528,7 @@ def _lookup_tenant_store_url(db: Any, tenant_id: int) -> str:
         )
 
         return _resolve(db, tenant_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: silent-ok — unified resolver must not block safety net
         logger.debug(
             "safety_nets.store_link | unified resolver failed tenant=%s err=%s",
             tenant_id,
@@ -4994,7 +4994,7 @@ def apply_outbound_artifact_guard(
             inbound_metadata=inbound_metadata,
             normalized_type=normalized_type,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — origin extract probe must not block artifact guard
         pass
 
     expected = _classify_expected_artifact(

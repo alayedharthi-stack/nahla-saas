@@ -228,7 +228,7 @@ def _lookup_kb_store_url(db: Any, tenant_id: int) -> Tuple[str, str]:
             url = _extract_store_url_from_text(body)
             if url:
                 return url, f"kb_free_text:{row.kind}"
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: silent-ok — KB scan must not block resolver chain
         logger.debug(
             "store_url_resolver.kb_scan_failed tenant=%s err=%s",
             tenant_id,
@@ -259,7 +259,7 @@ def resolve_store_url(db: Any, tenant_id: int) -> StoreUrlResolution:
             return StoreUrlResolution(
                 found=True, url=url, source="merchant_profile",
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: silent-ok — resolver layer must not block next source
         logger.debug(
             "store_url_resolver.snapshot_failed tenant=%s err=%s",
             tenant_id,
@@ -302,7 +302,7 @@ def resolve_store_url(db: Any, tenant_id: int) -> StoreUrlResolution:
                 source="structured_settings",
                 reason="whatsapp_button_url",
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: silent-ok — resolver layer must not block next source
         logger.debug(
             "store_url_resolver.settings_failed tenant=%s err=%s",
             tenant_id,
@@ -344,7 +344,7 @@ def resolve_store_url(db: Any, tenant_id: int) -> StoreUrlResolution:
                     source="integration",
                     reason=provider,
                 )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: silent-ok — resolver layer must not block next source
         logger.debug(
             "store_url_resolver.integration_failed tenant=%s err=%s",
             tenant_id,
