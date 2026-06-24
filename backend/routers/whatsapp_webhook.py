@@ -6716,7 +6716,7 @@ async def _handle_merchant_message(
                     except Exception:
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — rollback best-effort after commit failure
                             pass
                     _sync_persona_observability()
                     return
