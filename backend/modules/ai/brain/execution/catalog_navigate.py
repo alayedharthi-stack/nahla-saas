@@ -93,7 +93,7 @@ class CatalogNavigateHandler:
                 thumbnail = ""
 
         from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
-            resolve_catalog_body_text,
+            resolve_native_catalog_body_text,
         )
 
         return {
@@ -107,9 +107,9 @@ class CatalogNavigateHandler:
             "query": "",
             "native_catalog_entry": {
                 "thumbnail_product_retailer_id": thumbnail,
-                "body_text": resolve_catalog_body_text(
-                    str(getattr(ctx, "message", "") or ""),
-                    context_reply="",
+                "body_text": resolve_native_catalog_body_text(
+                    context_reply=str(args.get("catalog_context_reply") or ""),
+                    inbound_customer_message=str(getattr(ctx, "message", "") or ""),
                 ),
             },
             "navigation_state_patch": self._navigation_patch(

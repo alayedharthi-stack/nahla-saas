@@ -332,6 +332,7 @@ def is_explicit_order_tracking_request(
     state: Any = None,
     history: Optional[List[Any]] = None,
     commerce_bundle: Optional[dict] = None,
+    inbound_metadata: Optional[dict] = None,
 ) -> bool:
     """
     Layer 1 routing — only explicit tracking follow-ups become track_order.
@@ -339,6 +340,19 @@ def is_explicit_order_tracking_request(
     Excludes general shipping duration and post-order carrier/policy asks that
     the decision engine defers to ACTION_LLM_REPLY with order context.
     """
+    try:
+        from modules.ai.brain.commerce.current_order_amount import (  # noqa: PLC0415
+            should_route_current_order_amount_over_tracking,
+        )
+
+        if should_route_current_order_amount_over_tracking(
+            message,
+            state=state,
+            inbound_metadata=inbound_metadata,
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — amount guard must not block tracking
+        pass
     if not is_order_tracking_follow_up(
         message,
         state=state,
@@ -377,6 +391,7 @@ def boost_track_order_intent(
     state: Any = None,
     history: Optional[List[Any]] = None,
     commerce_bundle: Optional[dict] = None,
+    inbound_metadata: Optional[dict] = None,
 ) -> Optional[Intent]:
     """Return a high-confidence track_order intent when guard fires."""
     if not is_explicit_order_tracking_request(
@@ -384,6 +399,7 @@ def boost_track_order_intent(
         state=state,
         history=history,
         commerce_bundle=commerce_bundle,
+        inbound_metadata=inbound_metadata,
     ):
         return None
     if rule_intent and rule_intent.name == INTENT_TRACK_ORDER:

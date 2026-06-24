@@ -83,7 +83,7 @@ def _browse_ctx(*, db: Any = None) -> BrainContext:
 
 
 class TestCatalogNavigateDoesNotPreclaim:
-    def test_native_catalog_entry_defers_customer_text(self):
+    def test_native_catalog_entry_uses_minimal_body_not_customer_echo(self):
         ctx = _browse_ctx(db=MagicMock())
         decision = Decision(
             action=ACTION_CATALOG_NAVIGATE,
@@ -96,10 +96,10 @@ class TestCatalogNavigateDoesNotPreclaim:
         assert result.success is True
         assert result.data["discovery_presentation_text"] == ""
         assert result.data["product_lines"] == ""
-        assert result.data["native_catalog_entry"]["body_text"] != ""
-        assert "تفضّل، اختر من الكتالوج" not in (
-            result.data["native_catalog_entry"].get("body_text") or ""
-        )
+        body = result.data["native_catalog_entry"].get("body_text") or ""
+        assert body != ctx.message
+        assert body == "."
+        assert "تفضّل، اختر من الكتالوج" not in body
 
 
 class TestResponderDoesNotPreclaim:

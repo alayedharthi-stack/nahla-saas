@@ -913,11 +913,74 @@ class DefaultDecisionEngine:
                 _oc_exc,
             )
 
+        # ── 0a.615 Active checkout amount (before DB track_order) ───────
+        try:
+            from ..commerce.current_order_amount import (  # noqa: PLC0415
+                current_order_amount_facts_dict,
+                resolve_current_order_amount,
+                should_route_current_order_amount_over_tracking,
+            )
+
+            _inbound_meta = {}
+            try:
+                _prof = getattr(ctx, "profile", None) or {}
+                if isinstance(_prof, dict):
+                    _inbound_meta = dict(_prof.get("inbound_metadata") or {})
+            except Exception:  # noqa: BLE001
+                _inbound_meta = {}
+
+            if should_route_current_order_amount_over_tracking(
+                ctx.message or "",
+                state=getattr(ctx, "state", None),
+                inbound_metadata=_inbound_meta,
+            ):
+                _amount_snap = resolve_current_order_amount(
+                    state=getattr(ctx, "state", None),
+                    inbound_metadata=_inbound_meta,
+                )
+                logger.info(
+                    "[CURRENT_ORDER_AMOUNT] route=llm tenant=%s total=%s source=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _amount_snap.total_amount,
+                    _amount_snap.source,
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "current_order_amount",
+                        "current_order_amount_facts": current_order_amount_facts_dict(
+                            _amount_snap,
+                        ),
+                        "response_goal": (
+                            "Answer the customer's question about the total/value of "
+                            "their CURRENT in-progress WhatsApp order using only "
+                            "current_order_amount_facts. Do not claim no orders exist."
+                        ),
+                    },
+                    reason="active checkout amount question — skip DB track_order",
+                    confidence=0.96,
+                )
+        except Exception as _coa_exc:  # noqa: BLE001  # noqa: silent-ok — amount guard must not block decide
+            logger.debug(
+                "[CURRENT_ORDER_AMOUNT] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _coa_exc,
+            )
+
         # ── 0a.62 Existing-order tracking guard (Phase 2) ─────────────────
         try:
             from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
                 is_explicit_order_tracking_request,
             )
+
+            _track_inbound_meta = {}
+            try:
+                _tp = getattr(ctx, "profile", None) or {}
+                if isinstance(_tp, dict):
+                    _track_inbound_meta = dict(_tp.get("inbound_metadata") or {})
+            except Exception:  # noqa: BLE001
+                _track_inbound_meta = {}
 
             if (
                 is_explicit_order_tracking_request(
@@ -925,6 +988,7 @@ class DefaultDecisionEngine:
                     state=getattr(ctx, "state", None),
                     history=getattr(ctx, "history", None),
                     commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                    inbound_metadata=_track_inbound_meta,
                 )
                 and intent.name != INTENT_TRACK_ORDER
             ):

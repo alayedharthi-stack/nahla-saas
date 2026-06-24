@@ -1415,6 +1415,16 @@ class DefaultComposer:
                         prompt = f"{prompt}\n\n{_brief_overlay}"
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — brief overlay must not break compose
                     pass
+
+            _dec_args = (decision.args if decision is not None else None) or {}
+            _amount_facts = _dec_args.get("current_order_amount_facts")
+            if isinstance(_amount_facts, dict) and _amount_facts:
+                import json as _json  # noqa: PLC0415
+
+                prompt = (
+                    f"{prompt}\n\n[CURRENT_ORDER_AMOUNT_FACTS — operational only]\n"
+                    f"{_json.dumps(_amount_facts, ensure_ascii=False)}"
+                )
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(
                 ctx.history,

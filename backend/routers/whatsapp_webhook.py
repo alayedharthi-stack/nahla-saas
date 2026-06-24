@@ -8686,10 +8686,27 @@ async def _handle_merchant_message(
                         _POReason.FALLBACK_REPLY,
                         owner=f"brain_exception:{_decision.kind}",
                     )
+                    _fallback_meta = _persona_ownership.to_metadata()
+                    try:
+                        from core.outbound_text_policy import OutboundTextTracker  # noqa: PLC0415
+
+                        _fb_tracker = OutboundTextTracker()
+                        _fb_tracker.mark_fallback(
+                            reason=FALLBACK_REASON_BRAIN_EXCEPTION,
+                            kind=str(_decision.kind),
+                            intent=str(getattr(_trace, "intent", "") or ""),
+                            decision_action=str(getattr(_trace, "decision_action", "") or ""),
+                        )
+                        _fallback_meta = {
+                            **_fallback_meta,
+                            "outbound_text_policy": _fb_tracker.to_metadata(),
+                        }
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — fallback metadata must not block send
+                        pass
                     StateManager.save_message(
                         db, to, _safe_reply, "outbound",
                         conversation_id=convo.id, tenant_id=tenant_id,
-                        extra_metadata=_persona_ownership.to_metadata(),
+                        extra_metadata=_fallback_meta,
                     )
                     try:
                         await _send_whatsapp_message(
@@ -11738,12 +11755,12 @@ async def _handle_merchant_message(
                 _send_ok = True
                 try:
                     from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
-                        resolve_catalog_body_text,
+                        resolve_native_catalog_body_text,
                     )
 
-                    reply = resolve_catalog_body_text(
-                        str(_native_catalog_entry.get("body_text") or ""),
+                    reply = resolve_native_catalog_body_text(
                         context_reply=reply or "",
+                        inbound_customer_message=str(text or ""),
                     )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — success body for trace only
                     pass
@@ -14104,13 +14121,14 @@ async def _try_send_native_catalog_entry(
             reason="connection_missing",
         )
 
-    body_text = str(entry.get("body_text") or fallback_body or "").strip()
-    if not body_text:
-        from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
-            resolve_catalog_body_text,
-        )
+    from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+        resolve_native_catalog_body_text,
+    )
 
-        body_text = resolve_catalog_body_text("", context_reply=fallback_body or "")
+    body_text = resolve_native_catalog_body_text(
+        context_reply=str(fallback_body or entry.get("body_text") or "").strip(),
+        inbound_customer_message="",
+    )
 
     result = await send_catalog_message(
         db,
