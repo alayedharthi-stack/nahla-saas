@@ -143,8 +143,13 @@ def _split_name(full: str) -> Tuple[str, str]:
 def _to_float(value: Any) -> Optional[float]:
     if value is None:
         return None
-    try:
+    if isinstance(value, (int, float)):
         return float(value)
+    text = str(value).replace("ر.س", "").replace("SAR", "").replace(",", "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
     except (TypeError, ValueError):
         return None
 

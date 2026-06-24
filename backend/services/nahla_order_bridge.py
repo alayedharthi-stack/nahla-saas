@@ -830,6 +830,8 @@ def sync_nahla_wa_order(
     order_prep: Dict[str, Any],
     trigger: str = "unknown",
     customer: Any = None,
+    force_catalog_draft: bool = False,
+    extra_order_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """
     Upsert a Nahla-native WhatsApp order — draft (pending_payment) or paid.
@@ -883,7 +885,7 @@ def sync_nahla_wa_order(
     if is_payment_submitted_path:
         eligibility_reason = "payment_submitted_path" if not is_paid_path else "paid_promotion"
     else:
-        if not _draft_bridge_enabled(tenant_id):
+        if not force_catalog_draft and not _draft_bridge_enabled(tenant_id):
             _log_bridge(
                 external_id=external_id,
                 tenant_id=tenant_id,
@@ -894,7 +896,11 @@ def sync_nahla_wa_order(
                 trigger=trigger,
             )
             return None
-        eligible, eligibility_reason = _draft_eligible(order_prep, brain_state)
+        if force_catalog_draft:
+            eligible = True
+            eligibility_reason = "catalog_order_immediate"
+        else:
+            eligible, eligibility_reason = _draft_eligible(order_prep, brain_state)
         if not eligible:
             _log_bridge(
                 external_id=external_id,
@@ -1117,6 +1123,8 @@ def sync_nahla_wa_order(
             order_prep=order_prep,
             target_status=target_status,
         )
+        if extra_order_metadata:
+            base_meta.update(extra_order_metadata)
 
         if existing is not None:
             meta = dict(existing.extra_metadata or {})

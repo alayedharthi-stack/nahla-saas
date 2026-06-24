@@ -6596,6 +6596,7 @@ async def _handle_merchant_message(
                 tenant_id, convo.id, to,
             )
 
+        _catalog_message_event_id: Optional[int] = None
         if inbound_metadata:
             try:
                 latest_event = (
@@ -6611,12 +6612,37 @@ async def _handle_merchant_message(
                     meta = dict(latest_event.extra_metadata or {})
                     meta["normalized_inbound"] = dict(inbound_metadata)
                     latest_event.extra_metadata = meta
+                    _catalog_message_event_id = int(getattr(latest_event, "id", 0) or 0) or None
                     db.commit()
             except Exception:
                 try:
                     db.rollback()
                 except Exception:
                     pass
+
+        if inbound_metadata:
+            try:
+                from core.wa_catalog_order_immediate_draft import (  # noqa: PLC0415
+                    is_catalog_order_inbound,
+                    persist_catalog_order_immediate_draft,
+                )
+
+                if is_catalog_order_inbound(inbound_metadata):
+                    persist_catalog_order_immediate_draft(
+                        db,
+                        tenant_id=int(tenant_id),
+                        conversation=convo,
+                        inbound_metadata=dict(inbound_metadata),
+                        phone=to,
+                        message_event_id=_catalog_message_event_id,
+                        source_message_key=(wa_msg_id or None),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[CATALOG_ORDER_DRAFT] immediate persist hook failed tenant=%s conv=%s",
+                    tenant_id,
+                    getattr(convo, "id", None),
+                )
 
         # Keep a lightweight state row in sync with the same phone key used by history.
         state = StateManager.load(db, phone=to, tenant_id=tenant_id)
