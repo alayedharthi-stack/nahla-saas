@@ -323,26 +323,44 @@ def _load_active_draft(
         return None
     try:
         from models import Order  # noqa: PLC0415
+        from services.nahla_order_bridge import is_open_wa_draft_order, nahla_wa_external_id  # noqa: PLC0415
 
-        external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
-        order = (
+        prefix = nahla_wa_external_id(tenant_id, int(conversation_id))
+        candidates = (
             db.query(Order)
-            .filter_by(tenant_id=tenant_id, external_id=external_id)
-            .first()
+            .filter(
+                Order.tenant_id == tenant_id,
+                Order.source == "whatsapp",
+                Order.external_id.like(f"{prefix}%"),
+            )
+            .order_by(Order.id.desc())
+            .limit(20)
+            .all()
         )
-        if order is None:
+        if not candidates:
             return None
+
+        def _activity_ts(row: Any) -> str:
+            meta = _meta_dict(row)
+            for key in ("last_updated_at", "last_synced_at", "draft_created_at", "created_at"):
+                val = meta.get(key)
+                if val:
+                    return str(val)
+            return ""
+
+        open_drafts = [o for o in candidates if is_open_wa_draft_order(o)]
+        order = open_drafts[0] if open_drafts else candidates[0]
+        if len(candidates) > 1:
+            pool = open_drafts or candidates
+            order = sorted(pool, key=_activity_ts, reverse=True)[0]
+
         meta = _meta_dict(order)
         lifecycle = str(meta.get("lifecycle") or "")
-        if lifecycle and lifecycle != "whatsapp_draft":
-            # Still expose draft row when lifecycle unset (legacy rows).
-            if lifecycle not in {"", "whatsapp_draft"}:
-                pass  # include non-draft WA rows for read-only snapshot
         missing = list(meta.get("missing_fields") or [])
         total_raw = getattr(order, "total", None)
         return ActiveDraftContext(
             order_id=getattr(order, "id", None),
-            external_id=external_id,
+            external_id=str(getattr(order, "external_id", None) or prefix),
             status=str(getattr(order, "status", "") or ""),
             lifecycle=lifecycle or "whatsapp_draft",
             line_items=list(getattr(order, "line_items", None) or []),

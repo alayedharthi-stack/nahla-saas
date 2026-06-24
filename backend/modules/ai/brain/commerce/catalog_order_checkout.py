@@ -66,6 +66,30 @@ def is_current_catalog_order_submitted(ctx: BrainContext) -> bool:
 
 def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
     state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None)
+    line_items = list(
+        getattr(prep, "line_items", None) or getattr(state, "cart_items", None) or []
+    )
+    if line_items:
+        first = next((li for li in line_items if isinstance(li, dict)), None) or {}
+        count = len(line_items)
+        return {
+            "id": first.get("product_id") or first.get("product_retailer_id") or "catalog_order",
+            "external_id": first.get("product_retailer_id") or "",
+            "title": first.get("product_name") or first.get("title") or first.get("product_retailer_id") or "",
+            "price": prep.catalog_checkout_total if prep is not None else first.get("unit_price"),
+            "currency": (
+                getattr(prep, "catalog_checkout_currency", None)
+                or first.get("currency")
+                or ""
+            ),
+            "from_catalog_order": True,
+            "from_native_catalog_order": True,
+            "line_items_count": count,
+            "is_multi_item": count > 1,
+            "line_items": [dict(x) for x in line_items if isinstance(x, dict)],
+        }
+
     focus = getattr(state, "current_product_focus", None)
     if isinstance(focus, dict) and focus:
         product = dict(focus)
@@ -73,22 +97,7 @@ def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
         product.setdefault("from_native_catalog_order", True)
         return product
 
-    prep = getattr(state, "order_prep", None)
-    line_items = list(getattr(prep, "line_items", None) or getattr(state, "cart_items", None) or [])
-    first = next((li for li in line_items if isinstance(li, dict)), None)
-    if not first:
-        return None
-    retailer_id = str(first.get("product_retailer_id") or "").strip()
-    return {
-        "id": first.get("product_id") or retailer_id or "catalog_order",
-        "external_id": retailer_id,
-        "title": first.get("product_name") or first.get("title") or retailer_id,
-        "price": first.get("unit_price") or first.get("price"),
-        "currency": first.get("currency") or "",
-        "from_catalog_order": True,
-        "from_native_catalog_order": True,
-        "line_items_count": len(line_items),
-    }
+    return None
 
 
 def maybe_enforce_catalog_order_continue_checkout(

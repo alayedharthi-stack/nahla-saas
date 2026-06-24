@@ -393,17 +393,17 @@ def apply_native_order_to_state(
         (li for li in resolution.line_items if li.get("product_id")),
         resolution.line_items[0] if resolution.line_items else None,
     )
-    if first and not getattr(state, "current_product_focus", None):
-        state.current_product_focus = {
-            "id": first.get("product_id") or first.get("product_retailer_id"),
-            "external_id": first.get("product_retailer_id") or "",
-            "title": first.get("product_name") or first.get("title") or "",
-            "price": first.get("unit_price") or first.get("price"),
-            "currency": first.get("currency") or "",
-            "from_catalog_order": True,
-            "from_native_catalog_order": True,
-            "line_items_count": len(resolution.line_items),
-        }
+    state.current_product_focus = {
+        "id": (first or {}).get("product_id") or (first or {}).get("product_retailer_id"),
+        "external_id": (first or {}).get("product_retailer_id") or "",
+        "title": (first or {}).get("product_name") or (first or {}).get("title") or "",
+        "price": (first or {}).get("unit_price") or (first or {}).get("price"),
+        "currency": (first or {}).get("currency") or "",
+        "from_catalog_order": True,
+        "from_native_catalog_order": True,
+        "line_items_count": len(resolution.line_items),
+        "is_multi_item": len(resolution.line_items) > 1,
+    }
 
     logger.info(
         "[WA_NATIVE_ORDER] native_draft_order_created tenant=%s line_items=%d "

@@ -836,6 +836,7 @@ def _base_metadata(
         "amount_fallback_used": fallback_used,
         "counts_in_revenue":    is_paid_path,
         "last_synced_at":       now_iso,
+        "last_updated_at":      now_iso,
     }
     if is_paid_path:
         meta["payment_confirmed_at"] = confirmed_at

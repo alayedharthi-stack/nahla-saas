@@ -29,10 +29,35 @@ def is_forbidden_catalog_intro(text: str) -> bool:
 
 
 MINIMAL_CATALOG_BODY = "."
+# Meta requires a non-empty interactive body; neutral UI copy (not AI prose).
+TECHNICAL_CATALOG_BODY = "اختر المنتجات من القائمة"
+
+_UNSAFE_CATALOG_BODY_MARKERS = (
+    "التوفر قيد التحقق",
+    "غير متوفر",
+    "غير متاح",
+    "نفذت الكمية",
+    "out of stock",
+    "availability",
+    "أي نوع تبيه",
+    "أي نوع تبي",
+    "أي نوع تبغ",
+)
 
 
 def is_minimal_catalog_body(text: str) -> bool:
-    return str(text or "").strip() in ("", MINIMAL_CATALOG_BODY)
+    body = str(text or "").strip()
+    return body in ("", MINIMAL_CATALOG_BODY, TECHNICAL_CATALOG_BODY)
+
+
+def is_unsafe_catalog_body(text: str) -> bool:
+    body = str(text or "").strip()
+    if not body:
+        return True
+    if is_forbidden_catalog_intro(body):
+        return True
+    lowered = body.lower()
+    return any(m.lower() in lowered for m in _UNSAFE_CATALOG_BODY_MARKERS)
 
 
 def resolve_catalog_body_text(
@@ -45,13 +70,12 @@ def resolve_catalog_body_text(
         c = str(candidate or "").strip()
         if not c:
             continue
-        if is_forbidden_catalog_intro(c):
+        if is_unsafe_catalog_body(c):
             continue
         if len(c) > MAX_CATALOG_BODY_LEN:
             return c[: MAX_CATALOG_BODY_LEN - 1] + "…"
         return c
-    # Meta requires non-empty body — neutral placeholder, not a scripted intro.
-    return MINIMAL_CATALOG_BODY
+    return TECHNICAL_CATALOG_BODY
 
 
 def resolve_native_catalog_body_text(
@@ -78,9 +102,11 @@ def has_fixed_catalog_pointer(text: str) -> bool:
 __all__ = [
     "FORBIDDEN_CATALOG_INTRO_MARKERS",
     "MINIMAL_CATALOG_BODY",
+    "TECHNICAL_CATALOG_BODY",
     "has_fixed_catalog_pointer",
     "is_forbidden_catalog_intro",
     "is_minimal_catalog_body",
+    "is_unsafe_catalog_body",
     "resolve_catalog_body_text",
     "resolve_native_catalog_body_text",
 ]

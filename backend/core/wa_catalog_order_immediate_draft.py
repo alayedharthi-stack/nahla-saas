@@ -123,6 +123,7 @@ def build_catalog_order_prep(
     prep: Dict[str, Any] = {
         "line_items": list(line_items),
         "cart_items": list(line_items),
+        "catalog_line_items_authoritative": True,
         "order_status": "awaiting_address",
         "catalog_checkout_total": total,
         "catalog_checkout_currency": currency,
@@ -155,6 +156,7 @@ def build_catalog_brain_state(
             "from_catalog_order": True,
             "from_native_catalog_order": True,
             "line_items_count": len(line_items),
+            "is_multi_item": len(line_items) > 1,
         },
     }
 
