@@ -429,6 +429,22 @@ def build_line_items_from_order_prep(
     Returns ``(items, primary_title, timeline_events)``.
     """
     events: List[Dict[str, Any]] = []
+
+    if order_prep.get("catalog_line_items_authoritative"):
+        cart = merge_line_items(
+            list(order_prep.get("line_items") or [])
+            or list(brain_state.get("cart_items") or [])
+        )
+        primary = ""
+        for item in cart:
+            name = str(item.get("product_name") or item.get("title") or "").strip()
+            if name and name != "منتج":
+                primary = name
+                break
+        if len(cart) > 1 and primary:
+            primary = f"{len(cart)} منتجات"
+        return cart, primary, events
+
     cart = merge_line_items(_collect_item_lists(
         order_prep, brain_state, existing_meta, existing_line_items,
     ))

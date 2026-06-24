@@ -378,6 +378,34 @@ def _find_conversation_by_phone(
     return None
 
 
+def _format_line_items_summary(line_items: List[Dict[str, Any]]) -> str:
+    names: List[str] = []
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("product_name") or item.get("title") or item.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return " + ".join(names[:5])
+
+
+def _resolve_order_totals(op: Dict[str, Any], line_items: List[Dict[str, Any]]) -> tuple[Any, str]:
+    total = op.get("catalog_checkout_total") or op.get("order_total") or op.get("order_flow_v2_catalog_total")
+    currency = str(op.get("catalog_checkout_currency") or op.get("order_flow_v2_currency") or "SAR")
+    if total is None and line_items:
+        try:
+            from core.wa_cart_line_items import cart_total_amount  # noqa: PLC0415
+
+            total = cart_total_amount(line_items)
+        except Exception:  # noqa: BLE001
+            total = None
+    return total, currency
+
+
 def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
     """Extract a flat summary of the order focus from the persisted
     brain state. Returns empty fields when nothing is known. Used by
@@ -389,11 +417,24 @@ def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
     op = brain_state.get("order_prep") or brain_state.get("order_preparation") or {}
     if not isinstance(op, dict):
         op = {}
+    line_items = list(op.get("line_items") or brain_state.get("cart_items") or [])
+    selected = str(focus.get("title") or focus.get("name") or "")
+    price = focus.get("price")
+    currency = str(focus.get("currency") or "SAR")
+    if line_items:
+        selected = _format_line_items_summary(line_items) or selected
+        total, cur = _resolve_order_totals(op, line_items)
+        if total is not None:
+            price = total
+        if cur:
+            currency = cur
     return {
-        "selected_product":      str(focus.get("title") or focus.get("name") or ""),
+        "selected_product":      selected,
         "selected_product_id":   str(focus.get("id") or op.get("product_id") or ""),
-        "price":                 focus.get("price"),
-        "currency":              str(focus.get("currency") or "SAR"),
+        "price":                 price,
+        "currency":              currency,
+        "line_items_count":      len(line_items),
+        "is_multi_item":         len(line_items) > 1,
         "city":                  str(op.get("city") or ""),
         "short_address_code":    str(op.get("short_address_code") or ""),
         "google_maps_url":       str(op.get("google_maps_url") or ""),

@@ -1438,6 +1438,25 @@ class DefaultComposer:
                     f"{prompt}\n\n[CURRENT_ORDER_AMOUNT_FACTS — operational only]\n"
                     f"{_json.dumps(_amount_facts, ensure_ascii=False)}"
                 )
+            try:
+                from modules.ai.brain.commerce.catalog_order_facts import (  # noqa: PLC0415
+                    build_catalog_order_compose_facts,
+                )
+
+                _profile = dict(getattr(ctx, "profile", None) or {})
+                _cat_facts = build_catalog_order_compose_facts(
+                    state=getattr(ctx, "state", None),
+                    inbound_metadata=dict(_profile.get("inbound_metadata") or {}),
+                )
+                if _cat_facts:
+                    import json as _json  # noqa: PLC0415
+
+                    prompt = (
+                        f"{prompt}\n\n[CATALOG_ORDER_FACTS — operational only]\n"
+                        f"{_json.dumps(_cat_facts, ensure_ascii=False)}"
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog facts must not break compose
+                pass
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(
                 ctx.history,

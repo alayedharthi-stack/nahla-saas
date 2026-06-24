@@ -893,7 +893,11 @@ def _serialise_order(
         "customer":      display_name,
         "customer_name": display_name,
         "phone":         phone or "—",
-        "items":         "، ".join(item_titles) if item_titles else "—",
+        "items":         (
+            f"{len(item_titles)} منتجات — {('، '.join(item_titles))}"
+            if len(item_titles) > 1
+            else ("، ".join(item_titles) if item_titles else "—")
+        ),
         "amount":        _format_total(amount_value, order.total),
         "amount_sar":    round(amount_value, 2),
         "status":        status,
@@ -1140,6 +1144,13 @@ async def list_orders(
 
     q = _apply_lifecycle_db_filter(q, lifecycle_filter)
     rows = q.order_by(Order.id.desc()).limit(400).all()
+    rows.sort(
+        key=lambda o: (
+            _read_last_updated_at(o, created_at=_read_created_at(o, fallback=now)),
+            int(getattr(o, "id", 0) or 0),
+        ),
+        reverse=True,
+    )
 
     filt = (lifecycle_filter or "").strip().lower()
     if filt in (LIFECYCLE_FILTER_NEEDS_ACTION, LIFECYCLE_FILTER_MISSING_LOCATION):

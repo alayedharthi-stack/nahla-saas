@@ -23,7 +23,7 @@ from core.wa_native_catalog_order import (  # noqa: E402
 )
 from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: E402
     FORBIDDEN_CATALOG_INTRO_MARKERS,
-    MINIMAL_CATALOG_BODY,
+    TECHNICAL_CATALOG_BODY,
     resolve_native_catalog_body_text,
 )
 from modules.ai.brain.commerce.current_order_amount import (  # noqa: E402
@@ -127,7 +127,7 @@ class TestNativeCatalogBodyPolicy:
             inbound_customer_message=CUSTOMER_BROWSE,
         )
         assert body != CUSTOMER_BROWSE
-        assert body == MINIMAL_CATALOG_BODY
+        assert body == TECHNICAL_CATALOG_BODY
         for marker in FORBIDDEN_CATALOG_INTRO_MARKERS:
             assert marker not in body
 
@@ -143,7 +143,7 @@ class TestNativeCatalogBodyPolicy:
             context_reply=CUSTOMER_BROWSE,
             inbound_customer_message=CUSTOMER_BROWSE,
         )
-        assert body2 == MINIMAL_CATALOG_BODY
+        assert body2 == TECHNICAL_CATALOG_BODY
 
     def test_catalog_navigate_does_not_echo_customer_message(self):
         ctx = BrainContext(
@@ -166,7 +166,7 @@ class TestNativeCatalogBodyPolicy:
         result = asyncio.run(CatalogNavigateHandler().handle(decision, ctx))
         body = result.data["native_catalog_entry"]["body_text"]
         assert body != CUSTOMER_BROWSE
-        assert body == MINIMAL_CATALOG_BODY
+        assert body == TECHNICAL_CATALOG_BODY
 
     def test_native_catalog_minimal_body_metadata(self):
         tracker = OutboundTextTracker()

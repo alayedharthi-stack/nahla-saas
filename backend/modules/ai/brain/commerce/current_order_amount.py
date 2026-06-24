@@ -254,7 +254,9 @@ def resolve_current_order_amount(
 
 
 def current_order_amount_facts_dict(snapshot: CurrentOrderAmountSnapshot) -> Dict[str, Any]:
-    return asdict(snapshot)
+    data = asdict(snapshot)
+    data["is_multi_item"] = int(data.get("line_items_count") or 0) > 1
+    return data
 
 
 def should_route_current_order_amount_over_tracking(

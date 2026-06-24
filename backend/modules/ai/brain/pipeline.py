@@ -435,7 +435,7 @@ def _maybe_apply_native_catalog_order(
             ),
             resolution.line_items[0] if resolution.line_items else None,
         )
-        if first and not state.current_product_focus:
+        if first:
             state.current_product_focus = {
                 "id": first.get("product_id") or first.get("product_retailer_id"),
                 "external_id": first.get("product_retailer_id") or "",
@@ -445,6 +445,7 @@ def _maybe_apply_native_catalog_order(
                 "from_catalog_order": True,
                 "from_native_catalog_order": True,
                 "line_items_count": len(resolution.line_items),
+                "is_multi_item": len(resolution.line_items) > 1,
             }
     except Exception as exc:  # noqa: BLE001
         logger.warning(
