@@ -11,10 +11,15 @@ from core.wa_native_catalog_order import (
     parse_native_catalog_order,
 )
 
+from .contract import build_contract
 from .flags import is_order_flow_v2_enabled, is_order_flow_v2_shadow_enabled
 from .ingest import apply_inbound_slots
 from .missing_fields import compute_v2_missing_fields
-from .payment import apply_payment_method_selection, build_payment_instruction_reply
+from .payment import (
+    apply_payment_method_selection,
+    build_payment_instruction_reply,
+    default_payment_method_patch,
+)
 from .replies import (
     build_catalog_order_start_reply,
     build_greeting_with_pending_hint,
@@ -29,6 +34,12 @@ from .state import (
     mark_pending_patch,
     pending_order_exists,
     prep_dict,
+)
+from .slot_ownership import (
+    apply_slot_ownership,
+    higher_priority_missing_before_payment,
+    payment_attempt,
+    stamp_last_field_patch,
 )
 from .triggers import (
     is_catalog_order_inbound,
@@ -164,6 +175,12 @@ def try_handle_order_flow_v2(
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
         missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        patch.update(stamp_last_field_patch(missing))
+        patch.update(build_contract(
+            decision="ask_missing_field",
+            field=(patch.get("order_flow_v2_last_field") or ""),
+            reason="catalog_order_start",
+        ).to_patch())
         reply = build_catalog_order_start_reply(
             order_prep=merged_prep,
             brain_state=bs,
@@ -197,6 +214,12 @@ def try_handle_order_flow_v2(
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
         missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        patch.update(stamp_last_field_patch(missing))
+        patch.update(build_contract(
+            decision="ask_missing_field",
+            field=(patch.get("order_flow_v2_last_field") or ""),
+            reason="resume_checkout",
+        ).to_patch())
         reply = build_resume_ack(
             order_prep=merged_prep,
             brain_state=bs,
@@ -218,6 +241,12 @@ def try_handle_order_flow_v2(
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
         missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        patch.update(stamp_last_field_patch(missing))
+        patch.update(build_contract(
+            decision="ask_missing_field",
+            field=(patch.get("order_flow_v2_last_field") or ""),
+            reason="explicit_purchase_start",
+        ).to_patch())
         reply = build_next_field_reply(
             order_prep=merged_prep,
             brain_state=bs,
@@ -236,24 +265,54 @@ def try_handle_order_flow_v2(
             patch.update(mark_pending_patch())
         return OrderFlowV2Result(handled=False, reason="not_active")
 
-    slot_patch = apply_inbound_slots(
+    pre_missing = compute_v2_missing_fields(order_prep, brain_state=bs, whatsapp_phone=customer_phone)
+    owner_patch, owner_reason = apply_slot_ownership(
         message=text,
-        inbound_normalized_type=inbound_normalized_type,
-        inbound_metadata=meta,
         order_prep=order_prep,
+        missing_fields=pre_missing,
     )
-    if slot_patch:
-        patch.update(slot_patch)
+    if owner_patch:
+        patch.update(owner_patch)
+
+    if owner_reason not in {
+        "last_name_correction",
+        "customer_name_owned",
+        "address_refusal",
+        "payment_before_address",
+    }:
+        slot_patch = apply_inbound_slots(
+            message=text,
+            inbound_normalized_type=inbound_normalized_type,
+            inbound_metadata=meta,
+            order_prep=order_prep,
+        )
+        if slot_patch:
+            patch.update(slot_patch)
 
     merged_prep = {**order_prep, **patch}
     missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
 
-    if "payment_method" in missing and not merged_prep.get("payment_method"):
+    if (
+        "payment_method" in missing
+        and not merged_prep.get("payment_method")
+        and not higher_priority_missing_before_payment(missing)
+    ):
         pay_patch, chosen = apply_payment_method_selection(db, tenant_id=tenant_id, message=text)
+        if not pay_patch and not payment_attempt(text):
+            pay_patch, chosen = default_payment_method_patch(db, tenant_id=tenant_id)
         if pay_patch:
             patch.update(pay_patch)
             merged_prep = {**merged_prep, **pay_patch}
             missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+
+    if missing:
+        patch.update(stamp_last_field_patch(missing))
+        if "order_flow_v2_contract" not in patch:
+            patch.update(build_contract(
+                decision="ask_missing_field",
+                field=(patch.get("order_flow_v2_last_field") or ""),
+                reason=owner_reason or "collect_next_field",
+            ).to_patch())
 
     if merged_prep.get("payment_method") and not missing:
         reply = build_payment_instruction_reply(

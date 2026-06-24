@@ -13,6 +13,7 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from core.merchant_payment_methods import MerchantPaymentMethods  # noqa: E402
 from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: E402
     resolve_active_order_quantity_reply,
 )
@@ -31,8 +32,18 @@ from modules.ai.order_flow_v2.flags import (  # noqa: E402
     should_skip_legacy_order_flow_reply,
 )
 from modules.ai.order_flow_v2.owner import try_handle_order_flow_v2  # noqa: E402
+from modules.ai.order_flow_v2.payment_evidence import (  # noqa: E402
+    RECEIPT_RECEIVED_NEEDS_REVIEW,
+    RECEIPT_REJECTED_MISMATCH,
+    RECEIPT_VERIFIED_BY_MERCHANT,
+    evaluate_receipt_status,
+    payment_confirmation_allowed,
+)
 from modules.ai.order_flow_v2.replies import build_next_field_reply  # noqa: E402
-from modules.ai.order_flow_v2.shipping import evaluate_v2_shipping_readiness  # noqa: E402
+from modules.ai.order_flow_v2.shipping import (  # noqa: E402
+    can_claim_shipping_started,
+    evaluate_v2_shipping_readiness,
+)
 from modules.ai.order_flow_v2.triggers import (  # noqa: E402
     is_catalog_order_inbound,
     is_checkout_escape_inquiry,
@@ -47,6 +58,7 @@ _LEGACY_FORBIDDEN = (
     "تمام، أكمل معك الطلب —",
     "أحس أني كرّرت نفس الإجابة",
 )
+_PHONE_REQUEST_MARKERS = ("رقم جوالك", "رقم الجوال", "رقم هاتفك", "الجوال للتواصل")
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +192,16 @@ class TestOrderFlowV2Owner:
         db.query.return_value.join.return_value.filter.return_value.order_by.return_value.first.return_value = conv
         return db
 
+    def _active_prep(self, **extra):
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [{"product_id": "p1", "product_name": "عسل", "quantity": 1, "catalog_price": 285}],
+            "order_flow_v2_trusted_price": True,
+            "order_flow_v2_catalog_total": 285,
+        }
+        prep.update(extra)
+        return prep
+
     @patch("modules.ai.order_flow_v2.owner.build_line_items_from_payload")
     @patch("modules.ai.order_flow_v2.owner.apply_state_patch")
     def test_catalog_order_starts_v2(self, _patch, _items, monkeypatch):
@@ -234,6 +256,8 @@ class TestOrderFlowV2Owner:
         assert "وعليكم السلام" in result.reply
         assert "كمل الطلب" in result.reply
         assert "المدينة" not in result.reply
+        assert "payment_method" not in result.state_patch
+        assert not any(marker in result.reply for marker in _PHONE_REQUEST_MARKERS)
 
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
     def test_inquiry_not_handled(self, _load, monkeypatch):
@@ -337,6 +361,146 @@ class TestOrderFlowV2Owner:
         assert not any(phrase in result.reply for phrase in _LEGACY_FORBIDDEN)
 
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_name_correction_owns_turn_before_city(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = self._active_prep(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثب",
+            order_flow_v2_last_field="customer_name",
+        )
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="الحارثي",
+        )
+
+        assert result.handled
+        assert result.state_patch["customer_last_name"] == "الحارثي"
+        assert "city" not in result.state_patch
+        assert result.state_patch["order_flow_v2_last_field"] == "city"
+
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_address_refusal_keeps_address_missing_and_blocks_payment(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = self._active_prep(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثي",
+            city="مكة",
+            order_flow_v2_last_field="delivery_address",
+        )
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="لا",
+        )
+
+        assert result.handled
+        assert result.state_patch["order_flow_v2_address_refused"] is True
+        assert result.state_patch["order_flow_v2_contract"]["field"] == "delivery_address"
+        assert result.state_patch["order_flow_v2_contract"]["reason"] == "address_required_before_payment"
+        assert "payment_method" not in result.state_patch
+        assert "طريقة الدفع" not in result.reply
+
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_payment_before_address_is_blocked(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = self._active_prep(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثي",
+            city="مكة",
+        )
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="تحويل",
+        )
+
+        assert result.handled
+        assert "payment_method" not in result.state_patch
+        assert result.state_patch["order_flow_v2_contract"]["reason"] == "payment_blocked_until_address"
+        assert "تحويل بنكي" not in result.reply
+
+    @patch("modules.ai.order_flow_v2.payment.load_tenant_payment_accounts")
+    @patch("modules.ai.order_flow_v2.payment.load_merchant_payment_methods")
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_merchant_payment_bank_mismatch_rejected(self, _load, _methods, _accounts, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = self._active_prep(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثي",
+            city="مكة",
+            short_address_code="MDQA5061",
+        )
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+        _methods.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=True,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=["bank_transfer"],
+        )
+        _accounts.return_value = SimpleNamespace(bank_brands=("rajhi",))
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="تحويل الاهلي",
+        )
+
+        assert result.handled
+        assert "payment_method" not in result.state_patch
+        assert result.state_patch["order_flow_v2_payment_rejected"] is True
+        assert result.state_patch["order_flow_v2_payment_rejection_reason"] == "requested_bank_not_enabled"
+        assert result.state_patch["order_flow_v2_available_payment_methods"] == ["bank_transfer"]
+
+    @patch("modules.ai.order_flow_v2.payment.load_merchant_payment_methods")
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_single_available_payment_method_can_default_after_address(self, _load, _methods, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = self._active_prep(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثي",
+            city="مكة",
+            short_address_code="MDQA5061",
+        )
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+        _methods.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=True,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=["bank_transfer"],
+        )
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="تمام",
+        )
+
+        assert result.handled
+        assert result.state_patch["payment_method"] == "bank_transfer"
+        assert not any(marker in result.reply for marker in _PHONE_REQUEST_MARKERS)
+
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
     def test_resume_pending_checkout(self, _load, monkeypatch):
         monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
         monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
@@ -414,10 +578,89 @@ class TestShippingReadiness:
         assert verdict["allowed"]
 
     def test_bank_transfer_not_shipped_without_verification(self):
-        from modules.ai.order_flow_v2.shipping import can_claim_shipping_started  # noqa: E402
-
         prep = {
             "payment_method": "bank_transfer",
             "payment_receipt_received": True,
         }
         assert not can_claim_shipping_started(prep)
+
+    def test_bank_transfer_not_shipped_without_merchant_receipt_verification(self):
+        prep = {
+            "payment_method": "bank_transfer",
+            "payment_confirmed": True,
+            "payment_receipt_received": True,
+        }
+        assert not can_claim_shipping_started(prep)
+
+    def test_bank_transfer_shipping_allowed_after_merchant_verification(self):
+        prep = {
+            "payment_method": "bank_transfer",
+            "payment_confirmed": True,
+            "receipt_verified_by_merchant": True,
+        }
+        assert can_claim_shipping_started(prep)
+
+
+class TestPaymentEvidenceGuard:
+    def test_receipt_amount_mismatch_needs_rejection_not_confirmation(self):
+        verdict = evaluate_receipt_status(
+            order_prep={
+                "order_total": 285,
+                "payment_receipt_received": True,
+            },
+            receipt_metadata={
+                "amount": 2850,
+                "payment_evidence_status": "confirmed",
+            },
+        )
+        assert verdict["receipt_status"] == RECEIPT_REJECTED_MISMATCH
+        assert verdict["payment_confirmed_allowed"] is False
+        assert payment_confirmation_allowed({
+            "order_total": 285,
+            "payment_receipt_received": True,
+            "payment_receipt_metadata": {"amount": 2850},
+        }) is False
+
+    def test_receipt_bank_mismatch_requires_review(self):
+        verdict = evaluate_receipt_status(
+            order_prep={
+                "order_total": 285,
+                "requested_bank": "alahli",
+                "payment_receipt_received": True,
+            },
+            receipt_metadata={
+                "amount": 285,
+                "bank": "Al Rajhi Bank",
+                "payment_evidence_status": "confirmed",
+            },
+        )
+        assert verdict["receipt_status"] == RECEIPT_REJECTED_MISMATCH
+        assert verdict["reason"] == "bank_mismatch"
+        assert verdict["payment_confirmed_allowed"] is False
+
+    def test_confirmed_ocr_still_needs_merchant_review(self):
+        verdict = evaluate_receipt_status(
+            order_prep={
+                "order_total": 285,
+                "payment_receipt_received": True,
+            },
+            receipt_metadata={
+                "amount": 285,
+                "bank": "Al Rajhi Bank",
+                "payment_evidence_status": "confirmed",
+            },
+        )
+        assert verdict["receipt_status"] == RECEIPT_RECEIVED_NEEDS_REVIEW
+        assert verdict["payment_confirmed_allowed"] is False
+
+    def test_verified_only_by_merchant_allows_confirmation(self):
+        verdict = evaluate_receipt_status(
+            order_prep={
+                "order_total": 285,
+                "payment_receipt_received": True,
+                "receipt_verified_by_merchant": True,
+            },
+            receipt_metadata={"amount": 285},
+        )
+        assert verdict["receipt_status"] == RECEIPT_VERIFIED_BY_MERCHANT
+        assert verdict["payment_confirmed_allowed"] is True

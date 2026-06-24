@@ -8,6 +8,7 @@ from core.wa_order_lifecycle import is_payment_verified
 from modules.ai.commerce_agent.policies.shipping_readiness import evaluate_shipping_readiness
 from modules.ai.commerce_agent.contracts import AgentInputContext
 
+from .payment_evidence import payment_confirmation_allowed
 from .state import line_items_from_state
 
 
@@ -37,5 +38,5 @@ def evaluate_v2_shipping_readiness(
 def can_claim_shipping_started(order_prep: Dict[str, Any]) -> bool:
     method = str(order_prep.get("payment_method") or "").strip().lower()
     if method in {PAYMENT_METHOD_BANK_TRANSFER, "bank_transfer", "transfer"}:
-        return is_payment_verified(order_prep)
+        return is_payment_verified(order_prep) and payment_confirmation_allowed(order_prep)
     return bool(order_prep.get("payment_confirmed") or order_prep.get("payment_verified"))
