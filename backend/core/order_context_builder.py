@@ -129,6 +129,7 @@ class OrderContext:
     prefill: OrderPrefillState
     known_previous_address: Optional[ShippingContext] = None
     shadow_missing_modes: Optional[dict] = None
+    missing_fields_result: Optional[Any] = None
 
 
 def _prep_dict(brain_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -801,7 +802,9 @@ def build_order_context(
     shadow_missing = shadow_missing_fields_from_modes(prefill.shadow_missing_modes)
     divergence = compute_divergence_flags(legacy_missing, shadow_missing)
 
-    return OrderContext(
+    from core.order_missing_fields_engine import compute_missing_fields  # noqa: PLC0415
+
+    ctx_with_legacy = OrderContext(
         tenant_id=ctx.tenant_id,
         conversation_id=ctx.conversation_id,
         customer_id=ctx.customer_id,
@@ -810,7 +813,7 @@ def build_order_context(
         active_draft=ctx.active_draft,
         catalog_order=ctx.catalog_order,
         brain_order_prep=ctx.brain_order_prep,
-        legacy_missing_fields=ctx.legacy_missing_fields,
+        legacy_missing_fields=list(legacy_missing),
         shadow_missing_fields=shadow_missing,
         field_evidence=ctx.field_evidence,
         build_source=ctx.build_source,
@@ -818,6 +821,28 @@ def build_order_context(
         prefill=ctx.prefill,
         known_previous_address=ctx.known_previous_address,
         shadow_missing_modes=ctx.shadow_missing_modes,
+        missing_fields_result=None,
+    )
+    missing_result = compute_missing_fields(ctx_with_legacy)
+
+    return OrderContext(
+        tenant_id=ctx_with_legacy.tenant_id,
+        conversation_id=ctx_with_legacy.conversation_id,
+        customer_id=ctx_with_legacy.customer_id,
+        identity=ctx_with_legacy.identity,
+        shipping=ctx_with_legacy.shipping,
+        active_draft=ctx_with_legacy.active_draft,
+        catalog_order=ctx_with_legacy.catalog_order,
+        brain_order_prep=ctx_with_legacy.brain_order_prep,
+        legacy_missing_fields=ctx_with_legacy.legacy_missing_fields,
+        shadow_missing_fields=ctx_with_legacy.shadow_missing_fields,
+        field_evidence=ctx_with_legacy.field_evidence,
+        build_source=ctx_with_legacy.build_source,
+        divergence_flags=ctx_with_legacy.divergence_flags,
+        prefill=ctx_with_legacy.prefill,
+        known_previous_address=ctx_with_legacy.known_previous_address,
+        shadow_missing_modes=ctx_with_legacy.shadow_missing_modes,
+        missing_fields_result=missing_result,
     )
 
 

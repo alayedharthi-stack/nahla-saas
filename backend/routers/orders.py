@@ -993,6 +993,9 @@ def _serialise_order(
                         .filter_by(id=int(conv_id), tenant_id=int(tenant_id))
                         .first()
                     )
+                from core.order_missing_fields_engine import (  # noqa: PLC0415
+                    missing_fields_result_to_api_dict,
+                )
                 ctx = build_order_context(
                     db,
                     tenant_id=int(tenant_id),
@@ -1001,6 +1004,10 @@ def _serialise_order(
                     build_source="orders_api_detail",
                 )
                 payload["order_context_prefill"] = build_order_context_api_payload(ctx)
+                if ctx.missing_fields_result is not None:
+                    payload["missing_fields_engine"] = missing_fields_result_to_api_dict(
+                        ctx.missing_fields_result
+                    )
             except Exception:  # noqa: BLE001
                 payload["order_context_prefill"] = None
 
