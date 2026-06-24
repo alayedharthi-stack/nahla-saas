@@ -24,6 +24,14 @@ from core.customer_identity_resolver import (
 from core.wa_order_lifecycle import has_accepted_delivery_address
 from services.nahla_order_bridge import nahla_wa_external_id
 
+from core.order_context_prefill import (  # noqa: E402
+    OrderPrefillState,
+    build_prefill_state,
+    enrich_identity_context,
+    enrich_shipping_context,
+    shadow_missing_fields_from_modes,
+)
+
 logger = logging.getLogger("nahla.order_context_builder")
 
 _CATALOG_SOURCE = "catalog_order"
@@ -58,6 +66,8 @@ class OrderIdentityContext:
     has_verified_name: bool
     has_proposed_name: bool
     missing_name_reason: str = ""
+    missing_mode: str = "ask"
+    can_use_for_shipping_label: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,9 @@ class ShippingContext:
     source: str
     confidence: float
     accepted_delivery_address: bool
+    locked_by_merchant: bool = False
+    missing_mode: str = "ask"
+    requires_merchant_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,7 +126,9 @@ class OrderContext:
     field_evidence: dict
     build_source: str
     divergence_flags: dict
+    prefill: OrderPrefillState
     known_previous_address: Optional[ShippingContext] = None
+    shadow_missing_modes: Optional[dict] = None
 
 
 def _prep_dict(brain_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -588,6 +603,7 @@ def _build_field_evidence(
     shipping: ShippingContext,
     prep: Dict[str, Any],
     identity_snap: Any,
+    draft_locked: bool = False,
 ) -> Dict[str, FieldEvidence]:
     evidence: Dict[str, FieldEvidence] = {}
     if identity.operational_name:
@@ -600,18 +616,20 @@ def _build_field_evidence(
             updated_at=getattr(identity_snap, "customer_name_updated_at", None),
         )
     if shipping.city:
-        evidence["city"] = FieldEvidence(
-            field="city",
+        evidence["shipping.city"] = FieldEvidence(
+            field="shipping.city",
             value=shipping.city,
             source=shipping.source,
             confidence=shipping.confidence,
+            locked=draft_locked or shipping.locked_by_merchant,
         )
     if shipping.maps_url or shipping.short_address:
-        evidence["delivery_address"] = FieldEvidence(
-            field="delivery_address",
+        evidence["shipping.delivery_address"] = FieldEvidence(
+            field="shipping.delivery_address",
             value=shipping.short_address or shipping.maps_url,
             source=shipping.source,
             confidence=shipping.confidence,
+            locked=draft_locked or shipping.locked_by_merchant,
         )
     if _prep_str(prep, "product_id"):
         evidence["product"] = FieldEvidence(
@@ -656,6 +674,7 @@ def build_order_context(
     brain_state: Optional[Dict[str, Any]] = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
     build_source: str = "whatsapp_webhook",
+    message: str = "",
 ) -> OrderContext:
     bs = dict(brain_state or {})
     if not bs and conversation is not None:
@@ -722,6 +741,42 @@ def build_order_context(
         shipping=shipping,
         prep=prep,
         identity_snap=identity_snap,
+        draft_locked=bool(active_draft and active_draft.merchant_edit_locked),
+    )
+
+    has_product = _has_product_signal(
+        prep=prep,
+        brain_state=bs,
+        active_draft=active_draft,
+        catalog=catalog,
+    )
+    has_total = _has_total_signal(
+        prep=prep,
+        active_draft=active_draft,
+        catalog=catalog,
+    )
+
+    prefill = build_prefill_state(
+        identity=identity,
+        shipping=shipping,
+        known_previous=known_previous,
+        prep=prep,
+        active_draft=active_draft,
+        message=message,
+        has_product=has_product,
+        has_total=has_total,
+    )
+
+    shipping_locked = bool(active_draft and active_draft.merchant_edit_locked) or bool(
+        prep.get("merchant_shipping_locked")
+    )
+    identity = enrich_identity_context(identity, missing_mode=prefill.identity_missing_mode)
+    shipping = enrich_shipping_context(
+        shipping,
+        city_mode=prefill.shipping_city_mode,
+        delivery_mode=prefill.shipping_delivery_mode,
+        locked_by_merchant=shipping_locked,
+        requires_merchant_review=prefill.requires_merchant_review,
     )
 
     ctx = OrderContext(
@@ -738,10 +793,12 @@ def build_order_context(
         field_evidence=field_evidence,
         build_source=build_source,
         divergence_flags={},
+        prefill=prefill,
         known_previous_address=known_previous,
+        shadow_missing_modes=dict(prefill.shadow_missing_modes),
     )
 
-    shadow_missing = compute_shadow_missing_fields(ctx)
+    shadow_missing = shadow_missing_fields_from_modes(prefill.shadow_missing_modes)
     divergence = compute_divergence_flags(legacy_missing, shadow_missing)
 
     return OrderContext(
@@ -758,7 +815,9 @@ def build_order_context(
         field_evidence=ctx.field_evidence,
         build_source=ctx.build_source,
         divergence_flags=divergence,
+        prefill=ctx.prefill,
         known_previous_address=ctx.known_previous_address,
+        shadow_missing_modes=ctx.shadow_missing_modes,
     )
 
 

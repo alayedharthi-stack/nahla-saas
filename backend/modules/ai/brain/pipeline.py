@@ -729,6 +729,25 @@ class MerchantBrain:
             state=state_for_classify,
             inbound_metadata=(profile or {}).get("inbound_metadata"),
         )
+        try:
+            from core.order_context_prefill import maybe_apply_operational_prefill_to_state  # noqa: PLC0415
+
+            _profile = profile or {}
+            maybe_apply_operational_prefill_to_state(
+                db,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                customer=_profile.get("customer"),
+                phone=customer_phone,
+                message=message,
+                state=state_for_classify,
+                inbound_metadata=_profile.get("inbound_metadata"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[ORDER_CONTEXT_PREFILL] brain hook failed tenant=%s",
+                tenant_id,
+            )
 
         # ── 1a-pre. Commerce conversation guard (P0 drift prevention) ─────
         _commerce_prep = None
