@@ -2008,7 +2008,7 @@ async def _handle_360dialog_body(
                     except Exception as exc:  # noqa: BLE001
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — best-effort rollback after logged upstream failure
                             pass
                         logger.exception(
                             "[Webhook360] smb_message_echoes branch failed "
@@ -8439,7 +8439,7 @@ async def _handle_merchant_message(
                         brain_state=((convo.extra_metadata or {}).get("brain_state") or {}),
                         inbound_metadata=inbound_metadata,
                     )
-                except Exception:
+                except Exception:  # noqa: silent-ok — shadow logging must never break reply path
                     pass
                 _trace.handoff_triggered = bool(_brain_handoff)
                 _trace.buttons_count     = len(_brain_buttons or [])

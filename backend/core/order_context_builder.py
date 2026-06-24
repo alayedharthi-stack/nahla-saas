@@ -382,10 +382,9 @@ def _load_catalog_order_snapshot(
                     message_id = str(getattr(ev, "id", None) or "") or None
                     break
         except Exception:  # noqa: BLE001
-            logger.debug(
+            logger.exception(
                 "[ORDER_CONTEXT] catalog snapshot load failed tenant=%s",
                 tenant_id,
-                exc_info=True,
             )
 
     if not catalog_meta:
