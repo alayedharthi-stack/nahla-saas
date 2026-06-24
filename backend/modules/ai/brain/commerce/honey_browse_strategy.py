@@ -89,13 +89,38 @@ def classify_honey_type(title: str) -> Optional[str]:
 
 
 def customer_specified_honey_type(message: str, query: str = "") -> Optional[str]:
+    types = customer_specified_honey_types(message, query)
+    return types[0] if types else None
+
+
+def customer_specified_honey_types(message: str, query: str = "") -> List[str]:
     blob = _norm(f"{message or ''} {query or ''}")
     if not blob:
-        return None
+        return []
+    found: List[str] = []
     for label, pattern in _HONEY_TYPE_RULES:
-        if pattern.search(blob):
-            return label
-    return None
+        if pattern.search(blob) and label not in found:
+            found.append(label)
+    return found
+
+
+def filter_products_to_requested_honey_types(
+    products: Sequence[Mapping[str, Any]],
+    requested_types: Sequence[str],
+) -> List[Dict[str, Any]]:
+    """Keep only catalog rows whose honey type matches an explicit customer ask."""
+    labels = [str(t or "").strip() for t in (requested_types or []) if str(t or "").strip()]
+    if not labels:
+        return [dict(p) for p in products if isinstance(p, Mapping)]
+    label_set = set(labels)
+    kept: List[Dict[str, Any]] = []
+    for row in products:
+        if not isinstance(row, Mapping):
+            continue
+        honey_type = classify_honey_type(str(row.get("title") or ""))
+        if honey_type and honey_type in label_set:
+            kept.append(dict(row))
+    return kept
 
 
 def customer_specified_size(message: str) -> bool:
@@ -256,6 +281,13 @@ def apply_honey_browse_strategy(
     items = [dict(p) for p in (products or []) if isinstance(p, Mapping)]
     if not items:
         return items
+
+    requested_types = customer_specified_honey_types(message, query)
+    if requested_types:
+        filtered = filter_products_to_requested_honey_types(items, requested_types)
+        if filtered:
+            items = filtered
+
     if not should_collapse_to_honey_types(
         message,
         query=query,
@@ -271,5 +303,7 @@ __all__ = [
     "classify_honey_type",
     "collapse_products_to_honey_types",
     "customer_specified_honey_type",
+    "customer_specified_honey_types",
+    "filter_products_to_requested_honey_types",
     "should_collapse_to_honey_types",
 ]

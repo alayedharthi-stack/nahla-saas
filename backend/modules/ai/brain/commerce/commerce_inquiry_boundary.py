@@ -72,12 +72,58 @@ _BARE_TOKEN_INQUIRY_RE = re.compile(
     re.UNICODE,
 )
 
+_PRICE_INQUIRY_RE = re.compile(
+    r"(?:"
+    r"كم\s*(?:ال)?(?:سعر|ثمن)\b"
+    r"|(?:^|\s)(?:ال)?(?:سعر|ثمن)(?:ه|ها|هم|كم)?\b"
+    r"|(?:^|\s)بكم\b"
+    r"|قد\s*ايش"
+    r"|how\s*much"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PACKAGED_AVAILABILITY_RE = re.compile(
+    r"(?:"
+    r"\d+\s*(?:عبو(?:ات|ه|ة)|حبات?|قطع(?:ة|ات)?|pieces?)\s*(?:\d+\s*)?(?:g|gr|جرام|gram|ج)\b"
+    r"|\d+\s*(?:g|gr|جرام|gram|ج)\s*(?:عبو(?:ات|ه|ة)|حبات?)?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_MULTI_TYPE_INQUIRY_RE = re.compile(
+    r"(?:"
+    r"^اب(?:ي|غ(?:ى|a)?)\s+(?:\d+\s*)?(?:انواع|الانواع|الأنواع|نوع|types)\b"
+    r"|^(?:\d+\s*)?(?:انواع|الانواع|الأنواع)\s+(?:ه(?:ذه|ذي|ذا)|دي|ذي)\b"
+    r"|^اب(?:ي|غ(?:ى|a)?)\s+(?:\d+\s*)?(?:ه(?:ذه|ذي|ذا)|دي|ذي)\s*(?:انواع|الانواع|الأنواع|نوع)?\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SOFT_WANT_INQUIRY_RE = re.compile(
+    r"(?:"
+    r"^اب(?:ي|غ(?:ى|a)?)\s+(?:اعرف|استفسر|استفسار|تفاصيل|معلومات|اسعار|عرض|اشوف|أشوف)\b"
+    r"|(?:استفسار|استفسر)\s+(?:عن|حول)\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_PURCHASE_RE = re.compile(
+    r"(?:"
+    r"(?:أ?ضف|اضف|حط|زود|جهز|اعتمد|خذ(?:\s+لي)?|"
+    r"(?:اب(?:ي|غ(?:ى|a)?)|أ(?:بي|ب(?:غ(?:ى|a)?)?)|ار(?:يد|سل)|ودي|بدي)\s*(?:اطلب|أطلب|اشتري|أشتري))"
+    r"|(?:اطلب|أطلب|طلب|اشتري|أشتري|شراء|buy|order|purchase)\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 class CommerceTurnKind(str, Enum):
     UNKNOWN = "unknown"
     BROWSE = "browse"
     AVAILABILITY = "availability"
     VISUAL_BROWSE = "visual_browse"
+    PRICE_INQUIRY = "price_inquiry"
     ORDER = "order"
 
 
@@ -96,12 +142,38 @@ def _norm(text: str) -> str:
     return _WS_RE.sub(" ", s).strip()
 
 
+def has_price_inquiry_signal(message: str) -> bool:
+    """True when the customer asks for price/cost — not checkout."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    norm = _norm(raw)
+    if not _PRICE_INQUIRY_RE.search(norm):
+        return False
+    if _EXPLICIT_PURCHASE_RE.search(norm):
+        return False
+    return True
+
+
+def _has_packaged_availability_ask(norm: str) -> bool:
+    if not re.search(r"(?:متوفر|موجود|available)", norm, re.UNICODE | re.IGNORECASE):
+        return False
+    return bool(_PACKAGED_AVAILABILITY_RE.search(norm))
+
+
 def has_explicit_order_select_signal(message: str) -> bool:
     """True when the turn carries clear buy/select/add evidence."""
     raw = (message or "").strip()
     if not raw:
         return False
     norm = _norm(raw)
+
+    if has_price_inquiry_signal(raw):
+        return False
+    if _MULTI_TYPE_INQUIRY_RE.search(norm) or _SOFT_WANT_INQUIRY_RE.search(norm):
+        return False
+    if _has_packaged_availability_ask(norm):
+        return False
 
     if _ORDER_VERB_RE.search(norm):
         if _VISUAL_BROWSE_RE.search(norm) and not _QTY_OR_WEIGHT_RE.search(norm):
@@ -134,13 +206,19 @@ def classify_commerce_turn_kind(message: str) -> CommerceTurnKind:
 
     norm = _norm(raw)
 
+    if has_price_inquiry_signal(raw):
+        return CommerceTurnKind.PRICE_INQUIRY
+
     if _VISUAL_BROWSE_RE.search(norm):
         return CommerceTurnKind.VISUAL_BROWSE
 
     if _BROWSE_TYPES_RE.search(norm):
         return CommerceTurnKind.BROWSE
 
-    if _AVAILABILITY_RE.search(norm):
+    if _MULTI_TYPE_INQUIRY_RE.search(norm) or _SOFT_WANT_INQUIRY_RE.search(norm):
+        return CommerceTurnKind.BROWSE
+
+    if _AVAILABILITY_RE.search(norm) or _has_packaged_availability_ask(norm):
         return CommerceTurnKind.AVAILABILITY
 
     if _BARE_TOKEN_INQUIRY_RE.match(raw):
@@ -155,6 +233,7 @@ def is_browse_availability_inquiry(message: str) -> bool:
         CommerceTurnKind.BROWSE,
         CommerceTurnKind.AVAILABILITY,
         CommerceTurnKind.VISUAL_BROWSE,
+        CommerceTurnKind.PRICE_INQUIRY,
     )
 
 
@@ -190,6 +269,7 @@ __all__ = [
     "classify_commerce_turn_kind",
     "extract_inquiry_subject",
     "has_explicit_order_select_signal",
+    "has_price_inquiry_signal",
     "is_browse_availability_inquiry",
     "is_commerce_inquiry_turn",
 ]

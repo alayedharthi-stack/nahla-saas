@@ -34,12 +34,10 @@ _WS_RE = re.compile(r"\s+")
 
 _PURCHASE_INTENT_RE = re.compile(
     r"(?:"
-    r"سعر|ثمن|بكم|كم\s+س(?:عر|ثمن)|"
     r"طلب|اطلب|اشتري|شراء|"
     r"اب(?:ي|غ(?:ى|a)?)\s*(?:اطلب|اشتري|اطلبه|اطلبها)?|"
     r"بغ(?:يت|ى)\s*(?:اطلب|اشتري)?|"
     r"اريد|أريد|ودي|بدي|"
-    r"منتج|عسل|"
     r"دفع|تحويل|حوال(?:ه|ة)|"
     r"payment|pay\s+now|buy|order|purchase|"
     r"كيف\s+(?:اطلب|أطلب|اشتري|أشتري|ادفع|أدفع)"
@@ -301,11 +299,21 @@ def has_checkout_route_intent(message: str) -> bool:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional greeting filter must not block route intent
         pass
 
+    norm = _norm(raw)
+    if _PAYMENT_ASK_RE.search(norm):
+        return True
+
     try:
         from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
             has_explicit_order_select_signal,
+            has_price_inquiry_signal,
+            is_commerce_inquiry_turn,
         )
 
+        if has_price_inquiry_signal(raw):
+            return False
+        if is_commerce_inquiry_turn(raw) and not has_explicit_order_select_signal(raw):
+            return False
         if has_explicit_order_select_signal(raw):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional order-select probe must not block route intent
@@ -322,8 +330,6 @@ def has_checkout_route_intent(message: str) -> bool:
 
         intent = rules.match(raw)
         if intent and intent.name in {
-            "ask_price",
-            "ask_product",
             "start_order",
             "add_to_cart",
         }:

@@ -176,13 +176,13 @@ def compose_wa_order_flow_reply(
 
     try:
         from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
-            is_browse_availability_inquiry,
+            is_commerce_inquiry_turn,
         )
         from modules.ai.brain.commerce.product_visual import is_product_visual_request  # noqa: PLC0415
 
         msg = (customer_message or "").strip()
         if msg and (
-            is_browse_availability_inquiry(msg)
+            is_commerce_inquiry_turn(msg)
             or is_product_visual_request(msg)
         ):
             return None

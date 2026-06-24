@@ -64,8 +64,9 @@ class _StubDB:
 
 
 class TestCheckoutRouteIntent:
-    def test_price_question_is_checkout_intent(self) -> None:
-        assert has_checkout_route_intent("كم سعر العسل؟")
+    def test_price_question_is_not_checkout_intent(self) -> None:
+        assert not has_checkout_route_intent("كم سعر العسل؟")
+        assert not has_checkout_route_intent("عكبر كم سعره")
         assert not has_checkout_entry_intent("كم سعر العسل؟")
 
     def test_payment_question_is_checkout_intent(self) -> None:
