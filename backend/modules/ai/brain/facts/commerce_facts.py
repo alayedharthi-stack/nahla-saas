@@ -214,15 +214,13 @@ class DefaultFactsLoader:
         except Exception:
             pass   # working hours / persona are optional — never block a turn
 
-        # ── 5b. Unified store URL resolver ───────────────────────────────
+        # ── 5b. Unified store URL resolver (compose + safety-net parity) ─
         try:
-            from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
-                resolve_store_url,
+            from modules.ai.brain.commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+                apply_store_url_to_facts,
             )
 
-            resolved = resolve_store_url(db, tenant_id)
-            if resolved.found:
-                facts.store_url = resolved.url
+            apply_store_url_to_facts(facts, db, tenant_id)
         except Exception:  # noqa: silent-ok — unified store URL probe must not break facts loader
             pass
 

@@ -2638,6 +2638,35 @@ def apply_store_link_safety_net(
     result.store_url = store_url
 
     if store_url:
+        try:
+            from modules.ai.brain.commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+                body_claims_no_store_url,
+                body_has_order_size_bleed,
+                reconcile_store_link_body_when_url_found,
+            )
+
+            if (
+                body_claims_no_store_url(reply_text or "")
+                or body_has_order_size_bleed(reply_text or "")
+                or not (reply_text or "").strip()
+                or _looks_like_bare_store_intro(reply_text or "")
+            ):
+                _reconciled = reconcile_store_link_body_when_url_found(
+                    reply_text or "",
+                    store_url,
+                )
+                result.new_reply = _reconciled.body
+                result.fired = True
+                result.rewrote_reply = True
+                result.reason = f"url_reconciled:{_reconciled.action}"
+                return result
+        except Exception as _reconcile_exc:  # noqa: BLE001
+            logger.debug(
+                "safety_nets.store_link | reconcile failed tenant=%s err=%s",
+                tenant_id,
+                _reconcile_exc,
+            )
+
         if _looks_like_bare_store_intro(reply_text or ""):
             # Short generic stub → replace with the canonical short
             # reply that includes the URL.
