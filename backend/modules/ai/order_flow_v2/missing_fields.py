@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.wa_order_lifecycle import compute_wa_missing_fields, has_accepted_delivery_address
+from core.wa_order_lifecycle import compute_wa_missing_fields
 
 from .state import has_payment_method, line_items_from_state
+from .slot_ownership import has_address_evidence
 
 _V2_FIELD_ORDER: Tuple[str, ...] = (
     "customer_name",
@@ -37,7 +38,7 @@ def compute_v2_missing_fields(
         missing.append("customer_name")
     if "city" in base:
         missing.append("city")
-    if "delivery_address" in base:
+    if "delivery_address" in base or not has_address_evidence(order_prep):
         missing.append("delivery_address")
     if not has_payment_method(order_prep):
         missing.append("payment_method")
