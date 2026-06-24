@@ -653,6 +653,7 @@ ORDER_FLOW_V2_SHADOW_ENABLED = (
     os.environ.get("ORDER_FLOW_V2_SHADOW_ENABLED", "true").lower()
     in {"1", "true", "yes", "on"}
 )
+ORDER_CONTEXT_SHADOW_ENABLED = _bool_env("ORDER_CONTEXT_SHADOW_ENABLED", "false")
 
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message

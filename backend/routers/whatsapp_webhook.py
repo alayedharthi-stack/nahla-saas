@@ -2008,7 +2008,7 @@ async def _handle_360dialog_body(
                     except Exception as exc:  # noqa: BLE001
                         try:
                             db.rollback()
-                        except Exception:
+                        except Exception:  # noqa: silent-ok — best-effort rollback after logged upstream failure
                             pass
                         logger.exception(
                             "[Webhook360] smb_message_echoes branch failed "
@@ -8425,6 +8425,22 @@ async def _handle_merchant_message(
                 _trace.brain_stage       = _br_stage or ""
                 _trace.missing_fields    = list(_br_missing or [])
                 _trace.options_pending   = list(_br_options_pending or [])
+
+                # ── OrderContext shadow (read-only; gated by env flag) ─────
+                try:
+                    from core.order_context_builder import maybe_log_order_context_shadow  # noqa: PLC0415
+
+                    maybe_log_order_context_shadow(
+                        db,
+                        tenant_id=int(tenant_id),
+                        conversation=convo,
+                        customer=locals().get("customer"),
+                        phone=to,
+                        brain_state=((convo.extra_metadata or {}).get("brain_state") or {}),
+                        inbound_metadata=inbound_metadata,
+                    )
+                except Exception:  # noqa: silent-ok — shadow logging must never break reply path
+                    pass
                 _trace.handoff_triggered = bool(_brain_handoff)
                 _trace.buttons_count     = len(_brain_buttons or [])
                 # If we have a real, non-empty reply (NOT a fallback
