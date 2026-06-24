@@ -204,30 +204,34 @@ def test_explicit_handoff_request_keeps_handoff_ack():
 
 
 def test_explicit_handoff_softened_when_no_live_agent():
-    """When the customer asks for a human but the tenant has no live
-    team, the reply still acks but in softer wording — we don't
-    promise an immediate human reply we can't deliver."""
+    """Phase 2 P0: explicit handoff without live agent or escalation
+    evidence must not promise human contact — neutral retry only."""
+    from core.outbound_sanitizer import contains_handoff_promise
+
     decision = choose_safe_fallback(
         "حولني لموظف",
         reason=FALLBACK_REASON_BRAIN_EXCEPTION,
         store_has_live_agent=False,
     )
     assert decision.kind == FALLBACK_KIND_HANDOFF_ACK
-    # The softened text shouldn't say "سيتم الرد عليك في أقرب وقت
-    # من فريق المتجر" — it uses gentler "نتواصل معك" framing.
-    assert "في أقرب وقت ممكن" in decision.text or "نتواصل معك" in decision.text
+    assert decision.response_goal == GOAL_RETRY
+    assert decision.metadata.get("handoff_promise_blocked") is True
+    assert contains_handoff_promise(decision.text) is None
 
 
 def test_no_api_key_path_returns_no_ai_text_regardless_of_question():
-    """Even an informational question, when the AI is fully
-    disabled, gets the no-AI text (honest about AI being off)."""
+    """When AI is fully disabled, human-contact promise is blocked
+    without escalation evidence — neutral retry, not no-AI handoff copy."""
+    from core.outbound_sanitizer import contains_handoff_promise
+
     decision = choose_safe_fallback(
         "وشلون التوصيل",
         reason=FALLBACK_REASON_NO_API_KEY,
         store_has_live_agent=False,
     )
     assert decision.kind == FALLBACK_KIND_NO_AI
-    assert decision.response_goal == GOAL_ACK
+    assert decision.response_goal == GOAL_RETRY
+    assert contains_handoff_promise(decision.text) is None
 
 
 @pytest.mark.parametrize("inbound", ["", "أهلاً", "شكرا", "ok"])
