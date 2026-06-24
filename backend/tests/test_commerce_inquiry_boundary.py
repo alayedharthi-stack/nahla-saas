@@ -27,6 +27,8 @@ from modules.ai.brain.commerce.product_visual import (  # noqa: E402
 )
 from modules.ai.brain.intent.cart_intent_extractor import extract_cart_intents  # noqa: E402
 
+_AKBAR_PRICE = "\u0639\u0643\u0628\u0631 \u0643\u0645 \u0633\u0639\u0631\u0647"
+
 
 def _product(pid: int, title: str, *, category: str = "", quantity: int = 5) -> dict:
     return {
@@ -56,6 +58,10 @@ class TestCommerceInquiryClassifier:
             "وش العطور الرجالية؟",
             "فيه تيشيرتات؟",
             "ابي اشوف صور للعسل",
+            _AKBAR_PRICE,
+            "بكم العكبر؟",
+            "6 عبوات 40جرام متوفر؟",
+            "ابي 3 انواع ذي",
         ],
     )
     def test_inquiry_phrases_classified_as_browse(self, message: str) -> None:
@@ -64,8 +70,8 @@ class TestCommerceInquiryClassifier:
     @pytest.mark.parametrize(
         "message",
         [
-            "ابي كيلو طلح",
-            "2 كيلو طلح",
+            "ابي كيلo طلح",
+            "2 كيلo طلح",
             "أضف طلح",
             "سمر",
         ],
@@ -83,7 +89,7 @@ class TestCartIntentInquiryBoundary:
         assert extract_cart_intents(message) == []
 
     def test_explicit_order_still_adds(self) -> None:
-        intents = extract_cart_intents("ابي كيلو طلح")
+        intents = extract_cart_intents("ابي كيلo طلح")
         assert len(intents) == 1
         assert intents[0]["action"] == "add_item"
         assert "طلح" in intents[0]["product_name"]
