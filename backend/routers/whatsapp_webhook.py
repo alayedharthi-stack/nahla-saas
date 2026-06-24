@@ -10924,6 +10924,39 @@ async def _handle_merchant_message(
                             "clear_intent_fallback:"
                             + str(_ci.customer_intent or "")
                         )
+                    if _ci.facts.get("required_delivery") == "llm_rephrase":
+                        from core.clear_intent_recompose import (  # noqa: PLC0415
+                            maybe_recompose_clear_intent_reply,
+                        )
+
+                        _ci_reply, _ci_recompose_meta = await maybe_recompose_clear_intent_reply(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone=to or "",
+                            clear_intent_result=_ci,
+                            inbound_text=text or "",
+                            weak_reply=reply or "",
+                        )
+                        if _ci_recompose_meta.get("recomposed") and _ci_reply.strip():
+                            reply = _otp_apply_reply(
+                                _outbound_text_tracker,
+                                reply or "",
+                                _ci_reply,
+                                layer="clear_intent_recompose",
+                                op="replace",
+                            )
+                            if _outbound_text_tracker is not None:
+                                from core.outbound_text_policy import OutboundTextSource  # noqa: PLC0415
+
+                                _outbound_text_tracker.set_compose_provenance(
+                                    source=OutboundTextSource.LLM,
+                                    policy_path="clear_intent_recompose.constrained_compose",
+                                    debt=False,
+                                )
+                                _outbound_text_tracker.note(
+                                    "clear_intent_recompose:facts="
+                                    + str(_ci.facts.get("detected_intent") or "")
+                                )
                 if _ci.fired or _ci.skipped_reason not in {
                     "flag_disabled",
                     "reply_not_generic_fallback",
