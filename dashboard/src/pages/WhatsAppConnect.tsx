@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { apiCall } from '../api/client'
 import { whatsappConnectApi, type WaConnection } from '../api/whatsappConnect'
+import { buildEmbeddedSignupFbLoginOptions } from '../lib/metaEmbeddedSignupLogin'
 import { useLanguage } from '../i18n/context'
 import type { Translations } from '../i18n/types'
 
@@ -493,24 +494,10 @@ function EmbeddedSignupFlow({
     setError('')
     window.FB.login((response: any) => {
       if (!response?.authResponse) { setError(emb.linkCancelled); return }
-      const auth = response.authResponse
-      // Prefer accessToken if present — avoids redirect_uri mismatch on code exchange.
-      // 'code,token' response_type makes Meta JS SDK return both; backend uses
-      // access_token directly and skips the problematic code-exchange step.
-      handleExchange(
-        auth.accessToken ? undefined : auth.code,
-        auth.accessToken || undefined,
-      )
-    }, {
-      config_id: configId,
-      response_type: 'code,token',
-      override_default_response_type: true,
-      extras: {
-        setup: {},
-        feature: 'whatsapp_embedded_signup',
-        sessionInfoVersion: '3',
-      },
-    })
+      const code = response.authResponse.code
+      if (!code) { setError(emb.exchangeFailed); return }
+      handleExchange(code, undefined)
+    }, buildEmbeddedSignupFbLoginOptions(configId))
   }, [handleExchange, configId, signupEnabled, disabledReason, emb.directNotEnabled, emb.sdkNotReady, emb.linkCancelled])
 
   const selectPhone = useCallback(async (phoneId: string) => {

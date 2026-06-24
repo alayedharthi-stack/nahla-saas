@@ -13,6 +13,7 @@
     "check:billing-redirects": "npx --yes tsx@4 scripts/check-billing-redirects.mts",
     "check:plan-features": "npx --yes tsx@4 scripts/check-plan-features.mts",
     "check:no-native-dialogs": "npx --yes tsx@4 scripts/check-no-native-dialogs.mts",
+    "check:meta-embedded-signup-login": "npx --yes tsx@4 scripts/check-meta-embedded-signup-login.mts",
     "smoke:order-catalog-pick": "npx --yes tsx@4 scripts/smoke-order-catalog-pick.mts"
   },
   "dependencies": {
