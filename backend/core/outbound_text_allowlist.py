@@ -5,7 +5,8 @@ Only technical bodies, CTA labels, sanitizer fallbacks, and internal
 detection constants belong here. Everything else that reaches the
 customer is tracked as ``customer_facing_text_debt``.
 
-See ``outbound_text_policy.py`` and ``tests/test_outbound_text_debt_audit.py``.
+See ``outbound_text_policy.py``, ``outbound_text_audit_classification.py``,
+and ``tests/test_outbound_text_debt_audit.py``.
 """
 from __future__ import annotations
 
