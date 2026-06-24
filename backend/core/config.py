@@ -666,6 +666,14 @@ WA_CATALOG_ORDER_IMMEDIATE_DRAFT_ENABLED = _bool_env(
     "WA_CATALOG_ORDER_IMMEDIATE_DRAFT_ENABLED",
     "true",
 )
+ORDER_MISSING_FIELDS_ENGINE_SHADOW_ENABLED = _bool_env(
+    "ORDER_MISSING_FIELDS_ENGINE_SHADOW_ENABLED",
+    "true",
+)
+ORDER_MISSING_FIELDS_ENGINE_ENABLED = _bool_env(
+    "ORDER_MISSING_FIELDS_ENGINE_ENABLED",
+    "false",
+)
 
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message

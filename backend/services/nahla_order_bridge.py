@@ -1094,6 +1094,38 @@ def sync_nahla_wa_order(
         )
         base_meta["last_sync_snapshot"] = curr_snap
         base_meta["missing_fields"] = missing_fields
+        try:
+            from core.order_context_builder import build_order_context  # noqa: PLC0415
+            from core.order_missing_fields_engine import (  # noqa: PLC0415
+                apply_missing_fields_engine_to_metadata,
+                missing_fields_engine_enabled,
+                missing_fields_engine_shadow_enabled,
+            )
+
+            if missing_fields_engine_shadow_enabled() or missing_fields_engine_enabled():
+                ctx = build_order_context(
+                    db,
+                    tenant_id=tenant_id,
+                    conversation=conversation,
+                    customer=cust,
+                    phone=wa_phone or "",
+                    brain_state=brain_state,
+                    build_source="nahla_order_bridge",
+                )
+                if ctx.missing_fields_result is not None:
+                    apply_missing_fields_engine_to_metadata(
+                        base_meta,
+                        result=ctx.missing_fields_result,
+                        legacy_missing=missing_fields,
+                    )
+                    if missing_fields_engine_enabled():
+                        missing_fields = list(base_meta.get("missing_fields") or missing_fields)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[MISSING_FIELDS_ENGINE] bridge shadow failed tenant=%s conv=%s",
+                tenant_id,
+                conversation_id,
+            )
         base_meta["delivery_address_status"] = delivery_address_status
         base_meta["address_required_type"] = ADDRESS_REQUIRED_TYPE
         if wa_phone:
