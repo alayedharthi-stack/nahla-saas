@@ -106,6 +106,8 @@ export interface DashboardOrder {
   can_confirm_bank_transfer?: boolean
   merchant_post_confirm_notice?: string | null
   createdAt: string
+  display_created_at?: string
+  last_updated_at?: string
   is_ai_created?: boolean
   is_vip?: boolean
   has_open_conversation?: boolean
