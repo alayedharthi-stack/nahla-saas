@@ -138,10 +138,9 @@ class TestUrlAlreadyInReply:
 
 class TestUrlInjection:
     def test_replaces_bare_generic_intro_with_canonical_reply(self, monkeypatch):
-        """The exact production bug from the screenshot — customer
-        sends "رابط المتجر", LLM replies "هذا متجرنا 🌷". The
-        safety net must replace it with the full canonical reply
-        that includes the actual store URL."""
+        """Customer sends "رابط المتجر", LLM replies "هذا متجرنا 🌷".
+        Safety net must inject the configured store URL without a
+        fixed marketing wrapper."""
         from modules.ai.postprocess.safety_nets import (
             apply_store_link_safety_net,
         )
@@ -153,12 +152,9 @@ class TestUrlInjection:
         )
         assert res.fired is True
         assert res.rewrote_reply is True
-        # Required: the actual store URL must appear in the new reply.
         assert "https://aaied.store" in res.new_reply
-        # Required: must NOT remain only the generic "هذا متجرنا".
         assert res.new_reply.strip() != "هذا متجرنا 🌷"
-        # Required: canonical opener.
-        assert "تفضل رابط متجرنا" in res.new_reply
+        assert "تفضّل، اختر من الكتالوج" not in res.new_reply
 
     def test_appends_url_when_reply_has_other_content(self, monkeypatch):
         """If the LLM gave a longer contextual reply (answered

@@ -646,8 +646,7 @@ def faq_identity(
 
 
 MSG_STORE_LINK_NOT_CONFIGURED = (
-    "ما عندي رابط المتجر الإلكتروني حالياً، "
-    "تقدر تذكر المنتج اللي تبيه وأساعدك من هنا."
+    "ما عندي رابط المتجر الإلكتروني محفوظ في النظام حالياً."
 )
 
 MSG_WORKING_HOURS_NOT_CONFIGURED = (

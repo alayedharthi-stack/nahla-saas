@@ -11,11 +11,17 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+    is_forbidden_catalog_intro,
+    resolve_catalog_body_text,
+)
+
 logger = logging.getLogger("nahla.native_catalog")
 
 _CATALOG_CLAIM_PHRASE = "تفضّل، اختر من الكتالوج"
 
-NATIVE_CATALOG_SUCCESS_BODY_AR = f"{_CATALOG_CLAIM_PHRASE} 👇"
+# Deprecated — do not use for new sends. Detection-only for legacy scrubbing.
+NATIVE_CATALOG_SUCCESS_BODY_AR = ""
 
 _WHATSAPP_QUICK_ORDER_FALLBACK_AR = (
     "ما ظهر الكتالوج هنا، أقدر أكمّل طلبك بالواتساب. "

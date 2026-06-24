@@ -96,9 +96,9 @@ class TestCatalogNavigateDoesNotPreclaim:
         assert result.success is True
         assert result.data["discovery_presentation_text"] == ""
         assert result.data["product_lines"] == ""
-        assert result.data["native_catalog_entry"]["body_text"] == NATIVE_CATALOG_SUCCESS_BODY_AR
+        assert result.data["native_catalog_entry"]["body_text"] != ""
         assert "تفضّل، اختر من الكتالوج" not in (
-            result.data.get("discovery_presentation_text") or ""
+            result.data["native_catalog_entry"].get("body_text") or ""
         )
 
 
@@ -132,7 +132,8 @@ class TestDeferHelper:
         assert defer_native_catalog_customer_reply("مرحبا", native_catalog_entry=entry) == "مرحبا"
 
     def test_success_body_is_claim_text(self):
-        assert is_native_catalog_claim_text(NATIVE_CATALOG_SUCCESS_BODY_AR)
+        assert is_native_catalog_claim_text("تفضّل، اختر من الكتالوج 👇")
+        assert not is_native_catalog_claim_text(NATIVE_CATALOG_SUCCESS_BODY_AR)
 
 
 class TestMetaFailureUsesHonestFallbackOnly:
@@ -205,11 +206,14 @@ class TestCheckoutRouteCatalogSendRequest:
 
 
 class TestCatalogSenderSuccessBody:
-    def test_success_catalog_message_still_uses_natural_body(self, monkeypatch):
+    def test_success_catalog_message_uses_context_body_not_hardcoded_intro(
+        self, monkeypatch,
+    ):
         async def _fake_send(*_a, **_k):
             return {"messages": [{"id": "wamid.TEST123"}]}, {}
 
         monkeypatch.setattr(cs, "provider_send_message", _fake_send)
+        body = "المنتجات متاحة في الكتالوج"
         result = asyncio.run(
             cs.send_catalog_message(
                 MagicMock(),
@@ -218,8 +222,8 @@ class TestCatalogSenderSuccessBody:
                 to="966500000000",
                 phone_id="PHONE1",
                 thumbnail_product_retailer_id="good-rid",
-                body_text=NATIVE_CATALOG_SUCCESS_BODY_AR,
+                body_text=body,
             )
         )
         assert result.success is True
-        assert "تفضّل، اختر من الكتالوج" in NATIVE_CATALOG_SUCCESS_BODY_AR
+        assert "تفضّل، اختر من الكتالوج" not in body

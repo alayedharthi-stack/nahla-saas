@@ -43,6 +43,9 @@ _WEBSITE_EXPLICIT_MARKERS: tuple[str, ...] = (
     "website link",
     "online store",
     "shop link",
+    "عندكم متجر",
+    "عندك متجر",
+    "هل عندكم متجر",
 )
 
 _WEBSITE_TOKEN_MARKERS: tuple[str, ...] = (
@@ -274,13 +277,12 @@ def resolve_link_intent(message: str) -> LinkIntentType:
 
 
 def compose_website_url_reply(store_url: str) -> str:
-    """Canonical reply when the merchant has a configured store URL."""
+    """Operational store-link reply — URL when configured, honest none otherwise."""
     url = str(store_url or "").strip()
     if url:
-        return f"هذا رابط المتجر الإلكتروني: {url}"
+        return url
     return (
-        "ما عندي رابط المتجر الإلكتروني حالياً، "
-        "تقدر تذكر المنتج اللي تبيه وأساعدك من هنا."
+        "ما عندي رابط المتجر الإلكتروني محفوظ في النظام حالياً."
     )
 
 

@@ -27,6 +27,7 @@ from ..types import (
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
+    INTENT_ONLINE_STORE_INQUIRY,
     INTENT_ASK_WORKING_HOURS,
     INTENT_FAREWELL,
     INTENT_GENERAL,
@@ -316,6 +317,22 @@ _register(RuleSet(
         r"^(خلاص\s+شكر(?:ا|اً)|تمام\s+ك(?:ذا|ذ)|بس\s+ك(?:ذا|ذ)\s+شكر(?:ا|اً))[\s!?؟.]*$",
     ],
     confidence=0.94,
+))
+
+# ── Online store / e-commerce link (priority over generic «عندكم + …» product asks) ─
+_register(RuleSet(
+    intent=INTENT_ONLINE_STORE_INQUIRY,
+    patterns=[
+        r"(?:^|\s)(?:عند(?:كم|ك)|هل\s+عند(?:كم|ك)|لديك(?:م|)?)\s+"
+        r"(?:متجر|موقع)(?:\s*(?:ال)?(?:إ|ا)?لكتروني|\s*اونلاين|\s*أونلاين)?",
+        r"(?:^|\s)(?:متجر|موقع)(?:\s*(?:ال)?(?:إ|ا)?لكتروني|\s*اونلاين|\s*أونلاين)"
+        r"(?:\s*(?:عند(?:كم|ك)|موجود|متاح))?",
+        r"(?:^|\s)(?:ا|أ)?(?:بي|بغ(?:ى|a)?)\s*(?:أ?)?(?:طلب|اطلب)\s+من\s+(?:ال)?(?:موقع|متجر)",
+        r"(?:^|\s)(?:كيف|وش)\s+(?:أ?)?(?:طلب|اطلب)\s+من\s+(?:ال)?(?:موقع|متجر)",
+        r"(?:^|\s)(?:رابط|لينك)\s*(?:ال)?(?:طلب|شراء)(?:\s|$|[؟?!.])",
+        r"(online\s+store|e[\-\s]?commerce\s+link|website\s+order)",
+    ],
+    confidence=0.96,
 ))
 
 # ── Store info / e-commerce link ─────────────────────────────────────────────
@@ -1051,6 +1068,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_ASK_COD,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_STORE_INFO,
+    INTENT_ONLINE_STORE_INQUIRY,
     INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_TRACK_ORDER,

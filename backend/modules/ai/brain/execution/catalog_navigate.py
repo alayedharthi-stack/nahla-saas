@@ -92,7 +92,9 @@ class CatalogNavigateHandler:
             except Exception:  # noqa: BLE001
                 thumbnail = ""
 
-        from core.native_catalog_fallback import NATIVE_CATALOG_SUCCESS_BODY_AR  # noqa: PLC0415
+        from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
+            resolve_catalog_body_text,
+        )
 
         return {
             "products": [],
@@ -105,7 +107,10 @@ class CatalogNavigateHandler:
             "query": "",
             "native_catalog_entry": {
                 "thumbnail_product_retailer_id": thumbnail,
-                "body_text": NATIVE_CATALOG_SUCCESS_BODY_AR,
+                "body_text": resolve_catalog_body_text(
+                    str(getattr(ctx, "message", "") or ""),
+                    context_reply="",
+                ),
             },
             "navigation_state_patch": self._navigation_patch(
                 decision,

@@ -2477,6 +2477,14 @@ def _looks_like_store_link_request(
     msg_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", msg)
     msg_compact = re.sub(r"\s+", " ", msg_compact).strip()
     try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            is_online_store_inquiry,
+        )
+        if is_online_store_inquiry(customer_msg or ""):
+            return True
+    except Exception:  # noqa: silent-ok — online store probe must not block phrase match
+        pass
+    try:
         from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
             should_suppress_store_link_intent,
         )
@@ -2510,138 +2518,23 @@ def _normalise_url(url: str) -> str:
 
 
 def _lookup_tenant_store_url(db: Any, tenant_id: int) -> str:
-    """Return the canonical store URL configured for ``tenant_id``,
-    or an empty string when none is stored.
+    """Return the canonical store URL configured for ``tenant_id``.
 
-    Resolution chain (May 2026 #35 — platform-wide button-URL fallback):
-
-      1. ``StoreKnowledgeSnapshot.store_profile["store_url"]`` — the
-         canonical synced source, written by the platform-sync job
-         (Salla/Zid/Shopify webhooks → snapshot table). When the
-         merchant connects a platform this is populated automatically
-         and is the freshest signal we have.
-      2. ``TenantSettings.store_settings["store_url"]`` — manual
-         entry from the dashboard's "Store" tab. Used by merchants
-         who don't connect a platform but still want the AI to
-         surface a link (custom Shopify, WooCommerce, Zid SDK, …).
-      3. ``TenantSettings.whatsapp_settings["store_button_url"]`` —
-         manual entry from the dashboard's "WhatsApp" tab; the URL
-         the merchant types into the "Visit Store" CTA-button slot.
-         Same intent class as (2) but a different field. Many
-         Nahla-native shops fill ONLY this slot because that's what
-         their template-builder UI exposes most prominently. Without
-         this layer the AI cannot deliver "ابي رابط المتجر" for
-         those tenants even though the URL is sitting one column
-         away. Default value (``""``) means an empty merchant entry
-         simply falls through to the next layer — no behaviour
-         change for tenants who were already resolving via 1/2/4.
-      4. ``Integration.config["store_url"|"storefront_url"|"domain"
-         |"shop_domain"]`` for ANY provider — Salla, Zid, Shopify,
-         WooCommerce. The previous implementation only checked Salla,
-         which silently failed for tenants on other platforms.
-
-    Never raises. Every step is wrapped — a DB hiccup degrades to
-    "try the next source" rather than taking down the safety net.
-
-    Logs a single ``[STORE_LINK_RESOLVER]`` INFO line per call with
-    the chosen source and url length so production traffic can be
-    audited via grep without enabling DEBUG.
+    Delegates to :mod:`modules.ai.brain.commerce.store_url_resolver`.
     """
-    if db is None or not tenant_id:
+    try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            lookup_tenant_store_url as _resolve,
+        )
+
+        return _resolve(db, tenant_id)
+    except Exception as exc:  # noqa: silent-ok — unified resolver must not block safety net
+        logger.debug(
+            "safety_nets.store_link | unified resolver failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
         return ""
-    tenant_id = int(tenant_id)
-
-    # ── 1) Synced store profile (StoreKnowledgeSnapshot) ────────────
-    try:
-        from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415
-        loader = StoreKnowledgeLoader(db, tenant_id)
-        profile = loader.store_profile() or {}
-        url = _normalise_url(profile.get("store_url"))
-        if url:
-            logger.info(
-                "[STORE_LINK_RESOLVER] tenant_id=%s source=snapshot url_len=%d",
-                tenant_id, len(url),
-            )
-            return url
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "safety_nets.store_link | snapshot lookup failed tenant=%s "
-            "err=%s", tenant_id, exc,
-        )
-
-    # ── 2) Tenant settings — store tab (manual entry) ────────────────
-    # AND
-    # ── 3) Tenant settings — whatsapp tab (CTA button URL slot) ─────
-    # Combined under one DB read so we don't re-fetch the same row.
-    settings = None
-    try:
-        from core.tenant import (  # noqa: PLC0415
-            DEFAULT_STORE, DEFAULT_WHATSAPP,
-            get_or_create_settings, merge_defaults,
-        )
-        settings = get_or_create_settings(db, tenant_id)
-
-        store_cfg = merge_defaults(settings.store_settings, DEFAULT_STORE)
-        url = _normalise_url(store_cfg.get("store_url"))
-        if url:
-            logger.info(
-                "[STORE_LINK_RESOLVER] tenant_id=%s source=store_settings url_len=%d",
-                tenant_id, len(url),
-            )
-            return url
-
-        wa_cfg = merge_defaults(settings.whatsapp_settings, DEFAULT_WHATSAPP)
-        url = _normalise_url(wa_cfg.get("store_button_url"))
-        if url:
-            logger.info(
-                "[STORE_LINK_RESOLVER] tenant_id=%s source=whatsapp_button url_len=%d",
-                tenant_id, len(url),
-            )
-            return url
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "safety_nets.store_link | settings lookup failed tenant=%s "
-            "err=%s", tenant_id, exc,
-        )
-
-    # ── 4) Any platform Integration (broaden beyond Salla) ───────────
-    try:
-        from models import Integration  # noqa: PLC0415
-        # Provider order kept stable so test output is predictable.
-        # Add new providers HERE — every entry automatically becomes
-        # an additional source-of-truth checkpoint.
-        for provider in ("salla", "zid", "shopify", "woocommerce"):
-            integration = db.query(Integration).filter(
-                Integration.tenant_id == tenant_id,
-                Integration.provider  == provider,
-            ).first()
-            if not integration:
-                continue
-            cfg = integration.config or {}
-            url = _normalise_url(
-                cfg.get("store_url")
-                or cfg.get("storefront_url")
-                or cfg.get("domain")
-                or cfg.get("shop_domain")
-            )
-            if url:
-                logger.info(
-                    "[STORE_LINK_RESOLVER] tenant_id=%s source=integration:%s url_len=%d",
-                    tenant_id, provider, len(url),
-                )
-                return url
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "safety_nets.store_link | integration lookup failed tenant=%s "
-            "err=%s", tenant_id, exc,
-        )
-
-    logger.info(
-        "[STORE_LINK_RESOLVER] tenant_id=%s source=none url_len=0 "
-        "reason=no_source_configured",
-        tenant_id,
-    )
-    return ""
 
 
 def _looks_like_bare_store_intro(reply: str) -> bool:
@@ -2669,15 +2562,13 @@ def _looks_like_bare_store_intro(reply: str) -> bool:
 # and it does NOT contain any "أرسل لك الرابط" / "أرسل لك" phrase
 # that the asset-promise sanitizer would rewrite again.
 _FALLBACK_NO_URL_REPLY_AR = (
-    "تأمر أمر 🌷 خبّرنا أي قسم أو منتج تبحث عنه وسنرسل تفاصيله "
-    "مباشرة."
+    "ما عندي رابط المتجر الإلكتروني محفوظ في النظام حالياً."
 )
 
 
 def _build_store_link_reply(store_url: str) -> str:
-    """Canonical Arabic reply when we DO have a URL. Kept short so
-    WhatsApp renders the link as a tappable preview."""
-    return f"تفضل رابط متجرنا 🌷\n{store_url}"
+    """Inject configured store URL — operational fact, no marketing wrapper."""
+    return str(store_url or "").strip()
 
 
 def apply_store_link_safety_net(
@@ -5103,7 +4994,7 @@ def apply_outbound_artifact_guard(
             inbound_metadata=inbound_metadata,
             normalized_type=normalized_type,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — origin extract probe must not block artifact guard
         pass
 
     expected = _classify_expected_artifact(
