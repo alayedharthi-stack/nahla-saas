@@ -3595,6 +3595,8 @@ def _build_reply_state(
     known_facts = {
         "store_name": ctx.facts.store_name,
         "store_url": ctx.facts.store_url,
+        "store_url_resolved": bool(getattr(ctx.facts, "store_url_resolved", False)),
+        "store_url_source": str(getattr(ctx.facts, "store_url_source", "") or "none"),
         "has_products": ctx.facts.has_products,
         "product_count": ctx.facts.product_count,
         "in_stock_count": ctx.facts.in_stock_count,
@@ -3607,6 +3609,28 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    try:
+        from .commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+            is_store_link_compose_turn,
+        )
+
+        if is_store_link_compose_turn(
+            intent_name=getattr(ctx.intent, "name", "") or "",
+            decision_action=str(decision.action or ""),
+            decision_topic=str((decision.args or {}).get("topic") or ""),
+            customer_message=ctx.message or "",
+        ):
+            selected_product = None
+            known_facts["checkout_preparation"] = {}
+            known_facts["store_url"] = ctx.facts.store_url
+            known_facts["store_url_resolved"] = bool(
+                getattr(ctx.facts, "store_url_resolved", bool(ctx.facts.store_url))
+            )
+            known_facts["store_url_source"] = str(
+                getattr(ctx.facts, "store_url_source", "") or "none"
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — store-link defocus must not block compose
+        pass
     _sr = getattr(ctx, "state_relevance", None)
     if _sr is not None and hasattr(_sr, "to_dict"):
         known_facts["state_relevance_verdict"] = _sr.to_dict()
@@ -3644,6 +3668,24 @@ def _build_reply_state(
             _persona_kind or "-",
         )
 
+    _last_q_asked = previous_state.last_question_asked
+    _last_q_answered = previous_state.last_question_answered
+    try:
+        from .commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+            is_store_link_compose_turn,
+        )
+
+        if is_store_link_compose_turn(
+            intent_name=getattr(ctx.intent, "name", "") or "",
+            decision_action=str(decision.action or ""),
+            decision_topic=str((decision.args or {}).get("topic") or ""),
+            customer_message=ctx.message or "",
+        ):
+            _last_q_asked = ""
+            _last_q_answered = True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — pending-q clear must not block compose
+        pass
+
     return BrainReplyState(
         store_name=ctx.facts.store_name,
         tone=effective_tone,
@@ -3655,8 +3697,8 @@ def _build_reply_state(
         selected_product=selected_product,
         price_sensitivity=_price_sensitivity_label(sensitivity_score),
         known_facts=known_facts,
-        last_question_asked=previous_state.last_question_asked,
-        last_question_answered=previous_state.last_question_answered,
+        last_question_asked=_last_q_asked,
+        last_question_answered=_last_q_answered,
         recommended_next_step=suggestion.suggested_next_step or current_state.recommended_next_step,
         coupon_policy={
             "has_coupons": ctx.facts.has_coupons,

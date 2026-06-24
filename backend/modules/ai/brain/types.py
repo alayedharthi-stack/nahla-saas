@@ -756,6 +756,10 @@ class CommerceFacts:
     blocked_categories: List[str] = field(default_factory=list)
     store_name: str = ""
     store_url: str = ""
+    # Resolver audit — same chain as safety-net / CTA (Jun 2026 store inquiry fix).
+    store_url_resolved: bool = False
+    store_url_source: str = "none"
+    store_url_resolve_reason: str = ""
     # Physical-location URL (Google / Apple / Waze maps) — populated
     # from the May 2026 #36 maps resolver chain. Empty string means
     # the merchant has not configured a maps URL anywhere; the FAQ

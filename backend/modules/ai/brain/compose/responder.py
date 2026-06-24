@@ -1190,9 +1190,14 @@ class DefaultComposer:
         # follow-ups: when the customer asks a side question ("كم
         # التوصيل؟") mid-order, we answer the FAQ AND remind them where
         # we left off so the conversation doesn't lose momentum.
-        # Location/branch turns must never carry an order nudge — the
-        # maps CTA is the only asset on those replies.
-        if topic != TOPIC_LOCATION:
+        # Location/branch and store-link turns must never carry checkout
+        # resume hints — the wire layer owns the store URL CTA.
+        from ..commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+            should_skip_order_resume_hint,
+        )
+
+        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+        if not should_skip_order_resume_hint(topic=topic, intent_name=_intent_name):
             resume = self._order_resume_hint(ctx)
             if resume and resume not in text:
                 text = f"{text}\n\n{resume}"

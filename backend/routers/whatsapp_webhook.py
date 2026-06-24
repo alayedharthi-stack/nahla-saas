@@ -11793,6 +11793,7 @@ async def _handle_merchant_message(
             # for the algorithm. Brain replies that already attached
             # quick-reply buttons are skipped (handled above).
             _cta_messages: list = []
+            _reply_before_cta = reply or ""
             try:
                 from core.wa_link_buttons import (  # noqa: PLC0415
                     split_text_for_cta_buttons as _split_cta,
@@ -11900,6 +11901,27 @@ async def _handle_merchant_message(
                     # version so the dashboard transcript matches what
                     # the customer saw on WhatsApp.
                     reply = _msg.body or reply
+                    try:
+                        from core.outbound_send_status import (  # noqa: PLC0415
+                            sync_outbound_body_to_final as _sync_cta_body,
+                        )
+
+                        _sync_cta_body(
+                            db,
+                            tenant_id=tenant_id,
+                            recipient=to,
+                            final_body=reply,
+                            reason="post_cta_normalization",
+                            cta_metadata={
+                                "body_after_cta": _msg.body or "",
+                                "cta_url": _cls.url,
+                                "cta_label": _cls.button_title,
+                                "pre_cta_body": _reply_before_cta,
+                                "url_type": _cls.kind,
+                            },
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
+                        pass
                 else:
                     # WhatsApp rejected the interactive (e.g. outside the
                     # 24h window): fall back to the original plain text
