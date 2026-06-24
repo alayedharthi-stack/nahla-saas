@@ -141,11 +141,15 @@ def compose_operational_expression_goal(instruction: ReplyInstruction) -> str:
         )
     elif kind == DECISION_KIND_CLEAR_INTENT:
         intent = instruction.facts.get("clear_intent", "")
+        required = instruction.facts.get("required_delivery", "")
         context_note = (
-            f"The customer's message had a clear intent ({intent}) but the "
-            "draft reply was a generic timeout/apology. Replace with a "
-            "short helpful nudge toward that intent — no prices or promises."
+            f"The customer's message had a clear intent ({intent or 'unknown'}) but the "
+            "draft reply was a generic timeout/apology or weak fallback. "
+            "Compose a natural helpful reply that addresses that intent directly. "
+            "Do not ask them to repeat an already-clear question."
         )
+        if required:
+            context_note += f" Required delivery mode: {required}."
 
     forbidden = instruction.forbidden_claims
     forbidden_block = ""

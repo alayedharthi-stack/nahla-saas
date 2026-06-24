@@ -773,6 +773,7 @@ class DefaultComposer:
                     item_titles=data.get("item_titles") or [],
                 ),
                 ctx,
+                result=result,
             )
 
         # ── Coupon ─────────────────────────────────────────────────────────
@@ -785,6 +786,7 @@ class DefaultComposer:
                     product=data.get("product"),
                 ),
                 ctx,
+                result=result,
             )
 
         # ── Addon recommendation ───────────────────────────────────────────
@@ -794,6 +796,7 @@ class DefaultComposer:
             return self._with_follow_up(
                 T.addon_recommendations(products=data.get("products", [])),
                 ctx,
+                result=result,
             )
 
         # ── Web search ─────────────────────────────────────────────────────
