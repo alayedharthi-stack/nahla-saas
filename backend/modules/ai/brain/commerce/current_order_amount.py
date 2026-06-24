@@ -65,7 +65,7 @@ def _prep_dict(prep: Any) -> Dict[str, Any]:
     if hasattr(prep, "to_dict"):
         try:
             return dict(prep.to_dict())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — prep to_dict probe must not block amount facts
             pass
     return {}
 
