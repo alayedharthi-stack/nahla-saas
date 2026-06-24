@@ -364,6 +364,18 @@ def mark_compose_template(result: Any, *, layer: str = "") -> None:
             data["_compose_hybrid_layers"] = layers
 
 
+def mark_compose_metadata(result: Any, *, layer: str = "") -> None:
+    """Tag compose turn with metadata-only operational facts (no customer prose debt)."""
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        data["_compose_metadata_only"] = True
+        if layer:
+            layers = list(data.get("_compose_metadata_layers") or [])
+            if layer not in layers:
+                layers.append(layer)
+            data["_compose_metadata_layers"] = layers
+
+
 def merge_policy_into_extra_metadata(
     extra: Optional[Dict[str, Any]],
     policy: Dict[str, Any],
@@ -399,6 +411,7 @@ __all__ = [
     "infer_compose_provenance",
     "log_outbound_text_policy",
     "mark_compose_llm",
+    "mark_compose_metadata",
     "mark_compose_template",
     "merge_policy_into_extra_metadata",
 ]

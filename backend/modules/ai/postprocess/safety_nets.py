@@ -3522,43 +3522,18 @@ _CLEAR_INTENT_LEXICON: Dict[str, tuple] = {
 # discount, price, payment method, or shipping cost — those
 # numbers must come from the merchant's KB / catalogue, not from
 # this fallback.
-_CLEAR_INTENT_REPLIES: Dict[str, str] = {
-    _INTENT_OFFERS: (
-        "أبشر 🌷 لو فيه عروض حالية أعرضها لك مباشرة — "
-        "تحب أعرض لك المتوفر والأسعار؟"
-    ),
-    _INTENT_PRICE: (
-        "تحت أمرك 🌷 لو تخبرني المنتج المحدد أعرض لك السعر الحالي مباشرة."
-    ),
-    _INTENT_PRODUCT: (
-        "أبشر 🌷 تحب أعرض لك المنتجات المتوفرة والأسعار؟"
-    ),
-    _INTENT_STORE_LINK: (
-        # The dedicated store-link safety net handles the URL
-        # injection itself. Here we only supply a fallback line
-        # for the rare case it's disabled.
-        "أبشر 🌷 أرسل لك رابط المتجر الحين."
-    ),
-    _INTENT_SHIPPING: (
-        "أبشر 🌷 التوصيل متاح حسب موقعك — لو تخبرني المدينة "
-        "أرتب لك الشحن."
-    ),
-    _INTENT_PAYMENT: (
-        "أبشر 🌷 وسائل الدفع متاحة. تحب أرسل لك طرق الدفع المتوفرة؟"
-    ),
-    _INTENT_ORDER: (
-        "أبشر 🌷 لو تخبرني المنتج المطلوب أبدأ معك الطلب فورًا."
-    ),
-}
-
-
 @dataclass
 class ClearIntentFallbackResult:
+    """Phase 2 P0: facts/metadata only — never customer-facing prose."""
+
     fired: bool = False
     reason: str = ""
     skipped_reason: str = ""
     customer_intent: str = ""
     new_reply: str = ""
+    text_written: bool = False
+    facts: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -3566,6 +3541,8 @@ class ClearIntentFallbackResult:
             "fired":           self.fired,
             "reason":          self.reason or self.skipped_reason,
             "customer_intent": self.customer_intent,
+            "text_written":    self.text_written,
+            "facts":           dict(self.facts),
         }
 
 
@@ -3598,17 +3575,11 @@ def apply_clear_intent_fallback_net(
     reply_text: str,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> ClearIntentFallbackResult:
-    """Replace a "please repeat" / timeout-apology reply with a
-    short intent-aware reply when the customer's message was
-    clearly understandable.
+    """Detect clear customer intent when the LLM emitted a generic fallback.
 
-    The net is text-only. It NEVER mutates order state, never
-    invents prices, and never touches the marker / attachment
-    pipelines. When fired, the caller substitutes ``new_reply``
-    for the outbound text.
-
-    Returns ``ClearIntentFallbackResult`` with ``fired=True`` and
-    ``new_reply`` populated when the rewrite should happen.
+    Phase 2 P0: returns facts/metadata only — never replaces outbound text.
+    Callers record ``postprocess_mutations`` with ``text_written=False`` and
+    leave rephrasing to composer/LLM.
     """
     result = ClearIntentFallbackResult()
 
@@ -3633,8 +3604,6 @@ def apply_clear_intent_fallback_net(
 
     intent = _detect_clear_customer_intent(msg_norm)
     if not intent:
-        # No clear intent → the original "please repeat" reply is
-        # appropriate. Stay out of the way.
         result.skipped_reason = "no_clear_intent"
         return result
 
@@ -3656,13 +3625,22 @@ def apply_clear_intent_fallback_net(
             )
 
     result.customer_intent = intent
-    new_reply = _CLEAR_INTENT_REPLIES.get(intent)
-    if not new_reply:
-        result.skipped_reason = "no_template_for_intent"
-        return result
-
-    result.new_reply = new_reply
     result.fired = True
+    result.text_written = False
+    result.facts = {
+        "detected_intent": intent,
+        "customer_msg_normalized": msg_norm,
+        "reply_was_generic_fallback": True,
+        "required_delivery": "llm_rephrase",
+        "forbidden_claims": [],
+    }
+    result.metadata = {
+        "clear_intent_fallback": {
+            "intent": intent,
+            "text_written": False,
+            "action": "defer_to_composer",
+        },
+    }
     return result
 
 

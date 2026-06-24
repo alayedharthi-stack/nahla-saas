@@ -1223,16 +1223,21 @@ class DefaultComposer:
 
         _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
         if not should_skip_order_resume_hint(topic=topic, intent_name=_intent_name):
-            resume = self._order_resume_hint(ctx)
-            if resume and resume not in text:
-                text = f"{text}\n\n{resume}"
-                if result is not None:
-                    try:
-                        from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
+            resume_meta = self._order_resume_hint_metadata(ctx)
+            if resume_meta and result is not None:
+                data = getattr(result, "data", None)
+                if isinstance(data, dict):
+                    data["order_resume_hint"] = resume_meta
+                    layers = list(data.get("_compose_metadata_layers") or [])
+                    if "order_resume_hint" not in layers:
+                        layers.append("order_resume_hint")
+                    data["_compose_metadata_layers"] = layers
+                try:
+                    from core.outbound_text_policy import mark_compose_metadata  # noqa: PLC0415
 
-                        mark_compose_template(result, layer="order_resume_hint")
-                    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block resume hint
-                        pass
+                    mark_compose_metadata(result, layer="order_resume_hint")
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block compose
+                    pass
 
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
@@ -1245,22 +1250,22 @@ class DefaultComposer:
         return f"{text}\n\n{follow_up}"
 
     @staticmethod
-    def _order_resume_hint(ctx: BrainContext) -> str:
-        """Return a short Arabic prompt to resume an in-progress order,
-        or '' when no order is active. Triggered after FAQ replies so
-        customers don't lose track of the order flow when they ask a
-        side question (delivery / store info / etc.)."""
+    def _order_resume_hint_metadata(ctx: BrainContext) -> Dict[str, Any]:
+        """Return order-resume facts for compose — never customer-facing prose."""
         try:
             prep = getattr(ctx.state, "order_prep", None)
             focus = getattr(ctx.state, "current_product_focus", None) or {}
             if not prep or not (focus or getattr(prep, "product_id", "")):
-                return ""
+                return {}
 
             product_title = (focus or {}).get("title") or getattr(prep, "product_name", "") or "المنتج"
+            base: Dict[str, Any] = {
+                "active_order_context": True,
+                "resume_candidate": product_title,
+                "resume_hint_source": "order_prep",
+            }
 
-            # 1. Pending product options take priority — they're the most
-            # specific blocker.
-            pending_options = []
+            pending_options: List[str] = []
             try:
                 meta = list(getattr(prep, "product_options_meta", None) or [])
                 picked = dict(getattr(prep, "product_options", None) or {})
@@ -1277,32 +1282,37 @@ class DefaultComposer:
                 pending_options = []
 
             if pending_options:
-                if len(pending_options) == 1:
-                    return f"نكمل اختيار {pending_options[0]} لـ *{product_title}*؟ 👇"
-                joined = "، ".join(pending_options[:-1]) + f" و{pending_options[-1]}"
-                return f"نكمل اختيار {joined} لـ *{product_title}*؟ 👇"
+                base["pending_slot"] = "product_options"
+                base["pending_options"] = pending_options
+                return base
 
-            # 2. Otherwise hint the most likely missing checkout slot.
             missing = list(getattr(prep, "missing_fields", None) or [])
-            slot_labels = {
-                "customer_first_name": "اسمك",
-                "customer_last_name":  "اسمك",
-                "customer_name":       "اسمك",
-                "city":                "المدينة",
-                "address":             "العنوان أو الرمز الوطني",
-                "address_line":        "العنوان أو الرمز الوطني",
-                "short_address_code":  "الرمز الوطني (أو رابط الموقع)",
-                "google_maps_url":     "رابط الموقع",
+            slot_map = {
+                "customer_first_name": "customer_name",
+                "customer_last_name":  "customer_name",
+                "customer_name":       "customer_name",
+                "city":                "city",
+                "address":             "delivery_address",
+                "address_line":        "delivery_address",
+                "short_address_code":  "delivery_address",
+                "google_maps_url":     "delivery_address",
+                "delivery_address":    "delivery_address",
             }
             for slot in missing:
-                label = slot_labels.get(slot)
-                if label:
-                    return f"نكمل بعدها {label} لإتمام طلب *{product_title}*؟"
+                canonical = slot_map.get(slot)
+                if canonical:
+                    base["pending_slot"] = canonical
+                    return base
 
-            # 3. Order ready to create — prompt confirmation.
-            return f"نكمل إنشاء طلب *{product_title}* الآن؟"
+            base["pending_slot"] = "order_confirmation"
+            return base
         except Exception:
-            return ""
+            return {}
+
+    @staticmethod
+    def _order_resume_hint(ctx: BrainContext) -> str:
+        """Deprecated — Phase 2 P0: metadata only via ``_order_resume_hint_metadata``."""
+        return ""
 
     @staticmethod
     def _apply_established_greeting_etiquette(

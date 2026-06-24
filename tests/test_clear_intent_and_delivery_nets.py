@@ -75,11 +75,9 @@ class TestClearIntentFires:
         assert result.fired is True
         assert result.customer_intent == "offers"
         assert result.reason == "reply_asked_to_repeat_clear_question"
-        assert "تأخر"      not in result.new_reply
-        assert "إعادة سؤالك" not in result.new_reply
-        # Cross-merchant invariant: the reply must NOT hard-code a
-        # product class. It's the same line for every merchant.
-        assert "عسل" not in result.new_reply
+        assert result.new_reply == ""
+        assert result.text_written is False
+        assert result.facts.get("detected_intent") == "offers"
 
     @pytest.mark.parametrize(
         "msg,expected_intent",
@@ -126,11 +124,9 @@ class TestClearIntentFires:
         )
         assert result.fired is True
         assert result.customer_intent == expected_intent
-        assert result.new_reply
-        # The new reply must NOT be the generic "please repeat" copy.
-        assert "إعادة سؤالك" not in result.new_reply
-        assert "أعد سؤالك"   not in result.new_reply
-        assert "لم أفهم"      not in result.new_reply
+        assert result.new_reply == ""
+        assert result.text_written is False
+        assert result.facts.get("detected_intent") == expected_intent
 
     @pytest.mark.parametrize(
         "reply",
@@ -154,51 +150,23 @@ class TestClearIntentFires:
 
 
 class TestClearIntentCrossMerchant:
-    """The new reply templates must NOT hard-code any product
-    class — they have to work for every merchant."""
+    """Phase 2 P0: clear-intent net emits facts only — no reply templates."""
 
-    @pytest.mark.parametrize("intent_key", [
-        "offers", "price", "product", "store_link",
-        "shipping", "payment", "order",
-    ])
-    def test_reply_template_is_category_neutral(self, intent_key):
-        from modules.ai.postprocess import safety_nets
-        reply = safety_nets._CLEAR_INTENT_REPLIES[intent_key]
-        # Honey vocabulary must NOT leak into the canonical replies.
-        for honey_word in (
-            "عسل", "العسل", "طلح", "السدر", "السمر", "الزهر",
-            "نحل", "النحل",
+    def test_no_customer_prose_emitted_on_fire(self):
+        from modules.ai.postprocess.safety_nets import (
+            apply_clear_intent_fallback_net,
+        )
+        for msg in (
+            "هل يوجد عروض على العطور؟",
+            "ايش عندكم من سماعات بلوتوث؟",
         ):
-            assert honey_word not in reply, (
-                f"Reply for {intent_key!r} hard-codes {honey_word!r} — "
-                "the safety net runs for ALL merchants; replies must "
-                "stay category-neutral."
+            result = apply_clear_intent_fallback_net(
+                customer_msg=msg,
+                reply_text=PRODUCTION_TIMEOUT_REPLY,
             )
-
-    def test_perfume_merchant_offers_question_uses_generic_reply(self):
-        from modules.ai.postprocess.safety_nets import (
-            apply_clear_intent_fallback_net,
-        )
-        result = apply_clear_intent_fallback_net(
-            customer_msg="هل يوجد عروض على العطور؟",
-            reply_text=PRODUCTION_TIMEOUT_REPLY,
-        )
-        assert result.fired is True
-        assert result.customer_intent == "offers"
-        assert "عطور" not in result.new_reply  # generic reply, no category
-        assert "عسل"  not in result.new_reply  # never honey-flavoured
-
-    def test_electronics_merchant_product_browse(self):
-        from modules.ai.postprocess.safety_nets import (
-            apply_clear_intent_fallback_net,
-        )
-        result = apply_clear_intent_fallback_net(
-            customer_msg="ايش عندكم من سماعات بلوتوث؟",
-            reply_text="عذراً، لم أفهم. ممكن توضح أكثر؟",
-        )
-        assert result.fired is True
-        assert result.customer_intent == "product"
-        assert "سماعات" not in result.new_reply  # generic
+            assert result.fired is True
+            assert result.new_reply == ""
+            assert result.text_written is False
 
 
 class TestClearIntentSkips:
