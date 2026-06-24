@@ -1,0 +1,579 @@
+"""
+core/order_context_prefill.py
+──────────────────────────────
+Phase C — identity/shipping missing modes, merchant-lock respect, and
+optional safe order_prep prefill behind feature flags.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, replace
+from typing import Any, Dict, List, Optional, Tuple
+
+from core.customer_identity_resolver import (
+    STATUS_PROPOSED,
+    can_use_name_for_operations,
+)
+from core.wa_order_lifecycle import has_accepted_delivery_address
+
+logger = logging.getLogger("nahla.order_context_prefill")
+
+MODE_SKIP = "skip"
+MODE_CONFIRM = "confirm"
+MODE_ASK = "ask"
+MODE_EDIT_REQUESTED = "edit_requested"
+
+_NAME_EDIT_RE = re.compile(
+    r"(?:"
+    r"غير\s*(?:ال)?اسم|اسم\s*غلط|الاسم\s*غلط|مو\s*اسمي|تصحيح\s*اسم|"
+    r"change\s*name|wrong\s*name|correct\s*name|not\s*my\s*name"
+    r")",
+    re.I | re.UNICODE,
+)
+_SHIPPING_EDIT_RE = re.compile(
+    r"(?:"
+    r"أ?غير\s*(?:ال)?(?:عنوان|موقع|التوصيل|المدينة|المدينه)|"
+    r"(?:ال)?عنوان\s*غ(?:ل|ي)ط|مو\s*هذا\s*(?:ال)?(?:عنوان|موقع)|"
+    r"موقع\s*ث(?:اني|اني)|تغي(?:ر|ير)\s*(?:ال)?(?:عنوان|المدينة|المدينه)|"
+    r"change\s*(?:address|location)|wrong\s*address|different\s*address"
+    r")",
+    re.I | re.UNICODE,
+)
+_PREVIOUS_ADDRESS_CONFIRM_RE = re.compile(
+    r"(?:"
+    r"نفس\s*(?:ال)?(?:عنوان|موقع)|العنوان\s*(?:ال)?(?:سابق|قديم|اول)|"
+    r"استخدم\s*(?:ال)?(?:عنوان|موقع)\s*(?:ال)?(?:سابق|قديم)|"
+    r"confirm\s*(?:previous|old)\s*address|same\s*address"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+@dataclass(frozen=True)
+class EditIntentFacts:
+    name_edit_requested: bool = False
+    shipping_edit_requested: bool = False
+    previous_address_confirmed: bool = False
+
+
+@dataclass(frozen=True)
+class OrderPrefillState:
+    shadow_missing_modes: Dict[str, str]
+    identity_missing_mode: str
+    shipping_city_mode: str
+    shipping_delivery_mode: str
+    customer_requested_edit: bool = False
+    locked_field_edit_requested: bool = False
+    requires_merchant_review: bool = False
+    suggested_shipping_snapshot: Optional[Any] = None
+
+
+def detect_edit_intent_facts(
+    message: str = "",
+    prep: Optional[Dict[str, Any]] = None,
+) -> EditIntentFacts:
+    prep = dict(prep or {})
+    text = str(message or "").strip()
+    name_edit = bool(_NAME_EDIT_RE.search(text)) or bool(prep.get("customer_requested_name_edit"))
+    shipping_edit = (
+        bool(_SHIPPING_EDIT_RE.search(text))
+        or bool(prep.get("customer_requested_shipping_edit"))
+        or bool(prep.get("order_flow_v2_address_refused"))
+    )
+    prev_confirmed = (
+        bool(_PREVIOUS_ADDRESS_CONFIRM_RE.search(text))
+        or bool(prep.get("previous_address_confirmed"))
+        or bool(prep.get("customer_confirmed_previous_address"))
+    )
+    return EditIntentFacts(
+        name_edit_requested=name_edit,
+        shipping_edit_requested=shipping_edit,
+        previous_address_confirmed=prev_confirmed,
+    )
+
+
+def _prep_str(prep: Dict[str, Any], key: str) -> str:
+    return str(prep.get(key) or "").strip()
+
+
+def _shipping_locked(*, prep: Dict[str, Any], draft_meta: Dict[str, Any]) -> bool:
+    if bool(draft_meta.get("merchant_edit_locked")):
+        return True
+    return bool(prep.get("merchant_shipping_locked"))
+
+
+def resolve_identity_missing_mode(
+    *,
+    operational_name: str,
+    first_name: str,
+    last_name: str,
+    has_verified_name: bool,
+    has_proposed_name: bool,
+    locked_by_merchant: bool,
+    edit_facts: EditIntentFacts,
+) -> str:
+    if edit_facts.name_edit_requested:
+        return MODE_EDIT_REQUESTED
+    if locked_by_merchant and operational_name:
+        return MODE_SKIP
+    if has_verified_name and operational_name and (first_name or last_name):
+        return MODE_SKIP
+    if has_verified_name and operational_name:
+        return MODE_SKIP
+    if has_proposed_name and not has_verified_name:
+        return MODE_CONFIRM
+    if operational_name and not has_verified_name:
+        return MODE_CONFIRM
+    return MODE_ASK
+
+
+def resolve_shipping_city_mode(
+    *,
+    city: str,
+    locked_by_merchant: bool,
+    known_previous: bool,
+    edit_facts: EditIntentFacts,
+) -> str:
+    if edit_facts.shipping_edit_requested:
+        return MODE_EDIT_REQUESTED
+    if city:
+        return MODE_SKIP if locked_by_merchant else MODE_SKIP
+    if known_previous:
+        return MODE_CONFIRM
+    return MODE_ASK
+
+
+def resolve_shipping_delivery_mode(
+    *,
+    accepted_delivery_address: bool,
+    locked_by_merchant: bool,
+    known_previous: bool,
+    edit_facts: EditIntentFacts,
+) -> str:
+    if edit_facts.shipping_edit_requested:
+        return MODE_EDIT_REQUESTED
+    if accepted_delivery_address:
+        return MODE_SKIP
+    if known_previous and not accepted_delivery_address:
+        return MODE_CONFIRM
+    return MODE_ASK
+
+
+def compute_shadow_missing_modes(
+    *,
+    identity_mode: str,
+    city_mode: str,
+    delivery_mode: str,
+    has_product: bool,
+    has_total: bool,
+) -> Dict[str, str]:
+    modes: Dict[str, str] = {}
+    modes["product"] = MODE_SKIP if has_product else MODE_ASK
+    modes["name"] = identity_mode
+    modes["city"] = city_mode
+    modes["delivery_address"] = delivery_mode
+    modes["total"] = MODE_SKIP if has_total else MODE_ASK
+    return modes
+
+
+def shadow_missing_fields_from_modes(modes: Dict[str, str]) -> List[str]:
+    missing: List[str] = []
+    for field, mode in modes.items():
+        if mode in {MODE_ASK, MODE_CONFIRM, MODE_EDIT_REQUESTED}:
+            missing.append(field)
+    return missing
+
+
+def build_prefill_state(
+    *,
+    identity: Any,
+    shipping: Any,
+    known_previous: Optional[Any],
+    prep: Dict[str, Any],
+    active_draft: Optional[Any],
+    message: str = "",
+    has_product: bool,
+    has_total: bool,
+) -> OrderPrefillState:
+    draft_meta = {}
+    if active_draft is not None and getattr(active_draft, "merchant_edit_locked", False):
+        draft_meta["merchant_edit_locked"] = True
+
+    edit_facts = detect_edit_intent_facts(message, prep)
+    shipping_locked = _shipping_locked(prep=prep, draft_meta=draft_meta)
+    has_previous = known_previous is not None and bool(
+        getattr(known_previous, "city", None)
+        or getattr(known_previous, "maps_url", None)
+        or getattr(known_previous, "short_address", None)
+    )
+
+    identity_mode = resolve_identity_missing_mode(
+        operational_name=getattr(identity, "operational_name", "") or "",
+        first_name=getattr(identity, "first_name", "") or "",
+        last_name=getattr(identity, "last_name", "") or "",
+        has_verified_name=bool(getattr(identity, "has_verified_name", False)),
+        has_proposed_name=bool(getattr(identity, "has_proposed_name", False)),
+        locked_by_merchant=bool(getattr(identity, "locked_by_merchant", False)),
+        edit_facts=edit_facts,
+    )
+    city_mode = resolve_shipping_city_mode(
+        city=getattr(shipping, "city", "") or "",
+        locked_by_merchant=shipping_locked,
+        known_previous=has_previous,
+        edit_facts=edit_facts,
+    )
+    delivery_mode = resolve_shipping_delivery_mode(
+        accepted_delivery_address=bool(getattr(shipping, "accepted_delivery_address", False)),
+        locked_by_merchant=shipping_locked,
+        known_previous=has_previous,
+        edit_facts=edit_facts,
+    )
+
+    modes = compute_shadow_missing_modes(
+        identity_mode=identity_mode,
+        city_mode=city_mode,
+        delivery_mode=delivery_mode,
+        has_product=has_product,
+        has_total=has_total,
+    )
+
+    customer_requested_edit = edit_facts.name_edit_requested or edit_facts.shipping_edit_requested
+    locked_field_edit_requested = customer_requested_edit and (
+        bool(getattr(identity, "locked_by_merchant", False)) or shipping_locked
+    )
+    requires_review = locked_field_edit_requested
+
+    suggested = known_previous if (
+        has_previous
+        and not getattr(shipping, "accepted_delivery_address", False)
+        and delivery_mode == MODE_CONFIRM
+    ) else None
+
+    return OrderPrefillState(
+        shadow_missing_modes=modes,
+        identity_missing_mode=identity_mode,
+        shipping_city_mode=city_mode,
+        shipping_delivery_mode=delivery_mode,
+        customer_requested_edit=customer_requested_edit,
+        locked_field_edit_requested=locked_field_edit_requested,
+        requires_merchant_review=requires_review,
+        suggested_shipping_snapshot=suggested,
+    )
+
+
+def enrich_identity_context(identity: Any, *, missing_mode: str) -> Any:
+    can_label = bool(getattr(identity, "operational_name", "")) and (
+        getattr(identity, "has_verified_name", False)
+        or getattr(identity, "locked_by_merchant", False)
+    )
+    return replace(
+        identity,
+        missing_mode=missing_mode,
+        can_use_for_shipping_label=can_label,
+    )
+
+
+def enrich_shipping_context(
+    shipping: Any,
+    *,
+    city_mode: str,
+    delivery_mode: str,
+    locked_by_merchant: bool,
+    requires_merchant_review: bool,
+) -> Any:
+    missing_mode = delivery_mode if delivery_mode != MODE_SKIP else city_mode
+    return replace(
+        shipping,
+        locked_by_merchant=locked_by_merchant,
+        missing_mode=missing_mode,
+        requires_merchant_review=requires_merchant_review,
+    )
+
+
+def _shipping_context_to_prep_patch(source: Any) -> Dict[str, Any]:
+    return {
+        "city": getattr(source, "city", "") or "",
+        "district": getattr(source, "district", "") or "",
+        "street": getattr(source, "street", "") or "",
+        "address_line": getattr(source, "address_line", "") or "",
+        "google_maps_url": getattr(source, "maps_url", "") or "",
+        "short_address_code": getattr(source, "short_address", "") or "",
+        "latitude": getattr(source, "latitude", None),
+        "longitude": getattr(source, "longitude", None),
+        "shipping_source": getattr(source, "source", "") or "customer_confirmed_previous_address",
+        "shipping_confidence": getattr(source, "confidence", 0.95),
+    }
+
+
+def _operational_prefill_enabled() -> bool:
+    import os
+
+    return os.environ.get("ORDER_CONTEXT_OPERATIONAL_PREFILL_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _shipping_confirm_enabled() -> bool:
+    import os
+
+    return os.environ.get("ORDER_CONTEXT_SHIPPING_CONFIRM_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def build_order_prep_prefill_patch(
+    ctx: Any,
+    *,
+    prep: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Non-mutating patch proposal from OrderContext prefill rules."""
+    if not _operational_prefill_enabled():
+        return {}
+
+    patch: Dict[str, Any] = {}
+    identity = ctx.identity
+    prefill = ctx.prefill
+    locked_name = bool(getattr(identity, "locked_by_merchant", False))
+
+    first_name = getattr(identity, "first_name", "") or ""
+    last_name = getattr(identity, "last_name", "") or ""
+    if not first_name and not last_name and getattr(identity, "operational_name", ""):
+        from core.order_context_builder import _split_name  # noqa: PLC0415
+
+        first_name, last_name = _split_name(identity.operational_name)
+
+    if (
+        not locked_name
+        and getattr(identity, "has_verified_name", False)
+        and getattr(identity, "operational_name", "")
+        and prefill.identity_missing_mode == MODE_SKIP
+    ):
+        if not _prep_str(prep, "customer_first_name") and first_name:
+            patch["customer_first_name"] = first_name
+        if not _prep_str(prep, "customer_last_name") and last_name:
+            patch["customer_last_name"] = last_name
+        if patch:
+            patch["identity_prefill_source"] = identity.name_source or "verified_customer"
+            patch["identity_prefill_confidence"] = identity.confidence
+
+    edit_facts = detect_edit_intent_facts("", prep)
+    if (
+        _shipping_confirm_enabled()
+        and edit_facts.previous_address_confirmed
+        and ctx.known_previous_address is not None
+    ):
+        if not bool(getattr(ctx.shipping, "locked_by_merchant", False)):
+            if not has_accepted_delivery_address(prep):
+                patch.update(_shipping_context_to_prep_patch(ctx.known_previous_address))
+                patch["customer_confirmed_previous_address"] = True
+                patch["shipping_source"] = "customer_confirmed_previous_address"
+
+    if prefill.customer_requested_edit:
+        patch["customer_requested_edit"] = True
+    if prefill.locked_field_edit_requested:
+        patch["locked_field_edit_requested"] = True
+    if prefill.requires_merchant_review:
+        patch["requires_merchant_review"] = True
+
+    return patch
+
+
+def apply_order_prep_prefill_patch(prep: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply a prefill patch in-place on a copy of order_prep."""
+    merged = dict(prep or {})
+    for key, value in patch.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        current = merged.get(key)
+        if isinstance(current, str) and current.strip():
+            continue
+        if key in {"customer_first_name", "customer_last_name"}:
+            if bool(merged.get("merchant_name_locked")) or bool(merged.get("identity_locked_by_merchant")):
+                continue
+        if key in {
+            "city",
+            "google_maps_url",
+            "short_address_code",
+            "address_line",
+            "district",
+            "street",
+            "latitude",
+            "longitude",
+        }:
+            if bool(merged.get("merchant_shipping_locked")):
+                continue
+        merged[key] = value
+    return merged
+
+
+def maybe_apply_operational_prefill_to_state(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int],
+    customer: Any,
+    phone: str,
+    message: str,
+    state: Any,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Any]:
+    if not _operational_prefill_enabled():
+        return None
+    if state is None or conversation_id is None:
+        return None
+
+    try:
+        from core.order_context_builder import build_order_context  # noqa: PLC0415
+        from models import Conversation  # noqa: PLC0415
+
+        conversation = (
+            db.query(Conversation).filter_by(id=int(conversation_id), tenant_id=tenant_id).first()
+        )
+        if conversation is None:
+            return None
+
+        if customer is None and getattr(conversation, "customer_id", None):
+            from models import Customer  # noqa: PLC0415
+
+            customer = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
+        if customer is None and phone:
+            try:
+                from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+                customer = CustomerIntelligenceService(db, tenant_id).upsert_lead_customer(
+                    phone=phone,
+                    source="whatsapp_inbound",
+                    commit=False,
+                )
+            except Exception:  # noqa: BLE001
+                customer = None
+
+        brain_state = {}
+        prep_obj = getattr(state, "order_prep", None)
+        if prep_obj is not None:
+            try:
+                from dataclasses import asdict  # noqa: PLC0415
+
+                brain_state["order_prep"] = asdict(prep_obj)
+            except Exception:  # noqa: BLE001
+                brain_state["order_prep"] = dict(getattr(prep_obj, "__dict__", {}) or {})
+        else:
+            brain_state["order_prep"] = {}
+
+        ctx = build_order_context(
+            db,
+            tenant_id=tenant_id,
+            conversation=conversation,
+            customer=customer,
+            phone=phone,
+            brain_state=brain_state,
+            inbound_metadata=inbound_metadata,
+            build_source="operational_prefill",
+            message=message,
+        )
+        patch = build_order_prep_prefill_patch(ctx, prep=brain_state.get("order_prep") or {})
+        if not patch:
+            return ctx
+
+        merged = apply_order_prep_prefill_patch(brain_state.get("order_prep") or {}, patch)
+        prep_obj = getattr(state, "order_prep", None)
+        if prep_obj is not None:
+            for key, value in merged.items():
+                if hasattr(prep_obj, key):
+                    setattr(prep_obj, key, value)
+        logger.info(
+            "[ORDER_CONTEXT_PREFILL] applied tenant=%s conv=%s keys=%s",
+            tenant_id,
+            conversation_id,
+            sorted(patch.keys()),
+        )
+        return ctx
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ORDER_CONTEXT_PREFILL] apply failed tenant=%s conv=%s",
+            tenant_id,
+            conversation_id,
+        )
+        return None
+
+
+def build_order_context_api_payload(ctx: Any) -> Dict[str, Any]:
+    identity = ctx.identity
+    shipping = ctx.shipping
+    prefill = ctx.prefill
+    previous = ctx.known_previous_address
+    return {
+        "identity": {
+            "operational_name": identity.operational_name,
+            "display_name": identity.display_name,
+            "name_source": identity.name_source,
+            "name_status": identity.name_status,
+            "confidence": identity.confidence,
+            "locked_by_merchant": identity.locked_by_merchant,
+            "missing_mode": identity.missing_mode,
+            "can_use_for_shipping_label": identity.can_use_for_shipping_label,
+        },
+        "shipping": {
+            "city": shipping.city,
+            "source": shipping.source,
+            "confidence": shipping.confidence,
+            "accepted_delivery_address": shipping.accepted_delivery_address,
+            "locked_by_merchant": shipping.locked_by_merchant,
+            "missing_mode": shipping.missing_mode,
+            "requires_merchant_review": shipping.requires_merchant_review,
+        },
+        "known_previous_address": (
+            {
+                "city": previous.city,
+                "maps_url": previous.maps_url,
+                "short_address": previous.short_address,
+                "source": previous.source,
+            }
+            if previous is not None
+            else None
+        ),
+        "suggested_shipping_snapshot": (
+            {
+                "city": prefill.suggested_shipping_snapshot.city,
+                "maps_url": prefill.suggested_shipping_snapshot.maps_url,
+                "short_address": prefill.suggested_shipping_snapshot.short_address,
+                "source": prefill.suggested_shipping_snapshot.source,
+            }
+            if prefill.suggested_shipping_snapshot is not None
+            else None
+        ),
+        "shadow_missing_modes": dict(prefill.shadow_missing_modes),
+        "customer_requested_edit": prefill.customer_requested_edit,
+        "locked_field_edit_requested": prefill.locked_field_edit_requested,
+        "requires_merchant_review": prefill.requires_merchant_review,
+    }
+
+
+__all__ = [
+    "EditIntentFacts",
+    "MODE_ASK",
+    "MODE_CONFIRM",
+    "MODE_EDIT_REQUESTED",
+    "MODE_SKIP",
+    "OrderPrefillState",
+    "apply_order_prep_prefill_patch",
+    "build_order_context_api_payload",
+    "build_order_prep_prefill_patch",
+    "build_prefill_state",
+    "compute_shadow_missing_modes",
+    "detect_edit_intent_facts",
+    "enrich_identity_context",
+    "enrich_shipping_context",
+    "maybe_apply_operational_prefill_to_state",
+    "resolve_identity_missing_mode",
+    "shadow_missing_fields_from_modes",
+]

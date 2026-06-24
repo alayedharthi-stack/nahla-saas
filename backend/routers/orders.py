@@ -979,6 +979,30 @@ def _serialise_order(
             "national_short_address": caps.get("national_short_address"),
             "delivery_notes": caps.get("delivery_notes"),
         }
+        if source_key == "whatsapp" and db is not None and tenant_id is not None:
+            try:
+                from core.order_context_builder import build_order_context  # noqa: PLC0415
+                from core.order_context_prefill import build_order_context_api_payload  # noqa: PLC0415
+                from models import Conversation  # noqa: PLC0415
+
+                conv_id = order_meta.get("conversation_id")
+                conversation = None
+                if conv_id:
+                    conversation = (
+                        db.query(Conversation)
+                        .filter_by(id=int(conv_id), tenant_id=int(tenant_id))
+                        .first()
+                    )
+                ctx = build_order_context(
+                    db,
+                    tenant_id=int(tenant_id),
+                    conversation=conversation,
+                    phone=phone or "",
+                    build_source="orders_api_detail",
+                )
+                payload["order_context_prefill"] = build_order_context_api_payload(ctx)
+            except Exception:  # noqa: BLE001
+                payload["order_context_prefill"] = None
 
     return payload
 

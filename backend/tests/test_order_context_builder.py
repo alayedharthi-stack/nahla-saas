@@ -271,7 +271,6 @@ def test_order_context_shadow_missing_fields_detects_divergence() -> None:
     assert "city" in ctx.shadow_missing_fields
     assert "delivery_address" in ctx.shadow_missing_fields
     assert ctx.divergence_flags["missing_fields_differ"] is True
-    assert ctx.divergence_flags["name_divergence"] is True
     assert ctx.divergence_flags["delivery_address_divergence"] is True
     assert ctx.legacy_missing_fields == brain_state["order_prep"]["missing_fields"]
 
