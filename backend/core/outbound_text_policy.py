@@ -356,7 +356,7 @@ def log_outbound_text_policy(tracker: OutboundTextTracker, *, tenant_id: Any = N
             len(tracker.postprocess_mutations),
             tracker.policy_path,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy log must not block send
         pass
 
 

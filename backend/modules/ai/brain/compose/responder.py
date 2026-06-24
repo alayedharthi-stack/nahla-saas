@@ -212,9 +212,8 @@ class DefaultComposer:
                 from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
 
                 mark_compose_template(result, layer="faq_template")
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block FAQ compose
                 pass
-            payload = data.get("payload", {}) or {}
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
                 return self._with_follow_up(
@@ -867,9 +866,8 @@ class DefaultComposer:
                     tenant_id=getattr(ctx, "tenant_id", None),
                 )
                 reply = _srcg.reply
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — social context guard best-effort
                 pass
-            if not (reply or "").strip() and self._understood_social_religious_media(ctx):
                 result.data["chosen_path"] = "social_persona_compose_from_empty_template"
                 reply = await self._compose_social_persona_ack(
                     ctx, result, social_category=category,
@@ -1233,9 +1231,8 @@ class DefaultComposer:
                         from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
 
                         mark_compose_template(result, layer="order_resume_hint")
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block resume hint
                         pass
-                return text
 
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
