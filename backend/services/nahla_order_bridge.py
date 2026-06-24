@@ -66,6 +66,39 @@ def nahla_wa_external_id(tenant_id: int, conversation_id: int) -> str:
     return f"{_NAHL_WA_EXT_PREFIX}{tenant_id}-{conversation_id}"
 
 
+def nahla_wa_catalog_external_id(
+    tenant_id: int,
+    conversation_id: int,
+    *,
+    message_event_id: Optional[int] = None,
+    source_message_key: Optional[str] = None,
+) -> str:
+    """Distinct external_id when a new catalog draft must not reuse a closed order."""
+    base = nahla_wa_external_id(tenant_id, conversation_id)
+    if message_event_id is not None:
+        return f"{base}-msg-{int(message_event_id)}"
+    if source_message_key:
+        safe = "".join(ch if ch.isalnum() else "-" for ch in str(source_message_key))[:48]
+        return f"{base}-msg-{safe or 'unknown'}"
+    return f"{base}-msg-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+
+
+_TERMINAL_ORDER_STATUSES = _PAID_STATUSES | frozenset({
+    "cancelled", "canceled", "abandoned",
+})
+
+
+def is_open_wa_draft_order(order: Any) -> bool:
+    """True when an existing row is an active WhatsApp draft eligible for in-place update."""
+    if order is None:
+        return False
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    if str(meta.get("lifecycle") or "").lower() != "whatsapp_draft":
+        return False
+    status = str(getattr(order, "status", "") or "").lower()
+    return status not in _TERMINAL_ORDER_STATUSES
+
+
 def _draft_bridge_enabled(tenant_id: int) -> bool:
     raw = (os.environ.get("NAHLA_ORDER_DRAFT_BRIDGE_ENABLED") or "").strip().lower()
     if raw not in ("1", "true", "yes", "on"):
@@ -809,6 +842,7 @@ def _base_metadata(
         meta["created_at"] = confirmed_at
     else:
         meta["draft_created_at"] = now_iso
+        meta["created_at"] = now_iso
         meta["counts_in_revenue"] = False
     if receipt_metadata:
         meta["payment_receipt_metadata"] = receipt_metadata
@@ -832,6 +866,7 @@ def sync_nahla_wa_order(
     customer: Any = None,
     force_catalog_draft: bool = False,
     extra_order_metadata: Optional[Dict[str, Any]] = None,
+    external_id_override: Optional[str] = None,
 ) -> Optional[Any]:
     """
     Upsert a Nahla-native WhatsApp order — draft (pending_payment) or paid.
@@ -869,7 +904,11 @@ def sync_nahla_wa_order(
         )
         return None
 
-    external_id = nahla_wa_external_id(tenant_id, int(conversation_id))
+    external_id = (
+        str(external_id_override).strip()
+        if external_id_override
+        else nahla_wa_external_id(tenant_id, int(conversation_id))
+    )
     from core.wa_order_lifecycle import (  # noqa: PLC0415
         has_payment_submission,
         is_payment_verified,
@@ -1183,7 +1222,18 @@ def sync_nahla_wa_order(
                 )
                 return existing
 
+            prev_created = (
+                meta.get("created_at")
+                or meta.get("draft_created_at")
+                or meta.get("display_created_at")
+            )
             meta.update(base_meta)
+            if prev_created:
+                meta["created_at"] = prev_created
+                meta["draft_created_at"] = prev_created
+            elif not meta.get("created_at") and meta.get("draft_created_at"):
+                meta["created_at"] = meta["draft_created_at"]
+            meta["last_updated_at"] = now_iso
             existing.status = target_status
             existing.source = "whatsapp"
             existing.is_abandoned = False

@@ -292,7 +292,13 @@ export default function Orders() {
                       )}
                     </td>
                     <td className="px-5 py-3.5 text-xs text-slate-500 whitespace-nowrap">
-                      {o.updated_at ? formatDate(o.updated_at) : o.createdAt ? formatDate(o.createdAt) : '—'}
+                      {o.display_created_at
+                        ? formatDate(o.display_created_at)
+                        : o.createdAt
+                          ? formatDate(o.createdAt)
+                          : o.updated_at
+                            ? formatDate(o.updated_at)
+                            : '—'}
                     </td>
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2">

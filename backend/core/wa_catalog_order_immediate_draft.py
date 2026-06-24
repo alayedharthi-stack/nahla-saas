@@ -16,7 +16,12 @@ from core.wa_native_catalog_order import (
     build_line_items_from_payload,
     parse_native_catalog_order,
 )
-from services.nahla_order_bridge import nahla_wa_external_id, sync_nahla_wa_order
+from services.nahla_order_bridge import (
+    is_open_wa_draft_order,
+    nahla_wa_catalog_external_id,
+    nahla_wa_external_id,
+    sync_nahla_wa_order,
+)
 
 logger = logging.getLogger("nahla.wa_catalog_order_immediate_draft")
 
@@ -314,6 +319,24 @@ def persist_catalog_order_immediate_draft(
             )
             return existing
 
+        external_id_override: Optional[str] = None
+        if existing is not None and not is_open_wa_draft_order(existing):
+            external_id_override = nahla_wa_catalog_external_id(
+                tenant_id,
+                int(conversation_id),
+                message_event_id=message_event_id,
+                source_message_key=source_message_key,
+            )
+            logger.info(
+                "[CATALOG_ORDER_DRAFT] new draft external_id tenant=%s conv=%s "
+                "prev_order=%s external_id=%s reason=closed_prior_order",
+                tenant_id,
+                conversation_id,
+                getattr(existing, "id", None),
+                external_id_override,
+            )
+            existing = None
+
         if customer is None:
             try:
                 from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
@@ -359,6 +382,7 @@ def persist_catalog_order_immediate_draft(
             customer=customer,
             force_catalog_draft=True,
             extra_order_metadata=extra_meta,
+            external_id_override=external_id_override,
         )
         if order is not None:
             logger.info(

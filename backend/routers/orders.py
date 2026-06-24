@@ -268,6 +268,25 @@ def _format_total(amount_sar: float, raw: Any) -> str:
     return text or "0.00 ر.س"
 
 
+def _parse_order_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    text = str(value).strip()
+    for variant in (
+        text.replace("Z", "+00:00"),
+        text.replace(" ", "T", 1),
+        text.split(".", 1)[0].replace(" ", "T", 1),
+    ):
+        try:
+            dt = datetime.fromisoformat(variant)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
 def _read_created_at(order: Order, fallback: datetime) -> datetime:
     """
     The Order model has no `created_at` column — the canonical timestamp
@@ -275,31 +294,45 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
     upstream `created_at` field). Fall through every plausible source so
     the dashboard never claims an old order is "today".
     """
-    candidates: List[Any] = []
     meta = getattr(order, "extra_metadata", None) or {}
-    candidates.extend([
+    catalog_meta = meta.get("catalog_order") if isinstance(meta.get("catalog_order"), dict) else {}
+    candidates: List[Any] = [
         meta.get("created_at"),
-        meta.get("updated_at"),
-        getattr(order, "created_at", None),
-        getattr(order, "updated_at", None),
-    ])
+        meta.get("draft_created_at"),
+        meta.get("display_created_at"),
+        meta.get("source_message_created_at"),
+        meta.get("first_customer_message_at"),
+        catalog_meta.get("source_message_at") if isinstance(catalog_meta, dict) else None,
+    ]
     for cand in candidates:
-        if isinstance(cand, datetime):
-            return cand if cand.tzinfo else cand.replace(tzinfo=timezone.utc)
-        if not cand:
-            continue
-        text = str(cand).strip()
-        for variant in (
-            text.replace("Z", "+00:00"),
-            text.replace(" ", "T", 1),
-            text.split(".", 1)[0].replace(" ", "T", 1),
-        ):
-            try:
-                dt = datetime.fromisoformat(variant)
-                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            except Exception:
-                continue
+        parsed = _parse_order_timestamp(cand)
+        if parsed is not None:
+            return parsed
+    for cand in (
+        getattr(order, "created_at", None),
+        meta.get("updated_at"),
+        getattr(order, "updated_at", None),
+        meta.get("last_synced_at"),
+    ):
+        parsed = _parse_order_timestamp(cand)
+        if parsed is not None:
+            return parsed
     return fallback
+
+
+def _read_last_updated_at(order: Order, *, created_at: datetime) -> datetime:
+    """Last operational sync or status change — not the list display date."""
+    meta = getattr(order, "extra_metadata", None) or {}
+    for cand in (
+        meta.get("last_updated_at"),
+        meta.get("status_changed_at"),
+        meta.get("updated_at"),
+        meta.get("last_synced_at"),
+    ):
+        parsed = _parse_order_timestamp(cand)
+        if parsed is not None:
+            return parsed
+    return created_at
 
 
 def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
@@ -677,6 +710,7 @@ def _serialise_order(
     keeps it lean for performance.
     """
     created_at  = _read_created_at(order, fallback=now)
+    last_updated_at = _read_last_updated_at(order, created_at=created_at)
     raw_status  = str(order.status or "")
     status      = _classify_status(raw_status)
     amount_value = _to_float_sar(order.total)
@@ -871,7 +905,9 @@ def _serialise_order(
         "source_label":  source_label,
         "paymentLink":   order.checkout_url,
         "createdAt":     created_at.isoformat(),
-        "updated_at":    str(order_meta.get("status_changed_at") or order_meta.get("updated_at") or created_at.isoformat()),
+        "display_created_at": created_at.isoformat(),
+        "last_updated_at": last_updated_at.isoformat(),
+        "updated_at":    last_updated_at.isoformat(),
         "is_ai_created": is_ai_created,
         "is_vip":        is_vip_customer,
         "has_open_conversation": has_open_conv,
