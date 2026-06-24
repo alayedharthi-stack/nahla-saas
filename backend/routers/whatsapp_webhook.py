@@ -10569,6 +10569,13 @@ async def _handle_merchant_message(
                             layer="store_link_safety_net",
                             op="reconcile" if getattr(_sl, "reconciled", False) else "replace",
                         )
+                    elif _sl.fired and getattr(_sl, "facts_patch", None) and _outbound_text_tracker is not None:
+                        _outbound_text_tracker.record_facts_patch(
+                            layer="store_link_safety_net",
+                            facts_patch=_sl.facts_patch,
+                            before=reply or "",
+                            after=reply or "",
+                        )
                     if _sl.fired or _sl.skipped_reason not in {
                         "no_store_link_intent", "url_already_in_reply",
                     }:
@@ -10642,6 +10649,13 @@ async def _handle_merchant_message(
                             layer="location_safety_net",
                             op="replace",
                         )
+                    elif _ll.fired and getattr(_ll, "facts_patch", None) and _outbound_text_tracker is not None:
+                        _outbound_text_tracker.record_facts_patch(
+                            layer="location_safety_net",
+                            facts_patch=_ll.facts_patch,
+                            before=reply or "",
+                            after=reply or "",
+                        )
                     if _ll.fired or _ll.skipped_reason not in {
                         "no_location_intent", "maps_url_already_in_reply",
                     }:
@@ -10684,6 +10698,13 @@ async def _handle_merchant_message(
                         _dlv.new_reply,
                         layer="delivery_info_context_net",
                         op="replace",
+                    )
+                elif _dlv.fired and getattr(_dlv, "facts_patch", None) and _outbound_text_tracker is not None:
+                    _outbound_text_tracker.record_facts_patch(
+                        layer="delivery_info_context_net",
+                        facts_patch=_dlv.facts_patch,
+                        before=reply or "",
+                        after=reply or "",
                     )
                 if _dlv.fired or _dlv.skipped_reason not in {
                     "flag_disabled",
@@ -10732,6 +10753,27 @@ async def _handle_merchant_message(
                         layer="product_reask_guard",
                         op="replace",
                     )
+                elif _prg.fired and getattr(_prg, "strip_reply", False):
+                    from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
+                        strip_product_reask_prose as _strip_reask,
+                    )
+
+                    _stripped = _strip_reask(reply or "")
+                    if _stripped != (reply or ""):
+                        reply = _otp_apply_reply(
+                            _outbound_text_tracker,
+                            reply,
+                            _stripped,
+                            layer="product_reask_guard",
+                            op="strip",
+                        )
+                    if getattr(_prg, "facts_patch", None) and _outbound_text_tracker is not None:
+                        _outbound_text_tracker.record_facts_patch(
+                            layer="product_reask_guard",
+                            facts_patch=_prg.facts_patch,
+                            before=reply or "",
+                            after=reply or "",
+                        )
                 if _prg.fired or _prg.skipped_reason not in {
                     "flag_disabled",
                     "empty_reply",
@@ -10876,47 +10918,13 @@ async def _handle_merchant_message(
                     customer_msg=text or "",
                     reply_text=reply or "",
                 )
-                if _ci.fired and _ci.new_reply:
-                    from core.reply_instruction import (  # noqa: PLC0415
-                        build_clear_intent_instruction,
-                        is_operational_constrained_compose_enabled,
-                    )
-
-                    if is_operational_constrained_compose_enabled():
-                        from core.constrained_operational_compose import (  # noqa: PLC0415
-                            resolve_prebrain_reply_text,
-                        )
-
-                        _ci_decision = {
-                            "reply_text": _ci.new_reply,
-                            "deterministic_path": "clear_intent_fallback",
-                            "reply_instruction": build_clear_intent_instruction(
-                                intent=_ci.customer_intent,
-                                legacy_copy=_ci.new_reply,
-                                inbound_text=text or "",
-                            ).to_dict(),
-                        }
-                        _ci_reply, _ci_meta = await resolve_prebrain_reply_text(
-                            db=db,
-                            tenant_id=tenant_id,
-                            phone=sender,
-                            decision=_ci_decision,
-                            inbound_text=text or "",
-                        )
-                        reply = _otp_apply_reply(
-                            _outbound_text_tracker,
-                            reply,
-                            _ci_reply,
+                if _ci.fired:
+                    if _outbound_text_tracker is not None and getattr(_ci, "facts_patch", None):
+                        _outbound_text_tracker.record_facts_patch(
                             layer="clear_intent_fallback_net",
-                            op="replace",
-                        )
-                    else:
-                        reply = _otp_apply_reply(
-                            _outbound_text_tracker,
-                            reply,
-                            _ci.new_reply,
-                            layer="clear_intent_fallback_net",
-                            op="replace",
+                            facts_patch=_ci.facts_patch,
+                            before=reply or "",
+                            after=reply or "",
                         )
                 if _ci.fired or _ci.skipped_reason not in {
                     "flag_disabled",

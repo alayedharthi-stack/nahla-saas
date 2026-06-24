@@ -2453,6 +2453,7 @@ class StoreLinkSafetyNetResult:
     rewrote_reply: bool = False
     store_url: str = ""
     new_reply: str = ""
+    facts_patch: Dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -2687,12 +2688,14 @@ def apply_store_link_safety_net(
         result.reason = "url_injected"
         return result
 
-    # No URL on file. Avoid hallucinating one — return the polite
-    # placeholder so the customer doesn't see "هذا متجرنا 🌷" alone.
-    result.new_reply = _FALLBACK_NO_URL_REPLY_AR
+    # No URL on file — record facts only; do not inject hardcoded prose.
+    result.facts_patch = {
+        "store_url_resolved": False,
+        "store_url_configured": False,
+    }
     result.fired = True
-    result.rewrote_reply = True
-    result.reason = "fallback_no_url_configured"
+    result.rewrote_reply = False
+    result.reason = "fallback_no_url_configured_facts_only"
     return result
 
 
@@ -2860,6 +2863,7 @@ class LocationLinkSafetyNetResult:
     maps_url: str = ""
     source: str = ""           # snapshot | store_settings | kb:<kind> | none
     new_reply: str = ""
+    facts_patch: Dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -3322,10 +3326,13 @@ def apply_location_safety_net(
         result.reason = f"maps_url_injected:{source}"
         return result
 
-    result.new_reply = _FALLBACK_NO_MAPS_URL_REPLY_AR
+    result.facts_patch = {
+        "maps_url_resolved": False,
+        "maps_url_configured": False,
+    }
     result.fired = True
-    result.rewrote_reply = True
-    result.reason = "fallback_no_maps_url_configured"
+    result.rewrote_reply = False
+    result.reason = "fallback_no_maps_url_configured_facts_only"
     return result
 
 
@@ -3559,6 +3566,7 @@ class ClearIntentFallbackResult:
     skipped_reason: str = ""
     customer_intent: str = ""
     new_reply: str = ""
+    facts_patch: Dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -3566,6 +3574,7 @@ class ClearIntentFallbackResult:
             "fired":           self.fired,
             "reason":          self.reason or self.skipped_reason,
             "customer_intent": self.customer_intent,
+            "facts_only":      bool(self.facts_patch),
         }
 
 
@@ -3598,17 +3607,10 @@ def apply_clear_intent_fallback_net(
     reply_text: str,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> ClearIntentFallbackResult:
-    """Replace a "please repeat" / timeout-apology reply with a
-    short intent-aware reply when the customer's message was
-    clearly understandable.
+    """Detect clear customer intent when the LLM shipped a generic retry.
 
-    The net is text-only. It NEVER mutates order state, never
-    invents prices, and never touches the marker / attachment
-    pipelines. When fired, the caller substitutes ``new_reply``
-    for the outbound text.
-
-    Returns ``ClearIntentFallbackResult`` with ``fired=True`` and
-    ``new_reply`` populated when the rewrite should happen.
+    Phase 2 contract: facts/metadata only — never substitute deterministic
+    customer-facing prose. Callers attach ``facts_patch`` for compose/LLM.
     """
     result = ClearIntentFallbackResult()
 
@@ -3656,13 +3658,14 @@ def apply_clear_intent_fallback_net(
             )
 
     result.customer_intent = intent
-    new_reply = _CLEAR_INTENT_REPLIES.get(intent)
-    if not new_reply:
-        result.skipped_reason = "no_template_for_intent"
-        return result
-
-    result.new_reply = new_reply
+    result.facts_patch = {
+        "clear_intent_resolved": intent,
+        "clear_intent_detected": True,
+        "needs_recompose": True,
+        "generic_fallback_reply": True,
+    }
     result.fired = True
+    result.reason = "clear_intent_facts_only"
     return result
 
 
@@ -3893,6 +3896,7 @@ class DeliveryInfoContextResult:
     extracted_slots: Dict[str, Any] = field(default_factory=dict)
     has_phone: bool = False
     new_reply: str = ""
+    facts_patch: Dict[str, Any] = field(default_factory=dict)
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -4122,8 +4126,13 @@ def apply_delivery_info_context_net(
 
     result.extracted_slots = slots
     result.has_phone = bool(slots.get("phone"))
-    result.new_reply = _compose_delivery_info_ack(slots)
+    result.facts_patch = {
+        "delivery_info_received": True,
+        "extracted_delivery_slots": dict(slots),
+        "active_order_continuation": not awaiting_explicit,
+    }
     result.fired = True
+    result.reason = "delivery_info_facts_only"
     return result
 
 
@@ -4303,6 +4312,8 @@ class ProductReaskGuardResult:
     has_maps_url: bool = False
     has_short_address: bool = False
     new_reply: str = ""
+    facts_patch: Dict[str, Any] = field(default_factory=dict)
+    strip_reply: bool = False
 
     def to_log_dict(self) -> Dict[str, Any]:
         return {
@@ -4335,6 +4346,22 @@ _ORDER_CONTINUATION_ACK_LOCATION_FULL = (
     "وصلني موقعك 🌷 بيانات الشحن اكتملت، بنجهز الطلب ونرسل لك "
     "طريقة الدفع/التأكيد."
 )
+
+
+def strip_product_reask_prose(reply_text: str) -> str:
+    """Remove product re-ask sentences without injecting replacement copy."""
+    body = str(reply_text or "")
+    if not body.strip():
+        return body
+    kept: list[str] = []
+    for part in re.split(r"[\n\r]+", body):
+        line = part.strip()
+        if not line:
+            continue
+        if _reply_looks_like_product_reask(line):
+            continue
+        kept.append(part)
+    return "\n".join(kept).strip()
 
 
 def apply_product_reask_guard(
@@ -4404,10 +4431,17 @@ def apply_product_reask_guard(
     has_short_address = bool(slots.get("short_address_code"))
 
     if has_name and has_phone:
-        result.new_reply = _ORDER_CONTINUATION_ACK_LOCATION_FULL
+        delivery_complete = True
     else:
-        result.new_reply = _ORDER_CONTINUATION_ACK_LOCATION_ONLY
+        delivery_complete = False
 
+    result.facts_patch = {
+        "product_reask_blocked": True,
+        "active_order_continuation": True,
+        "delivery_slots_received": dict(slots),
+        "delivery_data_complete": delivery_complete,
+    }
+    result.strip_reply = True
     result.fired = True
     result.reason = "product_reask_after_location_in_active_order"
     result.has_maps_url = has_maps_url

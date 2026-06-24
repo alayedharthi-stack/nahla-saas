@@ -214,6 +214,7 @@ class DefaultComposer:
                 mark_compose_template(result, layer="faq_template")
             except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block FAQ compose
                 pass
+            payload = data.get("payload", {}) or {}
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
                 return self._with_follow_up(
@@ -1223,16 +1224,11 @@ class DefaultComposer:
 
         _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
         if not should_skip_order_resume_hint(topic=topic, intent_name=_intent_name):
-            resume = self._order_resume_hint(ctx)
-            if resume and resume not in text:
-                text = f"{text}\n\n{resume}"
-                if result is not None:
-                    try:
-                        from core.outbound_text_policy import mark_compose_template  # noqa: PLC0415
-
-                        mark_compose_template(result, layer="order_resume_hint")
-                    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block resume hint
-                        pass
+            meta = DefaultComposer._order_resume_metadata(ctx)
+            if meta and result is not None:
+                data = getattr(result, "data", None)
+                if isinstance(data, dict):
+                    data["order_resume_metadata"] = meta
 
         suggestion = getattr(ctx, "suggestion", None)
         if not suggestion or not suggestion.needs_follow_up_question:
@@ -1243,6 +1239,62 @@ class DefaultComposer:
             return text
 
         return f"{text}\n\n{follow_up}"
+
+    @staticmethod
+    def _order_resume_metadata(ctx: BrainContext) -> dict:
+        """Structured order-resume facts — no customer-facing prose."""
+        try:
+            prep = getattr(ctx.state, "order_prep", None)
+            focus = getattr(ctx.state, "current_product_focus", None) or {}
+            if not prep or not (focus or getattr(prep, "product_id", "")):
+                return {}
+
+            product_title = (focus or {}).get("title") or getattr(prep, "product_name", "") or ""
+            pending_options: list[str] = []
+            try:
+                meta = list(getattr(prep, "product_options_meta", None) or [])
+                picked = dict(getattr(prep, "product_options", None) or {})
+                for g in meta:
+                    name = (g.get("name") or "").strip()
+                    if not name:
+                        continue
+                    if not g.get("required", True):
+                        continue
+                    if name.lower() in picked:
+                        continue
+                    pending_options.append(name)
+            except Exception:
+                pending_options = []
+
+            missing = list(getattr(prep, "missing_fields", None) or [])
+            pending_slot = ""
+            if pending_options:
+                pending_slot = pending_options[0]
+            else:
+                slot_priority = (
+                    "customer_name",
+                    "customer_first_name",
+                    "city",
+                    "address",
+                    "address_line",
+                    "short_address_code",
+                    "google_maps_url",
+                )
+                for slot in slot_priority:
+                    if slot in missing:
+                        pending_slot = slot
+                        break
+
+            return {
+                "resume_candidate": True,
+                "active_order_context": True,
+                "product_title": product_title,
+                "pending_options": pending_options,
+                "pending_slot": pending_slot,
+                "missing_fields": missing,
+            }
+        except Exception:
+            return {}
 
     @staticmethod
     def _order_resume_hint(ctx: BrainContext) -> str:

@@ -414,19 +414,14 @@ def test_no_url_fallback_does_not_promise_to_send(
         reply_text="",
     )
     assert result.fired is True
-    assert result.rewrote_reply is True
+    assert result.rewrote_reply is False
     assert result.store_url == ""
+    assert result.facts_patch.get("store_url_resolved") is False
+    assert not (result.new_reply or "").strip()
 
-    # CRITICAL: the new fallback message must NOT itself contain a
-    # link/barcode/phone/location promise — otherwise the wire-layer
-    # sanitizer will rewrite it again, producing the awkward
-    # concatenated text the merchant flagged.
-    assert contains_promised_asset(result.new_reply) is None, (
-        f"no-URL fallback still contains a promise: {result.new_reply!r}"
-    )
+    assert contains_promised_asset(result.new_reply or "") is None
 
-    # And the specific banned phrase from the bug report.
-    assert "أرسل لك الرابط" not in result.new_reply
+    assert "أرسل لك الرابط" not in (result.new_reply or "")
     assert "بعد التأكد منه" not in result.new_reply
 
 

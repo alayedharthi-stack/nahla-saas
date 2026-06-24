@@ -219,25 +219,15 @@ class TestNoUrlConfigured:
             reply_text="هذا متجرنا 🌷",
         )
         assert res.fired is True
-        assert res.rewrote_reply is True
+        assert res.rewrote_reply is False
+        assert not (res.new_reply or "").strip()
+        assert res.facts_patch.get("store_url_resolved") is False
 
-        # Must NOT contain a fake URL.
-        assert "http" not in res.new_reply
-        assert ".com" not in res.new_reply
-        assert ".sa" not in res.new_reply
+        # Must NOT contain the old broken-promise phrasing in new_reply.
+        assert "أرسل لك الرابط" not in (res.new_reply or "")
+        assert "بعد التأكد منه" not in (res.new_reply or "")
 
-        # Must NOT contain the old broken-promise phrasing.
-        assert "أرسل لك الرابط" not in res.new_reply
-        assert "بعد التأكد منه" not in res.new_reply
-
-        # Critical invariant: the fallback must NOT itself contain
-        # any link/barcode/phone/location promise — otherwise the
-        # wire-layer ``maybe_scrub_unkept_asset_promise`` will
-        # rewrite it AGAIN, reproducing the production bug where
-        # the customer saw two stitched-together neutral phrases.
-        assert contains_promised_asset(res.new_reply) is None, (
-            f"no-URL fallback still contains a promise: {res.new_reply!r}"
-        )
+        assert contains_promised_asset(res.new_reply or "") is None
 
 
 # ──────────────────────────────────────────────────────────────────

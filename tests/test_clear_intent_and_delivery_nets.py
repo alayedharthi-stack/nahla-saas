@@ -74,12 +74,9 @@ class TestClearIntentFires:
         )
         assert result.fired is True
         assert result.customer_intent == "offers"
-        assert result.reason == "reply_asked_to_repeat_clear_question"
-        assert "تأخر"      not in result.new_reply
-        assert "إعادة سؤالك" not in result.new_reply
-        # Cross-merchant invariant: the reply must NOT hard-code a
-        # product class. It's the same line for every merchant.
-        assert "عسل" not in result.new_reply
+        assert result.reason == "clear_intent_facts_only"
+        assert result.facts_patch.get("clear_intent_resolved") == "offers"
+        assert not (result.new_reply or "").strip()
 
     @pytest.mark.parametrize(
         "msg,expected_intent",
@@ -126,11 +123,8 @@ class TestClearIntentFires:
         )
         assert result.fired is True
         assert result.customer_intent == expected_intent
-        assert result.new_reply
-        # The new reply must NOT be the generic "please repeat" copy.
-        assert "إعادة سؤالك" not in result.new_reply
-        assert "أعد سؤالك"   not in result.new_reply
-        assert "لم أفهم"      not in result.new_reply
+        assert result.facts_patch.get("clear_intent_resolved") == expected_intent
+        assert not (result.new_reply or "").strip()
 
     @pytest.mark.parametrize(
         "reply",
@@ -154,8 +148,7 @@ class TestClearIntentFires:
 
 
 class TestClearIntentCrossMerchant:
-    """The new reply templates must NOT hard-code any product
-    class — they have to work for every merchant."""
+    """Legacy template strings remain for detection only — net is facts-only."""
 
     @pytest.mark.parametrize("intent_key", [
         "offers", "price", "product", "store_link",
@@ -327,7 +320,7 @@ class TestDeliveryInfoContextFires:
             history=_history_with_outbound(SCREENSHOT_BOT_ASK),
         )
         assert result.fired is True
-        assert result.reason == "bot_was_awaiting_delivery_info"
+        assert result.reason == "delivery_info_facts_only"
         # Saudi phone must be picked up by our scan.
         assert result.has_phone is True
         # Either the deterministic ordering extractor caught the
@@ -337,9 +330,9 @@ class TestDeliveryInfoContextFires:
             k in slot_keys
             for k in ("city", "customer_name", "customer_first_name", "phone")
         )
-        # Confirmation copy — never the dismissive one.
-        assert "خارج تخصصي" not in result.new_reply
-        assert "وصلتني" in result.new_reply
+        # Confirmation is facts-only — dismissive copy is not replaced here.
+        assert result.facts_patch.get("delivery_info_received") is True
+        assert not (result.new_reply or "").strip()
 
     def test_partial_data_phone_only_nudges_for_missing(self):
         from modules.ai.postprocess.safety_nets import (
@@ -354,8 +347,8 @@ class TestDeliveryInfoContextFires:
         )
         assert result.fired is True
         assert result.has_phone is True
-        # Nudges for what's still missing (name / city / address).
-        assert "وصلتني" in result.new_reply
+        assert result.facts_patch.get("delivery_info_received") is True
+        assert not (result.new_reply or "").strip()
 
     def test_repeat_fallback_with_address_data_also_rewritten(self):
         """Dismissive markers include 'إعادة سؤالك' — make sure
@@ -562,7 +555,7 @@ class TestDeliveryInfoActiveOrderContinuation:
         )
         assert result.fired is True
         # Trace marker for the new path.
-        assert result.reason == "active_order_continuation_strong_signal"
+        assert result.reason == "delivery_info_facts_only"
         assert "خارج تخصصي" not in result.new_reply
 
     def test_full_address_after_quantity_confirmation_rewrites(self):

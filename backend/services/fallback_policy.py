@@ -296,6 +296,7 @@ def choose_safe_fallback(
     *,
     reason: str,
     store_has_live_agent: bool = False,
+    has_escalation_evidence: bool = False,
 ) -> FallbackDecision:
     """Choose a fallback reply that is honest about the situation.
 
@@ -310,11 +311,11 @@ def choose_safe_fallback(
         added without changing the call sites.
     store_has_live_agent:
         When True the merchant has a human team actively monitoring
-        the inbox. We can honestly promise a human reply for explicit
-        handoff requests in that case. Default False — most tenants
-        are AI-only, and promising a human we don't have is the
-        original bug. Wired in from tenant settings; the webhook
-        passes it in.
+        the inbox. Used together with ``has_escalation_evidence`` —
+        promising a human without both is the original bug.
+    has_escalation_evidence:
+        When True a handoff session / needs_human / handoff_active
+        state proves escalation was recorded before the outbound claim.
 
     Returns
     -------
@@ -324,29 +325,33 @@ def choose_safe_fallback(
     # ── Special-case: no API key / AI fully disabled ─────────────
     if reason == FALLBACK_REASON_NO_API_KEY:
         return FallbackDecision(
-            text          = _TEXT_NO_AI,
+            text          = _TEXT_NEUTRAL_RETRY,
             kind          = FALLBACK_KIND_NO_AI,
             response_goal = GOAL_ACK,
-            rationale     = "AI disabled — informing customer the team will reach out",
+            rationale     = "AI disabled — neutral retry without human promise",
         )
 
-    # ── Explicit handoff request → honest handoff ack ────────────
+    # ── Explicit handoff request → evidence-gated ack only ───────
     if is_explicit_handoff_request(inbound_text):
-        if store_has_live_agent:
+        from core.escalation_evidence import has_documented_human_escalation  # noqa: PLC0415
+
+        if has_documented_human_escalation(
+            store_has_live_agent=store_has_live_agent,
+            handoff_active=has_escalation_evidence,
+            needs_human=has_escalation_evidence,
+            handoff_session_exists=has_escalation_evidence,
+        ):
             return FallbackDecision(
                 text          = _TEXT_HANDOFF_ACK,
                 kind          = FALLBACK_KIND_HANDOFF_ACK,
                 response_goal = GOAL_HANDOFF,
-                rationale     = "customer asked for human + tenant has live agent",
+                rationale     = "customer asked for human + escalation evidence present",
             )
-        # Customer asked for a human but the tenant has no live
-        # team. Still acknowledge — but soften the wording so we
-        # don't promise an immediate human reply.
         return FallbackDecision(
-            text          = "وصلت رسالتك 🌷 راح نتواصل معك في أقرب وقت ممكن.",
+            text          = _TEXT_SOFT_RETRY,
             kind          = FALLBACK_KIND_HANDOFF_ACK,
-            response_goal = GOAL_HANDOFF,
-            rationale     = "customer asked for human, tenant has no live agent → softened",
+            response_goal = GOAL_RETRY,
+            rationale     = "customer asked for human but no escalation evidence → soft retry",
         )
 
     # ── Informational question + LLM failure → soft retry ────────
@@ -373,11 +378,13 @@ def fallback_text(
     *,
     reason: str,
     store_has_live_agent: bool = False,
+    has_escalation_evidence: bool = False,
 ) -> Tuple[str, str]:
     d = choose_safe_fallback(
         inbound_text,
         reason=reason,
         store_has_live_agent=store_has_live_agent,
+        has_escalation_evidence=has_escalation_evidence,
     )
     return d.text, d.kind
 

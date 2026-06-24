@@ -98,6 +98,7 @@ class OutboundTextTracker:
     catalog_sent: bool = False
     vcard_sent: bool = False
     contact_gate: Dict[str, Any] = field(default_factory=dict)
+    facts_patches: List[Dict[str, Any]] = field(default_factory=list)
 
     def note(self, msg: str) -> None:
         if msg and msg not in self.audit_notes:
@@ -159,6 +160,25 @@ class OutboundTextTracker:
             self.deterministic_text_detected = True
         self.postprocess_body = a
 
+    def record_facts_patch(
+        self,
+        *,
+        layer: str,
+        facts_patch: Dict[str, Any],
+        op: str = "noop",
+        before: str = "",
+        after: str = "",
+    ) -> None:
+        patch = {"layer": layer, **dict(facts_patch or {})}
+        self.facts_patches.append(patch)
+        self.record_mutation(
+            layer=layer,
+            op=op,
+            before=before,
+            after=after,
+            text_written=False,
+        )
+
     def set_cta_delivery(
         self,
         *,
@@ -219,6 +239,7 @@ class OutboundTextTracker:
             "decision_action": self.decision_action,
             "audit_notes": list(self.audit_notes),
             "contact_gate": dict(self.contact_gate) if self.contact_gate else {},
+            "facts_patches": list(self.facts_patches),
         }
 
     @classmethod
@@ -313,6 +334,10 @@ def attach_compose_provenance(
         "decision_action": action,
         "compose_hybrid_layers": hybrid_layers,
     }
+    resume_meta = data.get("order_resume_metadata")
+    if isinstance(resume_meta, dict) and resume_meta:
+        policy["order_resume_metadata"] = dict(resume_meta)
+        policy["resume_candidate"] = True
     data["outbound_text_policy"] = policy
     return policy
 
