@@ -616,6 +616,15 @@ class DefaultComposer:
             if data.get("salla_escalate"):
                 return T.salla_escalate_message(product=data.get("product", {}))
             if data.get("salla_retry"):
+                try:
+                    from modules.ai.order_flow_v2.flags import (  # noqa: PLC0415
+                        should_skip_legacy_order_flow_reply,
+                    )
+
+                    if should_skip_legacy_order_flow_reply():
+                        return str(data.get("existing_reply") or "")
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break compose
+                    pass
                 return T.salla_retry_message(
                     product=data.get("product", {}),
                     code=data.get("salla_address_code", ""),

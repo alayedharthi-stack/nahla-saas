@@ -453,6 +453,14 @@ def resolve_active_order_quantity_reply(
     """
     Deterministic reply when bare qty/variant must not receive generic ACK.
     """
+    try:
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
+
+        if should_skip_legacy_order_flow_reply():
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block qty extract outside checkout
+        pass
+
     prep = order_prep
     if prep is None and state is not None:
         if isinstance(state, dict):

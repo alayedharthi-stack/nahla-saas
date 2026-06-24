@@ -98,6 +98,13 @@ def maybe_enforce_catalog_order_continue_checkout(
     """
     if not catalog_order_continue_checkout_enabled():
         return decision
+    try:
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
+
+        if should_skip_legacy_order_flow_reply():
+            return decision
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block catalog ingest
+        pass
     if not is_current_catalog_order_submitted(ctx):
         return decision
 

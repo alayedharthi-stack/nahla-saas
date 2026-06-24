@@ -126,6 +126,14 @@ def build_checkout_slot_fallback_reply(
     Never asks for phone. Returns None when checkout is not active.
     """
     try:
+        from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
+
+        if should_skip_legacy_order_flow_reply():
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not block legacy fallback import
+        pass
+
+    try:
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             has_active_commerce_from_state,
         )

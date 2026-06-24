@@ -1,0 +1,304 @@
+"""OrderFlowV2 owner — single deterministic entry for checkout/shipping turns."""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from core.order_flow import apply_state_patch, _load_brain_state
+from core.wa_native_catalog_order import (
+    build_line_items_from_payload,
+    parse_native_catalog_order,
+)
+
+from .flags import is_order_flow_v2_enabled, is_order_flow_v2_shadow_enabled
+from .ingest import apply_inbound_slots
+from .missing_fields import compute_v2_missing_fields
+from .payment import apply_payment_method_selection, build_payment_instruction_reply
+from .replies import (
+    build_catalog_order_start_reply,
+    build_greeting_with_pending_hint,
+    build_next_field_reply,
+    build_resume_ack,
+)
+from .state import (
+    activate_checkout_patch,
+    checkout_active_now,
+    deactivate_checkout_patch,
+    line_items_from_state,
+    mark_pending_patch,
+    pending_order_exists,
+    prep_dict,
+)
+from .triggers import (
+    is_catalog_order_inbound,
+    is_explicit_purchase_intent,
+    is_greeting_message,
+    is_inquiry_message,
+    is_resume_order_command,
+    should_not_start_checkout,
+)
+
+logger = logging.getLogger("nahla.order_flow_v2")
+
+
+@dataclass
+class OrderFlowV2Result:
+    handled: bool = False
+    reply: str = ""
+    skip_brain: bool = False
+    shadow_only: bool = False
+    reason: str = ""
+    state_patch: Dict[str, Any] = field(default_factory=dict)
+
+
+def _catalog_order_patch(
+    db: Any,
+    *,
+    tenant_id: int,
+    inbound_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = parse_native_catalog_order(
+        dict(inbound_metadata.get("order") or {}),
+        metadata=inbound_metadata,
+    )
+    resolution = build_line_items_from_payload(db, int(tenant_id), payload)
+    patch: Dict[str, Any] = {
+        "line_items": list(resolution.line_items),
+        "order_flow_v2_trusted_price": True,
+        "order_flow_v2_pending": True,
+    }
+    if payload.items:
+        total = 0.0
+        currency = ""
+        for item in payload.items:
+            if item.item_price is not None:
+                total += float(item.item_price) * int(item.quantity or 1)
+            if item.currency:
+                currency = item.currency
+        if total > 0:
+            patch["order_flow_v2_catalog_total"] = total
+            patch["order_total"] = total
+            if currency:
+                patch["order_flow_v2_currency"] = currency
+    first = next((li for li in resolution.line_items if isinstance(li, dict)), None)
+    if isinstance(first, dict) and first.get("product_id"):
+        patch["product_id"] = str(first.get("product_id"))
+        patch["quantity"] = int(first.get("quantity") or 1)
+    if payload.customer_note:
+        patch.setdefault("address_line", payload.customer_note)
+    return patch
+
+
+def _sync_draft_order(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    brain_state: Dict[str, Any],
+) -> None:
+    try:
+        from services.nahla_order_bridge import sync_nahla_wa_order  # noqa: PLC0415
+
+        sync_nahla_wa_order(
+            db,
+            tenant_id=int(tenant_id),
+            customer_phone=phone,
+            brain_state=brain_state,
+            trigger="order_flow_v2",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ORDER_FLOW_V2] draft sync failed tenant=%s: %s", tenant_id, exc)
+
+
+def _finalize_result(
+    *,
+    enabled: bool,
+    shadow: bool,
+    reply: str,
+    reason: str,
+    state_patch: Dict[str, Any],
+    skip_brain: bool = True,
+) -> OrderFlowV2Result:
+    if shadow and not enabled:
+        logger.info(
+            "[ORDER_FLOW_V2/shadow] reason=%s reply_preview=%r patch_keys=%s",
+            reason,
+            (reply or "")[:120],
+            sorted(state_patch.keys()),
+        )
+        return OrderFlowV2Result(handled=False, shadow_only=True, reason=reason, state_patch=state_patch)
+    return OrderFlowV2Result(
+        handled=True,
+        reply=reply,
+        skip_brain=skip_brain,
+        reason=reason,
+        state_patch=state_patch,
+    )
+
+
+def try_handle_order_flow_v2(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    message: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    inbound_normalized_type: str = "text",
+) -> OrderFlowV2Result:
+    """Deterministic checkout owner. Returns handled=False for inquiry/general AI."""
+    enabled = is_order_flow_v2_enabled()
+    shadow = is_order_flow_v2_shadow_enabled()
+    if not enabled and not shadow:
+        return OrderFlowV2Result(handled=False)
+
+    meta = dict(inbound_metadata or {})
+    text = str(message or "").strip()
+    _, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
+    order_prep = prep_dict((brain_state or {}).get("order_prep") or {})
+    bs = dict(brain_state or {})
+    patch: Dict[str, Any] = {}
+
+    if is_catalog_order_inbound(meta):
+        patch.update(_catalog_order_patch(db, tenant_id=tenant_id, inbound_metadata=meta))
+        patch.update(activate_checkout_patch())
+        merged_prep = {**order_prep, **patch}
+        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        reply = build_catalog_order_start_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="catalog_order_start",
+            state_patch=patch,
+        )
+
+    if is_greeting_message(text):
+        if pending_order_exists(order_prep, bs):
+            reply = build_greeting_with_pending_hint(has_pending=True)
+            return _finalize_result(
+                enabled=enabled,
+                shadow=shadow,
+                reply=reply,
+                reason="greeting_pending_hint",
+                state_patch={},
+                skip_brain=True,
+            )
+        return OrderFlowV2Result(handled=False, reason="greeting_no_pending")
+
+    if is_inquiry_message(text) and not checkout_active_now(order_prep):
+        return OrderFlowV2Result(handled=False, reason="inquiry")
+
+    if is_resume_order_command(text) and pending_order_exists(order_prep, bs):
+        patch.update(activate_checkout_patch())
+        merged_prep = {**order_prep, **patch}
+        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        reply = build_resume_ack(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="resume_checkout",
+            state_patch=patch,
+        )
+
+    if is_explicit_purchase_intent(text) and not checkout_active_now(order_prep):
+        if should_not_start_checkout(text, meta):
+            return OrderFlowV2Result(handled=False, reason="purchase_blocked")
+        if not line_items_from_state(order_prep, bs) and not order_prep.get("product_id"):
+            return OrderFlowV2Result(handled=False, reason="purchase_no_product")
+        patch.update(activate_checkout_patch())
+        merged_prep = {**order_prep, **patch}
+        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        reply = build_next_field_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="explicit_purchase_start",
+            state_patch=patch,
+        )
+
+    if not checkout_active_now(order_prep):
+        if pending_order_exists(order_prep, bs):
+            patch.update(mark_pending_patch())
+        return OrderFlowV2Result(handled=False, reason="not_active")
+
+    slot_patch = apply_inbound_slots(
+        message=text,
+        inbound_normalized_type=inbound_normalized_type,
+        inbound_metadata=meta,
+        order_prep=order_prep,
+    )
+    if slot_patch:
+        patch.update(slot_patch)
+
+    merged_prep = {**order_prep, **patch}
+    missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+
+    if "payment_method" in missing and not merged_prep.get("payment_method"):
+        pay_patch, chosen = apply_payment_method_selection(db, tenant_id=tenant_id, message=text)
+        if pay_patch:
+            patch.update(pay_patch)
+            merged_prep = {**merged_prep, **pay_patch}
+            missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+
+    if merged_prep.get("payment_method") and not missing:
+        reply = build_payment_instruction_reply(
+            db,
+            tenant_id=tenant_id,
+            order_prep=merged_prep,
+            brain_state=bs,
+            payment_method=str(merged_prep.get("payment_method") or ""),
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="payment_instructions",
+            state_patch=patch,
+        )
+
+    reply = build_next_field_reply(
+        order_prep=merged_prep,
+        brain_state=bs,
+        missing_fields=missing,
+    )
+    return _finalize_result(
+        enabled=enabled,
+        shadow=shadow,
+        reply=reply,
+        reason="collect_next_field",
+        state_patch=patch,
+    )
+
+
+def persist_order_flow_v2_result(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    result: OrderFlowV2Result,
+) -> None:
+    if not result.state_patch:
+        return
+    apply_state_patch(
+        db,
+        tenant_id=tenant_id,
+        phone=customer_phone,
+        state_patch=result.state_patch,
+    )
+    _, bs = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
+    _sync_draft_order(db, tenant_id=tenant_id, phone=customer_phone, brain_state=bs)
