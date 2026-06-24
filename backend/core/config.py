@@ -654,6 +654,10 @@ ORDER_FLOW_V2_SHADOW_ENABLED = (
     in {"1", "true", "yes", "on"}
 )
 ORDER_CONTEXT_SHADOW_ENABLED = _bool_env("ORDER_CONTEXT_SHADOW_ENABLED", "false")
+WA_CATALOG_ORDER_IMMEDIATE_DRAFT_ENABLED = _bool_env(
+    "WA_CATALOG_ORDER_IMMEDIATE_DRAFT_ENABLED",
+    "true",
+)
 
 # ── Legacy conversational fallback ─────────────────────────────────────────
 # When the Brain pipeline raises (or is disabled), the merchant message
