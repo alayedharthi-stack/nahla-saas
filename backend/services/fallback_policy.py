@@ -650,7 +650,7 @@ def choose_intent_aware_fallback(
                     "instead of neutral_retry"
                 ),
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional honey order branch must not block fallback
         pass
 
     try:
