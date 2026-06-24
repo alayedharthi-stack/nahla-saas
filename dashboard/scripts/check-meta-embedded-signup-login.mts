@@ -13,6 +13,10 @@ const connectPage = readFileSync(
   join(__dir, '../src/pages/WhatsAppConnect.tsx'),
   'utf8',
 )
+const loginLib = readFileSync(
+  join(__dir, '../src/lib/metaEmbeddedSignupLogin.ts'),
+  'utf8',
+)
 
 let failed = 0
 
@@ -24,17 +28,26 @@ if (opts.response_type !== 'code') {
   console.log('OK   response_type === code')
 }
 
-if ('override_default_response_type' in opts) {
+if (opts.override_default_response_type !== true) {
   failed++
-  console.error('FAIL override_default_response_type must not be set')
+  console.error('FAIL override_default_response_type must be true')
 } else {
-  console.log('OK   no override_default_response_type')
+  console.log('OK   override_default_response_type === true')
 }
 
-for (const forbidden of ["response_type: 'code,token'", 'response_type: "code,token"', "response_type: 'token'", 'override_default_response_type']) {
-  if (connectPage.includes(forbidden)) {
-    failed++
-    console.error(`FAIL WhatsAppConnect.tsx still contains ${forbidden}`)
+const forbiddenInSource = [
+  "response_type: 'code,token'",
+  'response_type: "code,token"',
+  "response_type: 'token'",
+  'response_type: "token"',
+]
+for (const src of [loginLib, connectPage]) {
+  const label = src === loginLib ? 'metaEmbeddedSignupLogin.ts' : 'WhatsAppConnect.tsx'
+  for (const forbidden of forbiddenInSource) {
+    if (src.includes(forbidden)) {
+      failed++
+      console.error(`FAIL ${label} still contains ${forbidden}`)
+    }
   }
 }
 
