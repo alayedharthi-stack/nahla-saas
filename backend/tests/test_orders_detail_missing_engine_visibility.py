@@ -19,7 +19,12 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
         sys.path.insert(0, str(_p))
 
 from core.customer_identity_resolver import SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED  # noqa: E402
-from core.order_context_prefill import MODE_SKIP  # noqa: E402
+from core.order_context_builder import build_order_context_for_order  # noqa: E402
+from core.order_context_prefill import (  # noqa: E402
+    MODE_CONFIRM,
+    MODE_SKIP,
+    build_order_context_api_payload,
+)
 from models import Base, Conversation, Customer, Order, Tenant  # noqa: E402
 from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: E402
     build_checkout_slot_fallback_reply,
@@ -107,6 +112,133 @@ def test_order_detail_payload_contains_missing_fields_engine_for_whatsapp_order(
     assert "readiness_state" in engine
     assert "field_states" in engine
     assert "divergence_flags" in engine
+
+
+def _proposed_only_customer(db, tenant_id: int) -> Customer:
+    c = Customer(
+        tenant_id=tenant_id,
+        phone="+966500000099",
+        normalized_phone="966500000099",
+        name="",
+        extra_metadata={
+            "proposed_name": "WA Display",
+            "customer_name_status": "proposed",
+            "customer_name_confidence": 0.4,
+        },
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return c
+
+
+def test_order_detail_engine_name_skip_from_order_customer_info_when_complete() -> None:
+    """Order 60 pattern: WA proposed profile + complete order.customer_info names."""
+    db, _ = _make_db()
+    tenant = _seed_tenant(db)
+    customer = _proposed_only_customer(db, tenant.id)
+    convo = Conversation(tenant_id=tenant.id, customer_id=customer.id, status="open")
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    order = Order(
+        tenant_id=tenant.id,
+        external_id=nahla_wa_external_id(tenant.id, convo.id),
+        status="pending_customer_info",
+        total="100.00 ر.س",
+        line_items=[{"name": "P", "quantity": 1, "price": 100.0}],
+        customer_info={
+            "phone": "+966500000099",
+            "first_name": "هيثم",
+            "last_name": "الحارثي",
+        },
+        extra_metadata={
+            "lifecycle": "whatsapp_draft",
+            "conversation_id": convo.id,
+            "missing_fields": ["customer_first_name", "customer_last_name", "city"],
+        },
+    )
+    db.add(order)
+    db.commit()
+
+    payload = _detail_payload(db, order, tenant.id)
+    engine = payload["missing_fields_engine"]
+    prefill = payload["order_context_prefill"]
+
+    assert engine.get("available") is True
+    assert engine["missing_modes"]["name"] == MODE_SKIP
+    assert engine["field_states"]["name"]["mode"] == MODE_SKIP
+    assert engine["field_states"]["name"]["reason"] == "persisted_order_customer_name"
+    assert prefill["shadow_missing_modes"]["name"] == MODE_SKIP
+    assert prefill["identity"]["can_use_for_shipping_label"] is True
+    assert prefill["identity"]["name_source"] == "order_customer_info"
+
+
+def test_order_detail_engine_name_confirm_for_proposed_only() -> None:
+    db, _ = _make_db()
+    tenant = _seed_tenant(db)
+    customer = _proposed_only_customer(db, tenant.id)
+    convo = Conversation(tenant_id=tenant.id, customer_id=customer.id, status="open")
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    order = Order(
+        tenant_id=tenant.id,
+        external_id=nahla_wa_external_id(tenant.id, convo.id),
+        status="draft",
+        source="whatsapp",
+        total="100.00 ر.س",
+        line_items=[{"name": "P", "quantity": 1, "price": 100.0}],
+        customer_info={"phone": "+966500000099"},
+        extra_metadata={
+            "lifecycle": "whatsapp_draft",
+            "conversation_id": convo.id,
+            "missing_fields": ["customer_first_name", "customer_last_name", "city"],
+        },
+    )
+    db.add(order)
+    db.commit()
+
+    payload = _detail_payload(db, order, tenant.id)
+    engine = payload["missing_fields_engine"]
+    prefill = payload["order_context_prefill"]
+
+    assert engine["missing_modes"]["name"] == MODE_CONFIRM
+    assert engine["field_states"]["name"]["mode"] == MODE_CONFIRM
+    assert prefill["shadow_missing_modes"]["name"] == MODE_CONFIRM
+    assert prefill["identity"]["can_use_for_shipping_label"] is False
+
+
+def test_order_context_for_order_can_use_shipping_label_when_first_last_present() -> None:
+    db, _ = _make_db()
+    tenant = _seed_tenant(db)
+    customer = _proposed_only_customer(db, tenant.id)
+    convo = Conversation(tenant_id=tenant.id, customer_id=customer.id, status="open")
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    order = Order(
+        tenant_id=tenant.id,
+        external_id=nahla_wa_external_id(tenant.id, convo.id),
+        status="draft",
+        line_items=[{"name": "P", "quantity": 1, "price": 50.0}],
+        customer_info={
+            "phone": "+966500000099",
+            "first_name": "Ali",
+            "last_name": "Ahmed",
+        },
+        extra_metadata={"lifecycle": "whatsapp_draft", "conversation_id": convo.id},
+    )
+    db.add(order)
+    db.commit()
+
+    ctx = build_order_context_for_order(db, tenant_id=tenant.id, order=order)
+    api = build_order_context_api_payload(ctx)
+
+    assert ctx.identity.can_use_for_shipping_label is True
+    assert api["identity"]["can_use_for_shipping_label"] is True
+    assert ctx.missing_fields_result is not None
+    assert ctx.missing_fields_result.missing_modes["name"] == MODE_SKIP
 
 
 def test_order_detail_engine_name_skip_when_customer_name_present() -> None:

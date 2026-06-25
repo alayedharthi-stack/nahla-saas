@@ -117,9 +117,9 @@ def resolve_identity_missing_mode(
         return MODE_EDIT_REQUESTED
     if locked_by_merchant and operational_name:
         return MODE_SKIP
-    if has_verified_name and operational_name and (first_name or last_name):
-        return MODE_SKIP
     if has_verified_name and operational_name:
+        return MODE_SKIP
+    if first_name and last_name:
         return MODE_SKIP
     if has_proposed_name and not has_verified_name:
         return MODE_CONFIRM
@@ -263,9 +263,12 @@ def build_prefill_state(
 
 
 def enrich_identity_context(identity: Any, *, missing_mode: str) -> Any:
+    first = str(getattr(identity, "first_name", "") or "").strip()
+    last = str(getattr(identity, "last_name", "") or "").strip()
     can_label = bool(getattr(identity, "operational_name", "")) and (
         getattr(identity, "has_verified_name", False)
         or getattr(identity, "locked_by_merchant", False)
+        or bool(first and last)
     )
     return replace(
         identity,

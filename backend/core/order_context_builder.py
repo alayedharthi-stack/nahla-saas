@@ -250,6 +250,16 @@ def build_order_identity(
         and bool(snap.customer_name)
     )
 
+    name_source = str(snap.customer_name_source or "").strip()
+    if (
+        first
+        and last
+        and str(draft_ci.get("first_name") or "").strip()
+        and str(draft_ci.get("last_name") or "").strip()
+        and not can_use_name_for_operations(customer)
+    ):
+        name_source = "order_customer_info"
+
     return OrderIdentityContext(
         customer_id=customer_id,
         phone=phone or str(getattr(customer, "phone", None) or ""),
@@ -257,7 +267,7 @@ def build_order_identity(
         operational_name=operational,
         first_name=first,
         last_name=last,
-        name_source=snap.customer_name_source,
+        name_source=name_source,
         name_status=snap.customer_name_status,
         confidence=float(snap.customer_name_confidence or 0.0),
         locked_by_merchant=locked,

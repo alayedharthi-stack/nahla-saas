@@ -179,8 +179,12 @@ def _resolve_name_state(ctx: Any) -> MissingFieldState:
             evidence={"operational_name": identity.operational_name},
         )
     prep = ctx.brain_order_prep or {}
-    first = _prep_str(prep, "customer_first_name")
-    last = _prep_str(prep, "customer_last_name")
+    first = _prep_str(prep, "customer_first_name") or str(
+        getattr(identity, "first_name", "") or ""
+    ).strip()
+    last = _prep_str(prep, "customer_last_name") or str(
+        getattr(identity, "last_name", "") or ""
+    ).strip()
     if first and last:
         return MissingFieldState(
             field="name",
