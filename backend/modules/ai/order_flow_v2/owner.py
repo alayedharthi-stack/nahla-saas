@@ -165,16 +165,27 @@ def try_handle_order_flow_v2(
 
     meta = dict(inbound_metadata or {})
     text = str(message or "").strip()
-    _, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
+    conversation, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
     order_prep = prep_dict((brain_state or {}).get("order_prep") or {})
     bs = dict(brain_state or {})
     patch: Dict[str, Any] = {}
+
+    def _missing(prep: Dict[str, Any]) -> List[str]:
+        return compute_v2_missing_fields(
+            prep,
+            brain_state=bs,
+            whatsapp_phone=customer_phone,
+            db=db,
+            tenant_id=tenant_id,
+            conversation=conversation,
+            inbound_metadata=meta,
+        )
 
     if is_catalog_order_inbound(meta, text):
         patch.update(_catalog_order_patch(db, tenant_id=tenant_id, inbound_metadata=meta))
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
-        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        missing = _missing(merged_prep)
         patch.update(stamp_last_field_patch(missing))
         patch.update(build_contract(
             decision="ask_missing_field",
@@ -213,7 +224,7 @@ def try_handle_order_flow_v2(
     if is_resume_order_command(text) and pending_order_exists(order_prep, bs):
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
-        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        missing = _missing(merged_prep)
         patch.update(stamp_last_field_patch(missing))
         patch.update(build_contract(
             decision="ask_missing_field",
@@ -240,7 +251,7 @@ def try_handle_order_flow_v2(
             return OrderFlowV2Result(handled=False, reason="purchase_no_product")
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
-        missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+        missing = _missing(merged_prep)
         patch.update(stamp_last_field_patch(missing))
         patch.update(build_contract(
             decision="ask_missing_field",
@@ -265,7 +276,7 @@ def try_handle_order_flow_v2(
             patch.update(mark_pending_patch())
         return OrderFlowV2Result(handled=False, reason="not_active")
 
-    pre_missing = compute_v2_missing_fields(order_prep, brain_state=bs, whatsapp_phone=customer_phone)
+    pre_missing = _missing(order_prep)
     owner_patch, owner_reason = apply_slot_ownership(
         message=text,
         order_prep=order_prep,
@@ -290,7 +301,7 @@ def try_handle_order_flow_v2(
             patch.update(slot_patch)
 
     merged_prep = {**order_prep, **patch}
-    missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+    missing = _missing(merged_prep)
 
     if (
         "payment_method" in missing
@@ -303,7 +314,7 @@ def try_handle_order_flow_v2(
         if pay_patch:
             patch.update(pay_patch)
             merged_prep = {**merged_prep, **pay_patch}
-            missing = compute_v2_missing_fields(merged_prep, brain_state=bs, whatsapp_phone=customer_phone)
+            missing = _missing(merged_prep)
 
     if missing:
         patch.update(stamp_last_field_patch(missing))

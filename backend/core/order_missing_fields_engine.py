@@ -624,6 +624,135 @@ def missing_fields_result_to_api_dict(result: MissingFieldsResult) -> Dict[str, 
     }
 
 
+def augment_divergence_with_confirm_blockers(
+    result: MissingFieldsResult,
+    *,
+    confirm_blockers: List[str],
+) -> MissingFieldsResult:
+    """Compare engine projection with dashboard ``confirm_blockers`` (stale metadata)."""
+    flags = dict(result.divergence_flags)
+    legacy_set = set(str(x).strip() for x in (confirm_blockers or []) if str(x).strip())
+    engine_legacy = set(to_legacy_missing_fields(result))
+    flags["confirm_blockers_differ"] = legacy_set != engine_legacy
+    flags["confirm_blockers_stale"] = bool(legacy_set - engine_legacy)
+    name_state = result.field_states.get("name")
+    flags["confirm_blockers_name_stale"] = bool(
+        ("customer_first_name" in legacy_set or "customer_last_name" in legacy_set)
+        and name_state is not None
+        and name_state.mode == MODE_SKIP
+    )
+    return MissingFieldsResult(
+        missing_fields=list(result.missing_fields),
+        missing_modes=dict(result.missing_modes),
+        blockers=list(result.blockers),
+        readiness_state=result.readiness_state,
+        field_states=dict(result.field_states),
+        evidence_flags=dict(result.evidence_flags),
+        divergence_flags=flags,
+    )
+
+
+def log_missing_fields_engine_detail(
+    *,
+    order_id: Any,
+    tenant_id: int,
+    result: MissingFieldsResult,
+    legacy_missing: Optional[List[str]] = None,
+    confirm_blockers: Optional[List[str]] = None,
+    build_source: str = "",
+) -> None:
+    from core.order_context_builder import mask_phone  # noqa: PLC0415
+
+    logger.info(
+        "[MISSING_FIELDS_ENGINE_DETAIL] enabled=%s shadow=%s tenant=%s order_id=%s "
+        "source=%s readiness=%s missing=%s legacy=%s confirm_blockers=%s divergence=%s",
+        missing_fields_engine_enabled(),
+        missing_fields_engine_shadow_enabled(),
+        tenant_id,
+        order_id,
+        build_source,
+        result.readiness_state,
+        result.missing_fields,
+        legacy_missing or [],
+        confirm_blockers or [],
+        result.divergence_flags,
+    )
+    if missing_fields_engine_shadow_enabled() and result.divergence_flags.get("missing_fields_differ"):
+        logger.info(
+            "[MISSING_FIELDS_ENGINE_SHADOW] order_id=%s legacy=%s engine=%s divergence=%s",
+            order_id,
+            legacy_missing or [],
+            result.missing_fields,
+            result.divergence_flags,
+        )
+    _ = mask_phone  # imported for future PII-safe extensions
+
+
+def engine_result_to_v2_missing_fields(result: MissingFieldsResult) -> List[str]:
+    """Map engine canonical fields to OrderFlowV2 slot names."""
+    missing: List[str] = []
+    modes = result.missing_modes
+    if modes.get("product") in {MODE_ASK, MODE_REVIEW, MODE_COMPUTE_PENDING}:
+        missing.append("product")
+    if modes.get("name") in {MODE_ASK, MODE_EDIT_REQUESTED, MODE_CONFIRM}:
+        missing.append("customer_name")
+    if modes.get("city") in {MODE_ASK, MODE_EDIT_REQUESTED, MODE_CONFIRM}:
+        missing.append("city")
+    if modes.get("delivery_address") in {
+        MODE_ASK,
+        MODE_EDIT_REQUESTED,
+        MODE_CONFIRM,
+    }:
+        missing.append("delivery_address")
+    if modes.get("payment_method") in {MODE_ASK}:
+        missing.append("payment_method")
+    return missing
+
+
+def resolve_flow_missing_fields(
+    order_prep: Dict[str, Any],
+    *,
+    brain_state: Optional[Dict[str, Any]] = None,
+    whatsapp_phone: Optional[str] = None,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+    conversation: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], Optional[MissingFieldsResult]]:
+    """
+    Checkout missing fields for Brain/OrderFlow.
+
+    When the engine flag is enabled, recompute from ``OrderContext`` instead of
+    trusting stale ``order_prep.missing_fields``.
+    """
+    if not missing_fields_engine_enabled():
+        return [], None
+    if db is None or tenant_id is None:
+        return [], None
+    try:
+        from core.order_context_builder import build_order_context  # noqa: PLC0415
+
+        ctx = build_order_context(
+            db,
+            tenant_id=int(tenant_id),
+            conversation=conversation,
+            phone=str(whatsapp_phone or ""),
+            brain_state=brain_state,
+            inbound_metadata=inbound_metadata,
+            build_source="order_flow_missing_fields",
+        )
+        result = ctx.missing_fields_result
+        if result is None:
+            return [], None
+        return engine_result_to_v2_missing_fields(result), result
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[MISSING_FIELDS_ENGINE] flow resolve failed tenant=%s",
+            tenant_id,
+        )
+        return [], None
+
+
 def apply_missing_fields_engine_to_metadata(
     base_meta: Dict[str, Any],
     *,
@@ -655,10 +784,14 @@ __all__ = [
     "MissingFieldState",
     "MissingFieldsResult",
     "apply_missing_fields_engine_to_metadata",
+    "augment_divergence_with_confirm_blockers",
     "compute_divergence_vs_legacy",
     "compute_missing_fields",
+    "engine_result_to_v2_missing_fields",
+    "log_missing_fields_engine_detail",
     "missing_fields_engine_enabled",
     "missing_fields_engine_shadow_enabled",
     "missing_fields_result_to_api_dict",
+    "resolve_flow_missing_fields",
     "to_legacy_missing_fields",
 ]
