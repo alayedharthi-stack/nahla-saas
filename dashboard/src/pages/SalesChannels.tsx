@@ -56,7 +56,7 @@ function Toggle({
 
 export default function SalesChannels() {
   const { t } = useLanguage()
-  const sc = t.pages.salesChannels
+  const sc = t(tr => tr.pages.salesChannels)
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -166,9 +166,10 @@ export default function SalesChannels() {
           </div>
           <div className="flex items-center gap-2 text-sm">
             <span className="text-slate-600">{sc.statusLabel}:</span>
-            <Badge variant={onlineAvailable ? 'success' : 'neutral'}>
-              {onlineAvailable ? sc.available : sc.notAvailable}
-            </Badge>
+            <Badge
+              label={onlineAvailable ? sc.available : sc.notAvailable}
+              variant={onlineAvailable ? 'green' : 'slate'}
+            />
           </div>
         </div>
       </div>
@@ -182,7 +183,7 @@ export default function SalesChannels() {
           <p className="text-sm text-slate-600">{sc.whatsapp.description}</p>
           <div className="mt-3 flex items-center gap-2 text-sm">
             <span className="text-slate-600">{sc.statusLabel}:</span>
-            <Badge variant="success">{sc.available}</Badge>
+            <Badge label={sc.available} variant="green" />
           </div>
         </div>
       </div>
@@ -196,9 +197,10 @@ export default function SalesChannels() {
           <p className="text-sm text-slate-600">{sc.showroom.description}</p>
           <div className="flex items-center gap-2 text-sm">
             <span className="text-slate-600">{sc.statusLabel}:</span>
-            <Badge variant={showroomAvailable ? 'success' : 'neutral'}>
-              {showroomAvailable ? sc.available : sc.notAvailable}
-            </Badge>
+            <Badge
+              label={showroomAvailable ? sc.available : sc.notAvailable}
+              variant={showroomAvailable ? 'green' : 'slate'}
+            />
           </div>
           <Link
             to="/settings"
