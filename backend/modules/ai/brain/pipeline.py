@@ -1845,6 +1845,19 @@ class MerchantBrain:
                     message=message,
                     product_info=new_state.current_product_focus,
                 )
+                try:
+                    from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+                        filter_authoritative_line_items,
+                        sanitize_prep_line_items,
+                    )
+
+                    sanitize_prep_line_items(new_state.order_prep)
+                    auth_items = filter_authoritative_line_items(
+                        list(getattr(new_state, "cart_items", None) or [])
+                    )
+                    new_state.cart_items = auth_items
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — sanitize is best-effort
+                    pass
                 _cart_after = list(getattr(new_state, "cart_items", None) or [])
                 _cart_changed = _cart_before != _cart_after or bool(
                     getattr(new_state.order_prep, "cart_deltas", None)

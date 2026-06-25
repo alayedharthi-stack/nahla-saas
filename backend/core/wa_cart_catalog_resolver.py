@@ -355,6 +355,10 @@ def resolve_and_enrich_cart_state(
 
     resolution = resolve_cart_line_items(db, tenant_id, cart)
 
+    from core.catalog_authoritative_line_items import filter_authoritative_line_items  # noqa: PLC0415
+
+    resolution.items = filter_authoritative_line_items(resolution.items)
+
     if hasattr(state, "cart_items"):
         state.cart_items = resolution.items
     if hasattr(prep, "line_items"):
