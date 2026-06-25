@@ -236,6 +236,9 @@ class OrderPreparationState:
     # Native catalog checkout total (session-only until DB draft exists).
     catalog_checkout_total: Optional[float] = None
     catalog_checkout_currency: str = ""
+    checkout_channel: str = ""
+    awaiting_checkout_channel: bool = False
+    catalog_line_items_authoritative: bool = False
     # Gift / recipient delivery (P0 gift-order gate)
     recipient_name: str = ""
     fulfillment_kind: str = ""
@@ -307,6 +310,9 @@ class OrderPreparationState:
             "cart_deltas": list(self.cart_deltas or []),
             "catalog_checkout_total": self.catalog_checkout_total,
             "catalog_checkout_currency": str(self.catalog_checkout_currency or ""),
+            "checkout_channel": str(self.checkout_channel or ""),
+            "awaiting_checkout_channel": bool(self.awaiting_checkout_channel),
+            "catalog_line_items_authoritative": bool(self.catalog_line_items_authoritative),
             "recipient_name": str(self.recipient_name or ""),
             "fulfillment_kind": str(self.fulfillment_kind or ""),
             "pending_cart_confirmation": dict(self.pending_cart_confirmation or {}),
@@ -374,6 +380,11 @@ class OrderPreparationState:
             cart_deltas=list(raw.get("cart_deltas") or []),
             catalog_checkout_total=_as_optional_float(raw.get("catalog_checkout_total")),
             catalog_checkout_currency=str(raw.get("catalog_checkout_currency") or ""),
+            checkout_channel=str(raw.get("checkout_channel", "") or ""),
+            awaiting_checkout_channel=bool(raw.get("awaiting_checkout_channel", False)),
+            catalog_line_items_authoritative=bool(
+                raw.get("catalog_line_items_authoritative", False)
+            ),
             recipient_name=str(raw.get("recipient_name", "") or ""),
             fulfillment_kind=str(raw.get("fulfillment_kind", "") or ""),
             pending_cart_confirmation=dict(raw.get("pending_cart_confirmation") or {}),

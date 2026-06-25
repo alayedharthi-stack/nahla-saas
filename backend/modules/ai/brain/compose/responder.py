@@ -591,13 +591,30 @@ class DefaultComposer:
             # again — never silently push a doomed order to Salla.
             if data.get("product_unsyncable"):
                 _unsync_prod = data.get("product") or {}
-                logger.error(
-                    "[ORDER FLOW] product_unsyncable fired | "
-                    "title=%r external_id=%r message=%r action=%s",
-                    _unsync_prod.get("title"), _unsync_prod.get("external_id"),
-                    data.get("message"), action,
-                )
-                return T.product_unsyncable(product=_unsync_prod)
+                _keep_catalog = False
+                try:
+                    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+                        is_catalog_line_items_authoritative,
+                    )
+
+                    _keep_catalog = is_catalog_line_items_authoritative(ctx)
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
+                    _keep_catalog = False
+                if _keep_catalog:
+                    logger.warning(
+                        "[ORDER FLOW] product_unsyncable suppressed — catalog line items authoritative | "
+                        "title=%r external_id=%r",
+                        _unsync_prod.get("title"),
+                        _unsync_prod.get("external_id"),
+                    )
+                else:
+                    logger.error(
+                        "[ORDER FLOW] product_unsyncable fired | "
+                        "title=%r external_id=%r message=%r action=%s",
+                        _unsync_prod.get("title"), _unsync_prod.get("external_id"),
+                        data.get("message"), action,
+                    )
+                    return T.product_unsyncable(product=_unsync_prod)
             if data.get("needs_prediction_confirm"):
                 result.data["pending_buttons"] = [
                     {"type": "reply", "reply": {"id": "pred_ok",     "title": "نكمل عليه"}},
