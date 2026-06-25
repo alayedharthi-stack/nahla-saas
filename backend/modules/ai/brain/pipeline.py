@@ -3746,6 +3746,25 @@ def _build_reply_state(
         pass
 
     _commerce_navigator = None
+    _merchant_sales_channels = None
+    try:
+        from .commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            resolve_merchant_sales_channels,
+        )
+
+        _merchant_sales_channels = resolve_merchant_sales_channels(
+            None,
+            int(getattr(ctx, "tenant_id", 0) or 0),
+            store_url=str(ctx.facts.store_url or ""),
+            store_url_source=str(getattr(ctx.facts, "store_url_source", "") or ""),
+            maps_url=str(getattr(ctx.facts, "maps_url", "") or ""),
+        )
+        known_facts["sales_channel_availability"] = (
+            _merchant_sales_channels.availability_facts()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — sales channel facts must not block compose
+        pass
+
     try:
         from .commerce.commerce_navigator import resolve_commerce_navigator  # noqa: PLC0415
 
@@ -3762,6 +3781,7 @@ def _build_reply_state(
             store_url=str(ctx.facts.store_url or ""),
             maps_url=str(getattr(ctx.facts, "maps_url", "") or ""),
             whatsapp_phone=str(ctx.customer_phone or ""),
+            merchant_sales_channels=_merchant_sales_channels,
         )
         known_facts["commerce_navigator"] = _commerce_navigator.to_dict()
         logger.info(

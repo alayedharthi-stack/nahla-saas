@@ -211,7 +211,6 @@ def _awaiting_channel(order_prep: Dict[str, Any]) -> bool:
 
 
 def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabilities:
-    store_url = ""
     store_name = ""
     try:
         from database.models import StoreKnowledgeSnapshot, TenantSettings  # noqa: PLC0415
@@ -224,7 +223,6 @@ def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabil
         )
         if snap and snap.store_profile:
             profile = snap.store_profile or {}
-            store_url = str(profile.get("store_url") or "").strip()
             store_name = clean_store_name(profile.get("store_name", "") or "")
 
         settings = (
@@ -232,12 +230,9 @@ def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabil
             .filter(TenantSettings.tenant_id == tenant_id)
             .first()
         )
-        if settings:
+        if settings and not store_name:
             store_cfg = dict(settings.store_settings or {})
-            if not store_url:
-                store_url = str(store_cfg.get("store_url") or "").strip()
-            if not store_name:
-                store_name = clean_store_name(store_cfg.get("store_name") or "")
+            store_name = clean_store_name(store_cfg.get("store_name") or "")
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "[CHECKOUT_ROUTE] capabilities load skipped tenant=%s err=%s",
@@ -245,23 +240,34 @@ def load_channel_capabilities(db: Any, tenant_id: int) -> CheckoutChannelCapabil
             exc,
         )
 
-    showroom = False
     try:
-        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
-            structured_branch_contacts_enabled,
-            tenant_has_structured_branch_data,
+        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            resolve_merchant_sales_channels,
         )
 
-        if structured_branch_contacts_enabled():
-            showroom = tenant_has_structured_branch_data(db, int(tenant_id or 0))
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional branch capability probe must not block route owner
-        showroom = False
+        sales = resolve_merchant_sales_channels(db, int(tenant_id or 0))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[CHECKOUT_ROUTE] sales channels resolve skipped tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        sales = None
+
+    if sales is not None:
+        return CheckoutChannelCapabilities(
+            whatsapp_fast=sales.whatsapp_quick_order.available,
+            store_link=sales.online_store.available,
+            showroom_visit=sales.showroom_visit.available,
+            store_url=sales.store_url,
+            store_name=store_name,
+        )
 
     return CheckoutChannelCapabilities(
         whatsapp_fast=True,
-        store_link=bool(store_url),
-        showroom_visit=showroom,
-        store_url=store_url,
+        store_link=False,
+        showroom_visit=False,
+        store_url="",
         store_name=store_name,
     )
 
@@ -282,11 +288,27 @@ def resolve_available_purchase_channel_facts(
     store_url: str = "",
     maps_url: str = "",
     whatsapp_available: bool = True,
+    store_url_source: str = "",
+    merchant_sales_channels: Any = None,
 ) -> List[str]:
     """Structured channel ids for navigator/compose — mirrors tenant capabilities."""
+    if merchant_sales_channels is not None:
+        return list(merchant_sales_channels.available_purchase_channel_ids())
+
     out: List[str] = []
-    if str(store_url or "").strip():
-        out.append("online_store")
+    try:
+        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            store_url_evidence_activates_channel,
+        )
+
+        if store_url_evidence_activates_channel(
+            source=store_url_source,
+            found=bool(str(store_url or "").strip()),
+        ):
+            out.append("online_store")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence gate must not block legacy path
+        if str(store_url or "").strip():
+            out.append("online_store")
     if whatsapp_available:
         out.append("whatsapp_quick_order")
     if str(maps_url or "").strip():
@@ -328,6 +350,8 @@ def should_route_bare_start_to_channel_selection(
     store_url: str = "",
     maps_url: str = "",
     whatsapp_available: bool = True,
+    store_url_source: str = "",
+    merchant_sales_channels: Any = None,
 ) -> bool:
     """True when bare buy-intent must choose a channel before product/checkout."""
     if purchase_channel_committed(order_prep):
@@ -336,6 +360,8 @@ def should_route_bare_start_to_channel_selection(
         store_url=store_url,
         maps_url=maps_url,
         whatsapp_available=whatsapp_available,
+        store_url_source=store_url_source,
+        merchant_sales_channels=merchant_sales_channels,
     )
     return len(channels) >= 2
 
@@ -345,6 +371,8 @@ def should_block_bare_start_product_prompt(
     order_prep: Any = None,
     store_url: str = "",
     maps_url: str = "",
+    store_url_source: str = "",
+    merchant_sales_channels: Any = None,
 ) -> bool:
     """Block deterministic product prompts until purchase channel is chosen."""
     prep = _order_prep_mapping(order_prep)
@@ -356,6 +384,8 @@ def should_block_bare_start_product_prompt(
         order_prep=order_prep,
         store_url=store_url,
         maps_url=maps_url,
+        store_url_source=store_url_source,
+        merchant_sales_channels=merchant_sales_channels,
     )
 
 

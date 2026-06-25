@@ -830,6 +830,7 @@ def route_discovery_entry(
                 order_prep=getattr(getattr(ctx, "state", None), "order_prep", None),
                 store_url=str(getattr(_facts, "store_url", "") or ""),
                 maps_url=str(getattr(_facts, "maps_url", "") or ""),
+                store_url_source=str(getattr(_facts, "store_url_source", "") or ""),
             ):
                 return None
         except Exception:  # noqa: BLE001  # noqa: silent-ok — channel gate must not block discovery

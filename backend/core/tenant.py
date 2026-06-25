@@ -108,6 +108,12 @@ DEFAULT_STORE: Dict[str, Any] = {
     "shopify_access_token": "",
     "shipping_provider":    "",
     "google_maps_location": "",
+    # Merchant toggles for AI purchase-channel facts (JSON — no migration).
+    "sales_channels": {
+        "online_store": {"enabled": True},
+        "whatsapp_quick_order": {"enabled": True},
+        "showroom_visit": {"enabled": True},
+    },
     "instagram_url":        "",
     "twitter_url":          "",
     "snapchat_url":         "",

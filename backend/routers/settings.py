@@ -81,6 +81,7 @@ class StoreSettingsIn(BaseModel):
     shopify_access_token: str = ""
     shipping_provider: str = ""
     google_maps_location: str = ""
+    sales_channels: Optional[Dict[str, Any]] = None
     instagram_url: str = ""
     twitter_url: str = ""
     snapchat_url: str = ""

@@ -177,6 +177,7 @@ const PAGE_META: Record<string, MetaSelector> = {
   '/whatsapp-connect':          tr => tr.pages.whatsappConnect,
   '/help/whatsapp-manual-setup': tr => ({ title: tr.nav.items.manualSetup, subtitle: '' }),
   '/knowledge-base':            tr => tr.pages.knowledgeBase,
+  '/sales-channels':            tr => tr.pages.salesChannels,
   '/operations-center':         tr => tr.pages.operationsCenter,
   '/ai-sales-logs':             tr => ({ title: tr.nav.items.salesAgent,   subtitle: '' }),
   '/handoff-queue':             tr => ({ title: tr.nav.items.handoffQueue, subtitle: '' }),

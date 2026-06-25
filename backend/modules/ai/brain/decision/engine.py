@@ -2782,6 +2782,9 @@ class DefaultDecisionEngine:
                         order_prep=getattr(state, "order_prep", None),
                         store_url=str(getattr(facts, "store_url", "") or ""),
                         maps_url=str(getattr(facts, "maps_url", "") or ""),
+                        store_url_source=str(
+                            getattr(facts, "store_url_source", "") or "",
+                        ),
                     ):
                         return Decision(
                             action=ACTION_LLM_REPLY,
