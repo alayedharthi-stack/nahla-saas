@@ -848,6 +848,27 @@ def match(message: str) -> Optional[Intent]:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — complaint layer must not break intent match
         pass
 
+    # ── Layer 2a: price objection / competitor negotiation (beats start_order) ─
+    try:
+        from ..state.price_objection_topic import detect_price_objection_topic_shift  # noqa: PLC0415
+
+        if detect_price_objection_topic_shift(message):
+            candidates.append((
+                0.97,
+                Intent(
+                    name=INTENT_ASK_PRICE,
+                    confidence=0.97,
+                    slots={
+                        "price_objection": True,
+                        "block_quantity_prompt": True,
+                    },
+                    raw_message=message,
+                    extraction_method="rules+price_objection",
+                ),
+            ))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection layer must not break match
+        pass
+
     # ── Layer 2b: need-based advisory product questions ───────────────
     need_based = classify_solution_seeking_commerce(message) or classify_need_based_product_advice(message)
     if need_based is not None:
@@ -933,6 +954,20 @@ def match(message: str) -> Optional[Intent]:
                 )
                 if is_service_availability_inquiry(message):
                     break
+            if ruleset.intent == INTENT_START_ORDER:
+                try:
+                    from ..state.price_objection_topic import (  # noqa: PLC0415
+                        detect_price_objection_topic_shift,
+                        is_past_purchase_comparison_message,
+                    )
+
+                    if (
+                        detect_price_objection_topic_shift(message)
+                        or is_past_purchase_comparison_message(message)
+                    ):
+                        continue
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — must not break intent match
+                    pass
             candidates.append((
                 ruleset.confidence,
                 Intent(

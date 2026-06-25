@@ -2948,6 +2948,17 @@ class MerchantBrain:
                         focus_product=getattr(new_state, "current_product_focus", None),
                         recommended_product_ids=_pcgg_rec_ids,
                     )
+                _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                _pcgg_meta["inbound_text"] = message or ""
+                try:
+                    from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
+                        detect_price_objection_topic_shift,
+                    )
+
+                    if detect_price_objection_topic_shift(message or ""):
+                        _pcgg_meta["price_objection"] = True
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
+                    pass
                 _pcgg = apply_product_claim_grounding_guard(
                     reply=reply or "",
                     db=db,
@@ -2958,7 +2969,7 @@ class MerchantBrain:
                     chosen_path=_chosen_path,
                     history=history,
                     order_state=new_state,
-                    inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                    inbound_metadata=_pcgg_meta,
                 )
                 if _pcgg.replaced:
                     reply = _pcgg.reply
@@ -3657,6 +3668,17 @@ def _build_reply_state(
     if _sr is not None and hasattr(_sr, "to_dict"):
         known_facts["state_relevance_verdict"] = _sr.to_dict()
 
+    try:
+        from .state.price_objection_topic import (  # noqa: PLC0415
+            build_price_objection_facts,
+            detect_price_objection_topic_shift,
+        )
+
+        if detect_price_objection_topic_shift(ctx.message or ""):
+            known_facts["price_objection"] = build_price_objection_facts(ctx.message or "")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
+        pass
+
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
@@ -3931,6 +3953,36 @@ def _compose_base_response_goal(
                 "سؤال متابعة اختياري (واحد فقط): "
                 + _followups[0]
             )
+        return " | ".join(lines)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "price_objection"
+    ):
+        _goal = str((decision.args or {}).get("response_goal") or "").strip()
+        _facts = dict((decision.args or {}).get("price_objection_facts") or {})
+        lines = [
+            "price_objection — العميل يعترض على السعر أو يقارن بسعر منافس/مصدر آخر. "
+            "ردّي بصدق وثقة دون دفاعية؛ اذكري قيمة المنتج باختصار إن وُجدت. "
+            "ممنوع سؤال الكمية أو دفع checkout ما لم يطلب العميل شراءً صريحاً الآن. "
+            "ممنوع تقديم خصم أو تأكيد سعر منافس من تلقاء نفسك. "
+            "إذا كان سعر الكتالوج متوفراً في الحقائق، لا تقل إنه غير متوفر."
+        ]
+        if _facts.get("competitor_price_claim") is not None:
+            lines.append(
+                f"competitor_price_claim={_facts['competitor_price_claim']}"
+            )
+        if _facts.get("mentioned_catalog_or_expected_price") is not None:
+            lines.append(
+                "mentioned_catalog_or_expected_price="
+                f"{_facts['mentioned_catalog_or_expected_price']}"
+            )
+        if _facts.get("possible_bulk_quantity") is not None:
+            lines.append(f"possible_bulk_quantity={_facts['possible_bulk_quantity']}")
+        if _facts.get("must_not_ask_quantity_yet"):
+            lines.append("must_not_ask_quantity_yet=true")
+        if _goal:
+            lines.append(_goal)
         return " | ".join(lines)
 
     if (

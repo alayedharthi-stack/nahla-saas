@@ -190,22 +190,29 @@ def compose_personality_overlay(
         return fact
 
     effective_style = style
-    effective_style = style
     if include_followup and inbound_text.strip():
-        followup_kind = followup_style_for_request(
-            inbound_text=inbound_text,
-            category=category,
-            seeded_style=style.followup_style,
-        )
-        if followup_kind != style.followup_style:
-            effective_style = StyleBundle(
-                opening_style=style.opening_style,
-                followup_style=followup_kind,
-                emoji_style=style.emoji_style,
-                sentence_order=style.sentence_order,
-                seed=style.seed,
-                style_signature=f"{style.style_signature}|req:{followup_kind}",
+        try:
+            from ..state.price_objection_topic import should_suppress_quantity_followup  # noqa: PLC0415
+
+            if should_suppress_quantity_followup(inbound_text):
+                include_followup = False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price objection gate
+            pass
+        if include_followup:
+            followup_kind = followup_style_for_request(
+                inbound_text=inbound_text,
+                category=category,
+                seeded_style=style.followup_style,
             )
+            if followup_kind != style.followup_style:
+                effective_style = StyleBundle(
+                    opening_style=style.opening_style,
+                    followup_style=followup_kind,
+                    emoji_style=style.emoji_style,
+                    sentence_order=style.sentence_order,
+                    seed=style.seed,
+                    style_signature=f"{style.style_signature}|req:{followup_kind}",
+                )
 
     openers = _OPENING_BY_STYLE.get(effective_style.opening_style) or _OPENING_BY_STYLE["warm"]
     opener = openers[effective_style.seed % len(openers)].strip()

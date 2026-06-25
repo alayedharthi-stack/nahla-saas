@@ -82,6 +82,16 @@ def followup_style_for_request(
     seeded_style: str,
 ) -> str:
     """Map request kind to compositional follow-up style (not a sentence template)."""
+    try:
+        from ..state.price_objection_topic import should_suppress_quantity_followup  # noqa: PLC0415
+
+        if should_suppress_quantity_followup(inbound_text):
+            if seeded_style == "quantity":
+                return "options"
+            return seeded_style if seeded_style != "quantity" else "options"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection gate optional
+        pass
+
     kind = classify_commerce_request_kind(inbound_text)
     if kind == "options_list":
         return "options_list"

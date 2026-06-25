@@ -1013,10 +1013,12 @@ class DefaultDecisionEngine:
         # ── 0a.55 Price objection / explicit branch location ───────────────
         try:
             from ..state.price_objection_topic import (  # noqa: PLC0415
+                build_price_objection_facts,
                 detect_price_objection_topic_shift,
             )
 
             if detect_price_objection_topic_shift(ctx.message or ""):
+                _po_facts = build_price_objection_facts(ctx.message or "")
                 logger.info(
                     "[PRICE_OBJECTION] tenant=%s route=llm preview=%r",
                     ctx.tenant_id,
@@ -1026,10 +1028,13 @@ class DefaultDecisionEngine:
                     action=ACTION_LLM_REPLY,
                     args={
                         "topic": "price_objection",
+                        "price_objection_facts": _po_facts,
                         "response_goal": (
                             "Answer the customer's price or competitor comparison "
                             "objection. Briefly explain quality/value, and offer to "
-                            "check wholesale quantity pricing or available offers."
+                            "check wholesale quantity pricing or available offers. "
+                            "Do not ask for quantity or push checkout unless the "
+                            "customer explicitly requests to buy now."
                         ),
                     },
                     reason="price_objection — commerce answer before generic ack",

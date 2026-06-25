@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from modules.ai.brain.postprocess.product_claim_grounding_evidence import (
     ProductClaimGroundingEvidence,
@@ -174,7 +174,12 @@ def _claim_grounded_in_corpus(claim_marker: str, corpus: str) -> bool:
     return hits >= max(1, len(tokens) - 1)
 
 
-def _ungrounded_prices(reply: str, evidence: ProductClaimGroundingEvidence) -> List[int]:
+def _ungrounded_prices(
+    reply: str,
+    evidence: ProductClaimGroundingEvidence,
+    *,
+    customer_claimed: Optional[Set[int]] = None,
+) -> List[int]:
     prices = extract_reply_prices(reply)
     if not prices:
         return []
@@ -185,9 +190,15 @@ def _ungrounded_prices(reply: str, evidence: ProductClaimGroundingEvidence) -> L
         or evidence.recent_no_synced
     )
     if thread_unreliable and not evidence.catalog_products_this_turn:
+        if customer_claimed:
+            return sorted(p for p in prices if p not in customer_claimed)
         return sorted(prices)
 
-    missing = [p for p in prices if p not in evidence.grounded_prices]
+    claimed = customer_claimed or set()
+    missing = [
+        p for p in prices
+        if p not in evidence.grounded_prices and p not in claimed
+    ]
     return missing
 
 
@@ -213,11 +224,13 @@ def _unavailable_product_promoted(reply: str, evidence: ProductClaimGroundingEvi
 def _detect_violations(
     reply: str,
     evidence: ProductClaimGroundingEvidence,
+    *,
+    customer_claimed: Optional[Set[int]] = None,
 ) -> List[tuple[str, str]]:
     """Return list of (violation_kind, detail)."""
     violations: List[tuple[str, str]] = []
 
-    ungrounded = _ungrounded_prices(reply, evidence)
+    ungrounded = _ungrounded_prices(reply, evidence, customer_claimed=customer_claimed)
     if ungrounded:
         violations.append(("ungrounded_price", ",".join(str(p) for p in ungrounded)))
 
@@ -312,6 +325,26 @@ def log_product_claim_grounding_guard(
         pass
 
 
+def _resolve_price_objection_context(
+    inbound_metadata: Optional[Dict[str, Any]],
+) -> tuple[bool, Set[int], str]:
+    meta = dict(inbound_metadata or {})
+    inbound_text = str(meta.get("inbound_text") or meta.get("message") or "")
+    is_objection = bool(meta.get("price_objection"))
+    try:
+        from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
+            customer_claimed_price_numbers,
+            detect_price_objection_topic_shift,
+        )
+
+        if not is_objection:
+            is_objection = detect_price_objection_topic_shift(inbound_text)
+        claimed = customer_claimed_price_numbers(inbound_text) if inbound_text else set()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price objection import
+        claimed = set()
+    return is_objection, claimed, inbound_text
+
+
 def apply_product_claim_grounding_guard(
     *,
     reply: str,
@@ -361,7 +394,33 @@ def apply_product_claim_grounding_guard(
             order_state=order_state,
             inbound_metadata=inbound_metadata,
         )
-        violations = _detect_violations(original, evidence)
+        is_price_objection, customer_claimed, _inbound_text = _resolve_price_objection_context(
+            inbound_metadata,
+        )
+        violations = _detect_violations(
+            original,
+            evidence,
+            customer_claimed=customer_claimed if is_price_objection else None,
+        )
+        if (
+            is_price_objection
+            and evidence.grounded_prices
+            and violations
+            and all(v[0] == "ungrounded_price" for v in violations)
+        ):
+            log_product_claim_grounding_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                guard_mode=mode,
+                action="allowed_price_objection_customer_claims",
+                reason="customer_claimed_prices_only",
+                violations=[f"{k}:{d}" for k, d in violations],
+                would_rewrite=False,
+            )
+            return ProductClaimGroundingGuardResult(
+                reply=original,
+                action="allowed_price_objection_customer_claims",
+            )
         if not violations:
             log_product_claim_grounding_guard(
                 tenant_id=tenant_id,

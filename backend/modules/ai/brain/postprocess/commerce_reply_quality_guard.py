@@ -269,7 +269,20 @@ def select_arabic_commerce_fallback(
         )
         from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
 
-        if not should_skip_legacy_order_flow_reply():
+        _suppress_qty_followup = False
+        try:
+            from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
+                should_suppress_quantity_followup,
+            )
+
+            _suppress_qty_followup = should_suppress_quantity_followup(inbound_text)
+        except Exception:  # noqa: silent-ok — price objection gate must not break fallback
+            pass
+
+        if (
+            not _suppress_qty_followup
+            and not should_skip_legacy_order_flow_reply()
+        ):
             if message_has_bare_quantity_or_variant_signal(inbound_text):
                 qty_reply = resolve_active_order_quantity_reply(
                     inbound_text,
