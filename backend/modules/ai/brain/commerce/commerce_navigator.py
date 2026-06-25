@@ -400,6 +400,30 @@ class CommerceNavigatorDecision:
         return out
 
 
+def _enrich_navigator_known_fields(
+    known: Dict[str, Any],
+    *,
+    merchant_sales_channels: Any = None,
+    store_url: str = "",
+    maps_url: str = "",
+) -> Dict[str, Any]:
+    enriched = dict(known)
+    if merchant_sales_channels is not None:
+        enriched["sales_channel_availability"] = (
+            merchant_sales_channels.availability_facts()
+        )
+        if merchant_sales_channels.store_url:
+            enriched["store_url"] = merchant_sales_channels.store_url
+        if merchant_sales_channels.maps_url:
+            enriched["maps_url"] = merchant_sales_channels.maps_url
+    else:
+        if store_url:
+            enriched.setdefault("store_url", store_url)
+        if maps_url:
+            enriched.setdefault("maps_url", maps_url)
+    return enriched
+
+
 def resolve_commerce_navigator(
     *,
     message: str = "",
@@ -413,6 +437,7 @@ def resolve_commerce_navigator(
     store_url: str = "",
     maps_url: str = "",
     whatsapp_phone: str = "",
+    merchant_sales_channels: Any = None,
 ) -> CommerceNavigatorDecision:
     """Pure contract resolver — never returns customer reply text."""
     msg = (message or "").strip()
@@ -420,14 +445,23 @@ def resolve_commerce_navigator(
     prep = _order_prep_dict(order_prep)
     known = _known_fields_from_prep(prep)
     channels: List[PurchaseChannel] = []
-    for ch in _ALL_CHANNELS:
-        if ch == "online_store" and not str(store_url or "").strip():
-            continue
-        if ch == "showroom_visit" and not str(maps_url or "").strip():
-            continue
-        channels.append(ch)
+    if merchant_sales_channels is not None:
+        channels = list(merchant_sales_channels.available_purchase_channel_ids())  # type: ignore[assignment]
+    else:
+        for ch in _ALL_CHANNELS:
+            if ch == "online_store" and not str(store_url or "").strip():
+                continue
+            if ch == "showroom_visit" and not str(maps_url or "").strip():
+                continue
+            channels.append(ch)
     if not channels:
-        channels = list(_ALL_CHANNELS)
+        channels = ["whatsapp_quick_order"]
+    known = _enrich_navigator_known_fields(
+        known,
+        merchant_sales_channels=merchant_sales_channels,
+        store_url=store_url,
+        maps_url=maps_url,
+    )
     meta = dict(inbound_metadata or {})
     catalog_order = _is_catalog_order(inbound_metadata)
     if catalog_order or _catalog_order_authoritative(prep, meta):

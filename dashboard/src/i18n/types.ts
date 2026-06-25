@@ -38,6 +38,7 @@ export interface Translations {
       intelligence:     string
       knowledgeBase:    string
       operationsCenter: string
+      salesChannels:    string
       analyticsAI:      string
       salesAgent:       string
       handoffQueue:     string
@@ -116,6 +117,31 @@ export interface Translations {
     intelligence:     { title: string; subtitle: string }
     knowledgeBase:    { title: string; subtitle: string }
     operationsCenter: { title: string; subtitle: string }
+    salesChannels: {
+      title: string
+      subtitle: string
+      loadError: string
+      saveError: string
+      saved: string
+      save: string
+      statusLabel: string
+      available: string
+      notAvailable: string
+      onlineStore: {
+        title: string
+        enableLabel: string
+        enableHint: string
+        urlLabel: string
+        urlHint: string
+      }
+      whatsapp: { title: string; description: string }
+      showroom: {
+        title: string
+        description: string
+        mapsHint: string
+        branchesLink: string
+      }
+    }
     analytics:        { title: string; subtitle: string }
     integrations:     { title: string; subtitle: string }
     settings:         { title: string; subtitle: string }

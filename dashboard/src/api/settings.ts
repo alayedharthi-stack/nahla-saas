@@ -53,6 +53,11 @@ export interface StoreSettings {
   shopify_access_token: string
   shipping_provider: string
   google_maps_location: string
+  sales_channels?: {
+    online_store?: { enabled?: boolean }
+    whatsapp_quick_order?: { enabled?: boolean }
+    showroom_visit?: { enabled?: boolean }
+  }
   instagram_url: string
   twitter_url: string
   snapchat_url: string
