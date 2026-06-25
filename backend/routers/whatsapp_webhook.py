@@ -8157,14 +8157,26 @@ async def _handle_merchant_message(
                     _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
 
                 if not _billing_denied and not (reply or "").strip():
-                    _skip_silent_ack = False
+                    _skip_silent_ack = bool(
+                        isinstance(brain_result, dict)
+                        and brain_result.get("shipment_claim_scrubbed_empty")
+                    )
+                    if _skip_silent_ack:
+                        logger.info(
+                            "[BRAIN_SILENT_REPLY] tenant=%s skipped="
+                            "shipment_guard_scrub_empty blocked_claims=%s",
+                            tenant_id,
+                            brain_result.get("shipment_guard_blocked_claims"),
+                        )
                     try:
                         from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
                             is_product_visual_request as _is_visual_turn,
                         )
-                        _skip_silent_ack = bool(_is_visual_turn(text or ""))
+                        if not _skip_silent_ack:
+                            _skip_silent_ack = bool(_is_visual_turn(text or ""))
                     except Exception:  # noqa: BLE001
-                        _skip_silent_ack = False
+                        if not _skip_silent_ack:
+                            _skip_silent_ack = False
                     if not _skip_silent_ack:
                         try:
                             from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
@@ -8204,12 +8216,16 @@ async def _handle_merchant_message(
                                 tenant_id,
                             )
                     if _skip_silent_ack:
-                        logger.info(
-                            "[BRAIN_SILENT_REPLY] tenant=%s skipped reason="
-                            "product_visual_card_pending inbound=%r",
-                            tenant_id,
-                            (text or "")[:80],
-                        )
+                        if not (
+                            isinstance(brain_result, dict)
+                            and brain_result.get("shipment_claim_scrubbed_empty")
+                        ):
+                            logger.info(
+                                "[BRAIN_SILENT_REPLY] tenant=%s skipped reason="
+                                "product_visual_card_pending inbound=%r",
+                                tenant_id,
+                                (text or "")[:80],
+                            )
                     else:
                         _trace.brain_silent    = True
                         _trace.fallback_source = "brain_silent_ack"

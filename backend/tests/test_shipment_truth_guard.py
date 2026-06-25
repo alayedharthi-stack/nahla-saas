@@ -14,6 +14,7 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
 from modules.ai.brain.postprocess.shipment_evidence import (  # noqa: E402
     evaluate_shipment_evidence,
 )
+from core.fallback_policy import EMPTY_REPLY_OPERATIONAL_AR, empty_reply_fallback  # noqa: E402
 from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: E402
     CLAIM_KIND_DELIVERY_ETA,
     CLAIM_KIND_SHIPMENT,
@@ -24,8 +25,11 @@ from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: E402
     reply_contains_delivery_eta_claim,
     reply_contains_shipment_completed_wording,
     reply_contains_tracking_promise_claim,
+    resolve_outbound_after_shipment_scrub,
+    should_skip_brain_silent_ack_after_shipment_scrub,
     strip_ungrounded_shipment_claim_sentences,
 )
+from routers.whatsapp_webhook import _should_suppress_empty_outbound_reply  # noqa: E402
 
 
 def _bundle(
@@ -247,3 +251,41 @@ class TestScrubPreservesSafeChunks:
         assert reply_contains_tracking_promise_claim(
             "إذا صدر رابط تتبع نرسل لك مباشرة"
         )
+
+
+class TestEmptyScrubOutboundSafety:
+    def test_shipment_guard_empty_after_scrub_does_not_emit_empty_or_bad_fallback(
+        self,
+    ) -> None:
+        llm_reply = (
+            "شحنت لك الطلب، "
+            "وإن شاء الله يوصل قريب. "
+            "عادة الشحن يستغرق من 2-4 أيام عمل. "
+            "إذا فيه أي تحديثات أو رابط تتبع، "
+            "نرسل لك مباشرة."
+        )
+        guard = apply_shipment_truth_guard(
+            reply=llm_reply,
+            commerce_bundle=_bundle(order_status="pending_review"),
+        )
+        assert guard.scrubbed_empty is True
+        assert guard.replaced is True
+        assert not guard.reply.strip()
+
+        assert should_skip_brain_silent_ack_after_shipment_scrub(
+            reply=guard.reply,
+            shipment_claim_scrubbed_empty=True,
+        )
+
+        final_reply, suppress_send, skip_silent_ack = resolve_outbound_after_shipment_scrub(
+            guard_result=guard,
+            empty_reply_fallback_text=empty_reply_fallback(),
+        )
+        assert suppress_send is True
+        assert skip_silent_ack is True
+        assert not final_reply.strip()
+        assert final_reply != EMPTY_REPLY_OPERATIONAL_AR
+        assert _should_suppress_empty_outbound_reply(final_reply) is True
+        assert reply_contains_shipment_completed_wording(final_reply) is False
+        assert reply_contains_delivery_eta_claim(final_reply) is False
+        assert reply_contains_tracking_promise_claim(final_reply) is False

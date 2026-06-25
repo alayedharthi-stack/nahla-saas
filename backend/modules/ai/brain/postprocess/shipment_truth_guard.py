@@ -74,6 +74,10 @@ _DELIVERY_ETA_RES = (
         r"خلال\s*\d+\s*[-–]\s*\d+\s*ايام\s*(?:عمل)?",
         re.UNICODE | re.IGNORECASE,
     ),
+    re.compile(
+        r"(?:ال)?(?:شحن|توصيل).*\d+\s*[-–]\s*\d+\s*ايام",
+        re.UNICODE | re.IGNORECASE,
+    ),
 )
 
 _TRACKING_PROMISE_RES = (
@@ -87,6 +91,18 @@ _TRACKING_PROMISE_RES = (
     ),
     re.compile(
         r"(?:تحديثات|رابط\s*(?:ال)?تتبع).*(?:نرسل|بنرسل)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"رابط\s*(?:ال)?تتبع",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"نرسل.{0,25}مباشر[هة]",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:تحديثات|متابعة).*(?:تتبع|شحن)",
         re.UNICODE | re.IGNORECASE,
     ),
 )
@@ -190,6 +206,7 @@ class ShipmentTruthGuardResult:
     reason: str = ""
     evidence: Optional[ShipmentEvidenceResult] = None
     blocked_claims: Tuple[str, ...] = ()
+    scrubbed_empty: bool = False
 
 
 def log_shipment_truth_guard(
@@ -219,6 +236,42 @@ def log_shipment_truth_guard(
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def should_skip_brain_silent_ack_after_shipment_scrub(
+    *,
+    reply: str,
+    shipment_claim_scrubbed_empty: bool,
+) -> bool:
+    """True when shipment guard scrubbed all claims — do not inject silent ACK."""
+    return bool(shipment_claim_scrubbed_empty and not (reply or "").strip())
+
+
+def resolve_outbound_after_shipment_scrub(
+    *,
+    guard_result: ShipmentTruthGuardResult,
+    empty_reply_fallback_text: str,
+    skip_brain_silent_ack: bool = False,
+) -> tuple[str, bool, bool]:
+    """
+    Resolve webhook/pipeline outbound after shipment guard scrub.
+
+    Returns ``(final_reply, suppress_send, skip_silent_ack)``.
+    """
+    reply = str(guard_result.reply or "")
+    if not guard_result.scrubbed_empty:
+        return reply, False, False
+
+    if skip_brain_silent_ack or should_skip_brain_silent_ack_after_shipment_scrub(
+        reply=reply,
+        shipment_claim_scrubbed_empty=True,
+    ):
+        return "", True, True
+
+    fallback = (empty_reply_fallback_text or "").strip()
+    if fallback:
+        return fallback, False, False
+    return "", True, True
 
 
 def apply_shipment_truth_guard(
@@ -277,6 +330,7 @@ def apply_shipment_truth_guard(
             )
 
         scrubbed = strip_ungrounded_shipment_claim_sentences(original, blocked_kinds)
+        scrubbed_empty = not scrubbed.strip()
         log_shipment_truth_guard(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
@@ -294,6 +348,7 @@ def apply_shipment_truth_guard(
             reason=evidence.reason,
             evidence=evidence,
             blocked_claims=blocked_kinds,
+            scrubbed_empty=scrubbed_empty,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
