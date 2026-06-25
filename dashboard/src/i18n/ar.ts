@@ -635,7 +635,7 @@ const ar: Translations = {
       handoffFailed: 'تعذّر تحويل المحادثة',
       pauseFailed: 'تعذّر إيقاف الذكاء',
       customerNotFound: 'لم يُعثر على سجل العميل — تأكد أن الرقم مسجّل في قائمة العملاء.',
-      excludeFailed: 'تعذّر استبعاد العميل من الحملات',
+      excludeFailed: 'تعذّر تحديث حالة الاستبعاد من الحملات',
       resumeFailed: 'تعذّر إنهاء إشراف الموظف',
       blockFailed: 'تعذّر حظر الرقم',
       unpauseFailed: 'تعذّر تشغيل الذكاء',
