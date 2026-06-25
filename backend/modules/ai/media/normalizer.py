@@ -1061,15 +1061,18 @@ def _process_catalog_order(
                 product_names.append(v.strip())
                 break
 
-    item_count = total_qty if total_qty > 0 else len(items)
+    line_items_count = len([it for it in items if isinstance(it, dict)])
+    total_quantity = total_qty if total_qty > 0 else line_items_count
     currency = currencies[0] if currencies else ""
 
     # ── Compose brain-facing text ─────────────────────────────────
     # Frame as a clearly-tagged catalog order so the LLM treats it
     # as a buying intent without us adding a new intent / template.
     lines: list[str] = [CATALOG_FRAME_MARKER]
-    if item_count:
-        lines.append(f"عدد المنتجات: {item_count}")
+    if line_items_count:
+        lines.append(f"عدد أسطر الطلب: {line_items_count}")
+    if total_quantity:
+        lines.append(f"إجمالي الكمية: {total_quantity}")
     if total_price > 0:
         # Drop trailing zeros without forcing scientific notation.
         total_str = (
@@ -1107,7 +1110,9 @@ def _process_catalog_order(
         "wa_timestamp":    ts_raw,
         "wa_message_id":   wa_msg_id or None,
         "catalog_id":      catalog_id or None,
-        "item_count":      item_count,
+        "line_items_count": line_items_count,
+        "total_quantity":  total_quantity,
+        "item_count":      line_items_count,
         "total_price":     total_price if total_price > 0 else None,
         "currency":        currency or None,
         "product_skus":    skus,
@@ -1135,11 +1140,12 @@ def _process_catalog_order(
     if items and isinstance(items[0], dict):
         first_item_keys = sorted(items[0].keys())
     logger.info(
-        "[CATALOG_MESSAGE_TRACE] wamid=%s item_count=%d total=%s "
+        "[CATALOG_MESSAGE_TRACE] wamid=%s line_items=%d total_qty=%d total=%s "
         "currency=%s product_name=%s raw_retailer_id=%s item_keys=%s "
         "product_names_count=%d final_route=brain",
         wa_msg_id or "",
-        item_count,
+        line_items_count,
+        total_quantity,
         f"{total_price:.2f}" if total_price > 0 else "",
         currency or "",
         # Prefer real label when available, fall back to SKU so the

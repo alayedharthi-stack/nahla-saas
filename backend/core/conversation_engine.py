@@ -1219,6 +1219,55 @@ class StateManager:
             if extra_metadata:
                 meta.update(extra_metadata)
 
+            # ── Inbound dedupe on WhatsApp message id ─────────────────
+            # Meta / BSP retries can reach save_message even when the
+            # in-memory guard dropped the brain turn. Never create a
+            # second visible row for the same wamid — log metadata only.
+            if direction in ("inbound", "in") and conversation_id is not None:
+                _wa_mid = str(meta.get("wa_message_id") or "").strip()
+                if not _wa_mid:
+                    _norm = meta.get("normalized_inbound") or {}
+                    if isinstance(_norm, dict):
+                        _wa_mid = str(_norm.get("wa_message_id") or "").strip()
+                if _wa_mid:
+                    try:
+                        from core.catalog_inbound_dedupe import (  # noqa: PLC0415
+                            find_duplicate_inbound_by_wa_id,
+                        )
+
+                        _dup = find_duplicate_inbound_by_wa_id(
+                            db,
+                            tenant_id=_tid,
+                            conversation_id=int(conversation_id),
+                            wa_message_id=_wa_mid,
+                        )
+                        if _dup is not None:
+                            _dup_meta = dict(getattr(_dup, "extra_metadata", None) or {})
+                            _attempts = int(_dup_meta.get("inbound_retry_attempts") or 0) + 1
+                            _dup_meta["inbound_retry_attempts"] = _attempts
+                            _dup_meta["inbound_dedupe_wa_message_id"] = _wa_mid
+                            _dup.extra_metadata = _dup_meta
+                            db.add(_dup)
+                            db.commit()
+                            logger.info(
+                                "[PERSIST_DEDUP] inbound duplicate skipped "
+                                "tenant=%s conv=%s wa_message_id=%s "
+                                "existing_event=%s attempts=%d",
+                                _tid,
+                                conversation_id,
+                                _wa_mid,
+                                getattr(_dup, "id", None),
+                                _attempts,
+                            )
+                            return
+                    except Exception as _ded_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[PERSIST_DEDUP] lookup failed tenant=%s err=%s — "
+                            "continuing with insert",
+                            _tid,
+                            _ded_exc,
+                        )
+
             # ── Pre-stamp outbound rows with ``provider_send.status='queued'`` ──
             # The dashboard reads MessageEvent rows verbatim. Without
             # this marker the inbox renders every brand-new outbound

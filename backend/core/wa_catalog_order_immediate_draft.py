@@ -134,7 +134,8 @@ def build_catalog_order_prep(
     first = next((li for li in line_items if li.get("product_id")), line_items[0] if line_items else None)
     if first and first.get("product_id"):
         prep["product_id"] = str(first.get("product_id"))
-        prep["quantity"] = int(first.get("quantity") or 1)
+        total_qty = sum(int(li.get("quantity") or 1) for li in line_items)
+        prep["quantity"] = total_qty if total_qty > 0 else int(first.get("quantity") or 1)
     return prep
 
 
@@ -211,6 +212,7 @@ def _idempotent_noop(
     *,
     message_event_id: Optional[int],
     line_items: List[Dict[str, Any]],
+    source_message_key: Optional[str] = None,
 ) -> bool:
     if existing is None:
         return False
@@ -218,6 +220,19 @@ def _idempotent_noop(
     if meta.get("merchant_edit_locked"):
         return False
     catalog_meta = dict(meta.get("catalog_order") or {})
+    if source_message_key and catalog_meta.get("source_message_key"):
+        if str(catalog_meta.get("source_message_key")) == str(source_message_key):
+            from core.wa_cart_line_items import line_items_fingerprint  # noqa: PLC0415
+
+            prev_fp = str((meta.get("last_sync_snapshot") or {}).get("line_items_fingerprint") or "")
+            curr_fp = line_items_fingerprint(line_items)
+            if prev_fp and prev_fp == curr_fp:
+                logger.info(
+                    "[CATALOG_ORDER_DRAFT] noop by source_message_key=%s fingerprint match order=%s",
+                    source_message_key,
+                    getattr(existing, "id", None),
+                )
+                return True
     prev_msg = catalog_meta.get("source_message_id")
     if message_event_id is None or prev_msg is None:
         return False
@@ -312,6 +327,7 @@ def persist_catalog_order_immediate_draft(
             existing,
             message_event_id=message_event_id,
             line_items=line_items,
+            source_message_key=source_message_key,
         ):
             logger.info(
                 "[CATALOG_ORDER_DRAFT] noop tenant=%s conv=%s message_event=%s",

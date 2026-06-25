@@ -365,6 +365,10 @@ def apply_native_order_to_state(
     )
     if first_confirmed.get("product_id"):
         prep.product_id = str(first_confirmed.get("product_id"))
+    total_qty = sum(int(li.get("quantity") or 1) for li in resolution.line_items)
+    if total_qty > 0:
+        prep.quantity = total_qty
+    elif first_confirmed.get("product_id"):
         prep.quantity = int(first_confirmed.get("quantity") or 1)
     if payload.customer_note and not getattr(prep, "address_line", ""):
         prep.address_line = payload.customer_note

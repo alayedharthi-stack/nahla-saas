@@ -127,6 +127,44 @@ def _resolved_product_title(ctx: BrainContext) -> str:
     return ""
 
 
+def _total_quantity_from_items(items: List[Dict[str, Any]]) -> int:
+    total = 0
+    for row in items or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            total += max(1, int(float(row.get("quantity") or 1)))
+        except (TypeError, ValueError):
+            total += 1
+    return total
+
+
+def _quantity_already_provided(ctx: BrainContext) -> bool:
+    """True when catalog order or line_items already carry quantity."""
+    state = getattr(ctx, "state", None)
+    op = getattr(state, "order_prep", None) if state else None
+
+    profile = getattr(ctx, "profile", None) or {}
+    meta = dict(profile.get("inbound_metadata") or {}) if isinstance(profile, dict) else {}
+    if meta.get("source_type") == "catalog_order":
+        items = meta.get("product_items") or []
+        if isinstance(items, list) and items:
+            if _total_quantity_from_items(items) > 0:
+                return True
+        if int(meta.get("total_quantity") or 0) > 0:
+            return True
+
+    line_items = list(getattr(op, "line_items", None) or getattr(state, "cart_items", None) or [])
+    if line_items and _total_quantity_from_items(line_items) > 0:
+        return True
+
+    try:
+        qty = int(getattr(op, "quantity", 0) or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    return qty > 1
+
+
 def _next_missing_order_field(ctx: BrainContext) -> Optional[str]:
     """When product is known, return the next slot to ask — not product name."""
     state = getattr(ctx, "state", None)
@@ -142,7 +180,7 @@ def _next_missing_order_field(ctx: BrainContext) -> Optional[str]:
         selected = dict(getattr(op, "product_options", None) or {})
         if not selected:
             return "variant"
-    if op and int(getattr(op, "quantity", 0) or 0) <= 1:
+    if not _quantity_already_provided(ctx):
         slots = dict(getattr(getattr(ctx, "intent", None), "slots", None) or {})
         if not slots.get("quantity"):
             return "quantity"

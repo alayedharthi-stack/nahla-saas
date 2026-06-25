@@ -40,6 +40,18 @@ def _as_float(value: Any) -> Optional[float]:
         return None
 
 
+def _total_quantity_from_items(items: List[Dict[str, Any]]) -> int:
+    total = 0
+    for row in items or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            total += max(1, int(float(row.get("quantity") or 1)))
+        except (TypeError, ValueError):
+            total += 1
+    return total
+
+
 def _item_fact(row: Dict[str, Any]) -> Dict[str, Any]:
     name = (
         str(row.get("product_name") or row.get("title") or row.get("name") or "")
@@ -90,10 +102,16 @@ def build_catalog_order_compose_facts(
         )
     currency = str(meta.get("currency") or _prep_dict(state).get("catalog_checkout_currency") or "SAR")
 
-    count = len(item_facts) or int(meta.get("item_count") or len(items_raw) or 0)
+    count = len(item_facts) or int(meta.get("line_items_count") or len(items_raw) or 0)
+    total_quantity = _total_quantity_from_items(
+        [dict(x) for x in items_raw if isinstance(x, dict)]
+    )
+    if total_quantity <= 0 and item_facts:
+        total_quantity = sum(int(x.get("quantity") or 0) for x in item_facts)
     return {
         "has_catalog_order": True,
         "line_items_count": count,
+        "total_quantity": total_quantity,
         "line_items": item_facts,
         "is_multi_item": count > 1,
         "total_amount": total,
