@@ -177,6 +177,7 @@ export default function Conversations() {
   const [editNameSaving, setEditNameSaving] = useState(false)
   const [endingSupervision, setEndingSupervision] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
+  const [excludeModalRequest, setExcludeModalRequest] = useState<'exclude' | 're-enable' | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
   const [mobileFilterMenuOpen, setMobileFilterMenuOpen] = useState(false)
   const [aiPausedPopoverOpen, setAiPausedPopoverOpen] = useState(false)
@@ -238,9 +239,23 @@ export default function Conversations() {
     headPage: DashboardConversation[],
     prev: Conversation[],
   ): Conversation[] => {
-    const head = mergeRowsKeepMessages(headPage, prev)
-    const headPhones = new Set(head.map((c) => c.phone))
-    const tail = prev.filter((c) => !headPhones.has(c.phone))
+    const head = headPage.map((row) => {
+      const existing = prev.find((p) => phonesMatch(p.phone, row.phone))
+      const messages = existing?.messages ?? []
+      if (!existing) return { ...row, messages }
+      return {
+        ...row,
+        messages,
+        customerId: row.customerId ?? existing.customerId,
+        marketingOptOutManual:
+          typeof row.marketingOptOutManual === 'boolean'
+            ? row.marketingOptOutManual
+            : existing.marketingOptOutManual,
+      }
+    })
+    const headNormKeys = new Set(head.map((c) => (c.phone || '').trim()))
+    const tail = prev.filter((c) => !headNormKeys.has((c.phone || '').trim())
+      && !head.some((h) => phonesMatch(h.phone, c.phone)))
     return [...head, ...tail]
   }
 
@@ -306,8 +321,17 @@ export default function Conversations() {
       setListBootstrapping(false)
       setSelected((prevSel) => {
         if (!prevSel) return prevSel
-        const hit = rows.find((c: DashboardConversation) => prevSel.phone === c.phone)
-        return hit ? { ...hit, messages: prevSel.messages } : prevSel
+        const hit = rows.find((c: DashboardConversation) => phonesMatch(c.phone, prevSel.phone))
+        if (!hit) return prevSel
+        return {
+          ...hit,
+          messages: prevSel.messages,
+          customerId: hit.customerId ?? prevSel.customerId,
+          marketingOptOutManual:
+            typeof hit.marketingOptOutManual === 'boolean'
+              ? hit.marketingOptOutManual
+              : prevSel.marketingOptOutManual,
+        }
       })
       clearStaleRetryTimer()
       setListStaleBanner(null)
@@ -818,6 +842,28 @@ export default function Conversations() {
     )
   }
 
+  const _bumpCampaignExcludedFilterCounts = (nextOptedOut: boolean) => {
+    setFilterCounts(prev => {
+      if (!prev) return prev
+      const cur = prev.campaign_excluded ?? 0
+      return {
+        ...prev,
+        campaign_excluded: Math.max(0, cur + (nextOptedOut ? 1 : -1)),
+      }
+    })
+  }
+
+  const _handleCampaignExcludeSuccess = (phone: string, nextOptedOut: boolean) => {
+    _optimisticUpdate(phone, { marketingOptOutManual: nextOptedOut })
+    _bumpCampaignExcludedFilterCounts(nextOptedOut)
+    setActionToast(
+      nextOptedOut
+        ? cp.toasts.excludedFromCampaigns
+        : cp.toasts.reEnabledFromCampaigns,
+    )
+    void reloadFirstPagePreserveTail({ silent: true })
+  }
+
   const _applyCustomerNameByPhone = (phone: string, newName: string) => {
     setConversations(prev =>
       prev.map(c => (phonesMatch(c.phone, phone) ? { ...c, customer: newName } : c)),
@@ -964,6 +1010,7 @@ export default function Conversations() {
 
   useEffect(() => {
     setHeaderMenuOpen(false)
+    setExcludeModalRequest(null)
   }, [selected?.phone])
 
   useEffect(() => {
@@ -1626,25 +1673,26 @@ export default function Conversations() {
                             {cp.actions.endSupervision}
                           </button>
                         )}
-                        <CampaignExcludeControl
-                          customerId={selected.customerId ?? undefined}
-                          phone={selected.phone}
-                          optedOut={!!selected.marketingOptOutManual}
-                          customerLabel={selected.customer || selected.phone}
-                          variant="menu"
-                          onMenuClose={() => setHeaderMenuOpen(false)}
-                          onSuccess={(nextOptedOut) => {
-                            _optimisticUpdate(selected.phone, {
-                              marketingOptOutManual: nextOptedOut,
-                            })
-                            setActionToast(
-                              nextOptedOut
-                                ? cp.toasts.excludedFromCampaigns
-                                : cp.toasts.reEnabledFromCampaigns,
+                        <button
+                          type="button"
+                          className={
+                            selected.marketingOptOutManual
+                              ? 'w-full flex items-center gap-2 px-3 py-2.5 text-sm text-violet-700 hover:bg-violet-50'
+                              : 'w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50'
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setHeaderMenuOpen(false)
+                            setExcludeModalRequest(
+                              selected.marketingOptOutManual ? 're-enable' : 'exclude',
                             )
-                            void reloadFirstPagePreserveTail({ silent: true })
                           }}
-                        />
+                        >
+                          <Megaphone className="w-4 h-4 text-violet-500" />
+                          {selected.marketingOptOutManual
+                            ? cp.actions.excludedFromCampaigns
+                            : cp.actions.excludeCampaigns}
+                        </button>
                         {!_isBlocked(selected) && (
                           <>
                             <div className="my-1 border-t border-slate-100" />
@@ -1667,6 +1715,23 @@ export default function Conversations() {
                 </div>
               </div>
             </div>
+
+            {selected && (
+              <CampaignExcludeControl
+                key={selected.phone}
+                customerId={selected.customerId ?? undefined}
+                phone={selected.phone}
+                optedOut={!!selected.marketingOptOutManual}
+                customerLabel={selected.customer || selected.phone}
+                variant="menu"
+                hideTrigger
+                openRequest={excludeModalRequest}
+                onOpenRequestHandled={() => setExcludeModalRequest(null)}
+                onSuccess={(nextOptedOut) => {
+                  _handleCampaignExcludeSuccess(selected.phone, nextOptedOut)
+                }}
+              />
+            )}
 
             {/* Human-takeover banner — desktop only on mobile chat (header covers state) */}
             {(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (

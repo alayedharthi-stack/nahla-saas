@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Clock, Megaphone } from 'lucide-react'
 
 import { customersApi } from '../../api/customers'
@@ -30,6 +30,11 @@ export interface CampaignExcludeControlProps {
   onSuccess?: (nextOptedOut: boolean) => void
   onMenuClose?: () => void
   disabled?: boolean
+  /** Headless mode — hide the built-in trigger (menu delegates via ``openRequest``). */
+  hideTrigger?: boolean
+  /** When set, opens the confirmation modal without unmounting the control. */
+  openRequest?: 'exclude' | 're-enable' | null
+  onOpenRequestHandled?: () => void
 }
 
 export default function CampaignExcludeControl({
@@ -41,22 +46,38 @@ export default function CampaignExcludeControl({
   onSuccess,
   onMenuClose,
   disabled = false,
+  hideTrigger = false,
+  openRequest = null,
+  onOpenRequestHandled,
 }: CampaignExcludeControlProps) {
   const { t, dir } = useLanguage()
   const cp = t((tr) => tr.conversationsPage)
 
   const [modal, setModal] = useState<'exclude' | 're-enable' | null>(null)
   const [busy, setBusy] = useState(false)
+  const [displayOptedOut, setDisplayOptedOut] = useState(optedOut)
+
+  useEffect(() => {
+    setDisplayOptedOut(optedOut)
+  }, [optedOut, customerId, phone])
+
+  useEffect(() => {
+    if (!openRequest) return
+    setModal(openRequest)
+    onOpenRequestHandled?.()
+  }, [openRequest, onOpenRequestHandled])
 
   const openModal = (e?: React.MouseEvent) => {
     e?.stopPropagation()
     if (disabled || busy) return
-    onMenuClose?.()
-    setModal(optedOut ? 're-enable' : 'exclude')
+    setModal(displayOptedOut ? 're-enable' : 'exclude')
   }
 
   const closeModal = () => {
-    if (!busy) setModal(null)
+    if (!busy) {
+      setModal(null)
+      onMenuClose?.()
+    }
   }
 
   const resolveId = async (): Promise<number> => {
@@ -72,13 +93,17 @@ export default function CampaignExcludeControl({
     setBusy(true)
     try {
       const id = await resolveId()
-      const nextOptedOut = modal === 'exclude'
-      await customersApi.updateMarketingPreferences(id, {
-        marketing_opt_out_manual: nextOptedOut,
+      const requestedOptedOut = modal === 'exclude'
+      const res = await customersApi.updateMarketingPreferences(id, {
+        marketing_opt_out_manual: requestedOptedOut,
       })
+      const confirmedOptedOut = !!res.marketing_opt_out_manual
+      setDisplayOptedOut(confirmedOptedOut)
       setModal(null)
-      onSuccess?.(nextOptedOut)
+      onMenuClose?.()
+      onSuccess?.(confirmedOptedOut)
     } catch (e) {
+      console.error('[CampaignExcludeControl] marketing-preferences PATCH failed', e)
       alert(e instanceof Error ? e.message : cp.errors.excludeFailed)
     } finally {
       setBusy(false)
@@ -86,12 +111,14 @@ export default function CampaignExcludeControl({
   }
 
   const trigger = (() => {
+    if (hideTrigger) return null
+
     if (variant === 'menu') {
       return (
         <button
           type="button"
           className={
-            optedOut
+            displayOptedOut
               ? 'w-full flex items-center gap-2 px-3 py-2.5 text-sm text-violet-700 hover:bg-violet-50'
               : 'w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50'
           }
@@ -99,7 +126,7 @@ export default function CampaignExcludeControl({
           disabled={disabled || busy}
         >
           <Megaphone className="w-4 h-4 text-violet-500" />
-          {optedOut ? cp.actions.excludedFromCampaigns : cp.actions.excludeCampaigns}
+          {displayOptedOut ? cp.actions.excludedFromCampaigns : cp.actions.excludeCampaigns}
         </button>
       )
     }
@@ -112,20 +139,20 @@ export default function CampaignExcludeControl({
           disabled={disabled || busy}
           className={
             'text-[11px] font-medium inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition ' +
-            (optedOut
+            (displayOptedOut
               ? 'border-purple-400 bg-purple-100 text-purple-800 hover:bg-purple-200'
               : 'border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100')
           }
         >
           <Megaphone className="w-3 h-3" />
-          {optedOut ? cp.actions.removeExclusionShort : cp.actions.excludeCampaigns}
+          {displayOptedOut ? cp.actions.removeExclusionShort : cp.actions.excludeCampaigns}
         </button>
       )
     }
 
     return (
       <div className="space-y-2">
-        {optedOut && (
+        {displayOptedOut && (
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-lg px-2.5 py-1">
             <Megaphone className="w-3.5 h-3.5" />
             {cp.actions.excludedFromCampaigns}
@@ -136,13 +163,13 @@ export default function CampaignExcludeControl({
           onClick={openModal}
           disabled={disabled || busy}
           className={
-            optedOut
+            displayOptedOut
               ? 'w-full inline-flex items-center justify-center gap-2 text-sm border border-violet-300 text-violet-700 bg-white hover:bg-violet-50 rounded-lg py-2 font-medium transition-colors disabled:opacity-50'
               : 'w-full inline-flex items-center justify-center gap-2 text-sm bg-violet-600 hover:bg-violet-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50'
           }
         >
           <Megaphone className="w-4 h-4" />
-          {optedOut ? cp.actions.removeExclusion : cp.actions.excludeCampaigns}
+          {displayOptedOut ? cp.actions.removeExclusion : cp.actions.excludeCampaigns}
         </button>
       </div>
     )

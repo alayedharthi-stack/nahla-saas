@@ -592,7 +592,7 @@ const en: Translations = {
       handoffFailed: 'Could not transfer conversation',
       pauseFailed: 'Could not pause AI',
       customerNotFound: 'Customer record not found — make sure the number is in your customer list.',
-      excludeFailed: 'Could not exclude customer from campaigns',
+      excludeFailed: 'Could not update campaign exclusion status',
       resumeFailed: 'Could not end staff supervision',
       blockFailed: 'Could not block number',
       unpauseFailed: 'Could not resume AI',
