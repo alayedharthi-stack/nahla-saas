@@ -271,3 +271,41 @@ class TestCampaignExcludedFilter:
 
         result = _call_list(db, t.id, filter="all")
         assert result["filter_counts"]["campaign_excluded"] == 1
+
+
+class TestFindConversationsForPhone:
+    """Regression: phone resolver must not load every tenant row."""
+
+    def test_finds_orphan_row_by_metadata_phone(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        phone = "+966500000077"
+        orphan = Conversation(
+            tenant_id=t.id,
+            customer_id=None,
+            status="active",
+            extra_metadata={"customer_phone": phone, "phone": phone},
+        )
+        db.add(orphan)
+        db.commit()
+        db.refresh(orphan)
+
+        found = conv_router._find_conversations_for_phone(db, t.id, phone)
+        assert {c.id for c in found} == {orphan.id}
+
+    def test_finds_linked_customer_row_among_noise(self):
+        db, _ = _make_db()
+        t = _seed_tenant(db)
+        target_phone = "+966500000088"
+        _cust, target = _seed_conversation(db, t.id, target_phone)
+        for i in range(30):
+            db.add(Conversation(
+                tenant_id=t.id,
+                customer_id=None,
+                status="active",
+                extra_metadata={"customer_phone": f"+96651111100{i}", "phone": f"+96651111100{i}"},
+            ))
+        db.commit()
+
+        found = conv_router._find_conversations_for_phone(db, t.id, target_phone)
+        assert {c.id for c in found} == {target.id}

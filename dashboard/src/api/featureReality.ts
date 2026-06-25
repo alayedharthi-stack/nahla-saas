@@ -823,12 +823,14 @@ export const featureRealityApi = {
     return apiCall('/conversations/ai-pause', {
       method: 'POST',
       body: JSON.stringify(body),
+      timeoutMs: 15_000,
     })
   },
   resumeConversationAI(body: { customer_phone: string }): Promise<AIPauseStateResponse> {
     return apiCall('/conversations/ai-resume', {
       method: 'POST',
       body: JSON.stringify(body),
+      timeoutMs: 15_000,
     })
   },
   returnHandoffToAI(body: { customer_phone: string }): Promise<AIPauseStateResponse & {

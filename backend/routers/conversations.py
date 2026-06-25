@@ -510,6 +510,31 @@ def _message_identity_clause(phone_variants: list[str], phone_suffix: str):
     )
 
 
+def _conversation_metadata_phone_match_clause(variants: list[str], suffix: str):
+    """SQL filter for ``customer_phone`` / ``phone`` in Conversation.extra_metadata.
+
+    Replaces the legacy Python loop that loaded every tenant row on each
+    pause/resume/block action — that path timed out large inboxes (>25s).
+    """
+    from sqlalchemy import String, and_, cast, false, or_  # noqa: PLC0415
+
+    def _meta_text(key: str):
+        return cast(Conversation.extra_metadata.op("->>")(key), String)
+
+    clauses = []
+    for variant in variants:
+        v = (variant or "").strip()
+        if not v:
+            continue
+        for key in ("customer_phone", "phone"):
+            clauses.append(_meta_text(key) == v)
+    if suffix:
+        for key in ("customer_phone", "phone"):
+            raw = _meta_text(key)
+            clauses.append(and_(raw.isnot(None), raw != "", raw.like(f"%{suffix}")))
+    return or_(*clauses) if clauses else false()
+
+
 def _find_conversations_for_phone(
     db: Session,
     tenant_id: int,
@@ -529,7 +554,6 @@ def _find_conversations_for_phone(
        Customer link.
     """
     candidates, suffix = _phone_lookup_variants(customer_phone)
-    digits = _digits_only(normalize_phone(customer_phone) or customer_phone)
 
     customer_ids: list[int] = []
     if candidates:
@@ -559,22 +583,17 @@ def _find_conversations_for_phone(
         ):
             matches[c.id] = c
 
-    # Fallback: scan extra_metadata for orphaned conversation rows.
-    # Suffix match keeps the cost-vs-correctness trade-off reasonable for
-    # a per-tenant scan.
-    if suffix:
-        for c in (
-            db.query(Conversation)
-            .filter(Conversation.tenant_id == tenant_id)
-            .all()
-        ):
-            if c.id in matches:
-                continue
-            meta = c.extra_metadata or {}
-            phone_meta = str(meta.get("customer_phone") or meta.get("phone") or "")
-            d = _digits_only(phone_meta)
-            if d and (d == digits or d.endswith(suffix)):
-                matches[c.id] = c
+    # Orphan rows: metadata phone stamp without a Customer link — SQL-narrowed.
+    if candidates or suffix:
+        meta_clause = _conversation_metadata_phone_match_clause(candidates, suffix)
+        orphan_q = db.query(Conversation).filter(
+            Conversation.tenant_id == tenant_id,
+            meta_clause,
+        )
+        if matches:
+            orphan_q = orphan_q.filter(~Conversation.id.in_(list(matches.keys())))
+        for c in orphan_q.all():
+            matches[c.id] = c
 
     return list(matches.values())
 
