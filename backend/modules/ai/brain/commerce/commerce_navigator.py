@@ -478,7 +478,7 @@ def resolve_commerce_navigator(
                 ],
                 customer_intent="existing_online_store_order",
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address/online-store guards must not block navigator
         pass
 
     if _is_price_objection(
@@ -529,7 +529,7 @@ def resolve_commerce_navigator(
             order_prep=order_prep,
             stage=stage,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address context probe must not block browse routing
         _address_turn = False
 
     if browse_in_checkout and not _address_turn and (

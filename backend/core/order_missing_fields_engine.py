@@ -113,7 +113,7 @@ def _has_product(ctx: Any) -> Tuple[bool, str]:
         auth_items = authoritative_line_items_from_prep(prep)
         if auth_items:
             return True, "order_prep.authoritative_line_items"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — authoritative product probe must not block missing-fields
         pass
     mentions = prep.get("product_mentions") or []
     if isinstance(mentions, list) and mentions:
@@ -136,13 +136,13 @@ def _has_total(ctx: Any, *, has_product: bool) -> Tuple[bool, str]:
             from core.catalog_authoritative_line_items import filter_authoritative_line_items  # noqa: PLC0415
 
             items.extend(filter_authoritative_line_items(ctx.active_draft.line_items or []))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — authoritative filter fallback keeps draft items
             items.extend(ctx.active_draft.line_items or [])
     try:
         from core.catalog_authoritative_line_items import authoritative_line_items_from_prep  # noqa: PLC0415
 
         items.extend(authoritative_line_items_from_prep(prep))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — authoritative total probe must not block missing-fields
         items.extend(prep.get("line_items") or prep.get("cart_items") or [])
     if ctx.catalog_order.product_items:
         items.extend(ctx.catalog_order.product_items)

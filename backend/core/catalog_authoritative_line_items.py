@@ -81,7 +81,7 @@ def _prep_dict(order_prep: Any) -> Dict[str, Any]:
     if hasattr(order_prep, "to_dict"):
         try:
             return dict(order_prep.to_dict())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order_prep.to_dict() is best-effort
             return {}
     return {}
 
@@ -182,7 +182,7 @@ def is_shipping_address_capture_context(
             "عنوان" in norm or "الوطني" in norm or len(norm.split()) <= 6
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address signal probe must not block context guard
         pass
     prep = _prep_dict(order_prep)
     miss = {str(x).strip().lower() for x in (missing_fields or prep.get("missing_fields") or [])}
