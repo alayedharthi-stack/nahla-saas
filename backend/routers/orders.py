@@ -1144,6 +1144,8 @@ async def list_orders(
 
     q = _apply_lifecycle_db_filter(q, lifecycle_filter)
     rows = q.order_by(Order.id.desc()).limit(400).all()
+    now             = datetime.now(timezone.utc)
+    today           = now.date()
     rows.sort(
         key=lambda o: (
             _read_last_updated_at(o, created_at=_read_created_at(o, fallback=now)),
@@ -1162,8 +1164,6 @@ async def list_orders(
     customer_lookup = _build_customer_lookup(db, tenant_id)
     vip_phones      = _build_vip_phone_set(db, tenant_id)
     unread_phones   = _build_unread_phone_set(db, tenant_id)
-    now             = datetime.now(timezone.utc)
-    today           = now.date()
 
     orders: List[Dict[str, Any]] = []
     pending_count   = 0
