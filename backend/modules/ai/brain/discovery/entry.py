@@ -820,6 +820,20 @@ def route_discovery_entry(
         )
 
     if entry.entry_type == START_ORDER_BARE:
+        try:
+            from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+                should_route_bare_start_to_channel_selection,
+            )
+
+            _facts = getattr(ctx, "facts", None)
+            if should_route_bare_start_to_channel_selection(
+                order_prep=getattr(getattr(ctx, "state", None), "order_prep", None),
+                store_url=str(getattr(_facts, "store_url", "") or ""),
+                maps_url=str(getattr(_facts, "maps_url", "") or ""),
+            ):
+                return None
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — channel gate must not block discovery
+            pass
         logger.info(
             "[DISCOVERY_ENTRY] route=%s source=%s tenant=%s",
             entry.entry_type,

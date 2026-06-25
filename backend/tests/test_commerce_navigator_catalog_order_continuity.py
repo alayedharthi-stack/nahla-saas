@@ -107,7 +107,12 @@ class TestPurchaseChannelSelection:
         ]
         assert "inquiry" not in facts["available_purchase_channels"]
 
-        nav = resolve_commerce_navigator(message="أبي أطلب", intent_name="start_order")
+        nav = resolve_commerce_navigator(
+            message="أبي أطلب",
+            intent_name="start_order",
+            store_url="https://shop.example",
+            maps_url="https://maps.example.com/showroom",
+        )
         assert nav.stage == "purchase_channel_selection"
         assert nav.available_purchase_channels == [
             "online_store",

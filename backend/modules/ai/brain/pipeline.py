@@ -1458,6 +1458,23 @@ class MerchantBrain:
         _legacy_decision_for_shadow = decision
         _enforce_result = None
 
+        if str((decision.args or {}).get("topic") or "") == "purchase_channel_selection":
+            try:
+                from .commerce.checkout_route_owner import persist_checkout_route_state  # noqa: PLC0415
+
+                persist_checkout_route_state(
+                    db,
+                    tenant_id=tenant_id,
+                    phone=customer_phone,
+                    awaiting_checkout_channel=True,
+                )
+            except Exception as _pcs_exc:  # noqa: BLE001  # noqa: silent-ok — channel flag persist must not block decide
+                logger.debug(
+                    "[PURCHASE_CHANNEL] awaiting flag persist skipped tenant=%s err=%s",
+                    tenant_id,
+                    _pcs_exc,
+                )
+
         try:
             from .turn.enforce import maybe_enforce_turn_decision  # noqa: PLC0415
 
