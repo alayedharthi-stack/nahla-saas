@@ -277,6 +277,88 @@ def available_channels(caps: CheckoutChannelCapabilities) -> List[str]:
     return out
 
 
+def resolve_available_purchase_channel_facts(
+    *,
+    store_url: str = "",
+    maps_url: str = "",
+    whatsapp_available: bool = True,
+) -> List[str]:
+    """Structured channel ids for navigator/compose — mirrors tenant capabilities."""
+    out: List[str] = []
+    if str(store_url or "").strip():
+        out.append("online_store")
+    if whatsapp_available:
+        out.append("whatsapp_quick_order")
+    if str(maps_url or "").strip():
+        out.append("showroom_visit")
+    if not out:
+        out.append("whatsapp_quick_order")
+    return out
+
+
+def _order_prep_mapping(order_prep: Any) -> Dict[str, Any]:
+    if isinstance(order_prep, dict):
+        return dict(order_prep)
+    to_dict = getattr(order_prep, "to_dict", None)
+    if callable(to_dict):
+        raw = to_dict()
+        return dict(raw) if isinstance(raw, dict) else {}
+    return {}
+
+
+def purchase_channel_committed(order_prep: Any) -> bool:
+    prep = _order_prep_mapping(order_prep)
+    channel = _checkout_channel(prep)
+    if channel in {
+        CHECKOUT_CHANNEL_WHATSAPP,
+        CHECKOUT_CHANNEL_STORE,
+        CHECKOUT_CHANNEL_SHOWROOM,
+        "whatsapp_quick_order",
+        "whatsapp_fast",
+        "online_store",
+        "showroom_visit",
+    }:
+        return True
+    return bool(prep.get("catalog_line_items_authoritative"))
+
+
+def should_route_bare_start_to_channel_selection(
+    *,
+    order_prep: Any = None,
+    store_url: str = "",
+    maps_url: str = "",
+    whatsapp_available: bool = True,
+) -> bool:
+    """True when bare buy-intent must choose a channel before product/checkout."""
+    if purchase_channel_committed(order_prep):
+        return False
+    channels = resolve_available_purchase_channel_facts(
+        store_url=store_url,
+        maps_url=maps_url,
+        whatsapp_available=whatsapp_available,
+    )
+    return len(channels) >= 2
+
+
+def should_block_bare_start_product_prompt(
+    *,
+    order_prep: Any = None,
+    store_url: str = "",
+    maps_url: str = "",
+) -> bool:
+    """Block deterministic product prompts until purchase channel is chosen."""
+    prep = _order_prep_mapping(order_prep)
+    if purchase_channel_committed(order_prep):
+        return False
+    if _awaiting_channel(prep):
+        return True
+    return should_route_bare_start_to_channel_selection(
+        order_prep=order_prep,
+        store_url=store_url,
+        maps_url=maps_url,
+    )
+
+
 def has_checkout_route_intent(message: str) -> bool:
     """True when the turn should enter checkout channel selection."""
     raw = (message or "").strip()
@@ -840,6 +922,10 @@ __all__ = [
     "build_channel_choice_buttons",
     "build_channel_choice_prompt",
     "build_purchase_channel_selection_facts",
+    "purchase_channel_committed",
+    "resolve_available_purchase_channel_facts",
+    "should_block_bare_start_product_prompt",
+    "should_route_bare_start_to_channel_selection",
     "checkout_route_owner_enabled",
     "evaluate_checkout_route_owner",
     "has_checkout_entry_intent",

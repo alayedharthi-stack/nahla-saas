@@ -178,6 +178,27 @@ def try_guard_recovery_reply(
         )
 
         if is_bare_start_order_phrase(raw):
+            try:
+                from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+                    should_block_bare_start_product_prompt,
+                )
+
+                _prep = {}
+                if isinstance(state, dict):
+                    _prep = dict(state.get("order_prep") or {})
+                elif state is not None:
+                    _op = getattr(state, "order_prep", None)
+                    if isinstance(_op, dict):
+                        _prep = dict(_op)
+                    elif hasattr(_op, "to_dict"):
+                        _prep = dict(_op.to_dict() or {})
+                if should_block_bare_start_product_prompt(order_prep=_prep):
+                    return ConversationRecoveryResult(
+                        needs_persona_compose=True,
+                        source="purchase_channel_selection_pending",
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — channel gate must not break recovery
+                pass
             return ConversationRecoveryResult(
                 reply=build_bare_start_order_guard_reply(raw),
                 source="bare_start_order",

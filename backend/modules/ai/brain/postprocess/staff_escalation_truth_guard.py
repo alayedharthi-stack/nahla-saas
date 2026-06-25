@@ -264,6 +264,22 @@ def apply_staff_escalation_truth_guard(
                 )
 
                 if is_bare_start_order_phrase(inbound_text):
+                    try:
+                        from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+                            should_block_bare_start_product_prompt,
+                        )
+
+                        if should_block_bare_start_product_prompt(
+                            order_prep=getattr(state, "order_prep", None),
+                        ):
+                            return StaffEscalationTruthGuardResult(
+                                reply=original,
+                                action="allowed",
+                                reason="purchase_channel_selection_pending",
+                                evidence=evidence,
+                            )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok
+                        pass
                     return StaffEscalationTruthGuardResult(
                         reply=build_bare_start_order_guard_reply(inbound_text),
                         action="blocked_false_escalation_bare_start_order",

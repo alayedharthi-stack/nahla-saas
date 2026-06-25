@@ -19,6 +19,9 @@ from modules.ai.brain.commerce.commerce_navigator import (  # noqa: E402
 )
 from modules.ai.brain.types import OrderPreparationState  # noqa: E402
 
+_NAV_STORE = "https://shop.example"
+_NAV_MAPS = "https://maps.example.com/showroom"
+
 _REPLY_TEXT_KEYS = frozenset({
     "reply",
     "reply_text",
@@ -60,7 +63,12 @@ class TestPurchaseChannelSelection:
         self,
         message: str,
     ) -> None:
-        decision = resolve_commerce_navigator(message=message, intent_name="start_order")
+        decision = resolve_commerce_navigator(
+            message=message,
+            intent_name="start_order",
+            store_url=_NAV_STORE,
+            maps_url=_NAV_MAPS,
+        )
         assert decision.stage == "purchase_channel_selection"
         assert decision.next_goal == "help_customer_choose_purchase_channel"
         assert decision.available_purchase_channels == [
@@ -69,9 +77,15 @@ class TestPurchaseChannelSelection:
             "showroom_visit",
         ]
         assert "do_not_create_order_yet" in decision.forbidden_actions
+        assert "do_not_ask_product_yet" in decision.forbidden_actions
 
     def test_channel_selection_does_not_ask_address_or_payment(self) -> None:
-        decision = resolve_commerce_navigator(message="أبي أطلب")
+        decision = resolve_commerce_navigator(
+            message="أبي أطلب",
+            intent_name="start_order",
+            store_url="https://shop.example",
+            maps_url="https://maps.example.com/showroom",
+        )
         forbidden = set(decision.forbidden_actions)
         assert "do_not_ask_payment" in forbidden
         assert "do_not_ask_address" in forbidden
@@ -94,7 +108,12 @@ class TestWhatsappQuickOrder:
         self,
         message: str,
     ) -> None:
-        decision = resolve_commerce_navigator(message=message, intent_name="start_order")
+        decision = resolve_commerce_navigator(
+            message=message,
+            intent_name="start_order",
+            store_url=_NAV_STORE,
+            maps_url=_NAV_MAPS,
+        )
         assert decision.stage == "whatsapp_quick_order"
         assert decision.customer_intent == "whatsapp_quick_order"
         assert "do_not_ask_payment" in decision.forbidden_actions
@@ -134,7 +153,11 @@ class TestPriceObjectionAndBrowse:
 
 class TestNavigatorContractShape:
     def test_navigator_outputs_facts_not_reply_text(self) -> None:
-        decision = resolve_commerce_navigator(message="أبي أطلب")
+        decision = resolve_commerce_navigator(
+            message="أبي أطلب",
+            store_url=_NAV_STORE,
+            maps_url=_NAV_MAPS,
+        )
         payload = decision.to_dict()
         _assert_no_reply_payload(payload)
         directive = commerce_navigator_goal_directive(decision)
@@ -144,7 +167,11 @@ class TestNavigatorContractShape:
         assert "المتجر" not in directive or "online_store" in directive
 
     def test_decision_is_immutable_dataclass(self) -> None:
-        decision = resolve_commerce_navigator(message="أبي أطلب")
+        decision = resolve_commerce_navigator(
+            message="أبي أطلب",
+            store_url=_NAV_STORE,
+            maps_url=_NAV_MAPS,
+        )
         assert isinstance(decision, CommerceNavigatorDecision)
         with pytest.raises(Exception):
             decision.stage = "browse"  # type: ignore[misc]

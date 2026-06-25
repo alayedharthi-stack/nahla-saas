@@ -260,6 +260,10 @@ def _resolve_whatsapp_missing_fields(
 
 def _forbidden_for_channel_selection() -> List[str]:
     return [
+        "do_not_ask_product_yet",
+        "do_not_ask_quantity_yet",
+        "do_not_ask_city_yet",
+        "do_not_ask_address_yet",
         "do_not_ask_payment",
         "do_not_ask_address",
         "do_not_create_order_yet",
@@ -415,7 +419,15 @@ def resolve_commerce_navigator(
     slots = dict(intent_slots or {})
     prep = _order_prep_dict(order_prep)
     known = _known_fields_from_prep(prep)
-    channels = list(_ALL_CHANNELS)
+    channels: List[PurchaseChannel] = []
+    for ch in _ALL_CHANNELS:
+        if ch == "online_store" and not str(store_url or "").strip():
+            continue
+        if ch == "showroom_visit" and not str(maps_url or "").strip():
+            continue
+        channels.append(ch)
+    if not channels:
+        channels = list(_ALL_CHANNELS)
     meta = dict(inbound_metadata or {})
     catalog_order = _is_catalog_order(inbound_metadata)
     if catalog_order or _catalog_order_authoritative(prep, meta):

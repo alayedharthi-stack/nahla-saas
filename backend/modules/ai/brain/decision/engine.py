@@ -2773,6 +2773,32 @@ class DefaultDecisionEngine:
                         "[ORDER FLOW] fresh start-order clear failed tenant=%s",
                         ctx.tenant_id,
                     )
+                try:
+                    from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+                        should_route_bare_start_to_channel_selection,
+                    )
+
+                    if should_route_bare_start_to_channel_selection(
+                        order_prep=getattr(state, "order_prep", None),
+                        store_url=str(getattr(facts, "store_url", "") or ""),
+                        maps_url=str(getattr(facts, "maps_url", "") or ""),
+                    ):
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "purchase_channel_selection",
+                                "response_goal": "help_customer_choose_purchase_channel",
+                            },
+                            reason=(
+                                "bare start-order — purchase channel not chosen yet"
+                            ),
+                            confidence=0.92,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[ORDER FLOW] purchase channel selection gate skipped tenant=%s",
+                        ctx.tenant_id,
+                    )
 
             if (
                 not _bare_start_order
