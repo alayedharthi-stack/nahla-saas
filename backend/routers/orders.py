@@ -1119,6 +1119,20 @@ def _serialise_order(
                 db=db,
                 tenant_id=int(tenant_id),
             )
+        from core.order_shipping_snapshot import build_order_shipping_snapshot  # noqa: PLC0415
+        from core.wa_order_editor import _order_prep_from_order  # noqa: PLC0415
+
+        payload["shipping_snapshot"] = build_order_shipping_snapshot(
+            order_prep=_order_prep_from_order(order),
+            customer_info=customer_info,
+            extra_metadata=order_meta,
+            last_sync_snapshot=dict(order_meta.get("last_sync_snapshot") or {}),
+        )
+        payload["customer_address_persisted"] = bool(order_meta.get("customer_address_persisted"))
+        if payload.get("order_context_prefill"):
+            payload["known_previous_address"] = payload["order_context_prefill"].get(
+                "known_previous_address"
+            )
 
     return payload
 
@@ -1994,6 +2008,8 @@ async def patch_order_address(
             google_maps_url=body.google_maps_url,
             delivery_notes=body.delivery_notes,
             actor=actor,
+            db=db,
+            tenant_id=tenant_id,
         )
     except OrderEditError as exc:
         raise _handle_order_edit_error(exc) from exc

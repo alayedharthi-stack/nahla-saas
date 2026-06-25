@@ -470,23 +470,26 @@ def _load_known_previous_address(
         )
         if addr is None:
             return None
-        lat = _to_float(getattr(addr, "lat", None))
-        lng = _to_float(getattr(addr, "lng", None))
+        from core.customer_shipping_address_writer import customer_address_to_snapshot  # noqa: PLC0415
+
+        snap = customer_address_to_snapshot(addr)
+        lat = _to_float(snap.get("lat"))
+        lng = _to_float(snap.get("lng"))
         return ShippingContext(
-            city=str(getattr(addr, "city", None) or "").strip(),
-            district=str(getattr(addr, "district", None) or "").strip(),
+            city=str(snap.get("city") or "").strip(),
+            district=str(snap.get("district") or "").strip(),
             street="",
-            address_line=str(getattr(addr, "address_text", None) or "").strip(),
-            maps_url=str(getattr(addr, "google_maps_link", None) or "").strip(),
-            short_address=str(getattr(addr, "saudi_national_address", None) or "").strip(),
+            address_line=str(snap.get("address_line") or "").strip(),
+            maps_url=str(snap.get("google_maps_url") or "").strip(),
+            short_address=str(snap.get("short_address_code") or "").strip(),
             latitude=lat,
             longitude=lng,
             source="customer_addresses",
             confidence=0.5,
             accepted_delivery_address=bool(
-                getattr(addr, "google_maps_link", None)
-                or getattr(addr, "saudi_national_address", None)
-                or (lat is not None and lng is not None)
+                snap.get("google_maps_url")
+                or snap.get("short_address_code")
+                or snap.get("whatsapp_location")
             ),
         )
     except Exception:  # noqa: BLE001

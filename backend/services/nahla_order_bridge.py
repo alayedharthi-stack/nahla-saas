@@ -807,6 +807,50 @@ def _customer_payload(
     return display_name, customer_info
 
 
+def _apply_bridge_shipping_sync(
+    db: Any,
+    *,
+    tenant_id: int,
+    order: Any,
+    customer: Any,
+    order_prep: Dict[str, Any],
+    customer_info: Dict[str, Any],
+    extra_metadata: Dict[str, Any],
+    last_sync_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge shipping snapshot onto the order and persist confirmed customer address."""
+    from core.customer_shipping_address_writer import (  # noqa: PLC0415
+        persist_customer_shipping_address_if_confirmed,
+        sync_order_shipping_layers,
+    )
+
+    snapshot, merged_info, merged_meta = sync_order_shipping_layers(
+        order_prep=order_prep,
+        customer_info=customer_info,
+        extra_metadata=extra_metadata,
+        last_sync_snapshot=last_sync_snapshot,
+    )
+    order.customer_info = merged_info
+    order.extra_metadata = merged_meta
+
+    customer_id = getattr(customer, "id", None) if customer is not None else None
+    persisted, _ = persist_customer_shipping_address_if_confirmed(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=customer_id,
+        order_id=getattr(order, "id", None),
+        snapshot=snapshot,
+        extra_metadata=merged_meta,
+        order_prep=order_prep,
+    )
+    if persisted:
+        meta_flag = dict(order.extra_metadata or {})
+        meta_flag["customer_address_persisted"] = True
+        order.extra_metadata = meta_flag
+        return meta_flag
+    return merged_meta
+
+
 def _base_metadata(
     *,
     conversation_id: int,
@@ -1245,8 +1289,17 @@ def sync_nahla_wa_order(
             existing.line_items = line_items
             if customer_name:
                 existing.customer_name = customer_name
-            if customer_info:
-                existing.customer_info = {**(existing.customer_info or {}), **customer_info}
+            merged_ci = {**(existing.customer_info or {}), **(customer_info or {})}
+            meta = _apply_bridge_shipping_sync(
+                db,
+                tenant_id=tenant_id,
+                order=existing,
+                customer=cust,
+                order_prep=order_prep,
+                customer_info=merged_ci,
+                extra_metadata=meta,
+                last_sync_snapshot=curr_snap,
+            )
             existing.extra_metadata = meta
             db.add(existing)
             _log_bridge(
@@ -1286,6 +1339,18 @@ def sync_nahla_wa_order(
             extra_metadata        = base_meta,
         )
         db.add(order)
+        db.flush()
+        base_meta = _apply_bridge_shipping_sync(
+            db,
+            tenant_id=tenant_id,
+            order=order,
+            customer=cust,
+            order_prep=order_prep,
+            customer_info=dict(customer_info or {}),
+            extra_metadata=dict(base_meta),
+            last_sync_snapshot=curr_snap,
+        )
+        order.extra_metadata = base_meta
         db.flush()
         _log_bridge(
             external_id=external_id,

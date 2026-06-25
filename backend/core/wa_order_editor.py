@@ -401,6 +401,9 @@ def update_order_address(
     google_maps_url: Optional[str] = None,
     delivery_notes: Optional[str] = None,
     actor: str = "merchant",
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+    customer: Any = None,
 ) -> None:
     assert_editable(order)
     meta = _meta(order)
@@ -435,6 +438,37 @@ def update_order_address(
     _stamp_merchant_edit(meta, actor=actor, action="update_address")
     order.extra_metadata = meta
     _refresh_order_state(order)
+
+    if db is not None and tenant_id is not None:
+        try:
+            from core.customer_shipping_address_writer import (  # noqa: PLC0415
+                apply_confirmed_shipping_for_order,
+            )
+
+            apply_confirmed_shipping_for_order(
+                db,
+                tenant_id=int(tenant_id),
+                order=order,
+                customer=customer,
+                order_prep=_order_prep_from_order(order),
+                extra_metadata=dict(order.extra_metadata or {}),
+                merchant_edit_payload={
+                    "city": info.get("city"),
+                    "district": info.get("district"),
+                    "street": info.get("street"),
+                    "address_line": info.get("address"),
+                    "short_address_code": meta.get("short_address_code"),
+                    "google_maps_url": meta.get("google_maps_url"),
+                    "delivery_notes": meta.get("delivery_notes"),
+                },
+                confirmed_reason="merchant_edit",
+            )
+            db.add(order)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[WA_ORDER_EDITOR] shipping persist failed order_id=%s",
+                getattr(order, "id", None),
+            )
 
 
 def update_order_shipping_meta(
