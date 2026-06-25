@@ -3679,6 +3679,38 @@ def _build_reply_state(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
         pass
 
+    _commerce_navigator = None
+    try:
+        from .commerce.commerce_navigator import resolve_commerce_navigator  # noqa: PLC0415
+
+        _profile_meta = dict((ctx.profile or {}).get("inbound_metadata") or {})
+        _commerce_navigator = resolve_commerce_navigator(
+            message=ctx.message or "",
+            intent_name=getattr(ctx.intent, "name", "") or "",
+            intent_slots=dict(getattr(ctx.intent, "slots", None) or {}),
+            decision_topic=str((decision.args or {}).get("topic") or ""),
+            stage=str(current_state.stage or ""),
+            order_prep=getattr(current_state, "order_prep", None),
+            state=current_state,
+            inbound_metadata=_profile_meta,
+            store_url=str(ctx.facts.store_url or ""),
+            maps_url=str(getattr(ctx.facts, "maps_url", "") or ""),
+            whatsapp_phone=str(ctx.customer_phone or ""),
+        )
+        known_facts["commerce_navigator"] = _commerce_navigator.to_dict()
+        logger.info(
+            "[COMMERCE_NAVIGATOR] tenant=%s stage=%s next_goal=%s",
+            getattr(ctx, "tenant_id", None),
+            _commerce_navigator.stage,
+            _commerce_navigator.next_goal,
+        )
+    except Exception as _cn_exc:  # noqa: BLE001
+        logger.debug(
+            "[COMMERCE_NAVIGATOR] skipped tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            _cn_exc,
+        )
+
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
@@ -3767,6 +3799,7 @@ def _build_reply_state(
             suggestion,
             stance=_stance_result,
             intent_priority=_intent_priority,
+            commerce_navigator=_commerce_navigator,
         ),
         merchant_context=dict(merchant_context or {}),
         platform_kb_mode=platform_kb_mode,
@@ -3822,6 +3855,7 @@ def _compose_response_goal(
     *,
     stance: Any = None,
     intent_priority: Any = None,
+    commerce_navigator: Any = None,
 ) -> str:
     """Single-line summary of WHY this turn is being composed.
 
@@ -3846,7 +3880,22 @@ def _compose_response_goal(
     if persona_topic_from_decision_args(decision.args):
         return _prepend_intent_priority_directive(base_goal, intent_priority)
     goal_with_stance = _prepend_stance_directive(base_goal, stance)
-    return _prepend_intent_priority_directive(goal_with_stance, intent_priority)
+    goal_with_priority = _prepend_intent_priority_directive(goal_with_stance, intent_priority)
+    return _prepend_commerce_navigator_directive(goal_with_priority, commerce_navigator)
+
+
+def _prepend_commerce_navigator_directive(base_goal: str, commerce_navigator: Any) -> str:
+    if commerce_navigator is None:
+        return base_goal
+    try:
+        from .commerce.commerce_navigator import commerce_navigator_goal_directive  # noqa: PLC0415
+
+        directive = commerce_navigator_goal_directive(commerce_navigator)
+    except Exception:  # noqa: BLE001
+        return base_goal
+    if not directive:
+        return base_goal
+    return f"{directive} | {base_goal}"
 
 
 def _prepend_intent_priority_directive(base_goal: str, intent_priority: Any) -> str:
