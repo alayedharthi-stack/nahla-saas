@@ -64,6 +64,15 @@ def is_current_catalog_order_submitted(ctx: BrainContext) -> bool:
     return source in {"catalog_order", "order"} and isinstance(items, list) and bool(items)
 
 
+def _salla_external_id_from_line_item(item: Dict[str, Any]) -> str:
+    """Store-platform product id only — never WhatsApp ``product_retailer_id`` / SKU."""
+    for key in ("salla_product_id", "store_external_id", "store_product_id"):
+        val = str(item.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
     state = getattr(ctx, "state", None)
     prep = getattr(state, "order_prep", None)
@@ -73,10 +82,10 @@ def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
     if line_items:
         first = next((li for li in line_items if isinstance(li, dict)), None) or {}
         count = len(line_items)
-        return {
-            "id": first.get("product_id") or first.get("product_retailer_id") or "catalog_order",
-            "external_id": first.get("product_retailer_id") or "",
-            "title": first.get("product_name") or first.get("title") or first.get("product_retailer_id") or "",
+        retailer_id = str(first.get("product_retailer_id") or first.get("sku") or "").strip()
+        product: Dict[str, Any] = {
+            "id": first.get("product_id") or retailer_id or "catalog_order",
+            "title": first.get("product_name") or first.get("title") or retailer_id or "",
             "price": prep.catalog_checkout_total if prep is not None else first.get("unit_price"),
             "currency": (
                 getattr(prep, "catalog_checkout_currency", None)
@@ -89,12 +98,23 @@ def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
             "is_multi_item": count > 1,
             "line_items": [dict(x) for x in line_items if isinstance(x, dict)],
         }
+        if retailer_id:
+            product["product_retailer_id"] = retailer_id
+        store_external_id = _salla_external_id_from_line_item(first)
+        if store_external_id:
+            product["external_id"] = store_external_id
+        return product
 
     focus = getattr(state, "current_product_focus", None)
     if isinstance(focus, dict) and focus:
         product = dict(focus)
         product.setdefault("from_catalog_order", True)
         product.setdefault("from_native_catalog_order", True)
+        if product.get("from_native_catalog_order"):
+            ext = str(product.get("external_id") or "").strip()
+            if ext and not product.get("product_retailer_id"):
+                product["product_retailer_id"] = ext
+            product.pop("external_id", None)
         return product
 
     return None
@@ -163,7 +183,7 @@ def maybe_enforce_catalog_order_continue_checkout(
             "event_type": "catalog_order_submitted",
             "source": "whatsapp_catalog",
             "phone_source": "whatsapp",
-            "retailer_id": product.get("external_id") or "",
+            "retailer_id": product.get("product_retailer_id") or "",
             "line_items_count": product.get("line_items_count") or 1,
         },
     })

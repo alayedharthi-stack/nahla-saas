@@ -47,6 +47,49 @@ _PROMPT_ADDRESS = (
 _PROMPT_PAYMENT = "باقي تختار طريقة الدفع المناسبة لك."
 _PROMPT_REVIEW = "وصلتني بيانات الطلب، أراجعها الآن وأكمل معك."
 
+_WHATSAPP_PRODUCT_CHANNELS = frozenset({
+    "whatsapp_fast",
+    "whatsapp_quick_order",
+    "whatsapp_catalog",
+})
+
+
+def _has_authoritative_product(state: Any) -> bool:
+    """True when checkout has catalog-backed or explicitly selected products."""
+    prep = _order_prep_dict(state)
+    if not prep:
+        return False
+    try:
+        from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+            is_catalog_line_items_authoritative_from_prep,
+        )
+
+        if is_catalog_line_items_authoritative_from_prep(prep):
+            line_items = list(prep.get("line_items") or prep.get("cart_items") or [])
+            return bool(line_items)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — authoritative probe must not block fallback
+        pass
+
+    bs = _brain_state_dict(state)
+    line_items = list(
+        prep.get("line_items")
+        or prep.get("cart_items")
+        or bs.get("cart_items")
+        or []
+    )
+    if line_items:
+        for item in line_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("from_native_catalog_order") or item.get("from_catalog_order"):
+                return True
+            if item.get("product_retailer_id") and item.get("product_id"):
+                return True
+        channel = str(prep.get("checkout_channel") or "").strip().lower()
+        if channel in _WHATSAPP_PRODUCT_CHANNELS:
+            return True
+    return False
+
 
 def is_checkout_continue_inbound(text: str) -> bool:
     raw = (text or "").strip()
@@ -163,12 +206,16 @@ def build_checkout_slot_fallback_reply(
     if not has_active_commerce_from_state(state):
         return None
 
+    has_product = _has_authoritative_product(state)
     missing = _resolve_missing_fields(state)
     if not missing:
-        return _PROMPT_REVIEW
+        return _PROMPT_REVIEW if has_product else None
 
     for field in missing:
         slot = str(field).strip().lower()
+        if slot in _CITY_SLOTS or slot in _ADDRESS_SLOTS or slot == "delivery_address":
+            if not has_product:
+                continue
         if slot in _NAME_SLOTS or slot == "customer_first_name":
             return _PROMPT_NAME
         if slot in _CITY_SLOTS:
@@ -182,12 +229,16 @@ def build_checkout_slot_fallback_reply(
                 "باقي تحدد المنتج أو الكمية عشان نكمل الطلب."
             )
 
+    if not has_product:
+        return None
+
     if is_checkout_continue_inbound(inbound_text):
         return _PROMPT_REVIEW
     return _PROMPT_REVIEW
 
 
 __all__ = [
+    "_has_authoritative_product",
     "build_checkout_slot_fallback_reply",
     "is_checkout_continue_inbound",
 ]

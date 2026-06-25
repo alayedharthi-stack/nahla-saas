@@ -124,7 +124,19 @@ class DraftOrderHandler:
         # DB primary key and Salla has no concept of it. Sending Nahla's
         # `id` to Salla yields a 422 with bogus error messages because the
         # product simply does not exist on Salla under that ID.
-        current_product_id = str(product_info.get("external_id") or "").strip()
+        from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+            is_catalog_line_items_authoritative_from_prep,
+        )
+
+        _catalog_authoritative = is_catalog_line_items_authoritative_from_prep(prep)
+        if _catalog_authoritative and prep.line_items:
+            _first_li = next(
+                (li for li in prep.line_items if isinstance(li, dict)),
+                {},
+            )
+            current_product_id = str(_first_li.get("product_id") or prep.product_id or "").strip()
+        else:
+            current_product_id = str(product_info.get("external_id") or "").strip()
         previous_product_id = str(getattr(prev_prep, "product_id", "") or "")
         product_changed = bool(current_product_id and previous_product_id and current_product_id != previous_product_id)
         previous_failed = bool(getattr(prev_prep, "last_order_failed", False))
@@ -197,52 +209,62 @@ class DraftOrderHandler:
         #   • If the product is bad → customer hears it NOW, not 3 turns later.
         #   • If it's good → product_options_loaded=True on Turn 1, so Turns
         #     2 and 3 skip the Salla call entirely (via the loaded guard).
-        external_id = str(product_info.get("external_id") or "").strip()
-        if not external_id:
-            logger.error(
-                "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
-                "tenant=%s nahla_db_id=%s title=%r product_info=%s",
+        if not (_catalog_authoritative and prep.line_items):
+            external_id = str(product_info.get("external_id") or "").strip()
+            if not external_id:
+                logger.error(
+                    "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
+                    "tenant=%s nahla_db_id=%s title=%r product_info=%s",
+                    ctx.tenant_id,
+                    product_info.get("id"),
+                    product_info.get("title"),
+                    product_info,
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product_unsyncable": True,
+                        "message": "product_missing_external_id",
+                        "product": product_info,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+
+            logger.info(
+                "[ORDER FLOW] product validated | nahla_db_id=%s salla_product_id=%s name=%r "
+                "options_loaded=%s unsyncable=%s turn_product_changed=%s",
+                product_info.get("id"), external_id, product_info.get("title"),
+                prep.product_options_loaded, prep.product_unsyncable, product_changed,
+            )
+
+            await _ensure_product_options_loaded(prep, ctx, external_id)
+
+            _maybe_prefill_navigator_product_options(prep, product_info, decision)
+
+            if prep.product_unsyncable:
+                logger.error(
+                    "[ORDER FLOW] aborting order — product not found on Salla | "
+                    "tenant=%s salla_product_id=%s name=%r",
+                    ctx.tenant_id, external_id, product_info.get("title"),
+                )
+                return ActionResult(
+                    success=True,
+                    data={
+                        "product_unsyncable": True,
+                        "message": "product_not_on_store",
+                        "product": product_info,
+                        "order_prep": prep.to_dict(),
+                    },
+                )
+        else:
+            logger.info(
+                "[ORDER FLOW] catalog authoritative line_items — skipping Salla product lookup | "
+                "tenant=%s line_items=%d product_id=%r",
                 ctx.tenant_id,
-                product_info.get("id"),
-                product_info.get("title"),
-                product_info,
+                len(prep.line_items),
+                prep.product_id,
             )
-            return ActionResult(
-                success=True,
-                data={
-                    "product_unsyncable": True,
-                    "message": "product_missing_external_id",
-                    "product": product_info,
-                    "order_prep": prep.to_dict(),
-                },
-            )
-
-        logger.info(
-            "[ORDER FLOW] product validated | nahla_db_id=%s salla_product_id=%s name=%r "
-            "options_loaded=%s unsyncable=%s turn_product_changed=%s",
-            product_info.get("id"), external_id, product_info.get("title"),
-            prep.product_options_loaded, prep.product_unsyncable, product_changed,
-        )
-
-        await _ensure_product_options_loaded(prep, ctx, external_id)
-
-        _maybe_prefill_navigator_product_options(prep, product_info, decision)
-
-        if prep.product_unsyncable:
-            logger.error(
-                "[ORDER FLOW] aborting order — product not found on Salla | "
-                "tenant=%s salla_product_id=%s name=%r",
-                ctx.tenant_id, external_id, product_info.get("title"),
-            )
-            return ActionResult(
-                success=True,
-                data={
-                    "product_unsyncable": True,
-                    "message": "product_not_on_store",
-                    "product": product_info,
-                    "order_prep": prep.to_dict(),
-                },
-            )
+            external_id = str(product_info.get("external_id") or "").strip()
 
         # ── From here on, the product is confirmed to exist on Salla. ─────
 
