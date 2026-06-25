@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from modules.ai.brain.postprocess.shipment_evidence import (
     ShipmentEvidenceResult,
@@ -20,17 +20,80 @@ logger = logging.getLogger("nahla.brain.postprocess.shipment_truth_guard")
 
 _NORMALISE_AR_RE = re.compile(r"[\u064B-\u065F\u0670]")
 
+# Legacy export — kept for callers/tests; guard no longer injects this template.
 SAFE_PRE_SHIPMENT_REPLY_AR = (
     "طلبك تحت المراجعة/التجهيز، وبنبلغك برابط التتبع أول ما يصدر 🚚"
 )
 
 _SHIPMENT_COMPLETED_MARKERS = (
     "تم الشحن",
+    "تم شحن طلبك",
+    "تم شحن الطلب",
     "شحناه",
+    "شحنت لك",
+    "شحنت لكم",
+    "شحنت طلبك",
     "تم تسليمها للناقل",
     "في الطريق لشركة الشحن",
     "خرجت مع شركة الشحن",
+    "طلبك بالطريق",
+    "طلبك في الطريق",
+    "تم انشاء الشحنه",
+    "تم إنشاء الشحنة",
 )
+
+_SHIPMENT_COMPLETED_RES = (
+    re.compile(
+        r"شحنت(?:\s*لك|\s*لكم|\s+ال)?(?:طلب|الطلب)?",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"تم\s*شحن(?:ه|ها|(?:\s+)?(?:طلب(?:ك|كم)|الطلب))?",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:طلب(?:ك|كم)|الطلب)\s*(?:في|بال)\s*الط(?:ر|)يق",
+        re.UNICODE | re.IGNORECASE,
+    ),
+)
+
+_DELIVERY_ETA_RES = (
+    re.compile(
+        r"يوصل(?:ك|كم| طلب(?:ك|كم))?\s*خلال",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"يوصل(?:ك|كم| طلب(?:ك|كم))?\s*(?:قريب|ب(?:عد|سرعة))",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"يستغرق\s*(?:من\s*)?\d+\s*[-–]\s*\d+\s*ايام",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"خلال\s*\d+\s*[-–]\s*\d+\s*ايام\s*(?:عمل)?",
+        re.UNICODE | re.IGNORECASE,
+    ),
+)
+
+_TRACKING_PROMISE_RES = (
+    re.compile(
+        r"(?:نرسل|بنرسل|راح\s*نرسل)(?:\s*لك|\s*لكم|\s+لك)?.*(?:تتبع|tracking)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:رابط|رقم)\s*(?:ال)?تتبع.*(?:نرسل|ارسل|أرسل|بنرسل)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:تحديثات|رابط\s*(?:ال)?تتبع).*(?:نرسل|بنرسل)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+)
+
+CLAIM_KIND_SHIPMENT = "ungrounded_shipment_claim"
+CLAIM_KIND_DELIVERY_ETA = "ungrounded_delivery_eta"
+CLAIM_KIND_TRACKING_PROMISE = "ungrounded_tracking_promise"
 
 
 def _norm(text: Optional[str]) -> str:
@@ -45,12 +108,78 @@ def _norm(text: Optional[str]) -> str:
     return t.lower().strip()
 
 
+def _matches_any_pattern(norm: str, patterns: tuple) -> bool:
+    return any(p.search(norm) for p in patterns)
+
+
 def reply_contains_shipment_completed_wording(reply: Optional[str]) -> bool:
     norm = _norm(reply)
     if not norm:
         return False
     markers = (_norm(marker) for marker in _SHIPMENT_COMPLETED_MARKERS)
-    return any(marker in norm for marker in markers)
+    if any(marker in norm for marker in markers):
+        return True
+    return _matches_any_pattern(norm, _SHIPMENT_COMPLETED_RES)
+
+
+def reply_contains_delivery_eta_claim(reply: Optional[str]) -> bool:
+    norm = _norm(reply)
+    if not norm:
+        return False
+    return _matches_any_pattern(norm, _DELIVERY_ETA_RES)
+
+
+def reply_contains_tracking_promise_claim(reply: Optional[str]) -> bool:
+    norm = _norm(reply)
+    if not norm:
+        return False
+    return _matches_any_pattern(norm, _TRACKING_PROMISE_RES)
+
+
+def detect_ungrounded_shipment_claim_kinds(reply: Optional[str]) -> Tuple[str, ...]:
+    """Return blocked claim kinds present in *reply* (pre-evidence check)."""
+    kinds: list[str] = []
+    if reply_contains_shipment_completed_wording(reply):
+        kinds.append(CLAIM_KIND_SHIPMENT)
+    if reply_contains_delivery_eta_claim(reply):
+        kinds.append(CLAIM_KIND_DELIVERY_ETA)
+    if reply_contains_tracking_promise_claim(reply):
+        kinds.append(CLAIM_KIND_TRACKING_PROMISE)
+    return tuple(kinds)
+
+
+def chunk_contains_blocked_shipment_claim(
+    chunk: str,
+    kinds: Optional[Tuple[str, ...]] = None,
+) -> bool:
+    active = kinds or detect_ungrounded_shipment_claim_kinds(chunk)
+    if not active:
+        return False
+    if CLAIM_KIND_SHIPMENT in active and reply_contains_shipment_completed_wording(chunk):
+        return True
+    if CLAIM_KIND_DELIVERY_ETA in active and reply_contains_delivery_eta_claim(chunk):
+        return True
+    if CLAIM_KIND_TRACKING_PROMISE in active and reply_contains_tracking_promise_claim(chunk):
+        return True
+    return False
+
+
+def strip_ungrounded_shipment_claim_sentences(
+    reply: str,
+    kinds: Optional[Tuple[str, ...]] = None,
+) -> str:
+    """Remove sentences/chunks containing ungrounded shipment operational claims."""
+    raw = (reply or "").strip()
+    active = kinds or detect_ungrounded_shipment_claim_kinds(raw)
+    if not raw or not active:
+        return raw
+
+    kept: list[str] = []
+    for chunk in re.split(r"(?<=[.!?؟،])\s+|\n+", raw):
+        part = chunk.strip().rstrip("،,.")
+        if part and not chunk_contains_blocked_shipment_claim(part, active):
+            kept.append(part)
+    return " ".join(kept).strip()
 
 
 @dataclass(frozen=True)
@@ -60,6 +189,7 @@ class ShipmentTruthGuardResult:
     replaced: bool = False
     reason: str = ""
     evidence: Optional[ShipmentEvidenceResult] = None
+    blocked_claims: Tuple[str, ...] = ()
 
 
 def log_shipment_truth_guard(
@@ -71,12 +201,13 @@ def log_shipment_truth_guard(
     evidence_source: str,
     order_status: str,
     tracking_present: bool,
+    blocked_claims: Tuple[str, ...] = (),
 ) -> None:
     try:
         logger.info(
             "[SHIPMENT_TRUTH_GUARD] tenant_id=%s conversation_id=%s "
             "action=%s reason=%s evidence_source=%s order_status=%s "
-            "tracking_present=%s",
+            "tracking_present=%s blocked_claims=%s",
             tenant_id,
             conversation_id,
             action,
@@ -84,6 +215,7 @@ def log_shipment_truth_guard(
             evidence_source or "-",
             order_status or "-",
             bool(tracking_present),
+            ",".join(blocked_claims) if blocked_claims else "-",
         )
     except Exception:  # noqa: BLE001
         pass
@@ -104,18 +236,20 @@ def apply_shipment_truth_guard(
         if not original.strip():
             return ShipmentTruthGuardResult(reply=original, action="allowed")
 
-        if not reply_contains_shipment_completed_wording(original):
-            evidence = evaluate_shipment_evidence(
-                commerce_bundle=commerce_bundle,
-                extra_metadata=extra_metadata,
-                inbound_metadata=inbound_metadata,
-                payment_receipt_received=payment_receipt_received,
-            )
+        blocked_kinds = detect_ungrounded_shipment_claim_kinds(original)
+        evidence = evaluate_shipment_evidence(
+            commerce_bundle=commerce_bundle,
+            extra_metadata=extra_metadata,
+            inbound_metadata=inbound_metadata,
+            payment_receipt_received=payment_receipt_received,
+        )
+
+        if not blocked_kinds:
             log_shipment_truth_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 action="allowed",
-                reason="no_shipment_completed_wording",
+                reason="no_operational_shipment_claims",
                 evidence_source=evidence.evidence_source,
                 order_status=evidence.order_status,
                 tracking_present=evidence.tracking_present,
@@ -125,13 +259,6 @@ def apply_shipment_truth_guard(
                 action="allowed",
                 evidence=evidence,
             )
-
-        evidence = evaluate_shipment_evidence(
-            commerce_bundle=commerce_bundle,
-            extra_metadata=extra_metadata,
-            inbound_metadata=inbound_metadata,
-            payment_receipt_received=payment_receipt_received,
-        )
 
         if evidence.evidence_ok:
             log_shipment_truth_guard(
@@ -149,21 +276,24 @@ def apply_shipment_truth_guard(
                 evidence=evidence,
             )
 
+        scrubbed = strip_ungrounded_shipment_claim_sentences(original, blocked_kinds)
         log_shipment_truth_guard(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
-            action="blocked_false_shipment",
+            action="blocked_ungrounded_shipment_claim",
             reason=evidence.reason,
             evidence_source=evidence.evidence_source,
             order_status=evidence.order_status,
             tracking_present=evidence.tracking_present,
+            blocked_claims=blocked_kinds,
         )
         return ShipmentTruthGuardResult(
-            reply=SAFE_PRE_SHIPMENT_REPLY_AR,
-            action="blocked_false_shipment",
-            replaced=True,
+            reply=scrubbed,
+            action="blocked_ungrounded_shipment_claim",
+            replaced=(scrubbed != original),
             reason=evidence.reason,
             evidence=evidence,
+            blocked_claims=blocked_kinds,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
