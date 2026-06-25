@@ -58,8 +58,23 @@ _POLICY_AND_SYSTEM_PATTERNS: List[tuple[str, re.Pattern[str]]] = [
     ("policy_name_ar",           re.compile(r"سياسة\s*(?:البيع|الرد|النظام)", re.UNICODE)),
 ]
 
+# ── Merchant/admin troubleshooting leaks (June 2026) ───────────────────────
+# Customer-facing replies must never tell the buyer to sync products,
+# open the merchant dashboard, or diagnose store configuration.
+_MERCHANT_TROUBLESHOOTING_PATTERNS: List[tuple[str, re.Pattern[str]]] = [
+    ("merchant_dashboard_ar",       re.compile(r"لوحة\s*التحكم", re.UNICODE)),
+    ("product_sync_ar",             re.compile(r"مزامنة\s*الم(?:نتجات|تجر)", re.UNICODE)),
+    ("store_needs_sync_ar",         re.compile(r"يحتاج\s*الم(?:تجر|تجر)", re.UNICODE)),
+    ("store_settings_ar",           re.compile(r"إعدادات\s*الم(?:تجر|تجر)", re.UNICODE)),
+    ("internal_technical_issue_ar", re.compile(r"مشكلة\s*تقنية\s*داخلية", re.UNICODE)),
+    ("if_problem_persists_sync_ar", re.compile(
+        r"إذا\s*استمرت\s*المشكلة.*(?:مزامنة|لوحة\s*التحكم|المتجر)",
+        re.UNICODE | re.IGNORECASE,
+    )),
+]
+
 _ALL_LEAK_PATTERNS: List[tuple[str, re.Pattern[str]]] = (
-    _PLANNER_PATTERNS + _POLICY_AND_SYSTEM_PATTERNS
+    _PLANNER_PATTERNS + _POLICY_AND_SYSTEM_PATTERNS + _MERCHANT_TROUBLESHOOTING_PATTERNS
 )
 
 

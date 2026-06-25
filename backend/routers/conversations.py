@@ -1973,6 +1973,13 @@ async def get_conversation_messages(
         include_trace_outbound=False,
     )
 
+    try:
+        from core.catalog_inbound_dedupe import dedupe_timeline_by_wa_message_id  # noqa: PLC0415
+
+        messages = dedupe_timeline_by_wa_message_id(messages, me_rows=me_rows)
+    except Exception:  # noqa: silent-ok - timeline dedupe is best-effort; raw rows still returned
+        pass
+
     messages.sort(key=lambda m: m.get("_ts") or "")
     messages = messages[-limit:]
     for m in messages:

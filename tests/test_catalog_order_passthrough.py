@@ -127,7 +127,8 @@ class TestCatalogOrderScreenshotReproducer:
         assert text, "brain-facing text is empty"
         # Header + numeric facts + buying-intent framing.
         assert text.startswith("[طلب كتالوج من العميل]")
-        assert "عدد المنتجات: 1" in text
+        assert "عدد أسطر الطلب: 1" in text
+        assert "إجمالي الكمية: 1" in text
         assert "69" in text and "SAR" in text
         assert "honey-samr-quarter" in text
         assert "تعامل معه كنية شراء" in text
@@ -151,6 +152,8 @@ class TestCatalogOrderScreenshotReproducer:
         assert meta.get("source_type") == "catalog_order"
         assert meta.get("wa_message_id") == "wamid.SCREENSHOT_TEST_001"
         assert meta.get("item_count") == 1
+        assert meta.get("line_items_count") == 1
+        assert meta.get("total_quantity") == 1
         assert meta.get("total_price") == 69.0
         assert meta.get("currency") == "SAR"
         assert meta.get("product_skus") == ["honey-samr-quarter"]
@@ -172,7 +175,8 @@ class TestCatalogOrderScreenshotReproducer:
         assert traces, "no [CATALOG_MESSAGE_TRACE] log line emitted"
         msg = traces[-1].getMessage()
         assert "wamid=wamid.SCREENSHOT_TEST_001" in msg
-        assert "item_count=1" in msg
+        assert "line_items=1" in msg
+        assert "total_qty=1" in msg
         assert "currency=SAR" in msg
         assert "final_route=brain" in msg
 
@@ -205,7 +209,9 @@ class TestCatalogOrderEdgeCases:
         }
         result = _normalize(message)
         assert result.should_process is True
-        assert result.metadata["item_count"] == 5  # 2 + 3
+        assert result.metadata["line_items_count"] == 2
+        assert result.metadata["total_quantity"] == 5
+        assert result.metadata["item_count"] == 2
         # 2*10.50 + 3*20 = 81.00
         assert result.metadata["total_price"] == 81.0
         assert "81" in result.text and "SAR" in result.text
@@ -286,7 +292,9 @@ class TestCatalogOrderEdgeCases:
             },
         }
         result = _normalize(message)
-        assert result.metadata["item_count"] == 2
+        assert result.metadata["line_items_count"] == 1
+        assert result.metadata["total_quantity"] == 2
+        assert result.metadata["item_count"] == 1
         assert result.metadata["total_price"] == 25.0
 
 
@@ -575,7 +583,8 @@ class TestCatalogFocusPinUsesPayloadName:
         # for an order whose item carries a ``name`` field.
         message = "\n".join([
             "[طلب كتالوج من العميل]",
-            "عدد المنتجات: 1",
+            "عدد أسطر الطلب: 1",
+            "إجمالي الكمية: 1",
             "الإجمالي: 79 SAR",
             "اسم المنتج: ربع كيلو سمر",
             "رمز المنتج (SKU): honey-samr-quarter",
@@ -611,7 +620,8 @@ class TestCatalogFocusPinUsesPayloadName:
 
         message = "\n".join([
             "[طلب كتالوج من العميل]",
-            "عدد المنتجات: 1",
+            "عدد أسطر الطلب: 1",
+            "إجمالي الكمية: 1",
             "الإجمالي: 79 SAR",
             "اسم المنتج: ربع كيلو سمر",
             "رمز المنتج (SKU): honey-samr-quarter",
