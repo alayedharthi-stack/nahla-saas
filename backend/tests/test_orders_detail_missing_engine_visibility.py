@@ -103,6 +103,7 @@ def test_order_detail_payload_contains_missing_fields_engine_for_whatsapp_order(
     payload = _detail_payload(db, order, tenant.id)
     engine = payload.get("missing_fields_engine")
     assert engine is not None
+    assert engine.get("available") is True
     assert "readiness_state" in engine
     assert "field_states" in engine
     assert "divergence_flags" in engine
@@ -111,8 +112,7 @@ def test_order_detail_payload_contains_missing_fields_engine_for_whatsapp_order(
 def test_order_detail_engine_name_skip_when_customer_name_present() -> None:
     db, _ = _make_db()
     tenant = _seed_tenant(db)
-    customer = _verified_customer(db, tenant.id)
-    convo = Conversation(tenant_id=tenant.id, customer_id=customer.id, status="open")
+    convo = Conversation(tenant_id=tenant.id, status="open")
     db.add(convo)
     db.commit()
     db.refresh(convo)
@@ -146,9 +146,44 @@ def test_order_detail_engine_name_skip_when_customer_name_present() -> None:
 
     payload = _detail_payload(db, order, tenant.id)
     engine = payload["missing_fields_engine"]
+    assert engine.get("available") is True
     assert engine["field_states"]["name"]["mode"] == MODE_SKIP
     assert engine["missing_modes"]["name"] == MODE_SKIP
     assert "customer_first_name" in (payload.get("confirm_blockers") or [])
+
+
+def test_order_detail_engine_when_source_unset_but_nahla_wa_external_id() -> None:
+    """Regression: WA bridge orders may lack source=whatsapp on the Order row."""
+    db, _ = _make_db()
+    tenant = _seed_tenant(db)
+    convo = Conversation(tenant_id=tenant.id, status="open")
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    order = Order(
+        tenant_id=tenant.id,
+        external_id=nahla_wa_external_id(tenant.id, convo.id),
+        status="pending_customer_info",
+        total="100.00 ر.س",
+        line_items=[{"name": "P", "quantity": 1, "price": 100.0}],
+        customer_info={
+            "phone": "+966500000060",
+            "first_name": "هيثم",
+            "last_name": "الحارثي",
+        },
+        extra_metadata={
+            "lifecycle": "whatsapp_draft",
+            "conversation_id": convo.id,
+            "missing_fields": ["customer_first_name", "customer_last_name", "city"],
+        },
+    )
+    db.add(order)
+    db.commit()
+
+    payload = _detail_payload(db, order, tenant.id)
+    assert payload.get("missing_fields_engine") is not None
+    assert payload["missing_fields_engine"].get("available") is True
+    assert "readiness_state" in payload["missing_fields_engine"]
 
 
 def test_order_detail_engine_divergence_when_legacy_blockers_stale() -> None:
