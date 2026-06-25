@@ -805,16 +805,22 @@ def _serialise_order(
     last_updated_at = _read_last_updated_at(order, created_at=created_at)
     raw_status  = str(order.status or "")
     status      = _classify_status(raw_status)
-    amount_value = _to_float_sar(order.total)
-
     customer_info = order.customer_info or {}
     line_items    = order.line_items or []
     order_meta    = order.extra_metadata or {}
+    source_key    = _resolve_source(order)
+
+    from core.order_amount_display import resolve_display_amount_sar  # noqa: PLC0415
+
+    amount_value, persisted_amount_value, persisted_amount_stale = resolve_display_amount_sar(
+        source=source_key,
+        line_items=line_items,
+        persisted_total=order.total,
+    )
     meta_product  = str(order_meta.get("product_title") or "").strip()
 
     item_titles: List[str] = []
     detailed_items: List[Dict[str, Any]] = []
-    source_key   = _resolve_source(order)
     for item in line_items:
         name = (
             item.get("product_name")
@@ -992,6 +998,8 @@ def _serialise_order(
         ),
         "amount":        _format_total(amount_value, order.total),
         "amount_sar":    round(amount_value, 2),
+        "persisted_amount_sar": round(persisted_amount_value, 2),
+        "persisted_amount_stale": persisted_amount_stale,
         "status":        status,
         "status_label":  status_label_ar or RAW_STATUS_LABELS_AR.get(parsed_raw) or STATUS_LABELS_AR.get(status, status),
         "status_label_ar": status_label_ar,
