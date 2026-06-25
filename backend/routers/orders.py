@@ -1021,34 +1021,44 @@ def _serialise_order(
         }
         if source_key == "whatsapp" and db is not None and tenant_id is not None:
             try:
-                from core.order_context_builder import build_order_context  # noqa: PLC0415
+                from core.order_context_builder import (  # noqa: PLC0415
+                    build_order_context_for_order,
+                )
                 from core.order_context_prefill import build_order_context_api_payload  # noqa: PLC0415
-                from models import Conversation  # noqa: PLC0415
-
-                conv_id = order_meta.get("conversation_id")
-                conversation = None
-                if conv_id:
-                    conversation = (
-                        db.query(Conversation)
-                        .filter_by(id=int(conv_id), tenant_id=int(tenant_id))
-                        .first()
-                    )
                 from core.order_missing_fields_engine import (  # noqa: PLC0415
+                    augment_divergence_with_confirm_blockers,
+                    log_missing_fields_engine_detail,
                     missing_fields_result_to_api_dict,
                 )
-                ctx = build_order_context(
+
+                ctx = build_order_context_for_order(
                     db,
                     tenant_id=int(tenant_id),
-                    conversation=conversation,
-                    phone=phone or "",
-                    build_source="orders_api_detail",
+                    order=order,
                 )
                 payload["order_context_prefill"] = build_order_context_api_payload(ctx)
                 if ctx.missing_fields_result is not None:
+                    engine_result = augment_divergence_with_confirm_blockers(
+                        ctx.missing_fields_result,
+                        confirm_blockers=list(payload.get("confirm_blockers") or []),
+                    )
                     payload["missing_fields_engine"] = missing_fields_result_to_api_dict(
-                        ctx.missing_fields_result
+                        engine_result
+                    )
+                    log_missing_fields_engine_detail(
+                        order_id=getattr(order, "id", None),
+                        tenant_id=int(tenant_id),
+                        result=engine_result,
+                        legacy_missing=list(order_meta.get("missing_fields") or []),
+                        confirm_blockers=list(payload.get("confirm_blockers") or []),
+                        build_source="orders_api_detail",
                     )
             except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[ORDERS_API] missing_fields_engine detail failed order_id=%s tenant=%s",
+                    getattr(order, "id", None),
+                    tenant_id,
+                )
                 payload["order_context_prefill"] = None
 
     return payload

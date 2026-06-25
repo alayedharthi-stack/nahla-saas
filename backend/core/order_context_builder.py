@@ -683,6 +683,210 @@ def _resolve_legacy_missing_fields(
     )
 
 
+def _active_draft_from_order(order: Any) -> ActiveDraftContext:
+    """Anchor missing-fields computation on the persisted order row."""
+    meta = _meta_dict(order)
+    total_raw = getattr(order, "total", None)
+    return ActiveDraftContext(
+        order_id=getattr(order, "id", None),
+        external_id=str(getattr(order, "external_id", None) or ""),
+        status=str(getattr(order, "status", "") or ""),
+        lifecycle=str(meta.get("lifecycle") or "whatsapp_draft"),
+        line_items=list(getattr(order, "line_items", None) or []),
+        total=_to_float(total_raw),
+        currency=str(meta.get("currency") or "SAR"),
+        missing_fields=list(meta.get("missing_fields") or []),
+        merchant_edit_locked=bool(meta.get("merchant_edit_locked")),
+    )
+
+
+def build_order_context_for_order(
+    db: Any,
+    *,
+    tenant_id: int,
+    order: Any,
+) -> OrderContext:
+    """
+    Build ``OrderContext`` for dashboard order detail.
+
+    Uses the persisted ``Order`` row as the source of truth for line items,
+    customer/shipping prep, and stored legacy missing fields (for divergence).
+    """
+    from core.wa_order_editor import _order_prep_from_order  # noqa: PLC0415
+
+    meta = _meta_dict(order)
+    customer_info = dict(getattr(order, "customer_info", None) or {})
+    phone = str(customer_info.get("phone") or customer_info.get("mobile") or "").strip()
+    order_prep = _order_prep_from_order(order)
+    line_items = list(getattr(order, "line_items", None) or [])
+    if line_items:
+        order_prep["line_items"] = line_items
+    total_f = _to_float(getattr(order, "total", None))
+    if total_f is not None:
+        order_prep["total"] = total_f
+        order_prep["order_total"] = total_f
+    for key in (
+        "payment_method",
+        "payment_confirmed",
+        "payment_verified",
+        "payment_receipt_received",
+        "payment_submission_received",
+        "merchant_shipping_locked",
+        "customer_confirmed_previous_address",
+        "shipping_source",
+    ):
+        if meta.get(key) not in (None, ""):
+            order_prep[key] = meta.get(key)
+
+    conversation_id = meta.get("conversation_id")
+    conversation = None
+    if conversation_id:
+        try:
+            from models import Conversation  # noqa: PLC0415
+
+            conversation = (
+                db.query(Conversation)
+                .filter_by(id=int(conversation_id), tenant_id=int(tenant_id))
+                .first()
+            )
+        except Exception:  # noqa: BLE001
+            conversation = None
+
+    bs: Dict[str, Any] = {}
+    if conversation is not None:
+        bs = dict(_meta_dict(conversation).get("brain_state") or {})
+    prep = dict(_prep_dict(bs))
+    for key, val in order_prep.items():
+        if val not in (None, "", [], {}):
+            prep[key] = val
+    bs = {**bs, "order_prep": prep}
+
+    customer = None
+    if conversation is not None and getattr(conversation, "customer_id", None):
+        try:
+            from models import Customer  # noqa: PLC0415
+
+            customer = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
+        except Exception:  # noqa: BLE001
+            customer = None
+
+    active_draft = _active_draft_from_order(order)
+    identity = build_order_identity(
+        customer=customer,
+        prep=prep,
+        phone=phone,
+        draft_customer_info=customer_info,
+    )
+    shipping = build_shipping_context(prep, order_customer_info=customer_info)
+    catalog = _load_catalog_order_snapshot(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=int(conversation_id) if conversation_id else None,
+        inbound_metadata=None,
+    )
+    known_previous = _load_known_previous_address(
+        db,
+        tenant_id=tenant_id,
+        customer_id=identity.customer_id or (
+            getattr(conversation, "customer_id", None) if conversation else None
+        ),
+    )
+
+    legacy_missing = list(meta.get("missing_fields") or [])
+
+    identity_snap = read_customer_identity(customer) if customer is not None else None
+    field_evidence = _build_field_evidence(
+        identity=identity,
+        shipping=shipping,
+        prep=prep,
+        identity_snap=identity_snap,
+        draft_locked=bool(active_draft.merchant_edit_locked),
+    )
+
+    has_product = _has_product_signal(
+        prep=prep,
+        brain_state=bs,
+        active_draft=active_draft,
+        catalog=catalog,
+    )
+    has_total = _has_total_signal(
+        prep=prep,
+        active_draft=active_draft,
+        catalog=catalog,
+    )
+
+    prefill = build_prefill_state(
+        identity=identity,
+        shipping=shipping,
+        known_previous=known_previous,
+        prep=prep,
+        active_draft=active_draft,
+        message="",
+        has_product=has_product,
+        has_total=has_total,
+    )
+
+    shipping_locked = bool(active_draft.merchant_edit_locked) or bool(
+        prep.get("merchant_shipping_locked")
+    )
+    identity = enrich_identity_context(identity, missing_mode=prefill.identity_missing_mode)
+    shipping = enrich_shipping_context(
+        shipping,
+        city_mode=prefill.shipping_city_mode,
+        delivery_mode=prefill.shipping_delivery_mode,
+        locked_by_merchant=shipping_locked,
+        requires_merchant_review=prefill.requires_merchant_review,
+    )
+
+    shadow_missing = shadow_missing_fields_from_modes(prefill.shadow_missing_modes)
+    divergence = compute_divergence_flags(legacy_missing, shadow_missing)
+
+    from core.order_missing_fields_engine import compute_missing_fields  # noqa: PLC0415
+
+    ctx_with_legacy = OrderContext(
+        tenant_id=tenant_id,
+        conversation_id=int(conversation_id) if conversation_id else None,
+        customer_id=identity.customer_id or (
+            getattr(conversation, "customer_id", None) if conversation else None
+        ),
+        identity=identity,
+        shipping=shipping,
+        active_draft=active_draft,
+        catalog_order=catalog,
+        brain_order_prep=dict(prep),
+        legacy_missing_fields=list(legacy_missing),
+        shadow_missing_fields=shadow_missing,
+        field_evidence=field_evidence,
+        build_source="orders_api_detail",
+        divergence_flags=divergence,
+        prefill=prefill,
+        known_previous_address=known_previous,
+        shadow_missing_modes=dict(prefill.shadow_missing_modes),
+        missing_fields_result=None,
+    )
+    missing_result = compute_missing_fields(ctx_with_legacy)
+
+    return OrderContext(
+        tenant_id=ctx_with_legacy.tenant_id,
+        conversation_id=ctx_with_legacy.conversation_id,
+        customer_id=ctx_with_legacy.customer_id,
+        identity=ctx_with_legacy.identity,
+        shipping=ctx_with_legacy.shipping,
+        active_draft=ctx_with_legacy.active_draft,
+        catalog_order=ctx_with_legacy.catalog_order,
+        brain_order_prep=ctx_with_legacy.brain_order_prep,
+        legacy_missing_fields=ctx_with_legacy.legacy_missing_fields,
+        shadow_missing_fields=ctx_with_legacy.shadow_missing_fields,
+        field_evidence=ctx_with_legacy.field_evidence,
+        build_source=ctx_with_legacy.build_source,
+        divergence_flags=ctx_with_legacy.divergence_flags,
+        prefill=ctx_with_legacy.prefill,
+        known_previous_address=ctx_with_legacy.known_previous_address,
+        shadow_missing_modes=ctx_with_legacy.shadow_missing_modes,
+        missing_fields_result=missing_result,
+    )
+
+
 def build_order_context(
     db: Any,
     *,
@@ -946,6 +1150,7 @@ __all__ = [
     "OrderIdentityContext",
     "ShippingContext",
     "build_order_context",
+    "build_order_context_for_order",
     "compute_divergence_flags",
     "compute_shadow_missing_fields",
     "log_order_context_shadow",

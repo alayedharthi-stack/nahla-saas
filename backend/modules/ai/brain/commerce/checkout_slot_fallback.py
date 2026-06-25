@@ -96,6 +96,25 @@ def _resolve_missing_fields(state: Any) -> List[str]:
         or bs.get("cart_items")
         or []
     )
+
+    try:
+        from core.order_missing_fields_engine import (  # noqa: PLC0415
+            missing_fields_engine_enabled,
+        )
+
+        if missing_fields_engine_enabled():
+            from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
+
+            return list(
+                compute_wa_missing_fields(
+                    prep,
+                    brain_state=bs,
+                    line_items=line_items,
+                )
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] engine missing-fields gate failed")
+
     stored = list(prep.get("missing_fields") or [])
     if stored:
         return [str(x).strip() for x in stored if str(x).strip()]
