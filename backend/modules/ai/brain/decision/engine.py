@@ -2794,7 +2794,7 @@ class DefaultDecisionEngine:
                             ),
                             confidence=0.92,
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — channel selection gate must not block decide
                     logger.debug(
                         "[ORDER FLOW] purchase channel selection gate skipped tenant=%s",
                         ctx.tenant_id,

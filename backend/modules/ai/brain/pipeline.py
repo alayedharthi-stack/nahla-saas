@@ -1468,7 +1468,7 @@ class MerchantBrain:
                     phone=customer_phone,
                     awaiting_checkout_channel=True,
                 )
-            except Exception as _pcs_exc:  # noqa: BLE001
+            except Exception as _pcs_exc:  # noqa: BLE001  # noqa: silent-ok — channel flag persist must not block decide
                 logger.debug(
                     "[PURCHASE_CHANNEL] awaiting flag persist skipped tenant=%s err=%s",
                     tenant_id,
