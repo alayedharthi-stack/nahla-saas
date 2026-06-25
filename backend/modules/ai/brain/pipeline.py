@@ -2880,6 +2880,11 @@ class MerchantBrain:
             if _stg.replaced:
                 reply = _stg.reply
                 _guard_replaced["shipment_truth_guard"] = True
+                if _stg.scrubbed_empty:
+                    result.data["shipment_claim_scrubbed_empty"] = True
+                    result.data["shipment_guard_blocked_claims"] = list(
+                        _stg.blocked_claims
+                    )
         except Exception as _stg_exc:  # noqa: BLE001
             logger.warning(
                 "[SHIPMENT_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -3113,26 +3118,27 @@ class MerchantBrain:
                 apply_commerce_reply_quality_guard,
             )
 
-            _crqg = apply_commerce_reply_quality_guard(
-                reply=reply or "",
-                inbound_text=message or "",
-                intent_name=str(getattr(intent, "name", "") or ""),
-                primary_customer_goal=str(
-                    getattr(getattr(ctx, "reply_state", None), "primary_customer_goal", "")
-                    or ""
-                ),
-                conversation_objective=str(
-                    getattr(state, "active_conversation_objective", "") or ""
-                ),
-                locale=str((profile or {}).get("preferred_language") or "ar"),
-                tenant_id=tenant_id,
-                conversation_id=conversation_id,
-                state=new_state,
-                inbound_metadata=(profile or {}).get("inbound_metadata") or {},
-            )
-            if _crqg.replaced:
-                reply = _crqg.reply
-                _guard_replaced["commerce_reply_quality_guard"] = True
+            if not result.data.get("shipment_claim_scrubbed_empty"):
+                _crqg = apply_commerce_reply_quality_guard(
+                    reply=reply or "",
+                    inbound_text=message or "",
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    primary_customer_goal=str(
+                        getattr(getattr(ctx, "reply_state", None), "primary_customer_goal", "")
+                        or ""
+                    ),
+                    conversation_objective=str(
+                        getattr(state, "active_conversation_objective", "") or ""
+                    ),
+                    locale=str((profile or {}).get("preferred_language") or "ar"),
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    state=new_state,
+                    inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                )
+                if _crqg.replaced:
+                    reply = _crqg.reply
+                    _guard_replaced["commerce_reply_quality_guard"] = True
         except Exception as _crqg_exc:  # noqa: BLE001
             logger.warning(
                 "[COMMERCE_REPLY_QUALITY_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -3459,6 +3465,12 @@ class MerchantBrain:
             ),
             "native_catalog_entry": dict(result.data.get("native_catalog_entry") or {}),
             "outbound_text_policy": dict(result.data.get("outbound_text_policy") or {}),
+            "shipment_claim_scrubbed_empty": bool(
+                result.data.get("shipment_claim_scrubbed_empty")
+            ),
+            "shipment_guard_blocked_claims": list(
+                result.data.get("shipment_guard_blocked_claims") or []
+            ),
         }
 
 
