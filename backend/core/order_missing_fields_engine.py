@@ -178,6 +178,18 @@ def _resolve_name_state(ctx: Any) -> MissingFieldState:
             confidence=identity.confidence,
             evidence={"operational_name": identity.operational_name},
         )
+    prep = ctx.brain_order_prep or {}
+    first = _prep_str(prep, "customer_first_name")
+    last = _prep_str(prep, "customer_last_name")
+    if first and last:
+        return MissingFieldState(
+            field="name",
+            mode=MODE_SKIP,
+            reason="persisted_order_customer_name",
+            source="order_customer_info",
+            confidence=0.95,
+            evidence={"customer_first_name": first, "customer_last_name": last},
+        )
     if identity.has_proposed_name and not identity.has_verified_name:
         return MissingFieldState(
             field="name",
@@ -604,6 +616,8 @@ def to_legacy_missing_fields(result: MissingFieldsResult) -> List[str]:
 
 def missing_fields_result_to_api_dict(result: MissingFieldsResult) -> Dict[str, Any]:
     return {
+        "available": True,
+        "reason": "",
         "missing_fields": list(result.missing_fields),
         "missing_modes": dict(result.missing_modes),
         "blockers": list(result.blockers),
@@ -621,6 +635,21 @@ def missing_fields_result_to_api_dict(result: MissingFieldsResult) -> Dict[str, 
         },
         "evidence_flags": dict(result.evidence_flags),
         "divergence_flags": dict(result.divergence_flags),
+    }
+
+
+def missing_fields_engine_unavailable_dict(reason: str) -> Dict[str, Any]:
+    """Explicit unavailable payload — never omit the key silently on WA detail."""
+    return {
+        "available": False,
+        "reason": str(reason or "unavailable").strip() or "unavailable",
+        "missing_fields": [],
+        "missing_modes": {},
+        "blockers": [],
+        "readiness_state": "unavailable",
+        "field_states": {},
+        "evidence_flags": {},
+        "divergence_flags": {},
     }
 
 
@@ -656,28 +685,36 @@ def log_missing_fields_engine_detail(
     *,
     order_id: Any,
     tenant_id: int,
-    result: MissingFieldsResult,
+    available: bool,
+    reason: str = "",
+    result: Optional[MissingFieldsResult] = None,
     legacy_missing: Optional[List[str]] = None,
     confirm_blockers: Optional[List[str]] = None,
     build_source: str = "",
 ) -> None:
-    from core.order_context_builder import mask_phone  # noqa: PLC0415
-
     logger.info(
-        "[MISSING_FIELDS_ENGINE_DETAIL] enabled=%s shadow=%s tenant=%s order_id=%s "
-        "source=%s readiness=%s missing=%s legacy=%s confirm_blockers=%s divergence=%s",
+        "[MISSING_FIELDS_ENGINE_DETAIL] order_id=%s available=%s reason=%s tenant=%s "
+        "enabled=%s shadow=%s source=%s readiness=%s missing=%s legacy=%s "
+        "confirm_blockers=%s divergence=%s",
+        order_id,
+        available,
+        reason or "-",
+        tenant_id,
         missing_fields_engine_enabled(),
         missing_fields_engine_shadow_enabled(),
-        tenant_id,
-        order_id,
         build_source,
-        result.readiness_state,
-        result.missing_fields,
+        result.readiness_state if result is not None else "unavailable",
+        result.missing_fields if result is not None else [],
         legacy_missing or [],
         confirm_blockers or [],
-        result.divergence_flags,
+        result.divergence_flags if result is not None else {},
     )
-    if missing_fields_engine_shadow_enabled() and result.divergence_flags.get("missing_fields_differ"):
+    if (
+        available
+        and result is not None
+        and missing_fields_engine_shadow_enabled()
+        and result.divergence_flags.get("missing_fields_differ")
+    ):
         logger.info(
             "[MISSING_FIELDS_ENGINE_SHADOW] order_id=%s legacy=%s engine=%s divergence=%s",
             order_id,
@@ -685,7 +722,6 @@ def log_missing_fields_engine_detail(
             result.missing_fields,
             result.divergence_flags,
         )
-    _ = mask_phone  # imported for future PII-safe extensions
 
 
 def engine_result_to_v2_missing_fields(result: MissingFieldsResult) -> List[str]:
@@ -791,6 +827,7 @@ __all__ = [
     "log_missing_fields_engine_detail",
     "missing_fields_engine_enabled",
     "missing_fields_engine_shadow_enabled",
+    "missing_fields_engine_unavailable_dict",
     "missing_fields_result_to_api_dict",
     "resolve_flow_missing_fields",
     "to_legacy_missing_fields",

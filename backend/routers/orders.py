@@ -693,6 +693,98 @@ def _build_payment_reminder_text(
     return "\n".join(lines)
 
 
+def _attach_missing_fields_engine_detail_payload(
+    payload: Dict[str, Any],
+    order: Order,
+    order_meta: Dict[str, Any],
+    *,
+    db: Session,
+    tenant_id: int,
+) -> None:
+    """Always set ``missing_fields_engine`` for Nahla WhatsApp orders on detail."""
+    from core.order_context_builder import build_order_context_for_order  # noqa: PLC0415
+    from core.order_context_prefill import build_order_context_api_payload  # noqa: PLC0415
+    from core.order_missing_fields_engine import (  # noqa: PLC0415
+        augment_divergence_with_confirm_blockers,
+        log_missing_fields_engine_detail,
+        missing_fields_engine_unavailable_dict,
+        missing_fields_result_to_api_dict,
+    )
+    from core.wa_order_editor import is_wa_whatsapp_order  # noqa: PLC0415
+
+    order_id = getattr(order, "id", None)
+    legacy_missing = list(order_meta.get("missing_fields") or [])
+    confirm_blockers = list(payload.get("confirm_blockers") or [])
+
+    if not is_wa_whatsapp_order(order):
+        log_missing_fields_engine_detail(
+            order_id=order_id,
+            tenant_id=int(tenant_id),
+            available=False,
+            reason="not_whatsapp_order",
+            legacy_missing=legacy_missing,
+            confirm_blockers=confirm_blockers,
+            build_source="orders_api_detail",
+        )
+        return
+
+    try:
+        ctx = build_order_context_for_order(
+            db,
+            tenant_id=int(tenant_id),
+            order=order,
+        )
+        payload["order_context_prefill"] = build_order_context_api_payload(ctx)
+        if ctx.missing_fields_result is None:
+            payload["missing_fields_engine"] = missing_fields_engine_unavailable_dict(
+                "engine_result_none"
+            )
+            log_missing_fields_engine_detail(
+                order_id=order_id,
+                tenant_id=int(tenant_id),
+                available=False,
+                reason="engine_result_none",
+                legacy_missing=legacy_missing,
+                confirm_blockers=confirm_blockers,
+                build_source="orders_api_detail",
+            )
+            return
+
+        engine_result = augment_divergence_with_confirm_blockers(
+            ctx.missing_fields_result,
+            confirm_blockers=confirm_blockers,
+        )
+        payload["missing_fields_engine"] = missing_fields_result_to_api_dict(engine_result)
+        log_missing_fields_engine_detail(
+            order_id=order_id,
+            tenant_id=int(tenant_id),
+            available=True,
+            result=engine_result,
+            legacy_missing=legacy_missing,
+            confirm_blockers=confirm_blockers,
+            build_source="orders_api_detail",
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload["missing_fields_engine"] = missing_fields_engine_unavailable_dict(
+            f"build_failed:{type(exc).__name__}"
+        )
+        payload["order_context_prefill"] = None
+        logger.exception(
+            "[ORDERS_API] missing_fields_engine detail failed order_id=%s tenant=%s",
+            order_id,
+            tenant_id,
+        )
+        log_missing_fields_engine_detail(
+            order_id=order_id,
+            tenant_id=int(tenant_id),
+            available=False,
+            reason=f"build_failed:{type(exc).__name__}",
+            legacy_missing=legacy_missing,
+            confirm_blockers=confirm_blockers,
+            build_source="orders_api_detail",
+        )
+
+
 def _serialise_order(
     order: Order,
     *,
@@ -1019,47 +1111,14 @@ def _serialise_order(
             "national_short_address": caps.get("national_short_address"),
             "delivery_notes": caps.get("delivery_notes"),
         }
-        if source_key == "whatsapp" and db is not None and tenant_id is not None:
-            try:
-                from core.order_context_builder import (  # noqa: PLC0415
-                    build_order_context_for_order,
-                )
-                from core.order_context_prefill import build_order_context_api_payload  # noqa: PLC0415
-                from core.order_missing_fields_engine import (  # noqa: PLC0415
-                    augment_divergence_with_confirm_blockers,
-                    log_missing_fields_engine_detail,
-                    missing_fields_result_to_api_dict,
-                )
-
-                ctx = build_order_context_for_order(
-                    db,
-                    tenant_id=int(tenant_id),
-                    order=order,
-                )
-                payload["order_context_prefill"] = build_order_context_api_payload(ctx)
-                if ctx.missing_fields_result is not None:
-                    engine_result = augment_divergence_with_confirm_blockers(
-                        ctx.missing_fields_result,
-                        confirm_blockers=list(payload.get("confirm_blockers") or []),
-                    )
-                    payload["missing_fields_engine"] = missing_fields_result_to_api_dict(
-                        engine_result
-                    )
-                    log_missing_fields_engine_detail(
-                        order_id=getattr(order, "id", None),
-                        tenant_id=int(tenant_id),
-                        result=engine_result,
-                        legacy_missing=list(order_meta.get("missing_fields") or []),
-                        confirm_blockers=list(payload.get("confirm_blockers") or []),
-                        build_source="orders_api_detail",
-                    )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "[ORDERS_API] missing_fields_engine detail failed order_id=%s tenant=%s",
-                    getattr(order, "id", None),
-                    tenant_id,
-                )
-                payload["order_context_prefill"] = None
+        if db is not None and tenant_id is not None:
+            _attach_missing_fields_engine_detail_payload(
+                payload,
+                order,
+                order_meta,
+                db=db,
+                tenant_id=int(tenant_id),
+            )
 
     return payload
 
