@@ -421,6 +421,66 @@ def resolve_commerce_navigator(
     if catalog_order or _catalog_order_authoritative(prep, meta):
         known = _enrich_catalog_order_known_fields(prep, known, inbound_metadata=meta)
 
+    try:
+        from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+            is_online_store_existing_order_message,
+            is_shipping_address_capture_context,
+        )
+
+        if is_shipping_address_capture_context(
+            msg,
+            order_prep=order_prep,
+            stage=stage,
+        ):
+            missing = _resolve_whatsapp_missing_fields(
+                order_prep=order_prep,
+                state=state,
+                whatsapp_phone=whatsapp_phone,
+            )
+            addr_missing = [
+                m for m in missing
+                if m in {
+                    "city",
+                    "delivery_address",
+                    "address",
+                    "address_line",
+                    "short_address_code",
+                    "google_maps_url",
+                }
+            ] or missing
+            return CommerceNavigatorDecision(
+                stage="whatsapp_quick_order",
+                confidence=0.92,
+                reason="customer is providing or correcting delivery address",
+                next_goal="collect_or_confirm_delivery_address",
+                known_fields=known,
+                missing_fields=addr_missing,
+                forbidden_actions=[
+                    "do_not_browse",
+                    "do_not_capture_product_from_message",
+                    "do_not_append_quantity_prompt",
+                    "do_not_push_product_list",
+                ],
+                customer_intent="address_correction",
+            )
+
+        if is_online_store_existing_order_message(msg):
+            return CommerceNavigatorDecision(
+                stage="post_purchase_tracking",
+                confidence=0.88,
+                reason="customer referenced an existing online-store order",
+                next_goal="link_or_verify_existing_online_store_order",
+                known_fields=known,
+                forbidden_actions=[
+                    "do_not_create_whatsapp_line_items_from_text",
+                    "do_not_browse",
+                    "do_not_capture_product_from_message",
+                ],
+                customer_intent="existing_online_store_order",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address/online-store guards must not block navigator
+        pass
+
     if _is_price_objection(
         msg,
         intent_name=intent_name,
@@ -460,8 +520,19 @@ def resolve_commerce_navigator(
     channel = _selected_channel(msg)
     whatsapp_committed = _whatsapp_checkout_committed(prep)
     browse_in_checkout = bool(_BROWSE_SIGNAL_RE.search(_norm(msg)))
+    _address_turn = False
+    try:
+        from core.catalog_authoritative_line_items import is_shipping_address_capture_context  # noqa: PLC0415
 
-    if browse_in_checkout and (
+        _address_turn = is_shipping_address_capture_context(
+            msg,
+            order_prep=order_prep,
+            stage=stage,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address context probe must not block browse routing
+        _address_turn = False
+
+    if browse_in_checkout and not _address_turn and (
         whatsapp_committed
         or channel == "whatsapp_quick_order"
         or _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep)

@@ -239,6 +239,7 @@ class OrderPreparationState:
     checkout_channel: str = ""
     awaiting_checkout_channel: bool = False
     catalog_line_items_authoritative: bool = False
+    product_mentions: List[Dict[str, Any]] = field(default_factory=list)
     # Gift / recipient delivery (P0 gift-order gate)
     recipient_name: str = ""
     fulfillment_kind: str = ""
@@ -313,6 +314,7 @@ class OrderPreparationState:
             "checkout_channel": str(self.checkout_channel or ""),
             "awaiting_checkout_channel": bool(self.awaiting_checkout_channel),
             "catalog_line_items_authoritative": bool(self.catalog_line_items_authoritative),
+            "product_mentions": list(self.product_mentions or []),
             "recipient_name": str(self.recipient_name or ""),
             "fulfillment_kind": str(self.fulfillment_kind or ""),
             "pending_cart_confirmation": dict(self.pending_cart_confirmation or {}),
@@ -385,6 +387,9 @@ class OrderPreparationState:
             catalog_line_items_authoritative=bool(
                 raw.get("catalog_line_items_authoritative", False)
             ),
+            product_mentions=[
+                dict(x) for x in (raw.get("product_mentions") or []) if isinstance(x, dict)
+            ],
             recipient_name=str(raw.get("recipient_name", "") or ""),
             fulfillment_kind=str(raw.get("fulfillment_kind", "") or ""),
             pending_cart_confirmation=dict(raw.get("pending_cart_confirmation") or {}),

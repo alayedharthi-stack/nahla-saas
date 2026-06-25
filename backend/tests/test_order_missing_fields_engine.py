@@ -246,7 +246,16 @@ def test_missing_engine_readiness_ready_for_payment_after_required_fields() -> N
         phone="+966500000001",
         brain_state={
             "order_prep": {
-                "line_items": [{"name": "P", "quantity": 1, "price": 100.0}],
+                "line_items": [{
+                    "name": "P",
+                    "quantity": 1,
+                    "price": 100.0,
+                    "unit_price": 100.0,
+                    "product_id": "p1",
+                    "from_catalog_order": True,
+                    "match_status": "confirmed",
+                    "source": "whatsapp_native_catalog_order",
+                }],
                 "total_price": 100.0,
                 "city": "Riyadh",
                 "google_maps_url": "https://maps.google.com/?q=24,46",
@@ -355,7 +364,14 @@ def test_missing_engine_product_without_total_review_mode() -> None:
         db,
         tenant_id=tenant.id,
         phone="+966500000001",
-        brain_state={"order_prep": {"line_items": [{"name": "P", "quantity": 1}]}},
+        brain_state={"order_prep": {"line_items": [{
+            "name": "P",
+            "quantity": 1,
+            "product_id": "p1",
+            "from_catalog_order": True,
+            "match_status": "confirmed",
+            "source": "whatsapp_native_catalog_order",
+        }]}},
     )
     assert ctx.missing_fields_result.field_states["total"].mode == MODE_COMPUTE_PENDING
     assert ctx.missing_fields_result.readiness_state == READINESS_DRAFT_INCOMPLETE

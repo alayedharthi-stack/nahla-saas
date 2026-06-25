@@ -65,19 +65,41 @@ def test_extract_remove_without_product_is_empty() -> None:
     assert extract_cart_intents("مرحبا") == []
 
 
-def test_apply_add_builds_cart_items() -> None:
+def test_apply_add_builds_cart_items_with_catalog_evidence() -> None:
     state = SimpleNamespace(cart_items=[], current_product_focus={})
     prep = OrderPreparationState()
+    catalog_product = {
+        "id": "ext-99",
+        "external_id": "ext-99",
+        "title": "عسل طلح",
+        "from_catalog_order": True,
+        "price": 120,
+    }
     cart, deltas, changed = apply_cart_intents_to_state(
         state=state,
         prep=prep,
         intents=extract_cart_intents("أبغى كيلو طلح"),
+        product_info=catalog_product,
     )
     assert changed is True
     assert len(cart) == 1
     assert "طلح" in cart[0]["product_name"]
     assert len(prep.cart_deltas) == 1
     assert len(state.cart_items) == 1
+
+
+def test_apply_add_free_text_without_catalog_evidence_is_blocked() -> None:
+    state = SimpleNamespace(cart_items=[], current_product_focus={})
+    prep = OrderPreparationState()
+    cart, deltas, changed = apply_cart_intents_to_state(
+        state=state,
+        prep=prep,
+        intents=extract_cart_intents("أبغى كيلو طلح"),
+        product_info=None,
+    )
+    assert changed is False
+    assert cart == []
+    assert prep.product_mentions
 
 
 def test_apply_remove_does_not_break_on_missing() -> None:
@@ -93,18 +115,31 @@ def test_apply_remove_does_not_break_on_missing() -> None:
 
 
 def test_second_add_merges_via_state() -> None:
+    auth_item = {
+        "product_name": "عسل طلح",
+        "variant": "1kg",
+        "quantity": 1,
+        "product_id": "p1",
+        "from_catalog_order": True,
+        "source": "whatsapp_native_catalog_order",
+        "match_status": "confirmed",
+        "unit_price": 100.0,
+    }
     state = SimpleNamespace(
-        cart_items=[{"product_name": "عسل طلح", "variant": "1kg", "quantity": 1}],
+        cart_items=[dict(auth_item)],
         current_product_focus={},
     )
-    prep = OrderPreparationState(
-        line_items=[{"product_name": "عسل طلح", "variant": "1kg", "quantity": 1}],
-    )
+    prep = OrderPreparationState(line_items=[dict(auth_item)])
     cart, _, changed = apply_cart_intents_to_state(
         state=state,
         prep=prep,
         intents=extract_cart_intents("أضف كيلو طلح"),
-        product_info={"title": "عسل طلح", "external_id": "p1"},
+        product_info={
+            "title": "عسل طلح",
+            "external_id": "p1",
+            "from_catalog_order": True,
+            "price": 100,
+        },
     )
     assert changed
     assert len(cart) == 1
@@ -123,18 +158,31 @@ def test_maybe_apply_cart_message_noop_on_greeting() -> None:
 
 
 def test_focus_not_wiped_when_cart_exists() -> None:
+    auth_talh = {
+        "product_name": "عسل طلح",
+        "variant": "1kg",
+        "quantity": 1,
+        "product_id": "p1",
+        "from_catalog_order": True,
+        "source": "whatsapp_native_catalog_order",
+        "match_status": "confirmed",
+        "unit_price": 100.0,
+    }
     state = SimpleNamespace(
-        cart_items=[{"product_name": "عسل طلح", "variant": "1kg", "quantity": 1}],
+        cart_items=[dict(auth_talh)],
         current_product_focus={"title": "عسل طلح", "id": "p1"},
     )
-    prep = OrderPreparationState(
-        line_items=[{"product_name": "عسل طلح", "variant": "1kg", "quantity": 1}],
-    )
+    prep = OrderPreparationState(line_items=[dict(auth_talh)])
     apply_cart_intents_to_state(
         state=state,
         prep=prep,
         intents=extract_cart_intents("أضف نصف كيلو سمر"),
-        product_info={"title": "عسل سمر", "external_id": "p2"},
+        product_info={
+            "title": "عسل سمر",
+            "external_id": "p2",
+            "from_catalog_order": True,
+            "price": 80,
+        },
     )
     assert len(state.cart_items) == 2
     assert state.current_product_focus.get("title") == "عسل سمر"

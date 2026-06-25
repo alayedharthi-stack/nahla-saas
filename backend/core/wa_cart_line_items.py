@@ -449,15 +449,31 @@ def build_line_items_from_order_prep(
         order_prep, brain_state, existing_meta, existing_line_items,
     ))
 
+    prep_has_items = bool(order_prep.get("line_items"))
     for delta in order_prep.get("cart_deltas") or []:
         if isinstance(delta, dict):
+            if prep_has_items and str(delta.get("op") or "") == "add":
+                continue
             cart, delta_events = apply_cart_delta(cart, delta)
             events.extend(delta_events)
 
     focus_item = _item_from_focus(order_prep, brain_state)
     if focus_item is not None:
-        cart, focus_events = apply_focus_item(cart, focus_item)
-        events.extend(focus_events)
+        from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+            line_item_has_catalog_evidence,
+            product_info_has_catalog_evidence,
+        )
+
+        focus = brain_state.get("current_product_focus") if isinstance(brain_state, dict) else {}
+        if line_item_has_catalog_evidence(focus_item) or product_info_has_catalog_evidence(
+            focus if isinstance(focus, dict) else {}
+        ):
+            cart, focus_events = apply_focus_item(cart, focus_item)
+            events.extend(focus_events)
+
+    from core.catalog_authoritative_line_items import filter_authoritative_line_items  # noqa: PLC0415
+
+    cart = filter_authoritative_line_items(cart)
 
     primary = ""
     for item in cart:

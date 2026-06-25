@@ -113,6 +113,11 @@ def apply_cart_intents_to_state(
     deltas: List[Dict[str, Any]] = []
     events_total: List[Dict[str, Any]] = []
 
+    from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+        cart_add_allowed,
+        store_free_text_product_mention,
+    )
+
     for intent in intents:
         if str(intent.get("action") or "").lower() == "clear_cart":
             cart = []
@@ -139,6 +144,17 @@ def apply_cart_intents_to_state(
             events_total.append({"type": "edition_updated", "edition": edition})
             continue
         if delta.get("op") == "add" and isinstance(delta.get("item"), dict):
+            if not cart_add_allowed(intent=intent, product_info=product_info, order_prep=prep):
+                store_free_text_product_mention(
+                    prep,
+                    mention=str(intent.get("product_name") or delta["item"].get("product_name") or ""),
+                    variant=str(intent.get("variant") or delta["item"].get("variant") or ""),
+                )
+                logger.info(
+                    "[CART_STATE] blocked free-text add | mention=%r",
+                    intent.get("product_name"),
+                )
+                continue
             item = dict(delta["item"])
             if not item.get("query_hint"):
                 item["query_hint"] = str(item.get("product_name") or "")
@@ -249,6 +265,17 @@ def maybe_apply_cart_message(
         cart = list(getattr(prep, "line_items", None) or [])
     focus = product_info or getattr(state, "current_product_focus", None)
     active_commerce = _active_commerce_from_state_and_prep(state, prep)
+    stage = str(getattr(state, "stage", "") or "")
+
+    from core.catalog_authoritative_line_items import should_block_free_text_cart_capture  # noqa: PLC0415
+
+    if should_block_free_text_cart_capture(
+        message=message,
+        order_prep=prep,
+        stage=stage,
+    ):
+        return list(getattr(state, "cart_items", None) or []), [], False
+
     intents = extract_cart_intents_with_context(
         message,
         cart_items=cart,
