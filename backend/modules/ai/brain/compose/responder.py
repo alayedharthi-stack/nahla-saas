@@ -607,6 +607,7 @@ class DefaultComposer:
                         _unsync_prod.get("title"),
                         _unsync_prod.get("external_id"),
                     )
+                    data.pop("product_unsyncable", None)
                 else:
                     logger.error(
                         "[ORDER FLOW] product_unsyncable fired | "
@@ -721,11 +722,29 @@ class DefaultComposer:
                     return _slot_reply
                 return legacy_reply
             if data.get("intent_only"):
+                try:
+                    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+                        is_catalog_line_items_authoritative,
+                    )
+
+                    if is_catalog_line_items_authoritative(ctx):
+                        return None
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
+                    pass
                 return T.order_intent_captured(product=data.get("product", {}))
             _order_ref = str(
                 data.get("reference") or data.get("order_id") or ""
             ).strip()
             if not _order_ref:
+                try:
+                    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+                        is_catalog_line_items_authoritative,
+                    )
+
+                    if is_catalog_line_items_authoritative(ctx):
+                        return None
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
+                    pass
                 return T.order_intent_captured(product=data.get("product", {}))
             return T.draft_order_created(
                 product=data.get("product", {}),

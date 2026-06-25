@@ -438,7 +438,7 @@ def _maybe_apply_native_catalog_order(
         if first:
             state.current_product_focus = {
                 "id": first.get("product_id") or first.get("product_retailer_id"),
-                "external_id": first.get("product_retailer_id") or "",
+                "product_retailer_id": first.get("product_retailer_id") or "",
                 "title": first.get("product_name") or first.get("title") or "",
                 "price": first.get("unit_price") or first.get("price"),
                 "currency": first.get("currency") or meta.get("currency") or "",

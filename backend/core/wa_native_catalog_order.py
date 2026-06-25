@@ -353,6 +353,9 @@ def apply_native_order_to_state(
 
     prep.line_items = list(resolution.line_items)
     state.cart_items = list(resolution.line_items)
+    prep.catalog_line_items_authoritative = True
+    if not str(getattr(prep, "checkout_channel", "") or "").strip():
+        prep.checkout_channel = "whatsapp_catalog"
 
     first_confirmed = next(
         (
@@ -399,7 +402,7 @@ def apply_native_order_to_state(
     )
     state.current_product_focus = {
         "id": (first or {}).get("product_id") or (first or {}).get("product_retailer_id"),
-        "external_id": (first or {}).get("product_retailer_id") or "",
+        "product_retailer_id": (first or {}).get("product_retailer_id") or "",
         "title": (first or {}).get("product_name") or (first or {}).get("title") or "",
         "price": (first or {}).get("unit_price") or (first or {}).get("price"),
         "currency": (first or {}).get("currency") or "",
