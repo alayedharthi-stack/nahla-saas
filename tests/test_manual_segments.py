@@ -1221,6 +1221,66 @@ class TestCustomersListEndpointContract:
         result = self._call_segments(engine, tenant_id)
         assert result["campaignExcludedCount"] == 2
 
+    def test_segments_campaign_excluded_count_increments_after_patch(self):
+        """PATCH opt-out must bump ``campaignExcludedCount`` immediately."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(db, t.id, "+966500000001")
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        before = self._call_segments(engine, tenant_id)
+        assert before["campaignExcludedCount"] == 0
+
+        self._call_patch_marketing_prefs(
+            engine, tenant_id, customer_id, opted_out=True,
+        )
+        after = self._call_segments(engine, tenant_id)
+        assert after["campaignExcludedCount"] == before["campaignExcludedCount"] + 1
+
+    def test_segments_campaign_excluded_count_decrements_after_unpatch(self):
+        """Removing manual opt-out must drop ``campaignExcludedCount``."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        c = _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        tenant_id, customer_id = t.id, c.id
+        db.close()
+
+        before = self._call_segments(engine, tenant_id)
+        assert before["campaignExcludedCount"] == 1
+
+        self._call_patch_marketing_prefs(
+            engine, tenant_id, customer_id, opted_out=False,
+        )
+        after = self._call_segments(engine, tenant_id)
+        assert after["campaignExcludedCount"] == before["campaignExcludedCount"] - 1
+
+    def test_segments_campaign_excluded_count_tenant_wide_not_narrowed_by_list_segment(
+        self,
+    ):
+        """``/customers/segments`` count is tenant-wide regardless of list filters."""
+        db, engine = _make_db()
+        t = _seed_tenant(db)
+        _seed_customer(
+            db, t.id, "+966500000001",
+            extra={META_KEY_OPT_OUT: True},
+        )
+        _seed_customer(db, t.id, "+966500000002")
+        tenant_id = t.id
+        db.close()
+
+        segments = self._call_segments(engine, tenant_id)
+        assert segments["campaignExcludedCount"] == 1
+
+        # Narrow list to VIP segment — segments count must stay the same.
+        vip_only = self._call_list(engine, tenant_id, segment="vip")
+        assert vip_only["total"] == 0
+        segments_again = self._call_segments(engine, tenant_id)
+        assert segments_again["campaignExcludedCount"] == 1
+
     def _call_delete(self, engine, tenant_id: int, customer_id: int, segment_key: str):
         """Direct in-process call to ``remove_customer_segment``."""
         import asyncio

@@ -452,6 +452,22 @@ export default function Customers() {
     loadSegments()
   }, [loadSegments])
 
+  // Re-fetch segment counts when the merchant returns to this tab after
+  // excluding a customer from Conversations (or another browser tab).
+  useEffect(() => {
+    const refreshSegments = () => {
+      if (document.visibilityState === 'visible') {
+        void loadSegments()
+      }
+    }
+    window.addEventListener('focus', refreshSegments)
+    document.addEventListener('visibilitychange', refreshSegments)
+    return () => {
+      window.removeEventListener('focus', refreshSegments)
+      document.removeEventListener('visibilitychange', refreshSegments)
+    }
+  }, [loadSegments])
+
   useEffect(() => {
     setPage(1)
   }, [search, segmentKey, manualSegmentKey, marketingOptOutFilter])
@@ -1325,11 +1341,14 @@ export default function Customers() {
         </div>
 
         <button
-          onClick={load}
-          disabled={loading}
+          onClick={() => {
+            void load()
+            void loadSegments()
+          }}
+          disabled={loading || segmentsLoading}
           className="btn-secondary text-sm flex items-center gap-2"
         >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-4 h-4 ${loading || segmentsLoading ? 'animate-spin' : ''}`} />
           {cu.actions.refresh}
         </button>
 
@@ -2245,6 +2264,7 @@ export default function Customers() {
                                         return next
                                       })
                                     }
+                                    void loadSegments()
                                   }}
                                 />
                               </div>
