@@ -499,7 +499,22 @@ def _resolve_order_amount(
         if explicit_amt is not None:
             return explicit_amt, False, "confirmed_payment_amount"
 
-    for key in ("total_price", "price"):
+    from core.wa_cart_line_items import cart_total_amount  # noqa: PLC0415
+
+    cart_total = cart_total_amount(line_items)
+    prep_total = _parse_amount(order_prep.get("total_price"))
+
+    # Multi-item carts: line_items sum beats order_prep.price (often last focus item).
+    if cart_total is not None and len(line_items) > 1:
+        return cart_total, False, "line_items"
+
+    if prep_total is not None:
+        return prep_total, False, "order_prep_total_price"
+
+    if cart_total is not None:
+        return cart_total, False, "line_items"
+
+    for key in ("price",):
         amt = _parse_amount(order_prep.get(key))
         if amt is not None:
             return amt, False, "order_prep_total_price"
@@ -509,12 +524,6 @@ def _resolve_order_amount(
         amt = _parse_amount(focus.get("price"))
         if amt is not None:
             return amt, False, "product_focus_price"
-
-    from core.wa_cart_line_items import cart_total_amount  # noqa: PLC0415
-
-    cart_total = cart_total_amount(line_items)
-    if cart_total is not None:
-        return cart_total, False, "line_items"
 
     return None, not is_paid_path, "unknown"
 
