@@ -1,12 +1,15 @@
 """OrderFlowV2 missing fields — ordered checkout slot collection."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.wa_order_lifecycle import compute_wa_missing_fields
 
 from .state import has_payment_method, line_items_from_state
 from .slot_ownership import has_address_evidence
+
+logger = logging.getLogger("nahla.order_flow_v2.missing_fields")
 
 _V2_FIELD_ORDER: Tuple[str, ...] = (
     "customer_name",
@@ -47,7 +50,7 @@ def compute_v2_missing_fields(
                 if engine_result is not None:
                     return engine_missing
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("[ORDER_FLOW_V2] missing_fields_engine resolve failed")
 
     bs = dict(brain_state or {})
     items = line_items_from_state(order_prep, bs)
