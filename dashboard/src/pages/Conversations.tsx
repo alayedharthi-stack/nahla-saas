@@ -176,6 +176,8 @@ export default function Conversations() {
   const [editNameOpen, setEditNameOpen] = useState(false)
   const [editNameSaving, setEditNameSaving] = useState(false)
   const [endingSupervision, setEndingSupervision] = useState(false)
+  const [pausingAI, setPausingAI] = useState(false)
+  const [resumingAI, setResumingAI] = useState(false)
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false)
   const [excludeModalRequest, setExcludeModalRequest] = useState<'exclude' | 're-enable' | null>(null)
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
@@ -351,6 +353,13 @@ export default function Conversations() {
     } finally {
       if (gen === listReqGen.current) listBusyRef.current = false
     }
+  }
+
+  /** Refresh inbox head without blocking action buttons (pause, exclude, …). */
+  const refreshListInBackground = (opts?: { silent?: boolean }) => {
+    void reloadFirstPagePreserveTail({ silent: opts?.silent ?? true }).catch((err) => {
+      console.warn('[CONV_LIST] background refresh failed', err)
+    })
   }
 
   const replaceFirstPageFromServer = async (opts?: { signal?: AbortSignal }) => {
@@ -853,6 +862,17 @@ export default function Conversations() {
     })
   }
 
+  const _bumpPausedFilterCounts = (nextPaused: boolean) => {
+    setFilterCounts(prev => {
+      if (!prev) return prev
+      const cur = prev.paused ?? 0
+      return {
+        ...prev,
+        paused: Math.max(0, cur + (nextPaused ? 1 : -1)),
+      }
+    })
+  }
+
   const _handleCampaignExcludeSuccess = (phone: string, nextOptedOut: boolean) => {
     _optimisticUpdate(phone, { marketingOptOutManual: nextOptedOut })
     _bumpCampaignExcludedFilterCounts(nextOptedOut)
@@ -861,7 +881,7 @@ export default function Conversations() {
         ? cp.toasts.excludedFromCampaigns
         : cp.toasts.reEnabledFromCampaigns,
     )
-    void reloadFirstPagePreserveTail({ silent: true })
+    refreshListInBackground()
   }
 
   const _applyCustomerNameByPhone = (phone: string, newName: string) => {
@@ -936,7 +956,7 @@ export default function Conversations() {
         aiPaused: true,
         aiPausedReason: 'manual_takeover',
       })
-      await reloadFirstPagePreserveTail({ silent: true })
+      refreshListInBackground()
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.handoffFailed)
     }
@@ -977,7 +997,8 @@ export default function Conversations() {
   }
 
   const pauseIntelligenceForSelected = async () => {
-    if (!selected) return
+    if (!selected || pausingAI) return
+    setPausingAI(true)
     console.log('[AI_PAUSE_UI] request pause phone=', selected.phone, 'reason=manual_pause')
     try {
       const res = await featureRealityApi.pauseConversationAI({
@@ -990,9 +1011,12 @@ export default function Conversations() {
         aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
         aiPausedAt: res.aiPausedAt ?? null,
       })
-      await reloadFirstPagePreserveTail({ silent: true })
+      _bumpPausedFilterCounts(!!res.aiPaused)
+      refreshListInBackground()
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.pauseFailed)
+    } finally {
+      setPausingAI(false)
     }
   }
 
@@ -1041,8 +1065,8 @@ export default function Conversations() {
       _applyReturnToAIState(selected.phone)
       setActionToast(cp.toasts.resumedToAI)
       setHeaderMenuOpen(false)
-      await reloadFirstPagePreserveTail({ silent: true })
-      await loadMessagesForOpenChat(selected.phone)
+      refreshListInBackground()
+      void loadMessagesForOpenChat(selected.phone)
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.resumeFailed)
     } finally {
@@ -1051,7 +1075,7 @@ export default function Conversations() {
   }
 
   const resumeIntelligenceForSelected = async () => {
-    if (!selected) return
+    if (!selected || resumingAI) return
     const inTakeover =
       !!selected.needsHuman ||
       !!selected.handoffActive ||
@@ -1059,6 +1083,7 @@ export default function Conversations() {
     console.log(
       `[AI_RESUME_UI] phone=${selected.phone} takeover=${inTakeover}`,
     )
+    setResumingAI(true)
     try {
       if (inTakeover) {
         await featureRealityApi.returnHandoffToAI({
@@ -1074,11 +1099,14 @@ export default function Conversations() {
           aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
           aiPausedAt: res.aiPausedAt ?? null,
         })
+        if (!res.aiPaused) _bumpPausedFilterCounts(false)
       }
-      await reloadFirstPagePreserveTail({ silent: true })
-      await loadMessagesForOpenChat(selected.phone)
+      refreshListInBackground()
+      void loadMessagesForOpenChat(selected.phone)
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.unpauseFailed)
+    } finally {
+      setResumingAI(false)
     }
   }
 
@@ -1100,7 +1128,7 @@ export default function Conversations() {
         aiPausedAt: new Date().toISOString(),
       })
       _optimisticUpdate(selected.phone, { isBlocked: true })
-      await reloadFirstPagePreserveTail({ silent: true })
+      refreshListInBackground()
     } catch (e) {
       alert(e instanceof Error ? e.message : cp.errors.blockFailed)
     }
@@ -1600,8 +1628,9 @@ export default function Conversations() {
                   const intelligenceOff = humanTakeover || !!selected.aiPaused
                   return intelligenceOff ? (
                     <button
-                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
+                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50"
                       onClick={resumeIntelligenceForSelected}
+                      disabled={resumingAI}
                       title={cp.actions.resumeAI}
                       aria-label={cp.actions.resumeAI}
                     >
@@ -1610,8 +1639,9 @@ export default function Conversations() {
                     </button>
                   ) : (
                     <button
-                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100"
+                      className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-amber-600 border-amber-200 bg-amber-50 hover:bg-amber-100 disabled:opacity-50"
                       onClick={pauseIntelligenceForSelected}
+                      disabled={pausingAI}
                       title={cp.actions.pauseAI}
                       aria-label={cp.actions.pauseAI}
                     >
