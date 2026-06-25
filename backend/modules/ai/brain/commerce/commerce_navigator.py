@@ -120,7 +120,7 @@ def _order_prep_dict(order_prep: Any) -> Dict[str, Any]:
     if hasattr(order_prep, "to_dict"):
         try:
             return dict(order_prep.to_dict())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order_prep.to_dict() is best-effort
             pass
     return {}
 
