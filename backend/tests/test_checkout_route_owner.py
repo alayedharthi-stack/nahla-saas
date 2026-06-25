@@ -27,6 +27,7 @@ from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
     available_channels,
     build_channel_choice_buttons,
     build_channel_choice_prompt,
+    build_purchase_channel_selection_facts,
     evaluate_checkout_route_owner,
     has_checkout_entry_intent,
     has_checkout_route_intent,
@@ -89,7 +90,7 @@ class TestCheckoutRouteIntent:
 
 
 class TestChannelChoicePrompt:
-    def test_prompt_includes_checkout_entry_options_when_configured(self) -> None:
+    def test_prompt_includes_three_purchase_channels_when_configured(self) -> None:
         caps = CheckoutChannelCapabilities(
             whatsapp_fast=True,
             store_link=True,
@@ -99,14 +100,22 @@ class TestChannelChoicePrompt:
         prompt = build_channel_choice_prompt(caps)
         assert "طلب سريع عبر واتساب" in prompt
         assert "الطلب من المتجر الإلكتروني" in prompt
-        assert "لدي استفسار" in prompt
-        assert "زيارة المعرض" not in prompt
+        assert "زيارة المعرض" in prompt
+        assert "لدي استفسار" not in prompt
+        assert "عندي استفسار" not in prompt
 
         buttons = build_channel_choice_buttons(caps)
         assert [b["reply"]["title"] for b in buttons] == [
             "طلب سريع واتساب",
             "فتح المتجر",
-            "عندي استفسار",
+            "زيارة المعرض",
+        ]
+
+        facts = build_purchase_channel_selection_facts(caps)
+        assert facts["available_purchase_channels"] == [
+            "whatsapp_quick_order",
+            "online_store",
+            "showroom_visit",
         ]
 
     def test_prompt_omits_showroom_when_not_configured(self) -> None:
@@ -118,6 +127,13 @@ class TestChannelChoicePrompt:
         )
         prompt = build_channel_choice_prompt(caps)
         assert "زيارة المعرض" not in prompt
+        assert "لدي استفسار" not in prompt
+        assert prompt.count("\n") == 2  # header + 2 options
+        facts = build_purchase_channel_selection_facts(caps)
+        assert facts["available_purchase_channels"] == [
+            "whatsapp_quick_order",
+            "online_store",
+        ]
 
 
 class TestCheckoutRouteOwnerPreBrain:
@@ -153,8 +169,8 @@ class TestCheckoutRouteOwnerPreBrain:
         assert "كيف تحب تكمل؟" in decision.reply_text
         assert "طلب سريع عبر واتساب" in decision.reply_text
         assert "الطلب من المتجر الإلكتروني" in decision.reply_text
-        assert "لدي استفسار" in decision.reply_text
-        assert len(decision.buttons) == 3
+        assert "لدي استفسار" not in decision.reply_text
+        assert len(decision.buttons) == 2
         persist.assert_called_once()
 
     def test_price_ask_defers_to_brain_not_channel_choice(
@@ -265,7 +281,7 @@ class TestCheckoutRouteOwnerPreBrain:
         assert decision.reason == "whatsapp_fast_selected"
         assert "وش المنتج" in decision.reply_text
 
-    def test_inquiry_choice_defers_to_brain(
+    def test_inquiry_phrase_defers_to_brain_without_channel_slot(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -300,7 +316,8 @@ class TestCheckoutRouteOwnerPreBrain:
 
         assert decision is None
         persist.assert_called_once()
-        assert parse_checkout_channel_choice("3", caps=caps) == CHECKOUT_CHANNEL_INQUIRY
+        assert parse_checkout_channel_choice("3", caps=caps) is None
+        assert CHECKOUT_CHANNEL_INQUIRY not in available_channels(caps)
 
     def test_catalog_missing_question_repeats_help_with_buttons(
         self,
@@ -340,7 +357,7 @@ class TestCheckoutRouteOwnerPreBrain:
         assert "إذا ما ظهر لك الكتالوج" in decision.reply_text
         assert "عكبر" not in decision.reply_text
         assert "هلا قولي" not in decision.reply_text
-        assert len(decision.buttons) == 3
+        assert len(decision.buttons) == 2
 
     def test_question_mark_after_catalog_missing_not_broken_reply(
         self,
@@ -412,7 +429,7 @@ class TestCheckoutRouteOwnerPreBrain:
             )
 
         assert decision is None
-        persist.assert_called_once()
+        persist.assert_not_called()
 
     def test_showroom_channel_allows_staff_policies(
         self,

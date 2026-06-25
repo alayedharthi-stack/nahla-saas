@@ -1889,14 +1889,32 @@ class MerchantBrain:
         # they are equally suspect. Clearing forces the user to trigger a
         # fresh search rather than looping on the same unavailable products.
         if result.data.get("product_unsyncable"):
-            logger.warning(
-                "[ORDER FLOW] dropping product focus + search candidates — "
-                "product unsyncable on store | previous_focus=%s",
-                (new_state.current_product_focus or {}).get("title"),
-            )
-            new_state.current_product_focus = None
-            new_state.order_prep = OrderPreparationState()
-            new_state.last_search_candidates = []
+            _keep_catalog_prep = False
+            try:
+                from .commerce.catalog_order_checkout import (  # noqa: PLC0415
+                    is_catalog_line_items_authoritative_from_prep,
+                )
+
+                _keep_catalog_prep = is_catalog_line_items_authoritative_from_prep(
+                    getattr(new_state, "order_prep", None),
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
+                _keep_catalog_prep = False
+            if _keep_catalog_prep:
+                logger.warning(
+                    "[ORDER FLOW] product_unsyncable ignored — catalog line items authoritative | "
+                    "previous_focus=%s",
+                    (new_state.current_product_focus or {}).get("title"),
+                )
+            else:
+                logger.warning(
+                    "[ORDER FLOW] dropping product focus + search candidates — "
+                    "product unsyncable on store | previous_focus=%s",
+                    (new_state.current_product_focus or {}).get("title"),
+                )
+                new_state.current_product_focus = None
+                new_state.order_prep = OrderPreparationState()
+                new_state.last_search_candidates = []
 
         # ── 6b. Persist search candidates so user can pick by number ─────────
         # IMPORTANT: the source of truth is the executor (search.py returns
@@ -3672,10 +3690,16 @@ def _build_reply_state(
         from .state.price_objection_topic import (  # noqa: PLC0415
             build_price_objection_facts,
             detect_price_objection_topic_shift,
+            enrich_price_objection_facts_with_active_order,
         )
 
         if detect_price_objection_topic_shift(ctx.message or ""):
-            known_facts["price_objection"] = build_price_objection_facts(ctx.message or "")
+            known_facts["price_objection"] = enrich_price_objection_facts_with_active_order(
+                build_price_objection_facts(ctx.message or ""),
+                state=current_state,
+                order_prep=getattr(current_state, "order_prep", None),
+                inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
+            )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
         pass
 

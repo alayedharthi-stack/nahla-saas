@@ -158,6 +158,15 @@ def _quantity_already_provided(ctx: BrainContext) -> bool:
     if line_items and _total_quantity_from_items(line_items) > 0:
         return True
 
+    if op and bool(getattr(op, "catalog_line_items_authoritative", False)):
+        try:
+            if int(getattr(op, "quantity", 0) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if line_items:
+            return True
+
     try:
         qty = int(getattr(op, "quantity", 0) or 0)
     except (TypeError, ValueError):

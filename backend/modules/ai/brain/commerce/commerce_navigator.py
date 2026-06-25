@@ -16,6 +16,7 @@ logger = logging.getLogger("nahla.brain.commerce_navigator")
 
 CommerceStage = Literal[
     "browse",
+    "browse_with_purchase_intent",
     "price_objection",
     "purchase_channel_selection",
     "whatsapp_quick_order",
@@ -82,9 +83,12 @@ _SHOWROOM_CHANNEL_RE = re.compile(
 
 _BROWSE_SIGNAL_RE = re.compile(
     r"(?:"
-    r"\u0639\u0646\u062f(?:\u0643\u0645|\u0643)?\s*(?:\u0625?\u064a\u0634|\u0627\u064a\u0634|\u0648\u0634|\u0627\u064a\u0647|\u0627\u064a\u0647)"
+    r"\u0648\u0634\s*\u0639\u0646\u062f(?:\u0643\u0645|\u0643)?"
+    r"|\u0639\u0646\u062f(?:\u0643\u0645|\u0643)?\s*(?:\u0625?\u064a\u0634|\u0627\u064a\u0634|\u0648\u0634|\u0627\u064a\u0647|\u0627\u064a\u0647)"
     r"|\u0623?\u0634\u0648\u0641|\u0627\u0634\u0648\u0641|\u0623?\u062a\u0641\u0631\u062c|\u0627\u062a\u0641\u0631\u062c|\u0645\u062a\u0648\u0641\u0631"
     r"|\u0623?\u0646\u0648\u0627\u0639|\u0627\u0646\u0648\u0627\u0639|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a"
+    r"|\u0648\u0634\s*(?:\u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a|\u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a|\u0627\u0644\u0645\u062a\u0648\u0641\u0631)"
+    r"|\u0627\u0639\u0631\u0636\s*(?:\u0627\u0644\u0645\u0646\u062a\u062c\u0627\u062a|\u0644\u064a|\u0644\u0646\u0627)?"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -149,6 +153,47 @@ def _known_fields_from_prep(prep: Dict[str, Any]) -> Dict[str, Any]:
     return known
 
 
+def _whatsapp_checkout_committed(prep: Dict[str, Any]) -> bool:
+    channel = str(prep.get("checkout_channel") or "").strip().lower()
+    return channel in {"whatsapp_fast", "whatsapp_quick_order"}
+
+
+def _catalog_order_authoritative(
+    prep: Dict[str, Any],
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if prep.get("catalog_line_items_authoritative"):
+        return True
+    line_items = prep.get("line_items") or []
+    if isinstance(line_items, list) and line_items:
+        if prep.get("catalog_checkout_total") is not None:
+            return True
+    meta = dict(inbound_metadata or {})
+    if str(meta.get("source_type") or "").strip().lower() == "catalog_order":
+        items = meta.get("product_items") or []
+        if isinstance(items, list) and items:
+            return True
+    return False
+
+
+def _enrich_catalog_order_known_fields(
+    prep: Dict[str, Any],
+    known: Dict[str, Any],
+    *,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not _catalog_order_authoritative(prep, inbound_metadata):
+        return known
+    enriched = dict(known)
+    enriched["product"] = "known"
+    enriched["quantity"] = "known"
+    enriched["total"] = "known"
+    total = prep.get("catalog_checkout_total") or prep.get("order_total")
+    if total is not None:
+        enriched["order_total"] = total
+    return enriched
+
+
 def _resolve_whatsapp_missing_fields(
     *,
     order_prep: Any,
@@ -175,6 +220,12 @@ def _resolve_whatsapp_missing_fields(
         )
     except Exception:  # noqa: BLE001
         missing = list(prep.get("missing_fields") or [])
+
+    if _catalog_order_authoritative(prep):
+        missing = [
+            m for m in missing
+            if m not in {"product", "quantity", "variant"}
+        ]
 
     has_product = "product" not in missing
     qty = prep.get("quantity")
@@ -223,6 +274,15 @@ def _forbidden_for_price_objection() -> List[str]:
         "do_not_ask_payment",
         "do_not_ask_address",
         "do_not_offer_unapproved_discount",
+    ]
+
+
+def _forbidden_for_browse_with_purchase_intent() -> List[str]:
+    return [
+        "do_not_create_order_yet",
+        "do_not_ask_payment",
+        "do_not_ask_address_until_product_selected",
+        "do_not_append_quantity_prompt",
     ]
 
 
@@ -356,6 +416,10 @@ def resolve_commerce_navigator(
     prep = _order_prep_dict(order_prep)
     known = _known_fields_from_prep(prep)
     channels = list(_ALL_CHANNELS)
+    meta = dict(inbound_metadata or {})
+    catalog_order = _is_catalog_order(inbound_metadata)
+    if catalog_order or _catalog_order_authoritative(prep, meta):
+        known = _enrich_catalog_order_known_fields(prep, known, inbound_metadata=meta)
 
     if _is_price_objection(
         msg,
@@ -393,11 +457,29 @@ def resolve_commerce_navigator(
             forbidden_actions=["do_not_restart_checkout", "do_not_ask_address"],
         )
 
-    catalog_order = _is_catalog_order(inbound_metadata)
     channel = _selected_channel(msg)
+    whatsapp_committed = _whatsapp_checkout_committed(prep)
+    browse_in_checkout = bool(_BROWSE_SIGNAL_RE.search(_norm(msg)))
+
+    if browse_in_checkout and (
+        whatsapp_committed
+        or channel == "whatsapp_quick_order"
+        or _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep)
+    ):
+        return CommerceNavigatorDecision(
+            stage="browse_with_purchase_intent",
+            confidence=0.9,
+            reason="product browse inside committed whatsapp purchase path",
+            next_goal="show_or_summarize_available_products_or_send_catalog",
+            known_fields=known,
+            forbidden_actions=_forbidden_for_browse_with_purchase_intent(),
+            customer_intent="browse",
+        )
+
     active_wa = (
         catalog_order
         or channel == "whatsapp_quick_order"
+        or whatsapp_committed
         or (
             channel is None
             and _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep)
@@ -471,7 +553,7 @@ def resolve_commerce_navigator(
             customer_intent="whatsapp_quick_order",
         )
 
-    if _is_generic_buy_intent(msg, intent_name=intent_name) and not _BROWSE_SIGNAL_RE.search(_norm(msg)):
+    if _is_generic_buy_intent(msg, intent_name=intent_name) and not browse_in_checkout:
         return CommerceNavigatorDecision(
             stage="purchase_channel_selection",
             confidence=0.91,

@@ -66,7 +66,7 @@ _CHECKOUT_ENTRY_RE = re.compile(
 )
 
 _CHANNEL_INQUIRY_RE = re.compile(
-    r"(?:checkout_inquiry|^\s*3\s*$|استفسار|سؤال|عندي\s*استفسار|لدي\s*استفسار)",
+    r"(?:checkout_inquiry|استفسار|سؤال|عندي\s*استفسار|لدي\s*استفسار)",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -117,7 +117,7 @@ _CHANNEL_STORE_RE = re.compile(
 
 _CHANNEL_SHOWROOM_RE = re.compile(
     r"(?:"
-    r"^\s*3\s*$|"
+    r"checkout_showroom_visit|"
     r"المعرض|الفرع|"
     r"زي(?:ارة|اره)|"
     r"استلام\s*من|أ?ستلم\s*من|"
@@ -397,6 +397,32 @@ def _compose_prior_catalog_fallback_decision(
     )
 
 
+def _should_defer_to_brain_while_awaiting_channel(message: str) -> bool:
+    """Product/inquiry turns should reach the brain, not repeat channel buttons."""
+    raw = (message or "").strip()
+    if not raw or is_catalog_visibility_question(raw):
+        return False
+    if has_checkout_entry_intent(raw):
+        return False
+    if _CHANNEL_INQUIRY_RE.search(_norm(raw)):
+        return False
+    try:
+        from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+            INTENT_GREETING,
+            INTENT_SOCIAL,
+            INTENT_START_ORDER,
+            match as match_intent,
+        )
+
+        intent = match_intent(raw)
+        intent_name = str(getattr(intent, "name", intent) or "").strip()
+        if intent_name and intent_name not in {INTENT_START_ORDER, INTENT_GREETING, INTENT_SOCIAL}:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — intent probe must not block route owner
+        pass
+    return False
+
+
 def parse_checkout_channel_choice(
     message: str,
     *,
@@ -428,41 +454,58 @@ def parse_checkout_channel_choice(
     return None
 
 
+_CHANNEL_LABELS: Dict[str, str] = {
+    CHECKOUT_CHANNEL_WHATSAPP: "طلب سريع عبر واتساب",
+    CHECKOUT_CHANNEL_STORE: "الطلب من المتجر الإلكتروني",
+    CHECKOUT_CHANNEL_SHOWROOM: "زيارة المعرض",
+}
+
+_CHANNEL_BUTTONS: Dict[str, Dict[str, Any]] = {
+    CHECKOUT_CHANNEL_WHATSAPP: {
+        "type": "reply",
+        "reply": {"id": "checkout_whatsapp_fast", "title": "طلب سريع واتساب"},
+    },
+    CHECKOUT_CHANNEL_STORE: {
+        "type": "reply",
+        "reply": {"id": "checkout_store_link", "title": "فتح المتجر"},
+    },
+    CHECKOUT_CHANNEL_SHOWROOM: {
+        "type": "reply",
+        "reply": {"id": "checkout_showroom_visit", "title": "زيارة المعرض"},
+    },
+}
+
+_PURCHASE_CHANNEL_FACT_MAP: Dict[str, str] = {
+    CHECKOUT_CHANNEL_WHATSAPP: "whatsapp_quick_order",
+    CHECKOUT_CHANNEL_STORE: "online_store",
+    CHECKOUT_CHANNEL_SHOWROOM: "showroom_visit",
+}
+
+
+def build_purchase_channel_selection_facts(
+    caps: CheckoutChannelCapabilities,
+) -> Dict[str, Any]:
+    """Structured purchase-channel facts for compose — not customer reply text."""
+    channels = available_channels(caps) or [CHECKOUT_CHANNEL_WHATSAPP]
+    return {
+        "available_purchase_channels": [
+            _PURCHASE_CHANNEL_FACT_MAP[ch] for ch in channels
+        ],
+    }
+
+
 def build_channel_choice_prompt(caps: CheckoutChannelCapabilities) -> str:
     """Deterministic channel-choice question based on tenant capabilities."""
-    lines: List[str] = []
-    options: List[str] = []
-    if caps.whatsapp_fast:
-        options.append("1- طلب سريع عبر واتساب")
-    if caps.store_link:
-        options.append("2- الطلب من المتجر الإلكتروني")
-    options.append("3- لدي استفسار")
-
-    if not options:
-        options.append("1- طلب سريع عبر واتساب")
-
-    lines.append("كيف تحب تكمل؟")
-    lines.extend(options)
+    channels = available_channels(caps) or [CHECKOUT_CHANNEL_WHATSAPP]
+    lines: List[str] = ["كيف تحب تكمل؟"]
+    for idx, channel in enumerate(channels, start=1):
+        lines.append(f"{idx}- {_CHANNEL_LABELS[channel]}")
     return "\n".join(lines)
 
 
 def build_channel_choice_buttons(caps: CheckoutChannelCapabilities) -> Tuple[Dict[str, Any], ...]:
-    buttons: List[Dict[str, Any]] = []
-    if caps.whatsapp_fast:
-        buttons.append({
-            "type": "reply",
-            "reply": {"id": "checkout_whatsapp_fast", "title": "طلب سريع واتساب"},
-        })
-    if caps.store_link:
-        buttons.append({
-            "type": "reply",
-            "reply": {"id": "checkout_store_link", "title": "فتح المتجر"},
-        })
-    buttons.append({
-        "type": "reply",
-        "reply": {"id": "checkout_inquiry", "title": "عندي استفسار"},
-    })
-    return tuple(buttons[:3])
+    channels = available_channels(caps) or [CHECKOUT_CHANNEL_WHATSAPP]
+    return tuple(_CHANNEL_BUTTONS[ch] for ch in channels[:3])
 
 
 def build_catalog_visibility_reply(caps: CheckoutChannelCapabilities) -> str:
@@ -662,6 +705,8 @@ def evaluate_checkout_route_owner(
         picked = parse_checkout_channel_choice(raw, caps=caps)
         if not picked:
             catalog_help = is_catalog_visibility_question(raw)
+            if _should_defer_to_brain_while_awaiting_channel(raw):
+                return None
             if not catalog_help and has_checkout_route_intent(raw):
                 persist_checkout_route_state(
                     db,
@@ -794,6 +839,7 @@ __all__ = [
     "build_catalog_visibility_reply",
     "build_channel_choice_buttons",
     "build_channel_choice_prompt",
+    "build_purchase_channel_selection_facts",
     "checkout_route_owner_enabled",
     "evaluate_checkout_route_owner",
     "has_checkout_entry_intent",

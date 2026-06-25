@@ -100,6 +100,38 @@ def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
     return None
 
 
+def is_catalog_line_items_authoritative_from_prep(order_prep: Any) -> bool:
+    """True when native catalog line items must not be cleared or re-prompted."""
+    if order_prep is None:
+        return False
+    if isinstance(order_prep, dict):
+        if order_prep.get("catalog_line_items_authoritative"):
+            return True
+        line_items = order_prep.get("line_items") or []
+        if isinstance(line_items, list) and line_items:
+            if order_prep.get("catalog_checkout_total") is not None:
+                return True
+        return False
+    if bool(getattr(order_prep, "catalog_line_items_authoritative", False)):
+        return True
+    line_items = list(getattr(order_prep, "line_items", None) or [])
+    if line_items and getattr(order_prep, "catalog_checkout_total", None) is not None:
+        return True
+    return False
+
+
+def is_catalog_line_items_authoritative(ctx: BrainContext) -> bool:
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+    if is_catalog_line_items_authoritative_from_prep(prep):
+        return True
+    meta = _inbound_metadata(ctx)
+    if str(meta.get("source_type") or "").strip().lower() == "catalog_order":
+        items = meta.get("product_items") or []
+        return isinstance(items, list) and bool(items)
+    return False
+
+
 def maybe_enforce_catalog_order_continue_checkout(
     ctx: BrainContext,
     decision: Decision,
@@ -158,6 +190,8 @@ def maybe_enforce_catalog_order_continue_checkout(
 
 __all__ = [
     "catalog_order_continue_checkout_enabled",
+    "is_catalog_line_items_authoritative",
+    "is_catalog_line_items_authoritative_from_prep",
     "is_current_catalog_order_submitted",
     "maybe_enforce_catalog_order_continue_checkout",
 ]

@@ -280,10 +280,75 @@ def build_price_objection_facts(message: str) -> Dict[str, Any]:
     }
 
 
+def enrich_price_objection_facts_with_active_order(
+    facts: Dict[str, Any],
+    *,
+    state: Any = None,
+    order_prep: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Attach active catalog-order context so price objections stay order-scoped."""
+    out = dict(facts or {})
+    prep: Dict[str, Any] = {}
+    if isinstance(order_prep, dict):
+        prep = dict(order_prep)
+    elif order_prep is not None and hasattr(order_prep, "to_dict"):
+        try:
+            prep = dict(order_prep.to_dict())
+        except Exception:  # noqa: BLE001
+            prep = {}
+    elif state is not None:
+        raw_prep = getattr(state, "order_prep", None)
+        if isinstance(raw_prep, dict):
+            prep = dict(raw_prep)
+        elif raw_prep is not None and hasattr(raw_prep, "to_dict"):
+            try:
+                prep = dict(raw_prep.to_dict())
+            except Exception:  # noqa: BLE001
+                prep = {}
+
+    meta = dict(inbound_metadata or {})
+    line_items = list(prep.get("line_items") or [])
+    if not line_items and state is not None:
+        line_items = list(getattr(state, "cart_items", None) or [])
+
+    active = bool(
+        prep.get("catalog_line_items_authoritative")
+        or line_items
+        or prep.get("catalog_checkout_total") is not None
+        or str(meta.get("source_type") or "").strip().lower() == "catalog_order"
+    )
+    if not active:
+        return out
+
+    total = prep.get("catalog_checkout_total") or prep.get("order_total")
+    if total is None:
+        total = meta.get("total_price")
+
+    claimed = out.get("mentioned_catalog_or_expected_price")
+    if claimed is None and out.get("competitor_price_claim") is not None:
+        out["customer_claimed_competitor_or_expected_price"] = out.get(
+            "competitor_price_claim"
+        )
+    elif claimed is not None:
+        out["customer_claimed_competitor_or_expected_price"] = claimed
+
+    out.update({
+        "active_catalog_order": True,
+        "current_order_total": total,
+        "current_order_line_items_count": len(line_items) or int(
+            meta.get("line_items_count") or 0
+        ) or None,
+        "must_not_ask_which_product_if_active_order_exists": True,
+    })
+    return out
+
+
 __all__ = [
     "build_price_objection_facts",
     "customer_claimed_price_numbers",
     "detect_price_objection_topic_shift",
+    "enrich_price_objection_facts_with_active_order",
     "has_explicit_current_buy_quantity_intent",
     "is_past_purchase_comparison_message",
     "should_suppress_quantity_followup",
