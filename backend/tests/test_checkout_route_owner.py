@@ -107,7 +107,7 @@ class TestChannelChoicePrompt:
         buttons = build_channel_choice_buttons(caps)
         assert [b["reply"]["title"] for b in buttons] == [
             "طلب سريع واتساب",
-            "فتح المتجر",
+            "المتجر الإلكتروني",
             "زيارة المعرض",
         ]
 
@@ -166,11 +166,13 @@ class TestCheckoutRouteOwnerPreBrain:
 
         assert decision is not None
         assert decision.reason == "ask_checkout_channel"
-        assert "كيف تحب تكمل؟" in decision.reply_text
-        assert "طلب سريع عبر واتساب" in decision.reply_text
-        assert "الطلب من المتجر الإلكتروني" in decision.reply_text
+        assert decision.reply_text == "كيف تحب تكمل؟"
+        assert "طلب سريع عبر واتساب" not in decision.reply_text
+        assert "الطلب من المتجر الإلكتروني" not in decision.reply_text
         assert "لدي استفسار" not in decision.reply_text
         assert len(decision.buttons) == 2
+        assert "طلب سريع واتساب" in [b["reply"]["title"] for b in decision.buttons]
+        assert "المتجر الإلكتروني" in [b["reply"]["title"] for b in decision.buttons]
         persist.assert_called_once()
 
     def test_price_ask_defers_to_brain_not_channel_choice(
