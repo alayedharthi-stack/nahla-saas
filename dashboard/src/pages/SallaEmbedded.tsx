@@ -22,11 +22,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
-import {
-  buildEmbeddedEntryQuery,
-  extractThemeFromSdkState,
-  notifySallaHostTheme,
-} from '../i18n/embeddedTheme'
+import { buildEmbeddedEntryQuery, resolveEmbeddedAppearanceAndLocale } from '../i18n/embeddedContext'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 import {
   describeLoginFailure,
@@ -36,6 +32,11 @@ import {
   EMBEDDED_WATCHDOG_TIMEOUT_MS,
   shouldRetryEmbeddedLogin,
 } from '../lib/embeddedLogin'
+import {
+  signalEmbeddedReady,
+  startEmbeddedSdkHandshake,
+  waitForEmbeddedSdkContext,
+} from '../lib/embeddedSdkHandshake'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -44,10 +45,6 @@ import {
   try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
   try { window.parent.postMessage({ event: 'embedded::ready', payload: {}, source: 'embedded-app' }, '*') } catch { /* cross-origin */ }
 })()
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const SDK_URL = 'https://cdn.jsdelivr.net/npm/@salla.sa/embedded-sdk@0.2.4/dist/umd/index.js'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,64 +77,6 @@ interface SessionResponse {
   connected:  boolean
   tenant_id:  number
   token:      string
-}
-
-// ── Salla SDK handshake ───────────────────────────────────────────────────────
-// Must be called as early as possible. Salla's host frame listens for these
-// events to dismiss its own loading overlay.
-
-function signalReady() {
-  console.info('[SallaEmbedded] → signaling app.ready to Salla host frame')
-  const readyMsg = {
-    event:     'embedded::ready',
-    payload:   {},
-    timestamp: Date.now(),
-    source:    'embedded-app',
-    metadata:  { version: '0.2.4' },
-  }
-  try { window.parent.postMessage(readyMsg, '*') } catch { /* cross-origin */ }
-  try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*') } catch { /* cross-origin */ }
-}
-
-function loadSdk(): Promise<void> {
-  return new Promise((resolve) => {
-    if (document.querySelector(`script[src="${SDK_URL}"]`)) { resolve(); return }
-    const s   = document.createElement('script')
-    s.src     = SDK_URL
-    s.onload  = () => {
-      console.info('[SallaEmbedded] SDK loaded from CDN')
-      resolve()
-    }
-    s.onerror = () => {
-      console.warn('[SallaEmbedded] SDK CDN load failed — continuing without SDK')
-      resolve()   // non-fatal: postMessage works without the SDK helper
-    }
-    document.head.appendChild(s)
-  })
-}
-
-function initSdkHandshake() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sdk = (window as any).Salla?.embedded
-  if (!sdk) {
-    console.info('[SallaEmbedded] Salla.embedded not found — using raw postMessage only')
-    signalReady()
-    return
-  }
-  sdk.init({ debug: false })
-    .then((state: unknown) => {
-      const hostTheme = extractThemeFromSdkState(state)
-      if (hostTheme) {
-        console.info('[SallaEmbedded] SDK init layout theme=%s', hostTheme)
-        notifySallaHostTheme(hostTheme)
-      }
-      sdk.ready()
-      signalReady()
-    })
-    .catch((err: unknown) => {
-      console.warn('[SallaEmbedded] sdk.init error:', err)
-      signalReady()
-    })
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
@@ -206,13 +145,6 @@ export default function SallaEmbedded() {
   const storeId    = paramsRef.current.get('store_id') || ''
   const appId      = paramsRef.current.get('app_id')   || ''
 
-  // Always forward resolved lang (Salla rarely passes ?lang= on /embedded/…/index).
-  const entryUrlRef = useRef<string>('')
-  if (entryUrlRef.current === '') {
-    entryUrlRef.current = `/app/entry${buildEmbeddedEntryQuery(paramsRef.current)}`
-  }
-  const entryUrl = entryUrlRef.current
-
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   const clearWatchdog = useCallback(() => {
@@ -245,6 +177,17 @@ export default function SallaEmbedded() {
   // post-gesture surface so we may transition automatically.
   const WELCOME_HOLD_MS = 1400
 
+  const navigateToEntry = useCallback(async () => {
+    await waitForEmbeddedSdkContext()
+    const ctx = resolveEmbeddedAppearanceAndLocale({ inSallaEmbedded: true })
+    const entryPath = `/app/entry${buildEmbeddedEntryQuery(ctx)}`
+    console.info(
+      '[SallaEmbedded] navigating to entry | path=%s | theme=%s (%s) | lang=%s (%s)',
+      entryPath, ctx.theme, ctx.themeSource, ctx.lang, ctx.langSource,
+    )
+    navigate(entryPath, { replace: true })
+  }, [navigate])
+
   // ── markReady: auth + session save complete, show brief welcome card,
   //            then auto-navigate to /app/entry.
   const markReady = useCallback(() => {
@@ -254,9 +197,9 @@ export default function SallaEmbedded() {
     setTimeout(() => {
       setPhase('success')
       setStatusText(t.loader.entering)
-      setTimeout(() => navigate(entryUrl, { replace: true }), 150)
+      setTimeout(() => { void navigateToEntry() }, 150)
     }, WELCOME_HOLD_MS)
-  }, [clearWatchdog, navigate, t, entryUrl])
+  }, [clearWatchdog, t, navigateToEntry])
 
   // ── goToDashboard: kept for the explicit "Open dashboard" button on the
   //            welcome card — lets impatient merchants skip the 1.4 s hold.
@@ -264,8 +207,8 @@ export default function SallaEmbedded() {
     setPhase('success')
     console.info('[SallaEmbedded] user pressed CTA → navigating to /app/entry')
     setStatusText(t.loader.entering)
-    setTimeout(() => navigate(entryUrl, { replace: true }), 150)
-  }, [navigate, t, entryUrl])
+    setTimeout(() => { void navigateToEntry() }, 150)
+  }, [t, navigateToEntry])
 
   // ── Step 1: check existing Nahla session ──────────────────────────────────
 
@@ -476,8 +419,8 @@ export default function SallaEmbedded() {
       showError(t.errors.watchdog)
     }, EMBEDDED_WATCHDOG_TIMEOUT_MS)
 
-    // Load SDK in background — do NOT await before checking session/token
-    loadSdk().then(initSdkHandshake)
+    // Load SDK in background — do NOT block session/token checks
+    void startEmbeddedSdkHandshake()
 
     // ── TENANT ISOLATION: when Salla provides a fresh embedded token,
     // ALWAYS do a full token-login so the backend resolves the correct
@@ -510,9 +453,9 @@ export default function SallaEmbedded() {
     )
 
     // ⚡ CRITICAL: signal Salla host frame IMMEDIATELY
-    signalReady()
-    const t1 = setTimeout(signalReady, 1000)  // re-signal in case iframe missed it
-    const t2 = setTimeout(signalReady, 4000)  // final belt-and-suspenders
+    signalEmbeddedReady()
+    const t1 = setTimeout(() => signalEmbeddedReady(), 1000)
+    const t2 = setTimeout(() => signalEmbeddedReady(), 4000)
 
     if (bootedRef.current) return
     bootedRef.current = true
@@ -537,7 +480,7 @@ export default function SallaEmbedded() {
     setPhase('init')
     setStatusText(t.loader.retrying)
     setErrorDetail('')
-    signalReady()
+    signalEmbeddedReady()
     void doLogin()
   }, [doLogin, t, clearWatchdog, cancelActiveLogin])
 
