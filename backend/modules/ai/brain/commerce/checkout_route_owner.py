@@ -579,7 +579,7 @@ _CHANNEL_BUTTONS: Dict[str, Dict[str, Any]] = {
     },
     CHECKOUT_CHANNEL_STORE: {
         "type": "reply",
-        "reply": {"id": "checkout_store_link", "title": "فتح المتجر"},
+        "reply": {"id": "checkout_store_link", "title": "المتجر الإلكتروني"},
     },
     CHECKOUT_CHANNEL_SHOWROOM: {
         "type": "reply",
@@ -606,13 +606,48 @@ def build_purchase_channel_selection_facts(
     }
 
 
-def build_channel_choice_prompt(caps: CheckoutChannelCapabilities) -> str:
-    """Deterministic channel-choice question based on tenant capabilities."""
+_CHANNEL_CHOICE_INTRO = "كيف تحب تكمل؟"
+
+
+def build_channel_choice_prompt(
+    caps: CheckoutChannelCapabilities,
+    *,
+    include_numbered_options: bool = True,
+) -> str:
+    """Channel-choice body text based on tenant capabilities.
+
+    When interactive buttons carry the channel labels, keep the body to a
+    short question only — numbered options belong in text fallback paths.
+    """
+    if not include_numbered_options:
+        return _CHANNEL_CHOICE_INTRO
     channels = available_channels(caps) or [CHECKOUT_CHANNEL_WHATSAPP]
-    lines: List[str] = ["كيف تحب تكمل؟"]
+    lines: List[str] = [_CHANNEL_CHOICE_INTRO]
     for idx, channel in enumerate(channels, start=1):
         lines.append(f"{idx}- {_CHANNEL_LABELS[channel]}")
     return "\n".join(lines)
+
+
+def compose_purchase_channel_selection_goal(*, buttons_will_render: bool) -> str:
+    """Compose hint for LLM channel-selection turns — not customer reply text."""
+    parts = [
+        "help_customer_choose_purchase_channel — short natural Saudi Arabic "
+        "WhatsApp reply inviting the customer to pick how they want to "
+        "continue purchase.",
+        "Do NOT ask product, quantity, address, or payment yet.",
+    ]
+    if buttons_will_render:
+        parts.append(
+            "buttons_will_render=true | do_not_repeat_button_labels_in_body=true — "
+            "keep the body to one brief question; interactive buttons carry "
+            "channel names; no numbered list in the message body."
+        )
+    else:
+        parts.append(
+            "Present the available purchase channels clearly in natural "
+            "prose or a numbered list."
+        )
+    return " | ".join(parts)
 
 
 def build_channel_choice_buttons(caps: CheckoutChannelCapabilities) -> Tuple[Dict[str, Any], ...]:
@@ -832,7 +867,10 @@ def evaluate_checkout_route_owner(
                 reply_text=(
                     build_catalog_visibility_reply(caps)
                     if catalog_help
-                    else build_channel_choice_prompt(caps)
+                    else build_channel_choice_prompt(
+                        caps,
+                        include_numbered_options=False,
+                    )
                 ),
                 reason="catalog_visibility_help" if catalog_help else "channel_choice_repeat",
                 persist_awaiting_channel=True,
@@ -933,7 +971,10 @@ def evaluate_checkout_route_owner(
         channels,
     )
     return CheckoutRouteDecision(
-        reply_text=build_channel_choice_prompt(caps),
+        reply_text=build_channel_choice_prompt(
+            caps,
+            include_numbered_options=False,
+        ),
         reason="ask_checkout_channel",
         persist_awaiting_channel=True,
         buttons=build_channel_choice_buttons(caps),
@@ -952,6 +993,7 @@ __all__ = [
     "build_channel_choice_buttons",
     "build_channel_choice_prompt",
     "build_purchase_channel_selection_facts",
+    "compose_purchase_channel_selection_goal",
     "purchase_channel_committed",
     "resolve_available_purchase_channel_facts",
     "should_block_bare_start_product_prompt",

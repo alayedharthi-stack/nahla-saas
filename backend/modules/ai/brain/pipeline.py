@@ -4269,6 +4269,16 @@ def _compose_base_response_goal(
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "purchase_channel_selection"
+    ):
+        from .commerce.checkout_route_owner import (  # noqa: PLC0415
+            compose_purchase_channel_selection_goal,
+        )
+
+        return compose_purchase_channel_selection_goal(buttons_will_render=False)
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "location_delivery"
     ):
         return (
