@@ -89,6 +89,31 @@ def _catalog_items_from_metadata(meta: Dict[str, Any]) -> list[Dict[str, Any]]:
     return []
 
 
+def catalog_order_extraction_facts(ctx: BrainContext) -> Dict[str, Any]:
+    """Facts visible in a catalog_order fallback text when item payload is incomplete."""
+    meta = _inbound_metadata(ctx)
+    facts: Dict[str, Any] = {}
+    items = _catalog_items_from_metadata(meta)
+    if items:
+        facts["line_items_count"] = len(items)
+        skus = [
+            str(item.get("product_retailer_id") or item.get("sku") or "").strip()
+            for item in items
+            if isinstance(item, dict)
+        ]
+        skus = [sku for sku in skus if sku]
+        if skus:
+            facts["catalog_skus"] = skus
+    message = str(getattr(ctx, "message", "") or "")
+    try:
+        from core.wa_native_catalog_order import extract_catalog_order_text_facts  # noqa: PLC0415
+
+        facts.update(extract_catalog_order_text_facts(message))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — text fact extraction is best-effort
+        pass
+    return facts
+
+
 def _product_from_inbound_metadata(ctx: BrainContext) -> Optional[Dict[str, Any]]:
     meta = _inbound_metadata(ctx)
     if not is_current_catalog_order_submitted(ctx):
@@ -217,12 +242,40 @@ def try_catalog_order_continue_decision(ctx: BrainContext) -> Optional[Decision]
         return None
     decision = try_active_catalog_checkout_continue_decision(ctx)
     if decision is None:
-        return None
+        return try_catalog_order_extraction_fallback_decision(ctx)
     return Decision(
         action=decision.action,
         args=dict(decision.args or {}),
         reason="catalog_order_submitted → continue_checkout",
         confidence=1.0,
+    )
+
+
+def try_catalog_order_extraction_fallback_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Keep incomplete catalog_order payloads in checkout without asking product/quantity."""
+    if not catalog_order_continue_checkout_enabled():
+        return None
+    if not is_current_catalog_order_submitted(ctx):
+        return None
+    if _product_from_state(ctx):
+        return None
+    facts = catalog_order_extraction_facts(ctx)
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "catalog_order_extraction_incomplete",
+            "catalog_order_facts": facts,
+            "response_goal": (
+                "Acknowledge that a WhatsApp catalog order was received, but the "
+                "item details were not fully extracted. Mention any visible SKU, "
+                "quantity, line count, or total from catalog_order_facts. Ask the "
+                "customer to resend the catalog order or confirm the items as shown "
+                "on their side. Do not ask what product or quantity they want, do "
+                "not browse, and do not claim there is no order."
+            ),
+        },
+        reason="catalog_order_extraction_incomplete → constrained_reply",
+        confidence=0.97,
     )
 
 
@@ -341,7 +394,8 @@ def maybe_enforce_catalog_order_continue_checkout(
 
     product = _product_from_state(ctx)
     if not product:
-        return decision
+        fallback = try_catalog_order_extraction_fallback_decision(ctx)
+        return fallback or decision
 
     args = dict(decision.args or {})
     args.update(
@@ -373,12 +427,14 @@ def maybe_enforce_catalog_order_continue_checkout(
 
 
 __all__ = [
+    "catalog_order_extraction_facts",
     "catalog_order_continue_checkout_enabled",
     "is_active_catalog_checkout",
     "is_catalog_line_items_authoritative",
     "is_catalog_line_items_authoritative_from_prep",
     "is_current_catalog_order_submitted",
     "maybe_enforce_catalog_order_continue_checkout",
+    "try_catalog_order_extraction_fallback_decision",
     "try_active_catalog_checkout_continue_decision",
     "try_catalog_order_continue_decision",
 ]

@@ -111,3 +111,23 @@ def build_catalog_order_start_reply(
         brain_state=brain_state,
         missing_fields=missing_fields,
     )
+
+
+def build_catalog_order_extraction_fallback_reply(*, order_prep: Dict[str, Any]) -> str:
+    """Explain an incomplete WhatsApp catalog payload without asking product/quantity."""
+    details: List[str] = []
+    skus = [str(s).strip() for s in (order_prep.get("catalog_skus") or []) if str(s).strip()]
+    if skus:
+        details.append("SKU: " + "، ".join(skus[:3]))
+    qty = order_prep.get("catalog_total_quantity") or order_prep.get("quantity")
+    if qty not in (None, "", 0):
+        details.append(f"الكمية: {qty}")
+    total = order_prep.get("order_flow_v2_catalog_total") or order_prep.get("order_total")
+    if total not in (None, "", 0):
+        details.append(f"الإجمالي: {total} SAR")
+    visible = f"\nالظاهر عندي: {' | '.join(details)}" if details else ""
+    return (
+        "وصلني طلبك من كتالوج واتساب، لكن تفاصيل الأصناف لم تظهر كاملة عندي."
+        f"{visible}\n"
+        "أعد إرسال الطلب من الكتالوج أو أكّد الأصناف كما ظهرت عندك عشان أكمله."
+    )

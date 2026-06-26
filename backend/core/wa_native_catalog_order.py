@@ -9,6 +9,7 @@ Never invents ``product_id`` when no match exists.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,11 @@ class NativeCatalogOrderPayload:
     customer_note: str
     items: List[NativeCatalogOrderItem] = field(default_factory=list)
     raw_product_items: List[Dict[str, Any]] = field(default_factory=list)
+    text_line_count: Optional[int] = None
+    total_quantity: Optional[int] = None
+    total_price: Optional[float] = None
+    currency: str = ""
+    text_extracted: bool = False
 
 
 @dataclass
@@ -74,6 +80,67 @@ def _as_int(value: Any, *, default: int = 1) -> int:
         return default
 
 
+_TEXT_LINE_COUNT_RE = re.compile(
+    r"عدد\s*(?:أسطر|اسطر|سطور|الأسطر|الاسطر|المنتجات|الأصناف|الاصناف)(?:\s*الطلب)?\s*[:：]\s*(\d+)",
+    re.I | re.UNICODE,
+)
+_TEXT_TOTAL_QTY_RE = re.compile(
+    r"(?:إجمالي|اجمالي)\s*الكمية\s*[:：]\s*(\d+)",
+    re.I | re.UNICODE,
+)
+_TEXT_TOTAL_RE = re.compile(
+    r"(?:الإجمالي|الاجمالي|إجمالي\s*الطلب|اجمالي\s*الطلب)\s*[:：]\s*([0-9]+(?:[\.,][0-9]+)?)\s*([A-Z]{3}|ر\.?س|ريال)?",
+    re.I | re.UNICODE,
+)
+_TEXT_SKU_RE = re.compile(
+    r"(?:رمز\s*المنتج\s*\(?\s*SKU\s*\)?|SKU)\s*[:：]\s*([A-Za-z0-9_.-]+)",
+    re.I | re.UNICODE,
+)
+
+
+def extract_catalog_order_text_facts(text: str) -> Dict[str, Any]:
+    """Extract operational catalog-order facts from WhatsApp fallback text."""
+    raw = str(text or "")
+    facts: Dict[str, Any] = {}
+    line_match = _TEXT_LINE_COUNT_RE.search(raw)
+    if line_match:
+        facts["catalog_order_line_count"] = _as_int(line_match.group(1), default=0)
+    qty_match = _TEXT_TOTAL_QTY_RE.search(raw)
+    if qty_match:
+        facts["total_quantity"] = _as_int(qty_match.group(1), default=0)
+    total_match = _TEXT_TOTAL_RE.search(raw)
+    if total_match:
+        facts["catalog_total"] = _as_float(str(total_match.group(1)).replace(",", "."))
+        currency = str(total_match.group(2) or "").strip()
+        if currency:
+            facts["catalog_currency"] = "SAR" if currency in {"ر.س", "رس", "ريال"} else currency
+    skus = [m.group(1).strip() for m in _TEXT_SKU_RE.finditer(raw) if m.group(1).strip()]
+    if skus:
+        facts["catalog_skus"] = skus
+    return facts
+
+
+def _product_items_from_text(text: str) -> List[Dict[str, Any]]:
+    facts = extract_catalog_order_text_facts(text)
+    skus = list(facts.get("catalog_skus") or [])
+    if not skus:
+        return []
+    total_qty = int(facts.get("total_quantity") or 0)
+    total = _as_float(facts.get("catalog_total"))
+    currency = str(facts.get("catalog_currency") or "").strip()
+    items: List[Dict[str, Any]] = []
+    for sku in skus:
+        qty = total_qty if len(skus) == 1 and total_qty > 0 else 1
+        item_price = (total / qty) if total is not None and qty > 0 and len(skus) == 1 else None
+        items.append({
+            "product_retailer_id": sku,
+            "quantity": qty,
+            "item_price": item_price,
+            "currency": currency,
+        })
+    return items
+
+
 def _extract_item_name(item: Dict[str, Any]) -> str:
     for key in (
         "name",
@@ -103,6 +170,7 @@ def parse_native_catalog_order(
 ) -> NativeCatalogOrderPayload:
     """Parse raw WhatsApp order block (+ optional normalizer metadata)."""
     payload = dict(order_payload or {})
+    source_text = ""
     if metadata:
         if not payload.get("product_items") and metadata.get("product_items"):
             payload["product_items"] = metadata.get("product_items")
@@ -110,10 +178,21 @@ def parse_native_catalog_order(
             payload["catalog_id"] = metadata.get("catalog_id")
         if not payload.get("text") and metadata.get("customer_note"):
             payload["text"] = metadata.get("customer_note")
+        for key in ("_catalog_order_message", "inbound_text", "message", "text", "caption", "body"):
+            val = metadata.get(key)
+            if isinstance(val, str) and val.strip():
+                source_text = val
+                break
+
+    if not payload.get("product_items") and source_text:
+        text_items = _product_items_from_text(source_text)
+        if text_items:
+            payload["product_items"] = text_items
 
     raw_items = payload.get("product_items") or []
     if not isinstance(raw_items, list):
         raw_items = []
+    text_facts = extract_catalog_order_text_facts(source_text)
 
     items: List[NativeCatalogOrderItem] = []
     for raw in raw_items:
@@ -137,6 +216,11 @@ def parse_native_catalog_order(
         customer_note=str(payload.get("text") or "").strip(),
         items=items,
         raw_product_items=[dict(x) for x in raw_items if isinstance(x, dict)],
+        text_line_count=text_facts.get("catalog_order_line_count"),
+        total_quantity=text_facts.get("total_quantity"),
+        total_price=text_facts.get("catalog_total"),
+        currency=str(text_facts.get("catalog_currency") or "").strip(),
+        text_extracted=bool(source_text and text_facts),
     )
 
 
@@ -428,6 +512,7 @@ __all__ = [
     "RetailerMatchResult",
     "apply_native_order_to_state",
     "build_line_items_from_payload",
+    "extract_catalog_order_text_facts",
     "match_retailer_id",
     "parse_native_catalog_order",
 ]
