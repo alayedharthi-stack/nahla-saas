@@ -268,9 +268,9 @@ def next_missing_order_field(ctx: BrainContext) -> Optional[str]:
 
 
 def build_bare_start_order_guard_reply(message: str = "") -> str:
-    """Deterministic order-start prompt — never generic receipt ACK."""
+    """Deterministic order-start prompt — guide WhatsApp catalog selection, not free text."""
     _ = message
-    return "أبشر، وش المنتج اللي ترغب تطلبه؟"
+    return "أبشر، اختر المنتجات من كتالوج واتساب وأرسل الطلب من هناك."
 
 
 def build_product_ordering_prompt(ctx: BrainContext) -> str:

@@ -160,6 +160,14 @@ def extract_order_product_query(ctx: BrainContext) -> str:
 
 def _is_category_price_browse(ctx: BrainContext) -> bool:
     """True when a price/availability ask targets a merchant category scope."""
+    try:
+        from ..commerce.catalog_order_checkout import is_current_catalog_order_submitted  # noqa: PLC0415
+
+        if is_current_catalog_order_submitted(ctx):
+            return False
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] catalog_order_category_browse_guard_failed")
+
     msg = ctx.message or ""
     if not msg:
         return False
@@ -234,6 +242,14 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
 
     if intent_name == INTENT_WHO_ARE_YOU:
         return "persona_identity"
+
+    try:
+        from ..commerce.catalog_order_checkout import is_current_catalog_order_submitted  # noqa: PLC0415
+
+        if is_current_catalog_order_submitted(ctx):
+            return "catalog_order"
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] catalog_order_suppression_failed")
 
     try:
         from ..intent import rules  # noqa: PLC0415

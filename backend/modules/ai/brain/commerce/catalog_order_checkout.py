@@ -52,16 +52,21 @@ def _inbound_metadata(ctx: BrainContext) -> Dict[str, Any]:
 def is_current_catalog_order_submitted(ctx: BrainContext) -> bool:
     """True only for the current inbound WhatsApp native catalog order event."""
     meta = _inbound_metadata(ctx)
+    message = str(getattr(ctx, "message", "") or "")
     try:
         from modules.ai.order_flow_v2.triggers import is_catalog_order_inbound  # noqa: PLC0415
 
-        return is_catalog_order_inbound(meta)
+        return is_catalog_order_inbound(meta, message)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — local fallback below keeps legacy behavior
         pass
     source = str(meta.get("source_type") or "").strip().lower()
     order = meta.get("order") if isinstance(meta.get("order"), dict) else {}
     items = meta.get("product_items") or order.get("product_items") or []
-    return source in {"catalog_order", "order"} and isinstance(items, list) and bool(items)
+    if source in {"catalog_order", "order"} and isinstance(items, list) and bool(items):
+        return True
+    if "[طلب كتالوج من العميل]" in message and items:
+        return True
+    return False
 
 
 def _salla_external_id_from_line_item(item: Dict[str, Any]) -> str:
@@ -71,6 +76,62 @@ def _salla_external_id_from_line_item(item: Dict[str, Any]) -> str:
         if val:
             return val
     return ""
+
+
+def _catalog_items_from_metadata(meta: Dict[str, Any]) -> list[Dict[str, Any]]:
+    raw = meta.get("product_items")
+    if isinstance(raw, list) and raw:
+        return [dict(x) for x in raw if isinstance(x, dict)]
+    order = meta.get("order") if isinstance(meta.get("order"), dict) else {}
+    nested = order.get("product_items")
+    if isinstance(nested, list) and nested:
+        return [dict(x) for x in nested if isinstance(x, dict)]
+    return []
+
+
+def _product_from_inbound_metadata(ctx: BrainContext) -> Optional[Dict[str, Any]]:
+    meta = _inbound_metadata(ctx)
+    if not is_current_catalog_order_submitted(ctx):
+        return None
+    items = _catalog_items_from_metadata(meta)
+    if not items:
+        return None
+    first = items[0]
+    count = len(items)
+    retailer_id = str(
+        first.get("product_retailer_id")
+        or first.get("sku")
+        or first.get("retailer_id")
+        or "",
+    ).strip()
+    names = meta.get("product_names")
+    title = ""
+    if isinstance(names, list) and names:
+        title = str(names[0] or "").strip()
+    if not title:
+        title = str(first.get("product_name") or first.get("title") or "").strip()
+    try:
+        total_price = float(meta.get("total_price")) if meta.get("total_price") is not None else None
+    except (TypeError, ValueError):
+        total_price = None
+    currency = str(meta.get("currency") or first.get("currency") or "").strip()
+    product: Dict[str, Any] = {
+        "id": retailer_id or "catalog_order",
+        "title": title or retailer_id or "catalog_order",
+        "price": total_price,
+        "currency": currency,
+        "from_catalog_order": True,
+        "from_native_catalog_order": True,
+        "line_items_count": count,
+        "is_multi_item": count > 1,
+        "line_items": items,
+    }
+    if retailer_id:
+        product["product_retailer_id"] = retailer_id
+    store_external_id = _salla_external_id_from_line_item(first)
+    if store_external_id:
+        product["external_id"] = store_external_id
+    return product
 
 
 def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
@@ -117,7 +178,56 @@ def _product_from_state(ctx: BrainContext) -> Optional[Dict[str, Any]]:
             product.pop("external_id", None)
         return product
 
+    product = _product_from_inbound_metadata(ctx)
+    if product:
+        return product
+
     return None
+
+
+def _catalog_order_continue_args(
+    ctx: BrainContext,
+    product: Dict[str, Any],
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "product": product,
+        "forced_product": product,
+        "source": "catalog_order_submitted",
+        "catalog_order_submitted": True,
+        "continue_checkout": True,
+        "native_catalog_order": {
+            "event_type": "catalog_order_submitted",
+            "source": "whatsapp_catalog",
+            "phone_source": "whatsapp",
+            "retailer_id": product.get("product_retailer_id") or "",
+            "line_items_count": product.get("line_items_count") or 1,
+        },
+        "use_catalog_prices_only": True,
+        "skip_product_discovery": True,
+    }
+
+
+def try_catalog_order_continue_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Early route: WhatsApp catalog order beats browse/search/discovery."""
+    if not catalog_order_continue_checkout_enabled():
+        return None
+    if not is_current_catalog_order_submitted(ctx):
+        return None
+    product = _product_from_state(ctx)
+    if not product:
+        return None
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args=_catalog_order_continue_args(
+            ctx,
+            product,
+            reason="catalog_order_submitted → continue_checkout",
+        ),
+        reason="catalog_order_submitted → continue_checkout",
+        confidence=1.0,
+    )
 
 
 def is_catalog_line_items_authoritative_from_prep(order_prep: Any) -> bool:
@@ -173,20 +283,13 @@ def maybe_enforce_catalog_order_continue_checkout(
         return decision
 
     args = dict(decision.args or {})
-    args.update({
-        "product": product,
-        "forced_product": product,
-        "source": "catalog_order_submitted",
-        "catalog_order_submitted": True,
-        "continue_checkout": True,
-        "native_catalog_order": {
-            "event_type": "catalog_order_submitted",
-            "source": "whatsapp_catalog",
-            "phone_source": "whatsapp",
-            "retailer_id": product.get("product_retailer_id") or "",
-            "line_items_count": product.get("line_items_count") or 1,
-        },
-    })
+    args.update(
+        _catalog_order_continue_args(
+            ctx,
+            product,
+            reason="catalog_order_submitted → continue_checkout",
+        ),
+    )
 
     if decision.action == ACTION_PROPOSE_DRAFT_ORDER:
         return Decision(
@@ -214,4 +317,5 @@ __all__ = [
     "is_catalog_line_items_authoritative_from_prep",
     "is_current_catalog_order_submitted",
     "maybe_enforce_catalog_order_continue_checkout",
+    "try_catalog_order_continue_decision",
 ]

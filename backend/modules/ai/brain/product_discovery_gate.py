@@ -959,6 +959,14 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return None
 
+    try:
+        from .commerce.catalog_order_checkout import is_current_catalog_order_submitted  # noqa: PLC0415
+
+        if is_current_catalog_order_submitted(ctx):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog-order guard must not block price routing
+        pass
+
     if not getattr(ctx.facts, "has_products", False):
         return None
 
