@@ -1155,6 +1155,33 @@ def maybe_log_order_context_shadow(
         return None
 
 
+def load_saved_open_checkout_draft(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int],
+) -> Optional[ActiveDraftContext]:
+    """Load the latest open WhatsApp draft order for checkout continuation."""
+    return _load_active_draft(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+    )
+
+
+def saved_open_checkout_draft_is_grounded(draft: Optional[ActiveDraftContext]) -> bool:
+    """True when a saved draft has line items and a positive total."""
+    if draft is None or not draft.line_items:
+        return False
+    total = draft.total
+    if total is None:
+        return False
+    try:
+        return float(total) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 __all__ = [
     "ActiveDraftContext",
     "CatalogOrderSnapshot",
@@ -1166,7 +1193,9 @@ __all__ = [
     "build_order_context_for_order",
     "compute_divergence_flags",
     "compute_shadow_missing_fields",
+    "load_saved_open_checkout_draft",
     "log_order_context_shadow",
     "mask_phone",
     "maybe_log_order_context_shadow",
+    "saved_open_checkout_draft_is_grounded",
 ]

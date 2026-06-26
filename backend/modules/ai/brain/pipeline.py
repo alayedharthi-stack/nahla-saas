@@ -4081,6 +4081,15 @@ def _compose_base_response_goal(
             "their name unless name_mode=ask."
         )
     _checkout_goal = str(_checkout.get("next_goal") or "").strip()
+    if _checkout_goal == "confirm_customer_order_and_shipping_details_once":
+        return (
+            "confirm_customer_order_and_shipping_details_once — one natural Saudi Arabic "
+            "WhatsApp message summarizing known order total/line items, name, phone, city, "
+            "and delivery address for confirmation. Use CHECKOUT_IDENTITY_SHIPPING_FACTS "
+            "only. Include order_total when order_total_known=true. Do NOT ask for phone on "
+            "WhatsApp. Do NOT ask for fields marked skip. Do NOT send separate per-field "
+            "confirmations in this turn."
+        )
     if _checkout_goal == "confirm_customer_and_shipping_details_once":
         return (
             "confirm_customer_and_shipping_details_once — one natural Saudi Arabic "

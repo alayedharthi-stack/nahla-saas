@@ -216,6 +216,67 @@ def collect_whatsapp_catalog_grounded_prices(
     return prices
 
 
+def collect_saved_open_draft_grounded_prices(
+    db: Optional[Session],
+    *,
+    tenant_id: Optional[int],
+    conversation_id: Optional[int] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Set[int]:
+    """Trusted prices from a saved open WhatsApp draft order in the DB."""
+    prices: Set[int] = set()
+    conv_id = conversation_id
+    if conv_id is None and inbound_metadata:
+        raw = inbound_metadata.get("conversation_id")
+        if raw is not None:
+            try:
+                conv_id = int(raw)
+            except (TypeError, ValueError):
+                conv_id = None
+    if db is None or tenant_id is None or not conv_id:
+        return prices
+    try:
+        from core.order_context_builder import (  # noqa: PLC0415
+            load_saved_open_checkout_draft,
+            saved_open_checkout_draft_is_grounded,
+        )
+
+        draft = load_saved_open_checkout_draft(
+            db,
+            tenant_id=int(tenant_id),
+            conversation_id=int(conv_id),
+        )
+        if not saved_open_checkout_draft_is_grounded(draft):
+            return prices
+        total = parse_price_amount(getattr(draft, "total", None))
+        if total is not None:
+            prices.add(total)
+        for item in getattr(draft, "line_items", None) or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("unit_price", "price", "item_price"):
+                unit = parse_price_amount(item.get(key))
+                if unit is not None:
+                    prices.add(unit)
+            qty = 1
+            try:
+                qty = max(1, int(item.get("quantity") or 1))
+            except (TypeError, ValueError):
+                qty = 1
+            unit = parse_price_amount(
+                item.get("unit_price") or item.get("price") or item.get("item_price")
+            )
+            if unit is not None and qty > 1:
+                prices.add(unit * qty)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[PRODUCT_CLAIM_GROUNDING] saved draft prices skipped tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+    return prices
+
+
 def _distinctive_title_tokens(title: str) -> Set[str]:
     from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
 
@@ -301,6 +362,7 @@ def build_product_claim_grounding_evidence(
     history: Optional[Sequence[Any]] = None,
     order_state: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    conversation_id: Optional[int] = None,
 ) -> ProductClaimGroundingEvidence:
     """Build evidence bundle for product claim grounding guard."""
     ctx = availability_context or {}
@@ -332,7 +394,14 @@ def build_product_claim_grounding_evidence(
         inbound_metadata=inbound_metadata,
     )
     grounded_prices.update(wa_prices)
-    whatsapp_catalog_trusted = bool(wa_prices) or (
+    draft_prices = collect_saved_open_draft_grounded_prices(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        inbound_metadata=inbound_metadata,
+    )
+    grounded_prices.update(draft_prices)
+    whatsapp_catalog_trusted = bool(wa_prices) or bool(draft_prices) or (
         str((inbound_metadata or {}).get("source_type") or "") == "catalog_order"
     )
     corpus_parts: List[str] = []
