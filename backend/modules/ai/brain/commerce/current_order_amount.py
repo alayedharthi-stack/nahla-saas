@@ -272,11 +272,83 @@ def should_route_current_order_amount_over_tracking(
     return snap.has_active_current_order
 
 
+_CURRENT_ORDER_INQUIRY_RE = re.compile(
+    r"(?:"
+    r"وش\s*(?:هو\s*)?(?:ال)?(?:طلب|طلبي|طلبيتي)"
+    r"|(?:ا|أ)?(?:يش|يه)\s*(?:هو\s*)?(?:ال)?(?:طلب|طلبي|طلبيتي)"
+    r"|(?:ماذا|ما)\s*(?:هو\s*)?(?:ال)?(?:طلب|طلبيتي)"
+    r"|(?:و|ف)?ش\s*(?:ال)?(?:طلب|طلبي|طلبيتي)\s*(?:هو|؟|\?)?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def is_current_order_inquiry(message: str) -> bool:
+    """Customer asks what their current order contains — not shipment tracking."""
+    raw = str(message or "").strip()
+    if not raw:
+        return False
+    norm = _norm_ar(raw)
+    if not norm:
+        return False
+    if _TRACKING_ONLY_RE.search(norm) and not _CURRENT_ORDER_INQUIRY_RE.search(norm):
+        return False
+    if not _CURRENT_ORDER_INQUIRY_RE.search(norm):
+        return False
+    if re.search(r"(?:وين|فين|متى|حالة|تتبع|tracking|where|when)", norm):
+        if not re.search(r"وش\s*(?:هو\s*)?(?:ال)?(?:طلب|طلبي)|(?:ا|أ)?(?:يش|يه)\s*(?:ال)?(?:طلب|طلبي)", norm):
+            return False
+    return True
+
+
+def build_current_order_inquiry_facts(
+    *,
+    state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Facts for summarizing the in-session draft order — no customer-facing text."""
+    snap = resolve_current_order_amount(state=state, inbound_metadata=inbound_metadata)
+    line_items = _line_items_from_state(state) if state is not None else []
+    titles: List[str] = []
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(
+            item.get("product_name") or item.get("title") or item.get("name") or ""
+        ).strip()
+        if title:
+            titles.append(title)
+    prep = _prep_dict(getattr(state, "order_prep", None) if state is not None else None)
+    missing = list(prep.get("missing_fields") or [])
+    return {
+        **current_order_amount_facts_dict(snap),
+        "product_titles": titles,
+        "missing_fields": missing,
+        "order_status": str(prep.get("order_status") or ""),
+        "is_draft_in_progress": True,
+    }
+
+
+def should_route_current_order_inquiry_over_tracking(
+    message: str,
+    *,
+    state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Route «وش هو طلبي؟» to draft summary, not DB track_order."""
+    if not is_current_order_inquiry(message):
+        return False
+    return has_active_current_order(state=state, inbound_metadata=inbound_metadata)
+
+
 __all__ = [
     "CurrentOrderAmountSnapshot",
+    "build_current_order_inquiry_facts",
     "current_order_amount_facts_dict",
     "has_active_current_order",
     "is_current_order_amount_question",
+    "is_current_order_inquiry",
     "resolve_current_order_amount",
     "should_route_current_order_amount_over_tracking",
+    "should_route_current_order_inquiry_over_tracking",
 ]

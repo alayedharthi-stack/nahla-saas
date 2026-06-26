@@ -982,6 +982,89 @@ class DefaultDecisionEngine:
                 _coa_exc,
             )
 
+        # ── 0a.616 Active draft order inquiry (before DB track_order) ─────
+        try:
+            from ..commerce.current_order_amount import (  # noqa: PLC0415
+                build_current_order_inquiry_facts,
+                should_route_current_order_inquiry_over_tracking,
+            )
+
+            _inq_meta = {}
+            try:
+                _prof = getattr(ctx, "profile", None) or {}
+                if isinstance(_prof, dict):
+                    _inq_meta = dict(_prof.get("inbound_metadata") or {})
+            except Exception:  # noqa: BLE001
+                _inq_meta = {}
+
+            if should_route_current_order_inquiry_over_tracking(
+                ctx.message or "",
+                state=getattr(ctx, "state", None),
+                inbound_metadata=_inq_meta,
+            ):
+                _inq_facts = build_current_order_inquiry_facts(
+                    state=getattr(ctx, "state", None),
+                    inbound_metadata=_inq_meta,
+                )
+                logger.info(
+                    "[CURRENT_ORDER_INQUIRY] route=llm tenant=%s titles=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _inq_facts.get("product_titles"),
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "current_order_inquiry",
+                        "current_order_inquiry_facts": _inq_facts,
+                        "response_goal": (
+                            "Summarize the customer's CURRENT in-progress WhatsApp draft "
+                            "order using current_order_inquiry_facts only. Mention items "
+                            "and total if known, then state what is still missing to "
+                            "complete checkout. Do NOT say no orders exist. Do NOT browse "
+                            "or list catalog products."
+                        ),
+                    },
+                    reason="active draft order inquiry — skip DB track_order",
+                    confidence=0.96,
+                )
+        except Exception as _coi_exc:  # noqa: BLE001  # noqa: silent-ok — inquiry guard must not block decide
+            logger.debug(
+                "[CURRENT_ORDER_INQUIRY] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _coi_exc,
+            )
+
+        # ── 0a.617 Active catalog checkout continuity (same order / address claim)
+        try:
+            from ..commerce.catalog_order_checkout import (  # noqa: PLC0415
+                is_active_catalog_checkout,
+                try_active_catalog_checkout_continue_decision,
+            )
+            from ..commerce.commerce_turn_contract import (  # noqa: PLC0415
+                is_address_on_file_claim,
+                is_same_order_confirmation,
+            )
+
+            if is_active_catalog_checkout(ctx):
+                if is_same_order_confirmation(ctx.message or "") or is_address_on_file_claim(
+                    ctx.message or "",
+                ):
+                    _cont = try_active_catalog_checkout_continue_decision(ctx)
+                    if _cont is not None:
+                        logger.info(
+                            "[ACTIVE_CATALOG_CHECKOUT] route=continue tenant=%s preview=%r",
+                            getattr(ctx, "tenant_id", None),
+                            (ctx.message or "")[:60],
+                        )
+                        return _cont
+        except Exception as _acc_exc:  # noqa: BLE001  # noqa: silent-ok — checkout continuity must not block decide
+            logger.debug(
+                "[ACTIVE_CATALOG_CHECKOUT] pre_track skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _acc_exc,
+            )
+
         # ── 0a.62 Existing-order tracking guard (Phase 2) ─────────────────
         try:
             from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415

@@ -351,6 +351,16 @@ def is_explicit_order_tracking_request(
             inbound_metadata=inbound_metadata,
         ):
             return False
+        from modules.ai.brain.commerce.current_order_amount import (  # noqa: PLC0415
+            should_route_current_order_inquiry_over_tracking,
+        )
+
+        if should_route_current_order_inquiry_over_tracking(
+            message,
+            state=state,
+            inbound_metadata=inbound_metadata,
+        ):
+            return False
     except Exception:  # noqa: BLE001  # noqa: silent-ok — amount guard must not block tracking
         pass
     if not is_order_tracking_follow_up(
