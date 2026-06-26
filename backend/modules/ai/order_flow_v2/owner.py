@@ -21,6 +21,7 @@ from .payment import (
     default_payment_method_patch,
 )
 from .replies import (
+    build_catalog_order_extraction_fallback_reply,
     build_catalog_order_start_reply,
     build_greeting_with_pending_hint,
     build_next_field_reply,
@@ -68,17 +69,39 @@ def _catalog_order_patch(
     *,
     tenant_id: int,
     inbound_metadata: Dict[str, Any],
+    message: str = "",
 ) -> Dict[str, Any]:
+    meta = dict(inbound_metadata or {})
+    if message:
+        meta.setdefault("_catalog_order_message", message)
     payload = parse_native_catalog_order(
-        dict(inbound_metadata.get("order") or {}),
-        metadata=inbound_metadata,
+        dict(meta.get("order") or {}),
+        metadata=meta,
     )
     resolution = build_line_items_from_payload(db, int(tenant_id), payload)
     patch: Dict[str, Any] = {
         "line_items": list(resolution.line_items),
         "order_flow_v2_trusted_price": True,
         "order_flow_v2_pending": True,
+        "catalog_line_items_authoritative": bool(resolution.line_items),
     }
+    skus = [
+        item.product_retailer_id
+        for item in payload.items
+        if str(item.product_retailer_id or "").strip()
+    ]
+    if skus:
+        patch["catalog_skus"] = skus
+    if payload.text_line_count:
+        patch["catalog_order_line_count"] = int(payload.text_line_count)
+    if payload.total_quantity:
+        patch["quantity"] = int(payload.total_quantity)
+        patch["catalog_total_quantity"] = int(payload.total_quantity)
+    if payload.total_price is not None:
+        patch["order_flow_v2_catalog_total"] = float(payload.total_price)
+        patch["order_total"] = float(payload.total_price)
+        if payload.currency:
+            patch["order_flow_v2_currency"] = payload.currency
     if payload.items:
         total = 0.0
         currency = ""
@@ -95,9 +118,18 @@ def _catalog_order_patch(
     first = next((li for li in resolution.line_items if isinstance(li, dict)), None)
     if isinstance(first, dict) and first.get("product_id"):
         patch["product_id"] = str(first.get("product_id"))
+    if isinstance(first, dict) and first.get("quantity") and not patch.get("quantity"):
         patch["quantity"] = int(first.get("quantity") or 1)
     if payload.customer_note:
         patch.setdefault("address_line", payload.customer_note)
+    expected_lines = int(payload.text_line_count or 0)
+    actual_lines = len(payload.items or [])
+    if (
+        not resolution.line_items
+        or int(getattr(resolution, "unmatched_count", 0) or 0) > 0
+        or (expected_lines > 0 and actual_lines < expected_lines)
+    ):
+        patch["catalog_order_extraction_incomplete"] = True
     return patch
 
 
@@ -182,10 +214,32 @@ def try_handle_order_flow_v2(
         )
 
     if is_catalog_order_inbound(meta, text):
-        patch.update(_catalog_order_patch(db, tenant_id=tenant_id, inbound_metadata=meta))
+        patch.update(_catalog_order_patch(
+            db,
+            tenant_id=tenant_id,
+            inbound_metadata=meta,
+            message=text,
+        ))
         patch.update(activate_checkout_patch())
         merged_prep = {**order_prep, **patch}
-        missing = _missing(merged_prep)
+        missing = [
+            m for m in _missing(merged_prep)
+            if m not in {"product", "products", "product_id", "variant", "quantity", "qty"}
+        ]
+        if patch.get("catalog_order_extraction_incomplete"):
+            patch.update(build_contract(
+                decision="catalog_order_extraction_incomplete",
+                field="",
+                reason="catalog_order_text_extraction_incomplete",
+            ).to_patch())
+            reply = build_catalog_order_extraction_fallback_reply(order_prep=merged_prep)
+            return _finalize_result(
+                enabled=enabled,
+                shadow=shadow,
+                reply=reply,
+                reason="catalog_order_extraction_incomplete",
+                state_patch=patch,
+            )
         patch.update(stamp_last_field_patch(missing))
         patch.update(build_contract(
             decision="ask_missing_field",

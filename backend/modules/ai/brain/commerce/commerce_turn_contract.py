@@ -32,10 +32,19 @@ _CATALOG_ORDER_FORBIDDEN = (
     "do_not_browse",
     "do_not_search_products",
     "do_not_ask_product",
+    "do_not_ask_quantity",
     "do_not_show_top_products",
 )
 
 _BROWSE_FORBIDDEN_TOKENS = frozenset(_CATALOG_ORDER_FORBIDDEN)
+_PRODUCT_QUANTITY_FIELDS = frozenset({
+    "product",
+    "products",
+    "product_id",
+    "variant",
+    "quantity",
+    "qty",
+})
 
 _BROWSE_OR_SEARCH_ACTIONS = frozenset({
     ACTION_SEARCH_PRODUCTS,
@@ -267,7 +276,7 @@ def _load_order_context_for_contract(ctx: BrainContext, db: Any) -> Any:
         return None
 
 
-def _catalog_order_line_item_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
+def _catalog_order_line_item_facts(meta: Dict[str, Any], message: str = "") -> Dict[str, Any]:
     facts: Dict[str, Any] = {}
     items = meta.get("product_items") or []
     if not isinstance(items, list):
@@ -275,6 +284,23 @@ def _catalog_order_line_item_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     order = meta.get("order") if isinstance(meta.get("order"), dict) else {}
     if not items and isinstance(order.get("product_items"), list):
         items = order["product_items"]
+    try:
+        from core.wa_native_catalog_order import extract_catalog_order_text_facts  # noqa: PLC0415
+
+        text_facts = extract_catalog_order_text_facts(message)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — text fact extraction is best-effort
+        text_facts = {}
+    if text_facts.get("catalog_order_line_count"):
+        facts["catalog_order_line_count"] = text_facts.get("catalog_order_line_count")
+    if text_facts.get("catalog_total") is not None:
+        facts["catalog_total"] = text_facts.get("catalog_total")
+    if text_facts.get("catalog_currency"):
+        facts["catalog_currency"] = text_facts.get("catalog_currency")
+    if text_facts.get("catalog_skus"):
+        facts["catalog_skus"] = list(text_facts.get("catalog_skus") or [])
+    if text_facts.get("total_quantity"):
+        facts["quantity_known"] = True
+        facts["quantity"] = int(text_facts.get("total_quantity") or 0)
     if items:
         facts["line_items_known"] = True
         titles: List[str] = []
@@ -304,6 +330,14 @@ def _catalog_order_line_item_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
         total = meta.get("total_price")
         if total is not None:
             facts["catalog_total"] = total
+        skus = [
+            str(item.get("product_retailer_id") or item.get("sku") or "").strip()
+            for item in items
+            if isinstance(item, dict)
+        ]
+        skus = [sku for sku in skus if sku]
+        if skus:
+            facts["catalog_skus"] = skus
     return facts
 
 
@@ -393,10 +427,13 @@ def build_commerce_turn_contract(
             forbidden_actions,
             _CATALOG_ORDER_FORBIDDEN,
         )
-        known_facts.update(_catalog_order_line_item_facts(meta))
+        known_facts.update(_catalog_order_line_item_facts(
+            meta,
+            str(getattr(ctx, "message", "") or ""),
+        ))
         missing_fields = [
             m for m in missing_fields
-            if m not in {"product", "quantity", "variant"}
+            if m not in _PRODUCT_QUANTITY_FIELDS
         ]
         allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
         catalog_decision = try_catalog_order_continue_decision(ctx)
@@ -415,7 +452,7 @@ def build_commerce_turn_contract(
             )
             missing_fields = [
                 m for m in missing_fields
-                if m not in {"product", "quantity", "variant"}
+                if m not in _PRODUCT_QUANTITY_FIELDS
             ]
             next_goal = _derive_active_checkout_next_goal(
                 str(getattr(ctx, "message", "") or ""),
@@ -564,6 +601,7 @@ def maybe_enforce_commerce_turn_contract_decision(
 
     from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
         catalog_order_continue_checkout_enabled,
+        try_catalog_order_continue_decision,
         maybe_enforce_catalog_order_continue_checkout,
         try_active_catalog_checkout_continue_decision,
     )
@@ -590,7 +628,11 @@ def maybe_enforce_commerce_turn_contract_decision(
     if raw_action not in _CATALOG_ORDER_OVERRIDE_ACTIONS:
         return decision
 
-    catalog_decision = try_active_catalog_checkout_continue_decision(ctx)
+    catalog_decision = (
+        try_catalog_order_continue_decision(ctx)
+        if contract.known_facts.get("catalog_order_current_turn")
+        else try_active_catalog_checkout_continue_decision(ctx)
+    )
     if catalog_decision is None:
         logger.warning(
             "[COMMERCE_TURN_CONTRACT/enforce] catalog_order override skipped "
