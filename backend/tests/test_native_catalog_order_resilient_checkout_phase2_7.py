@@ -85,19 +85,24 @@ def _assert_no_forbidden_product_prompt(text: str) -> None:
 
 class TestSafeQuantityAndPromptDetection:
     def test_safe_line_item_quantity_accepts_decimal_strings(self) -> None:
-        assert safe_line_item_quantity("2.5") == 2
+        assert safe_line_item_quantity("2.5") == 2.5
+        assert safe_line_item_quantity("2") == 2.0
 
-    def test_build_catalog_order_start_reply_does_not_crash_on_decimal_qty(self) -> None:
+    def test_decimal_quantity_display_in_catalog_reply(self) -> None:
+        from modules.ai.brain.commerce.catalog_order_resilience import format_line_item_quantity  # noqa: PLC0415
+
         prep = {
-            "line_items": [{"quantity": "2.5", "title": "عسل"}],
+            "line_items": [{"quantity": "2.5", "title": "عسل", "item_price": 100}],
             "order_flow_v2_trusted_price": True,
-            "order_total": 319,
+            "order_total": 250,
         }
         reply = build_catalog_order_start_reply(
             order_prep=prep,
             brain_state={},
             missing_fields=["customer_name"],
         )
+        assert format_line_item_quantity(2.5) == "2.5"
+        assert "× 2.5" in reply
         _assert_no_forbidden_product_prompt(reply)
 
 

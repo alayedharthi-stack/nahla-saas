@@ -43,6 +43,7 @@ def prep_dict(order_prep: Any) -> Dict[str, Any]:
         "catalog_total_quantity",
         "catalog_checkout_total",
         "catalog_checkout_currency",
+        "checkout_channel",
         "order_total",
         "total",
         "order_status",

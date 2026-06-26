@@ -31,15 +31,22 @@ _PRODUCT_MISSING_SLOTS = frozenset({
 })
 
 
-def safe_line_item_quantity(raw: Any, *, default: int = 1) -> int:
+def safe_line_item_quantity(raw: Any, *, default: float = 1.0) -> float:
+    """Parse catalog line-item quantity without crashing; preserves decimals (e.g. 2.5)."""
     try:
         if raw is None or raw == "":
             return default
         val = float(raw)
-        n = int(val)
-        return n if n > 0 else default
+        return val if val > 0 else default
     except (TypeError, ValueError):
         return default
+
+
+def format_line_item_quantity(qty: float) -> str:
+    """Display quantity without truncating fractional catalog amounts."""
+    if abs(qty - round(qty)) < 1e-9:
+        return str(int(round(qty)))
+    return f"{qty:.4f}".rstrip("0").rstrip(".")
 
 
 def reply_contains_forbidden_catalog_product_question(text: str) -> bool:
@@ -444,6 +451,7 @@ __all__ = [
     "reply_contains_forbidden_catalog_product_question",
     "resolve_store_external_id",
     "safe_line_item_quantity",
+    "format_line_item_quantity",
     "sanitize_forbidden_catalog_product_question",
     "try_catalog_order_pre_brain_safe_reply",
 ]

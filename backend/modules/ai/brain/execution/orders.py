@@ -161,7 +161,7 @@ class DraftOrderHandler:
                 if _forced:
                     try:
                         ctx.state.current_product_focus = dict(product_info)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — focus update must not block catalog checkout
                         pass
         if _catalog_authoritative and _has_catalog_items:
             _first_li = next(
