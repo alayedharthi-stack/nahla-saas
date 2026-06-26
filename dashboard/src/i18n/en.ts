@@ -94,6 +94,24 @@ const en: Translations = {
     salesChannels: {
       title:    'Sales & Contact Channels',
       subtitle: 'Configure purchase channels for AI — online store, WhatsApp, showroom',
+      tabs: {
+        sales:    'Sales channels',
+        branches: 'Branches & locations',
+        contacts: 'Contacts & escalation',
+        routing:  'Routing rules',
+      },
+      contactsTab: {
+        description: 'Contacts and escalation chains are managed per branch. Open branches to configure reception and escalation.',
+        openBranches: 'Open branches & locations',
+      },
+      routingTab: {
+        rules: [
+          'Purchase intent → sales channel selection (store, WhatsApp, showroom)',
+          'Location or branch question → active branch data',
+          'Staff handoff request → branch escalation chain',
+        ],
+        note: 'Detailed routing is driven by AI settings and the knowledge base — this is an overview.',
+      },
       loadError: 'Could not load settings',
       saveError: 'Could not save settings',
       saved:    'Sales channels saved',

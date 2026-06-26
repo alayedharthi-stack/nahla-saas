@@ -22,7 +22,10 @@ import Intelligence from './pages/Intelligence'
 import KnowledgeBase from './pages/KnowledgeBase'
 import OperationsCenterBranches from './pages/OperationsCenterBranches'
 import OperationsCenterBranchDetail from './pages/OperationsCenterBranchDetail'
-import SalesChannels from './pages/SalesChannels'
+import SalesChannelsLayout from './pages/SalesChannelsLayout'
+import SalesChannelsSettingsTab from './pages/SalesChannelsSettingsTab'
+import SalesChannelsContactsTab from './pages/SalesChannelsContactsTab'
+import SalesChannelsRoutingTab from './pages/SalesChannelsRoutingTab'
 import Integrations from './pages/Integrations'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
@@ -150,7 +153,21 @@ export default function App() {
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />
             <Route path="knowledge-base"     element={<KnowledgeBase />} />
-            <Route path="sales-channels"     element={<SalesChannels />} />
+            <Route path="sales-channels" element={<SalesChannelsLayout />}>
+              <Route index element={<SalesChannelsSettingsTab />} />
+              <Route
+                path="branches"
+                element={
+                  <OperationsCenterBranches
+                    embedded
+                    branchLinkPrefix="/sales-channels/branches"
+                  />
+                }
+              />
+              <Route path="branches/:branchId" element={<OperationsCenterBranchDetail />} />
+              <Route path="contacts" element={<SalesChannelsContactsTab />} />
+              <Route path="routing" element={<SalesChannelsRoutingTab />} />
+            </Route>
             <Route path="operations-center"  element={<OperationsCenterBranches />} />
             <Route path="operations-center/branches/:branchId" element={<OperationsCenterBranchDetail />} />
             <Route path="integrations"       element={<Integrations />} />

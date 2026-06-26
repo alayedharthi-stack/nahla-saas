@@ -21,7 +21,13 @@ const emptyBranch: BranchInput = {
   sort_order: 0,
 }
 
-export default function OperationsCenterBranches() {
+export default function OperationsCenterBranches({
+  embedded = false,
+  branchLinkPrefix = '/operations-center/branches',
+}: {
+  embedded?: boolean
+  branchLinkPrefix?: string
+}) {
   const { t } = useLanguage()
   const navigate = useNavigate()
   const [branches, setBranches] = useState<MerchantBranch[]>([])
@@ -116,16 +122,28 @@ export default function OperationsCenterBranches() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title={t(tr => tr.pages.operationsCenter.title)}
-        subtitle={t(tr => tr.pages.operationsCenter.subtitle)}
-        action={
+      {!embedded && (
+        <PageHeader
+          title={t(tr => tr.pages.operationsCenter.title)}
+          subtitle={t(tr => tr.pages.operationsCenter.subtitle)}
+          action={
+            <button type="button" className="btn-primary flex items-center gap-2" onClick={openCreate}>
+              <Plus className="w-4 h-4" />
+              إضافة فرع
+            </button>
+          }
+        />
+      )}
+
+      {embedded && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-slate-600">{t(tr => tr.pages.operationsCenter.subtitle)}</p>
           <button type="button" className="btn-primary flex items-center gap-2" onClick={openCreate}>
             <Plus className="w-4 h-4" />
             إضافة فرع
           </button>
-        }
-      />
+        </div>
+      )}
 
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -160,7 +178,7 @@ export default function OperationsCenterBranches() {
                   <tr key={branch.id} className="border-b border-slate-50 hover:bg-slate-50/60">
                     <td className="p-3 font-medium text-slate-900">
                       <Link
-                        to={`/operations-center/branches/${branch.id}`}
+                        to={`${branchLinkPrefix}/${branch.id}`}
                         className="text-brand-600 hover:underline"
                       >
                         {branch.name}
@@ -211,7 +229,7 @@ export default function OperationsCenterBranches() {
                         <button
                           type="button"
                           className="text-xs text-brand-600 hover:underline"
-                          onClick={() => navigate(`/operations-center/branches/${branch.id}`)}
+                          onClick={() => navigate(`${branchLinkPrefix}/${branch.id}`)}
                         >
                           التفاصيل
                         </button>

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2, MapPin, MessageCircle, Save, Store } from 'lucide-react'
-import PageHeader from '../components/ui/PageHeader'
 import Badge from '../components/ui/Badge'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type StoreSettings } from '../api/settings'
@@ -54,7 +53,7 @@ function Toggle({
   )
 }
 
-export default function SalesChannels() {
+export default function SalesChannelsSettingsTab() {
   const { t } = useLanguage()
   const sc = t(tr => tr.pages.salesChannels)
 
@@ -124,9 +123,7 @@ export default function SalesChannels() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6 pb-10">
-      <PageHeader title={sc.title} subtitle={sc.subtitle} />
-
+    <div className="space-y-6">
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
@@ -210,7 +207,7 @@ export default function SalesChannels() {
           </Link>
           {' · '}
           <Link
-            to="/operations-center"
+            to="/sales-channels/branches"
             className="inline-flex text-sm text-brand-600 hover:text-brand-700"
           >
             {sc.showroom.branchesLink}
