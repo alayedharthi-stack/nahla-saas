@@ -8,6 +8,7 @@ evidence, not automatic owner. Read-only: no new regex patterns.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, List, Optional, Tuple
 
 from ..types import (
@@ -28,6 +29,8 @@ from ..types import (
     MerchantConversationState,
 )
 from .contract import StateConflict, TurnUnderstanding, UnderstandingEvidence
+
+logger = logging.getLogger("nahla.brain.turn.understanding")
 
 _CHECKOUT_STAGES = frozenset({"ordering", "deciding", "checkout"})
 _SEMANTIC_AUTHORITY_MIN_CONFIDENCE = 0.72
@@ -250,7 +253,7 @@ def _apply_operational_turn_signals(
                 evidence,
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[TURN_UNDERSTANDING] checkout_slot_probe_failed")
 
     try:
         from core.catalog_authoritative_line_items import is_shipping_address_capture_context  # noqa: PLC0415
@@ -275,7 +278,7 @@ def _apply_operational_turn_signals(
                 evidence,
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[TURN_UNDERSTANDING] shipping_address_context_probe_failed")
 
     _inbound_meta: dict = {}
     profile = getattr(ctx, "profile", None)
@@ -302,7 +305,7 @@ def _apply_operational_turn_signals(
             ))
             return ("payment_action", "payment", "current_order_amount", evidence)
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[TURN_UNDERSTANDING] current_order_amount_probe_failed")
 
     try:
         from ..commerce.contact_route_policy import has_explicit_contact_intent  # noqa: PLC0415
@@ -321,7 +324,7 @@ def _apply_operational_turn_signals(
             ))
             return ("reach_staff", "staff_contact", "talk_to_human", evidence)
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[TURN_UNDERSTANDING] contact_route_probe_failed")
 
     if intent_name in {INTENT_ASK_PAYMENT_INFO, INTENT_PAY_NOW}:
         evidence = list(evidence)
@@ -354,7 +357,7 @@ def _apply_operational_turn_signals(
             ))
             return ("health_advisory", "health_inquiry", "advisory_product_guidance", evidence)
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[TURN_UNDERSTANDING] solution_seeking_probe_failed")
 
     return None
 

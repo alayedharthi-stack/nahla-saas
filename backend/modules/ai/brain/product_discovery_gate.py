@@ -1197,7 +1197,7 @@ def clarify_instead_of_top_products(
                 confidence=0.90,
             )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[PRODUCT_DISCOVERY_GATE] bare_start_order_recovery_probe_failed")
     try:
         from .commerce.product_breadth_policy import (  # noqa: PLC0415
             global_availability_browse_requested,

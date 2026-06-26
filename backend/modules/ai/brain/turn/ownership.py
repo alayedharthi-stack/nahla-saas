@@ -139,7 +139,7 @@ def has_explicit_catalog_browse_intent(
         if _is_show_more_request(msg) and _has_prior_browse_context(ctx):
             return True
     except Exception:  # noqa: BLE001
-        logger.debug("[TURN_OWNERSHIP] show_more_browse_probe_skipped")
+        logger.exception("[TURN_OWNERSHIP] show_more_browse_probe_failed")
 
     return False
 

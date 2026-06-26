@@ -321,7 +321,7 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
                 if ownership is not None and ownership.explicit_browse_intent:
                     _skip_nav_suppression = True
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("[DISCOVERY_ENTRY] nav_suppression_skip_probe_failed")
 
         if not _skip_nav_suppression:
             _nav_signals = evaluate_catalog_navigation_signals(ctx)
