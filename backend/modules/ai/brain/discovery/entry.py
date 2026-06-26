@@ -158,8 +158,52 @@ def extract_order_product_query(ctx: BrainContext) -> str:
     return _extract_embedded_order_product_query(msg)
 
 
+def _is_category_price_browse(ctx: BrainContext) -> bool:
+    """True when a price/availability ask targets a merchant category scope."""
+    msg = ctx.message or ""
+    if not msg:
+        return False
+    try:
+        from ..commerce.commerce_browse_category_guard import extract_browse_category_scope  # noqa: PLC0415
+        from ..catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+            active_catalog_group_slug_from_state,
+            resolve_catalog_category_scope,
+        )
+        from ..commerce.commerce_browse_category_guard import active_category_from_state  # noqa: PLC0415
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] category_price_browse_probe_failed")
+        return False
+
+    subject = extract_browse_category_scope(msg, "")
+    if not subject:
+        return False
+
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is not None and tenant_id is not None:
+        scope = resolve_catalog_category_scope(
+            db,
+            int(tenant_id),
+            msg,
+            subject,
+            active_group_slug=active_catalog_group_slug_from_state(ctx.state),
+            active_category=active_category_from_state(ctx.state),
+        )
+        return scope.must_filter_by_category and not scope.specific_product
+
+    try:
+        from ..product_discovery_gate import is_generic_category_noun  # noqa: PLC0415
+
+        return is_generic_category_noun(subject)
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] generic_category_noun_failed")
+        return False
+
+
 def _is_price_turn(ctx: BrainContext) -> bool:
     """Price asks are not discovery entry turns."""
+    if _is_category_price_browse(ctx):
+        return False
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     msg = ctx.message or ""
     if intent_name in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):

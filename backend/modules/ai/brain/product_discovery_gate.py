@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from .decision.actions import (
     ACTION_CLARIFY,
@@ -468,6 +468,13 @@ _PRICE_ASK_SUFFIX = (
     r"كم\s*تمنه|كم\s*تمنها)"
 )
 
+_CATEGORY_PRICE_PREFIX_RE = re.compile(
+    r"^(?:اسعار|أسعار|سعر(?:ات)?|ثمن|تكلفة|"
+    rf"{_PRICE_ASK_SUFFIX}|how\s*much|price(?:s)?)"
+    r"\s+(?:ال)?(.+)$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _PRICE_SUFFIX_RE = re.compile(
     r"^(.{2,80}?)\s+"
     rf"{_PRICE_ASK_SUFFIX}\s*"
@@ -502,7 +509,21 @@ def _extract_price_subject(message: str) -> str:
     if not raw:
         return ""
     norm = _normalize_ar(raw)
-    for prefix in ("كم سعر", "بكم", "سعر", "قد ايش", "how much"):
+    prefix_match = _CATEGORY_PRICE_PREFIX_RE.match(norm)
+    if prefix_match:
+        candidate = (prefix_match.group(1) or "").strip(" ؟?!.")
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    for prefix in (
+        "كم سعر",
+        "بكم",
+        "اسعار",
+        "أسعار",
+        "سعر",
+        "ثمن",
+        "قد ايش",
+        "how much",
+    ):
         pn = _normalize_ar(prefix)
         if norm.startswith(pn):
             rest = raw[len(prefix):].strip(" ؟?!.")
@@ -929,6 +950,82 @@ def should_suppress_recommendation_escalation(
     return False
 
 
+def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route category-level price/availability asks to scoped catalog browse."""
+    msg = ctx.message or ""
+    if not msg:
+        return None
+    intent_name = str(getattr(ctx.intent, "name", "") or "")
+    if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
+        return None
+
+    if not getattr(ctx.facts, "has_products", False):
+        return None
+
+    try:
+        from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            active_category_from_state,
+            extract_browse_category_scope,
+            is_category_price_or_availability_message,
+        )
+        from .catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+            active_catalog_group_slug_from_state,
+            resolve_catalog_category_scope,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[PRODUCT_DISCOVERY] category_price_browse_import_failed")
+        return None
+
+    subject = extract_browse_category_scope(msg, "")
+    if not subject:
+        return None
+
+    if not is_category_price_or_availability_message(msg, ""):
+        return None
+
+    db = getattr(ctx, "_db", None)
+    tenant_id = getattr(ctx, "tenant_id", None)
+    if db is None or tenant_id is None:
+        if not is_generic_category_noun(subject):
+            return None
+        return Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": subject,
+                "source": "category_browse",
+                "category_scope": subject,
+            },
+            reason="category price browse — subject token scope",
+            confidence=0.88,
+        )
+
+    scope = resolve_catalog_category_scope(
+        db,
+        int(tenant_id),
+        msg,
+        subject,
+        active_group_slug=active_catalog_group_slug_from_state(ctx.state),
+        active_category=active_category_from_state(ctx.state),
+    )
+    if not scope.must_filter_by_category or scope.specific_product:
+        return None
+
+    args: Dict[str, Any] = {
+        "query": scope.query_subject or scope.matched_category or subject,
+        "source": "category_browse",
+        "category_scope": scope.matched_category or subject,
+        "use_catalog_prices_only": True,
+    }
+    if scope.catalog_group_id is not None:
+        args["catalog_group_id"] = scope.catalog_group_id
+    return Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args=args,
+        reason="category price browse — merchant catalog category scope",
+        confidence=0.9,
+    )
+
+
 def try_price_query_decision(
     ctx: BrainContext,
     *,
@@ -940,6 +1037,10 @@ def try_price_query_decision(
         return None
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return None
+
+    _category_browse = try_category_price_browse_decision(ctx)
+    if _category_browse is not None:
+        return _category_browse
 
     msg = ctx.message or ""
     focus = ctx.state.current_product_focus

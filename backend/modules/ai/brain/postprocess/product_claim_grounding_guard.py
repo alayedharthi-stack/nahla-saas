@@ -151,6 +151,87 @@ class ProductClaimGroundingGuardResult:
     would_rewrite: bool = False
 
 
+def _is_general_category_browse_turn(
+    inbound_metadata: Optional[Dict[str, Any]],
+    *,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+) -> bool:
+    meta = dict(inbound_metadata or {})
+    if meta.get("specific_product"):
+        return False
+    if meta.get("category_browse") and not meta.get("specific_product"):
+        return True
+
+    text = str(meta.get("inbound_text") or meta.get("message") or "").strip()
+    if not text:
+        return False
+
+    try:
+        from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            active_category_from_state,
+            extract_browse_category_scope,
+        )
+        from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+            active_catalog_group_slug_from_state,
+            resolve_catalog_category_scope,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+    subject = extract_browse_category_scope(text, "")
+    if not subject:
+        return False
+
+    try:
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            _SKU_SPECIFICITY_RE,
+            is_generic_category_noun,
+        )
+
+        if _SKU_SPECIFICITY_RE.search(text):
+            return False
+        words = [w for w in text.split() if w.strip()]
+        if len(words) > 4:
+            return False
+        if not is_generic_category_noun(subject):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+
+    if db is not None and tenant_id is not None:
+        scope = resolve_catalog_category_scope(
+            db,
+            int(tenant_id),
+            text,
+            subject,
+            active_group_slug=active_catalog_group_slug_from_state(
+                meta.get("brain_state"),
+            ),
+            active_category=str(meta.get("active_category") or ""),
+        )
+        return scope.must_filter_by_category and not scope.specific_product
+
+    return True
+
+
+def _filter_violations_for_category_browse(
+    violations: List[tuple[str, str]],
+    *,
+    category_browse: bool,
+) -> List[tuple[str, str]]:
+    if not category_browse:
+        return violations
+    return [
+        v for v in violations
+        if v[0] not in {
+            "ungrounded_price",
+            "unavailable_promoted",
+            "ungrounded_best_pick",
+        }
+    ]
+
+
 def _find_markers(text: str, markers: Sequence[str]) -> List[str]:
     found: List[str] = []
     norm = _norm(text)
@@ -402,6 +483,15 @@ def apply_product_claim_grounding_guard(
             original,
             evidence,
             customer_claimed=customer_claimed if is_price_objection else None,
+        )
+        category_browse = _is_general_category_browse_turn(
+            inbound_metadata,
+            db=db,
+            tenant_id=tenant_id,
+        )
+        violations = _filter_violations_for_category_browse(
+            violations,
+            category_browse=category_browse,
         )
         if (
             is_price_objection

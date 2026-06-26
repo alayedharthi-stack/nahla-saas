@@ -52,7 +52,7 @@ _GLOBAL_ONLY_RE = re.compile(
 
 _SCOPE_STOPWORDS = frozenset({
     "وش", "ايش", "ايه", "ما", "عندكم", "عندك", "لديكم", "لديك",
-    "متوفر", "متوفره", "متاح", "available", "products", "product",
+    "متوفر", "متوفره", "المتوفر", "متاح", "available", "products", "product",
     "المنتجات", "منتج", "منتجات", "الانواع", "انواع", "أنواع",
     "اعرض", "وريني", "ارسل", "أرسل", "show", "display", "browse",
     "ابي", "أبي", "ابغ", "أبغ", "اريد", "أريد", "want", "need",
@@ -61,8 +61,35 @@ _SCOPE_STOPWORDS = frozenset({
     "collection", "options", "option", "items", "item", "line", "lines",
     "season", "seasonal", "batch", "inventory", "stock",
     "خيارات", "الخيارات", "وين", "where",
+    "اسعار", "أسعار", "سعر", "سعره", "سعرها", "ثمن", "تكلفة", "بكم", "كم",
+    "price", "prices", "cost", "costs", "how", "much",
+    "من", "from",
     "؟", "?", ".", "!", ",",
 })
+
+# Price / availability lead-ins stripped before category noun extraction.
+_PRICE_LEAD_RE = re.compile(
+    r"^(?:"
+    r"(?:اسعار|أسعار|سعر(?:ات)?|ثمن|تكلفة|بكم|كم\s*سعر|قد\s*ايش|how\s*much|price(?:s)?|cost(?:s)?)\s+"
+    r"|(?:وش|ايش|ايه|ما)\s+(?:المتوفر|متوفر|available)\s+(?:من|from)\s+"
+    r"|(?:عندكم|عندك|لديكم|لديك)\s+"
+    r")+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Whole-message signals for category price / availability browse turns.
+_CATEGORY_PRICE_OR_AVAILABILITY_RE = re.compile(
+    r"(?:"
+    r"اسعار|أسعار|سعر(?:ات)?|بكم|كم\s*سعر|ثمن|تكلفة|"
+    r"how\s*much|price(?:s)?|cost(?:s)?|"
+    r"(?:وش|ايش|ايه|ما|what)\s+(?:المتوفر|متوفر|available|ال)?|"
+    r"(?:وش|what)\s+(?:المتوفر|متوفر|available)\s+(?:من|from)|"
+    r"عندكم|عندك|لديكم|لديك|"
+    r"انواع|أنواع|types?\s+of|"
+    r"المتوفر|متوفر|available"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 
 # Product-form markers that usually signal a different category family.
 _CROSS_FORM_MARKERS = frozenset({
@@ -139,6 +166,8 @@ def _canonical_scope_token(token: str) -> str:
     if not raw:
         return ""
     raw = re.sub(r"^(?:ال|the)\s+", "", raw)
+    if raw.startswith("ال") and len(raw) > 3:
+        raw = raw[2:]
     for pattern, singular in _PLURAL_TO_SINGULAR:
         if pattern.search(raw):
             return singular
@@ -173,6 +202,25 @@ def is_generic_category_browse(message: str, query: str = "") -> bool:
     if not blob:
         return False
     return bool(_GENERIC_CATEGORY_BROWSE_RE.search(blob))
+
+
+def is_category_price_or_availability_message(message: str, query: str = "") -> bool:
+    """True when the turn asks for category prices, availability, or options."""
+    blob = _norm(f"{message or ''} {query or ''}")
+    if not blob:
+        return False
+    if is_generic_category_browse(message, query):
+        return True
+    if _CATEGORY_PRICE_OR_AVAILABILITY_RE.search(blob):
+        return True
+    try:
+        from ..product_discovery_gate import has_types_overview_ask  # noqa: PLC0415
+
+        if has_types_overview_ask(message or "", query or ""):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("[BROWSE_CATEGORY_GUARD] types_overview_probe_failed")
+    return False
 
 
 def active_category_from_state(state: Any) -> str:
@@ -249,7 +297,8 @@ def extract_browse_category_scope(
         if not candidate:
             continue
         stripped = _BROWSE_LEAD_RE.sub("", _norm(candidate)).strip(" ؟?!.")
-        stripped = re.sub(r"^(?:ال|the)\s+", "", stripped)
+        stripped = _PRICE_LEAD_RE.sub("", stripped).strip(" ؟?!.")
+        stripped = re.sub(r"^(?:ال|the|من|from)\s+", "", stripped)
         for tok in _tokens(stripped):
             scope = _canonical_scope_token(tok)
             if _is_valid_scope_token(scope):
@@ -486,26 +535,56 @@ def filter_products_for_browse_turn(
     try:
         from ..catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
             active_catalog_group_slug_from_state,
+            filter_products_by_category_metadata,
             filter_products_to_merchant_group,
+            resolve_catalog_category_scope,
             resolve_browse_scope,
         )
 
         if db is not None and tenant_id is not None:
-            resolution = resolve_browse_scope(
+            category_subject = extract_browse_category_scope(
+                message or "",
+                effective_query,
+            ) or effective_query
+            cat_scope = resolve_catalog_category_scope(
                 db,
                 int(tenant_id),
                 message or "",
-                effective_query,
+                category_subject,
                 active_group_slug=active_catalog_group_slug_from_state(state),
                 active_category=locked_category,
             )
-            if resolution.matched and resolution.product_ids:
-                grouped = filter_products_to_merchant_group(
-                    base,
-                    product_ids=resolution.product_ids,
+            if cat_scope.must_filter_by_category:
+                if cat_scope.product_ids:
+                    grouped = filter_products_to_merchant_group(
+                        base,
+                        product_ids=cat_scope.product_ids,
+                    )
+                    if grouped:
+                        base = grouped
+                elif cat_scope.matched_category:
+                    meta_filtered = filter_products_by_category_metadata(
+                        base,
+                        category=cat_scope.matched_category,
+                    )
+                    if meta_filtered:
+                        base = meta_filtered
+            else:
+                resolution = resolve_browse_scope(
+                    db,
+                    int(tenant_id),
+                    message or "",
+                    category_subject,
+                    active_group_slug=active_catalog_group_slug_from_state(state),
+                    active_category=locked_category,
                 )
-                if grouped:
-                    base = grouped
+                if resolution.matched and resolution.product_ids:
+                    grouped = filter_products_to_merchant_group(
+                        base,
+                        product_ids=resolution.product_ids,
+                    )
+                    if grouped:
+                        base = grouped
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] merchant_group_filter_failed")
 
@@ -529,6 +608,7 @@ __all__ = [
     "extract_browse_category_scope",
     "filter_products_for_browse_turn",
     "filter_products_to_browse_category",
+    "is_category_price_or_availability_message",
     "is_category_scoped_browse",
     "is_generic_category_browse",
     "resolve_browse_category_scope",
