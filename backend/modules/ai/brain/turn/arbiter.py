@@ -13,6 +13,7 @@ from ..types import BrainContext
 from .contract import (
     OWNER_CHECKOUT,
     OWNER_DISCOVERY,
+    OWNER_HEALTH_ADVISORY,
     OWNER_ORDERING,
     OWNER_PAYMENT,
     OWNER_PERSONA_SOCIAL,
@@ -172,6 +173,14 @@ def arbitrate_turn(
         return _make_arbitration(
             OWNER_TRACKING,
             "track_order_intent",
+            understanding,
+            ctx,
+        )
+
+    if understanding.current_intent == "health_advisory":
+        return _make_arbitration(
+            OWNER_HEALTH_ADVISORY,
+            "health_advisory_solution_seeking",
             understanding,
             ctx,
         )

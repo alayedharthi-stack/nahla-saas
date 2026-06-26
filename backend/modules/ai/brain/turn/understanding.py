@@ -8,13 +8,17 @@ evidence, not automatic owner. Read-only: no new regex patterns.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, List, Optional, Tuple
 
 from ..types import (
+    INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
     INTENT_COMPLAINT_REFUND,
     INTENT_GREETING,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
     INTENT_PAY_NOW,
     INTENT_SOCIAL,
     INTENT_START_ORDER,
@@ -25,6 +29,8 @@ from ..types import (
     MerchantConversationState,
 )
 from .contract import StateConflict, TurnUnderstanding, UnderstandingEvidence
+
+logger = logging.getLogger("nahla.brain.turn.understanding")
 
 _CHECKOUT_STAGES = frozenset({"ordering", "deciding", "checkout"})
 _SEMANTIC_AUTHORITY_MIN_CONFIDENCE = 0.72
@@ -180,6 +186,9 @@ def _derive_semantics(
     if intent_name == INTENT_TALK_HUMAN:
         return ("reach_staff", "staff_contact", "talk_to_human", evidence)
 
+    if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE:
+        return ("health_advisory", "health_inquiry", "advisory_product_guidance", evidence)
+
     if intent_name in {INTENT_ASK_PRICE, INTENT_ASK_PRODUCT}:
         topic = "promotion_inquiry" if primary_goal == "price_inquiry" else "catalog_inquiry"
         return ("product_inquiry", topic, "learn_product_or_pricing", evidence)
@@ -205,6 +214,152 @@ def _derive_semantics(
         )
 
     return ("general_inquiry", "general", "get_help", evidence)
+
+
+def _apply_operational_turn_signals(
+    ctx: BrainContext,
+    *,
+    intent_name: str,
+    evidence: List[UnderstandingEvidence],
+) -> Optional[Tuple[str, str, str, List[UnderstandingEvidence]]]:
+    """
+    Current-turn operational signals from existing classifiers (not phrase lists).
+
+    Returns (current_intent, topic, customer_goal, evidence) or None.
+    """
+    msg = ctx.message or ""
+    state = ctx.state
+    order_prep = getattr(state, "order_prep", None)
+
+    try:
+        from ..commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+            is_bare_city_token_message,
+            message_fulfills_checkout_slot,
+        )
+
+        if message_fulfills_checkout_slot(msg, order_prep=order_prep) or is_bare_city_token_message(msg):
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "checkout_slot_guard",
+                "checkout_slot_fulfillment",
+                "message fulfills awaited checkout slot",
+                weight=0.92,
+            ))
+            return (
+                "checkout_continuation",
+                "fulfillment",
+                "provide_checkout_slot_answer",
+                evidence,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[TURN_UNDERSTANDING] checkout_slot_probe_failed")
+
+    try:
+        from core.catalog_authoritative_line_items import is_shipping_address_capture_context  # noqa: PLC0415
+
+        if is_shipping_address_capture_context(
+            msg,
+            order_prep=order_prep,
+            stage=str(getattr(state, "stage", "") or ""),
+        ):
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "shipping_address_context",
+                "address_capture",
+                "shipping address capture context",
+                weight=0.9,
+            ))
+            return (
+                "checkout_continuation",
+                "fulfillment",
+                "provide_delivery_address",
+                evidence,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[TURN_UNDERSTANDING] shipping_address_context_probe_failed")
+
+    _inbound_meta: dict = {}
+    profile = getattr(ctx, "profile", None)
+    if isinstance(profile, dict):
+        _inbound_meta = dict(profile.get("inbound_metadata") or {})
+
+    try:
+        from ..commerce.current_order_amount import (  # noqa: PLC0415
+            should_route_current_order_amount_over_tracking,
+        )
+
+        if should_route_current_order_amount_over_tracking(
+            msg,
+            state=state,
+            inbound_metadata=_inbound_meta,
+        ):
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "current_order_amount",
+                "payment_amount_inquiry",
+                "active checkout amount question",
+                weight=0.93,
+            ))
+            return ("payment_action", "payment", "current_order_amount", evidence)
+    except Exception:  # noqa: BLE001
+        logger.exception("[TURN_UNDERSTANDING] current_order_amount_probe_failed")
+
+    try:
+        from ..commerce.contact_route_policy import has_explicit_contact_intent  # noqa: PLC0415
+
+        if has_explicit_contact_intent(msg) or intent_name in {
+            INTENT_TALK_HUMAN,
+            INTENT_ASK_OWNER_CONTACT,
+        }:
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "contact_route_policy",
+                "staff_contact",
+                "explicit staff/contact request",
+                weight=0.91,
+            ))
+            return ("reach_staff", "staff_contact", "talk_to_human", evidence)
+    except Exception:  # noqa: BLE001
+        logger.exception("[TURN_UNDERSTANDING] contact_route_probe_failed")
+
+    if intent_name in {INTENT_ASK_PAYMENT_INFO, INTENT_PAY_NOW}:
+        evidence = list(evidence)
+        evidence.append(_evidence(
+            "current_turn_authority",
+            "intent_classifier",
+            f"intent.{intent_name}",
+            "payment-related intent",
+            weight=0.88,
+        ))
+        return ("payment_action", "payment", "payment_inquiry", evidence)
+
+    try:
+        from ..commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
+
+        if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or classify_solution_seeking_commerce(msg):
+            axis = ""
+            if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE:
+                axis = "need_based_intent"
+            else:
+                nb = classify_solution_seeking_commerce(msg)
+                axis = nb.axis if nb is not None else "solution_seeking"
+            evidence = list(evidence)
+            evidence.append(_evidence(
+                "current_turn_authority",
+                "solution_seeking",
+                axis or "health_advisory",
+                "solution-seeking / health advisory commerce",
+                weight=0.9,
+            ))
+            return ("health_advisory", "health_inquiry", "advisory_product_guidance", evidence)
+    except Exception:  # noqa: BLE001
+        logger.exception("[TURN_UNDERSTANDING] solution_seeking_probe_failed")
+
+    return None
 
 
 def _apply_current_turn_authority(
@@ -298,16 +453,14 @@ def _derive_conflicts(
         return tuple(conflicts), tuple(suspend_scope), False
 
     try:
-        from ..catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
-            is_catalog_browse_turn,
-            is_fresh_start_order_turn,
-        )
+        from .ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
+        from ..catalog.catalog_browse_turn_policy import is_fresh_start_order_turn  # noqa: PLC0415
 
-        if is_catalog_browse_turn(
-            message or "",
+        if has_explicit_catalog_browse_intent(
+            ctx,
+            message=message or "",
             intent_name=intent_name,
-            ctx=ctx,
-        ):
+        ) if ctx is not None else False:
             conflicts.append(StateConflict(
                 state_field="order_prep",
                 persisted_objective=active_objective or "active_checkout",
@@ -420,24 +573,28 @@ def synthesize_turn_understanding(ctx: BrainContext) -> TurnUnderstanding:
     )
     evidence.extend(sem_evidence)
 
+    operational = _apply_operational_turn_signals(
+        ctx,
+        intent_name=intent_name,
+        evidence=evidence,
+    )
+    if operational is not None:
+        current_intent, current_topic, customer_goal, evidence = operational
+
     active_objective = _derive_active_objective_candidate(state, state_rel)
 
     try:
-        from ..catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+        from .ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
 
-        if is_catalog_browse_turn(
-            ctx.message or "",
-            intent_name=intent_name,
-            ctx=ctx,
-        ):
+        if has_explicit_catalog_browse_intent(ctx, intent_name=intent_name):
             current_intent = "product_inquiry"
             current_topic = "catalog_inquiry"
             customer_goal = "learn_product_or_pricing"
             evidence.append(_evidence(
                 "current_turn_authority",
-                "catalog_browse_turn_policy",
-                "catalog_browse",
-                "catalog_browse_turn_overrides_stale_checkout",
+                "turn_ownership",
+                "explicit_catalog_browse",
+                "explicit_catalog_browse_turn_overrides_stale_checkout",
                 weight=0.9,
             ))
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy probe

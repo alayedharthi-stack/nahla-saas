@@ -14,6 +14,7 @@ from .contract import (
     COMPOSE_MODE_PERSONA,
     OWNER_CHECKOUT,
     OWNER_DISCOVERY,
+    OWNER_HEALTH_ADVISORY,
     OWNER_ORDERING,
     OWNER_PAYMENT,
     OWNER_PERSONA_SOCIAL,
@@ -23,6 +24,12 @@ from .contract import (
     OWNER_TRACKING,
     OwnerBrief,
     TurnUnderstanding,
+)
+
+_DISCOVERY_FORBIDDEN = (
+    "product_discovery",
+    "top_products",
+    "catalog_browse",
 )
 
 
@@ -47,6 +54,7 @@ def build_owner_brief(
                 "product_upsell",
                 "ask_city",
                 "ask_last_name",
+                *_DISCOVERY_FORBIDDEN,
             ),
             required_evidence=(
                 "order_reference_or_product_photo_if_available",
@@ -97,6 +105,7 @@ def build_owner_brief(
                 "support_reply",
                 "staff_escalation",
                 "product_upsell",
+                *_DISCOVERY_FORBIDDEN,
             ),
             required_evidence=(),
             tone_guidance="natural helpful non-template",
@@ -112,6 +121,7 @@ def build_owner_brief(
                 "checkout_slot_replay",
                 "product_upsell",
                 "unsupported_payment_claims",
+                *_DISCOVERY_FORBIDDEN,
             ),
             required_evidence=(
                 "payment_receipt_or_transfer_proof",
@@ -129,6 +139,7 @@ def build_owner_brief(
                 "checkout",
                 "product_upsell",
                 "unsupported_shipment_claims",
+                *_DISCOVERY_FORBIDDEN,
             ),
             required_evidence=(
                 "shipment_or_order_status_evidence",
@@ -146,12 +157,30 @@ def build_owner_brief(
                 "unsupported_staff_contact_claims",
                 "checkout",
                 "product_push",
+                *_DISCOVERY_FORBIDDEN,
             ),
             required_evidence=(
                 "staff_contact_evidence",
             ),
             tone_guidance="honest operational non-template",
             compose_mode=COMPOSE_MODE_OPERATIONAL,
+        )
+
+    if owner == OWNER_HEALTH_ADVISORY:
+        return OwnerBrief(
+            owner=owner,
+            customer_goal=goal,
+            reply_goal="advisory_health_commerce_guidance_without_medical_claims",
+            forbidden_objectives=(
+                "product_discovery",
+                "top_products",
+                "catalog_browse",
+                "checkout_push",
+                "unsupported_medical_claims",
+            ),
+            required_evidence=(),
+            tone_guidance="natural cautious non-template",
+            compose_mode=COMPOSE_MODE_PERSONA,
         )
 
     return OwnerBrief(
