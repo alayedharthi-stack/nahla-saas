@@ -268,11 +268,10 @@ def collect_saved_open_draft_grounded_prices(
             )
             if unit is not None and qty > 1:
                 prices.add(unit * qty)
-    except Exception:  # noqa: BLE001
-        logger.debug(
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — saved draft lookup must not block grounding guard
+        logger.exception(
             "[PRODUCT_CLAIM_GROUNDING] saved draft prices skipped tenant=%s",
             tenant_id,
-            exc_info=True,
         )
     return prices
 
