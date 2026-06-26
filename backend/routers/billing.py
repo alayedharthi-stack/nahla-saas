@@ -504,6 +504,19 @@ async def _do_checkout(
     tenant_id: str,
 ) -> dict:
     """Inner checkout logic — all non-HTTPExceptions bubble up to the caller."""
+    from core.trial_lifecycle import tenant_has_salla_integration  # noqa: PLC0415
+
+    if tenant_has_salla_integration(db, int(tenant_id)):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code":             "salla_billing_required",
+                "renewal_method":   "salla_app",
+                "billing_channel":  "salla",
+                "message":          "يتم الاشتراك وإدارة الباقة عبر منصة سلة. لا يمكن إنشاء دفع مباشر من نحلة.",
+            },
+        )
+
     try:
         ensure_billing_plans(db)
     except Exception as _ep_exc:
