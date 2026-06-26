@@ -393,6 +393,7 @@ def apply_product_claim_grounding_guard(
             history=history,
             order_state=order_state,
             inbound_metadata=inbound_metadata,
+            conversation_id=conversation_id,
         )
         is_price_objection, customer_claimed, _inbound_text = _resolve_price_objection_context(
             inbound_metadata,

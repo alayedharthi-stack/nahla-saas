@@ -719,12 +719,53 @@ def build_checkout_compose_facts(
     missing = resolve_checkout_missing_fields_legacy(ctx)
     facts["missing_fields"] = missing
     facts["next_goal"] = derive_checkout_next_goal(result, prefill)
-    if facts["next_goal"] == "confirm_customer_and_shipping_details_once":
-        facts["ask_confirmation_once"] = True
+
+    draft = getattr(ctx, "active_draft", None)
+    if draft is not None and getattr(draft, "line_items", None):
+        facts["line_items_known"] = True
+        facts["line_items_count"] = len(draft.line_items)
+        draft_total = getattr(draft, "total", None)
+        if draft_total is not None:
+            try:
+                total_val = float(draft_total)
+                if total_val > 0:
+                    facts["order_total_known"] = True
+                    facts["order_total"] = total_val
+            except (TypeError, ValueError):
+                pass
 
     if result is not None:
         facts["readiness_state"] = str(getattr(result, "readiness_state", "") or "")
         facts["missing_modes"] = dict(getattr(result, "missing_modes", None) or {})
+
+    if facts.get("order_total_known") and facts.get("line_items_known"):
+        from core.order_missing_fields_engine import (  # noqa: PLC0415
+            READINESS_CONFIRMING_SHIPPING,
+            READINESS_READY_FOR_CONFIRMATION,
+            READINESS_READY_FOR_PAYMENT,
+        )
+
+        readiness = str(facts.get("readiness_state") or "")
+        address_ready = bool(
+            facts.get("known_short_address_code")
+            or facts.get("known_google_maps_url")
+            or facts.get("delivery_address_mode") == MODE_SKIP
+        )
+        shipping_ready = readiness in {
+            READINESS_CONFIRMING_SHIPPING,
+            READINESS_READY_FOR_CONFIRMATION,
+            READINESS_READY_FOR_PAYMENT,
+        }
+        identity_only = set(missing) <= {
+            "name",
+            "customer_first_name",
+            "customer_last_name",
+        }
+        if address_ready and (not missing or shipping_ready or identity_only):
+            facts["next_goal"] = "confirm_customer_order_and_shipping_details_once"
+            facts["ask_confirmation_once"] = True
+    elif facts["next_goal"] == "confirm_customer_and_shipping_details_once":
+        facts["ask_confirmation_once"] = True
 
     return facts
 

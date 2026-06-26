@@ -658,6 +658,8 @@ class DefaultComposer:
                 )
             if data.get("salla_escalate"):
                 return T.salla_escalate_message(product=data.get("product", {}))
+            if data.get("checkout_continue_after_address"):
+                return await self._llm_compose(ctx, result, decision=decision)
             if data.get("salla_retry"):
                 try:
                     from modules.ai.order_flow_v2.flags import (  # noqa: PLC0415

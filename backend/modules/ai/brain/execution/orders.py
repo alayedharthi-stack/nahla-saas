@@ -976,6 +976,26 @@ class DraftOrderHandler:
                 },
             )
 
+        _saved_draft = _should_continue_saved_open_checkout(
+            ctx,
+            prep,
+            catalog_authoritative=_catalog_authoritative,
+            order_context_update=bool(decision.args.get("order_context_update")),
+        )
+        if _saved_draft is not None:
+            logger.info(
+                "[ORDER FLOW] saved open draft — skipping Salla create, continuing checkout | "
+                "tenant=%s conversation=%s total=%s",
+                ctx.tenant_id,
+                getattr(ctx, "conversation_id", None),
+                getattr(_saved_draft, "total", None),
+            )
+            return _checkout_continue_after_address_result(
+                product_info=product_info,
+                prep=prep,
+                draft=_saved_draft,
+            )
+
         runtime_result = await runtime.execute(
             "create_draft_order", _build_order_args(_options_payload),
         )
@@ -1391,6 +1411,25 @@ class DraftOrderHandler:
             )
 
             if has_address and prep.salla_failure_count <= 1:
+                _saved_draft = _should_continue_saved_open_checkout(
+                    ctx,
+                    prep,
+                    catalog_authoritative=_catalog_authoritative,
+                    order_context_update=bool(decision.args.get("order_context_update")),
+                )
+                if _saved_draft is not None:
+                    logger.info(
+                        "[ORDER FLOW] saved open draft — suppressing salla_retry | "
+                        "tenant=%s conversation=%s total=%s",
+                        ctx.tenant_id,
+                        getattr(ctx, "conversation_id", None),
+                        getattr(_saved_draft, "total", None),
+                    )
+                    return _checkout_continue_after_address_result(
+                        product_info=product_info,
+                        prep=prep,
+                        draft=_saved_draft,
+                    )
                 # First failure with address → silent retry message.
                 # Customer should send any message to trigger another attempt.
                 logger.info(
@@ -1900,6 +1939,63 @@ def _has_sa_checkout_address(prep: OrderPreparationState) -> bool:
     )
 
     return has_sa_address_evidence(prep)
+
+
+def _grounded_saved_open_draft(ctx: BrainContext) -> Optional[Any]:
+    conv_id = getattr(ctx, "conversation_id", None)
+    db = getattr(ctx, "_db", None)
+    if db is None or not conv_id:
+        return None
+    try:
+        from core.order_context_builder import (  # noqa: PLC0415
+            load_saved_open_checkout_draft,
+            saved_open_checkout_draft_is_grounded,
+        )
+
+        draft = load_saved_open_checkout_draft(
+            db,
+            tenant_id=int(ctx.tenant_id),
+            conversation_id=int(conv_id),
+        )
+        return draft if saved_open_checkout_draft_is_grounded(draft) else None
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[ORDER FLOW] saved open draft lookup failed tenant=%s",
+            getattr(ctx, "tenant_id", None),
+            exc_info=True,
+        )
+        return None
+
+
+def _checkout_continue_after_address_result(
+    *,
+    product_info: Dict[str, Any],
+    prep: OrderPreparationState,
+    draft: Any,
+) -> ActionResult:
+    return ActionResult(
+        success=True,
+        data={
+            "product": product_info,
+            "checkout_continue_after_address": True,
+            "saved_open_order_total": getattr(draft, "total", None),
+            "order_prep": prep.to_dict(),
+        },
+    )
+
+
+def _should_continue_saved_open_checkout(
+    ctx: BrainContext,
+    prep: OrderPreparationState,
+    *,
+    catalog_authoritative: bool,
+    order_context_update: bool,
+) -> Optional[Any]:
+    if not (catalog_authoritative or order_context_update):
+        return None
+    if not _has_sa_checkout_address(prep):
+        return None
+    return _grounded_saved_open_draft(ctx)
 
 
 def _has_intl_address(prep: OrderPreparationState) -> bool:
