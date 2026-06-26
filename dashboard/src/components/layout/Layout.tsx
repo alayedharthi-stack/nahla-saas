@@ -211,7 +211,9 @@ function LayoutShell() {
 
   const metaSelector =
     PAGE_META[pathname]
-    ?? (pathname.startsWith('/operations-center/branches/')
+    ?? (pathname.startsWith('/sales-channels')
+      ? (tr: Translations) => tr.pages.salesChannels
+      : pathname.startsWith('/operations-center/branches/')
       ? (tr: Translations) => tr.pages.operationsCenter
       : (_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
   const meta = t(metaSelector)

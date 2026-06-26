@@ -120,6 +120,20 @@ export interface Translations {
     salesChannels: {
       title: string
       subtitle: string
+      tabs: {
+        sales: string
+        branches: string
+        contacts: string
+        routing: string
+      }
+      contactsTab: {
+        description: string
+        openBranches: string
+      }
+      routingTab: {
+        rules: string[]
+        note: string
+      }
       loadError: string
       saveError: string
       saved: string

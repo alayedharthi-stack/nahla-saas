@@ -33,7 +33,6 @@ import {
   BookOpen,
   Gauge,
   Package,
-  MapPin,
   ShieldCheck,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -117,7 +116,6 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/intelligence',  icon: Brain,        label: tr => tr.nav.items.intelligence, isAI: true },
       { to: '/knowledge-base',icon: BookOpen,     label: tr => tr.nav.items.knowledgeBase,isAI: true },
       { to: '/sales-channels',         icon: Store,        label: tr => tr.nav.items.salesChannels },
-      { to: '/operations-center', icon: MapPin,   label: tr => tr.nav.items.operationsCenter, isAI: true },
       { to: '/analytics',     icon: BarChart2,    label: tr => tr.nav.items.analyticsAI,  isAI: true },
       { to: '/ai-sales-logs', icon: BrainCircuit, label: tr => tr.nav.items.salesAgent,   isAI: true },
       { to: '/handoff-queue', icon: UserCheck,    label: tr => tr.nav.items.handoffQueue             },

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowRight, Pencil, Phone, Plus, Star, Trash2,
 } from 'lucide-react'
@@ -40,6 +40,10 @@ export default function OperationsCenterBranchDetail() {
   const { branchId } = useParams()
   const id = Number(branchId)
   const navigate = useNavigate()
+  const location = useLocation()
+  const branchesListPath = location.pathname.startsWith('/sales-channels')
+    ? '/sales-channels/branches'
+    : '/operations-center'
   const [tab, setTab] = useState<TabId>('info')
   const [branch, setBranch] = useState<MerchantBranch | null>(null)
   const [contacts, setContacts] = useState<BranchContact[]>([])
@@ -239,7 +243,7 @@ export default function OperationsCenterBranchDetail() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm text-slate-500">
-        <Link to="/operations-center" className="hover:text-brand-600">الفروع</Link>
+        <Link to={branchesListPath} className="hover:text-brand-600">الفروع</Link>
         <span>/</span>
         <span className="text-slate-800">{branch?.name || '…'}</span>
       </div>
@@ -248,7 +252,7 @@ export default function OperationsCenterBranchDetail() {
         title={branch?.name || 'تفاصيل الفرع'}
         subtitle="إدارة بيانات الفرع وجهات التواصل وسلسلة التصعيد"
         action={
-          <button type="button" className="btn-secondary flex items-center gap-2" onClick={() => navigate('/operations-center')}>
+          <button type="button" className="btn-secondary flex items-center gap-2" onClick={() => navigate(branchesListPath)}>
             <ArrowRight className="w-4 h-4" />
             رجوع
           </button>
