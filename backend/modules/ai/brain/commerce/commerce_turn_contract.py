@@ -5,10 +5,13 @@ Unified pre-decide commerce turn contract.
 
 Phase 1: build + attach + divergence telemetry before DecisionEngine.decide().
 Phase 2: enforce catalog_order_current_turn at decide-time (browse → checkout).
+Phase 2.5: extend to active catalog checkout continuity on follow-up turns.
 """
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -57,6 +60,108 @@ _PHONE_FIELD_NAMES = frozenset({
     "customer_phone_number",
     "mobile",
 })
+
+_SAME_ORDER_CONFIRM_RE = re.compile(
+    r"(?:^|\s)(?:نفس\s*(?:ال)?(?:طلب|طلبي|طلبيتي)|نفسه|نفسها|زي\s*قبل)(?:\s*[\?؟!.]*)?$",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_ADDRESS_ON_FILE_CLAIM_RE = re.compile(
+    r"(?:"
+    r"(?:ال)?(?:مدين(?:ة|ه)|العنوان|الموقع|بيانات(?:ك)?).{0,40}(?:عندكم|مسجل|محفوظ|موجود|عندك)"
+    r"|(?:عندكم|مسجل|محفوظ|موجود).{0,40}(?:ال)?(?:مدين(?:ة|ه)|العنوان|الموقع)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _norm_msg(text: str) -> str:
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", str(text).lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _contract_checkout_enforced(contract: CommerceTurnContract) -> bool:
+    facts = contract.known_facts
+    return bool(
+        facts.get("catalog_order_current_turn")
+        or facts.get("active_catalog_checkout")
+    )
+
+
+def _derive_active_checkout_next_goal(
+    message: str,
+    missing_fields: Sequence[str],
+) -> str:
+    from modules.ai.brain.commerce.current_order_amount import is_current_order_inquiry  # noqa: PLC0415
+
+    msg = str(message or "")
+    if is_current_order_inquiry(msg):
+        return "summarize_active_draft_order"
+    if _SAME_ORDER_CONFIRM_RE.search(_norm_msg(msg)):
+        return "continue_checkout"
+    if _ADDRESS_ON_FILE_CLAIM_RE.search(msg):
+        return "confirm_known_address"
+    if missing_fields:
+        first = missing_fields[0]
+        if first in {"city"}:
+            return "collect_missing_city"
+        if first in {"delivery_address", "address", "address_line", "short_address_code"}:
+            return "collect_missing_address"
+        if first in {"customer_first_name", "customer_last_name", "name"}:
+            return "collect_customer_name_for_whatsapp_order"
+        if first == "payment_method":
+            return "collect_payment_method_for_whatsapp_order"
+    return "continue_checkout"
+
+
+def _resolve_active_checkout_known_facts(
+    ctx: BrainContext,
+    *,
+    order_context: Any = None,
+) -> Dict[str, Any]:
+    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+        is_active_catalog_checkout,
+    )
+
+    if not is_active_catalog_checkout(ctx):
+        return {}
+
+    facts: Dict[str, Any] = {
+        "active_catalog_checkout": True,
+        "checkout_owner_active": True,
+    }
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+    prep_d: Dict[str, Any] = {}
+    if prep is not None:
+        if hasattr(prep, "to_dict"):
+            try:
+                prep_d = dict(prep.to_dict())
+            except Exception:  # noqa: BLE001
+                prep_d = {}
+        elif isinstance(prep, dict):
+            prep_d = dict(prep)
+        else:
+            prep_d = dict(getattr(prep, "__dict__", {}) or {})
+
+    line_items = list(prep_d.get("line_items") or [])
+    if line_items:
+        facts["line_items_known"] = True
+        titles = [
+            str(li.get("product_name") or li.get("title") or "").strip()
+            for li in line_items
+            if isinstance(li, dict)
+        ]
+        titles = [t for t in titles if t]
+        if titles:
+            facts["product_titles"] = titles
+    if prep_d.get("catalog_checkout_total") is not None:
+        facts["catalog_total"] = prep_d.get("catalog_checkout_total")
+    if order_context is not None and getattr(order_context, "active_draft", None) is not None:
+        facts["active_draft_exists"] = True
+    return facts
 
 
 @dataclass
@@ -298,15 +403,42 @@ def build_commerce_turn_contract(
         if catalog_decision is not None:
             action_to_execute = catalog_decision.action
             reasons.append("catalog_order_continue_checkout_candidate")
-    elif commerce_state == "whatsapp_quick_order":
-        allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
-    elif commerce_state == "browse":
-        allowed_actions = [
-            ACTION_SEARCH_PRODUCTS,
-            ACTION_CATALOG_NAVIGATE,
-            ACTION_CLARIFY,
-            "llm_compose",
-        ]
+    else:
+        active_facts = _resolve_active_checkout_known_facts(ctx, order_context=order_context)
+        if active_facts.get("active_catalog_checkout"):
+            known_facts.update(active_facts)
+            reasons.append("active_catalog_checkout_session")
+            commerce_state = "whatsapp_quick_order"
+            forbidden_actions = _merge_forbidden(
+                forbidden_actions,
+                _CATALOG_ORDER_FORBIDDEN,
+            )
+            missing_fields = [
+                m for m in missing_fields
+                if m not in {"product", "quantity", "variant"}
+            ]
+            next_goal = _derive_active_checkout_next_goal(
+                str(getattr(ctx, "message", "") or ""),
+                missing_fields,
+            )
+            allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
+            from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+                try_active_catalog_checkout_continue_decision,
+            )
+
+            active_decision = try_active_catalog_checkout_continue_decision(ctx)
+            if active_decision is not None:
+                action_to_execute = active_decision.action
+                reasons.append("active_catalog_checkout_continue_candidate")
+        elif commerce_state == "whatsapp_quick_order":
+            allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
+        elif commerce_state == "browse":
+            allowed_actions = [
+                ACTION_SEARCH_PRODUCTS,
+                ACTION_CATALOG_NAVIGATE,
+                ACTION_CLARIFY,
+                "llm_compose",
+            ]
 
     # Phase 2 TODO: wire MissingFieldsEngine enforce when ORDER_MISSING_FIELDS_ENGINE_ENABLED.
     if order_context is not None:
@@ -366,6 +498,17 @@ def log_commerce_turn_contract_divergence(
             contract.next_goal,
         )
 
+    if contract.known_facts.get("active_catalog_checkout") and action in _BROWSE_OR_SEARCH_ACTIONS:
+        divergences.append("active_catalog_checkout_but_decision_is_browse_or_search")
+        logger.warning(
+            "[COMMERCE_TURN_CONTRACT/divergence] phase=%s kind=active_checkout_vs_browse "
+            "tenant=%s action=%s goal=%s",
+            phase,
+            getattr(ctx, "tenant_id", None) if ctx else None,
+            action,
+            contract.next_goal,
+        )
+
     if contract.known_facts.get("phone_known"):
         phone_missing = [m for m in contract.missing_fields if m in _PHONE_FIELD_NAMES]
         if phone_missing:
@@ -413,16 +556,16 @@ def maybe_enforce_commerce_turn_contract_decision(
     decision: Decision,
 ) -> Decision:
     """
-    Phase 2 — when contract marks a current-turn catalog order, override browse
-    / discovery / LLM-fallback decisions into checkout continuation.
+    Phase 2 — when contract marks catalog order or active catalog checkout, override
+    browse / discovery / LLM-fallback decisions into checkout continuation.
     """
-    if not contract.known_facts.get("catalog_order_current_turn"):
+    if not _contract_checkout_enforced(contract):
         return decision
 
     from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
         catalog_order_continue_checkout_enabled,
         maybe_enforce_catalog_order_continue_checkout,
-        try_catalog_order_continue_decision,
+        try_active_catalog_checkout_continue_decision,
     )
 
     if not catalog_order_continue_checkout_enabled():
@@ -447,7 +590,7 @@ def maybe_enforce_commerce_turn_contract_decision(
     if raw_action not in _CATALOG_ORDER_OVERRIDE_ACTIONS:
         return decision
 
-    catalog_decision = try_catalog_order_continue_decision(ctx)
+    catalog_decision = try_active_catalog_checkout_continue_decision(ctx)
     if catalog_decision is None:
         logger.warning(
             "[COMMERCE_TURN_CONTRACT/enforce] catalog_order override skipped "
@@ -469,10 +612,20 @@ def maybe_enforce_commerce_turn_contract_decision(
     return catalog_decision
 
 
+def is_address_on_file_claim(message: str) -> bool:
+    return bool(_ADDRESS_ON_FILE_CLAIM_RE.search(str(message or "")))
+
+
+def is_same_order_confirmation(message: str) -> bool:
+    return bool(_SAME_ORDER_CONFIRM_RE.search(_norm_msg(message)))
+
+
 __all__ = [
     "CommerceTurnContract",
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
+    "is_address_on_file_claim",
+    "is_same_order_confirmation",
     "log_commerce_turn_contract_divergence",
     "maybe_enforce_commerce_turn_contract_decision",
 ]

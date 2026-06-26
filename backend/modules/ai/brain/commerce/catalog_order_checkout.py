@@ -215,6 +215,69 @@ def try_catalog_order_continue_decision(ctx: BrainContext) -> Optional[Decision]
         return None
     if not is_current_catalog_order_submitted(ctx):
         return None
+    decision = try_active_catalog_checkout_continue_decision(ctx)
+    if decision is None:
+        return None
+    return Decision(
+        action=decision.action,
+        args=dict(decision.args or {}),
+        reason="catalog_order_submitted → continue_checkout",
+        confidence=1.0,
+    )
+
+
+def _prep_dict(order_prep: Any) -> Dict[str, Any]:
+    if order_prep is None:
+        return {}
+    if isinstance(order_prep, dict):
+        return dict(order_prep)
+    if hasattr(order_prep, "to_dict"):
+        try:
+            return dict(order_prep.to_dict())
+        except Exception:  # noqa: BLE001
+            pass
+    return dict(getattr(order_prep, "__dict__", {}) or {})
+
+
+def is_active_catalog_checkout(ctx: BrainContext) -> bool:
+    """
+    True when a native catalog checkout session is still in progress — including
+    follow-up turns after the initial catalog_order event.
+    """
+    if is_current_catalog_order_submitted(ctx):
+        return True
+    if is_catalog_line_items_authoritative(ctx):
+        return True
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+    prep_d = _prep_dict(prep)
+    if is_catalog_line_items_authoritative_from_prep(prep):
+        return True
+    line_items = list(prep_d.get("line_items") or [])
+    if line_items and prep_d.get("catalog_checkout_total") is not None:
+        return True
+    if prep_d.get("order_flow_v2_active") and prep_d.get("order_flow_v2_trusted_price"):
+        return True
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("from_native_catalog_order") or str(item.get("source") or "") == "whatsapp_native_catalog_order":
+            return True
+    focus = getattr(state, "current_product_focus", None) if state else None
+    if isinstance(focus, dict) and (
+        focus.get("from_catalog_order") or focus.get("from_native_catalog_order")
+    ):
+        if line_items or prep_d.get("catalog_checkout_total") is not None:
+            return True
+    return False
+
+
+def try_active_catalog_checkout_continue_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Continue checkout from order_prep / active draft — not only current-turn catalog_order."""
+    if not catalog_order_continue_checkout_enabled():
+        return None
+    if not is_active_catalog_checkout(ctx):
+        return None
     product = _product_from_state(ctx)
     if not product:
         return None
@@ -223,10 +286,10 @@ def try_catalog_order_continue_decision(ctx: BrainContext) -> Optional[Decision]
         args=_catalog_order_continue_args(
             ctx,
             product,
-            reason="catalog_order_submitted → continue_checkout",
+            reason="active_catalog_checkout → continue_checkout",
         ),
-        reason="catalog_order_submitted → continue_checkout",
-        confidence=1.0,
+        reason="active_catalog_checkout → continue_checkout",
+        confidence=0.98,
     )
 
 
@@ -275,7 +338,7 @@ def maybe_enforce_catalog_order_continue_checkout(
     """
     if not catalog_order_continue_checkout_enabled():
         return decision
-    if not is_current_catalog_order_submitted(ctx):
+    if not is_current_catalog_order_submitted(ctx) and not is_active_catalog_checkout(ctx):
         return decision
 
     product = _product_from_state(ctx)
@@ -313,9 +376,11 @@ def maybe_enforce_catalog_order_continue_checkout(
 
 __all__ = [
     "catalog_order_continue_checkout_enabled",
+    "is_active_catalog_checkout",
     "is_catalog_line_items_authoritative",
     "is_catalog_line_items_authoritative_from_prep",
     "is_current_catalog_order_submitted",
     "maybe_enforce_catalog_order_continue_checkout",
+    "try_active_catalog_checkout_continue_decision",
     "try_catalog_order_continue_decision",
 ]
