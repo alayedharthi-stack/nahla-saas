@@ -1,11 +1,10 @@
 """
 commerce_turn_contract.py
 ─────────────────────────
-Phase 1 — unified pre-decide commerce turn contract (shadow / log-only).
+Unified pre-decide commerce turn contract.
 
-Aggregates facts, goals, and forbidden actions from existing projections
-(OrderContext, commerce_navigator, catalog_order_checkout) before
-DecisionEngine.decide(). Does not change routing or compose in Phase 1.
+Phase 1: build + attach + divergence telemetry before DecisionEngine.decide().
+Phase 2: enforce catalog_order_current_turn at decide-time (browse → checkout).
 """
 from __future__ import annotations
 
@@ -16,15 +15,16 @@ from typing import Any, Dict, List, Optional, Sequence
 from modules.ai.brain.decision.actions import (
     ACTION_CATALOG_NAVIGATE,
     ACTION_CLARIFY,
+    ACTION_LLM_REPLY,
     ACTION_NARROW,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
 )
 from modules.ai.brain.types import BrainContext, Decision
 
 logger = logging.getLogger("nahla.brain.commerce_turn_contract")
 
-# Phase 2 TODO: enforce contract at decide-time (not log-only).
 _CATALOG_ORDER_FORBIDDEN = (
     "do_not_browse",
     "do_not_search_products",
@@ -39,6 +39,16 @@ _BROWSE_OR_SEARCH_ACTIONS = frozenset({
     ACTION_CATALOG_NAVIGATE,
     ACTION_NARROW,
     ACTION_CLARIFY,
+})
+
+# Matches catalog_order_checkout._BROWSE_OR_LISTING_ACTIONS — override to checkout.
+_CATALOG_ORDER_OVERRIDE_ACTIONS = frozenset({
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_SEARCH_PRODUCTS,
+    ACTION_CLARIFY,
+    ACTION_NARROW,
+    ACTION_LLM_REPLY,
+    ACTION_STASH_ADDRESS_PRE_PRODUCT,
 })
 
 _PHONE_FIELD_NAMES = frozenset({
@@ -218,11 +228,7 @@ def build_commerce_turn_contract(
     *,
     db: Any = None,
 ) -> CommerceTurnContract:
-    """
-    Build a unified pre-decide commerce contract from existing projections.
-
-    Shadow-only in Phase 1 — does not mutate ctx.state or routing.
-    """
+    """Build a unified pre-decide commerce contract from existing projections."""
     reasons: List[str] = []
     intent = getattr(ctx, "intent", None)
     intent_name = str(getattr(intent, "name", "") or "")
@@ -401,9 +407,72 @@ def log_commerce_turn_contract_divergence(
     return divergences
 
 
+def maybe_enforce_commerce_turn_contract_decision(
+    ctx: BrainContext,
+    contract: CommerceTurnContract,
+    decision: Decision,
+) -> Decision:
+    """
+    Phase 2 — when contract marks a current-turn catalog order, override browse
+    / discovery / LLM-fallback decisions into checkout continuation.
+    """
+    if not contract.known_facts.get("catalog_order_current_turn"):
+        return decision
+
+    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+        catalog_order_continue_checkout_enabled,
+        maybe_enforce_catalog_order_continue_checkout,
+        try_catalog_order_continue_decision,
+    )
+
+    if not catalog_order_continue_checkout_enabled():
+        return decision
+
+    raw_action = str(getattr(decision, "action", "") or "")
+
+    if raw_action == ACTION_PROPOSE_DRAFT_ORDER:
+        enforced = maybe_enforce_catalog_order_continue_checkout(ctx, decision)
+        if enforced.action != raw_action or enforced.args != decision.args:
+            logger.info(
+                "[COMMERCE_TURN_CONTRACT/enforce] "
+                "event=contract_enforced_catalog_order_over_browse "
+                "tenant=%s raw_action=%s enforced_action=%s next_goal=%s",
+                getattr(ctx, "tenant_id", None),
+                raw_action,
+                enforced.action,
+                contract.next_goal,
+            )
+        return enforced
+
+    if raw_action not in _CATALOG_ORDER_OVERRIDE_ACTIONS:
+        return decision
+
+    catalog_decision = try_catalog_order_continue_decision(ctx)
+    if catalog_decision is None:
+        logger.warning(
+            "[COMMERCE_TURN_CONTRACT/enforce] catalog_order override skipped "
+            "tenant=%s raw_action=%s reason=no_checkout_candidate",
+            getattr(ctx, "tenant_id", None),
+            raw_action,
+        )
+        return decision
+
+    logger.info(
+        "[COMMERCE_TURN_CONTRACT/enforce] "
+        "event=contract_enforced_catalog_order_over_browse "
+        "tenant=%s raw_action=%s enforced_action=%s next_goal=%s",
+        getattr(ctx, "tenant_id", None),
+        raw_action,
+        catalog_decision.action,
+        contract.next_goal,
+    )
+    return catalog_decision
+
+
 __all__ = [
     "CommerceTurnContract",
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
     "log_commerce_turn_contract_divergence",
+    "maybe_enforce_commerce_turn_contract_decision",
 ]
