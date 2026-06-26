@@ -1493,6 +1493,19 @@ class DefaultComposer:
                     )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog facts must not break compose
                 pass
+            _checkout_facts = dict(
+                (getattr(reply_state, "known_facts", None) or {}).get(
+                    "checkout_identity_shipping",
+                )
+                or {}
+            )
+            if _checkout_facts:
+                import json as _json  # noqa: PLC0415
+
+                prompt = (
+                    f"{prompt}\n\n[CHECKOUT_IDENTITY_SHIPPING_FACTS — operational only]\n"
+                    f"{_json.dumps(_checkout_facts, ensure_ascii=False)}"
+                )
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(
                 ctx.history,

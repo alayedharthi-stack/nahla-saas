@@ -199,7 +199,25 @@ def _resolve_whatsapp_missing_fields(
     order_prep: Any,
     state: Any = None,
     whatsapp_phone: str = "",
+    order_context: Any = None,
 ) -> List[str]:
+    if order_context is not None:
+        try:
+            from core.order_context_prefill import (  # noqa: PLC0415
+                resolve_checkout_missing_fields_legacy,
+            )
+
+            missing = resolve_checkout_missing_fields_legacy(order_context)
+            prep = _order_prep_dict(order_prep)
+            if _catalog_order_authoritative(prep):
+                missing = [
+                    m for m in missing
+                    if m not in {"product", "quantity", "variant"}
+                ]
+            return missing
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order-context missing must not block legacy path
+            pass
+
     prep = _order_prep_dict(order_prep)
     missing: List[str] = []
     try:
@@ -438,6 +456,7 @@ def resolve_commerce_navigator(
     maps_url: str = "",
     whatsapp_phone: str = "",
     merchant_sales_channels: Any = None,
+    order_context: Any = None,
 ) -> CommerceNavigatorDecision:
     """Pure contract resolver — never returns customer reply text."""
     msg = (message or "").strip()
@@ -482,6 +501,7 @@ def resolve_commerce_navigator(
                 order_prep=order_prep,
                 state=state,
                 whatsapp_phone=whatsapp_phone,
+                order_context=order_context,
             )
             addr_missing = [
                 m for m in missing
@@ -639,9 +659,20 @@ def resolve_commerce_navigator(
             order_prep=order_prep,
             state=state,
             whatsapp_phone=whatsapp_phone,
+            order_context=order_context,
         )
         next_goal = "collect_next_whatsapp_order_field"
-        if not missing:
+        if order_context is not None:
+            try:
+                from core.order_context_prefill import derive_checkout_next_goal  # noqa: PLC0415
+
+                next_goal = derive_checkout_next_goal(
+                    getattr(order_context, "missing_fields_result", None),
+                    order_context.prefill,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — derived goal must not block legacy navigator
+                next_goal = "collect_next_whatsapp_order_field"
+        elif not missing:
             next_goal = "confirm_whatsapp_order_before_payment"
         elif missing[0] == "product":
             next_goal = "collect_product_for_whatsapp_order"
