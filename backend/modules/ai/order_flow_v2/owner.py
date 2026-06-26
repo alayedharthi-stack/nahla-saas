@@ -214,50 +214,61 @@ def try_handle_order_flow_v2(
         )
 
     if is_catalog_order_inbound(meta, text):
-        patch.update(_catalog_order_patch(
-            db,
-            tenant_id=tenant_id,
-            inbound_metadata=meta,
-            message=text,
-        ))
-        patch.update(activate_checkout_patch())
-        merged_prep = {**order_prep, **patch}
-        missing = [
-            m for m in _missing(merged_prep)
-            if m not in {"product", "products", "product_id", "variant", "quantity", "qty"}
-        ]
-        if patch.get("catalog_order_extraction_incomplete"):
+        try:
+            patch.update(_catalog_order_patch(
+                db,
+                tenant_id=tenant_id,
+                inbound_metadata=meta,
+                message=text,
+            ))
+            patch.update(activate_checkout_patch())
+            merged_prep = {**order_prep, **patch}
+            missing = [
+                m for m in _missing(merged_prep)
+                if m not in {"product", "products", "product_id", "variant", "quantity", "qty"}
+            ]
+            if patch.get("catalog_order_extraction_incomplete"):
+                patch.update(build_contract(
+                    decision="catalog_order_extraction_incomplete",
+                    field="",
+                    reason="catalog_order_text_extraction_incomplete",
+                ).to_patch())
+                reply = build_catalog_order_extraction_fallback_reply(order_prep=merged_prep)
+                return _finalize_result(
+                    enabled=enabled,
+                    shadow=shadow,
+                    reply=reply,
+                    reason="catalog_order_extraction_incomplete",
+                    state_patch=patch,
+                )
+            patch.update(stamp_last_field_patch(missing))
             patch.update(build_contract(
-                decision="catalog_order_extraction_incomplete",
-                field="",
-                reason="catalog_order_text_extraction_incomplete",
+                decision="ask_missing_field",
+                field=(patch.get("order_flow_v2_last_field") or ""),
+                reason="catalog_order_start",
             ).to_patch())
-            reply = build_catalog_order_extraction_fallback_reply(order_prep=merged_prep)
+            reply = build_catalog_order_start_reply(
+                order_prep=merged_prep,
+                brain_state=bs,
+                missing_fields=missing,
+            )
             return _finalize_result(
                 enabled=enabled,
                 shadow=shadow,
                 reply=reply,
-                reason="catalog_order_extraction_incomplete",
+                reason="catalog_order_start",
                 state_patch=patch,
             )
-        patch.update(stamp_last_field_patch(missing))
-        patch.update(build_contract(
-            decision="ask_missing_field",
-            field=(patch.get("order_flow_v2_last_field") or ""),
-            reason="catalog_order_start",
-        ).to_patch())
-        reply = build_catalog_order_start_reply(
-            order_prep=merged_prep,
-            brain_state=bs,
-            missing_fields=missing,
-        )
-        return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
-            reply=reply,
-            reason="catalog_order_start",
-            state_patch=patch,
-        )
+        except Exception:
+            logger.exception(
+                "[ORDER_FLOW_V2] catalog_order path failed tenant=%s phone=%s",
+                tenant_id,
+                customer_phone,
+            )
+            return OrderFlowV2Result(
+                handled=False,
+                reason="catalog_order_v2_error",
+            )
 
     if is_greeting_message(text):
         if pending_order_exists(order_prep, bs):

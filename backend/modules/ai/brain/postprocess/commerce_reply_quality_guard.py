@@ -283,7 +283,20 @@ def select_arabic_commerce_fallback(
             not _suppress_qty_followup
             and not should_skip_legacy_order_flow_reply()
         ):
-            if message_has_bare_quantity_or_variant_signal(inbound_text):
+            _block_qty_prompt = False
+            try:
+                from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                    is_catalog_checkout_product_question_forbidden,
+                )
+
+                _block_qty_prompt = is_catalog_checkout_product_question_forbidden(
+                    inbound_metadata=inbound_metadata,
+                    message=inbound_text,
+                    state=state,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard must not break fallback
+                _block_qty_prompt = False
+            if not _block_qty_prompt and message_has_bare_quantity_or_variant_signal(inbound_text):
                 qty_reply = resolve_active_order_quantity_reply(
                     inbound_text,
                     state=state,
@@ -595,6 +608,31 @@ def apply_commerce_reply_quality_guard(
             len(text),
             intent_name or "-",
         )
+
+    try:
+        from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+            is_catalog_checkout_product_question_forbidden,
+            sanitize_forbidden_catalog_product_question,
+        )
+
+        if is_catalog_checkout_product_question_forbidden(
+            inbound_metadata=inbound_metadata,
+            message=inbound_text,
+            state=state,
+        ):
+            sanitized = sanitize_forbidden_catalog_product_question(
+                text,
+                inbound_metadata=inbound_metadata,
+                message=inbound_text,
+                state=state,
+            )
+            if sanitized and sanitized != text:
+                text = sanitized
+                replaced = True
+                used_fallback = True
+                fallback_kind = fallback_kind or "catalog_checkout_safe"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog sanitize must not block reply
+        pass
 
     return CommerceReplyQualityGuardResult(
         reply=text,

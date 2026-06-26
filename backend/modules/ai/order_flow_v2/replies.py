@@ -8,8 +8,14 @@ from .state import line_items_from_state, trusted_catalog_price
 
 
 def _format_item(item: Dict[str, Any]) -> str:
+    from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+        format_line_item_quantity,
+        safe_line_item_quantity,
+    )
+
     name = str(item.get("product_name") or item.get("title") or item.get("name") or "منتج").strip()
-    qty = int(item.get("quantity") or 1)
+    qty = safe_line_item_quantity(item.get("quantity"))
+    qty_txt = format_line_item_quantity(qty)
     price = item.get("catalog_price") or item.get("item_price") or item.get("price")
     price_txt = ""
     if price not in (None, ""):
@@ -18,8 +24,8 @@ def _format_item(item: Dict[str, Any]) -> str:
             price_txt = f" — {val:.0f} ر.س" if val == int(val) else f" — {val:.2f} ر.س"
         except (TypeError, ValueError):
             price_txt = f" — {price}"
-    if qty > 1:
-        return f"• {name}{price_txt} × {qty}"
+    if qty > 1 or qty != int(qty):
+        return f"• {name}{price_txt} × {qty_txt}"
     return f"• {name}{price_txt}"
 
 

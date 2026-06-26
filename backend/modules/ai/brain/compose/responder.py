@@ -586,6 +586,13 @@ class DefaultComposer:
         if action in (ACTION_PROPOSE_DRAFT_ORDER, ACTION_ORDER_CONTEXT_UPDATE):
             if not result.success:
                 return T.generic_fallback(variant=self._variant_idx(ctx))
+            if data.get("catalog_checkout_safe"):
+                from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                    build_catalog_checkout_safe_reply_for_ctx,
+                )
+
+                result.data["chosen_path"] = "catalog_checkout_safe"
+                return build_catalog_checkout_safe_reply_for_ctx(ctx)
             # The product reference we have can't be resolved on the store
             # (wrong id, deleted, not synced). Ask the customer to choose
             # again — never silently push a doomed order to Salla.
@@ -730,7 +737,11 @@ class DefaultComposer:
                     )
 
                     if is_catalog_line_items_authoritative(ctx):
-                        return None
+                        from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                            build_catalog_checkout_safe_reply_for_ctx,
+                        )
+
+                        return build_catalog_checkout_safe_reply_for_ctx(ctx)
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
                     pass
                 return T.order_intent_captured(product=data.get("product", {}))
@@ -744,7 +755,11 @@ class DefaultComposer:
                     )
 
                     if is_catalog_line_items_authoritative(ctx):
-                        return None
+                        from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                            build_catalog_checkout_safe_reply_for_ctx,
+                        )
+
+                        return build_catalog_checkout_safe_reply_for_ctx(ctx)
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard is best-effort
                     pass
                 return T.order_intent_captured(product=data.get("product", {}))

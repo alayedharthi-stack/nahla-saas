@@ -172,7 +172,10 @@ class TestCatalogOrderResponderAndHandler:
             },
         )
         reply = asyncio.run(DefaultComposer().compose(decision, result, ctx))
-        assert reply is None
+        assert reply is not None
+        assert "وش المنتج" not in reply
+        assert "وش العدد" not in reply
+        assert "وش الوزن" not in reply
 
     def test_catalog_order_routes_to_missing_fields_only_after_draft_creation(
         self,

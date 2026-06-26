@@ -6762,6 +6762,8 @@ async def _handle_merchant_message(
             return
 
         # ── OrderFlowV2 deterministic checkout owner ─────────────────────
+        _of2_result = None
+        _of2_catalog_error = False
         try:
             from modules.ai.order_flow_v2.owner import (  # noqa: PLC0415
                 persist_order_flow_v2_result,
@@ -6776,6 +6778,7 @@ async def _handle_merchant_message(
                 inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
                 inbound_normalized_type=str(inbound_type or "text"),
             )
+            _of2_catalog_error = str(getattr(_of2_result, "reason", "") or "") == "catalog_order_v2_error"
             if _of2_result.handled and _of2_result.reply and _trace.outbound_lock_acquired():
                 persist_order_flow_v2_result(
                     db,
@@ -6818,11 +6821,70 @@ async def _handle_merchant_message(
                     _sync_persona_observability()
                     return
         except Exception:
+            _of2_catalog_error = True
             logger.exception(
                 "[ORDER_FLOW_V2] pre-brain owner failed tenant=%s to=%s",
                 tenant_id,
                 to,
             )
+
+        if _of2_catalog_error and _trace.outbound_lock_acquired():
+            try:
+                from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                    try_catalog_order_pre_brain_safe_reply,
+                )
+                from modules.ai.order_flow_v2.triggers import is_catalog_order_inbound  # noqa: PLC0415
+
+                _in_meta_of2 = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+                if is_catalog_order_inbound(_in_meta_of2, text or ""):
+                    _safe_catalog_reply = try_catalog_order_pre_brain_safe_reply(
+                        db,
+                        tenant_id=int(tenant_id),
+                        customer_phone=to,
+                        message=text or "",
+                        inbound_metadata=_in_meta_of2,
+                    )
+                    if _safe_catalog_reply:
+                        _persona_ownership.mark_bypass(
+                            _POReason.PRE_BRAIN_FAST_PATH,
+                            owner="catalog_order_resilience:pre_brain_safe",
+                        )
+                        _of2_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_safe_catalog_reply,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
+                        if _of2_ok:
+                            StateManager.save_message(
+                                db,
+                                to,
+                                _safe_catalog_reply,
+                                "outbound",
+                                conversation_id=convo.id,
+                                tenant_id=tenant_id,
+                                extra_metadata={
+                                    **_persona_ownership.to_metadata(),
+                                    "reply_owner": "catalog_order_resilience",
+                                    "order_flow_v2_reason": "catalog_order_pre_brain_safe",
+                                },
+                            )
+                            try:
+                                db.commit()
+                            except Exception:
+                                try:
+                                    db.rollback()
+                                except Exception:  # noqa: silent-ok — rollback best-effort after commit failure
+                                    pass
+                            _sync_persona_observability()
+                            return
+            except Exception:
+                logger.exception(
+                    "[CATALOG_ORDER_RESILIENCE] pre-brain safe send failed tenant=%s to=%s",
+                    tenant_id,
+                    to,
+                )
 
         # ── Checkout route owner: explicit order-entry channel choice ───────
         # Operational routing happens before Brain/staff/location/FAQ owners.
