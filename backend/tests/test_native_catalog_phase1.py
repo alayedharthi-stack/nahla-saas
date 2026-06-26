@@ -550,7 +550,7 @@ class TestNativeOrderDoesNotReaskProduct:
         assert enforced.args["continue_checkout"] is True
         assert enforced.args["native_catalog_order"]["event_type"] == "catalog_order_submitted"
         assert enforced.args["native_catalog_order"]["phone_source"] == "whatsapp"
-        assert enforced.args["product"]["external_id"] == "ext-10"
+        assert enforced.args["product"]["product_retailer_id"] == "ext-10"
 
     def test_catalog_order_submitted_overrides_product_search(self, monkeypatch):
         monkeypatch.setenv("WA_CATALOG_ORDER_CONTINUE_CHECKOUT_ENABLED", "true")

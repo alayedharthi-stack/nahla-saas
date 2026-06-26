@@ -438,6 +438,20 @@ class DefaultDecisionEngine:
                     confidence=0.97,
                 )
 
+        try:
+            from ..commerce.catalog_order_checkout import (  # noqa: PLC0415
+                try_catalog_order_continue_decision,
+            )
+
+            _catalog_order_dec = try_catalog_order_continue_decision(ctx)
+            if _catalog_order_dec is not None:
+                return _catalog_order_dec
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog-order route must not block decide
+            logger.debug(
+                "[WA_NATIVE_ORDER] early catalog_order route skipped tenant=%s",
+                ctx.tenant_id,
+            )
+
         # When the system proposed predicted options and is waiting for the
         # customer to confirm/reject, ALWAYS route to the draft-order handler
         # so the handler can process the confirm/reject logic.  This MUST
