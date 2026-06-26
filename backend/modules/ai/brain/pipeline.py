@@ -1453,17 +1453,20 @@ class MerchantBrain:
                 _cbt_exc,
             )
 
-        # ── 3.992 Commerce Turn Contract (Phase 1 — pre-decide shadow) ───────
+        # ── 3.992 Commerce Turn Contract (pre-decide + Phase 2 catalog enforce) ─
         _commerce_turn_contract = None
         _log_commerce_turn_contract_divergence = None
+        _enforce_commerce_turn_contract_decision = None
         try:
             from .commerce.commerce_turn_contract import (  # noqa: PLC0415
                 attach_commerce_turn_contract,
                 build_commerce_turn_contract,
                 log_commerce_turn_contract_divergence as _log_ctc_divergence_fn,
+                maybe_enforce_commerce_turn_contract_decision,
             )
 
             _log_commerce_turn_contract_divergence = _log_ctc_divergence_fn
+            _enforce_commerce_turn_contract_decision = maybe_enforce_commerce_turn_contract_decision
             _commerce_turn_contract = build_commerce_turn_contract(ctx, db=db)
             attach_commerce_turn_contract(ctx, _commerce_turn_contract)
             logger.info(
@@ -1502,6 +1505,20 @@ class MerchantBrain:
                     "[COMMERCE_TURN_CONTRACT] divergence_log skipped tenant=%s err=%s",
                     tenant_id,
                     _ctc_div_exc,
+                )
+
+        if _commerce_turn_contract is not None and _enforce_commerce_turn_contract_decision:
+            try:
+                decision = _enforce_commerce_turn_contract_decision(
+                    ctx,
+                    _commerce_turn_contract,
+                    decision,
+                )
+            except Exception as _ctc_enf_exc:  # noqa: BLE001  # noqa: silent-ok — contract enforce must not block decide
+                logger.debug(
+                    "[COMMERCE_TURN_CONTRACT] enforce skipped tenant=%s err=%s",
+                    tenant_id,
+                    _ctc_enf_exc,
                 )
 
         if str((decision.args or {}).get("topic") or "") == "purchase_channel_selection":
