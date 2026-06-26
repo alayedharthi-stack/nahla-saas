@@ -2363,6 +2363,7 @@ class MerchantBrain:
             tenant_tone=_tenant_tone,
             tenant_overlay=_tenant_overlay,
             merchant_context=slim_merchant_ctx,
+            db=db,
         )
 
         # ── 6.99 OwnerBrief native compose (Phase 3A) ─────────────────────
@@ -3559,6 +3560,7 @@ def _build_reply_state(
     tenant_tone: str = "",
     tenant_overlay: str = "",
     merchant_context: Optional[Dict[str, Any]] = None,
+    db: Any = None,
 ) -> BrainReplyState:
     recent_turns = []
     recent_customer_messages: List[str] = []
@@ -3797,6 +3799,58 @@ def _build_reply_state(
             _cn_exc,
         )
 
+    _checkout_order_context = _load_checkout_order_context(
+        db,
+        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+        customer_id=getattr(ctx, "customer_id", None),
+        conversation_id=getattr(ctx, "conversation_id", None),
+        phone=str(ctx.customer_phone or ""),
+        state=current_state,
+        message=str(ctx.message or ""),
+        inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
+    )
+    if _checkout_order_context is not None:
+        try:
+            from core.order_context_prefill import build_checkout_compose_facts  # noqa: PLC0415
+
+            known_facts["checkout_identity_shipping"] = build_checkout_compose_facts(
+                _checkout_order_context,
+                message=str(ctx.message or ""),
+                phone=str(ctx.customer_phone or ""),
+            )
+        except Exception as _cif_exc:  # noqa: BLE001  # noqa: silent-ok — checkout facts must not block compose
+            logger.debug(
+                "[CHECKOUT_COMPOSE_FACTS] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _cif_exc,
+            )
+        try:
+            from .commerce.commerce_navigator import resolve_commerce_navigator  # noqa: PLC0415
+
+            _profile_meta = dict((ctx.profile or {}).get("inbound_metadata") or {})
+            _commerce_navigator = resolve_commerce_navigator(
+                message=ctx.message or "",
+                intent_name=getattr(ctx.intent, "name", "") or "",
+                intent_slots=dict(getattr(ctx.intent, "slots", None) or {}),
+                decision_topic=str((decision.args or {}).get("topic") or ""),
+                stage=str(current_state.stage or ""),
+                order_prep=getattr(current_state, "order_prep", None),
+                state=current_state,
+                inbound_metadata=_profile_meta,
+                store_url=str(ctx.facts.store_url or ""),
+                maps_url=str(getattr(ctx.facts, "maps_url", "") or ""),
+                whatsapp_phone=str(ctx.customer_phone or ""),
+                merchant_sales_channels=_merchant_sales_channels,
+                order_context=_checkout_order_context,
+            )
+            known_facts["commerce_navigator"] = _commerce_navigator.to_dict()
+        except Exception as _cn2_exc:  # noqa: BLE001  # noqa: silent-ok — navigator refresh must not block compose
+            logger.debug(
+                "[COMMERCE_NAVIGATOR] refresh skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _cn2_exc,
+            )
+
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
@@ -3886,6 +3940,7 @@ def _build_reply_state(
             stance=_stance_result,
             intent_priority=_intent_priority,
             commerce_navigator=_commerce_navigator,
+            checkout_facts=dict(known_facts.get("checkout_identity_shipping") or {}),
         ),
         merchant_context=dict(merchant_context or {}),
         platform_kb_mode=platform_kb_mode,
@@ -3942,6 +3997,7 @@ def _compose_response_goal(
     stance: Any = None,
     intent_priority: Any = None,
     commerce_navigator: Any = None,
+    checkout_facts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Single-line summary of WHY this turn is being composed.
 
@@ -3960,6 +4016,7 @@ def _compose_response_goal(
         decision,
         suggestion,
         intent_priority=intent_priority,
+        checkout_facts=checkout_facts,
     )
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
 
@@ -4004,11 +4061,48 @@ def _compose_base_response_goal(
     suggestion: SuggestionSnapshot,
     *,
     intent_priority: Any = None,
+    checkout_facts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Decision-action-specific goal text (no stance, no relational frame).
 
     Pulled into its own function so the stance enrichment can wrap it
     without re-implementing every branch."""
+    _checkout = dict(checkout_facts or {})
+    if _checkout.get("customer_asks_known_phone") and _checkout.get("known_phone"):
+        return (
+            "customer_asks_known_phone — answer honestly with known_phone from "
+            "CHECKOUT_IDENTITY_SHIPPING_FACTS. Do NOT ask the customer to type "
+            "their phone. Do NOT use generic recovery."
+        )
+    if _checkout.get("customer_asks_known_name") and _checkout.get("known_name"):
+        return (
+            "customer_asks_known_name — answer honestly with known_name from "
+            "CHECKOUT_IDENTITY_SHIPPING_FACTS. Do NOT ask the customer to re-type "
+            "their name unless name_mode=ask."
+        )
+    _checkout_goal = str(_checkout.get("next_goal") or "").strip()
+    if _checkout_goal == "confirm_customer_and_shipping_details_once":
+        return (
+            "confirm_customer_and_shipping_details_once — one natural Saudi Arabic "
+            "WhatsApp message summarizing known name, phone, city, and delivery "
+            "address for confirmation. Use CHECKOUT_IDENTITY_SHIPPING_FACTS only. "
+            "Do NOT ask for phone on WhatsApp. Do NOT ask for fields marked skip. "
+            "Do NOT send separate per-field confirmations in this turn."
+        )
+    if _checkout_goal in {
+        "collect_customer_name_only",
+        "collect_city_only",
+        "collect_delivery_address_only",
+        "confirm_customer_name_once",
+        "confirm_city_once",
+        "confirm_delivery_address_once",
+    }:
+        return (
+            f"{_checkout_goal} — ask or confirm only the missing checkout field "
+            "indicated in CHECKOUT_IDENTITY_SHIPPING_FACTS. Do NOT ask phone. "
+            "Do NOT ask other fields already marked skip."
+        )
+
     if decision.action == ACTION_PLATFORM_REPLY:
         # Critical — keep the commerce-oriented suggestion engine hints from
         # hijacking ``response_goal``. Platform turns are NOT sales funnel.
@@ -4424,6 +4518,67 @@ def _prepend_first_contact_salaam(reply: str, ctx: Any) -> str:
         getattr(ctx, "state", None),
         tenant_id=getattr(ctx, "tenant_id", None),
     )
+
+
+def _load_checkout_order_context(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int],
+    conversation_id: Optional[int],
+    phone: str,
+    state: MerchantConversationState,
+    message: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Build OrderContext for active WhatsApp checkout compose — read-only."""
+    if db is None or not tenant_id:
+        return None
+    try:
+        from dataclasses import asdict, is_dataclass
+
+        from core.order_context_builder import build_order_context
+
+        customer = None
+        conversation = None
+        if customer_id:
+            from models import Conversation, Customer  # noqa: PLC0415
+
+            customer = (
+                db.query(Customer)
+                .filter_by(id=int(customer_id), tenant_id=int(tenant_id))
+                .first()
+            )
+            if conversation_id:
+                conversation = (
+                    db.query(Conversation)
+                    .filter_by(id=int(conversation_id), tenant_id=int(tenant_id))
+                    .first()
+                )
+
+        prep = (
+            asdict(state.order_prep)
+            if is_dataclass(state.order_prep)
+            else dict(getattr(state.order_prep, "__dict__", {}) or {})
+        )
+        return build_order_context(
+            db,
+            tenant_id=int(tenant_id),
+            conversation=conversation,
+            customer=customer,
+            phone=str(phone or ""),
+            brain_state={"order_prep": prep},
+            inbound_metadata=dict(inbound_metadata or {}),
+            message=str(message or ""),
+            build_source="brain_compose",
+        )
+    except Exception as _oc_exc:  # noqa: BLE001  # noqa: silent-ok — order context is best-effort for compose
+        logger.debug(
+            "[CHECKOUT_ORDER_CONTEXT] build skipped tenant=%s err=%s",
+            tenant_id,
+            _oc_exc,
+        )
+        return None
 
 
 def _history_has_outbound(history: List[Dict[str, Any]]) -> bool:

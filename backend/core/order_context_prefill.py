@@ -561,6 +561,174 @@ def build_order_context_api_payload(ctx: Any) -> Dict[str, Any]:
     }
 
 
+_CUSTOMER_ASKS_NAME_RE = re.compile(
+    r"(?:"
+    r"وش\s*اسمي|اسمي\s*(?:ايش|إيش|ك(?:م|يف)?)|"
+    r"ت(?:عرف|عرفين|عرفون)\s*اسمي|"
+    r"انت\s*عارف\s*اسمي|"
+    r"what(?:'s|\s+is)\s*my\s*name"
+    r")",
+    re.I | re.UNICODE,
+)
+_CUSTOMER_ASKS_PHONE_RE = re.compile(
+    r"(?:"
+    r"وش\s*(?:ج(?:وال|وال)|رقم(?:ي|)?)|"
+    r"ج(?:وال|وال)(?:ي|)\s*(?:عند(?:كم|ك)|عندنا|كم|ك(?:م|يف)?)|"
+    r"رقم(?:ي|)\s*(?:عند(?:كم|ك)|عندنا|كم|ك(?:م|يف)?)|"
+    r"what(?:'s|\s+is)\s*my\s*(?:phone|number|mobile)"
+    r")",
+    re.I | re.UNICODE,
+)
+
+
+def detect_customer_identity_inquiry(message: str = "") -> Dict[str, bool]:
+    """Detect when the customer asks for their own known name or phone."""
+    text = str(message or "").strip()
+    if not text:
+        return {}
+    out: Dict[str, bool] = {}
+    if _CUSTOMER_ASKS_NAME_RE.search(text):
+        out["customer_asks_known_name"] = True
+    if _CUSTOMER_ASKS_PHONE_RE.search(text):
+        out["customer_asks_known_phone"] = True
+    return out
+
+
+def derive_checkout_next_goal(result: Any, prefill: Any) -> str:
+    """Map missing-fields engine readiness to a single compose goal token."""
+    from core.order_missing_fields_engine import (  # noqa: PLC0415
+        READINESS_CONFIRMING_SHIPPING,
+        READINESS_READY_FOR_CONFIRMATION,
+        READINESS_READY_FOR_PAYMENT,
+    )
+
+    if result is None:
+        return "collect_next_whatsapp_order_field"
+
+    readiness = str(getattr(result, "readiness_state", "") or "")
+    if readiness in {
+        READINESS_CONFIRMING_SHIPPING,
+        READINESS_READY_FOR_CONFIRMATION,
+        READINESS_READY_FOR_PAYMENT,
+    }:
+        return "confirm_customer_and_shipping_details_once"
+
+    engine_missing = [
+        f for f in list(getattr(result, "missing_fields", None) or [])
+        if f in {"name", "city", "delivery_address"}
+    ]
+    if len(engine_missing) == 1:
+        field = engine_missing[0]
+        if field == "name":
+            if prefill.identity_missing_mode == MODE_CONFIRM:
+                return "confirm_customer_name_once"
+            return "collect_customer_name_only"
+        if field == "city":
+            if prefill.shipping_city_mode == MODE_CONFIRM:
+                return "confirm_city_once"
+            return "collect_city_only"
+        if field == "delivery_address":
+            if prefill.shipping_delivery_mode == MODE_CONFIRM:
+                return "confirm_delivery_address_once"
+            return "collect_delivery_address_only"
+
+    if not engine_missing:
+        return "confirm_customer_and_shipping_details_once"
+    return "collect_next_whatsapp_order_field"
+
+
+def resolve_checkout_missing_fields_legacy(ctx: Any) -> List[str]:
+    """Legacy bridge missing fields from OrderContext engine projection."""
+    result = getattr(ctx, "missing_fields_result", None)
+    if result is None:
+        return list(getattr(ctx, "legacy_missing_fields", None) or [])
+    from core.order_missing_fields_engine import to_legacy_missing_fields  # noqa: PLC0415
+
+    return list(to_legacy_missing_fields(result))
+
+
+def build_checkout_compose_facts(
+    ctx: Any,
+    *,
+    message: str = "",
+    phone: str = "",
+) -> Dict[str, Any]:
+    """Operational checkout facts for LLM compose — not customer reply text."""
+    facts: Dict[str, Any] = {
+        "do_not_ask_phone": True,
+        "do_not_repeat_field_confirmations": True,
+    }
+
+    inquiry = detect_customer_identity_inquiry(message)
+    facts.update(inquiry)
+
+    if phone:
+        facts["phone_mode"] = MODE_SKIP
+        facts["known_phone"] = str(phone).strip()
+        facts["phone_source"] = "whatsapp_sender"
+
+    identity = ctx.identity
+    prefill = ctx.prefill
+    shipping = ctx.shipping
+    result = getattr(ctx, "missing_fields_result", None)
+
+    name_mode = str(getattr(identity, "missing_mode", "") or prefill.identity_missing_mode)
+    operational_name = str(getattr(identity, "operational_name", "") or "").strip()
+    if name_mode == MODE_SKIP and operational_name:
+        facts["name_mode"] = MODE_SKIP
+        facts["known_name"] = operational_name
+        facts["name_reason"] = (
+            getattr(identity, "name_source", "") or "known_customer_name"
+        )
+    elif name_mode == MODE_CONFIRM and operational_name:
+        facts["name_mode"] = MODE_CONFIRM
+        facts["known_name"] = operational_name
+    elif name_mode == MODE_ASK:
+        facts["name_mode"] = MODE_ASK
+
+    city_mode = str(prefill.shipping_city_mode or "")
+    if shipping.city:
+        facts["known_city"] = shipping.city
+        facts["city_mode"] = city_mode or MODE_SKIP
+    elif city_mode:
+        facts["city_mode"] = city_mode
+
+    delivery_mode = str(prefill.shipping_delivery_mode or "")
+    if shipping.short_address:
+        facts["known_short_address_code"] = shipping.short_address
+    if shipping.maps_url:
+        facts["known_google_maps_url"] = shipping.maps_url
+    if shipping.address_line:
+        facts["known_address_text"] = shipping.address_line
+
+    if delivery_mode == MODE_SKIP or shipping.accepted_delivery_address:
+        facts["delivery_address_mode"] = MODE_SKIP
+    elif delivery_mode == MODE_CONFIRM:
+        facts["delivery_address_mode"] = "confirm"
+    elif delivery_mode:
+        facts["delivery_address_mode"] = delivery_mode
+
+    previous = getattr(ctx, "known_previous_address", None)
+    if previous is not None and delivery_mode == MODE_CONFIRM:
+        facts["known_previous_address"] = {
+            "city": getattr(previous, "city", "") or "",
+            "short_address_code": getattr(previous, "short_address", "") or "",
+            "google_maps_url": getattr(previous, "maps_url", "") or "",
+        }
+
+    missing = resolve_checkout_missing_fields_legacy(ctx)
+    facts["missing_fields"] = missing
+    facts["next_goal"] = derive_checkout_next_goal(result, prefill)
+    if facts["next_goal"] == "confirm_customer_and_shipping_details_once":
+        facts["ask_confirmation_once"] = True
+
+    if result is not None:
+        facts["readiness_state"] = str(getattr(result, "readiness_state", "") or "")
+        facts["missing_modes"] = dict(getattr(result, "missing_modes", None) or {})
+
+    return facts
+
+
 __all__ = [
     "EditIntentFacts",
     "MODE_ASK",
@@ -569,11 +737,15 @@ __all__ = [
     "MODE_SKIP",
     "OrderPrefillState",
     "apply_order_prep_prefill_patch",
+    "build_checkout_compose_facts",
     "build_order_context_api_payload",
     "build_order_prep_prefill_patch",
     "build_prefill_state",
     "compute_shadow_missing_modes",
+    "derive_checkout_next_goal",
+    "detect_customer_identity_inquiry",
     "detect_edit_intent_facts",
+    "resolve_checkout_missing_fields_legacy",
     "enrich_identity_context",
     "enrich_shipping_context",
     "maybe_apply_operational_prefill_to_state",
