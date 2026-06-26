@@ -14,6 +14,7 @@ WhatsApp connected       → trial_active (FREE_TRIAL_DAYS window starts once)
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -586,6 +587,19 @@ def _tenant_salla_integration(db: Session, tenant_id: int):
     )
 
 
+def tenant_has_salla_integration(db: Session, tenant_id: int) -> bool:
+    """True when the merchant installed Nahla via Salla (regardless of billing fields)."""
+    return _tenant_salla_integration(db, tenant_id) is not None
+
+
+def _salla_app_store_url() -> str:
+    app_id = os.getenv("SALLA_APP_ID", os.getenv("SALLA_CLIENT_ID", ""))
+    return os.getenv(
+        "SALLA_APP_STORE_URL",
+        f"https://s.salla.sa/apps/{app_id}" if app_id else "https://s.salla.sa/apps/nahla",
+    )
+
+
 def resolve_billing_renewal_info(
     db: Session,
     tenant_id: int,
@@ -597,17 +611,7 @@ def resolve_billing_renewal_info(
     Platform-wide: do not assume every merchant is Salla-managed.
     """
     salla_integ = _tenant_salla_integration(db, tenant_id)
-    cfg = (salla_integ.config or {}) if salla_integ else {}
-    billing_status = str(cfg.get("billing_status") or "none").strip().lower()
-    salla_sub_id = cfg.get("salla_subscription_id")
-
-    is_salla_managed = bool(
-        salla_integ
-        and (
-            salla_sub_id
-            or billing_status in ("active", "trial", "trial_blocked", "cancelled", "failed")
-        )
-    )
+    is_salla_managed = bool(salla_integ)
 
     payment_provider = str(lifecycle.get("payment_provider") or "unknown").lower()
     has_paid_history = bool(lifecycle.get("has_paid_subscription_history"))
@@ -616,7 +620,7 @@ def resolve_billing_renewal_info(
         billing_channel = "salla"
         renewal_method = "salla_app"
         can_renew_directly = False
-        renewal_url = None
+        renewal_url = _salla_app_store_url()
     elif payment_provider == "moyasar":
         billing_channel = "moyasar"
         renewal_method = "direct_checkout"

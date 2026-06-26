@@ -16,14 +16,21 @@ const SALLA_APP_URL: string =
 
 // Open the Salla app subscription page at the TOP level so it breaks out of
 // the iframe when the merchant is viewing this page inside Salla's dashboard.
-function openSallaApp(): void {
+function openSallaApp(url?: string | null): void {
+  const target = (url && url.startsWith('http')) ? url : SALLA_APP_URL
   try {
     if (window.top) {
-      window.top.location.href = SALLA_APP_URL
+      window.top.location.href = target
       return
     }
   } catch { /* cross-origin top access blocked — fall through */ }
-  window.location.href = SALLA_APP_URL
+  window.location.href = target
+}
+
+function sallaPlanCtaLabel(isManage: boolean): string {
+  const en = document.documentElement.lang === 'en'
+  if (isManage) return en ? 'Manage via Salla' : 'إدارة الاشتراك عبر سلة'
+  return en ? 'Subscribe via Salla' : 'الاشتراك عبر سلة'
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
@@ -119,6 +126,7 @@ function PlanCard({
   checkingOut,
   storeName,
   isSalla,
+  renewalUrl,
 }: {
   plan:          BillingPlan
   billingStatus: BillingStatus | null
@@ -126,6 +134,7 @@ function PlanCard({
   checkingOut:   string | null
   storeName:     string
   isSalla:       boolean
+  renewalUrl:    string
 }) {
   const isPopular  = plan.slug === 'growth'
   const gradient   = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
@@ -142,6 +151,7 @@ function PlanCard({
     billingStatus?.lifecycle_status === 'paid_expired'
     || billingStatus?.lifecycle_status === 'trial_expired'
   )
+  const isSallaManage = isRenewal || billingStatus?.has_paid_subscription_history === true
   const isTrialPlan = billingStatus?.lifecycle_status === 'trial_active'
   const isHighlighted = isPaidActive
 
@@ -233,7 +243,7 @@ function PlanCard({
               </div>
             )}
             <a
-              href={SALLA_APP_URL}
+              href={renewalUrl}
               target="_top"
               rel="noopener noreferrer"
               onClick={() => trackEvent('salla_redirect_clicked', {
@@ -249,7 +259,7 @@ function PlanCard({
               ].join(' ')}
             >
               <ArrowUpRight className="w-4 h-4" />
-              الاشتراك عبر سلة
+              {sallaPlanCtaLabel(isSallaManage)}
             </a>
             <p className="mt-2 text-[11px] text-amber-700 text-center leading-relaxed">
               يتم الاشتراك من داخل منصة سلة لضمان الربط الصحيح بمتجرك
@@ -327,6 +337,9 @@ export default function Billing() {
 
   // Salla-managed billing comes from the API — not localStorage alone.
   const isSallaRenewal = status?.is_salla_managed === true
+  const sallaRenewalUrl =
+    (status?.renewal_url && status.renewal_url.startsWith('http') ? status.renewal_url : null)
+    || SALLA_APP_URL
   const isSallaEmbedded = isSallaMerchant()
 
   // Inactivity hint for Salla merchants — appears 8 seconds after the page
@@ -410,7 +423,7 @@ export default function Billing() {
     // Salla app subscription page at the top level instead of opening Moyasar.
     if (isSallaRenewal) {
       console.info('[Billing] Salla merchant — redirecting to Salla subscription instead of Moyasar')
-      openSallaApp()
+      openSallaApp(sallaRenewalUrl)
       return
     }
 
@@ -609,7 +622,7 @@ export default function Billing() {
             </p>
           </div>
           <a
-            href={SALLA_APP_URL}
+            href={sallaRenewalUrl}
             target="_top"
             rel="noopener noreferrer"
             onClick={() => {
@@ -783,6 +796,7 @@ export default function Billing() {
                 try { return localStorage.getItem('nahla_store_name') || '' } catch { return '' }
               })()}
               isSalla={isSallaRenewal}
+              renewalUrl={sallaRenewalUrl}
             />
           ))}
         </div>
@@ -1161,7 +1175,7 @@ export default function Billing() {
           {/* Primary CTA — always available so the merchant can jump to Salla
               at any time, even before scrolling through the plans below. */}
           <a
-            href={SALLA_APP_URL}
+            href={sallaRenewalUrl}
             target="_top"
             rel="noopener noreferrer"
             onClick={() => {

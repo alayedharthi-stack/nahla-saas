@@ -400,6 +400,24 @@ class TestBillingRenewalChannel:
         assert info["renewal_method"] == "salla_app"
         assert info["can_renew_directly"] is False
 
+    def test_salla_integration_without_billing_status_is_salla_managed(self, db):
+        t = _tenant(db)
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-fresh",
+            config={},
+            enabled=True,
+        ))
+        db.commit()
+        lifecycle = {"payment_provider": "unknown", "has_paid_subscription_history": False}
+        info = resolve_billing_renewal_info(db, t.id, lifecycle)
+        assert info["is_salla_managed"] is True
+        assert info["billing_channel"] == "salla"
+        assert info["renewal_method"] == "salla_app"
+        assert info["can_renew_directly"] is False
+        assert info["renewal_url"] and info["renewal_url"].startswith("https://")
+
     def test_build_billing_status_payload_includes_renewal_fields(self, db):
         now = datetime.now(timezone.utc)
         t = _tenant(db)
@@ -436,6 +454,67 @@ class TestBillingRenewalChannel:
         assert payload["is_salla_managed"] is False
         assert payload["renewal_method"] == "direct_checkout"
         assert payload["can_renew_directly"] is True
+
+
+class TestSallaCheckoutGuard:
+    def test_salla_merchant_checkout_rejected(self, db):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from routers.billing import CheckoutRequest, _do_checkout
+
+        t = _tenant(db)
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-guard",
+            config={},
+            enabled=True,
+        ))
+        db.add(BillingPlan(
+            tenant_id=None, slug="starter", name="Starter", description="",
+            currency="SAR", price_sar=349, billing_cycle="monthly",
+            features=[], limits={},
+        ))
+        db.commit()
+
+        body = CheckoutRequest(plan_slug="starter")
+        request = MagicMock()
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(_do_checkout(body, request, db, str(t.id)))
+
+        assert exc.value.status_code == 403
+        detail = exc.value.detail
+        assert detail["renewal_method"] == "salla_app"
+        assert detail["billing_channel"] == "salla"
+        assert "سلة" in detail["message"]
+
+    def test_direct_merchant_checkout_not_blocked_by_guard(self, db):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        from routers.billing import CheckoutRequest, _do_checkout
+
+        t = _tenant(db)
+        db.add(BillingPlan(
+            tenant_id=None, slug="starter", name="Starter", description="",
+            currency="SAR", price_sar=349, billing_cycle="monthly",
+            features=[], limits={"conversations_per_month": 500},
+            extra_metadata={"launch_price_sar": 174},
+        ))
+        db.commit()
+
+        body = CheckoutRequest(plan_slug="starter")
+        request = MagicMock()
+
+        with patch("routers.billing.get_billing_gateway") as mock_gw:
+            mock_gw.return_value = (None, None, {})
+            with patch("services.billing_activation.lazy_reconcile_tenant_pending_subs", return_value=None):
+                with patch("routers.billing.get_tenant_subscription", return_value=None):
+                    result = asyncio.run(_do_checkout(body, request, db, str(t.id)))
+
+        assert result.get("demo_mode") is True or result.get("checkout_url") is not None
 
 
 class TestSilentBillingOutbound:

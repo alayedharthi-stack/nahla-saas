@@ -15,6 +15,27 @@ import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing
 import { pricingPageBackRoute, pricingPageBackLabel, pricingBackOpensFullDashboard } from '../lib/billingPostPayment'
 import { displayPlanFeature } from '../lib/planFeatures'
 
+const SALLA_APP_URL: string =
+  (import.meta.env.VITE_SALLA_APP_URL as string | undefined) ||
+  'https://s.salla.sa/apps/nahla'
+
+function openSallaApp(url?: string | null): void {
+  const target = (url && url.startsWith('http')) ? url : SALLA_APP_URL
+  try {
+    if (window.top) {
+      window.top.location.href = target
+      return
+    }
+  } catch { /* cross-origin top access blocked — fall through */ }
+  window.location.href = target
+}
+
+function sallaPlanCtaLabel(isManage: boolean): string {
+  const en = document.documentElement.lang === 'en'
+  if (isManage) return en ? 'Manage via Salla' : 'إدارة الاشتراك عبر سلة'
+  return en ? 'Subscribe via Salla' : 'الاشتراك عبر سلة'
+}
+
 const SUPPORT_WHATSAPP = '966555000000'
 
 function buildSupportUrl(planNameAr: string): string {
@@ -58,11 +79,15 @@ function SallaPlanCard({
   billingStatus,
   onCheckout,
   checkingOut,
+  isSallaManaged,
+  sallaAppUrl,
 }: {
   plan:          BillingPlan
   billingStatus: BillingStatus | null
   onCheckout:    (slug: string) => void
   checkingOut:   string | null
+  isSallaManaged: boolean
+  sallaAppUrl:   string
 }) {
   const isPopular      = plan.slug === 'growth'
   const gradient       = PLAN_GRADIENTS[plan.slug] ?? 'from-slate-500 to-slate-600'
@@ -75,6 +100,9 @@ function SallaPlanCard({
     && billingStatus.plan?.slug === plan.slug
 
   const isTrialPlan = billingStatus?.lifecycle_status === 'trial_active'
+  const isSallaManage = billingStatus?.has_paid_subscription_history === true
+    || billingStatus?.lifecycle_status === 'paid_expired'
+    || billingStatus?.lifecycle_status === 'trial_expired'
 
   return (
     <div
@@ -165,6 +193,28 @@ function SallaPlanCard({
           <div className="w-full py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-semibold text-center">
             مشترك الآن ✓
           </div>
+        ) : isSallaManaged ? (
+          <>
+            {isTrialPlan && (
+              <div className="w-full py-2 rounded-xl bg-brand-50 border border-brand-200 text-brand-700 text-xs font-semibold text-center mb-2 flex items-center justify-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                تجربة مجانية — متبقي {billingStatus?.trial_days_remaining ?? 0} يوم
+              </div>
+            )}
+            <a
+              href={sallaAppUrl}
+              target="_top"
+              rel="noopener noreferrer"
+              className={[
+                'w-full py-2.5 rounded-xl text-white text-sm font-semibold transition-all',
+                'flex items-center justify-center gap-2 cursor-alias',
+                `bg-gradient-to-br ${gradient}`,
+                'hover:opacity-90 active:scale-95',
+              ].join(' ')}
+            >
+              {sallaPlanCtaLabel(isSallaManage)}
+            </a>
+          </>
         ) : (
           <>
             {isTrialPlan && (
@@ -201,7 +251,7 @@ function SallaPlanCard({
           </>
         )}
 
-        {!isPaidActive && (
+        {!isPaidActive && !isSallaManaged && (
           <p className="flex items-center justify-center gap-1 text-[10px] text-slate-400 mt-2">
             <ShieldCheck className="w-3 h-3" />
             دفع آمن عبر ميسر
@@ -261,7 +311,17 @@ export default function SallaPricing() {
 
   useEffect(() => { load() }, [load])
 
+  const isSallaManaged = status?.is_salla_managed === true
+  const sallaAppUrl =
+    (status?.renewal_url && status.renewal_url.startsWith('http') ? status.renewal_url : null)
+    || SALLA_APP_URL
+
   const handleCheckout = async (slug: string) => {
+    if (isSallaManaged) {
+      openSallaApp(sallaAppUrl)
+      return
+    }
+
     setCheckingOut(slug)
     setCheckoutErr(null)
     try {
@@ -414,6 +474,8 @@ export default function SallaPricing() {
                   billingStatus={status}
                   onCheckout={handleCheckout}
                   checkingOut={checkingOut}
+                  isSallaManaged={isSallaManaged}
+                  sallaAppUrl={sallaAppUrl}
                 />
               ))}
             </div>
