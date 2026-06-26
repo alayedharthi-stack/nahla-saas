@@ -126,12 +126,46 @@ class DraftOrderHandler:
         # product simply does not exist on Salla under that ID.
         from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
             is_catalog_line_items_authoritative_from_prep,
+            is_current_catalog_order_submitted,
+        )
+        from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+            enrich_catalog_product_with_store_ids,
         )
 
-        _catalog_authoritative = is_catalog_line_items_authoritative_from_prep(prep)
-        if _catalog_authoritative and prep.line_items:
+        _from_catalog = bool(
+            product_info.get("from_native_catalog_order")
+            or product_info.get("from_catalog_order")
+            or decision.args.get("catalog_order_submitted")
+            or decision.args.get("source") == "catalog_order_submitted"
+        )
+        _meta_line_items = [
+            dict(li) for li in (product_info.get("line_items") or [])
+            if isinstance(li, dict)
+        ]
+        if _meta_line_items and not prep.line_items:
+            prep.line_items = list(_meta_line_items)
+        _has_catalog_items = bool(prep.line_items) or bool(_meta_line_items)
+        _catalog_authoritative = (
+            is_catalog_line_items_authoritative_from_prep(prep)
+            or (_from_catalog and _has_catalog_items)
+            or is_current_catalog_order_submitted(ctx)
+        )
+        if _from_catalog:
+            _db = getattr(ctx, "_db", None)
+            if _db is not None:
+                product_info = enrich_catalog_product_with_store_ids(
+                    _db,
+                    int(ctx.tenant_id),
+                    dict(product_info),
+                )
+                if _forced:
+                    try:
+                        ctx.state.current_product_focus = dict(product_info)
+                    except Exception:  # noqa: BLE001
+                        pass
+        if _catalog_authoritative and _has_catalog_items:
             _first_li = next(
-                (li for li in prep.line_items if isinstance(li, dict)),
+                (li for li in (prep.line_items or _meta_line_items) if isinstance(li, dict)),
                 {},
             )
             current_product_id = str(_first_li.get("product_id") or prep.product_id or "").strip()
@@ -209,9 +243,26 @@ class DraftOrderHandler:
         #   • If the product is bad → customer hears it NOW, not 3 turns later.
         #   • If it's good → product_options_loaded=True on Turn 1, so Turns
         #     2 and 3 skip the Salla call entirely (via the loaded guard).
-        if not (_catalog_authoritative and prep.line_items):
+        if not (_catalog_authoritative and _has_catalog_items):
             external_id = str(product_info.get("external_id") or "").strip()
             if not external_id:
+                if _from_catalog and _has_catalog_items:
+                    logger.warning(
+                        "[ORDER FLOW] catalog order without store external_id — safe checkout | "
+                        "tenant=%s retailer_id=%r line_items=%d",
+                        ctx.tenant_id,
+                        product_info.get("product_retailer_id") or product_info.get("id"),
+                        len(_meta_line_items or prep.line_items or []),
+                    )
+                    return ActionResult(
+                        success=True,
+                        data={
+                            "catalog_checkout_safe": True,
+                            "message": "catalog_order_checkout_safe",
+                            "product": product_info,
+                            "order_prep": prep.to_dict(),
+                        },
+                    )
                 logger.error(
                     "[ORDER FLOW] invalid product — no external_id (Salla product id missing) | "
                     "tenant=%s nahla_db_id=%s title=%r product_info=%s",
@@ -261,7 +312,7 @@ class DraftOrderHandler:
                 "[ORDER FLOW] catalog authoritative line_items — skipping Salla product lookup | "
                 "tenant=%s line_items=%d product_id=%r",
                 ctx.tenant_id,
-                len(prep.line_items),
+                len(prep.line_items or _meta_line_items),
                 prep.product_id,
             )
             external_id = str(product_info.get("external_id") or "").strip()

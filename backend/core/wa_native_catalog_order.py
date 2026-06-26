@@ -52,6 +52,7 @@ class RetailerMatchResult:
     variant_id: Optional[int] = None
     product_title: str = ""
     catalog_price: Optional[float] = None
+    store_external_id: str = ""
 
 
 @dataclass
@@ -261,6 +262,7 @@ def match_retailer_id(
                 variant_id=int(getattr(variant, "id", 0) or 0) or None,
                 product_title=str(getattr(product, "title", "") or ""),
                 catalog_price=price,
+                store_external_id=str(getattr(product, "external_id", "") or "").strip(),
             )
 
         product = (
@@ -326,6 +328,7 @@ def _product_match_result(
         variant_id=int(getattr(variant, "id", 0) or 0) if variant is not None else None,
         product_title=str(getattr(product, "title", "") or ""),
         catalog_price=price,
+        store_external_id=str(getattr(product, "external_id", "") or "").strip(),
     )
 
 
@@ -372,7 +375,13 @@ def build_line_items_from_payload(
                 "match_field": match.match_field,
                 "source": "whatsapp_native_catalog_order",
                 "price_mismatch": price_flag,
+                "from_native_catalog_order": True,
             }
+            store_ext = str(match.store_external_id or "").strip()
+            if store_ext:
+                raw["external_id"] = store_ext
+                raw["salla_product_id"] = store_ext
+                raw["store_external_id"] = store_ext
         else:
             unmatched += 1
             needs_review += 1

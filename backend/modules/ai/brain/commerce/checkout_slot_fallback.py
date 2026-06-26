@@ -225,6 +225,15 @@ def build_checkout_slot_fallback_reply(
         if slot in _PAYMENT_SLOTS:
             return _PROMPT_PAYMENT
         if slot == "product":
+            try:
+                from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+                    is_catalog_checkout_product_question_forbidden,
+                )
+
+                if is_catalog_checkout_product_question_forbidden(state=state):
+                    continue
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog guard must not block fallback
+                pass
             return (
                 "باقي تحدد المنتج أو الكمية عشان نكمل الطلب."
             )

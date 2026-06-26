@@ -179,6 +179,35 @@ def maybe_enforce_turn_decision(
         str(understanding.should_suspend_stale_state).lower(),
         (getattr(ctx, "raw_message", None) or ctx.message or "")[:80],
     )
+    try:
+        from modules.ai.brain.commerce.catalog_order_resilience import (  # noqa: PLC0415
+            catalog_resilience_known_facts,
+        )
+        from modules.ai.order_flow_v2.triggers import is_catalog_order_inbound  # noqa: PLC0415
+
+        _meta = {}
+        _profile = getattr(ctx, "profile", None)
+        if isinstance(_profile, dict):
+            _meta = dict(_profile.get("inbound_metadata") or {})
+        _msg = str(getattr(ctx, "raw_message", None) or ctx.message or "")
+        if is_catalog_order_inbound(_meta, _msg):
+            _facts = catalog_resilience_known_facts(
+                inbound_metadata=_meta,
+                message=_msg,
+                state=getattr(ctx, "state", None),
+            )
+            if _facts.get("catalog_order_current_turn") or _facts.get("line_items_known"):
+                logger.warning(
+                    "[TURN_ARBITER_CATALOG] tenant=%s mismatch_type=%s "
+                    "legacy_action=%s new_action=%s catalog_order=true line_items_known=%s",
+                    ctx.tenant_id,
+                    mismatch_type,
+                    legacy_action,
+                    enforced_decision.action,
+                    str(bool(_facts.get("line_items_known"))).lower(),
+                )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog arbiter telemetry must not block enforce
+        pass
 
     ctx.turn_enforce_result = result  # type: ignore[attr-defined]
     ctx.turn_legacy_decision = decision  # type: ignore[attr-defined]
