@@ -223,10 +223,36 @@ def try_handle_order_flow_v2(
             ))
             patch.update(activate_checkout_patch())
             merged_prep = {**order_prep, **patch}
-            missing = [
-                m for m in _missing(merged_prep)
-                if m not in {"product", "products", "product_id", "variant", "quantity", "qty"}
-            ]
+            missing = _filter_catalog_missing(
+                [
+                    m for m in _missing(merged_prep)
+                    if m not in {"product", "products", "product_id", "variant", "quantity", "qty"}
+                ]
+            )
+            try:
+                from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                    enrich_catalog_checkout_prep_and_missing,
+                )
+
+                merged_prep, missing, _identity_facts = enrich_catalog_checkout_prep_and_missing(
+                    merged_prep,
+                    list(missing),
+                    db=db,
+                    tenant_id=int(tenant_id),
+                    phone=str(customer_phone or ""),
+                )
+                patch.update(
+                    {
+                        k: merged_prep[k]
+                        for k in ("customer_first_name", "customer_last_name", "customer_phone")
+                        if k in merged_prep
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[ORDER_FLOW_V2] catalog customer identity enrich failed tenant=%s",
+                    tenant_id,
+                )
             if patch.get("catalog_order_extraction_incomplete"):
                 patch.update(build_contract(
                     decision="catalog_order_extraction_incomplete",

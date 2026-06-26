@@ -30,6 +30,30 @@ def compute_v2_missing_fields(
     inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Ordered missing fields for V2 checkout. Phone is never listed."""
+    prep = dict(order_prep or {})
+    identity_facts: Dict[str, Any] = {}
+    if _catalog_checkout_prep(prep, inbound_metadata) and db is not None and tenant_id and whatsapp_phone:
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                filter_missing_for_known_catalog_customer,
+                merge_prep_with_customer_identity,
+                resolve_catalog_checkout_customer_identity,
+            )
+
+            identity = resolve_catalog_checkout_customer_identity(
+                db=db,
+                tenant_id=int(tenant_id),
+                phone=str(whatsapp_phone),
+                order_prep=prep,
+            )
+            prep = merge_prep_with_customer_identity(prep, identity)
+            identity_facts = dict(identity.known_facts or {})
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[ORDER_FLOW_V2] catalog customer identity prefill failed tenant=%s",
+                tenant_id,
+            )
+
     if db is not None and tenant_id is not None:
         try:
             from core.order_missing_fields_engine import (  # noqa: PLC0415
@@ -39,7 +63,7 @@ def compute_v2_missing_fields(
 
             if missing_fields_engine_enabled():
                 engine_missing, engine_result = resolve_flow_missing_fields(
-                    order_prep,
+                    prep,
                     brain_state=brain_state,
                     whatsapp_phone=whatsapp_phone,
                     db=db,
@@ -48,14 +72,24 @@ def compute_v2_missing_fields(
                     inbound_metadata=inbound_metadata,
                 )
                 if engine_result is not None:
+                    if identity_facts:
+                        from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                            filter_missing_for_known_catalog_customer,
+                        )
+
+                        return filter_missing_for_known_catalog_customer(
+                            engine_missing,
+                            known_facts=identity_facts,
+                            phone=str(whatsapp_phone or ""),
+                        )
                     return engine_missing
         except Exception:  # noqa: BLE001
             logger.exception("[ORDER_FLOW_V2] missing_fields_engine resolve failed")
 
     bs = dict(brain_state or {})
-    items = line_items_from_state(order_prep, bs)
+    items = line_items_from_state(prep, bs)
     base = compute_wa_missing_fields(
-        order_prep,
+        prep,
         brain_state=bs,
         whatsapp_phone=whatsapp_phone,
         line_items=items or None,
@@ -69,9 +103,30 @@ def compute_v2_missing_fields(
         missing.append("city")
     if "delivery_address" in base or not has_address_evidence(order_prep):
         missing.append("delivery_address")
-    if not has_payment_method(order_prep):
+    if not has_payment_method(prep):
         missing.append("payment_method")
-    return missing
+    return filter_missing_for_known_catalog_customer(
+        missing,
+        known_facts=identity_facts,
+        phone=str(whatsapp_phone or ""),
+    ) if identity_facts else missing
+
+
+def _catalog_checkout_prep(
+    order_prep: Dict[str, Any],
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    prep = dict(order_prep or {})
+    if prep.get("catalog_line_items_authoritative"):
+        return True
+    meta = dict(inbound_metadata or {})
+    if str(meta.get("source_type") or "").strip().lower() == "catalog_order":
+        items = meta.get("product_items") or []
+        if isinstance(items, list) and items:
+            return True
+    if prep.get("order_flow_v2_trusted_price") and (prep.get("line_items") or prep.get("cart_items")):
+        return True
+    return False
 
 
 def next_missing_field(missing: List[str]) -> Optional[str]:
