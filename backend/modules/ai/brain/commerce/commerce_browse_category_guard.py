@@ -77,6 +77,20 @@ _PRICE_LEAD_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Whole-message signals for category price / availability browse turns.
+_CATEGORY_PRICE_OR_AVAILABILITY_RE = re.compile(
+    r"(?:"
+    r"اسعار|أسعار|سعر(?:ات)?|بكم|كم\s*سعر|ثمن|تكلفة|"
+    r"how\s*much|price(?:s)?|cost(?:s)?|"
+    r"(?:وش|ايش|ايه|ما|what)\s+(?:المتوفر|متوفر|available|ال)?|"
+    r"(?:وش|what)\s+(?:المتوفر|متوفر|available)\s+(?:من|from)|"
+    r"عندكم|عندك|لديكم|لديك|"
+    r"انواع|أنواع|types?\s+of|"
+    r"المتوفر|متوفر|available"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 # Product-form markers that usually signal a different category family.
 _CROSS_FORM_MARKERS = frozenset({
     "كريم", "cream", "زيت", "oil", "lotion", "serum", "صابون", "soap",
@@ -188,6 +202,25 @@ def is_generic_category_browse(message: str, query: str = "") -> bool:
     if not blob:
         return False
     return bool(_GENERIC_CATEGORY_BROWSE_RE.search(blob))
+
+
+def is_category_price_or_availability_message(message: str, query: str = "") -> bool:
+    """True when the turn asks for category prices, availability, or options."""
+    blob = _norm(f"{message or ''} {query or ''}")
+    if not blob:
+        return False
+    if is_generic_category_browse(message, query):
+        return True
+    if _CATEGORY_PRICE_OR_AVAILABILITY_RE.search(blob):
+        return True
+    try:
+        from ..product_discovery_gate import has_types_overview_ask  # noqa: PLC0415
+
+        if has_types_overview_ask(message or "", query or ""):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("[BROWSE_CATEGORY_GUARD] types_overview_probe_failed")
+    return False
 
 
 def active_category_from_state(state: Any) -> str:
@@ -575,6 +608,7 @@ __all__ = [
     "extract_browse_category_scope",
     "filter_products_for_browse_turn",
     "filter_products_to_browse_category",
+    "is_category_price_or_availability_message",
     "is_category_scoped_browse",
     "is_generic_category_browse",
     "resolve_browse_category_scope",

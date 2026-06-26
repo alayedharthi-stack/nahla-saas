@@ -959,10 +959,14 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return None
 
+    if not getattr(ctx.facts, "has_products", False):
+        return None
+
     try:
         from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
             active_category_from_state,
             extract_browse_category_scope,
+            is_category_price_or_availability_message,
         )
         from .catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
             active_catalog_group_slug_from_state,
@@ -974,6 +978,9 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
 
     subject = extract_browse_category_scope(msg, "")
     if not subject:
+        return None
+
+    if not is_category_price_or_availability_message(msg, ""):
         return None
 
     db = getattr(ctx, "_db", None)
