@@ -24,6 +24,20 @@ _WS = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
+class CatalogCategoryScope:
+    intent: str = ""
+    matched_category: str = ""
+    category_id: str = ""
+    catalog_group_id: Optional[int] = None
+    query_subject: str = ""
+    must_filter_by_category: bool = False
+    use_catalog_prices_only: bool = False
+    specific_product: bool = False
+    product_ids: Tuple[int, ...] = ()
+    match_source: str = ""
+
+
+@dataclass(frozen=True)
 class BrowseScopeResolution:
     matched: bool
     group_id: Optional[int] = None
@@ -153,6 +167,189 @@ def _group_product_ids(db: Any, tenant_id: int, group_id: int) -> Tuple[int, ...
         except (TypeError, ValueError):
             continue
     return tuple(ids)
+
+
+def _category_labels_match(subject: str, candidate: str) -> bool:
+    s_norm = _norm_token(subject)
+    c_norm = _norm_token(candidate)
+    if not s_norm or not c_norm:
+        return False
+    if c_norm == s_norm or c_norm in s_norm or s_norm in c_norm:
+        return True
+    if s_norm.startswith("ال") and s_norm[2:] == c_norm:
+        return True
+    if c_norm.startswith("ال") and c_norm[2:] == s_norm:
+        return True
+    return False
+
+
+def _load_snapshot_categories(db: Any, tenant_id: int) -> List[str]:
+    if db is None or tenant_id is None:
+        return []
+    try:
+        from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415
+
+        summary = StoreKnowledgeLoader(db, int(tenant_id)).catalog_summary() or {}
+        raw = summary.get("categories") or []
+        out: List[str] = []
+        for item in raw:
+            label = str(item or "").strip()
+            if label:
+                out.append(label)
+        return out
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[CATALOG_BROWSE_SCOPE] snapshot_categories_failed tenant=%s",
+            tenant_id,
+        )
+        return []
+
+
+def _load_product_metadata_categories(db: Any, tenant_id: int) -> List[str]:
+    if db is None or tenant_id is None:
+        return []
+    try:
+        from database.models import Product  # noqa: PLC0415
+
+        rows = (
+            db.query(Product.extra_metadata)
+            .filter(Product.tenant_id == int(tenant_id))
+            .limit(500)
+            .all()
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[CATALOG_BROWSE_SCOPE] metadata_categories_failed tenant=%s",
+            tenant_id,
+        )
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for (meta,) in rows:
+        if not isinstance(meta, dict):
+            continue
+        cat = meta.get("category")
+        if isinstance(cat, str) and cat.strip():
+            label = cat.strip()
+            key = _norm_token(label)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(label)
+        elif isinstance(cat, list):
+            for entry in cat:
+                if isinstance(entry, str) and entry.strip():
+                    label = entry.strip()
+                    key = _norm_token(label)
+                    if key and key not in seen:
+                        seen.add(key)
+                        out.append(label)
+    return out
+
+
+def resolve_catalog_category_scope(
+    db: Any,
+    tenant_id: int,
+    user_text: str,
+    query: str = "",
+    *,
+    active_group_slug: str = "",
+    active_category: str = "",
+) -> CatalogCategoryScope:
+    """Resolve a category-scoped browse turn against merchant catalog evidence."""
+    try:
+        from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            extract_browse_category_scope,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_SCOPE] subject_extract_import_failed")
+        return CatalogCategoryScope(specific_product=True)
+
+    subject = extract_browse_category_scope(user_text or "", query or "")
+    if not subject:
+        return CatalogCategoryScope(specific_product=True)
+
+    groups = load_merchant_catalog_groups(db, tenant_id)
+    group_match = match_catalog_group(
+        groups,
+        message=user_text or "",
+        query=subject,
+        active_group_slug=active_group_slug,
+        active_category=active_category,
+    )
+    if group_match is not None and group_match.matched:
+        product_ids: Tuple[int, ...] = ()
+        if group_match.group_id is not None:
+            product_ids = _group_product_ids(db, tenant_id, int(group_match.group_id))
+        return CatalogCategoryScope(
+            intent="category_price_browse",
+            matched_category=str(group_match.group_label or subject),
+            category_id=str(group_match.group_slug or ""),
+            catalog_group_id=group_match.group_id,
+            query_subject=subject,
+            must_filter_by_category=True,
+            use_catalog_prices_only=True,
+            specific_product=False,
+            product_ids=product_ids,
+            match_source=str(group_match.match_source or "product_group"),
+        )
+
+    for source_name, labels in (
+        ("snapshot_category", _load_snapshot_categories(db, tenant_id)),
+        ("product_metadata_category", _load_product_metadata_categories(db, tenant_id)),
+    ):
+        for label in labels:
+            if _category_labels_match(subject, label):
+                return CatalogCategoryScope(
+                    intent="category_price_browse",
+                    matched_category=label,
+                    category_id=_norm_token(label),
+                    query_subject=subject,
+                    must_filter_by_category=True,
+                    use_catalog_prices_only=True,
+                    specific_product=False,
+                    match_source=source_name,
+                )
+
+    try:
+        from ..product_discovery_gate import is_generic_category_noun  # noqa: PLC0415
+
+        if is_generic_category_noun(subject):
+            return CatalogCategoryScope(
+                intent="category_price_browse",
+                matched_category=subject,
+                category_id=_norm_token(subject),
+                query_subject=subject,
+                must_filter_by_category=True,
+                use_catalog_prices_only=True,
+                specific_product=False,
+                match_source="subject_token",
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_SCOPE] generic_category_probe_failed")
+
+    return CatalogCategoryScope(
+        query_subject=subject,
+        specific_product=True,
+    )
+
+
+def filter_products_by_category_metadata(
+    products: Sequence[Mapping[str, Any]],
+    *,
+    category: str,
+) -> List[Dict[str, Any]]:
+    """Keep products whose structured category matches the resolved scope."""
+    label = str(category or "").strip()
+    if not label:
+        return [dict(p) for p in products if isinstance(p, Mapping)]
+    kept: List[Dict[str, Any]] = []
+    for product in products or []:
+        if not isinstance(product, Mapping):
+            continue
+        product_category = str(product.get("category") or "").strip()
+        if product_category and _category_labels_match(label, product_category):
+            kept.append(dict(product))
+    return kept
 
 
 def match_catalog_group(
@@ -375,7 +572,9 @@ def stamp_catalog_group_session(state: Any, resolution: BrowseScopeResolution) -
 
 __all__ = [
     "BrowseScopeResolution",
+    "CatalogCategoryScope",
     "active_catalog_group_slug_from_state",
+    "filter_products_by_category_metadata",
     "filter_products_to_merchant_group",
     "group_by_db_id",
     "hydrate_group_products",
@@ -384,5 +583,6 @@ __all__ = [
     "match_group_by_collection_name",
     "read_group_membership_ids",
     "resolve_browse_scope",
+    "resolve_catalog_category_scope",
     "stamp_catalog_group_session",
 ]

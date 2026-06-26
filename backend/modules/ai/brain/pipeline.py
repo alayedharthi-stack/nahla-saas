@@ -3005,6 +3005,34 @@ class MerchantBrain:
                 _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 _pcgg_meta["inbound_text"] = message or ""
                 try:
+                    from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+                        active_catalog_group_slug_from_state,
+                        resolve_catalog_category_scope,
+                    )
+                    from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                        active_category_from_state,
+                        extract_browse_category_scope,
+                    )
+
+                    _cat_subject = extract_browse_category_scope(message or "", "")
+                    if _cat_subject:
+                        _cat_scope = resolve_catalog_category_scope(
+                            db,
+                            tenant_id,
+                            message or "",
+                            _cat_subject,
+                            active_group_slug=active_catalog_group_slug_from_state(new_state),
+                            active_category=active_category_from_state(new_state),
+                        )
+                        if _cat_scope.must_filter_by_category and not _cat_scope.specific_product:
+                            _pcgg_meta["category_browse"] = True
+                            _pcgg_meta["specific_product"] = False
+                            _pcgg_meta["use_catalog_prices_only"] = True
+                            if _cat_scope.matched_category:
+                                _pcgg_meta["active_category"] = _cat_scope.matched_category
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
+                    pass
+                try:
                     from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
                         detect_price_objection_topic_shift,
                     )
