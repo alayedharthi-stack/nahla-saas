@@ -3,12 +3,16 @@
  *
  * Run:  npm run check:resolvers   (from dashboard/)
  */
-import { resolveEmbeddedLang } from '../src/i18n/embeddedLocale.ts'
+import { resolveEmbeddedLang, extractLangFromSdkState } from '../src/i18n/embeddedLocale.ts'
 import {
   resolveEmbeddedTheme,
   extractThemeFromPostMessage,
   isTrustedSallaThemeMessage,
 } from '../src/i18n/embeddedTheme.ts'
+import {
+  buildEmbeddedEntryQuery,
+  resolveEmbeddedAppearanceAndLocale,
+} from '../src/i18n/embeddedContext.ts'
 import {
   shouldRetryEmbeddedLogin,
   EMBEDDED_LOGIN_MAX_ATTEMPTS,
@@ -29,6 +33,16 @@ const embedLangCases: Case<Lang>[] = [
     input: { inSallaEmbedded: true, userPref: 'en' },
     want: 'ar',
   },
+  {
+    name: 'embedded: Salla postMessage en → en',
+    input: { inSallaEmbedded: true, sallaMessageLang: 'en' },
+    want: 'en',
+  },
+  {
+    name: 'embedded: live en beats url ar',
+    input: { inSallaEmbedded: true, sallaMessageLang: 'en', urlLang: 'ar' },
+    want: 'en',
+  },
 ]
 
 const embedThemeCases: Case<Theme>[] = [
@@ -43,9 +57,14 @@ const embedThemeCases: Case<Theme>[] = [
     want: 'light',
   },
   {
-    name: 'embedded: stale stored dark without trusted source → light default',
-    input: { inSallaEmbedded: true, embedStored: null, sallaMessageTheme: null },
-    want: 'light',
+    name: 'embedded: live dark beats url light',
+    input: { inSallaEmbedded: true, sallaMessageTheme: 'dark', urlTheme: 'light' },
+    want: 'dark',
+  },
+  {
+    name: 'embedded: no signal → system fallback when provided',
+    input: { inSallaEmbedded: true, systemTheme: 'dark' },
+    want: 'dark',
   },
   {
     name: 'embedded: trusted stored dark from Salla → dark',
@@ -86,16 +105,80 @@ for (const c of embedThemeCases) {
   }
 }
 
+// Combined resolver — four Salla combinations
+const combos: Array<{ theme: Theme; lang: Lang }> = [
+  { theme: 'light', lang: 'ar' },
+  { theme: 'dark',  lang: 'ar' },
+  { theme: 'light', lang: 'en' },
+  { theme: 'dark',  lang: 'en' },
+]
+for (const combo of combos) {
+  const got = resolveEmbeddedAppearanceAndLocale({
+    liveTheme: combo.theme,
+    liveLang:  combo.lang,
+    inSallaEmbedded: true,
+  })
+  if (got.theme !== combo.theme || got.lang !== combo.lang) {
+    failed++
+    console.error(
+      `FAIL [embed-context] Salla ${combo.lang}+${combo.theme} — got ${got.lang}+${got.theme}`,
+    )
+  } else {
+    console.log(`OK   [embed-context] Salla ${combo.lang}+${combo.theme}`)
+  }
+}
+
+// Default-only handoff must not pin theme/lang in entry URL
+const defaultQs = buildEmbeddedEntryQuery({
+  theme: 'light',
+  lang: 'ar',
+  themeSource: 'default',
+  langSource: 'default',
+})
+if (defaultQs !== '') {
+  failed++
+  console.error(`FAIL [embed-context] default handoff should omit query — got '${defaultQs}'`)
+} else {
+  console.log('OK   [embed-context] default handoff omits query params')
+}
+
+const trustedQs = buildEmbeddedEntryQuery({
+  theme: 'dark',
+  lang: 'en',
+  themeSource: 'salla',
+  langSource: 'salla',
+})
+if (trustedQs !== '?theme=dark&lang=en') {
+  failed++
+  console.error(`FAIL [embed-context] trusted handoff — got '${trustedQs}'`)
+} else {
+  console.log('OK   [embed-context] trusted handoff serializes theme+lang')
+}
+
 // postMessage parsing
 const ctxDark = {
   event: 'embedded:context.provide',
-  payload: { layout: { theme: 'dark', mode: 'dark' } },
+  payload: { layout: { theme: 'dark', mode: 'dark', dir: 'rtl' } },
 }
 if (!isTrustedSallaThemeMessage(ctxDark) || extractThemeFromPostMessage(ctxDark) !== 'dark') {
   failed++
   console.error('FAIL [embed-theme] embedded:context.provide dark payload')
 } else {
   console.log('OK   [embed-theme] embedded:context.provide dark payload')
+}
+
+if (extractLangFromSdkState({ layout: { dir: 'ltr' } }) !== 'en') {
+  failed++
+  console.error('FAIL [embed-lang] SDK layout dir=ltr → en')
+} else {
+  console.log('OK   [embed-lang] SDK layout dir=ltr → en')
+}
+
+if (extractLangFromSdkState({ layout: { locale: 'en', dir: 'ltr' } }) !== 'en') {
+  failed++
+  console.error('FAIL [embed-lang] SDK layout locale=en')
+} else {
+  console.log('OK   [embed-lang] SDK layout locale=en')
 }
 
 const abortErr = new DOMException('Aborted', 'AbortError')

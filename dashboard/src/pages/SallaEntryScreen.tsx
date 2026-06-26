@@ -21,6 +21,7 @@ import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
+import { startEmbeddedSdkHandshake } from '../lib/embeddedSdkHandshake'
 import type { EmbeddedStrings } from '../i18n/embedded'
 
 // ── Immediate ready re-signal ─────────────────────────────────────────────────
@@ -646,6 +647,9 @@ export default function SallaEntryScreen() {
   useEffect(() => {
     // Re-signal Salla's host frame in case it missed the module-level signal.
     try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
+
+    // Refresh / direct /app/entry loads must re-read Salla layout (theme + locale).
+    void startEmbeddedSdkHandshake('[SallaEntry]')
 
     if (bootedRef.current) return
     bootedRef.current = true

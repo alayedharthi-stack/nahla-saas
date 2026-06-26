@@ -1,17 +1,7 @@
 /**
  * Pure theme resolution for Salla embedded surfaces (no React).
  */
-import {
-  isSallaEmbeddedIframe,
-  resolveEmbeddedLang,
-  readUrlEmbeddedLang,
-  readStoredEmbedLang,
-  readStoredUserLang,
-  readSallaReferrerLang,
-  readNavigatorLang,
-  readDocumentLang,
-  isDocumentRtl,
-} from './embeddedLocale'
+import { isSallaEmbeddedIframe } from './embeddedLocale'
 
 export type EmbeddedTheme = 'light' | 'dark'
 
@@ -201,8 +191,8 @@ export interface ResolveEmbeddedThemeInput {
 
 /**
  * Inside Salla iframe:
- *   URL → live Salla signal (postMessage / SDK / referrer) → trusted stored → light default.
- * Stale `nahla-embedded-theme=dark` without `nahla-embedded-theme-source=salla|url` is ignored.
+ *   live Salla (SDK/postMessage) → referrer → trusted stored → URL → system → light default.
+ * Stale `nahla-embedded-theme=dark` without trusted source is ignored.
  */
 export function resolveEmbeddedTheme(input: ResolveEmbeddedThemeInput = {}): {
   theme: EmbeddedTheme
@@ -210,9 +200,6 @@ export function resolveEmbeddedTheme(input: ResolveEmbeddedThemeInput = {}): {
 } {
   const embedded = input.inSallaEmbedded ?? isSallaEmbeddedIframe()
 
-  if (input.urlTheme) {
-    return { theme: input.urlTheme, source: 'url' }
-  }
   if (input.sallaMessageTheme) {
     return { theme: input.sallaMessageTheme, source: 'salla' }
   }
@@ -225,8 +212,14 @@ export function resolveEmbeddedTheme(input: ResolveEmbeddedThemeInput = {}): {
   if (!embedded && input.embedStored) {
     return { theme: input.embedStored, source: 'stored' }
   }
+  if (input.urlTheme) {
+    return { theme: input.urlTheme, source: 'url' }
+  }
 
   if (embedded) {
+    if (input.systemTheme) {
+      return { theme: input.systemTheme, source: 'system' }
+    }
     return { theme: 'light', source: 'default' }
   }
 
@@ -252,13 +245,26 @@ export function persistEmbeddedThemeWithSource(
   theme: EmbeddedTheme,
   source: EmbeddedThemeSource,
 ): void {
-  persistEmbeddedTheme(theme)
+  applyEmbeddedThemeToDocument(theme)
+  if (source === 'default' || source === 'system') return
+
+  try { localStorage.setItem(EMBED_THEME_STORAGE_KEY, theme) } catch { /* ignore */ }
+
+  const tag: TrustedEmbedThemeSource | 'default' =
+    source === 'url' ? 'url'
+    : (source === 'salla' || source === 'stored') ? 'salla'
+    : 'default'
+
+  if (tag !== 'default') {
+    try { localStorage.setItem(EMBED_THEME_SOURCE_KEY, tag) } catch { /* ignore */ }
+  }
+
+  if (source === 'url' || source === 'salla' || source === 'stored' || source === 'user') {
+    try { localStorage.setItem(USER_THEME_STORAGE_KEY, theme) } catch { /* ignore */ }
+  }
+
   try {
-    const tag: TrustedEmbedThemeSource | 'default' =
-      source === 'url' ? 'url'
-      : (source === 'salla' || source === 'stored') ? 'salla'
-      : 'default'
-    localStorage.setItem(EMBED_THEME_SOURCE_KEY, tag)
+    window.dispatchEvent(new CustomEvent('nahla:theme-change', { detail: theme }))
   } catch { /* ignore */ }
 }
 
@@ -269,33 +275,4 @@ export function applyEmbeddedThemeToDocument(theme: EmbeddedTheme): void {
     root.setAttribute('data-theme', theme)
     root.style.colorScheme = theme
   } catch { /* ignore */ }
-}
-
-export function buildEmbeddedEntryQuery(searchParams?: URLSearchParams): string {
-  const sp = searchParams ?? new URLSearchParams(window.location.search)
-  const search = sp.toString() ? `?${sp}` : undefined
-  const inEmbed = isSallaEmbeddedIframe()
-  const { lang } = resolveEmbeddedLang({
-    urlLang:           readUrlEmbeddedLang(search),
-    embedStored:       readStoredEmbedLang(),
-    userPref:          readStoredUserLang(),
-    referrerLang:      readSallaReferrerLang(),
-    navigatorLang:     readNavigatorLang(),
-    documentLang:      readDocumentLang(),
-    documentRtl:       isDocumentRtl(),
-    inSallaEmbedded:   inEmbed,
-  })
-  const { theme } = resolveEmbeddedTheme({
-    urlTheme:          readUrlEmbeddedTheme(search),
-    embedStored:       inEmbed ? readTrustedStoredEmbedTheme() : readStoredEmbedTheme(),
-    referrerTheme:     inEmbed ? readSallaReferrerTheme() : null,
-    userResolved:      inEmbed ? null : readStoredUserResolvedTheme(),
-    systemTheme:       inEmbed ? null : readSystemTheme(),
-    inSallaEmbedded:   inEmbed,
-  })
-  const out = new URLSearchParams()
-  out.set('lang', lang)
-  out.set('theme', theme)
-  const qs = out.toString()
-  return qs ? `?${qs}` : ''
 }
