@@ -2,12 +2,9 @@
  * useEmbeddedLocale — Salla-aware locale resolution for embedded surfaces.
  *
  * Priority inside Salla iframe (see `resolveEmbeddedLang` in embeddedLocale.ts):
- *   URL → Salla postMessage → nahla-embedded-lang → referrer / RTL → Arabic default
- *   (stale `nahla-lang=en` from the main dashboard is NOT used in iframe)
- *
- * Outside iframe: URL → embed storage → user pref → referrer → navigator → ar
+ *   live Salla (SDK/postMessage) → referrer → embed storage → URL → Arabic default
  */
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { EMBEDDED_STRINGS, type EmbeddedLang, type EmbeddedStrings } from '../i18n/embedded'
 import {
   type EmbeddedLangSource,
@@ -21,7 +18,9 @@ import {
   isDocumentRtl,
   isSallaEmbeddedIframe,
   extractLangFromPostMessage,
-  persistEmbeddedLang,
+  isTrustedSallaLangMessage,
+  persistEmbeddedLangWithSource,
+  SALLA_LANG_EVENT,
   EMBED_LANG_STORAGE_KEY,
 } from '../i18n/embeddedLocale'
 
@@ -35,46 +34,75 @@ export interface UseEmbeddedLocaleReturn<S extends EmbeddedStrings = EmbeddedStr
 }
 
 export function useEmbeddedLocale(): UseEmbeddedLocaleReturn {
+  const sallaLiveRef = useRef<EmbeddedLang | null>(null)
+
   const resolve = useCallback((): { lang: EmbeddedLang; source: EmbeddedLangSource } => {
     const embedded = isSallaEmbeddedIframe()
-    const { lang, source } = resolveEmbeddedLang({
+    const result = resolveEmbeddedLang({
       urlLang:          readUrlEmbeddedLang(),
+      sallaMessageLang: sallaLiveRef.current,
       embedStored:      readStoredEmbedLang(),
-      userPref:         readStoredUserLang(),
+      userPref:         embedded ? null : readStoredUserLang(),
       referrerLang:     readSallaReferrerLang(),
-      navigatorLang:    readNavigatorLang(),
+      navigatorLang:    embedded ? null : readNavigatorLang(),
       documentLang:     readDocumentLang(),
       documentRtl:      isDocumentRtl(),
       inSallaEmbedded:  embedded,
     })
-    if (source === 'url' || source === 'stored' || source === 'salla' || source === 'default' || source === 'referrer') {
-      persistEmbeddedLang(lang)
-    } else if (embedded) {
-      // Still mirror resolved lang into embed storage inside iframe
-      persistEmbeddedLang(lang)
-    }
-    return { lang, source }
+    persistEmbeddedLangWithSource(result.lang, result.source)
+    return result
   }, [])
 
   const [state, setState] = useState(resolve)
+
+  const applyHostLang = useCallback((lang: EmbeddedLang) => {
+    sallaLiveRef.current = lang
+    const result = resolveEmbeddedLang({
+      urlLang:          readUrlEmbeddedLang(),
+      sallaMessageLang: lang,
+      embedStored:      readStoredEmbedLang(),
+      userPref:         null,
+      referrerLang:     readSallaReferrerLang(),
+      navigatorLang:    null,
+      documentLang:     readDocumentLang(),
+      documentRtl:      isDocumentRtl(),
+      inSallaEmbedded:  isSallaEmbeddedIframe(),
+    })
+    persistEmbeddedLangWithSource(result.lang, result.source)
+    setState(result)
+  }, [])
 
   useEffect(() => { setState(resolve()) }, [resolve])
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      const next = extractLangFromPostMessage(e?.data)
+      const d = e?.data
+      if (!isTrustedSallaLangMessage(d)) {
+        const loose = extractLangFromPostMessage(d)
+        if (!loose) return
+        applyHostLang(loose)
+        return
+      }
+      const next = extractLangFromPostMessage(d)
       if (!next) return
-      persistEmbeddedLang(next)
-      setState({ lang: next, source: 'salla' })
+      applyHostLang(next)
+    }
+    const onSallaEvent = (e: Event) => {
+      const next = (e as CustomEvent<EmbeddedLang>).detail
+      if (next === 'ar' || next === 'en') applyHostLang(next)
     }
     window.addEventListener('message', onMsg)
-    return () => window.removeEventListener('message', onMsg)
-  }, [])
+    window.addEventListener(SALLA_LANG_EVENT, onSallaEvent)
+    return () => {
+      window.removeEventListener('message', onMsg)
+      window.removeEventListener(SALLA_LANG_EVENT, onSallaEvent)
+    }
+  }, [applyHostLang])
 
   const setLang = useCallback((next: EmbeddedLang | null) => {
     try {
       if (next === null) localStorage.removeItem(EMBED_LANG_STORAGE_KEY)
-      else               persistEmbeddedLang(next)
+      else               persistEmbeddedLangWithSource(next, 'stored')
     } catch { /* ignore */ }
     setState(next ? { lang: next, source: 'stored' } : resolve())
   }, [resolve])

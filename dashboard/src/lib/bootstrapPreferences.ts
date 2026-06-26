@@ -15,10 +15,10 @@ import {
   isSallaEmbeddedIframe,
   readDocumentLang,
   isDocumentRtl,
-  readNavigatorLang,
   readSallaReferrerLang,
   readStoredEmbedLang,
   resolveEmbeddedLang,
+  persistEmbeddedLangWithSource,
 } from '../i18n/embeddedLocale'
 import {
   readTrustedStoredEmbedTheme,
@@ -144,11 +144,11 @@ export function bootstrapPreferences(): {
       embedStored:       readTrustedStoredEmbedTheme(),
       referrerTheme:     readSallaReferrerTheme(),
       userResolved:      null,
-      systemTheme:       null,
+      systemTheme:       readSystemTheme(),
       inSallaEmbedded:   true,
     })
     resolvedTheme = theme
-    themeSource   = source === 'stored' ? 'stored' : source === 'salla' ? 'embed' : 'embed'
+    themeSource   = source === 'stored' ? 'stored' : source === 'system' ? 'system' : 'embed'
     logEmbeddedThemeResolved(theme, source)
     persistEmbeddedThemeWithSource(theme, source)
   } else {
@@ -170,17 +170,16 @@ export function bootstrapPreferences(): {
     const { lang, source } = resolveEmbeddedLang({
       urlLang:          null,
       embedStored:      readStoredEmbedLang(),
-      userPref:         readStoredLang(),
+      userPref:         null,
       referrerLang:     readSallaReferrerLang(),
-      navigatorLang:    readNavigatorLang(),
+      navigatorLang:    null,
       documentLang:     readDocumentLang(),
       documentRtl:      isDocumentRtl(),
       inSallaEmbedded:  true,
     })
     resolvedLang = lang
-    langSource   = source === 'stored' ? 'stored' : 'embed'
-    try { localStorage.setItem(LANG_KEY, lang) } catch { /* ignore */ }
-    try { localStorage.setItem(EMBED_LANG_STORAGE_KEY, lang) } catch { /* ignore */ }
+    langSource   = source === 'stored' ? 'stored' : source === 'default' ? 'default' : 'embed'
+    persistEmbeddedLangWithSource(lang, source)
   } else {
     const stored = readStoredLang()
     if (stored) {

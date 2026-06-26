@@ -39,7 +39,7 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
       sallaMessageTheme: sallaLiveRef.current,
       embedStored:       embedded ? readTrustedStoredEmbedTheme() : null,
       referrerTheme:     embedded ? readSallaReferrerTheme() : null,
-      userResolved:      readStoredUserResolvedTheme(),
+      userResolved:      embedded ? null : readStoredUserResolvedTheme(),
       systemTheme:       readSystemTheme(),
       inSallaEmbedded:   embedded,
     })
@@ -61,8 +61,8 @@ export function useEmbeddedTheme(): UseEmbeddedThemeReturn {
       sallaMessageTheme: theme,
       embedStored:       embedded ? readTrustedStoredEmbedTheme() : null,
       referrerTheme:     embedded ? readSallaReferrerTheme() : null,
-      userResolved:      null,
-      systemTheme:       null,
+      userResolved:      embedded ? null : readStoredUserResolvedTheme(),
+      systemTheme:       embedded ? readSystemTheme() : null,
       inSallaEmbedded:   embedded,
     })
     logEmbeddedThemeResolved(result.theme, result.source)
