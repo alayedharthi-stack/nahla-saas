@@ -483,6 +483,51 @@ def build_commerce_turn_contract(
         if isinstance(shadow_missing, list) and shadow_missing:
             reasons.append("order_context_shadow_missing_fields_available")
 
+    if known_facts.get("catalog_order_current_turn") or known_facts.get("active_catalog_checkout"):
+        from dataclasses import asdict, is_dataclass  # noqa: PLC0415
+
+        prep_d: Dict[str, Any] = {}
+        order_prep_obj = getattr(state, "order_prep", None) if state else None
+        if order_prep_obj is not None:
+            if is_dataclass(order_prep_obj):
+                prep_d = asdict(order_prep_obj)
+            elif isinstance(order_prep_obj, dict):
+                prep_d = dict(order_prep_obj)
+        customer_row = None
+        if order_context is not None and getattr(order_context, "customer_id", None) and db is not None:
+            try:
+                from models import Customer  # noqa: PLC0415
+
+                customer_row = (
+                    db.query(Customer)
+                    .filter_by(id=int(order_context.customer_id), tenant_id=int(ctx.tenant_id))
+                    .first()
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — contract identity lookup is best-effort
+                customer_row = None
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                apply_catalog_customer_identity_to_contract,
+            )
+
+            missing_fields, known_facts = apply_catalog_customer_identity_to_contract(
+                missing_fields=list(missing_fields),
+                known_facts=dict(known_facts),
+                db=db,
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0) or None,
+                phone=phone,
+                order_prep=prep_d,
+                profile=dict(getattr(ctx, "profile", None) or {}),
+                customer=customer_row,
+            )
+            if known_facts.get("customer_name_known"):
+                reasons.append("catalog_checkout_customer_name_known")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[COMMERCE_TURN_CONTRACT] catalog customer identity apply failed tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
+
     return CommerceTurnContract(
         commerce_state=commerce_state,
         known_facts=known_facts,
@@ -559,10 +604,17 @@ def log_commerce_turn_contract_divergence(
             )
 
     name_known = bool(
-        contract.known_facts.get("name")
+        contract.known_facts.get("customer_name_known")
+        or contract.known_facts.get("name")
         or contract.known_facts.get("customer_first_name")
     )
-    name_fields = {"customer_first_name", "customer_last_name", "name"}
+    name_fields = {
+        "customer_first_name",
+        "customer_last_name",
+        "name",
+        "full_name",
+        "customer_name",
+    }
     if name_known and any(m in name_fields for m in contract.missing_fields):
         divergences.append("name_known_but_missing_fields_contains_name")
         logger.warning(

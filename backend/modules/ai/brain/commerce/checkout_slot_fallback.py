@@ -217,6 +217,30 @@ def build_checkout_slot_fallback_reply(
             if not has_product:
                 continue
         if slot in _NAME_SLOTS or slot == "customer_first_name":
+            try:
+                from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                    is_catalog_checkout_name_question_forbidden,
+                )
+
+                prep = getattr(state, "order_prep", None)
+                prep_d: Dict[str, Any] = {}
+                if prep is not None and hasattr(prep, "to_dict"):
+                    try:
+                        prep_d = dict(prep.to_dict())
+                    except Exception:  # noqa: BLE001
+                        prep_d = {}
+                elif isinstance(prep, dict):
+                    prep_d = dict(prep)
+                first = str(prep_d.get("customer_first_name") or "").strip()
+                last = str(prep_d.get("customer_last_name") or "").strip()
+                if first and last:
+                    continue
+                if is_catalog_checkout_name_question_forbidden(
+                    known_facts={"customer_name_known": bool(first and last)},
+                ):
+                    continue
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog name guard must not block fallback
+                pass
             return _PROMPT_NAME
         if slot in _CITY_SLOTS:
             return _PROMPT_CITY

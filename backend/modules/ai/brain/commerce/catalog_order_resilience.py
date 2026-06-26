@@ -268,13 +268,29 @@ def build_catalog_checkout_safe_reply_for_ctx(
             bs = {}
     missing: List[str] = []
     try:
-        from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
+        from modules.ai.order_flow_v2.missing_fields import compute_v2_missing_fields  # noqa: PLC0415
+        from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+            merge_prep_with_customer_identity,
+            resolve_catalog_checkout_customer_identity,
+        )
 
-        missing = list(
-            compute_wa_missing_fields(
+        meta = dict((getattr(ctx, "profile", None) or {}).get("inbound_metadata") or {})
+        identity = resolve_catalog_checkout_customer_identity(
+            db=getattr(ctx, "_db", None),
+            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0) or None,
+            phone=str(getattr(ctx, "customer_phone", "") or ""),
+            order_prep=prep,
+            profile=dict(getattr(ctx, "profile", None) or {}),
+        )
+        prep = merge_prep_with_customer_identity(prep, identity)
+        missing = _filter_catalog_missing(
+            compute_v2_missing_fields(
                 prep,
                 brain_state=bs,
-                line_items=prep.get("line_items") or None,
+                whatsapp_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                db=getattr(ctx, "_db", None),
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0) or None,
+                inbound_metadata=meta,
             )
         )
     except Exception:  # noqa: BLE001
@@ -361,6 +377,19 @@ def try_catalog_order_pre_brain_safe_reply(
         if extraction_incomplete:
             patch["catalog_order_extraction_incomplete"] = True
         merged = {**order_prep, **patch}
+        from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+            filter_missing_for_known_catalog_customer,
+            merge_prep_with_customer_identity,
+            resolve_catalog_checkout_customer_identity,
+        )
+
+        identity = resolve_catalog_checkout_customer_identity(
+            db=db,
+            tenant_id=int(tenant_id),
+            phone=customer_phone,
+            order_prep=merged,
+        )
+        merged = merge_prep_with_customer_identity(merged, identity)
         missing = _filter_catalog_missing(
             compute_v2_missing_fields(
                 merged,
@@ -372,12 +401,30 @@ def try_catalog_order_pre_brain_safe_reply(
                 inbound_metadata=meta,
             )
         )
+        missing = filter_missing_for_known_catalog_customer(
+            missing,
+            known_facts=identity.known_facts,
+            phone=customer_phone,
+        )
+        identity_facts = dict(identity.known_facts or {})
+        facts.update(identity_facts)
         reply = build_catalog_checkout_safe_reply(
             order_prep=merged,
             brain_state=dict(brain_state or {}),
             missing_fields=missing,
             extraction_incomplete=extraction_incomplete,
         )
+        from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+            reply_contains_forbidden_catalog_name_question,
+            sanitize_forbidden_catalog_name_question,
+        )
+
+        if identity_facts.get("customer_name_known") and reply_contains_forbidden_catalog_name_question(reply):
+            reply = sanitize_forbidden_catalog_name_question(
+                reply,
+                known_facts=identity_facts,
+                missing_fields=missing,
+            )
         if reply_contains_forbidden_catalog_product_question(reply):
             logger.error(
                 "[CATALOG_ORDER_RESILIENCE] blocked unsafe pre-brain reply tenant=%s phone=%s",

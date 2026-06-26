@@ -631,6 +631,23 @@ def apply_commerce_reply_quality_guard(
                 replaced = True
                 used_fallback = True
                 fallback_kind = fallback_kind or "catalog_checkout_safe"
+        from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+            is_catalog_checkout_name_question_forbidden,
+            reply_contains_forbidden_catalog_name_question,
+            sanitize_forbidden_catalog_name_question,
+        )
+
+        if is_catalog_checkout_name_question_forbidden(state=state):
+            if reply_contains_forbidden_catalog_name_question(text):
+                sanitized_name = sanitize_forbidden_catalog_name_question(
+                    text,
+                    state=state,
+                )
+                if sanitized_name and sanitized_name != text:
+                    text = sanitized_name
+                    replaced = True
+                    used_fallback = True
+                    fallback_kind = fallback_kind or "catalog_checkout_name_safe"
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog sanitize must not block reply
         pass
 
