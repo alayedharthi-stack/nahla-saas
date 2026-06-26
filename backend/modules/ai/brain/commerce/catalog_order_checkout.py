@@ -234,7 +234,7 @@ def _prep_dict(order_prep: Any) -> Dict[str, Any]:
     if hasattr(order_prep, "to_dict"):
         try:
             return dict(order_prep.to_dict())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — prep to_dict probe must not block checkout detection
             pass
     return dict(getattr(order_prep, "__dict__", {}) or {})
 
@@ -245,8 +245,6 @@ def is_active_catalog_checkout(ctx: BrainContext) -> bool:
     follow-up turns after the initial catalog_order event.
     """
     if is_current_catalog_order_submitted(ctx):
-        return True
-    if is_catalog_line_items_authoritative(ctx):
         return True
     state = getattr(ctx, "state", None)
     prep = getattr(state, "order_prep", None) if state else None
