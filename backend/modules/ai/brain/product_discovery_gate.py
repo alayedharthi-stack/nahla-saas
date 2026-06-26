@@ -701,6 +701,19 @@ def product_discovery_block_reason(
     msg = message if message is not None else (ctx.message or "")
     src = str(source or "").strip().lower()
     intent_name = str(getattr(ctx.intent, "name", "") or "")
+
+    try:
+        from .turn.ownership import (  # noqa: PLC0415
+            FALLBACK_PRODUCT_DISCOVERY,
+            ownership_forbids_fallback,
+        )
+
+        owned = ownership_forbids_fallback(ctx, FALLBACK_PRODUCT_DISCOVERY)
+        if owned:
+            return owned
+    except Exception:  # noqa: BLE001
+        pass
+
     if intent_name == "product_visual_request":
         return None
 
@@ -713,12 +726,12 @@ def product_discovery_block_reason(
         pass
 
     if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
-        return None
+        return "health_advisory"
 
     try:
-        from .catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
+        from .turn.ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
 
-        if is_catalog_browse_turn(msg, intent_name=intent_name, ctx=ctx):
+        if has_explicit_catalog_browse_intent(ctx, message=msg, intent_name=intent_name):
             return None
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse policy probe
         pass

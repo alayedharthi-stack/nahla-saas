@@ -140,7 +140,31 @@ def should_suspend_stale_checkout_for_turn(
     ctx: Any = None,
 ) -> bool:
     """True when browse or bare start-order must isolate stale checkout for this turn."""
-    if is_catalog_browse_turn(message, intent_name=intent_name, ctx=ctx):
+    if ctx is not None:
+        try:
+            from ..turn.ownership import (  # noqa: PLC0415
+                FALLBACK_STALE_CHECKOUT_SUSPEND,
+                ownership_forbids_fallback,
+            )
+
+            if ownership_forbids_fallback(ctx, FALLBACK_STALE_CHECKOUT_SUSPEND):
+                return False
+        except Exception:  # noqa: BLE001
+            logger.exception("[CATALOG_BROWSE_TURN] ownership_suspend_probe_failed")
+
+    try:
+        from ..turn.ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
+
+        if ctx is not None and has_explicit_catalog_browse_intent(
+            ctx,
+            message=message,
+            intent_name=intent_name,
+        ):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_TURN] explicit_browse_probe_failed")
+
+    if is_catalog_browse_message(message, intent_name=intent_name):
         return True
     return is_fresh_start_order_turn(message)
 

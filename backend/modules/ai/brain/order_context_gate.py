@@ -305,20 +305,55 @@ def is_fulfillment_discovery_unlock(
     message: str,
     *,
     intent_name: Optional[str] = None,
+    ctx: Optional[BrainContext] = None,
 ) -> bool:
     """Deterministic unlock for catalog browse / product visual during fulfillment lock."""
     if has_explicit_commerce_topic_change(message):
         return True
-    try:
-        from .catalog.catalog_browse_turn_policy import is_catalog_browse_turn  # noqa: PLC0415
 
-        if is_catalog_browse_turn(message, intent_name=str(intent_name or "")):
-            return True
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "[ORDER_CONTEXT_GATE] catalog browse unlock check failed msg=%r",
-            (message or "")[:80],
+    if ctx is not None:
+        try:
+            from .turn.ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
+
+            if has_explicit_catalog_browse_intent(
+                ctx,
+                message=message,
+                intent_name=str(intent_name or ""),
+            ):
+                return True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[ORDER_CONTEXT_GATE] explicit browse unlock check failed msg=%r",
+                (message or "")[:80],
+            )
+    else:
+        try:
+            from .catalog.catalog_browse_turn_policy import is_catalog_browse_message  # noqa: PLC0415
+
+            if is_catalog_browse_message(message or "", intent_name=str(intent_name or "")):
+                return True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[ORDER_CONTEXT_GATE] catalog browse unlock check failed msg=%r",
+                (message or "")[:80],
+            )
+
+    try:
+        from .commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+            is_bare_city_token_message,
+            message_fulfills_checkout_slot,
         )
+
+        order_prep = None
+        if ctx is not None:
+            order_prep = getattr(getattr(ctx, "state", None), "order_prep", None)
+        if is_bare_city_token_message(message or ""):
+            return False
+        if order_prep is not None and message_fulfills_checkout_slot(message or "", order_prep=order_prep):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         from .commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
 
@@ -419,7 +454,7 @@ def should_block_product_discovery(ctx: BrainContext, message: Optional[str] = N
     msg = message if message is not None else (ctx.message or "")
     intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
 
-    if is_fulfillment_discovery_unlock(msg, intent_name=intent_name):
+    if is_fulfillment_discovery_unlock(msg, intent_name=intent_name, ctx=ctx):
         return False
 
     if not is_fulfillment_session_locked(ctx):
@@ -615,7 +650,7 @@ def try_fulfillment_lock_continuation(ctx: BrainContext) -> Optional[Decision]:
     if not is_fulfillment_session_locked(ctx):
         return None
     intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
-    if is_fulfillment_discovery_unlock(ctx.message or "", intent_name=intent_name):
+    if is_fulfillment_discovery_unlock(ctx.message or "", intent_name=intent_name, ctx=ctx):
         return None
 
     try:

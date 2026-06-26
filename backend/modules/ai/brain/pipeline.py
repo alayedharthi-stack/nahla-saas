@@ -1440,19 +1440,6 @@ class MerchantBrain:
                 _tas_exc,
             )
 
-        try:
-            from .catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
-                maybe_suspend_stale_checkout_for_turn,
-            )
-
-            maybe_suspend_stale_checkout_for_turn(ctx)
-        except Exception as _cbt_exc:  # noqa: BLE001  # noqa: silent-ok — browse isolation must not block decide
-            logger.debug(
-                "[CATALOG_BROWSE_TURN] pre_decide suspend skipped tenant=%s err=%s",
-                tenant_id,
-                _cbt_exc,
-            )
-
         # ── 3.992 Commerce Turn Contract (pre-decide + Phase 2 catalog enforce) ─
         _commerce_turn_contract = None
         _log_commerce_turn_contract_divergence = None
@@ -1485,6 +1472,41 @@ class MerchantBrain:
                 "[COMMERCE_TURN_CONTRACT] pre_decide skipped tenant=%s err=%s",
                 tenant_id,
                 _ctc_exc,
+            )
+
+        try:
+            from .turn.ownership import (  # noqa: PLC0415
+                attach_conversation_turn_ownership,
+                resolve_conversation_turn_ownership,
+            )
+
+            _turn_ownership = resolve_conversation_turn_ownership(ctx)
+            attach_conversation_turn_ownership(ctx, _turn_ownership)
+            logger.info(
+                "[TURN_OWNERSHIP] pre_decide tenant=%s owner=%s forbidden=%s explicit_browse=%s",
+                tenant_id,
+                _turn_ownership.turn_owner,
+                sorted(_turn_ownership.forbidden_fallbacks),
+                _turn_ownership.explicit_browse_intent,
+            )
+        except Exception as _to_exc:  # noqa: BLE001  # noqa: silent-ok — ownership must not block decide
+            logger.debug(
+                "[TURN_OWNERSHIP] pre_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _to_exc,
+            )
+
+        try:
+            from .catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
+                maybe_suspend_stale_checkout_for_turn,
+            )
+
+            maybe_suspend_stale_checkout_for_turn(ctx)
+        except Exception as _cbt_exc:  # noqa: BLE001  # noqa: silent-ok — browse isolation must not block decide
+            logger.debug(
+                "[CATALOG_BROWSE_TURN] pre_decide suspend skipped tenant=%s err=%s",
+                tenant_id,
+                _cbt_exc,
             )
 
         decision: Decision   = self._decision_engine.decide(ctx)

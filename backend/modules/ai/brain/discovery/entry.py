@@ -237,6 +237,18 @@ def _is_price_turn(ctx: BrainContext) -> bool:
 
 def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
     """Return suppression reason or ``None`` when discovery may classify."""
+    try:
+        from ..turn.ownership import (  # noqa: PLC0415
+            FALLBACK_PRODUCT_DISCOVERY,
+            ownership_forbids_fallback,
+        )
+
+        owned = ownership_forbids_fallback(ctx, FALLBACK_PRODUCT_DISCOVERY)
+        if owned:
+            return owned
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] turn_ownership_probe_failed")
+
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     msg = ctx.message or ""
 
@@ -292,14 +304,34 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
     try:
         from ..catalog.navigation_signals import evaluate_catalog_navigation_signals  # noqa: PLC0415
 
-        _nav_signals = evaluate_catalog_navigation_signals(ctx)
-        if _nav_signals.catalog_browse_intent:
-            return "catalog_navigator_owned"
-        if _nav_signals.navigation_state and not _nav_signals.advisory_or_comparison:
-            from ..commerce.collection_navigation import is_collection_navigation_message  # noqa: PLC0415
+        _skip_nav_suppression = False
+        try:
+            from ..turn.ownership import (  # noqa: PLC0415
+                get_conversation_turn_ownership,
+                has_explicit_catalog_browse_intent,
+            )
+            from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
 
-            if is_collection_navigation_message(msg):
+            if is_bare_start_order_phrase(msg):
+                _skip_nav_suppression = True
+            elif has_explicit_catalog_browse_intent(ctx, message=msg, intent_name=intent_name):
+                _skip_nav_suppression = True
+            else:
+                ownership = get_conversation_turn_ownership(ctx)
+                if ownership is not None and ownership.explicit_browse_intent:
+                    _skip_nav_suppression = True
+        except Exception:  # noqa: BLE001
+            pass
+
+        if not _skip_nav_suppression:
+            _nav_signals = evaluate_catalog_navigation_signals(ctx)
+            if _nav_signals.catalog_browse_intent:
                 return "catalog_navigator_owned"
+            if _nav_signals.navigation_state and not _nav_signals.advisory_or_comparison:
+                from ..commerce.collection_navigation import is_collection_navigation_message  # noqa: PLC0415
+
+                if is_collection_navigation_message(msg):
+                    return "catalog_navigator_owned"
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional navigator suppression probe
         pass
 
@@ -459,6 +491,16 @@ def _discovery_category_followup_entry(ctx: BrainContext) -> Optional[DiscoveryE
 
     scope = extract_browse_category_scope(msg, "")
     if not scope or not _is_valid_scope_token(scope):
+        return None
+
+    try:
+        from ..commerce.commerce_browse_category_guard import is_generic_category_browse  # noqa: PLC0415
+        from ..product_discovery_gate import has_types_overview_ask  # noqa: PLC0415
+
+        if not has_types_overview_ask(msg) and not is_generic_category_browse(msg, scope):
+            return None
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] category_followup_guard_failed")
         return None
 
     words = [w for w in msg.split() if w.strip()]
