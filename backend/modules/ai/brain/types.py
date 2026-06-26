@@ -1036,6 +1036,8 @@ class BrainContext:
     turn_understanding_shadow: Optional[Any] = None
     turn_arbitration_shadow: Optional[Any] = None
     turn_shadow_telemetry: Optional[Any] = None
+    # Phase 1 commerce turn contract — built pre-decide; shadow/log-only until Phase 2.
+    commerce_turn_contract: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
