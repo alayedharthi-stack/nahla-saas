@@ -1453,10 +1453,56 @@ class MerchantBrain:
                 _cbt_exc,
             )
 
+        # ── 3.992 Commerce Turn Contract (Phase 1 — pre-decide shadow) ───────
+        _commerce_turn_contract = None
+        _log_commerce_turn_contract_divergence = None
+        try:
+            from .commerce.commerce_turn_contract import (  # noqa: PLC0415
+                attach_commerce_turn_contract,
+                build_commerce_turn_contract,
+                log_commerce_turn_contract_divergence as _log_ctc_divergence_fn,
+            )
+
+            _log_commerce_turn_contract_divergence = _log_ctc_divergence_fn
+            _commerce_turn_contract = build_commerce_turn_contract(ctx, db=db)
+            attach_commerce_turn_contract(ctx, _commerce_turn_contract)
+            logger.info(
+                "[COMMERCE_TURN_CONTRACT] pre_decide tenant=%s state=%s goal=%s "
+                "forbidden=%s missing=%s catalog_order=%s action_candidate=%s",
+                tenant_id,
+                _commerce_turn_contract.commerce_state,
+                _commerce_turn_contract.next_goal,
+                _commerce_turn_contract.forbidden_actions,
+                _commerce_turn_contract.missing_fields,
+                _commerce_turn_contract.known_facts.get("catalog_order_current_turn"),
+                _commerce_turn_contract.action_to_execute,
+            )
+        except Exception as _ctc_exc:  # noqa: BLE001  # noqa: silent-ok — contract shadow must not block decide
+            logger.debug(
+                "[COMMERCE_TURN_CONTRACT] pre_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _ctc_exc,
+            )
+
         decision: Decision   = self._decision_engine.decide(ctx)
         reason_before_policy = decision.reason
         _legacy_decision_for_shadow = decision
         _enforce_result = None
+
+        if _commerce_turn_contract is not None and _log_commerce_turn_contract_divergence:
+            try:
+                _log_commerce_turn_contract_divergence(
+                    _commerce_turn_contract,
+                    decision,
+                    ctx=ctx,
+                    phase="post_decide_raw",
+                )
+            except Exception as _ctc_div_exc:  # noqa: BLE001  # noqa: silent-ok — divergence log must not block decide
+                logger.debug(
+                    "[COMMERCE_TURN_CONTRACT] divergence_log skipped tenant=%s err=%s",
+                    tenant_id,
+                    _ctc_div_exc,
+                )
 
         if str((decision.args or {}).get("topic") or "") == "purchase_channel_selection":
             try:
@@ -1499,6 +1545,21 @@ class MerchantBrain:
                 tenant_id,
                 _coc_exc,
             )
+
+        if _commerce_turn_contract is not None and _log_commerce_turn_contract_divergence:
+            try:
+                _log_commerce_turn_contract_divergence(
+                    _commerce_turn_contract,
+                    decision,
+                    ctx=ctx,
+                    phase="post_decide_enforced",
+                )
+            except Exception as _ctc_post_exc:  # noqa: BLE001  # noqa: silent-ok — divergence log must not block decide
+                logger.debug(
+                    "[COMMERCE_TURN_CONTRACT] post_enforce divergence skipped tenant=%s err=%s",
+                    tenant_id,
+                    _ctc_post_exc,
+                )
 
         try:
             from .turn.shadow import complete_turn_shadow_telemetry  # noqa: PLC0415
