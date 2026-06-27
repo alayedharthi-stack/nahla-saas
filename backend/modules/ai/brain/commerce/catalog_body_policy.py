@@ -56,6 +56,13 @@ def is_unsafe_catalog_body(text: str) -> bool:
         return True
     if is_forbidden_catalog_intro(body):
         return True
+    try:
+        from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+        if is_compose_failure_fallback(body):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional fallback policy import
+        pass
     lowered = body.lower()
     return any(m.lower() in lowered for m in _UNSAFE_CATALOG_BODY_MARKERS)
 

@@ -147,6 +147,23 @@ def operational_compose_error_fallback(*, variant: int = 0) -> str:
     return OPERATIONAL_COMPOSE_ERROR_AR
 
 
+def is_compose_failure_fallback(text: str) -> bool:
+    """True when text is the platform compose/empty-reply operational fallback."""
+    norm = _normalize_ar(text)
+    if not norm:
+        return False
+    for marker in (
+        _normalize_ar(EMPTY_REPLY_OPERATIONAL_AR),
+        _normalize_ar(OPERATIONAL_COMPOSE_ERROR_AR),
+    ):
+        if marker and marker in norm:
+            return True
+    return (
+        "تعذرت صياغه الرد" in norm
+        or "تعذرت معالجه الطلب" in norm
+    )
+
+
 def is_personality_fallback_text(text: str) -> bool:
     norm = _normalize_ar(text)
     if not norm:
@@ -276,6 +293,7 @@ __all__ = [
     "contains_sales_closer",
     "contains_service_closer",
     "empty_reply_fallback",
+    "is_compose_failure_fallback",
     "is_personality_fallback_text",
     "operational_compose_error_fallback",
     "strip_closer_segments",
