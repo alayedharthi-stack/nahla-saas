@@ -633,6 +633,7 @@ class CustomerIntelligenceService:
         external_id: Optional[str] = None,
         source: Optional[str] = None,
         extra_metadata: Optional[Dict[str, Any]] = None,
+        message_context: Optional[Dict[str, Any]] = None,
         seen_at: Optional[datetime] = None,
     ) -> Optional[Customer]:
         """
@@ -650,6 +651,11 @@ class CustomerIntelligenceService:
         normalized_phone = normalize_phone(phone)
         clean_name       = str(name or "").strip()
         clean_email      = str(email or "").strip() or None
+        name_message_context = dict(message_context or {})
+        if extra_metadata:
+            for key in ("message", "inbound_text", "raw_message", "name_capture_pattern"):
+                if key in extra_metadata and key not in name_message_context:
+                    name_message_context[key] = extra_metadata[key]
 
         # ── Central name-adoption guard (Jun 2026 P0) ─────────────────────
         # Block outbound echoes, campaigns, automations, and any other
@@ -759,6 +765,7 @@ class CustomerIntelligenceService:
                     source=source,
                     platform=platform,
                     explicit_customer_entry=(source or "") == "ai_detected_name",
+                    message_context=name_message_context,
                 )
             logger.debug(
                 "[CIS] customer CREATED | tenant=%s e164=%s salla_id=%s channel=%s",
@@ -786,8 +793,10 @@ class CustomerIntelligenceService:
                     source=source,
                     platform=platform,
                     explicit_customer_entry=(source or "") == "ai_detected_name",
+                    message_context=name_message_context,
                     force_merchant=(source or "") in {
                         "merchant_correction",
+                        "merchant_manual",
                         "manual",
                         "manual_admin",
                     },

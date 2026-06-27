@@ -16,7 +16,8 @@ before ``upsert_customer_identity`` writes identity fields.
 from __future__ import annotations
 
 import logging
-from typing import FrozenSet, Optional, Tuple
+import re
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
 
 logger = logging.getLogger("nahla.customer_name_adoption_guard")
 
@@ -38,11 +39,18 @@ UNTRUSTED_MESSAGE_NAME_SOURCES: FrozenSet[str] = frozenset({
 TRUSTED_OFFICIAL_NAME_SOURCES: FrozenSet[str] = frozenset({
     "manual",
     "manual_admin",
+    "merchant_manual",
     "merchant_correction",
+    "salla",
     "salla_sync",
     "customer_webhook",
+    "zid",
     "zid_sync",
+    "shopify",
     "shopify_sync",
+    "commerce_platform",
+    "sales_channel",
+    "platform_verified",
     "order_sync",
     "order_webhook",
     "order_incremental",
@@ -62,9 +70,71 @@ WHATSAPP_PROFILE_HINT_SOURCES: FrozenSet[str] = frozenset({
     "whatsapp_lead",
 })
 
+COMMERCE_PLATFORM_NAME_SOURCES: FrozenSet[str] = frozenset({
+    "salla",
+    "salla_order",
+    "salla_sync",
+    "zid",
+    "zid_order",
+    "zid_sync",
+    "shopify",
+    "shopify_order",
+    "shopify_sync",
+    "commerce_platform",
+    "sales_channel",
+    "platform_verified",
+    "customer_webhook",
+    "order_webhook",
+    "order_sync",
+    "order_incremental",
+    "order",
+})
+
+MERCHANT_MANUAL_NAME_SOURCES: FrozenSet[str] = frozenset({
+    "merchant_manual",
+    "merchant_correction",
+    "manual",
+    "manual_admin",
+})
+
+CUSTOMER_ENTERED_NAME_SOURCES: FrozenSet[str] = frozenset({
+    "customer_message",
+    "ai_detected_name",
+})
+
+_ROLE_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"\b(?:smsa|aramex|spl|naqel|courier|delivery|shipping)\b|"
+    r"مندوب|سمسا|ارامكس|أرامكس|ناقل|توصيل|الشحن|شحن|شركة|"
+    r"خدمة\s*العملاء|موظف|المعرض|الاداره|الإدارة|"
+    r"انا\s*في\s*الموقع|أنا\s*في\s*الموقع|في\s*الموقع"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_NAME_CORRECTION_RE = re.compile(
+    r"(?:"
+    r"اسمي\s*الصحيح|إسمي\s*الصحيح|"
+    r"صحح\s*اسمي|صحح\s*الاسم|"
+    r"غير\s*اسمي|غيّر\s*اسمي|غير\s*الاسم|غيّر\s*الاسم|"
+    r"الاسم\s*المسجل\s*خط[اأأء]|الاسم\s*عندكم\s*خط[اأأء]"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def _norm_source(source: Optional[str]) -> str:
     return (source or "").strip().lower()
+
+
+def contains_customer_name_role_context(text: Optional[str]) -> bool:
+    """True when text is a role/logistics/context phrase, not a human name."""
+    return bool(_ROLE_CONTEXT_RE.search(str(text or "")))
+
+
+def is_explicit_name_correction_message(text: Optional[str]) -> bool:
+    """True only for clear customer statements correcting a stored name."""
+    return bool(_EXPLICIT_NAME_CORRECTION_RE.search(str(text or "")))
 
 
 def is_untrusted_message_name_source(source: Optional[str]) -> bool:
@@ -151,3 +221,101 @@ def filter_name_for_identity_upsert(
         clean[:60],
     )
     return None, "blocked"
+
+
+def _message_context_dict(message_context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    return dict(message_context or {})
+
+
+def can_ai_update_customer_name(
+    customer: Any,
+    candidate_name: Optional[str],
+    message_context: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """
+    Decide whether AI/customer-message evidence may update ``Customer.name``.
+
+    Source priority:
+    merchant manual non-empty > commerce platform > validated customer-entered
+    > WhatsApp profile / AI candidate.  Role/logistics contexts never win.
+    """
+    candidate = str(candidate_name or "").strip()
+    if not candidate:
+        return False
+
+    ctx = _message_context_dict(message_context)
+    inbound_text = str(
+        ctx.get("message")
+        or ctx.get("inbound_text")
+        or ctx.get("raw_message")
+        or "",
+    ).strip()
+    source = _norm_source(ctx.get("source"))
+    explicit_customer_entry = bool(ctx.get("explicit_customer_entry"))
+
+    if contains_customer_name_role_context(candidate) or contains_customer_name_role_context(inbound_text):
+        logger.info(
+            "[NAME_ADOPTION_GUARD] blocked role_context source=%s candidate=%r",
+            source,
+            candidate[:60],
+        )
+        return False
+
+    try:
+        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+
+        validation = validate_customer_name(candidate)
+        if not validation.valid:
+            return False
+    except Exception:  # noqa: BLE001
+        logger.exception("[NAME_ADOPTION_GUARD] validator unavailable")
+        return False
+
+    if customer is None:
+        return explicit_customer_entry or source in CUSTOMER_ENTERED_NAME_SOURCES
+
+    try:
+        from core.customer_identity_resolver import (  # noqa: PLC0415
+            STATUS_CUSTOMER_ENTERED,
+            read_customer_identity,
+        )
+
+        snap = read_customer_identity(customer)
+        current_status = str(snap.customer_name_status or "").strip().lower()
+        current_source = _norm_source(snap.customer_name_source)
+    except Exception:  # noqa: BLE001
+        logger.exception("[NAME_ADOPTION_GUARD] current identity read failed")
+        current_status = ""
+        current_source = _norm_source(
+            (getattr(customer, "extra_metadata", None) or {}).get("customer_name_source")
+        )
+
+    meta = dict(getattr(customer, "extra_metadata", None) or {})
+    current_name = str(getattr(customer, "name", None) or "").strip()
+    manual_cleared = bool(meta.get("manual_name_cleared"))
+    manual_override = bool(meta.get("manual_name_override"))
+
+    if current_name and (
+        current_source in MERCHANT_MANUAL_NAME_SOURCES
+        or (manual_override and not manual_cleared)
+    ):
+        return False
+
+    if current_name and current_source in COMMERCE_PLATFORM_NAME_SOURCES:
+        return False
+
+    explicit_correction = bool(ctx.get("explicit_name_correction")) or is_explicit_name_correction_message(inbound_text)
+
+    if current_name and current_status == STATUS_CUSTOMER_ENTERED:
+        return explicit_correction
+
+    if manual_override and manual_cleared and not current_name:
+        return explicit_customer_entry or explicit_correction
+
+    if not current_name:
+        return explicit_customer_entry or explicit_correction or source in CUSTOMER_ENTERED_NAME_SOURCES
+
+    if current_source in {"", "whatsapp_profile", "whatsapp_inbound", "whatsapp_lead"}:
+        return explicit_customer_entry or explicit_correction
+
+    return explicit_correction

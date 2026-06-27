@@ -7,7 +7,11 @@ import httpx
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+_BACKEND_ROOT = os.path.join(_REPO_ROOT, "backend")
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
 
+from core.customer_identity_resolver import apply_customer_name
 from database.models import Customer, SyncLog
 from database.session import SessionLocal
 
@@ -59,7 +63,6 @@ async def fetch_and_sync_customers(store_id: str, access_token: str, tenant_id: 
                             customer = Customer(tenant_id=tenant_id)
                             db.add(customer)
 
-                        customer.name = item.get("name")
                         customer.email = item.get("email")
                         customer.phone = item.get("mobile", item.get("phone"))
                         customer.metadata = {
@@ -68,6 +71,12 @@ async def fetch_and_sync_customers(store_id: str, access_token: str, tenant_id: 
                             "city": item.get("city"),
                             "country": item.get("country", "SA"),
                         }
+                        apply_customer_name(
+                            customer,
+                            item.get("name"),
+                            source="zid",
+                            platform="zid",
+                        )
                         db.commit()
                         synced += 1
                     except Exception:

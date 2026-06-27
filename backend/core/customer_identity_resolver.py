@@ -70,15 +70,23 @@ _SOURCE_TRUST: Dict[str, int] = {
     SOURCE_CUSTOMER_MESSAGE: 80,
     SOURCE_WHATSAPP_PROFILE: 10,
     # Legacy aliases mapped at runtime
+    "salla": 100,
     "salla_sync": 100,
     "customer_webhook": 100,
+    "zid": 100,
     "zid_sync": 100,
+    "shopify": 100,
     "shopify_sync": 100,
+    "commerce_platform": 100,
+    "sales_channel": 100,
+    "platform_verified": 100,
     "order_webhook": 95,
     "order_sync": 95,
+    "order_incremental": 95,
     "order": 95,
     "ai_detected_name": 80,
     "merchant_correction": 90,
+    "merchant_manual": 95,
     "manual": 85,
     "manual_import": 40,
     "whatsapp_inbound": 10,
@@ -87,17 +95,25 @@ _SOURCE_TRUST: Dict[str, int] = {
 }
 
 _LEGACY_SOURCE_MAP: Dict[str, Tuple[str, str, float]] = {
+    "salla": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "salla_sync": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "customer_webhook": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
+    "zid": (SOURCE_ZID_ORDER, STATUS_VERIFIED, 1.0),
     "zid_sync": (SOURCE_ZID_ORDER, STATUS_VERIFIED, 1.0),
+    "shopify": (SOURCE_SHOPIFY_ORDER, STATUS_VERIFIED, 1.0),
     "shopify_sync": (SOURCE_SHOPIFY_ORDER, STATUS_VERIFIED, 1.0),
+    "commerce_platform": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
+    "sales_channel": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
+    "platform_verified": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "order_webhook": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "order_sync": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
+    "order_incremental": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "order": (SOURCE_SALLA_ORDER, STATUS_VERIFIED, 1.0),
     "whatsapp_inbound": (SOURCE_WHATSAPP_PROFILE, STATUS_PROPOSED, 0.4),
     "whatsapp_lead": (SOURCE_WHATSAPP_PROFILE, STATUS_PROPOSED, 0.4),
     "ai_detected_name": (SOURCE_CUSTOMER_MESSAGE, STATUS_CUSTOMER_ENTERED, 0.85),
     "merchant_correction": (SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.95),
+    "merchant_manual": (SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.95),
     "manual": (SOURCE_MERCHANT, STATUS_CUSTOMER_ENTERED, 0.9),
     "manual_admin": (SOURCE_MANUAL_ADMIN, STATUS_CUSTOMER_ENTERED, 0.98),
 }
@@ -268,6 +284,7 @@ def apply_customer_name(
     platform: Optional[str] = None,
     explicit_customer_entry: bool = False,
     force_merchant: bool = False,
+    message_context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Validate and persist a customer name with provenance.
@@ -306,6 +323,13 @@ def apply_customer_name(
     current_name = str(getattr(customer, "name", None) or "").strip()
 
     if not validation.valid:
+        if canon_source == SOURCE_CUSTOMER_MESSAGE and not force_merchant:
+            logger.info(
+                "[CUSTOMER_IDENTITY] blocked ai candidate name=%r reason=%s",
+                str(raw_name or "")[:60],
+                validation.reason,
+            )
+            return False
         if raw_name and str(raw_name).strip():
             logger.info(
                 "[CUSTOMER_IDENTITY] rejected name=%r source=%s reason=%s",
@@ -359,6 +383,22 @@ def apply_customer_name(
         and _trust(canon_source) < _trust(SOURCE_CUSTOMER_MESSAGE)
     ):
         return False
+
+    if canon_source == SOURCE_CUSTOMER_MESSAGE and not force_merchant:
+        from core.customer_name_adoption_guard import can_ai_update_customer_name  # noqa: PLC0415
+
+        policy_context = {
+            **dict(message_context or {}),
+            "source": source or canon_source,
+            "explicit_customer_entry": explicit_customer_entry,
+        }
+        if not can_ai_update_customer_name(customer, cleaned, policy_context):
+            logger.info(
+                "[CUSTOMER_IDENTITY] blocked by ai name policy id=%s source=%s",
+                getattr(customer, "id", None),
+                source or canon_source,
+            )
+            return False
 
     if current_name and not _should_overwrite(
         existing_status=existing_status,
