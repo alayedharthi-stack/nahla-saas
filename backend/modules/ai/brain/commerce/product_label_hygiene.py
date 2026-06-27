@@ -106,11 +106,28 @@ _ROLE_CONTACT_LEAD_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
-_LOGISTICS_ROLE_RE = re.compile(
+# Courier *role* words — not bare carrier names in post-order shipping asks.
+_COURIER_ROLE_WORD_RE = re.compile(
+    r"(?:مندوب|موصل|ساعي|courier|delivery\s+agent)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_COURIER_ROLE_ANNOUNCE_RE = re.compile(
     r"(?:"
-    r"مندوب|موصل|ساعي|ناقل|courier|delivery|"
-    r"سمسا|smsa|aramex|ارامكس|أرامكس|spl|dhl|naqel|fedex|"
-    r"tracking|pin|delivery\s*code|شحن|شحنه|شحنة|توصيل|بوليص"
+    r"مندوب\s+(?:ال)?(?:شحن|توصيل)|"
+    r"مندوب\s+(?:ال)?(?:شحن|توصيل)\s+معك|"
+    r"(?:^|\s)(?:i am|i'm|im\b)\s+.*\bcourier\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Existing-order / shipment anchor — not a courier role announcement.
+_ORDER_SHIPPING_ANCHOR_RE = re.compile(
+    r"(?:"
+    r"طلبي|طلبيتي|شحنتي|الشحنه|الشحنة|"
+    r"رقم\s*الطلب|رقم\s*التتبع|رابط\s*التتبع|tracking|"
+    r"طلبت|سويت\s*طلب|عملت\s*طلب|قدمت\s*طلب|"
+    r"order\s*status|track\s*my\s*order|where\s*is\s*my\s*order"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -186,15 +203,15 @@ def looks_like_sentence_not_product(text: str) -> bool:
 
 def is_conversational_non_product_inbound(text: str) -> bool:
     """True when inbound is identity/conversation — never a product label."""
-    if is_negative_logistics_or_contact_context(text):
-        return True
     return is_identity_or_intro_phrase(text) or looks_like_sentence_not_product(text)
 
 
 def is_negative_logistics_or_contact_context(text: str) -> bool:
     """
-    Courier/logistics/staff-contact inbounds must never become product labels,
-    availability asks, or variant-option prompts.
+    True when inbound must never be adopted as a catalog product label.
+
+    Courier *role* announcements and staff-contact asks — not post-order
+    shipping questions that merely mention a carrier name (``طلبي … سمسا``).
     """
     raw = str(text or "").strip()
     if not raw:
@@ -204,26 +221,32 @@ def is_negative_logistics_or_contact_context(text: str) -> bool:
             product_browse_negative_context_reason,
         )
 
-        reason = product_browse_negative_context_reason(raw)
-        if reason in ("logistics_context", "contact_context"):
+        if product_browse_negative_context_reason(raw) == "contact_context":
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional discovery gate import
         pass
     return _looks_like_role_or_courier_intro(raw)
 
 
+def _has_order_shipping_anchor(text: str) -> bool:
+    norm = normalize_label_text(text)
+    if not norm:
+        return False
+    return bool(_ORDER_SHIPPING_ANCHOR_RE.search(norm))
+
+
 def _looks_like_role_or_courier_intro(text: str) -> bool:
     norm = normalize_label_text(text)
     if not norm:
         return False
-    if _LOGISTICS_ROLE_RE.search(norm):
+    if _has_order_shipping_anchor(norm):
+        return False
+    if _COURIER_ROLE_ANNOUNCE_RE.search(norm):
         return True
-    if not _ROLE_CONTACT_LEAD_RE.search(norm):
-        return False
-    if _EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE.search(norm):
-        return False
-    words = [w for w in norm.split() if w]
-    return len(words) <= 6
+    if _ROLE_CONTACT_LEAD_RE.search(norm) and _COURIER_ROLE_WORD_RE.search(norm):
+        if not _EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE.search(norm):
+            return True
+    return False
 
 
 def is_non_product_label(text: str) -> bool:
@@ -232,6 +255,8 @@ def is_non_product_label(text: str) -> bool:
     if not norm or len(norm) < 2:
         return True
     if is_conversational_non_product_inbound(text):
+        return True
+    if is_negative_logistics_or_contact_context(text):
         return True
     if _NON_PRODUCT_LABEL_RE.search(norm):
         return True

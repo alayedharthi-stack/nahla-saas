@@ -58,6 +58,56 @@ COURIER_MESSAGES = (
 )
 
 
+POST_ORDER_SHIPPING_MESSAGES = (
+    "اي فرع ارسلتو طلبي في سمسا",
+    "وين طلبي مع سمسا",
+    "طلبي مع أي فرع سمسا",
+    "متى توصل شحنتي من سمسا",
+)
+
+
+class TestPostOrderShippingNotCourierRole:
+    @pytest.mark.parametrize("message", POST_ORDER_SHIPPING_MESSAGES)
+    def test_post_order_shipping_not_courier_role_gate(self, message: str) -> None:
+        assert is_negative_logistics_or_contact_context(message) is False
+        assert _label_from_inbound_availability_ask(message) == ""
+
+    def test_post_order_shipping_routes_to_shipping_post_order(self) -> None:
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+        from modules.ai.brain.types import (
+            BrainContext,
+            CommerceFacts,
+            INTENT_ASK_SHIPPING,
+            Intent,
+            MerchantConversationState,
+            OrderPreparationState,
+        )
+
+        op = OrderPreparationState()
+        op.payment_receipt_received = True
+        state = MerchantConversationState()
+        state.order_prep = op
+        message = "اي فرع ارسلتو طلبي في سمسا"
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="+966500000099",
+            message=message,
+            intent=Intent(
+                name=INTENT_ASK_SHIPPING,
+                confidence=0.90,
+                slots={},
+                raw_message=message,
+                extraction_method="rules",
+            ),
+            state=state,
+            facts=CommerceFacts(),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "shipping_post_order"
+
+
 class TestCourierRoleNotProduct:
     @pytest.mark.parametrize("message", COURIER_MESSAGES)
     def test_courier_role_not_product_label(self, message: str) -> None:
