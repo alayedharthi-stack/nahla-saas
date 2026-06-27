@@ -1802,6 +1802,8 @@ class StoreSyncService:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_customers"):
             return 0
+        adapter_platform = str(getattr(adapter, "platform", None) or "salla").strip().lower() or "salla"
+        sync_source = f"{adapter_platform}_sync"
 
         updated_since = None
         if incremental:
@@ -1880,7 +1882,14 @@ class StoreSyncService:
             if existing:
                 # ── Update existing customer ──────────────────────────────
                 if name:
-                    existing.name = name
+                    from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                    apply_customer_name(
+                        existing,
+                        name,
+                        source=sync_source,
+                        platform=adapter_platform,
+                    )
                 if email:
                     existing.email = email
                 if phone:
@@ -1899,7 +1908,7 @@ class StoreSyncService:
                 #   layer can show composite labels like "سلة • مستورد".
                 prev_meta = dict(existing.extra_metadata or {})
                 tags = set(prev_meta.get("source_tags") or [])
-                tags.add("salla_sync")
+                tags.add(sync_source)
                 prev_meta.update({
                     "salla_id":    ext_id,
                     "source_tags": sorted(tags),
@@ -1911,23 +1920,33 @@ class StoreSyncService:
             else:
                 # ── Create new customer from Salla ────────────────────────
                 from datetime import timezone as _tz  # noqa: PLC0415
-                self.db.add(Customer(
+                new_customer = Customer(
                     tenant_id           = self.tenant_id,
-                    name                = name or None,
+                    name                = None,
                     email               = email or None,
                     phone               = phone or None,
                     normalized_phone    = norm_phone,
                     extra_metadata      = {
                         "salla_id":    ext_id,
-                        "source":      "salla_sync",
-                        "source_tags": ["salla_sync"],
+                        "source":      sync_source,
+                        "source_tags": [sync_source],
                         "city":        raw.get("city", ""),
                         "country":     raw.get("country", "SA"),
                     },
                     salla_customer_id   = ext_id or None,
-                    acquisition_channel = "salla_sync",
+                    acquisition_channel = sync_source,
                     first_seen_at       = datetime.now(_tz.utc),
-                ))
+                )
+                if name:
+                    from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                    apply_customer_name(
+                        new_customer,
+                        name,
+                        source=sync_source,
+                        platform=adapter_platform,
+                    )
+                self.db.add(new_customer)
                 created += 1
         self.db.flush()
         logger.info(

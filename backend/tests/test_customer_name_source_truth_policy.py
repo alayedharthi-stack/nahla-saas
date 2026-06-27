@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import asyncio
 from types import SimpleNamespace
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +29,7 @@ from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # no
     filter_missing_for_known_catalog_customer,
 )
 from modules.ai.order_flow_v2.slot_ownership import apply_slot_ownership  # noqa: E402
+from services.store_sync import StoreSyncService  # noqa: E402
 
 
 def _customer(*, name: str | None = None, source: str = "", status: str = "", **meta):
@@ -228,3 +230,70 @@ def test_phone_known_rule_remains_unchanged() -> None:
     assert "customer_phone" not in missing
     assert "phone" not in missing
     assert "city" in missing
+
+
+class _FakeCustomerQuery:
+    def __init__(self, customer):
+        self._customer = customer
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return self._customer
+
+
+class _FakeStoreSyncDB:
+    def __init__(self, customer):
+        self.customer = customer
+        self.flushed = 0
+        self.added = []
+
+    def query(self, *_args, **_kwargs):
+        return _FakeCustomerQuery(self.customer)
+
+    def flush(self):
+        self.flushed += 1
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+class _FakeCustomerAdapter:
+    platform = "salla"
+
+    async def get_customers(self, *, updated_since=None):
+        return [
+            {
+                "id": "salla-1",
+                "name": "اسم سلة",
+                "email": "salla@example.com",
+                "mobile": "966500000000",
+                "city": "الرياض",
+                "country": "SA",
+            }
+        ]
+
+
+def test_store_sync_respects_merchant_manual_customer_name_lock() -> None:
+    customer = _customer(
+        name="اسم التاجر",
+        source=SOURCE_MERCHANT,
+        status=STATUS_CUSTOMER_ENTERED,
+        manual_name_override=True,
+        manual_name_cleared=False,
+    )
+    customer.tenant_id = 33
+    customer.salla_customer_id = "salla-1"
+    customer.acquisition_channel = "manual"
+    db = _FakeStoreSyncDB(customer)
+    service = StoreSyncService(db, tenant_id=33)
+    service._adapter = _FakeCustomerAdapter()
+
+    synced = asyncio.run(service.sync_customers())
+
+    assert synced == 1
+    assert customer.name == "اسم التاجر"
+    assert customer.email == "salla@example.com"
+    assert customer.extra_metadata["salla_id"] == "salla-1"
+    assert customer.extra_metadata["customer_name_source"] == SOURCE_MERCHANT
