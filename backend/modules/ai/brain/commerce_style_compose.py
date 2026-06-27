@@ -192,6 +192,15 @@ def compose_personality_overlay(
     effective_style = style
     if include_followup and inbound_text.strip():
         try:
+            from modules.ai.brain.commerce.product_label_hygiene import (  # noqa: PLC0415
+                is_negative_logistics_or_contact_context,
+            )
+
+            if is_negative_logistics_or_contact_context(inbound_text):
+                include_followup = False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional logistics gate
+            pass
+        try:
             from ..state.price_objection_topic import should_suppress_quantity_followup  # noqa: PLC0415
 
             if should_suppress_quantity_followup(inbound_text):

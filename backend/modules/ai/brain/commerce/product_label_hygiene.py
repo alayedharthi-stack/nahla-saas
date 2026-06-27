@@ -96,6 +96,51 @@ _SEND_OPTIONS_LEADING_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Courier / role announcements — «معك مندوب سمسا», «I am SMSA courier», …
+_ROLE_CONTACT_LEAD_RE = re.compile(
+    r"^(?:"
+    r"معك|معاك|معكم|"
+    r"انا|أنا|an?\b|"
+    r"i am|i'm|im\b|this is"
+    r")\s+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Courier *role* words — not bare carrier names in post-order shipping asks.
+_COURIER_ROLE_WORD_RE = re.compile(
+    r"(?:مندوب|موصل|ساعي|courier|delivery\s+agent)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_COURIER_ROLE_ANNOUNCE_RE = re.compile(
+    r"(?:"
+    r"مندوب\s+(?:ال)?(?:شحن|توصيل)|"
+    r"مندوب\s+(?:ال)?(?:شحن|توصيل)\s+معك|"
+    r"(?:^|\s)(?:i am|i'm|im\b)\s+.*\bcourier\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Existing-order / shipment anchor — not a courier role announcement.
+_ORDER_SHIPPING_ANCHOR_RE = re.compile(
+    r"(?:"
+    r"طلبي|طلبيتي|شحنتي|الشحنه|الشحنة|"
+    r"رقم\s*الطلب|رقم\s*التتبع|رابط\s*التتبع|tracking|"
+    r"طلبت|سويت\s*طلب|عملت\s*طلب|قدمت\s*طلب|"
+    r"order\s*status|track\s*my\s*order|where\s*is\s*my\s*order"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE = re.compile(
+    r"(?:"
+    r"ابي|ابغى|أبي|أبغى|بدي|اريد|أريد|"
+    r"هل|عندكم|عندك|do you have|"
+    r"عسل|منتج|product|order|price|سعر|كم\s+سعر"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def normalize_label_text(text: str) -> str:
     raw = unicodedata.normalize("NFKC", (text or "").strip())
@@ -161,12 +206,57 @@ def is_conversational_non_product_inbound(text: str) -> bool:
     return is_identity_or_intro_phrase(text) or looks_like_sentence_not_product(text)
 
 
+def is_negative_logistics_or_contact_context(text: str) -> bool:
+    """
+    True when inbound must never be adopted as a catalog product label.
+
+    Courier *role* announcements and staff-contact asks — not post-order
+    shipping questions that merely mention a carrier name (``طلبي … سمسا``).
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            product_browse_negative_context_reason,
+        )
+
+        if product_browse_negative_context_reason(raw) == "contact_context":
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional discovery gate import
+        pass
+    return _looks_like_role_or_courier_intro(raw)
+
+
+def _has_order_shipping_anchor(text: str) -> bool:
+    norm = normalize_label_text(text)
+    if not norm:
+        return False
+    return bool(_ORDER_SHIPPING_ANCHOR_RE.search(norm))
+
+
+def _looks_like_role_or_courier_intro(text: str) -> bool:
+    norm = normalize_label_text(text)
+    if not norm:
+        return False
+    if _has_order_shipping_anchor(norm):
+        return False
+    if _COURIER_ROLE_ANNOUNCE_RE.search(norm):
+        return True
+    if _ROLE_CONTACT_LEAD_RE.search(norm) and _COURIER_ROLE_WORD_RE.search(norm):
+        if not _EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE.search(norm):
+            return True
+    return False
+
+
 def is_non_product_label(text: str) -> bool:
     """True when text is a meta phrase, not a product name."""
     norm = normalize_label_text(text)
     if not norm or len(norm) < 2:
         return True
     if is_conversational_non_product_inbound(text):
+        return True
+    if is_negative_logistics_or_contact_context(text):
         return True
     if _NON_PRODUCT_LABEL_RE.search(norm):
         return True
@@ -211,6 +301,7 @@ def sanitize_product_label(
 __all__ = [
     "is_conversational_non_product_inbound",
     "is_identity_or_intro_phrase",
+    "is_negative_logistics_or_contact_context",
     "is_non_product_label",
     "looks_like_sentence_not_product",
     "normalize_label_text",

@@ -76,8 +76,11 @@ def inbound_exempt_from_availability_rewrite(message: str) -> bool:
     try:
         from modules.ai.brain.commerce.product_label_hygiene import (  # noqa: PLC0415
             is_conversational_non_product_inbound,
+            is_negative_logistics_or_contact_context,
         )
 
+        if is_negative_logistics_or_contact_context(raw):
+            return True
         if is_conversational_non_product_inbound(raw):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at guard boundary

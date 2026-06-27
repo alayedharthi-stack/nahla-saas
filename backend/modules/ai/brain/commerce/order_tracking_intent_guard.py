@@ -391,6 +391,15 @@ def should_exempt_from_availability_rewrite(
     must not produce «متوفر متى يوصل الطلب بعدة خيارات».
     """
     _ = (state, history, commerce_bundle)  # reserved for future contextual exempt
+    try:
+        from modules.ai.brain.commerce.product_label_hygiene import (  # noqa: PLC0415
+            is_negative_logistics_or_contact_context,
+        )
+
+        if is_negative_logistics_or_contact_context(message):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import at guard boundary
+        pass
     return is_shipping_tracking_non_product_label(message)
 
 
