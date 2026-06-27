@@ -47,6 +47,32 @@ _AMBIGUOUS_INTENTS = frozenset({
     "unknown",
 })
 
+_LOGISTICS_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"\b(?:smsa|aramex|spl|dhl|naqel|fedex|courier|tracking|pin|delivery\s*code)\b|"
+    r"سمسا|ارامكس|أرامكس|ساعي|مندوب|موصل|توصيل|شحن|شحنه|شحنة|"
+    r"رقم\s*(?:التتبع|الشحنه|الشحنة)|كود\s*(?:التوصيل|الاستلام)|رمز\s*(?:التوصيل|الاستلام)|"
+    r"بوليصه|بوليصة"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+_CONTACT_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"ارسل\s*(?:لي\s*)?(?:ال)?(?:ارقام|أرقام|رقم)|"
+    r"(?:ابي|أبي|ابغى|أبغى)\s*(?:رقم(?:كم|ك)?|احد\s*يكلمني|أحد\s*يكلمني)|"
+    r"رقمكم|رقمك|اتصال|مكالمة|كلمني|تواصل(?:وا)?\s*معي"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+_SOCIAL_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"جزاك(?:م)?\s*الله|الله\s*يعطيك|بارك\s*الله|"
+    r"صلى\s*الله\s*عليه\s*وسلم|اللهم|دعاء|امين|آمين|"
+    r"شكرا|شكرًا|مشكور|يعطيك\s*العافيه|يعطيك\s*العافية"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _PRICE_ONLY_RE = re.compile(
     r"(?:كم\s*سعر|بكم|سعر\s*ال|قد\s*ايش|how\s*much)"
     r"[\s\u0020]*"
@@ -121,6 +147,20 @@ def has_explicit_broad_browse_request(message: str) -> bool:
         "top products",
     )
     return any(_normalize_ar(p) in norm for p in _EXTRA_BROWSE)
+
+
+def product_browse_negative_context_reason(message: str) -> str:
+    """Non-product operational/social contexts that must not fall into browse."""
+    raw = str(message or "").strip()
+    if not raw:
+        return ""
+    if _LOGISTICS_CONTEXT_RE.search(raw):
+        return "logistics_context"
+    if _CONTACT_CONTEXT_RE.search(raw):
+        return "contact_context"
+    if _SOCIAL_CONTEXT_RE.search(raw):
+        return "social_context"
+    return ""
 
 
 _INQUIRY_PRODUCT_QUERY_RE = re.compile(
@@ -455,6 +495,50 @@ def has_explicit_product_inquiry(message: str) -> bool:
         return False
 
 
+def has_explicit_product_browse_intent(
+    ctx: BrainContext,
+    *,
+    message: Optional[str] = None,
+    source: str = "",
+) -> bool:
+    """Positive allowlist for any browse/search/listing surface."""
+    msg = message if message is not None else (ctx.message or "")
+    if not str(msg or "").strip():
+        return False
+
+    if has_explicit_broad_browse_request(msg):
+        return True
+    if has_explicit_product_inquiry(msg):
+        return True
+    if has_types_overview_ask(msg):
+        return True
+    if _extract_price_subject(msg):
+        return True
+
+    try:
+        from .commerce.start_order_verb_guard import (  # noqa: PLC0415
+            extract_start_order_product_query,
+            is_bare_start_order_phrase,
+        )
+
+        if extract_start_order_product_query(msg):
+            return True
+        if is_bare_start_order_phrase(msg):
+            return False
+    except Exception:  # noqa: BLE001
+        logger.exception("[PRODUCT_DISCOVERY_GATE] explicit_product_intent_start_order_probe_failed")
+
+    slots = dict(getattr(getattr(ctx, "intent", None), "slots", None) or {})
+    if str(slots.get("product_query") or slots.get("product_name") or "").strip():
+        return True
+
+    src = str(source or "").strip().lower()
+    if src in _CONTINUATION_SOURCES and _has_prior_browse_context(ctx):
+        return True
+
+    return False
+
+
 # Optional sellable-unit token after a trailing price ask (كيلو، لتر، …).
 _PRICE_UNIT_SUFFIX = (
     r"(?:ال)?(?:كilo|كيلo|كيلو|كيلوغرام|كيلограм|kg|gram|جرام|كجم|g|"
@@ -728,6 +812,18 @@ def product_discovery_block_reason(
     if intent_name == INTENT_NEED_BASED_PRODUCT_ADVICE or is_need_based_product_advice(ctx):
         return "health_advisory"
 
+    negative_context = product_browse_negative_context_reason(msg)
+    if negative_context and not has_explicit_product_browse_intent(ctx, message=msg, source=src):
+        return negative_context
+
+    try:
+        from .commerce.catalog_order_checkout import is_active_catalog_checkout  # noqa: PLC0415
+
+        if is_active_catalog_checkout(ctx):
+            return "active_catalog_checkout"
+    except Exception:  # noqa: BLE001
+        logger.exception("[PRODUCT_DISCOVERY_GATE] active_catalog_checkout_probe_failed")
+
     try:
         from .turn.ownership import has_explicit_catalog_browse_intent  # noqa: PLC0415
 
@@ -818,6 +914,13 @@ def product_discovery_block_reason(
     if src in _CONTINUATION_SOURCES:
         if not _has_prior_browse_context(ctx):
             return "weak_or_unknown_intent"
+        return None
+
+    explicit_product_browse = has_explicit_product_browse_intent(ctx, message=msg, source=src)
+    if not explicit_product_browse:
+        return "missing_explicit_product_browse_intent"
+
+    if explicit_product_browse:
         return None
 
     if src in _TOP_PRODUCTS_SOURCES:
@@ -1002,6 +1105,10 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
         return None
 
     if not is_category_price_or_availability_message(msg, ""):
+        return None
+
+    price_subject = _extract_price_subject(msg)
+    if price_subject and not is_generic_category_noun(price_subject):
         return None
 
     db = getattr(ctx, "_db", None)

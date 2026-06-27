@@ -138,7 +138,8 @@ class TestCatalogOrderPriority:
             ["عكبر سائل", "1 كيلو عسل سمر", "كريم سم النحل"],
             greeting="حاضر، أي نوع يناسبك؟",
         )
-        assert "المتوفر حاليًا عندنا" in list_reply
+        assert "الكتالوج" in list_reply
+        assert "المتوفر حاليًا عندنا" not in list_reply
         assert decision.action != ACTION_SEARCH_PRODUCTS
 
     def test_quick_whatsapp_order_prompts_catalog_selection_not_free_text_product(self) -> None:

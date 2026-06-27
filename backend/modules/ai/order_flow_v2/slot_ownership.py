@@ -23,6 +23,33 @@ _ADDRESS_CLUE_RE = re.compile(
     r"(?:حي|شارع|طريق|منزل|بيت|عمارة|شقة|قريب|بجوار|مكة|جدة|الرياض|المدينة|الدمام|الخبر)",
     re.I | re.UNICODE,
 )
+_ARABIC_TEXT_RE = re.compile(r"^[\u0600-\u06FF\s]+$", re.UNICODE)
+
+
+def _city_and_hint_from_text(text: str) -> Tuple[str, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return "", ""
+    try:
+        from modules.ai.brain.intent.ordering_extractor import _detect_city  # noqa: PLC0415
+
+        city = str(_detect_city(raw) or "").strip()
+    except Exception:  # noqa: BLE001
+        city = ""
+    if not city:
+        return "", ""
+
+    hint = raw
+    if city and city in hint:
+        hint = hint.replace(city, "", 1).strip()
+    elif city.startswith("مكة") and hint.startswith("مكة"):
+        hint = hint[len("مكة"):].strip()
+    elif city.startswith("مكه") and hint.startswith("مكه"):
+        hint = hint[len("مكه"):].strip()
+    elif city.startswith("المدينة") and hint.startswith("المدينة"):
+        hint = hint[len("المدينة"):].strip()
+
+    return city, hint
 
 
 def has_address_evidence(order_prep: Dict[str, Any]) -> bool:
@@ -106,6 +133,28 @@ def apply_slot_ownership(
             reason="customer_name_owned_turn",
         ).to_patch())
         return patch, "customer_name_owned"
+
+    if expected == "city" and _ARABIC_TEXT_RE.match(text):
+        city, address_hint = _city_and_hint_from_text(text)
+        if city:
+            patch["city"] = city
+            if address_hint and not prep.get("address_line"):
+                patch["address_line"] = address_hint
+            patch["order_flow_v2_last_field"] = "delivery_address"
+            patch.update(build_contract(
+                decision="update_slot",
+                field="city",
+                reason="city_owned_turn",
+                facts={"address_hint": bool(address_hint)},
+            ).to_patch())
+            return patch, "city_owned"
+        patch.update(stamp_last_field_patch(missing))
+        patch.update(build_contract(
+            decision="ask_missing_field",
+            field="city",
+            reason="city_uncertain_before_checkout",
+        ).to_patch())
+        return patch, "city_uncertain"
 
     if expected == "delivery_address" and address_refusal(text):
         patch.update({

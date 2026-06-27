@@ -262,8 +262,9 @@ class TestGroundingImport:
         )
 
         reply = build_catalog_grounded_list_reply(["Alpha", "Beta"], category_hint="items")
-        assert "Alpha" in reply
-        assert "Beta" in reply
+        assert "catalog" in reply.lower() or "الكتالوج" in reply
+        assert "Alpha" not in reply
+        assert "Beta" not in reply
 
 
 class TestValidationClient:

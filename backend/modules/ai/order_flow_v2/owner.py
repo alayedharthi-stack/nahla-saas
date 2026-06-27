@@ -53,6 +53,24 @@ from .triggers import (
 
 logger = logging.getLogger("nahla.order_flow_v2")
 
+_PRODUCT_MISSING_SLOTS = frozenset({
+    "product",
+    "products",
+    "product_id",
+    "variant",
+    "quantity",
+    "qty",
+})
+
+
+def _filter_catalog_missing(missing_fields: List[str]) -> List[str]:
+    """Native catalog orders already carry product/quantity in the payload."""
+    return [
+        field
+        for field in list(missing_fields or [])
+        if str(field).strip().lower() not in _PRODUCT_MISSING_SLOTS
+    ]
+
 
 @dataclass
 class OrderFlowV2Result:
@@ -379,6 +397,8 @@ def try_handle_order_flow_v2(
     if owner_reason not in {
         "last_name_correction",
         "customer_name_owned",
+        "city_owned",
+        "city_uncertain",
         "address_refusal",
         "payment_before_address",
     }:

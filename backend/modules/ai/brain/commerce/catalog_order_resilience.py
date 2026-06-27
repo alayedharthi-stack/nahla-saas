@@ -340,7 +340,7 @@ def try_catalog_order_pre_brain_safe_reply(
             parse_native_catalog_order,
         )
         from modules.ai.order_flow_v2.missing_fields import compute_v2_missing_fields  # noqa: PLC0415
-        from modules.ai.order_flow_v2.state import prep_dict  # noqa: PLC0415
+        from modules.ai.order_flow_v2.state import activate_checkout_patch, prep_dict  # noqa: PLC0415
 
         if text:
             meta.setdefault("_catalog_order_message", text)
@@ -351,6 +351,7 @@ def try_catalog_order_pre_brain_safe_reply(
         )
         order_prep = prep_dict((brain_state or {}).get("order_prep") or {})
         patch: Dict[str, Any] = {
+            **activate_checkout_patch(),
             "line_items": list(resolution.line_items),
             "order_flow_v2_trusted_price": True,
             "catalog_line_items_authoritative": bool(resolution.line_items),
@@ -436,6 +437,32 @@ def try_catalog_order_pre_brain_safe_reply(
             )
 
             return build_catalog_order_extraction_fallback_reply(order_prep=merged)
+        try:
+            from core.order_flow import apply_state_patch  # noqa: PLC0415
+            from modules.ai.order_flow_v2.contract import build_contract  # noqa: PLC0415
+            from modules.ai.order_flow_v2.slot_ownership import stamp_last_field_patch  # noqa: PLC0415
+
+            state_patch = {
+                **merged,
+                **stamp_last_field_patch(missing),
+            }
+            state_patch.update(build_contract(
+                decision="ask_missing_field",
+                field=str(state_patch.get("order_flow_v2_last_field") or ""),
+                reason="catalog_order_pre_brain_safe",
+            ).to_patch())
+            apply_state_patch(
+                db,
+                tenant_id=int(tenant_id),
+                phone=customer_phone,
+                state_patch=state_patch,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[CATALOG_ORDER_RESILIENCE] pre-brain state persist failed tenant=%s phone=%s",
+                tenant_id,
+                customer_phone,
+            )
         return reply
     except Exception:
         logger.exception(

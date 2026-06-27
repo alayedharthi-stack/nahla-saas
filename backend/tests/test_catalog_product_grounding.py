@@ -157,8 +157,9 @@ class TestCatalogProductGroundingHelpers:
             ["عسل طلح نجد", "عسل سمر الحجاز"],
             category_hint="العسل",
         )
-        assert "عسل طلح نجد" in reply
-        assert "عسل سمر الحجاز" in reply
+        assert "الكتالوج" in reply
+        assert "المتوفر حاليًا" not in reply
+        assert "تحب أعرض لك الأسعار" not in reply
         for forbidden in _FORBIDDEN_INVENTED:
             assert forbidden not in reply
 
@@ -242,8 +243,8 @@ class TestCatalogProductGroundingGuard:
             chosen_path="llm",
         )
         assert result.replaced is True
-        assert "عسل طلح نجد" in result.reply
-        assert "عسل سمر الحجاز" in result.reply
+        assert "الكتالوج" in result.reply
+        assert "المتوفر حاليًا" not in result.reply
         for forbidden in _FORBIDDEN_INVENTED:
             assert forbidden not in result.reply
 

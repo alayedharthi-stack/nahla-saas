@@ -252,6 +252,18 @@ def _discovery_suppressed(ctx: BrainContext) -> Optional[str]:
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     msg = ctx.message or ""
 
+    try:
+        from ..product_discovery_gate import (  # noqa: PLC0415
+            has_explicit_product_browse_intent,
+            product_browse_negative_context_reason,
+        )
+
+        negative_context = product_browse_negative_context_reason(msg)
+        if negative_context and not has_explicit_product_browse_intent(ctx, message=msg):
+            return negative_context
+    except Exception:
+        logger.exception("[DISCOVERY_ENTRY] negative_context_probe_failed")
+
     if intent_name == INTENT_WHO_ARE_YOU:
         return "persona_identity"
 
@@ -493,15 +505,9 @@ def _discovery_category_followup_entry(ctx: BrainContext) -> Optional[DiscoveryE
     if not scope or not _is_valid_scope_token(scope):
         return None
 
-    try:
-        from ..commerce.commerce_browse_category_guard import is_generic_category_browse  # noqa: PLC0415
-        from ..product_discovery_gate import has_types_overview_ask  # noqa: PLC0415
-
-        if not has_types_overview_ask(msg) and not is_generic_category_browse(msg, scope):
-            return None
-    except Exception:
-        logger.exception("[DISCOVERY_ENTRY] category_followup_guard_failed")
-        return None
+    # A short category token is a valid answer only while discovery owns the
+    # turn. Outside this objective, bare product-ish nouns stay ambiguous and
+    # must not trigger browse.
 
     words = [w for w in msg.split() if w.strip()]
     if len(words) > 3:
@@ -872,6 +878,16 @@ def route_discovery_entry(
         if entry.entry_type == PRODUCT_SPECIFIC:
             return None
         return None
+
+    if entry.entry_type in {TOP_PRODUCTS, GLOBAL_BROWSE} and getattr(ctx, "_db", None) is not None:
+        try:
+            from ..catalog.navigation import try_catalog_navigation_decision  # noqa: PLC0415
+
+            catalog_decision = try_catalog_navigation_decision(ctx)
+            if catalog_decision is not None:
+                return catalog_decision
+        except Exception:
+            logger.exception("[DISCOVERY_ENTRY] native_catalog_preference_failed")
 
     if entry.entry_type == SHOW_MORE:
         if block_stale_resume("show_more"):

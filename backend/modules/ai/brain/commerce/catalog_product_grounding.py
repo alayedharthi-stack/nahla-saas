@@ -205,28 +205,18 @@ def build_catalog_grounded_list_reply(
     greeting: str = "",
     ask_prices: bool = True,
 ) -> str:
-    """Build a catalog-grounded availability list — never invents product names."""
+    """Build a short catalog-grounded pointer — never a long textual product list."""
     names = [t for t in catalog_titles if t]
-    joined = _join_names(names)
     prefix = f"{greeting} " if greeting else ""
-    label = category_hint.strip() or "المنتجات"
+    _ = category_hint
 
-    bullet_joined = joined.replace(" و", "\n- ") if joined else ""
-
-    if is_honey_category_hint(category_hint) or (
-        names and all(is_honey_category_hint(t) for t in names)
-    ):
-        if bullet_joined:
-            body = f"المتوفر حاليًا عندنا من العسل:\n- {bullet_joined}"
-        else:
-            return _SAFE_NO_CATALOG_AR
-    elif bullet_joined:
-        body = f"المتوفر حاليًا عندنا من {label}:\n- {bullet_joined}"
-    else:
+    if not names:
         return _SAFE_NO_CATALOG_AR
 
+    body = "أقدر أعرض لك الخيارات المؤكدة من الكتالوج."
+
     if ask_prices:
-        body += "\n\nتحب أعرض لك الأسعار والأحجام المتوفرة؟"
+        body += " تبغاني أرسل لك الأقرب من الكتالوج؟"
     return f"{prefix}{body}".strip()
 
 
