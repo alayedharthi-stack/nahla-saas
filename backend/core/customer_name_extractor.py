@@ -81,6 +81,30 @@ logger = logging.getLogger("nahla.customer_name_extractor")
 # countless non-naming contexts ("أنا أبغى", "أنا انضحك علي",
 # "أنا وصلت"). Only an explicit "أنا اسمي …" intro is allowed.
 _NAME_PATTERNS = [
+    # Explicit correction: "اسمي الصحيح محمد" / "صحح اسمي إلى محمد"
+    (
+        re.compile(
+            r"^\s*(?:اسمي|إسمي|اسمى|إسمى)\s+الصحيح"
+            r"\s+(?P<name>[\u0600-\u06FF\u0750-\u077Fa-zA-Z][\u0600-\u06FF\u0750-\u077Fa-zA-Z\s]{1,58})\s*$"
+        ),
+        "اسمي الصحيح",
+    ),
+    (
+        re.compile(
+            r"^\s*(?:صحح|صحّح|غير|غيّر)\s+(?:اسمي|إسمي|اسمى|إسمى|الاسم|الإسم)"
+            r"(?:\s+(?:الى|إلى|لـ|لي))?\s+"
+            r"(?P<name>[\u0600-\u06FF\u0750-\u077Fa-zA-Z][\u0600-\u06FF\u0750-\u077Fa-zA-Z\s]{1,58})\s*$"
+        ),
+        "تصحيح الاسم",
+    ),
+    (
+        re.compile(
+            r"^\s*(?:الاسم\s+المسجل\s+خط[اأأء]|الاسم\s+عندكم\s+خط[اأأء])"
+            r"(?:[،,]\s*)?(?:اسمي|إسمي|اسمى|إسمى)\s+"
+            r"(?P<name>[\u0600-\u06FF\u0750-\u077Fa-zA-Z][\u0600-\u06FF\u0750-\u077Fa-zA-Z\s]{1,58})\s*$"
+        ),
+        "الاسم المسجل خطأ",
+    ),
     # "اسمي محمد"             | "اسمي محمد العتيبي"
     (
         re.compile(
@@ -96,6 +120,14 @@ _NAME_PATTERNS = [
             r"\s+(?P<name>[\u0600-\u06FF\u0750-\u077Fa-zA-Z][\u0600-\u06FF\u0750-\u077Fa-zA-Z\s]{1,58})\s*$"
         ),
         "أنا اسمي",
+    ),
+    # "أنا محمد العتيبي" — accepted only for 2+ clean name tokens.
+    (
+        re.compile(
+            r"^\s*(?:انا|أنا)"
+            r"\s+(?P<name>[\u0600-\u06FF\u0750-\u077F][\u0600-\u06FF\u0750-\u077F\s]{3,58})\s*$"
+        ),
+        "أنا",
     ),
     # "معك محمد" — corner-shop self-intro
     (
@@ -148,6 +180,9 @@ _BLOCKED_TOKENS = frozenset({
     "عميل", "عميلة", "عملاء", "زبون", "زبونة",
     "ضيف", "ضيفة", "متجر",
     "customer", "user", "guest", "client", "buyer",
+    "مندوب", "سمسا", "smsa", "ارامكس", "اراميكس", "aramex", "spl",
+    "ناقل", "توصيل", "الشحن", "شركة", "خدمة", "العملاء", "موظف",
+    "المعرض", "الإدارة", "الاداره", "الموقع",
     # Status / questions that match the regex anchor
     "وش", "ايش", "كيف", "متى", "وين", "ليش",
     "بكم", "بمت", "كم", "السعر", "الطلب",
@@ -301,9 +336,6 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         # the rare case where a long message coincidentally
         # starts with "اسمي ...".
         return None
-    if _message_starts_with_bare_ana(txt):
-        return None
-
     for pattern, label in _NAME_PATTERNS:
         m = pattern.match(txt)
         if not m:
@@ -317,6 +349,8 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
 
         tokens = raw_name.split(" ")
         if not tokens or len(tokens) > _TOTAL_MAX_TOKENS:
+            continue
+        if label == "أنا" and len(tokens) < 2:
             continue
 
         ok = True

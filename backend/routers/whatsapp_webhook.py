@@ -6264,6 +6264,16 @@ async def _handle_merchant_message(
                         phone=to,
                         name=_name_hit.value,
                         source="ai_detected_name",
+                        extra_metadata={
+                            "inbound_text": text,
+                            "name_capture_pattern": _name_hit.pattern,
+                        },
+                        message_context={
+                            "message": text,
+                            "source": "ai_detected_name",
+                            "explicit_customer_entry": True,
+                            "name_capture_pattern": _name_hit.pattern,
+                        },
                     )
                     # If the row was previously CLEARED by the merchant
                     # we now flip ``manual_name_cleared`` back to false
