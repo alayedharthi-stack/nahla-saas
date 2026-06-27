@@ -101,19 +101,29 @@ def email_verify(store_name: str, verify_url: str) -> str:
 </div>"""
 
 
-def email_welcome(store_name: str, dashboard_url: str) -> str:
+def email_welcome(store_name: str, dashboard_url: str, merchant_email: str) -> str:
     return f"""
 <div dir="rtl" style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1e293b">
-  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
-  <h3>تم تفعيل حسابك بنجاح 🎉</h3>
-  <p>مرحباً بك في <strong>{store_name}</strong>! يمكنك الآن الدخول للوحة التحكم وبدء ربط متجرك.</p>
+  <h2 style="color:#f59e0b">🐝 نحلة الذكية</h2>
+  <h3>مرحباً بك في نحلة الذكية 🎉</h3>
+  <p>
+    تم إنشاء حسابك وتأكيد بريدك بنجاح. مرحباً بك <strong>{store_name}</strong>!
+  </p>
+  <p>
+    للدخول إلى لوحة نحلة، استخدم بريدك الإلكتروني
+    (<strong dir="ltr">{merchant_email}</strong>)
+    مع كلمة المرور التي اخترتها عند التسجيل.
+  </p>
   <a href="{dashboard_url}"
      style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
             border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
-    الدخول إلى لوحة التحكم
+    الدخول إلى لوحة نحلة
   </a>
+  <p style="color:#64748b;font-size:13px">
+    إذا نسيت كلمة المرور، يمكنك استخدام «نسيت كلمة المرور» من صفحة تسجيل الدخول.
+  </p>
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
-  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة الذكية</p>
 </div>"""
 
 

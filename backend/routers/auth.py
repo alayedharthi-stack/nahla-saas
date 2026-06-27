@@ -61,7 +61,7 @@ from core.config import (
     REQUIRE_INVITE,
 )
 from core.database import get_db
-from core.notifications import email_reset, email_verify, email_welcome, send_email
+from core.notifications import email_reset, email_verify, send_email
 from core.password_setup import (
     ExpiredToken,
     InvalidToken,
@@ -859,26 +859,40 @@ async def verify_email(token: str, db: Session = Depends(get_db)):
             url=f"{DASHBOARD_URL}/verify-email?status=not_found",
             status_code=302,
         )
-    # Mark verified (column added by start.sh migration)
-    try:
-        db.execute(
-            sqlalchemy.text("UPDATE users SET email_verified=true WHERE email=:e"),
-            {"e": email},
+
+    already_verified = bool(getattr(user, "email_verified", False))
+    if not already_verified:
+        user.email_verified = True
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            return RedirectResponse(
+                url=f"{DASHBOARD_URL}/verify-email?status=invalid",
+                status_code=302,
+            )
+        audit("email_verified", sub=email)
+
+    from core.direct_welcome_email import (  # noqa: PLC0415
+        get_notification_settings,
+        queue_direct_welcome_email,
+        welcome_email_already_sent,
+    )
+
+    notification_settings = get_notification_settings(db, user.tenant_id)
+    if welcome_email_already_sent(notification_settings):
+        audit("email_verify_repeat", sub=email)
+        logger.info("Email already verified: %s — welcome already sent", email)
+    else:
+        store_name = user.tenant.name if user.tenant else email.split("@")[0]
+        queue_direct_welcome_email(
+            email=email,
+            store_name=store_name,
+            dashboard_url=DASHBOARD_URL,
+            tenant_id=user.tenant_id,
         )
-        db.commit()
-    except Exception:
-        db.rollback()
+        logger.info("Email verified: %s — welcome email queued", email)
 
-    audit("email_verified", sub=email)
-
-    # Send welcome email now that verification is confirmed (fire-and-forget)
-    store_name = user.tenant.name if user.tenant else email.split("@")[0]
-    asyncio.ensure_future(send_email(
-        to      = email,
-        subject = "مرحباً بك في نحلة AI 🎉",
-        html    = email_welcome(store_name, DASHBOARD_URL),
-    ))
-    logger.info("Email verified: %s — welcome email queued", email)
     return RedirectResponse(
         url=f"{DASHBOARD_URL}/verify-email?status=success",
         status_code=302,

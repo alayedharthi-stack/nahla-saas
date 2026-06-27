@@ -60,8 +60,8 @@ export default function VerifyEmail() {
     pending: {
       icon: <Mail className="w-10 h-10 text-brand-500" />,
       bg: 'bg-brand-50',
-      title: 'تحقق من بريدك الإلكتروني',
-      body: 'أرسلنا لك رابط تأكيد. افتح بريدك وانقر على الرابط لتفعيل حسابك.',
+      title: 'تم إنشاء حسابك',
+      body: 'أرسلنا لك رابط تأكيد البريد الإلكتروني. يرجى تأكيد بريدك للمتابعة، ثم يمكنك الدخول بالبريد وكلمة المرور التي اخترتها.',
       action: <Link to="/login" className="block w-full text-center px-4 py-2.5 rounded-lg border border-slate-300 text-slate-700 text-sm font-medium hover:bg-slate-50 transition-colors">تسجيل الدخول</Link>,
     },
   }
