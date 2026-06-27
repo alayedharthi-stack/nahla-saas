@@ -819,18 +819,19 @@ class DefaultDecisionEngine:
                 )
 
         # ── 0a.52 CatalogNavigator ownership (before discovery/search) ────
-        try:
-            from ..catalog.navigation import try_catalog_navigation_decision  # noqa: PLC0415
+        if getattr(ctx, "_db", None) is not None:
+            try:
+                from ..catalog.navigation import try_catalog_navigation_decision  # noqa: PLC0415
 
-            _catalog_nav_dec = try_catalog_navigation_decision(ctx)
-            if _catalog_nav_dec is not None:
-                return _catalog_nav_dec
-        except Exception as _cat_nav_exc:  # noqa: BLE001  # noqa: silent-ok — catalog navigator hook must not block decide
-            logger.debug(
-                "[CATALOG_NAVIGATOR] skipped tenant=%s err=%s",
-                getattr(ctx, "tenant_id", None),
-                _cat_nav_exc,
-            )
+                _catalog_nav_dec = try_catalog_navigation_decision(ctx)
+                if _catalog_nav_dec is not None:
+                    return _catalog_nav_dec
+            except Exception as _cat_nav_exc:  # noqa: BLE001  # noqa: silent-ok — catalog navigator hook must not block decide
+                logger.debug(
+                    "[CATALOG_NAVIGATOR] skipped tenant=%s err=%s",
+                    getattr(ctx, "tenant_id", None),
+                    _cat_nav_exc,
+                )
 
         # ── 0a.515 CatalogNavigator group-product pick (before selection_context) ─
         try:
