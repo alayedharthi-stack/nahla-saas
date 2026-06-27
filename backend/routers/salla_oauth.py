@@ -133,7 +133,7 @@ def _error_url(reason: str, detail: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Welcome + set-password email helper (Salla auto-create) ────────────────────
+# ── Welcome + onboarding email helper (Salla auto-provisioning) ───────────────
 async def _send_welcome_set_password_email(
     *,
     email: str,
@@ -141,37 +141,18 @@ async def _send_welcome_set_password_email(
     set_password_url: str,
     dashboard_url: str,
 ) -> None:
-    """Fire-and-forget welcome email for newly auto-created merchants.
+    """Legacy wrapper — prefer ``queue_salla_onboarding_email``."""
+    from core.salla_onboarding_email import queue_salla_onboarding_email  # noqa: PLC0415
 
-    Wrapped in a try/except: an SMTP outage must NOT propagate into the
-    OAuth handler. We surface success/failure as ``audit()`` events so
-    operators can chase down delivery problems via the structured audit
-    log without grepping container output.
-    """
-    from core.notifications import email_set_password, send_email  # noqa: PLC0415
-    from core.audit import audit  # noqa: PLC0415
-
-    try:
-        ok = await send_email(
-            to      = email,
-            subject = "أهلاً بك في نحلة — اضبط كلمة مرورك",
-            html    = email_set_password(
-                store_name       = store_name,
-                email            = email,
-                set_password_url = set_password_url,
-                dashboard_url    = dashboard_url,
-                source_label     = "سلة",
-            ),
-        )
-        if ok:
-            audit("password_setup_email_sent", sub=email)
-            logger.info("[SallaLogin] welcome+set-password email sent to %s", email)
-        else:
-            audit("password_setup_email_failed", sub=email, reason="provider_returned_failure")
-            logger.warning("[SallaLogin] welcome email NOT sent (provider failure) email=%s", email)
-    except Exception as exc:  # noqa: BLE001 — silent-ok: email is best-effort, never fails OAuth
-        audit("password_setup_email_failed", sub=email, reason="exception")
-        logger.exception("[SallaLogin] welcome email crashed: %s | email=%s", exc, email)
+    queue_salla_onboarding_email(
+        email=email,
+        store_name=store_name,
+        dashboard_url=dashboard_url,
+        set_password_url=set_password_url,
+        integration_id=None,
+        tenant_id=0,
+        user_id=0,
+    )
 
 
 # ── Salla Embedded Token Login ─────────────────────────────────────────────────
@@ -409,6 +390,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             )
 
         # ── Save / update Salla integration record ────────────────────────────
+        salla_integration_id = None
         if merchant_id_str:
             integration = db.query(Integration).filter(
                 Integration.provider == "salla",
@@ -476,6 +458,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     integration.enabled = True
                 from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
                 flag_modified(integration, "config")
+                salla_integration_id = integration.id
                 logger.info(
                     "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s "
                     "enabled=%s api_key_source=%s has_refresh=%s",
@@ -499,13 +482,16 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     new_cfg["api_key_source"] = "introspect"
                     if introspect_expires_in:
                         new_cfg["expires_in"] = introspect_expires_in
-                db.add(Integration(
+                new_integration = Integration(
                     tenant_id = tenant_id,
                     provider  = "salla",
                     external_store_id = merchant_id_str,
                     config    = new_cfg,
                     enabled   = bool(api_key_to_persist),
-                ))
+                )
+                db.add(new_integration)
+                db.flush()
+                salla_integration_id = new_integration.id
                 logger.info(
                     "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s "
                     "enabled=%s api_key_source=%s has_refresh=%s",
@@ -525,33 +511,26 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Database error during account setup")
 
     # ══════════════════════════════════════════════════════════════
-    # STEP 4.5 — Welcome + set-password email (auto-create only)
+    # STEP 4.5 — Onboarding email (new user: set-password link; existing: success)
     # ══════════════════════════════════════════════════════════════
-    #
-    # Dispatch is fire-and-forget so a slow Resend API call never
-    # blocks the OAuth handshake. Failures are logged + audited but do
-    # NOT fail the login — the merchant can always click "forgot
-    # password" later, and the operator runbook describes how to
-    # re-issue the welcome link via CLI if it never arrived.
-    #
-    # We deliberately skip the email when:
-    #   * the user already existed (linked_existing) — they've seen this before
-    #   * the auto-derived address is a @salla-merchant.nahlah.ai placeholder
-    #     (no real inbox to deliver to)
-    if provision.set_password_token and provision.email and (
-        not provision.email.endswith("@salla-merchant.nahlah.ai")
-        and not provision.email.endswith("@zid-merchant.nahlah.ai")
-    ):
-        asyncio.ensure_future(_send_welcome_set_password_email(
-            email             = provision.email,
-            store_name        = store_name or "متجرك",
-            set_password_url  = f"{_DASHBOARD_ORIGIN}/set-password?token={provision.set_password_token}",
-            dashboard_url     = _DASHBOARD_ORIGIN,
-        ))
-        logger.info(
-            "[SallaLogin] ▶ Welcome+set-password email queued | user_id=%s tenant=%s",
-            provision.user_id, provision.tenant_id,
-        )
+    from core.salla_onboarding_email import queue_salla_onboarding_email  # noqa: PLC0415
+
+    queue_salla_onboarding_email(
+        email            = provision.email,
+        store_name       = store_name or "متجرك",
+        dashboard_url    = _DASHBOARD_ORIGIN,
+        set_password_url = (
+            f"{_DASHBOARD_ORIGIN}/set-password?token={provision.set_password_token}"
+            if provision.set_password_token else None
+        ),
+        integration_id   = salla_integration_id,
+        tenant_id        = tenant_id,
+        user_id          = provision.user_id,
+    )
+    logger.info(
+        "[SallaLogin] ▶ Onboarding email queued | user_id=%s tenant=%s new_user=%s",
+        provision.user_id, tenant_id, bool(provision.set_password_token),
+    )
 
     # ══════════════════════════════════════════════════════════════
     # STEP 5 — Issue Nahla JWT (must carry user_id for tenant isolation)
