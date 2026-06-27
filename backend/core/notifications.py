@@ -143,40 +143,36 @@ def email_set_password(
     dashboard_url: str,
     source_label: str = "سلة",
 ) -> str:
-    """Welcome + set-password email body.
+    """Welcome email for a newly auto-provisioned merchant.
 
-    Sent automatically when a merchant is auto-created via OAuth (Salla
-    today, Zid in a follow-up). Two CTAs: a primary "set password"
-    button that consumes a single-use ``PasswordSetupToken``, and a
-    secondary "open dashboard" link for merchants who prefer to keep
-    using the in-Salla iframe and never set a local password.
-
-    The email explicitly tells the merchant their account is ALREADY
-    LIVE — the password is just a way to log in directly without going
-    through Salla. Setting (or never setting) a local password does
-    not affect Salla-iframe login. This wording matters: merchants
-    panicking that they "must" set a password to keep using Nahla is a
-    support ticket we want to avoid.
+    Security: sends a single-use ``/set-password?token=...`` link backed by
+    ``PasswordSetupToken`` — never a plaintext temporary password.
     """
     return f"""
 <div dir="rtl" style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
-  <h2 style="color:#f59e0b">🐝 نحلة AI</h2>
-  <h3>أهلاً بك في نحلة، <strong>{store_name}</strong>!</h3>
+  <h2 style="color:#f59e0b">🐝 نحلة الذكية</h2>
+  <h3>مرحباً <strong>{store_name}</strong>،</h3>
   <p>
-    تم إنشاء حسابك في نحلة بنجاح وربطه بمتجرك على {source_label}.
-    يمكنك البدء بالعمل من داخل {source_label} مباشرة في أي وقت.
+    نبارك لك ربط متجرك في {source_label} مع نحلة الذكية بنجاح 🎉
+  </p>
+  <p>
+    شكرًا لانضمامك إلى نحلة. يمكنك الآن الدخول إلى لوحة نحلة المتقدمة لإدارة الربط،
+    متابعة الإعدادات، وربط واتساب وتشغيل أدوات الذكاء والمبيعات.
   </p>
 
   <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:14px 18px;margin:18px 0">
-    <p style="margin:0 0 6px 0"><strong>بيانات حسابك في نحلة</strong></p>
-    <p style="margin:0;color:#475569">
+    <p style="margin:0 0 8px 0"><strong>معلومات الدخول</strong></p>
+    <p style="margin:0 0 4px 0;color:#475569">
       البريد الإلكتروني: <span style="font-family:monospace">{email}</span>
+    </p>
+    <p style="margin:0;color:#475569">
+      كلمة المرور: استخدم الزر أدناه لتعيين كلمة مرورك (رابط لمرة واحدة).
     </p>
   </div>
 
-  <p>
-    لو تحب تدخل لوحة نحلة مباشرة (بدون المرور من سلة)،
-    عيِّن كلمة مرور للحساب من خلال الرابط التالي:
+  <p style="color:#92400e;font-size:13px;line-height:1.6">
+    <strong>تنبيه مهم:</strong> هذا رابط تعيين كلمة مرور لمرة واحدة.
+    ننصحك بتعيين كلمة مرور قوية بعد أول دخول حفاظًا على أمان حسابك.
   </p>
 
   <a href="{set_password_url}"
@@ -189,23 +185,71 @@ def email_set_password(
     الرابط صالح لمدة 7 أيام، ويُستخدم مرة واحدة فقط لأسباب أمنية.
   </p>
 
-  <p style="margin-top:22px">
-    أو افتح لوحة نحلة مباشرة عبر هذا الرابط:
-    <a href="{dashboard_url}" style="color:#f59e0b">{dashboard_url}</a>
+  <a href="{dashboard_url}"
+     style="display:inline-block;background:#1e293b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:8px 0 16px 0">
+    فتح لوحة نحلة المتقدمة
+  </a>
+
+  <p style="color:#64748b;font-size:13px">
+    أو افتح: <a href="{dashboard_url}" style="color:#f59e0b">{dashboard_url}</a>
   </p>
 
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-  <p style="color:#475569;font-size:13px;margin:0 0 4px 0">
-    <strong>هل تستطيع الدخول من سلة بدون كلمة مرور؟</strong>
-  </p>
   <p style="color:#64748b;font-size:13px;margin:0">
-    نعم — الدخول من داخل {source_label} يعمل دائماً وبدون كلمة مرور،
-    حتى لو لم تُعيّن واحدة، أو غيّرتها لاحقاً، أو نسيتها.
-    تعيين كلمة المرور خطوة اختيارية فقط لتسجيل الدخول المباشر إلى لوحة نحلة.
+    الدخول من داخل {source_label} يعمل دائماً بدون كلمة مرور.
+    تعيين كلمة المرور خطوة إضافية للدخول المباشر إلى لوحة نحلة.
   </p>
 
   <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
-  <p style="color:#94a3b8;font-size:12px">مدعوم بواسطة نحلة AI</p>
+  <p style="color:#94a3b8;font-size:12px">مع التحية،<br>فريق نحلة الذكية</p>
+</div>"""
+
+
+def email_salla_store_connected(
+    *,
+    store_name: str,
+    email: str,
+    dashboard_url: str,
+) -> str:
+    """Connection-success email for an existing Nahla merchant linking Salla."""
+    return f"""
+<div dir="rtl" style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#1e293b">
+  <h2 style="color:#f59e0b">🐝 نحلة الذكية</h2>
+  <h3>مرحباً <strong>{store_name}</strong>،</h3>
+  <p>
+    نبارك لك ربط متجرك في سلة مع نحلة الذكية بنجاح 🎉
+  </p>
+  <p>
+    شكرًا لاستمرارك مع نحلة. يمكنك الآن الدخول إلى لوحة نحلة المتقدمة لإدارة الربط
+    ومتابعة الإعدادات.
+  </p>
+
+  <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:14px 18px;margin:18px 0">
+    <p style="margin:0;color:#15803d;font-size:14px">
+      ✅ تم ربط متجر <strong>{store_name}</strong> بنجاح.
+    </p>
+  </div>
+
+  <p style="margin:0 0 4px 0;color:#475569">
+    البريد الإلكتروني: <span style="font-family:monospace">{email}</span>
+  </p>
+  <p style="color:#64748b;font-size:13px;margin:12px 0 18px 0">
+    إذا كنت قد ربطت متجرك مسبقًا، استخدم بيانات دخولك الحالية.
+  </p>
+
+  <a href="{dashboard_url}"
+     style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+            border-radius:8px;text-decoration:none;font-weight:bold;margin:16px 0">
+    فتح لوحة نحلة المتقدمة
+  </a>
+
+  <p style="color:#64748b;font-size:13px">
+    <a href="{dashboard_url}" style="color:#f59e0b">{dashboard_url}</a>
+  </p>
+
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0">
+  <p style="color:#94a3b8;font-size:12px">مع التحية،<br>فريق نحلة الذكية</p>
 </div>"""
 
 
