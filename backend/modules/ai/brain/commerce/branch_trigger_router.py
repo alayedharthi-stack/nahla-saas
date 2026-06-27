@@ -21,9 +21,9 @@ from modules.operations.branch_arrival_keyword_evidence import (
     match_branch_trigger,
     needs_branch_clarification,
 )
-from modules.operations.branch_contact_evidence import (
-    structured_branch_contacts_enabled,
-    tenant_has_structured_branch_data,
+from modules.ai.brain.commerce.pending_operational_choice import (  # noqa: PLC0415
+    PENDING_PICKUP_MAPS_OR_CONTACT,
+    evaluate_pending_operational_choice_routing,
 )
 
 logger = logging.getLogger("nahla.brain.branch_trigger_router")
@@ -55,6 +55,8 @@ class BranchTriggerDecision:
     reception_reply_text: str = ""
     resend_maps: bool = False
     persist_contact: bool = False
+    persist_pending_choice: str = ""
+    pending_branch_id: int = 0
     metadata_path: str = "branch_trigger_router"
 
 
@@ -160,6 +162,16 @@ def _build_location_decision(
         reception_call_target=reception_target,
         reception_reply_text=reception_reply,
         persist_contact=deliver_reception,
+        persist_pending_choice=(
+            PENDING_PICKUP_MAPS_OR_CONTACT
+            if MSG_PICKUP_PREFERENCE_ASK in reply
+            else ""
+        ),
+        pending_branch_id=(
+            int(match.branch_id)
+            if MSG_PICKUP_PREFERENCE_ASK in reply
+            else 0
+        ),
     )
 
 
@@ -325,6 +337,20 @@ def evaluate_branch_trigger_routing(
     customer_phone: str = "",
 ) -> Optional[BranchTriggerDecision]:
     """Return a pre-brain decision when structured keyword routing matches."""
+    pending = evaluate_pending_operational_choice_routing(
+        db,
+        tenant_id=int(tenant_id or 0),
+        message=message or "",
+        customer_phone=customer_phone or "",
+    )
+    if pending is not None:
+        return pending
+
+    from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+        structured_branch_contacts_enabled,
+        tenant_has_structured_branch_data,
+    )
+
     if not structured_branch_contacts_enabled():
         return None
     if not tenant_has_structured_branch_data(db, int(tenant_id or 0)):
@@ -398,6 +424,8 @@ def evaluate_branch_trigger_routing(
                 reason="pickup_intent_confirm_first",
                 reply_text=MSG_PICKUP_PREFERENCE_ASK,
                 deliver_contact=False,
+                persist_pending_choice=PENDING_PICKUP_MAPS_OR_CONTACT,
+                pending_branch_id=int(branch.id),
             )
 
     match = match_branch_trigger(db, int(tenant_id or 0), message or "")
