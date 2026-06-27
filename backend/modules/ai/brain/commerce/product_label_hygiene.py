@@ -96,6 +96,34 @@ _SEND_OPTIONS_LEADING_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Courier / role announcements — «معك مندوب سمسا», «I am SMSA courier», …
+_ROLE_CONTACT_LEAD_RE = re.compile(
+    r"^(?:"
+    r"معك|معاك|معكم|"
+    r"انا|أنا|an?\b|"
+    r"i am|i'm|im\b|this is"
+    r")\s+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_LOGISTICS_ROLE_RE = re.compile(
+    r"(?:"
+    r"مندوب|موصل|ساعي|ناقل|courier|delivery|"
+    r"سمسا|smsa|aramex|ارامكس|أرامكس|spl|dhl|naqel|fedex|"
+    r"tracking|pin|delivery\s*code|شحن|شحنه|شحنة|توصيل|بوليص"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE = re.compile(
+    r"(?:"
+    r"ابي|ابغى|أبي|أبغى|بدي|اريد|أريد|"
+    r"هل|عندكم|عندك|do you have|"
+    r"عسل|منتج|product|order|price|سعر|كم\s+سعر"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def normalize_label_text(text: str) -> str:
     raw = unicodedata.normalize("NFKC", (text or "").strip())
@@ -158,7 +186,44 @@ def looks_like_sentence_not_product(text: str) -> bool:
 
 def is_conversational_non_product_inbound(text: str) -> bool:
     """True when inbound is identity/conversation — never a product label."""
+    if is_negative_logistics_or_contact_context(text):
+        return True
     return is_identity_or_intro_phrase(text) or looks_like_sentence_not_product(text)
+
+
+def is_negative_logistics_or_contact_context(text: str) -> bool:
+    """
+    Courier/logistics/staff-contact inbounds must never become product labels,
+    availability asks, or variant-option prompts.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            product_browse_negative_context_reason,
+        )
+
+        reason = product_browse_negative_context_reason(raw)
+        if reason in ("logistics_context", "contact_context"):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional discovery gate import
+        pass
+    return _looks_like_role_or_courier_intro(raw)
+
+
+def _looks_like_role_or_courier_intro(text: str) -> bool:
+    norm = normalize_label_text(text)
+    if not norm:
+        return False
+    if _LOGISTICS_ROLE_RE.search(norm):
+        return True
+    if not _ROLE_CONTACT_LEAD_RE.search(norm):
+        return False
+    if _EXPLICIT_PRODUCT_INTENT_IN_ROLE_LEAD_RE.search(norm):
+        return False
+    words = [w for w in norm.split() if w]
+    return len(words) <= 6
 
 
 def is_non_product_label(text: str) -> bool:
@@ -211,6 +276,7 @@ def sanitize_product_label(
 __all__ = [
     "is_conversational_non_product_inbound",
     "is_identity_or_intro_phrase",
+    "is_negative_logistics_or_contact_context",
     "is_non_product_label",
     "looks_like_sentence_not_product",
     "normalize_label_text",
