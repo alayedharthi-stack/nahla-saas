@@ -13,6 +13,8 @@ _ENFORCE_FLAG = "TURN_ARBITER_ENFORCE_ENABLED"
 _ENFORCE_TENANTS_FLAG = "TURN_ARBITER_ENFORCE_TENANTS"
 _ENFORCE_MISMATCH_TYPES_FLAG = "TURN_ARBITER_ENFORCE_MISMATCH_TYPES"
 _OWNER_BRIEF_COMPOSE_FLAG = "TURN_ARBITER_OWNER_BRIEF_COMPOSE_ENABLED"
+_FINAL_TURN_SHADOW_FLAG = "FINAL_TURN_CONTRACT_SHADOW_ENABLED"
+_FINAL_TURN_ENFORCE_FLAG = "FINAL_TURN_CONTRACT_ENFORCE_ENABLED"
 
 _DEFAULT_ENFORCE_MISMATCH_TYPES = frozenset({
     "checkout_vs_support",
@@ -106,10 +108,27 @@ def should_prepare_turn_arbitration() -> bool:
     )
 
 
+def is_final_turn_contract_shadow_enabled() -> bool:
+    """
+    Phase 3.1 — final turn contract shadow logging on by default.
+
+    Set ``FINAL_TURN_CONTRACT_SHADOW_ENABLED=false`` to disable.
+    """
+    raw = os.getenv(_FINAL_TURN_SHADOW_FLAG, "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def is_final_turn_contract_enforce_enabled() -> bool:
+    """Phase 3.2+ — off by default. Shadow-only in Phase 3.1."""
+    return _truthy(os.getenv(_FINAL_TURN_ENFORCE_FLAG, "false"))
+
+
 __all__ = [
     "get_enforce_mismatch_types",
     "get_enforce_tenant_allowlist",
     "is_enforce_tenant",
+    "is_final_turn_contract_enforce_enabled",
+    "is_final_turn_contract_shadow_enabled",
     "is_owner_brief_native_compose_enabled",
     "is_turn_arbiter_enforce_enabled",
     "is_turn_arbiter_shadow_enabled",
