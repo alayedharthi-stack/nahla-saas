@@ -61,7 +61,7 @@ from core.config import (
     REQUIRE_INVITE,
 )
 from core.database import get_db
-from core.notifications import email_reset, email_verify, email_welcome, send_email
+from core.notifications import email_reset, email_verify, send_email
 from core.password_setup import (
     ExpiredToken,
     InvalidToken,
@@ -871,19 +871,27 @@ async def verify_email(token: str, db: Session = Depends(get_db)):
                 url=f"{DASHBOARD_URL}/verify-email?status=invalid",
                 status_code=302,
             )
-
         audit("email_verified", sub=email)
 
-        store_name = user.tenant.name if user.tenant else email.split("@")[0]
-        asyncio.ensure_future(send_email(
-            to      = email,
-            subject = "مرحباً بك في نحلة الذكية 🎉",
-            html    = email_welcome(store_name, DASHBOARD_URL, email),
-        ))
-        logger.info("Email verified: %s — welcome email queued", email)
-    else:
+    from core.direct_welcome_email import (  # noqa: PLC0415
+        get_notification_settings,
+        queue_direct_welcome_email,
+        welcome_email_already_sent,
+    )
+
+    notification_settings = get_notification_settings(db, user.tenant_id)
+    if welcome_email_already_sent(notification_settings):
         audit("email_verify_repeat", sub=email)
-        logger.info("Email already verified: %s — skipping welcome email", email)
+        logger.info("Email already verified: %s — welcome already sent", email)
+    else:
+        store_name = user.tenant.name if user.tenant else email.split("@")[0]
+        queue_direct_welcome_email(
+            email=email,
+            store_name=store_name,
+            dashboard_url=DASHBOARD_URL,
+            tenant_id=user.tenant_id,
+        )
+        logger.info("Email verified: %s — welcome email queued", email)
 
     return RedirectResponse(
         url=f"{DASHBOARD_URL}/verify-email?status=success",

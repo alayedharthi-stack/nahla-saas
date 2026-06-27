@@ -20,7 +20,11 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
         sys.path.insert(0, s)
 
 from core.auth import create_verify_token, hash_password  # noqa: E402
-from models import Base, Tenant, User  # noqa: E402
+from core.direct_welcome_email import (  # noqa: E402
+    _WELCOME_FLAG,
+    welcome_email_already_sent,
+)
+from models import Base, Tenant, TenantSettings, User  # noqa: E402
 from routers import auth as auth_router  # noqa: E402
 
 
@@ -51,7 +55,7 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
-def _patch_email_capture(monkeypatch):
+def _patch_register_email_capture(monkeypatch):
     sent: list[dict] = []
     pending: list = []
 
@@ -79,6 +83,43 @@ def _patch_email_capture(monkeypatch):
     return {"items": sent, "flush": flush_pending}
 
 
+def _patch_welcome_email_capture(monkeypatch, *, send_ok: bool = True):
+    import core.direct_welcome_email as welcome_mod  # noqa: PLC0415
+
+    sent: list[dict] = []
+    pending: list = []
+
+    async def fake_send_email(*, to, subject, html):
+        sent.append({"to": to, "subject": subject, "html": html})
+        return send_ok
+
+    def fake_ensure_future(coro):
+        pending.append(coro)
+
+    def flush_pending():
+        if not pending:
+            return
+        loop = asyncio.new_event_loop()
+        try:
+            while pending:
+                coro = pending.pop(0)
+                loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr("core.notifications.send_email", fake_send_email)
+    monkeypatch.setattr(welcome_mod.asyncio, "ensure_future", fake_ensure_future)
+    monkeypatch.setattr("core.database.SessionLocal", lambda: _current_test_db["session"]())
+    return {"items": sent, "flush": flush_pending}
+
+
+_current_test_db: dict = {}
+
+
+def _tenant_settings(db, tenant_id: int) -> TenantSettings | None:
+    return db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).first()
+
+
 @pytest.fixture
 def auth_env(monkeypatch):
     monkeypatch.setattr(auth_router, "BCRYPT_AVAILABLE", True)
@@ -86,13 +127,14 @@ def auth_env(monkeypatch):
     monkeypatch.setattr(auth_router, "REQUIRE_INVITE", False)
     monkeypatch.setattr(auth_router, "DASHBOARD_URL", "https://app.nahlah.ai")
     monkeypatch.setattr(auth_router, "audit", lambda *a, **k: None)
+    monkeypatch.setattr("core.audit.audit", lambda *a, **k: None)
 
 
 class TestDirectRegister:
     def test_register_sends_verification_not_welcome(self, monkeypatch, auth_env):
         db, engine = _make_db()
         try:
-            sent = _patch_email_capture(monkeypatch)
+            sent = _patch_register_email_capture(monkeypatch)
             monkeypatch.setattr(auth_router, "get_db", lambda: iter([db]))
 
             body = auth_router.RegisterIn(
@@ -129,7 +171,7 @@ class TestDirectRegister:
             ))
             db.commit()
 
-            _patch_email_capture(monkeypatch)
+            _patch_register_email_capture(monkeypatch)
 
             body = auth_router.RegisterIn(
                 email="dup@example.com",
@@ -151,7 +193,14 @@ class TestDirectRegister:
 
 
 class TestDirectVerifyEmail:
-    def _seed_user(self, db, *, email: str = "merchant@example.com", verified: bool = False):
+    def _seed_user(
+        self,
+        db,
+        *,
+        email: str = "merchant@example.com",
+        verified: bool = False,
+        welcome_sent: bool = False,
+    ):
         tenant = Tenant(name="Shop One", is_active=True)
         db.add(tenant)
         db.flush()
@@ -165,16 +214,22 @@ class TestDirectVerifyEmail:
             tenant_id=tenant.id,
         )
         db.add(user)
+        if welcome_sent:
+            db.add(TenantSettings(
+                tenant_id=tenant.id,
+                notification_settings={_WELCOME_FLAG: "2026-01-01T00:00:00+00:00"},
+            ))
         db.commit()
         db.refresh(user)
         return user
 
     def test_first_verify_sends_welcome_once(self, monkeypatch, auth_env):
         db, engine = _make_db()
+        _current_test_db["session"] = sessionmaker(bind=engine)
         try:
             email = "merchant@example.com"
-            self._seed_user(db, email=email, verified=False)
-            sent = _patch_email_capture(monkeypatch)
+            user = self._seed_user(db, email=email, verified=False)
+            sent = _patch_welcome_email_capture(monkeypatch)
 
             token = create_verify_token(email)
             resp = _run_async(auth_router.verify_email(token, db))
@@ -192,16 +247,74 @@ class TestDirectVerifyEmail:
 
             user = db.query(User).filter(User.email == email).one()
             assert user.email_verified is True
+            ts = _tenant_settings(db, user.tenant_id)
+            assert ts is not None
+            assert welcome_email_already_sent(ts.notification_settings)
         finally:
             db.close()
             engine.dispose()
+            _current_test_db.clear()
 
-    def test_repeat_verify_skips_welcome(self, monkeypatch, auth_env):
+    def test_first_verify_welcome_failure_leaves_dedupe_unset(self, monkeypatch, auth_env):
         db, engine = _make_db()
+        _current_test_db["session"] = sessionmaker(bind=engine)
+        try:
+            email = "fail@example.com"
+            self._seed_user(db, email=email, verified=False)
+            sent = _patch_welcome_email_capture(monkeypatch, send_ok=False)
+
+            token = create_verify_token(email)
+            resp = _run_async(auth_router.verify_email(token, db))
+            sent["flush"]()
+
+            assert isinstance(resp, RedirectResponse)
+            assert resp.headers["location"].endswith("status=success")
+            assert len(sent["items"]) == 1
+
+            user = db.query(User).filter(User.email == email).one()
+            assert user.email_verified is True
+            ts = _tenant_settings(db, user.tenant_id)
+            assert ts is None or not welcome_email_already_sent(ts.notification_settings)
+        finally:
+            db.close()
+            engine.dispose()
+            _current_test_db.clear()
+
+    def test_repeat_verify_retries_welcome_after_failure(self, monkeypatch, auth_env):
+        db, engine = _make_db()
+        _current_test_db["session"] = sessionmaker(bind=engine)
+        try:
+            email = "retry@example.com"
+            self._seed_user(db, email=email, verified=False)
+
+            fail_sent = _patch_welcome_email_capture(monkeypatch, send_ok=False)
+            token = create_verify_token(email)
+            _run_async(auth_router.verify_email(token, db))
+            fail_sent["flush"]()
+
+            ok_sent = _patch_welcome_email_capture(monkeypatch, send_ok=True)
+            _run_async(auth_router.verify_email(token, db))
+            ok_sent["flush"]()
+
+            assert len(fail_sent["items"]) == 1
+            assert len(ok_sent["items"]) == 1
+
+            user = db.query(User).filter(User.email == email).one()
+            ts = _tenant_settings(db, user.tenant_id)
+            assert ts is not None
+            assert welcome_email_already_sent(ts.notification_settings)
+        finally:
+            db.close()
+            engine.dispose()
+            _current_test_db.clear()
+
+    def test_repeat_verify_skips_welcome_after_success(self, monkeypatch, auth_env):
+        db, engine = _make_db()
+        _current_test_db["session"] = sessionmaker(bind=engine)
         try:
             email = "verified@example.com"
-            self._seed_user(db, email=email, verified=True)
-            sent = _patch_email_capture(monkeypatch)
+            self._seed_user(db, email=email, verified=True, welcome_sent=True)
+            sent = _patch_welcome_email_capture(monkeypatch)
 
             token = create_verify_token(email)
             resp = _run_async(auth_router.verify_email(token, db))
@@ -216,11 +329,13 @@ class TestDirectVerifyEmail:
         finally:
             db.close()
             engine.dispose()
+            _current_test_db.clear()
 
 
 class TestSallaIsolation:
     def test_verify_email_does_not_use_salla_onboarding(self, monkeypatch, auth_env):
         db, engine = _make_db()
+        _current_test_db["session"] = sessionmaker(bind=engine)
         try:
             tenant = Tenant(name="Salla Shop", is_active=True)
             db.add(tenant)
@@ -237,7 +352,7 @@ class TestSallaIsolation:
             ))
             db.commit()
 
-            sent = _patch_email_capture(monkeypatch)
+            sent = _patch_welcome_email_capture(monkeypatch)
             salla_calls = {"n": 0}
 
             def fake_queue_salla_onboarding_email(**kwargs):
@@ -259,6 +374,7 @@ class TestSallaIsolation:
         finally:
             db.close()
             engine.dispose()
+            _current_test_db.clear()
 
     def test_salla_onboarding_module_unchanged_by_direct_welcome(self):
         from core.notifications import email_welcome  # noqa: PLC0415
