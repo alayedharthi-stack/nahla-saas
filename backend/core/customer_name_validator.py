@@ -36,6 +36,15 @@ _CONVERSATIONAL_TOKENS: FrozenSet[str] = frozenset({
     "طبعا", "اه", "آه", "ابد", "ابدا",
     # Conversation / complaint fragments (Jun 2026 P0 — production echo leak)
     "ايه", "اية", "وقف", "شغلتنا", "شغلنا", "النحلة", "نحلة",
+    # Deictic / pronoun fragments — never personal names (Jun 2026 P0)
+    "هذا", "هذه", "هذي", "انت", "أنت",
+})
+
+# Full deictic phrases (normalised) — e.g. WA profile / caption "هذا انت".
+_DEICTIC_NAME_PHRASES_RAW: FrozenSet[str] = frozenset({
+    "هذا انت", "هذه انت", "هذا أنت", "هذه أنت",
+    "هذي انت", "هذي أنت",
+    "this is you",
 })
 
 _COMMERCE_TOKENS: FrozenSet[str] = frozenset({
@@ -107,6 +116,20 @@ def _is_pure_letter_token(token: str) -> bool:
     return True
 
 
+_DEICTIC_NAME_PHRASES = frozenset(_normalize_arabic(p) for p in _DEICTIC_NAME_PHRASES_RAW)
+
+
+def is_deictic_or_conversational_name_phrase(raw: Optional[str]) -> bool:
+    """True when text is a deictic/conversational phrase, not a human name."""
+    text = _normalize_full(_EMOJI_RE.sub(" ", str(raw or "")))
+    if not text:
+        return False
+    if _normalize_arabic(text) in _DEICTIC_NAME_PHRASES:
+        return True
+    tokens = [_normalize_arabic(t) for t in text.split() if t]
+    return bool(tokens) and all(t in _CONVERSATIONAL_TOKENS for t in tokens)
+
+
 def validate_customer_name(raw: Optional[str]) -> NameValidationResult:
     """
     Return ``valid=True`` only for plausible human names.
@@ -132,6 +155,9 @@ def validate_customer_name(raw: Optional[str]) -> NameValidationResult:
 
     norm_tokens = [_normalize_arabic(t) for t in tokens]
     full_norm = " ".join(norm_tokens)
+
+    if is_deictic_or_conversational_name_phrase(text):
+        return NameValidationResult(valid=False, reason="deictic_phrase")
 
     if full_norm in {_normalize_arabic(c) for c in _SAUDI_CITY_TOKENS}:
         return NameValidationResult(valid=False, reason="city_only")
