@@ -859,26 +859,32 @@ async def verify_email(token: str, db: Session = Depends(get_db)):
             url=f"{DASHBOARD_URL}/verify-email?status=not_found",
             status_code=302,
         )
-    # Mark verified (column added by start.sh migration)
-    try:
-        db.execute(
-            sqlalchemy.text("UPDATE users SET email_verified=true WHERE email=:e"),
-            {"e": email},
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
 
-    audit("email_verified", sub=email)
+    already_verified = bool(getattr(user, "email_verified", False))
+    if not already_verified:
+        user.email_verified = True
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            return RedirectResponse(
+                url=f"{DASHBOARD_URL}/verify-email?status=invalid",
+                status_code=302,
+            )
 
-    # Send welcome email now that verification is confirmed (fire-and-forget)
-    store_name = user.tenant.name if user.tenant else email.split("@")[0]
-    asyncio.ensure_future(send_email(
-        to      = email,
-        subject = "مرحباً بك في نحلة AI 🎉",
-        html    = email_welcome(store_name, DASHBOARD_URL),
-    ))
-    logger.info("Email verified: %s — welcome email queued", email)
+        audit("email_verified", sub=email)
+
+        store_name = user.tenant.name if user.tenant else email.split("@")[0]
+        asyncio.ensure_future(send_email(
+            to      = email,
+            subject = "مرحباً بك في نحلة الذكية 🎉",
+            html    = email_welcome(store_name, DASHBOARD_URL, email),
+        ))
+        logger.info("Email verified: %s — welcome email queued", email)
+    else:
+        audit("email_verify_repeat", sub=email)
+        logger.info("Email already verified: %s — skipping welcome email", email)
+
     return RedirectResponse(
         url=f"{DASHBOARD_URL}/verify-email?status=success",
         status_code=302,

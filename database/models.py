@@ -128,6 +128,7 @@ class User(Base):
     password_hash = Column(String, nullable=True)
     role          = Column(String, nullable=False, default='merchant', server_default='merchant')
     is_active     = Column(Boolean, nullable=False, default=True, server_default='true')
+    email_verified = Column(Boolean, nullable=False, default=False, server_default='false')
     created_at    = Column(DateTime, nullable=True)
     tenant_id     = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant        = relationship('Tenant', back_populates='users')
