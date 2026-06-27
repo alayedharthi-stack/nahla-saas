@@ -27,6 +27,27 @@ _STORE_CHANNEL_PHONE_TOKENS = frozenset({
     "رقم", "phone", "contact",
 })
 
+_GENERAL_CONTACT_CHANNEL_TOKENS = frozenset({
+    "الارقام", "ارقام", "الارقم",
+    "بيانات التواصل", "بيانات تواصل", "رقم التواصل", "التواصل",
+})
+
+_GENERAL_CONTACT_NUMBERS_RE = re.compile(
+    r"(?:"
+    r"(?:ارسل|أرسل|ارسلي|أرسلي)\s+(?:لي\s+)?(?:ال)?(?:ارقام|أرقام|ارقم)(?:كم|ك|ه|ها|هم)?(?:\s+(?:لاهنت|لو\s+سمحت))?"
+    r"|(?:ارسل|أرسل|ارسلي|أرسلي)\s+(?:لي\s+)?(?:ال)?(?:رقم|رقمكم|رقمك)(?:\s+(?:لاهنت|لو\s+سمحت))?"
+    r"|(?:ارسل|أرسل)\s+(?:لي\s+)?(?:بيانات\s+)?(?:ال)?تواصل"
+    r"|(?:ال)?(?:ارقام|أرقام)\s+(?:لاهنت|لو\s+سمحت)"
+    r"|بيانات\s+(?:ال)?تواصل"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_POLITE_TAIL_RE = re.compile(
+    r"\s+(?:لاهنت|لو\s+سمحت|الله\s+يعطيك\s+العاف(?:يه|ية)|please)\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _STORE_CHANNEL_PHONE_PHRASE_RE = re.compile(
     r"(?:"
     r"(?:ع(?:ل|)?(?:ي|يه|ا)\s+)?(?:رقم\s+)?(?:ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل)(?:كم|ك|ه|ها|هم)?"
@@ -70,12 +91,63 @@ def _norm(text: str) -> str:
     return _WS_RE.sub(" ", t).strip()
 
 
+def _is_general_contact_channel_span(text: str) -> bool:
+    norm = _norm(_POLITE_TAIL_RE.sub("", str(text or "").strip()))
+    if not norm:
+        return False
+    if norm in _GENERAL_CONTACT_CHANNEL_TOKENS:
+        return True
+    if norm in _STORE_CHANNEL_PHONE_TOKENS:
+        return True
+    if re.fullmatch(r"(?:ال)?(?:ارقام|أرقام|ارقم)(?:كم|ك|ه|ها|هم)?", norm):
+        return True
+    if re.fullmatch(r"(?:بيانات\s+)?(?:ال)?تواصل", norm):
+        return True
+    tokens = norm.split()
+    return bool(tokens) and all(
+        tok in (_GENERAL_CONTACT_CHANNEL_TOKENS | _STORE_CHANNEL_PHONE_TOKENS)
+        for tok in tokens
+    )
+
+
+def is_general_contact_numbers_request(message: str) -> bool:
+    """True for store-wide numbers/contact asks — not a named staff member."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if extract_staff_name_candidate(raw):
+        return False
+    norm = _norm(raw)
+    if _GENERAL_CONTACT_NUMBERS_RE.search(norm):
+        return True
+    if _STORE_CHANNEL_PHONE_PHRASE_RE.search(norm):
+        return True
+    if re.fullmatch(r"رقم(?:كم|ك|ه|ها|هم)?", norm):
+        return True
+    if re.fullmatch(
+        r"رقم(?:\s+ال)?(?:هاتف|تليفون|تلفون|جوال|موبايل)",
+        norm,
+    ):
+        return True
+    m = _NAMED_STAFF_EXTRACT_RE.search(norm)
+    if m:
+        for group in m.groups():
+            if group and _is_general_contact_channel_span(group):
+                return True
+    return _is_general_contact_channel_span(raw)
+
+
 def _clean_staff_candidate(raw: str) -> str:
     cand = _WS_RE.sub(" ", (raw or "").strip()).strip("؟?.,! ")
+    cand = _POLITE_TAIL_RE.sub("", cand).strip()
     if not cand:
+        return ""
+    if _is_general_contact_channel_span(cand):
         return ""
     norm_cand = _norm(cand)
     if norm_cand in _STORE_CHANNEL_PHONE_TOKENS:
+        return ""
+    if norm_cand in _GENERAL_CONTACT_CHANNEL_TOKENS:
         return ""
     tokens = norm_cand.split()
     if all(tok in _STORE_PRONOUN_TOKENS for tok in tokens):
@@ -105,6 +177,8 @@ def is_store_channel_phone_phrase(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    if is_general_contact_numbers_request(raw):
+        return True
     if extract_staff_name_candidate(raw):
         return False
     norm = _norm(raw)
@@ -155,6 +229,8 @@ def is_generic_store_contact_phrase(message: str) -> bool:
     raw = (message or "").strip()
     if not raw or is_thanks_with_contact_phrase(raw):
         return False
+    if is_general_contact_numbers_request(raw):
+        return True
     if is_store_channel_phone_phrase(raw):
         return True
     if extract_staff_name_candidate(raw):
@@ -252,6 +328,7 @@ __all__ = [
     "MSG_GENERAL_CONTACT_IN_CHANNEL",
     "extract_staff_name_candidate",
     "general_contact_reply_for_message",
+    "is_general_contact_numbers_request",
     "has_explicit_purchase_intent",
     "is_generic_store_contact_phrase",
     "is_identity_collaboration_without_purchase",

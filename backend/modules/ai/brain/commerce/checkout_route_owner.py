@@ -608,6 +608,109 @@ def build_purchase_channel_selection_facts(
 
 _CHANNEL_CHOICE_INTRO = "كيف تحب تكمل؟"
 
+_MSG_SHOWROOM_VISIT_UNAVAILABLE = (
+    "زيارة المعرض غير مهيأة حالياً. تقدر تكمل الطلب من واتساب."
+)
+
+
+def _branch_showroom_routing_available(db: Any, tenant_id: int) -> bool:
+    try:
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            structured_branch_contacts_enabled,
+            tenant_has_structured_branch_data,
+        )
+
+        return bool(
+            structured_branch_contacts_enabled()
+            and tenant_has_structured_branch_data(db, int(tenant_id or 0))
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional branch probe
+        return False
+
+
+def _parse_channel_switch_choice(raw: str) -> Optional[str]:
+    """Match purchase-channel labels even when the channel is currently disabled."""
+    norm = _norm(raw)
+    if not norm:
+        return None
+    if _CHANNEL_STORE_RE.search(norm):
+        return CHECKOUT_CHANNEL_STORE
+    if _CHANNEL_SHOWROOM_RE.search(norm):
+        return CHECKOUT_CHANNEL_SHOWROOM
+    if _CHANNEL_WHATSAPP_RE.search(norm):
+        return CHECKOUT_CHANNEL_WHATSAPP
+    return None
+
+
+def _channel_switch_target(
+    raw: str,
+    *,
+    current_channel: str,
+    caps: CheckoutChannelCapabilities,
+) -> Optional[str]:
+    del caps  # availability validated in resolver
+    picked = _parse_channel_switch_choice(raw)
+    if not picked or picked == current_channel:
+        return None
+    return picked
+
+
+def _resolve_channel_switch_decision(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    raw: str,
+    caps: CheckoutChannelCapabilities,
+    current_channel: str,
+) -> Optional[CheckoutRouteDecision]:
+    """Re-route when customer picks another purchase channel after commit."""
+    target = _channel_switch_target(raw, current_channel=current_channel, caps=caps)
+    if not target:
+        return None
+
+    if target == CHECKOUT_CHANNEL_STORE:
+        persist_checkout_route_state(
+            db,
+            tenant_id=tenant_id,
+            phone=customer_phone,
+            checkout_channel=target,
+            awaiting_checkout_channel=False,
+        )
+        return CheckoutRouteDecision(
+            reply_text=build_store_link_reply(caps),
+            reason=(
+                "store_link_delivered"
+                if caps.store_url
+                else "store_link_unavailable"
+            ),
+            checkout_channel=target,
+            clear_awaiting_channel=True,
+            cta_label="فتح المتجر الإلكتروني",
+            cta_url=caps.store_url if caps.store_url else "",
+        )
+
+    if target == CHECKOUT_CHANNEL_SHOWROOM:
+        persist_checkout_route_state(
+            db,
+            tenant_id=tenant_id,
+            phone=customer_phone,
+            checkout_channel=target,
+            awaiting_checkout_channel=False,
+        )
+        if not caps.showroom_visit or not _branch_showroom_routing_available(
+            db, int(tenant_id or 0),
+        ):
+            return CheckoutRouteDecision(
+                reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,
+                reason="showroom_visit_unavailable",
+                checkout_channel=target,
+                clear_awaiting_channel=True,
+            )
+        return None
+
+    return None
+
 
 def build_channel_choice_prompt(
     caps: CheckoutChannelCapabilities,
@@ -915,13 +1018,42 @@ def evaluate_checkout_route_owner(
                 clear_awaiting_channel=True,
             )
         if picked == CHECKOUT_CHANNEL_SHOWROOM:
+            if not caps.showroom_visit or not _branch_showroom_routing_available(
+                db, int(tenant_id or 0),
+            ):
+                return CheckoutRouteDecision(
+                    reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,
+                    reason="showroom_visit_unavailable",
+                    checkout_channel=picked,
+                    clear_awaiting_channel=True,
+                )
             return None
         return None
 
     if channel == CHECKOUT_CHANNEL_STORE:
+        switch = _resolve_channel_switch_decision(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            raw=raw,
+            caps=caps,
+            current_channel=channel,
+        )
+        if switch is not None:
+            return switch
         return None
 
     if channel == CHECKOUT_CHANNEL_WHATSAPP:
+        switch = _resolve_channel_switch_decision(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            raw=raw,
+            caps=caps,
+            current_channel=channel,
+        )
+        if switch is not None:
+            return switch
         if is_catalog_send_request(raw):
             return None
         if is_catalog_visibility_question(raw):

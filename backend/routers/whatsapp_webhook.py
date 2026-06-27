@@ -7373,6 +7373,31 @@ async def _handle_merchant_message(
                         "branch_vcard_sent": _btr_vcard_ok,
                     },
                 )
+                _pending_choice = str(
+                    getattr(_btr_decision, "persist_pending_choice", "") or "",
+                ).strip()
+                if _btr_ok and _pending_choice:
+                    try:
+                        from modules.ai.brain.commerce.pending_operational_choice import (  # noqa: PLC0415
+                            persist_pending_operational_choice as _persist_pending_choice,
+                        )
+
+                        _persist_pending_choice(
+                            db,
+                            tenant_id=tenant_id,
+                            phone=to,
+                            choice=_pending_choice,
+                            branch_id=int(
+                                getattr(_btr_decision, "pending_branch_id", 0) or 0,
+                            ),
+                        )
+                    except Exception as _pending_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[BRANCH_TRIGGER_ROUTER] pending choice persist "
+                            "failed tenant=%s err=%s",
+                            tenant_id,
+                            _pending_exc,
+                        )
             except Exception as _btr_send_exc:  # noqa: BLE001
                 logger.warning(
                     "[BRANCH_TRIGGER_ROUTER] send failed tenant=%s err=%s",
