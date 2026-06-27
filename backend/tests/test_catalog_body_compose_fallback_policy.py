@@ -85,6 +85,12 @@ class TestFallbackAllowedWhenNotCatalogBody:
         # Policy only applies at catalog body resolution — not wire text suppression.
         assert COMPOSE_FALLBACK == EMPTY_REPLY_OPERATIONAL_AR
 
+    def test_technical_catalog_body_not_used_as_general_wire_reply(self) -> None:
+        # Case B: compose failure fallback stays the operational error line for plain text.
+        assert COMPOSE_FALLBACK != TECHNICAL_CATALOG_BODY
+        assert TECHNICAL_CATALOG_BODY not in COMPOSE_FALLBACK
+        assert "تعذّرت صياغة" in COMPOSE_FALLBACK
+
 
 class TestExplicitBrowseCatalogDispatchPath:
     def test_try_send_native_catalog_entry_resolves_body(self) -> None:

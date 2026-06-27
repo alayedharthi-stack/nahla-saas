@@ -29,8 +29,8 @@ def is_forbidden_catalog_intro(text: str) -> bool:
 
 
 MINIMAL_CATALOG_BODY = "."
-# Meta requires a non-empty interactive body; neutral UI copy (not AI prose).
-TECHNICAL_CATALOG_BODY = "اختر المنتجات من القائمة"
+# Meta requires a non-empty interactive body; neutral UI copy for catalog card only.
+TECHNICAL_CATALOG_BODY = "اختر المنتجات المناسبة من القائمة، ونضبط طلبك 😊"
 
 _UNSAFE_CATALOG_BODY_MARKERS = (
     "التوفر قيد التحقق",
