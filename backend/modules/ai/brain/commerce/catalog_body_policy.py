@@ -29,8 +29,8 @@ def is_forbidden_catalog_intro(text: str) -> bool:
 
 
 MINIMAL_CATALOG_BODY = "."
-# Meta requires a non-empty interactive body; neutral UI copy (not AI prose).
-TECHNICAL_CATALOG_BODY = "اختر المنتجات من القائمة"
+# Meta requires a non-empty interactive body; neutral UI copy for catalog card only.
+TECHNICAL_CATALOG_BODY = "اختر المنتجات المناسبة من القائمة، ونضبط طلبك 😊"
 
 _UNSAFE_CATALOG_BODY_MARKERS = (
     "التوفر قيد التحقق",
@@ -56,6 +56,13 @@ def is_unsafe_catalog_body(text: str) -> bool:
         return True
     if is_forbidden_catalog_intro(body):
         return True
+    try:
+        from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+        if is_compose_failure_fallback(body):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional fallback policy import
+        pass
     lowered = body.lower()
     return any(m.lower() in lowered for m in _UNSAFE_CATALOG_BODY_MARKERS)
 
