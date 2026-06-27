@@ -2466,6 +2466,25 @@ class MerchantBrain:
             db=db,
         )
 
+        # ── 6.98 Final Turn Contract (Phase 3.1 shadow) ────────────────────
+        _final_turn_contract = None
+        try:
+            from .turn.final_turn_contract import (  # noqa: PLC0415
+                attach_final_turn_contract,
+                build_final_turn_contract,
+            )
+            from .turn.flags import is_final_turn_contract_shadow_enabled  # noqa: PLC0415
+
+            if is_final_turn_contract_shadow_enabled():
+                _final_turn_contract = build_final_turn_contract(ctx, decision, result)
+                attach_final_turn_contract(ctx, _final_turn_contract)
+        except Exception as _ftc_exc:  # noqa: BLE001  # noqa: silent-ok — shadow contract must not block compose
+            logger.debug(
+                "[FINAL_TURN_CONTRACT] build skipped tenant=%s err=%s",
+                tenant_id,
+                _ftc_exc,
+            )
+
         # ── 6.99 OwnerBrief native compose (Phase 3A) ─────────────────────
         _owner_brief_attached = False
         try:
@@ -2491,6 +2510,28 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+
+        if _final_turn_contract is not None:
+            try:
+                from .turn.final_turn_audit import audit_final_turn_reply  # noqa: PLC0415
+
+                _ftc_post_compose = audit_final_turn_reply(
+                    _final_turn_contract,
+                    reply or "",
+                    phase="post_compose",
+                    tenant_id=tenant_id,
+                    result_data=dict(getattr(result, "data", None) or {}),
+                )
+                if _ftc_post_compose.has_violations:
+                    result.data["final_turn_violations_post_compose"] = list(
+                        _ftc_post_compose.violations
+                    )
+            except Exception as _ftc_audit_exc:  # noqa: BLE001  # noqa: silent-ok — shadow audit must not block reply
+                logger.debug(
+                    "[FINAL_TURN_VIOLATION] post_compose audit skipped tenant=%s err=%s",
+                    tenant_id,
+                    _ftc_audit_exc,
+                )
 
         try:
             from .turn.observability import log_turn_outcome  # noqa: PLC0415
@@ -3434,6 +3475,28 @@ class MerchantBrain:
                 "[FINAL_REPLY_SOURCE] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _frs_exc,
             )
+
+        if _final_turn_contract is not None:
+            try:
+                from .turn.final_turn_audit import audit_final_turn_reply  # noqa: PLC0415
+
+                _ftc_post_guards = audit_final_turn_reply(
+                    _final_turn_contract,
+                    reply or "",
+                    phase="post_postprocess",
+                    tenant_id=tenant_id,
+                    result_data=dict(getattr(result, "data", None) or {}),
+                )
+                if _ftc_post_guards.has_violations:
+                    result.data["final_turn_violations_post_postprocess"] = list(
+                        _ftc_post_guards.violations
+                    )
+            except Exception as _ftc_guard_audit_exc:  # noqa: BLE001  # noqa: silent-ok — shadow audit must not block reply
+                logger.debug(
+                    "[FINAL_TURN_VIOLATION] post_postprocess audit skipped tenant=%s err=%s",
+                    tenant_id,
+                    _ftc_guard_audit_exc,
+                )
 
         # ── Persona ownership snapshot (measurement-only) ───────────────
         try:
