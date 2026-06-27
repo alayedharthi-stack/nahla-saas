@@ -227,6 +227,8 @@ _BLOCKED_TOKENS = frozenset({
     # anchors (الاسم: …) only when typed deliberately, so the
     # blocklist is the right place to catch them.
     "هلا", "اهلا", "اهلين", "السلام",
+    # Deictic / pronoun fragments — never names (Jun 2026 P0)
+    "هذا", "هذه", "هذي", "انت", "أنت",
 })
 
 
@@ -343,6 +345,18 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         raw_name = (m.group("name") or "").strip()
         raw_name = re.sub(r"\s+", " ", raw_name)
         if not raw_name:
+            continue
+        try:
+            from core.customer_name_validator import (  # noqa: PLC0415
+                is_deictic_or_conversational_name_phrase,
+                validate_customer_name,
+            )
+
+            if is_deictic_or_conversational_name_phrase(raw_name):
+                continue
+            if not validate_customer_name(raw_name).valid:
+                continue
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — validator import boundary
             continue
         if not (_TOTAL_MIN_LEN <= len(raw_name) <= _TOTAL_MAX_LEN):
             continue

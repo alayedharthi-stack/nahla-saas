@@ -181,6 +181,47 @@ def is_official_name_status(status: Optional[str]) -> bool:
     return (status or "").strip().lower() in OFFICIAL_STATUSES
 
 
+def _protected_stored_name(
+    customer: Any,
+    *,
+    existing_status: str,
+    current_name: str,
+) -> bool:
+    """True when ``Customer.name`` must not be demoted by low-trust hints."""
+    if not current_name:
+        return False
+    if is_official_name_status(existing_status):
+        return True
+    if is_manual_name_locked(customer):
+        return True
+    try:
+        from core.customer_display import is_valid_customer_display_name  # noqa: PLC0415
+
+        if is_valid_customer_display_name(current_name):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — display helper optional
+        pass
+    return False
+
+
+def _resolve_display_name(
+    *,
+    name: str,
+    proposed: str,
+    status: str,
+    manual_cleared: bool,
+) -> str:
+    from core.customer_display import is_valid_customer_display_name  # noqa: PLC0415
+
+    if manual_cleared and not name:
+        return ""
+    if name and is_valid_customer_display_name(name):
+        return name
+    if proposed and validate_customer_name(proposed).valid:
+        return proposed
+    return name or ""
+
+
 def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
     """Read identity fields from a Customer row."""
     meta = _meta(customer)
@@ -208,14 +249,12 @@ def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
             status = STATUS_MISSING
 
     manual_cleared = bool(meta.get("manual_name_cleared"))
-    if manual_cleared and not name:
-        # Merchant intentionally wiped the name — never resurrect a
-        # WhatsApp-profile ``proposed_name`` ghost in the table.
-        display = ""
-    elif is_official_name_status(status) and name:
-        display = name
-    else:
-        display = proposed or name
+    display = _resolve_display_name(
+        name=name,
+        proposed=proposed,
+        status=status,
+        manual_cleared=manual_cleared,
+    )
     return CustomerIdentitySnapshot(
         customer_name=name,
         customer_name_source=source,
@@ -323,6 +362,16 @@ def apply_customer_name(
     current_name = str(getattr(customer, "name", None) or "").strip()
 
     if not validation.valid:
+        if _protected_stored_name(
+            customer,
+            existing_status=existing_status,
+            current_name=current_name,
+        ):
+            logger.info(
+                "[CUSTOMER_IDENTITY] blocked low-trust hint on protected name id=%s",
+                getattr(customer, "id", None),
+            )
+            return False
         if canon_source == SOURCE_CUSTOMER_MESSAGE and not force_merchant:
             logger.info(
                 "[CUSTOMER_IDENTITY] blocked ai candidate name=%r reason=%s",
@@ -351,6 +400,18 @@ def apply_customer_name(
             logger.debug(
                 "[CUSTOMER_IDENTITY] blocked proposed by manual_name_override id=%s",
                 getattr(customer, "id", None),
+            )
+            return False
+        if _protected_stored_name(
+            customer,
+            existing_status=existing_status,
+            current_name=current_name,
+        ):
+            logger.info(
+                "[CUSTOMER_IDENTITY] blocked proposed downgrade id=%s name=%r hint=%r",
+                getattr(customer, "id", None),
+                current_name[:60],
+                cleaned[:60],
             )
             return False
         meta["proposed_name"] = cleaned
