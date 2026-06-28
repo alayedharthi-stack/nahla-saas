@@ -41,7 +41,9 @@ _STAFF_LOCATION_QUERY_RE = re.compile(
 
 # Person identity ask — «من أمين؟», «مين البائع؟», not a product label.
 _STAFF_IDENTITY_QUERY_RE = re.compile(
-    r"^(?:من|مين|من\s+هو|مين\s+هو|وش\s+هو|ايش\s+هو)\s+\S.{0,40}[\?؟]?$",
+    r"^(?:من|مين|من\s+هو|مين\s+هو|وش\s+هو|ايش\s+هو)\s+"
+    r"(?!انت|أنت|انتِ|أنتِ|you\b)"
+    r"\S.{0,40}[\?؟]?$",
     re.UNICODE | re.IGNORECASE,
 )
 

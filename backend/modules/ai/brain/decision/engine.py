@@ -938,7 +938,12 @@ class DefaultDecisionEngine:
         from ..current_turn_social_non_commerce import CurrentTurnSocialNonCommerce  # noqa: PLC0415
 
         _current_social_nc = CurrentTurnSocialNonCommerce(False)
-        if intent.name not in (INTENT_TALK_HUMAN, INTENT_COMPLAINT_REFUND):
+        if intent.name not in (
+            INTENT_TALK_HUMAN,
+            INTENT_COMPLAINT_REFUND,
+            INTENT_WHO_ARE_YOU,
+            INTENT_PERSONA_INTERACTION,
+        ):
             _current_social_nc = _current_turn_social_noncommerce(ctx)
         if getattr(_current_social_nc, "matched", False):
             try:
@@ -956,6 +961,23 @@ class DefaultDecisionEngine:
                     (ctx.message or "")[:60],
                 )
                 return _social_noncommerce_decision(ctx, _current_social_nc)
+
+        if intent.name == INTENT_WHO_ARE_YOU:
+            logger.info(
+                "[PERSONA_IDENTITY] route=persona_identity intent=%s tenant=%s preview=%r",
+                intent.name,
+                getattr(ctx, "tenant_id", None),
+                (ctx.message or "")[:60],
+            )
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "persona_identity",
+                    "block_commerce_escalation": True,
+                },
+                reason="identity probe — thin persona compose",
+                confidence=intent.confidence,
+            )
 
         # ── 0a.52 CatalogNavigator ownership (before discovery/search) ────
         if getattr(ctx, "_db", None) is not None:

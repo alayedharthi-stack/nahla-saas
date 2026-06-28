@@ -37,6 +37,7 @@ from .types import (
     INTENT_TALK_HUMAN,
     INTENT_COMPLAINT_REFUND,
     INTENT_TRACK_ORDER,
+    INTENT_WHO_ARE_YOU,
     Intent,
 )
 
@@ -66,6 +67,8 @@ _OPERATIONAL_NON_CATALOG_INTENTS = frozenset({
     INTENT_TRACK_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_COMPLAINT_REFUND,
+    INTENT_WHO_ARE_YOU,
+    INTENT_PERSONA_INTERACTION,
 })
 
 _GREETING_ONLY_RE = re.compile(
@@ -300,7 +303,7 @@ def _is_staff_contact_non_product(message: str, *, intent: Optional[Intent] = No
     if not raw:
         return False
     name = _intent_name(intent)
-    if name in {INTENT_TALK_HUMAN, INTENT_COMPLAINT_REFUND} and _intent_confidence(intent) >= 0.80:
+    if name in {INTENT_TALK_HUMAN, INTENT_COMPLAINT_REFUND, INTENT_WHO_ARE_YOU, INTENT_PERSONA_INTERACTION} and _intent_confidence(intent) >= 0.80:
         return False
     try:
         from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415

@@ -42,6 +42,7 @@ from modules.ai.brain.types import (  # noqa: E402
     INTENT_GENERAL,
     INTENT_GREETING,
     INTENT_TALK_HUMAN,
+    INTENT_WHO_ARE_YOU,
     Intent,
     MerchantConversationState,
     OrderPreparationState,
@@ -172,6 +173,44 @@ def test_greeting_only_does_not_route_handoff() -> None:
     )
     assert decision.action == ACTION_LLM_REPLY
     assert decision.action != ACTION_HANDOFF
+
+
+def test_identity_question_routes_persona_identity() -> None:
+    message = "من أنت"
+    decision = DefaultDecisionEngine().decide(
+        _ctx(
+            message,
+            intent=Intent(name=INTENT_WHO_ARE_YOU, confidence=0.9, raw_message=message),
+        ),
+    )
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == "persona_identity"
+    assert decision.args.get("block_commerce_escalation") is True
+
+
+def test_identity_question_during_stale_ordering_routes_persona_identity() -> None:
+    message = "من أنت"
+    decision = DefaultDecisionEngine().decide(
+        _ctx(
+            message,
+            intent=Intent(name=INTENT_WHO_ARE_YOU, confidence=0.9, raw_message=message),
+            stage=STAGE_ORDERING,
+            product_focus=True,
+        ),
+    )
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("topic") == "persona_identity"
+    assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+
+
+def test_staff_identity_question_still_blocks_commerce_not_persona() -> None:
+    message = "من أمين؟"
+    verdict = resolve_current_turn_social_non_commerce(
+        message,
+        intent=Intent(name=INTENT_GENERAL, confidence=0.55, raw_message=message),
+    )
+    assert verdict.matched is True
+    assert verdict.category == "staff_contact"
 
 
 @pytest.mark.parametrize(
