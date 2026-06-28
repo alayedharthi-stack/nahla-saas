@@ -540,6 +540,31 @@ def persist_staff_contacts_sent_batch(
                 turn=int(entry.get("turn") or 0),
             )
         bs["staff_contacts_sent"] = updated
+        try:
+            from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                PENDING_CONTACT_TARGET_KEY,
+                pending_target_from_role_label,
+            )
+
+            turn = int(bs.get("turn") or 0)
+            for entry in entries:
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                target = pending_target_from_role_label(
+                    name,
+                    registry=None,
+                    source="staff_contacts_sent",
+                    confidence=0.98,
+                    created_turn=int(entry.get("turn") or turn),
+                )
+                if target is not None:
+                    op = dict(bs.get("order_prep") or {})
+                    op[PENDING_CONTACT_TARGET_KEY] = target.to_dict()
+                    bs["order_prep"] = op
+                    break
+        except Exception:  # noqa: BLE001
+            pass
         meta = dict(getattr(conv, "extra_metadata", None) or {})
         meta["brain_state"] = bs
         conv.extra_metadata = meta

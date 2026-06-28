@@ -115,6 +115,15 @@ def is_general_contact_numbers_request(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    try:
+        from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+            is_pronoun_staff_contact_followup,
+        )
+
+        if is_pronoun_staff_contact_followup(raw):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
     if extract_staff_name_candidate(raw):
         return False
     norm = _norm(raw)
