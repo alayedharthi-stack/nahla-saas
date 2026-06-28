@@ -564,8 +564,9 @@ def persist_staff_contacts_sent_batch(
                     bs["order_prep"] = op
                     break
         except Exception:  # noqa: BLE001
-            pass
-        meta = dict(getattr(conv, "extra_metadata", None) or {})
+            logger.exception(
+                "[CONTACT_ESCALATION] pending_contact_target_persist_failed",
+            )
         meta["brain_state"] = bs
         conv.extra_metadata = meta
         flag_modified(conv, "extra_metadata")

@@ -114,7 +114,9 @@ def is_pronoun_staff_contact_followup(message: str) -> bool:
         if extract_staff_name_candidate(raw):
             return False
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] staff_name_candidate_check_failed",
+        )
     norm = _norm(raw)
     if not _PRONOUN_CONTACT_FOLLOWUP_RE.search(norm):
         return False
@@ -143,7 +145,9 @@ def should_clear_pending_on_topic_switch(message: str) -> bool:
         if has_explicit_product_commerce_intent(raw):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] product_intent_clear_check_failed",
+        )
     try:
         from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
             is_commerce_or_product_flow_message,
@@ -152,7 +156,9 @@ def should_clear_pending_on_topic_switch(message: str) -> bool:
         if is_commerce_or_product_flow_message(raw):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] commerce_flow_clear_check_failed",
+        )
     return False
 
 
@@ -298,7 +304,9 @@ def infer_pending_target_from_text(
                     created_turn=created_turn,
                 )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] role_label_infer_failed",
+        )
     return None
 
 
@@ -359,7 +367,9 @@ def infer_pending_target_from_context(
                 if target and not is_stale_pending_target(target, current_turn=turn):
                     return target
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] staff_contacts_sent_infer_failed",
+        )
 
     for direction, body, msg_turn in reversed(_recent_message_texts(bs)):
         inferred = infer_pending_target_from_text(
@@ -507,7 +517,9 @@ def capture_pending_target_from_inbound(
                         created_turn=created_turn,
                     )
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] inbound_named_capture_failed",
+        )
     return None
 
 

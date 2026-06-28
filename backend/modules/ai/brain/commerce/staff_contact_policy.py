@@ -424,7 +424,9 @@ def evaluate_staff_contact_policy(
                     store_contact_phone=store_contact_phone,
                 )
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception(
+                    "[STAFF_CONTACT_POLICY] pending_contact_target_capture_failed",
+                )
         return decision
 
     _log_target_trace(
@@ -475,7 +477,9 @@ def evaluate_staff_contact_policy(
                 source="continuity_not_configured",
             )
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception(
+                "[STAFF_CONTACT_POLICY] pending_contact_target_outbound_persist_failed",
+            )
     return not_cfg
 
 
