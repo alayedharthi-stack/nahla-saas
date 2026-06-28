@@ -1038,6 +1038,8 @@ class BrainContext:
     turn_shadow_telemetry: Optional[Any] = None
     # Phase 1 commerce turn contract — built pre-decide; shadow/log-only until Phase 2.
     commerce_turn_contract: Optional[Any] = None
+    # PR-B1 — merchant operational policy hint from KB (shadow-only; no enforce).
+    merchant_operational_policy_hint: Optional[Any] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
