@@ -3245,6 +3245,9 @@ class MerchantBrain:
                     chosen_path=_chosen_path,
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
+                    order_state=new_state,
+                    inbound_metadata=dict((profile or {}).get("inbound_metadata") or {}),
+                    intent=intent,
                 )
                 if _cpgg.replaced:
                     reply = _cpgg.reply

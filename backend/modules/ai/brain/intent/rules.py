@@ -96,7 +96,7 @@ _register(RuleSet(
 _register(RuleSet(
     intent=INTENT_GREETING,
     patterns=[
-        r"^(السلام عليكم|وعليكم السلام|مرحبا?ً?|أهلاً?|هلا|صباح الخير|مساء الخير|كيف حالك|هاي|هلو|hello|hi\b|hey\b)",
+        r"^((?:ال)?سلام عليكم|وعليكم السلام|مرحبا?ً?|أهلاً?|هلا|صباح الخير|مساء الخير|كيف حالك|هاي|هلو|hello|hi\b|hey\b)",
         r"^(أهلين|يا هلا|هلأ|هلأً|أهلا وسهلا|حياك الله|حياك)",
     ],
     confidence=0.95,
@@ -1200,6 +1200,9 @@ def _pick_embedded_actionable(
 # from the START only — the stripper walks the message left-to-right.
 _GREETING_RESIDUE_LEAD_TOKENS = (
     # ── Religious / formal greetings ──
+    "سلام عليكم ورحمة الله وبركاته",
+    "سلام عليكم ورحمة الله",
+    "سلام عليكم",
     "السلام عليكم ورحمة الله وبركاته",
     "السلام عليكم ورحمة الله",
     "السلام عليكم",

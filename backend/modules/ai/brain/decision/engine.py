@@ -109,6 +109,123 @@ def _is_commerce_blocked(ctx: BrainContext) -> bool:
     return False
 
 
+def _current_turn_social_noncommerce(ctx: BrainContext) -> Any:
+    """Return current-turn social/non-commerce ownership verdict."""
+    try:
+        from ..current_turn_social_non_commerce import (  # noqa: PLC0415
+            resolve_current_turn_social_non_commerce,
+        )
+
+        profile = getattr(ctx, "profile", None) or {}
+        inbound_metadata = (
+            profile.get("inbound_metadata")
+            if isinstance(profile, dict)
+            else None
+        )
+        state = getattr(ctx, "state", None)
+        last_question = str(getattr(state, "last_question_asked", "") or "")
+        return resolve_current_turn_social_non_commerce(
+            ctx.message or "",
+            intent=getattr(ctx, "intent", None),
+            state=state,
+            inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+            last_question=last_question,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[CURRENT_TURN_SOCIAL_NC] engine_probe_failed err=%s", exc)
+        return None
+
+
+def _has_stale_commerce_context(ctx: BrainContext) -> bool:
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return False
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    if stage in {STAGE_DECIDING, STAGE_ORDERING, STAGE_CHECKOUT}:
+        return True
+    if getattr(state, "current_product_focus", None):
+        return True
+    op = getattr(state, "order_prep", None)
+    if op is None:
+        return False
+    if isinstance(op, dict):
+        return any(bool(v) for v in op.values())
+    meaningful_fields = (
+        "product_id",
+        "missing_fields",
+        "city",
+        "short_address_code",
+        "google_maps_url",
+        "customer_first_name",
+        "customer_last_name",
+        "line_items",
+        "catalog_line_items_authoritative",
+        "awaiting_payment_receipt",
+        "payment_receipt_received",
+        "active_order_quantity_clarification",
+        "pending_cart_confirmation",
+    )
+    for field in meaningful_fields:
+        value = getattr(op, field, None)
+        if value:
+            return True
+    return False
+
+
+def _social_noncommerce_decision(ctx: BrainContext, verdict: Any) -> Decision:
+    """Build a non-commerce decision without adding customer-facing templates."""
+    category = str(getattr(verdict, "category", "") or "general_courtesy").strip()
+    reason = (
+        "current_turn_social_non_commerce: "
+        f"{getattr(verdict, 'reason', '') or category}"
+    )
+    confidence = float(getattr(verdict, "confidence", 0.88) or 0.88)
+    try:
+        verdict_dict = verdict.to_dict()
+    except Exception:  # noqa: BLE001
+        verdict_dict = {"matched": True, "category": category}
+
+    if category == "greeting":
+        from ..persona_expression import (  # noqa: PLC0415
+            PERSONA_KIND_GREETING,
+            PERSONA_TOPIC_SOCIAL,
+        )
+
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": PERSONA_TOPIC_SOCIAL,
+                "persona_kind": PERSONA_KIND_GREETING,
+                "block_commerce_escalation": True,
+                "current_turn_social_non_commerce": verdict_dict,
+            },
+            reason=reason,
+            confidence=max(confidence, 0.90),
+        )
+
+    if category in {"quantity_without_product", "staff_contact", "unclear_audio"}:
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "non_sales_ambiguous",
+                "block_commerce_escalation": True,
+                "current_turn_social_non_commerce": verdict_dict,
+            },
+            reason=reason,
+            confidence=confidence,
+        )
+
+    from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+    return build_social_courtesy_decision(
+        category,
+        confidence=confidence,
+        reason=reason,
+        block_commerce=True,
+        extra_args={"current_turn_social_non_commerce": verdict_dict},
+    )
+
+
 def _goal_based_commerce_decision(ctx: BrainContext) -> Optional[Decision]:
     """Structured KB regimen — only when pipeline composed a resolved bundle."""
     _goal_bundle = getattr(ctx, "goal_regimen_bundle", None)
@@ -818,6 +935,28 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
+        _current_social_nc = _current_turn_social_noncommerce(ctx)
+        if getattr(_current_social_nc, "matched", False):
+            try:
+                ctx.current_turn_social_non_commerce = _current_social_nc  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[CURRENT_TURN_SOCIAL_NC] attach_failed tenant=%s err=%s",
+                    getattr(ctx, "tenant_id", None),
+                    exc,
+                )
+            _category = str(getattr(_current_social_nc, "category", "") or "")
+            if _category != "greeting" or _has_stale_commerce_context(ctx):
+                logger.info(
+                    "[CURRENT_TURN_SOCIAL_NC] route tenant=%s category=%s "
+                    "reason=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _category or "-",
+                    getattr(_current_social_nc, "reason", "") or "-",
+                    (ctx.message or "")[:60],
+                )
+                return _social_noncommerce_decision(ctx, _current_social_nc)
+
         # ── 0a.52 CatalogNavigator ownership (before discovery/search) ────
         if getattr(ctx, "_db", None) is not None:
             try:
@@ -1381,6 +1520,7 @@ class DefaultDecisionEngine:
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
             and not _checkout_topic_blocks()
+            and not getattr(_current_social_nc, "matched", False)
         ):
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
@@ -2174,6 +2314,7 @@ class DefaultDecisionEngine:
             and not _explicit_commerce_switch
             and not _is_global_browse
             and not _checkout_topic_blocks()
+            and not getattr(_current_social_nc, "matched", False)
             and (
                 intent.name in _CONTINUATION_INTENTS
                 or any(slot in intent.slots for slot in checkout_slots)
@@ -2333,6 +2474,7 @@ class DefaultDecisionEngine:
             _is_repeat_req
             and facts.has_products
             and not _is_commerce_blocked(ctx)
+            and not getattr(_current_social_nc, "matched", False)
             and not _product_discovery_blocked("replay")
             and not _block_stale_resume("product_replay")
         ):
@@ -3238,6 +3380,7 @@ class DefaultDecisionEngine:
                 and not state.checkout_url
                 and not _is_global_browse
                 and not _checkout_topic_blocks()
+                and not getattr(_current_social_nc, "matched", False)
             ):
                 logger.info(
                     "[ORDER FLOW] FORCED action=propose_draft_order "

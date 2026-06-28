@@ -14,7 +14,6 @@ if _BACKEND not in sys.path:
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_GREET,
     ACTION_LLM_REPLY,
-    ACTION_PROPOSE_DRAFT_ORDER,
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
@@ -122,7 +121,7 @@ def test_first_turn_greeting_routes_persona_llm() -> None:
     _assert_persona_greeting_llm(decision)
 
 
-def test_greeting_locked_during_ordering() -> None:
+def test_greeting_during_ordering_keeps_social_ownership() -> None:
     decision = DefaultDecisionEngine().decide(
         _ctx(
             "هلا",
@@ -131,11 +130,11 @@ def test_greeting_locked_during_ordering() -> None:
         )
     )
     assert decision.action != ACTION_GREET
-    assert decision.args.get("persona_kind") != PERSONA_KIND_GREETING
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
 
 
-def test_greeting_locked_during_checkout() -> None:
+def test_greeting_during_checkout_keeps_social_ownership() -> None:
     decision = DefaultDecisionEngine().decide(
         _ctx(
             "هلا",
@@ -145,7 +144,8 @@ def test_greeting_locked_during_checkout() -> None:
         )
     )
     assert decision.action != ACTION_GREET
-    assert decision.args.get("persona_kind") != PERSONA_KIND_GREETING
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.args.get("persona_kind") == PERSONA_KIND_GREETING
 
 
 def test_embedded_greeting_skips_persona_re_greet_short_circuit() -> None:
