@@ -17,11 +17,21 @@ from core.reply_instruction import (
     CONSTRAINT_NO_PAYMENT_CONFIRM,
     CONSTRAINT_NO_SHIPPING_PROMISE,
     FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
+    PATH_PAYMENT_RECEIPT_ACK,
     ReplyInstruction,
 )
 
 _DIA = re.compile(r"[\u064B-\u065F\u0670]")
 _WS = re.compile(r"\s+")
+
+_RECEIPT_UNGROUNDED_PRODUCT_RE = re.compile(
+    r"(?:"
+    r"ل(?:ـ|ل)\s*\d+|"
+    r"لطلب\s|"
+    r"استلمت(?:\s+\w+){0,4}\s+ل(?:ـ|ل)?\s*\S"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 
 
 def _norm(text: str) -> str:
@@ -42,6 +52,16 @@ _SHIP_PROMISE_MARKERS = (
     "في الطريق",
     "سيتم التوصيل",
     "بيوصلك",
+)
+
+_ADDRESS_ASK_MARKERS = (
+    "عنوان التوصيل",
+    "عنوان البيت",
+    "احتاج منك عنوان",
+    "أحتاج منك عنوان",
+    "شاركنا عنوان",
+    "رابط قوقل ماب",
+    "العنوان الوطني",
 )
 
 
@@ -80,6 +100,29 @@ def validate_operational_reply(
                 return OperationalReplyValidation(
                     ok=False,
                     reason=f"forbidden_ship_promise:{marker}",
+                )
+
+    if instruction.path == PATH_PAYMENT_RECEIPT_ACK:
+        facts = instruction.facts or {}
+        if facts.get("needs_order_linking_or_review") or facts.get("needs_merchant_amount_review"):
+            for marker in _ADDRESS_ASK_MARKERS:
+                if _norm(marker) in norm:
+                    return OperationalReplyValidation(
+                        ok=False,
+                        reason="receipt_address_without_order_evidence",
+                    )
+            product_fact = str(facts.get("selected_product") or "").strip()
+            if product_fact and _norm(product_fact) in norm:
+                return OperationalReplyValidation(
+                    ok=False,
+                    reason="receipt_product_without_order_evidence",
+                )
+            if facts.get("needs_order_linking_or_review") and _RECEIPT_UNGROUNDED_PRODUCT_RE.search(
+                text
+            ):
+                return OperationalReplyValidation(
+                    ok=False,
+                    reason="receipt_product_without_order_evidence",
                 )
 
     return OperationalReplyValidation(ok=True)

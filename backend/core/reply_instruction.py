@@ -48,6 +48,13 @@ FORBIDDEN_PAYMENT_CONFIRM_MARKERS: Tuple[str, ...] = (
     "تم استلام الطلب",
 )
 
+FORBIDDEN_MERCHANT_PAYMENT_CONFIRM_MARKERS: Tuple[str, ...] = (
+    "تم تأكيد الدفع",
+    "تم التحقق من التحويل",
+    "سيتم تجهيز الطلب",
+    "تم استلام الطلب",
+)
+
 # ── Path identifiers (align with deterministic_path metadata) ───────────────
 
 PATH_PAYMENT_EVIDENCE_SOFT_ACK = "payment_evidence_soft_ack"
@@ -235,24 +242,46 @@ def build_payment_receipt_instruction(
     summary: Optional[Dict[str, Any]] = None,
     inbound_text: str = "",
 ) -> ReplyInstruction:
-    facts: Dict[str, Any] = {"receipt_evidence": "confirmed"}
-    if summary:
+    s = summary or {}
+    can_mention = bool(s.get("can_mention_receipt_product"))
+    can_address = bool(s.get("can_request_receipt_address"))
+    amount_mismatch = bool(s.get("receipt_amount_mismatch"))
+
+    facts: Dict[str, Any] = {"receipt_evidence": "confirmed", "receipt_received": True}
+    ev = s.get("receipt_order_evidence") if isinstance(s.get("receipt_order_evidence"), dict) else {}
+    if ev.get("receipt_amount") is not None:
+        facts["amount"] = ev.get("receipt_amount")
+    if ev.get("expected_total") is not None:
+        facts["expected_total"] = ev.get("expected_total")
+
+    constraints: List[str] = [
+        CONSTRAINT_NO_SHIPPING_PROMISE,
+        CONSTRAINT_NO_INTERNAL_CONTACT_LEAK,
+        CONSTRAINT_NO_PAYMENT_CONFIRM,
+    ]
+
+    if amount_mismatch:
+        facts["needs_merchant_amount_review"] = True
+        facts["needs_order_linking_or_review"] = True
+    elif can_mention:
         facts.update({
-            "selected_product": summary.get("selected_product"),
-            "price": summary.get("price"),
-            "short_address_code": summary.get("short_address_code"),
-            "awaiting_payment_receipt": summary.get("awaiting_payment_receipt"),
+            "selected_product": s.get("selected_product"),
+            "price": s.get("price"),
+            "short_address_code": s.get("short_address_code"),
+            "awaiting_payment_receipt": s.get("awaiting_payment_receipt"),
         })
+        constraints.append(CONSTRAINT_INCLUDE_ORDER_FACTS)
+        if can_address:
+            constraints.append(CONSTRAINT_ASK_PARSEABLE_ADDRESS)
+    else:
+        facts["needs_order_linking_or_review"] = True
+
     return ReplyInstruction(
         path=PATH_PAYMENT_RECEIPT_ACK,
         decision_kind=DECISION_KIND_PAYMENT_RECEIPT,
         facts=facts,
-        constraints=(
-            CONSTRAINT_INCLUDE_ORDER_FACTS,
-            CONSTRAINT_NO_SHIPPING_PROMISE,
-            CONSTRAINT_NO_INTERNAL_CONTACT_LEAK,
-        ),
-        forbidden_claims=(),
+        constraints=tuple(constraints),
+        forbidden_claims=FORBIDDEN_MERCHANT_PAYMENT_CONFIRM_MARKERS,
         legacy_copy=legacy_copy,
         decision_owner="core.order_flow.receipt",
         inbound_text=inbound_text,

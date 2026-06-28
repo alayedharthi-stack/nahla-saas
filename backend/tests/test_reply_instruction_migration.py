@@ -109,7 +109,10 @@ def test_validator_allows_receipt_ack_copy() -> None:
 
     instr = build_payment_receipt_instruction(
         legacy_copy="وصلنا إيصال التحويل",
-        summary={"selected_product": "عسل"},
+        summary={
+            "can_mention_receipt_product": True,
+            "selected_product": "عسل",
+        },
     )
     result = validate_operational_reply(instr.legacy_copy, instr)
     assert result.ok

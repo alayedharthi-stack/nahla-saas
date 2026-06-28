@@ -410,7 +410,11 @@ def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
     """Extract a flat summary of the order focus from the persisted
     brain state. Returns empty fields when nothing is known. Used by
     both ``build_order_context`` and the deterministic receipt
-    acknowledgement so they speak the same shape."""
+    acknowledgement so they speak the same shape.
+
+    For receipt replies, use ``_receipt_turn_summary`` which applies
+    ``receipt_order_grounding`` — this helper may still surface browse
+    focus for non-receipt consumers."""
     focus = brain_state.get("current_product_focus")
     if not isinstance(focus, dict):
         focus = {}
@@ -450,6 +454,25 @@ def _focus_summary(brain_state: Dict[str, Any]) -> Dict[str, Any]:
             brain_state.get("payment_method") or op.get("payment_method") or ""
         ),
     }
+
+
+def _receipt_turn_summary(
+    brain_state: Dict[str, Any],
+    *,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Receipt-path summary — product/address only when order evidence exists."""
+    from core.receipt_order_grounding import (  # noqa: PLC0415
+        apply_receipt_grounding_to_summary,
+        evaluate_receipt_order_grounding,
+    )
+
+    raw = _focus_summary(brain_state)
+    evidence = evaluate_receipt_order_grounding(
+        brain_state,
+        inbound_metadata=inbound_metadata,
+    )
+    return apply_receipt_grounding_to_summary(raw, evidence)
 
 
 def build_order_context(
@@ -548,45 +571,14 @@ def _compose_address_interview(missing: List[str]) -> str:
 
 
 def _compose_receipt_ack(summary: Dict[str, Any]) -> str:
-    """Build the deterministic "we received your transfer receipt"
-    Arabic reply. The reply surfaces the product + price + national
-    address so the customer can immediately confirm what's being
-    processed — closes the "did the bot lose my context?" anxiety
-    that motivated this whole change.
+    """Build the deterministic payment-receipt Arabic reply.
 
-    May 2026 update: when the conversation hasn't yet collected the
-    shipping fields (first/last name, city, Google Maps URL OR
-    national short address), append a single follow-up paragraph
-    asking for everything at once. This replaces the previous
-    behaviour where the funnel fell back to a generic "pickup or
-    shipping?" question that never collected structured data.
-    """
-    lines: List[str] = [
-        "وصلنا إيصال التحويل، شكراً لك 🌷",
-        "تم استلام الطلب وسيتم مراجعته وتجهيزه بإذن الله.",
-    ]
-    detail_bits: List[str] = []
-    if summary.get("selected_product"):
-        prod = summary["selected_product"]
-        price_str = _format_price(summary.get("price"), summary.get("currency") or "SAR")
-        if price_str:
-            detail_bits.append(f"الطلب: {prod} ({price_str})")
-        else:
-            detail_bits.append(f"الطلب: {prod}")
-    if summary.get("short_address_code"):
-        detail_bits.append(f"العنوان الوطني: {summary['short_address_code']}")
-    elif summary.get("city"):
-        detail_bits.append(f"المدينة: {summary['city']}")
-    if detail_bits:
-        lines.append("")
-        lines.extend(detail_bits)
+    Product, quantity, and address asks require confirmed order evidence
+    (see ``core.receipt_order_grounding``). Receipt media alone grounds
+    only transfer received + optional amount review."""
+    from core.receipt_order_grounding import compose_grounded_receipt_ack  # noqa: PLC0415
 
-    missing = _missing_shipping_fields(summary)
-    interview = _compose_address_interview(missing)
-    if interview:
-        lines.append("")
-        lines.append(interview)
-    return "\n".join(lines)
+    return compose_grounded_receipt_ack(summary)
 
 
 def _receipt_text_fields(inbound_metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -629,7 +621,9 @@ def _compose_payment_state_patch(
         conversation=conversation,
     )
     patch: Dict[str, Any] = {"payment_receipt_metadata": enriched}
-    has_active = bool(summary.get("selected_product"))
+    has_active = bool(summary.get("can_mention_receipt_product")) or bool(
+        summary.get("receipt_order_evidence", {}).get("has_confirmed_order")
+    )
     awaiting = bool(summary.get("awaiting_payment_receipt"))
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -696,20 +690,36 @@ def maybe_handle_receipt_inbound(
         payment_context_active,
         try_metadata_receipt_short_circuit,
     )
+    from core.receipt_order_grounding import (  # noqa: PLC0415
+        compose_grounded_receipt_ack,
+        evaluate_receipt_order_grounding,
+        receipt_payment_context_active,
+    )
 
     md = flatten_inbound_payment_metadata(inbound_metadata or {})
     if not has_inbound_attachment(inbound_normalized_type, md):
         return None
 
     _conv, bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
-    summary = _focus_summary(bs)
+    evidence = evaluate_receipt_order_grounding(bs, inbound_metadata=md)
+    summary = _receipt_turn_summary(bs, inbound_metadata=md)
 
-    has_active = bool(summary.get("selected_product"))
+    has_confirmed_order = evidence.has_confirmed_order
     awaiting = bool(summary.get("awaiting_payment_receipt"))
-    if not (has_active or awaiting or summary.get("payment_receipt_received")):
-        if not payment_context_active(summary):
+    kind_early = md.get("pdf_kind") or md.get("image_kind")
+    pe_early = md.get("payment_evidence_status")
+    receipt_media_confirmed = kind_early == "payment_receipt" and (
+        not pe_early or pe_early == "confirmed"
+    )
+    if not (
+        has_confirmed_order
+        or awaiting
+        or summary.get("payment_receipt_received")
+        or receipt_media_confirmed
+    ):
+        if not receipt_payment_context_active(summary, brain_state=bs):
             logger.info(
-                "[ORDER_FLOW_STATE] receipt arrived but no active order — "
+                "[ORDER_FLOW_STATE] receipt arrived but no payment context — "
                 "letting brain handle | tenant=%s phone=*%s",
                 tenant_id, phone[-4:] if phone else "",
             )
@@ -736,6 +746,21 @@ def maybe_handle_receipt_inbound(
                 _metadata_decision.get("route"),
                 _metadata_decision.get("duplicate"),
             )
+            _metadata_decision["summary"] = summary
+            if not _metadata_decision.get("duplicate"):
+                _metadata_decision["reply_text"] = compose_grounded_receipt_ack(summary)
+                from core.reply_instruction import (  # noqa: PLC0415
+                    attach_instruction_to_decision,
+                    build_payment_receipt_instruction,
+                )
+
+                _metadata_decision = attach_instruction_to_decision(
+                    _metadata_decision,
+                    build_payment_receipt_instruction(
+                        legacy_copy=_metadata_decision["reply_text"],
+                        summary=summary,
+                    ),
+                )
         return _metadata_decision
 
     if pe_status and pe_status != "confirmed":
@@ -755,18 +780,8 @@ def maybe_handle_receipt_inbound(
 
     inbound_metadata = md
 
-    # Guard: we only short-circuit when the conversation has SOME
-    # evidence of an active order. Otherwise a random PDF that
-    # happens to be classified as a receipt could trigger an
-    # acknowledgement for an order that doesn't exist.
-    if not (has_active or awaiting):
-        logger.info(
-            "[ORDER_FLOW_STATE] receipt arrived but no active order — "
-            "letting brain handle | tenant=%s phone=*%s",
-            tenant_id, phone[-4:] if phone else "",
-        )
-        return None
-
+    # Confirmed receipt media always short-circuits; reply content is
+    # grounded by ``receipt_order_grounding`` (stale focus is not enough).
     # ── Tenant-account verification gate (May 2026 #48) ───────────
     # Even when the deterministic ``payment_evidence`` classifier
     # said ``confirmed`` (a real receipt with completion markers),
@@ -934,19 +949,23 @@ def maybe_handle_receipt_inbound(
         "payment_submission_at":       datetime.now(timezone.utc).isoformat(),
         "payment_submission_type":     "receipt",
         "payment_submission_source":   "whatsapp",
-        "order_status":                "payment_submitted",
     })
+    if has_confirmed_order or awaiting:
+        state_patch["order_status"] = "payment_submitted"
 
     reply_text = _compose_receipt_ack(summary)
 
     logger.info(
         "[ORDER_FLOW_STATE] receipt acknowledged tenant=%s phone=*%s "
-        "kind=%s product=%r price=%s address_code=%s awaiting_was=%s",
+        "kind=%s product=%r price=%s address_code=%s awaiting_was=%s "
+        "confirmed_order=%s reason=%s",
         tenant_id, phone[-4:] if phone else "", kind,
         summary.get("selected_product"),
         summary.get("price"),
         summary.get("short_address_code"),
         awaiting,
+        has_confirmed_order,
+        evidence.reason,
     )
     from core.reply_instruction import (  # noqa: PLC0415
         attach_instruction_to_decision,
