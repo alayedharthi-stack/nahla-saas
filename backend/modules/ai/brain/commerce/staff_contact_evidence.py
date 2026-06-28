@@ -361,7 +361,14 @@ def classify_staff_contact_request(
     role_graph: Optional[StaffRoleAliasGraph] = None,
 ) -> StaffContactRequest:
     """Classify inbound staff-contact intent (deterministic)."""
-    raw = (message or "").strip()
+    try:
+        from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+            staff_contact_intent_message,
+        )
+
+        raw = staff_contact_intent_message(message or "")
+    except Exception:  # noqa: BLE001
+        raw = (message or "").strip()
     if not raw:
         return StaffContactRequest(kind="none")
 
@@ -682,6 +689,18 @@ def build_deliver_reply_text(record: StaffContactRecord) -> str:
     return f"تقدر تتواصل مع {label}."
 
 
+def build_staff_identity_reply_text(record: StaffContactRecord) -> str:
+    """Configured role/name only — no presence, location, or availability."""
+    label = resolve_contact_display_name(
+        record.lookup_name,
+        role=record.role,
+    )
+    role_label = _role_display_label(record.role)
+    if role_label and _norm(label) != _norm(role_label):
+        return f"{label} {role_label}."
+    return f"{label}."
+
+
 def build_not_configured_reply(
     resolution: StaffContactResolution,
     *,
@@ -709,6 +728,7 @@ __all__ = [
     "StaffContactRequest",
     "StaffContactResolution",
     "build_deliver_reply_text",
+    "build_staff_identity_reply_text",
     "build_not_configured_reply",
     "build_staff_call_target",
     "build_staff_call_target_from_record",
