@@ -128,10 +128,9 @@ def _merge_known_facts(ctx: BrainContext, commerce: Any) -> Dict[str, Any]:
             from ..policy.contracts import hint_to_log_dict  # noqa: PLC0415
 
             facts["merchant_operational_policy_shadow"] = hint_to_log_dict(hint)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "[FINAL_TURN_CONTRACT] merchant_op_policy_shadow attach skipped err=%s",
-                exc,
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[FINAL_TURN_CONTRACT] merchant_operational_policy_hint_failed",
             )
     phone = str(getattr(ctx, "customer_phone", "") or "").strip()
     if phone:
