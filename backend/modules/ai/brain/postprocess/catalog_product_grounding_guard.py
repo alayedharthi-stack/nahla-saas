@@ -277,11 +277,8 @@ def apply_catalog_product_grounding_guard(
                 action="allowed_social_noncommerce",
                 reason=current_turn.reason or "current_turn_social_non_commerce",
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[CATALOG_PRODUCT_GROUNDING_GUARD] social_noncommerce_probe_failed err=%s",
-            exc,
-        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_GROUNDING_GUARD] social_non_commerce_probe_failed")
 
     if evidence is None:
         from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415

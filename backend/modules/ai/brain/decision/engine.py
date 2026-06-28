@@ -939,12 +939,8 @@ class DefaultDecisionEngine:
         if getattr(_current_social_nc, "matched", False):
             try:
                 ctx.current_turn_social_non_commerce = _current_social_nc  # type: ignore[attr-defined]
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "[CURRENT_TURN_SOCIAL_NC] attach_failed tenant=%s err=%s",
-                    getattr(ctx, "tenant_id", None),
-                    exc,
-                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[DECISION_ENGINE] social_non_commerce_probe_failed")
             _category = str(getattr(_current_social_nc, "category", "") or "")
             if _category != "greeting" or _has_stale_commerce_context(ctx):
                 logger.info(

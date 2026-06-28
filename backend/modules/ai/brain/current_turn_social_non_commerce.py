@@ -228,8 +228,8 @@ def _has_explicit_catalog_or_product_intent(
 
         if has_explicit_product_commerce_intent(raw):
             return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] product_intent_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] commerce_evidence_probe_failed")
 
     try:
         from modules.ai.brain.catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
@@ -238,8 +238,8 @@ def _has_explicit_catalog_or_product_intent(
 
         if is_catalog_browse_message(raw, intent_name=name):
             return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] browse_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] commerce_evidence_probe_failed")
 
     try:
         from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
@@ -248,8 +248,8 @@ def _has_explicit_catalog_or_product_intent(
 
         if classify_solution_seeking_commerce(raw) is not None:
             return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] solution_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] commerce_evidence_probe_failed")
 
     return False
 
@@ -302,8 +302,8 @@ def _is_staff_contact_non_product(message: str) -> bool:
 
         if is_staff_or_contact_context(raw):
             return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] staff_context_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] staff_contact_probe_failed")
 
     return bool(_STAFF_IDENTITY_QUESTION_RE.search(_norm(raw)))
 
@@ -370,8 +370,8 @@ def resolve_current_turn_social_non_commerce(
                 reason=f"non_commerce:{nc.source}",
                 confidence=float(nc.confidence or 0.90),
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] non_commerce_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] detector_probe_failed")
 
     try:
         from modules.ai.brain.intent.social_classifier import classify_social  # noqa: PLC0415
@@ -384,8 +384,8 @@ def resolve_current_turn_social_non_commerce(
                 reason="social_classifier",
                 confidence=float(getattr(social, "confidence", 0.90) or 0.90),
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[CURRENT_TURN_SOCIAL_NC] social_probe_failed err=%s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] detector_probe_failed")
 
     norm = _norm(raw)
     meta = _metadata(inbound_metadata)

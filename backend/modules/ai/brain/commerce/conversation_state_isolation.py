@@ -146,11 +146,8 @@ def should_replay_pending_question(
                 raw[:72],
             )
             return False
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[CONVERSATION_STATE_ISOLATION] social_noncommerce_replay_probe_failed err=%s",
-            exc,
-        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CONVERSATION_STATE_ISOLATION] social_non_commerce_probe_failed")
     try:
         from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
             is_checkout_escape_inquiry,
