@@ -1256,12 +1256,13 @@ def _maybe_promote_prior_evidence(
     s = selected_summary or {}
     selected_product = s.get("selected_product")
     try:
-        from core.order_flow import _compose_receipt_ack  # noqa: PLC0415
+        from core.order_flow import _compose_receipt_ack, _load_brain_state  # noqa: PLC0415
 
         if _resolution and _resolution.reply_ar:
             reply_text = _resolution.reply_ar
         else:
-            reply_text = _compose_receipt_ack(s)
+            _conv, _bs = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+            reply_text = _compose_receipt_ack(s, brain_state=_bs or {})
     except Exception as _ack_exc:  # noqa: BLE001
         logger.debug(
             "[PAYMENT_INTENT] receipt-ack import failed tenant=%s err=%s",

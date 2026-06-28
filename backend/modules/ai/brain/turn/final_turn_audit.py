@@ -77,6 +77,18 @@ _PHONE_QUESTION_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_RECEIPT_ADDRESS_ASK_RE = re.compile(
+    r"(?:"
+    r"عنوان\s*(?:ال)?(?:توصيل|بيت|المنزل)|"
+    r"احتاج\s*(?:منك)?\s*عنوان|"
+    r"أحتاج\s*(?:منك)?\s*عنوان|"
+    r"شار(?:ك|كنا)\s*عنوان|"
+    r"العنوان\s*الوطني|"
+    r"رابط\s*قوقل\s*ماب"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _AVAILABILITY_CLAIM_RE = re.compile(
     r"(?:متوفر|available|after\s+several\s+options|بعدة\s+خيارات)",
     re.UNICODE | re.IGNORECASE,
@@ -198,6 +210,16 @@ def detect_final_turn_violations(
     ) and _reply_uses_untrusted_inbound_label(contract, blob):
         if _AVAILABILITY_CLAIM_RE.search(blob) or contract.inbound_text in blob:
             violations.append("unsafe_product_availability_claim")
+
+    known = dict(contract.known_facts or {})
+    receipt_ctx = bool(known.get("payment_receipt_turn") or known.get("receipt_received"))
+    confirmed_order = bool(known.get("receipt_confirmed_order"))
+    if receipt_ctx and not confirmed_order:
+        product_label = str(known.get("receipt_product_label") or contract.trusted_product_label or "").strip()
+        if product_label and product_label in blob:
+            violations.append("payment_receipt_product_claim_without_order_evidence")
+        if _RECEIPT_ADDRESS_ASK_RE.search(blob):
+            violations.append("payment_receipt_address_request_without_confirmed_order")
 
     purpose = str(contract.response_purpose or "")
     if purpose in {"shipping_post_order", "shipping", "track_order"}:

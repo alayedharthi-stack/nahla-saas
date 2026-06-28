@@ -145,23 +145,10 @@ def mime_suggests_receipt(metadata: Optional[Dict[str, Any]]) -> bool:
 
 
 def payment_context_active(summary: Optional[Dict[str, Any]]) -> bool:
-    s = summary or {}
-    if bool(s.get("awaiting_payment_receipt")):
-        return True
-    if bool(s.get("payment_receipt_received")):
-        return True
-    if bool(s.get("selected_product")):
-        return True
-    status = str(s.get("order_status") or "").strip().lower()
-    if status in _PAYMENT_FLOW_STATUSES:
-        return True
-    if str(s.get("payment_method") or "").strip().lower() in {
-        "bank_transfer",
-        "transfer",
-        "iban",
-    }:
-        return True
-    return False
+    """Return True when attachment receipt routing has real payment context."""
+    from core.receipt_order_grounding import receipt_payment_context_active  # noqa: PLC0415
+
+    return receipt_payment_context_active(summary)
 
 
 def blocks_receipt_received_ack(

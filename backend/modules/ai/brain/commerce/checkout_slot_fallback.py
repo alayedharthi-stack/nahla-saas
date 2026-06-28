@@ -206,6 +206,21 @@ def build_checkout_slot_fallback_reply(
     if not has_active_commerce_from_state(state):
         return None
 
+    try:
+        from core.receipt_order_grounding import (  # noqa: PLC0415
+            evaluate_receipt_order_grounding_from_state,
+            is_remaining_payment_balance_message,
+        )
+
+        if is_remaining_payment_balance_message(inbound_text):
+            prep = _order_prep_dict(state)
+            if prep.get("payment_receipt_received") and not evaluate_receipt_order_grounding_from_state(
+                state
+            ).has_confirmed_order:
+                return None
+    except Exception:  # noqa: BLE001
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] payment_balance_guard_failed")
+
     has_product = _has_authoritative_product(state)
     missing = _resolve_missing_fields(state)
     if not missing:
