@@ -12,6 +12,7 @@ from typing import FrozenSet, Optional
 from .link_intent import (
     LinkIntentType,
     is_explicit_direct_location_request,
+    resolve_inbound_link_intent,
     resolve_link_intent,
 )
 
@@ -28,12 +29,12 @@ FORBIDDEN_LOCATION_SUBSTITUTIONS: FrozenSet[str] = frozenset({
 
 def is_physical_location_request(message: str) -> bool:
     """True when the customer asks for a physical branch/showroom location."""
-    return resolve_link_intent(message or "") == LinkIntentType.PHYSICAL_LOCATION
+    return resolve_inbound_link_intent(message or "") == LinkIntentType.PHYSICAL_LOCATION
 
 
 def is_website_storefront_request(message: str) -> bool:
     """True when the customer asks for the online store / website URL."""
-    return resolve_link_intent(message or "") == LinkIntentType.WEBSITE_URL
+    return resolve_inbound_link_intent(message or "") == LinkIntentType.WEBSITE_URL
 
 
 def should_block_catalog_substitution_for_location(message: str) -> bool:

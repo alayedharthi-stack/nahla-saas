@@ -139,10 +139,10 @@ def is_online_store_inquiry(message: str) -> bool:
     try:
         from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
             LinkIntentType,
-            resolve_link_intent,
+            resolve_inbound_link_intent,
         )
 
-        return resolve_link_intent(message or "") == LinkIntentType.WEBSITE_URL
+        return resolve_inbound_link_intent(message or "") == LinkIntentType.WEBSITE_URL
     except Exception:
         return False
 

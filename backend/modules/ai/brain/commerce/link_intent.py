@@ -261,7 +261,9 @@ def is_explicit_direct_location_request(message: str) -> bool:
     Skips maps-vs-contact disambiguation (e.g. «موقع المعرض», «وين موقعكم؟»).
     Ambiguous arrival-only phrasing (e.g. «أبي أجيكم») may still disambiguate.
     """
-    raw = message or ""
+    from .link_intent_media_source_guard import link_intent_message  # noqa: PLC0415
+
+    raw = link_intent_message(message or "")
     norm = _normalise(raw)
     if not norm or not _looks_like_physical_location_request(norm, raw):
         return False
@@ -274,6 +276,13 @@ def is_explicit_direct_location_request(message: str) -> bool:
     if _contains_any(norm, _PHYSICAL_EXPLICIT_MARKERS):
         return True
     return False
+
+
+def resolve_inbound_link_intent(message: str) -> LinkIntentType:
+    """Classify link intent from customer-authored inbound text only."""
+    from .link_intent_media_source_guard import link_intent_message  # noqa: PLC0415
+
+    return resolve_link_intent(link_intent_message(message or ""))
 
 
 def resolve_link_intent(message: str) -> LinkIntentType:
@@ -312,5 +321,6 @@ __all__ = [
     "LinkIntentType",
     "compose_website_url_reply",
     "is_explicit_direct_location_request",
+    "resolve_inbound_link_intent",
     "resolve_link_intent",
 ]
