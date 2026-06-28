@@ -8,6 +8,7 @@ quantity, or address requirement from stale browse focus alone.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -17,6 +18,8 @@ from core.catalog_authoritative_line_items import (
     order_has_authoritative_products,
 )
 from core.wa_cart_line_items import ITEM_STATUS_CONFIRMED
+
+logger = logging.getLogger("nahla.receipt_order_grounding")
 
 _DIA = re.compile(r"[\u064B-\u065F\u0670]")
 _WS = re.compile(r"\s+")
@@ -166,7 +169,7 @@ def _resolve_expected_total(prep: Dict[str, Any], line_items: Sequence[Dict[str,
             if total is not None:
                 return float(total)
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("[RECEIPT_GROUNDING] evidence_parse_failed")
     return None
 
 

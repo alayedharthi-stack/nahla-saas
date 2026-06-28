@@ -219,7 +219,7 @@ def build_checkout_slot_fallback_reply(
             ).has_confirmed_order:
                 return None
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[CHECKOUT_SLOT_FALLBACK] payment_balance_guard_failed")
 
     has_product = _has_authoritative_product(state)
     missing = _resolve_missing_fields(state)
