@@ -255,14 +255,21 @@ def _label_from_inbound_availability_ask(inbound_text: str) -> str:
         is_non_product_label,
         normalize_label_text,
     )
+    from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+        is_staff_or_contact_label,
+    )
 
     raw = (inbound_text or "").strip()
     if not raw:
+        return ""
+    if is_staff_or_contact_label(raw):
         return ""
     cleaned = _INBOUND_AVAIL_PREFIX_RE.sub("", raw)
     cleaned = _INBOUND_AVAIL_SUFFIX_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip("؟? ")
     cleaned = normalize_label_text(cleaned)
+    if is_staff_or_contact_label(cleaned):
+        return ""
     word_count = len([w for w in cleaned.split() if w])
     if (
         2 <= len(cleaned) <= 40
@@ -348,9 +355,30 @@ def build_operational_availability_conflict_reply(
     Personality (warmth, emoji, follow-up wording) is applied later by the
     commerce style composer — never here (Nahla doctrine).
     """
+    from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+        should_block_product_availability_rewrite,
+    )
+
     label = _product_label_for_reply(evidence, availability_context, inbound_text)
+    if should_block_product_availability_rewrite(
+        inbound_text,
+        label=label,
+        guard_action="rewrite_conflict",
+    ):
+        logger.info(
+            "[PRODUCT_AVAILABILITY_TRUTH_GUARD] blocked_staff_contact_rewrite "
+            "inbound=%r label=%r",
+            (inbound_text or "")[:80],
+            (label or "")[:80],
+        )
+        return ""
     if label:
         return f"متوفر {label} بعدة خيارات."
+    if should_block_product_availability_rewrite(
+        inbound_text,
+        guard_action="rewrite_conflict",
+    ):
+        return ""
     return "متوفر بعدة خيارات."
 
 
@@ -565,6 +593,7 @@ def apply_product_availability_truth_guard(
             inbound_text=inbound_text,
             evidence_state=evidence.evidence_state,
             guard_action=guard_action,
+            availability_context=availability_context,
         ):
             would_rw = False
             if guard_action.startswith("rewrite"):
