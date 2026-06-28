@@ -120,16 +120,21 @@ def _build_location_decision(
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
         is_explicit_arrival_intent,
     )
+    from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+        is_explicit_direct_location_request,
+    )
 
     deliver_reception = config.location_response_mode == LOCATION_MODE_PLUS_RECEPTION
     reception_target = None
     reception_reply = ""
     _arrival_confirmed = is_explicit_arrival_intent(message or "")
+    _direct_location = is_explicit_direct_location_request(message or "")
     if deliver_reception and not _arrival_confirmed:
         deliver_reception = False
         if config.location_instructions_text:
             reply = f"{reply}\n{config.location_instructions_text}"
-        reply = f"{reply}\n{MSG_PICKUP_PREFERENCE_ASK}"
+        if not _direct_location:
+            reply = f"{reply}\n{MSG_PICKUP_PREFERENCE_ASK}"
     elif deliver_reception:
         reception_target, reception_reply = _build_reception_targets(
             db, tenant_id, message,
@@ -164,12 +169,12 @@ def _build_location_decision(
         persist_contact=deliver_reception,
         persist_pending_choice=(
             PENDING_PICKUP_MAPS_OR_CONTACT
-            if MSG_PICKUP_PREFERENCE_ASK in reply
+            if MSG_PICKUP_PREFERENCE_ASK in reply and not _direct_location
             else ""
         ),
         pending_branch_id=(
             int(match.branch_id)
-            if MSG_PICKUP_PREFERENCE_ASK in reply
+            if MSG_PICKUP_PREFERENCE_ASK in reply and not _direct_location
             else 0
         ),
     )
@@ -397,10 +402,14 @@ def evaluate_branch_trigger_routing(
         from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
             has_explicit_showroom_pickup_intent,
         )
+        from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+            is_explicit_direct_location_request,
+        )
 
         _raw = (message or "").strip()
         _pickup_confirm_re = (
             has_explicit_showroom_pickup_intent(_raw)
+            and not is_explicit_direct_location_request(_raw)
             and _re.search(
                 r"(?:المعرض|الفرع|استلام\s*من|أ?ستلم\s*من|أ?ج(?:ي|يك)(?:كم|ك)?\s*(?:المعرض|الفرع)?|"
                 r"موقع\s*المعرض|فرع\s+)",

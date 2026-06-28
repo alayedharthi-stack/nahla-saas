@@ -1159,19 +1159,36 @@ class DefaultDecisionEngine:
                 )
 
             _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
-            if (
-                _link_intent == LinkIntentType.PHYSICAL_LOCATION
-                and _maps_url
-            ):
+            if _link_intent == LinkIntentType.PHYSICAL_LOCATION:
+                if _maps_url:
+                    logger.info(
+                        "[LINK_INTENT] tenant=%s route=faq_location maps=1",
+                        ctx.tenant_id,
+                    )
+                    return Decision(
+                        action=ACTION_FAQ_REPLY,
+                        args={"topic": TOPIC_LOCATION},
+                        reason=(
+                            "explicit branch location request — configured maps URL"
+                        ),
+                        confidence=0.94,
+                    )
+                from ..commerce.physical_location_ownership import (  # noqa: PLC0415
+                    build_physical_location_decision_args,
+                )
+
                 logger.info(
-                    "[LINK_INTENT] tenant=%s route=faq_location maps=1",
+                    "[LINK_INTENT] tenant=%s route=physical_location_missing_config",
                     ctx.tenant_id,
                 )
                 return Decision(
                     action=ACTION_FAQ_REPLY,
-                    args={"topic": TOPIC_LOCATION},
+                    args={
+                        **build_physical_location_decision_args(maps_url=""),
+                        "topic": TOPIC_LOCATION,
+                    },
                     reason=(
-                        "explicit branch location request — configured maps URL"
+                        "explicit branch location request — maps URL not configured"
                     ),
                     confidence=0.94,
                 )

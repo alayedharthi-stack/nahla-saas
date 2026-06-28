@@ -254,6 +254,28 @@ def _looks_like_payment_link_request(norm: str) -> bool:
     return _contains_any(norm, _PAYMENT_LINK_MARKERS)
 
 
+def is_explicit_direct_location_request(message: str) -> bool:
+    """
+    True for unambiguous physical-location asks that should send maps directly.
+
+    Skips maps-vs-contact disambiguation (e.g. «موقع المعرض», «وين موقعكم؟»).
+    Ambiguous arrival-only phrasing (e.g. «أبي أجيكم») may still disambiguate.
+    """
+    raw = message or ""
+    norm = _normalise(raw)
+    if not norm or not _looks_like_physical_location_request(norm, raw):
+        return False
+    if _SEND_LOCATION_REQUEST_RE.search(norm):
+        return True
+    if _PHYSICAL_WHERE_SITE_RE.search(norm):
+        return True
+    if _PHYSICAL_SITE_NOUN_RE.search(norm):
+        return True
+    if _contains_any(norm, _PHYSICAL_EXPLICIT_MARKERS):
+        return True
+    return False
+
+
 def resolve_link_intent(message: str) -> LinkIntentType:
     """Classify link-related customer messages deterministically."""
     raw = message or ""
@@ -289,5 +311,6 @@ def compose_website_url_reply(store_url: str) -> str:
 __all__ = [
     "LinkIntentType",
     "compose_website_url_reply",
+    "is_explicit_direct_location_request",
     "resolve_link_intent",
 ]

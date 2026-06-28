@@ -95,7 +95,26 @@ def compose_native_catalog_failure_decision(
     customer_message: str = "",
 ) -> NativeCatalogFallbackDecision:
     """Return tenant-aware fallback after native catalog send failure."""
-    _ = customer_message  # reserved for future scoped browse fallback
+    try:
+        from modules.ai.brain.commerce.physical_location_ownership import (  # noqa: PLC0415
+            should_block_catalog_substitution_for_location,
+        )
+        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            MSG_LOCATION_NOT_CONFIGURED,
+        )
+
+        if should_block_catalog_substitution_for_location(customer_message or ""):
+            return NativeCatalogFallbackDecision(
+                text=MSG_LOCATION_NOT_CONFIGURED,
+                delivery_mode="text",
+                failure_reason="physical_location_blocks_catalog_fallback",
+            )
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — guard must not block fallback
+        logger.debug(
+            "[NATIVE_CATALOG] location_ownership_guard_failed err=%s",
+            exc,
+        )
+
     store_url = _load_store_url(db, tenant_id) if tenant_id else ""
     if store_url:
         return NativeCatalogFallbackDecision(
