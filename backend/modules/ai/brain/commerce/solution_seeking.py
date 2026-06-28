@@ -126,6 +126,46 @@ _STRUCTURE_PATTERNS: List[str] = [
     r"\S.{2,30}\s+(?:بدون|مناسب\s*ل|ل(?:ل)?(?:دايت|رسم|صيف|اطف|معد|نوم|سكر))",
 ]
 
+# Category nouns — any vertical (not honey-only).
+_CATEGORY_NOUN = (
+    r"(?:"
+    r"عسل|honey|منتج|product|شي(?:ء)?|something|"
+    r"عطر|perfume|supplement|مكمل|food"
+    r")"
+)
+
+# Product/category + purpose/benefit preposition — use-case, not SKU name.
+# Distinct from named variety (``عسل السمر`` uses ``ال`` + variety, not ``لل`` purpose).
+_PURPOSE_BENEFIT_PATTERNS: List[str] = [
+    rf"{_CATEGORY_NOUN}\s+ل(?:ل)?\S+(?:\s+\S+){{0,5}}",
+    r"(?:اب(?:غ|ي)|أ(?:بغ|بي|ريد|حتاج)|بدي|ودي|ار(?:يد|غ)|"
+    r"i want|looking for)\s+(?:\S+\s+){0,4}"
+    rf"{_CATEGORY_NOUN}\s+ل(?:ل)?\S+",
+    rf"{_CATEGORY_NOUN}\s+"
+    r"(?:ينفع|يفيد|يساعد|يقوي|يعالج|helps?|good\s*for)"
+    r"(?:\s+ل(?:ل)?\S+(?:\s+\S+){0,3})?",
+    r"(?:فيه|هل\s+(?:فيه|يوجد|عند))\s+\S.{0,25}"
+    r"(?:ينفع|يفيد|يساعد|يقوي)",
+    r"(?:تنصحن|ترشح|تنصح|ترشد|وش\s+تنصح|ايش\s+تنصح|recommend)\w*\s+"
+    r"ل(?:ل)?\S+(?:\s+\S+){0,4}",
+    r"(?:اب(?:غ|ي)|أ(?:بغ|بي|ريد|حتاج)|بدي|ودي)\s+"
+    r"شي(?:ء)?\s+(?:"
+    r"ل(?:ل)?\S+(?:\s+\S+){0,4}|"
+    r"ي(?:قوي|فيد|نفع|ساعد|عالج)"
+    r")",
+]
+
+# Explicit catalog product / availability / order — NOT use-case seeking.
+_EXPLICIT_CATALOG_PRODUCT_RE = re.compile(
+    r"(?:"
+    rf"{_CATEGORY_NOUN}\s+ال(?!ل)[\w\u0600-\u06FF]{{2,20}}(?:\s|$)|"
+    r"هل\s+\S.{0,40}(?:متوفر|موجود|available)|"
+    r"(?:كيلو|كيلوغرام|جرام|gram|kg)\b|"
+    r"أكثر\s+مبيع|best\s+seller|top\s+products"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 # Negative gate — do NOT treat as solution-seeking when the turn is clearly
 # delivery / payment / support / order / location (tenant-agnostic).
 _NEGATIVE_GATE_RULES: List[Tuple[str, List[str]]] = [
@@ -205,6 +245,28 @@ def _matches_solution_structure(norm: str) -> bool:
     )
 
 
+def _is_explicit_catalog_product_query(norm: str) -> bool:
+    """True when the turn names a SKU/variety or asks availability — not use-case."""
+    if not norm:
+        return False
+    return bool(_EXPLICIT_CATALOG_PRODUCT_RE.search(norm))
+
+
+def _matches_use_case_purpose_phrasing(norm: str) -> bool:
+    """Product/category + benefit/purpose, or recommendation + need — not SKU lookup."""
+    if not norm or _is_explicit_catalog_product_query(norm):
+        return False
+    return any(
+        re.search(pat, norm, re.IGNORECASE | re.UNICODE)
+        for pat in _PURPOSE_BENEFIT_PATTERNS
+    )
+
+
+def is_use_case_commerce_phrase(message: str) -> bool:
+    """True when message describes a customer need/benefit, not a product SKU name."""
+    return classify_solution_seeking_commerce(message) is not None
+
+
 def classify_solution_seeking_commerce(message: str) -> Optional[SolutionSeekingMatch]:
     """Detect attribute/outcome-based commerce intent (all verticals)."""
     raw = (message or "").strip()
@@ -218,9 +280,16 @@ def classify_solution_seeking_commerce(message: str) -> Optional[SolutionSeeking
     if _PRICE_ONLY_TAIL_RE.search(norm):
         return None
 
+    if _is_explicit_catalog_product_query(norm):
+        return None
+
     # Very short bare lookups ("عسل سدر", "بكم") are SKU/price — not advisory.
     if len(norm.split()) <= 3 and not _has_attribute_outcome_signal(norm):
-        return None
+        if not (
+            _matches_use_case_purpose_phrasing(norm)
+            or _matches_solution_structure(norm)
+        ):
+            return None
 
     axis = _has_attribute_outcome_signal(norm)
     if axis:
@@ -232,6 +301,10 @@ def classify_solution_seeking_commerce(message: str) -> Optional[SolutionSeeking
 
     if _matches_solution_structure(norm) and _has_commerce_context(norm):
         return SolutionSeekingMatch(axis=AXIS_GENERAL, source="structure")
+
+    if _matches_use_case_purpose_phrasing(norm):
+        _purpose_axis = _has_attribute_outcome_signal(norm) or AXIS_GENERAL
+        return SolutionSeekingMatch(axis=_purpose_axis, source="purpose_phrasing")
 
     return None
 
@@ -502,6 +575,7 @@ __all__ = [
     "customer_explicit_recommendation_request",
     "detect_solution_seeking_suppression",
     "intelligent_need_clarification",
+    "is_use_case_commerce_phrase",
     "log_intelligent_need_clarification",
     "log_intelligent_need_clarification_suppressed",
     "log_solution_seeking_commerce",

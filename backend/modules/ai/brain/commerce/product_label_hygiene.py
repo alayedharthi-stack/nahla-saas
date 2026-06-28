@@ -272,6 +272,15 @@ def is_non_product_label(text: str) -> bool:
         return True
     if is_negative_logistics_or_contact_context(text):
         return True
+    try:
+        from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
+            is_use_case_commerce_phrase,
+        )
+
+        if is_use_case_commerce_phrase(text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional use-case guard import
+        pass
     if _NON_PRODUCT_LABEL_RE.search(norm):
         return True
     try:
