@@ -340,13 +340,36 @@ def evaluate_branch_trigger_routing(
     tenant_id: int,
     message: str,
     customer_phone: str = "",
+    inbound_metadata: Optional[dict] = None,
 ) -> Optional[BranchTriggerDecision]:
     """Return a pre-brain decision when structured keyword routing matches."""
+    from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415
+        customer_turn_probe_message,
+        has_explicit_operational_intent,
+        maybe_clear_stale_operational_choice,
+        should_break_stale_operational_choice,
+    )
+
+    route_msg = customer_turn_probe_message(message or "")
+    if should_break_stale_operational_choice(
+        message or "",
+        inbound_metadata=inbound_metadata,
+    ) and not has_explicit_operational_intent(message or ""):
+        maybe_clear_stale_operational_choice(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            message=message or "",
+            inbound_metadata=inbound_metadata,
+        )
+        return None
+
     pending = evaluate_pending_operational_choice_routing(
         db,
         tenant_id=int(tenant_id or 0),
-        message=message or "",
+        message=route_msg or (message or ""),
         customer_phone=customer_phone or "",
+        inbound_metadata=inbound_metadata,
     )
     if pending is not None:
         return pending
@@ -406,7 +429,7 @@ def evaluate_branch_trigger_routing(
             is_explicit_direct_location_request,
         )
 
-        _raw = (message or "").strip()
+        _raw = route_msg or (message or "").strip()
         _pickup_confirm_re = (
             has_explicit_showroom_pickup_intent(_raw)
             and not is_explicit_direct_location_request(_raw)
@@ -422,9 +445,9 @@ def evaluate_branch_trigger_routing(
 
     if (
         _pickup_confirm_re
-        and not is_explicit_arrival_intent(message or "")
+        and not is_explicit_arrival_intent(route_msg or message or "")
     ):
-        branch = resolve_branch_for_message(db, int(tenant_id or 0), message or "")
+        branch = resolve_branch_for_message(db, int(tenant_id or 0), route_msg or message or "")
         if branch is not None:
             return BranchTriggerDecision(
                 trigger_type=TRIGGER_ARRIVAL_SOFT,
@@ -437,7 +460,7 @@ def evaluate_branch_trigger_routing(
                 pending_branch_id=int(branch.id),
             )
 
-    match = match_branch_trigger(db, int(tenant_id or 0), message or "")
+    match = match_branch_trigger(db, int(tenant_id or 0), route_msg or message or "")
     if match is None:
         return None
 
@@ -446,14 +469,14 @@ def evaluate_branch_trigger_routing(
         return None
 
     if match.trigger_type == TRIGGER_LOCATION_REQUEST:
-        return _build_location_decision(db, tenant_id, message, match, config)
+        return _build_location_decision(db, tenant_id, route_msg or message or "", match, config)
     if match.trigger_type == TRIGGER_ARRIVAL_SOFT:
         return _build_soft_decision(match, config)
     if match.trigger_type == TRIGGER_ARRIVAL_CONFIRMED:
-        return _build_confirmed_decision(db, tenant_id, message, match, config)
+        return _build_confirmed_decision(db, tenant_id, route_msg or message or "", match, config)
     if match.trigger_type == TRIGGER_NO_RESPONSE:
         return _build_no_response_decision(
-            db, tenant_id, message, match, customer_phone=customer_phone,
+            db, tenant_id, route_msg or message or "", match, customer_phone=customer_phone,
         )
     return None
 

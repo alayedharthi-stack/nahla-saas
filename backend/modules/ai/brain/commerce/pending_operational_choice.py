@@ -170,13 +170,32 @@ def evaluate_pending_operational_choice_routing(
     tenant_id: int,
     message: str,
     customer_phone: str = "",
+    inbound_metadata: Optional[dict] = None,
 ) -> Optional[Any]:
     """Consume pending operational choice before other branch routing."""
     from modules.ai.brain.commerce.branch_trigger_router import (  # noqa: PLC0415
         BranchTriggerDecision,
     )
+    from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415
+        has_explicit_operational_intent,
+        maybe_clear_stale_operational_choice,
+        should_break_stale_operational_choice,
+    )
 
     raw = (message or "").strip()
+    if should_break_stale_operational_choice(
+        raw,
+        inbound_metadata=inbound_metadata,
+    ) and not has_explicit_operational_intent(raw):
+        maybe_clear_stale_operational_choice(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            message=raw,
+            inbound_metadata=inbound_metadata,
+        )
+        return None
+
     if not raw or not is_pending_choice_confirmation(raw):
         return None
 
@@ -281,6 +300,20 @@ def _build_pickup_maps_or_contact_delivery(
     )
 
 
+def read_pending_operational_choice(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+) -> Tuple[str, int]:
+    order_prep = _load_order_prep_from_db(
+        db,
+        tenant_id=int(tenant_id or 0),
+        customer_phone=customer_phone,
+    )
+    return load_pending_operational_context(order_prep)
+
+
 __all__ = [
     "PENDING_PICKUP_MAPS_OR_CONTACT",
     "clear_pending_operational_choice",
@@ -288,4 +321,5 @@ __all__ = [
     "is_pending_choice_confirmation",
     "load_pending_operational_context",
     "persist_pending_operational_choice",
+    "read_pending_operational_choice",
 ]
