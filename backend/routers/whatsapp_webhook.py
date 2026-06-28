@@ -7261,8 +7261,9 @@ async def _handle_merchant_message(
             _btr_decision = _evaluate_branch_trigger_routing(
                 db,
                 tenant_id=tenant_id,
-                message=_pre_brain_customer_msg,
+                message=text or "",
                 customer_phone=to,
+                inbound_metadata=inbound_metadata,
             )
         except Exception as _btr_exc:  # noqa: BLE001
             logger.warning(

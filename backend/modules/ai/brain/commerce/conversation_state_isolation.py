@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Any, Optional
+from typing import Any, Optional, Optional
 
 logger = logging.getLogger("nahla.brain.conversation_state_isolation")
 
@@ -116,6 +116,7 @@ def should_replay_pending_question(
     *,
     inbound_text: str = "",
     last_question: str = "",
+    inbound_metadata: Optional[dict] = None,
 ) -> bool:
     """
     True only when replaying ``last_question_asked`` is conversationally valid.
@@ -129,12 +130,40 @@ def should_replay_pending_question(
     if not raw:
         return False
     try:
+        from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415
+            has_explicit_operational_intent,
+            pending_question_is_operational_choice,
+            should_break_stale_operational_choice,
+        )
+
+        if pending_question_is_operational_choice(last_q) and (
+            should_break_stale_operational_choice(
+                raw,
+                inbound_metadata=inbound_metadata,
+            )
+            and not has_explicit_operational_intent(raw)
+        ):
+            logger.info(
+                "[CONVERSATION_STATE_ISOLATION] operational_choice_replay_blocked "
+                "preview=%r",
+                raw[:72],
+            )
+            return False
+    except Exception:  # noqa: BLE001
+        logger.exception("[CONVERSATION_STATE_ISOLATION] operational_choice_probe_failed")
+    try:
+        from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415
+            customer_turn_probe_message,
+        )
+
+        probe = customer_turn_probe_message(raw) or raw
         from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: PLC0415
             resolve_current_turn_social_non_commerce,
         )
 
         current_turn = resolve_current_turn_social_non_commerce(
-            raw,
+            probe,
+            inbound_metadata=inbound_metadata,
             last_question=last_q,
         )
         if current_turn.matched:
