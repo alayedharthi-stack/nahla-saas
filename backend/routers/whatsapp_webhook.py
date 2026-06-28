@@ -7716,6 +7716,11 @@ async def _handle_merchant_message(
                     logger.exception(
                         "[STAFF_CONTACT_POLICY] pending_contact_target_outbound_capture_failed",
                     )
+            except Exception as _scp_send_exc:  # noqa: BLE001
+                logger.warning(
+                    "[STAFF_CONTACT_POLICY] text send failed tenant=%s err=%s",
+                    tenant_id, _scp_send_exc,
+                )
 
             _scp_contacts_ok = False
             if (
