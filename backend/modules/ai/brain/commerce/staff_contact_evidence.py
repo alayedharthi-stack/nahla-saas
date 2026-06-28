@@ -361,7 +361,14 @@ def classify_staff_contact_request(
     role_graph: Optional[StaffRoleAliasGraph] = None,
 ) -> StaffContactRequest:
     """Classify inbound staff-contact intent (deterministic)."""
-    raw = (message or "").strip()
+    try:
+        from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+            staff_contact_intent_message,
+        )
+
+        raw = staff_contact_intent_message(message or "")
+    except Exception:  # noqa: BLE001
+        raw = (message or "").strip()
     if not raw:
         return StaffContactRequest(kind="none")
 

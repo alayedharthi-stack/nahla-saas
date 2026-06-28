@@ -189,6 +189,15 @@ def evaluate_staff_contact_policy(
         )
         return None
 
+    try:
+        from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+            staff_contact_intent_message,
+        )
+
+        _intent_msg = staff_contact_intent_message(message or "")
+    except Exception:  # noqa: BLE001
+        _intent_msg = (message or "").strip()
+
     registry = load_staff_contact_registry(
         db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
     )
@@ -222,7 +231,7 @@ def evaluate_staff_contact_policy(
                 )
             else:
                 _inbound_target = capture_pending_target_from_inbound(
-                    message or "",
+                    _intent_msg,
                     registry=registry,
                     created_turn=_brain_turn,
                 )
@@ -252,7 +261,7 @@ def evaluate_staff_contact_policy(
         _continuity = None
 
     request = classify_staff_contact_request(
-        message or "",
+        _intent_msg,
         registry=registry,
         role_graph=role_graph,
     )
@@ -300,14 +309,14 @@ def evaluate_staff_contact_policy(
             request_kind="general_channel",
         )
 
-    _resolution_message = _continuity_synthetic or (message or "")
+    _resolution_message = _continuity_synthetic or _intent_msg or (message or "")
     registry_match = registry.match_record_in_message(_resolution_message) is not None
-    explicit_ask = bool(_CONTACT_ASK_RE.search(_evidence_norm(message or "")))
+    explicit_ask = bool(_CONTACT_ASK_RE.search(_evidence_norm(_intent_msg)))
     if _continuity is not None:
         explicit_ask = True
 
     if request.kind == "named" and not staff_policy_applies_to_named_request(
-        message or "",
+        _intent_msg,
         registry_match=registry_match,
         explicit_contact_ask=explicit_ask,
     ):

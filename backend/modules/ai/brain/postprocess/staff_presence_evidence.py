@@ -78,6 +78,16 @@ def _resolve_matched_record(
     raw: str,
     registry: StaffContactRegistry,
 ) -> Optional[StaffContactRecord]:
+    try:
+        from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+            staff_contact_intent_message,
+        )
+
+        raw = staff_contact_intent_message(raw or "")
+    except Exception:  # noqa: BLE001
+        raw = (raw or "").strip()
+    if not raw:
+        return None
     matched = registry.match_record_in_message(raw)
     if matched is not None:
         return matched
@@ -126,13 +136,21 @@ def evaluate_staff_presence_evidence(
     registry: Optional[StaffContactRegistry] = None,
 ) -> StaffPresenceEvidence:
     raw = (message or "").strip()
+    try:
+        from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+            staff_contact_intent_message,
+        )
+
+        intent_raw = staff_contact_intent_message(raw)
+    except Exception:  # noqa: BLE001
+        intent_raw = raw
     staff_context_active = False
     try:
         from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
             is_staff_or_contact_context,
         )
 
-        staff_context_active = bool(raw) and is_staff_or_contact_context(raw)
+        staff_context_active = bool(intent_raw) and is_staff_or_contact_context(intent_raw)
     except Exception:  # noqa: BLE001
         staff_context_active = False
 
