@@ -54,7 +54,7 @@ def _commerce_already_blocked(ctx: Any, message: str) -> bool:
             inbound_metadata=_inbound_metadata(ctx),
         )
         return bool(blocked and blocked.block_commerce)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional non-commerce block probe
         return False
 
 
@@ -70,7 +70,7 @@ def _has_operational_caption_signal(caption: str) -> bool:
 
         if resolve_inbound_link_intent(text) != LinkIntentType.UNKNOWN_LINK:
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional link intent probe
         pass
     try:
         from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
@@ -79,7 +79,7 @@ def _has_operational_caption_signal(caption: str) -> bool:
 
         if classify_staff_contact_request(text).kind != "none":
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional staff contact probe
         pass
     try:
         from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
@@ -88,7 +88,7 @@ def _has_operational_caption_signal(caption: str) -> bool:
 
         if is_product_visual_request(text):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product visual probe
         pass
     try:
         from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
@@ -97,7 +97,7 @@ def _has_operational_caption_signal(caption: str) -> bool:
 
         if has_explicit_purchase_intent(text):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional purchase intent probe
         pass
     return False
 
