@@ -71,7 +71,7 @@ def _brain_state_dict(state: Any) -> Dict[str, Any]:
             raw = state.to_dict() or {}
             return dict(raw) if isinstance(raw, dict) else {}
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[RECEIPT_GROUNDING] brain_state_to_dict_failed")
     out: Dict[str, Any] = {}
     op = getattr(state, "order_prep", None)
     if op is not None:
@@ -190,7 +190,7 @@ def _parse_receipt_amount(inbound_metadata: Optional[Dict[str, Any]]) -> Optiona
         if amt is not None:
             return float(str(amt).replace(",", "").strip())
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[RECEIPT_GROUNDING] receipt_amount_parse_failed")
     return None
 
 
@@ -225,7 +225,7 @@ def _has_order_ownership(brain_state: Dict[str, Any], prep: Dict[str, Any]) -> b
         if is_catalog_line_items_authoritative_from_prep(prep):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        logger.exception("[RECEIPT_GROUNDING] catalog_authority_probe_failed")
     status = str(prep.get("order_status") or "").strip().lower()
     if status in {
         "awaiting_payment",
