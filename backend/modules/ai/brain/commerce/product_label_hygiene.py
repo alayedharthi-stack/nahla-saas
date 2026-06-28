@@ -217,11 +217,25 @@ def is_negative_logistics_or_contact_context(text: str) -> bool:
     if not raw:
         return False
     try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            is_staff_or_contact_context,
+        )
+
+        if is_staff_or_contact_context(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional staff guard import
+        pass
+    try:
         from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
             product_browse_negative_context_reason,
         )
 
-        if product_browse_negative_context_reason(raw) == "contact_context":
+        reason = product_browse_negative_context_reason(raw)
+        if reason in {
+            "contact_context",
+            "staff_contact_context",
+            "showroom_escalation_context",
+        }:
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional discovery gate import
         pass

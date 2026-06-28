@@ -54,14 +54,27 @@ def browse_alternatives_requested(message: str) -> bool:
     return any(phrase in norm for phrase in _BROWSE_ALTERNATIVES_PHRASES)
 
 
-def inbound_exempt_from_availability_rewrite(message: str) -> bool:
+def inbound_exempt_from_availability_rewrite(
+    message: str,
+    *,
+    availability_context: Optional[Any] = None,
+) -> bool:
     """
     Turns where availability claim rewrite must not fire — broad browse,
-    browse continuation, delivery/location policy questions.
+    browse continuation, delivery/location policy questions, staff/contact.
     """
     raw = (message or "").strip()
     if not raw:
         return False
+    try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            should_block_product_availability_rewrite,
+        )
+
+        if should_block_product_availability_rewrite(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional staff guard import
+        pass
     try:
         from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
             global_availability_browse_requested,
@@ -129,14 +142,28 @@ def should_block_availability_rewrite(
     inbound_text: str,
     evidence_state: str,
     guard_action: str,
+    availability_context: Optional[Any] = None,
 ) -> bool:
     """
     Block canned rewrites — pass the brain/compose reply through unchanged.
 
-    Used for variant families, browse/delivery turns, and allowed evidence.
+    Used for variant families, browse/delivery turns, staff/contact/showroom
+    turns, and allowed evidence.
     """
-    if inbound_exempt_from_availability_rewrite(inbound_text):
+    if inbound_exempt_from_availability_rewrite(inbound_text, availability_context=availability_context):
         return True
+    try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            should_block_product_availability_rewrite,
+        )
+
+        if should_block_product_availability_rewrite(
+            inbound_text,
+            guard_action=guard_action,
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional staff guard import
+        pass
     if guard_action == "allowed":
         return True
     if guard_action in ("rewrite_conflict", "rewrite_unknown"):

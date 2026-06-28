@@ -67,8 +67,18 @@ _CONTACT_CONTEXT_RE = re.compile(
 _SOCIAL_CONTEXT_RE = re.compile(
     r"(?:"
     r"جزاك(?:م)?\s*الله|الله\s*يعطيك|بارك\s*الله|"
-    r"صلى\s*الله\s*عليه\s*وسلم|اللهم|دعاء|امين|آمين|"
+    r"صلى\s*الله\s*عليه\s*وسلم|اللهم|دعاء|"
     r"شكرا|شكرًا|مشكور|يعطيك\s*العافيه|يعطيك\s*العافية"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Religious «آمين» only — standalone amen, not a substring inside staff names/phrases.
+_RELIGIOUS_AMEN_RE = re.compile(
+    r"(?:"
+    r"^(?:اللهم\s+)?(?:آ?\s*م\s*ي\s*ن)\s*(?:يا\s*رب)?(?:[!.؟?\s]|$)"
+    r"|^(?:يا\s*رب)\s"
+    r"|جزاك(?:\s+الله)?(?:\s+خير)?[^\n]{0,40}(?:آ?\s*م\s*ي\s*ن)\s*(?:[!.؟?]|$)"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -156,8 +166,22 @@ def product_browse_negative_context_reason(message: str) -> str:
         return ""
     if _LOGISTICS_CONTEXT_RE.search(raw):
         return "logistics_context"
+    try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            has_explicit_product_commerce_intent,
+            is_staff_or_contact_context,
+            staff_contact_context_reason,
+        )
+
+        if not has_explicit_product_commerce_intent(raw):
+            if is_staff_or_contact_context(raw):
+                return staff_contact_context_reason(raw) or "staff_contact_context"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional staff guard import
+        pass
     if _CONTACT_CONTEXT_RE.search(raw):
         return "contact_context"
+    if _RELIGIOUS_AMEN_RE.search(raw):
+        return "social_context"
     if _SOCIAL_CONTEXT_RE.search(raw):
         return "social_context"
     return ""
