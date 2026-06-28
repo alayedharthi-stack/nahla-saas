@@ -233,6 +233,9 @@ def apply_catalog_product_grounding_guard(
     chosen_path: str = "",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    order_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    intent: Any = None,
 ) -> CatalogProductGroundingGuardResult:
     mode = catalog_product_grounding_guard_mode()
     original = str(reply or "")
@@ -246,6 +249,36 @@ def apply_catalog_product_grounding_guard(
     path = str(chosen_path or "").strip()
     if path in _DETERMINISTIC_ALLOW_PATHS:
         return CatalogProductGroundingGuardResult(reply=original, action="allowed")
+
+    try:
+        from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: PLC0415
+            resolve_current_turn_social_non_commerce,
+        )
+
+        last_question = str(getattr(order_state, "last_question_asked", "") or "")
+        current_turn = resolve_current_turn_social_non_commerce(
+            inbound_text or "",
+            intent=intent,
+            state=order_state,
+            inbound_metadata=inbound_metadata,
+            last_question=last_question,
+        )
+        if current_turn.matched:
+            logger.info(
+                "[CATALOG_PRODUCT_GROUNDING_GUARD] allow_social_noncommerce "
+                "tenant=%s conv=%s category=%s reason=%s",
+                tenant_id,
+                conversation_id,
+                current_turn.category or "-",
+                current_turn.reason or "-",
+            )
+            return CatalogProductGroundingGuardResult(
+                reply=original,
+                action="allowed_social_noncommerce",
+                reason=current_turn.reason or "current_turn_social_non_commerce",
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_GROUNDING_GUARD] social_non_commerce_probe_failed")
 
     if evidence is None:
         from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415

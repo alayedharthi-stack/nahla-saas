@@ -129,6 +129,26 @@ def should_replay_pending_question(
     if not raw:
         return False
     try:
+        from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: PLC0415
+            resolve_current_turn_social_non_commerce,
+        )
+
+        current_turn = resolve_current_turn_social_non_commerce(
+            raw,
+            last_question=last_q,
+        )
+        if current_turn.matched:
+            logger.info(
+                "[CONVERSATION_STATE_ISOLATION] pending_question_replay_blocked "
+                "category=%s reason=%s preview=%r",
+                current_turn.category or "-",
+                current_turn.reason or "-",
+                raw[:72],
+            )
+            return False
+    except Exception:  # noqa: BLE001
+        logger.exception("[CONVERSATION_STATE_ISOLATION] social_non_commerce_probe_failed")
+    try:
         from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
             is_checkout_escape_inquiry,
         )

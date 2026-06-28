@@ -345,19 +345,42 @@ def _ctx(
     )
 
 
-def test_decision_engine_refuses_to_greet_during_ordering():
+def test_decision_engine_allows_social_reply_during_stale_ordering():
+    """PR-D3.5 — greeting-only during stale ordering keeps social ownership."""
+    from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY, ACTION_PROPOSE_DRAFT_ORDER
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_PROPOSE_DRAFT_ORDER
     from modules.ai.brain.state.stages import STAGE_ORDERING
     from modules.ai.brain.types import INTENT_GREETING
 
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_ORDERING, product={"id": 1, "title": "فستان", "price": 189})
+    msg = "سلام عليكم"
 
-    decision = engine.decide(_ctx(state, INTENT_GREETING))
+    decision = engine.decide(_ctx(state, INTENT_GREETING, message=msg))
 
-    # MUST NOT greet — should keep collecting checkout details instead.
     assert decision.action != ACTION_GREET
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args.get("block_commerce_escalation") is True
+
+
+def test_decision_engine_continues_ordering_on_quantity_slot_answer():
+    """PR-D3.5 — slot-shaped quantity answers must still continue checkout/order."""
+    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.state.stages import STAGE_ORDERING
+    from modules.ai.brain.types import INTENT_GENERAL, OrderPreparationState
+
+    engine = DefaultDecisionEngine()
+    state = _make_state(STAGE_ORDERING, product={"id": 1, "title": "عسل طلح", "price": 100})
+    state.order_prep = OrderPreparationState.from_dict(
+        {"product_id": "sku-1", "missing_fields": ["quantity"]},
+    )
+    state.last_question_asked = "كم الكمية تحتاج؟"
+    msg = "نص كيلو"
+
+    decision = engine.decide(_ctx(state, INTENT_GENERAL, message=msg))
+
     assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
 
 

@@ -39,6 +39,14 @@ _STAFF_LOCATION_QUERY_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# Person identity ask — «من أمين؟», «مين البائع؟», not a product label.
+_STAFF_IDENTITY_QUERY_RE = re.compile(
+    r"^(?:من|مين|من\s+هو|مين\s+هو|وش\s+هو|ايش\s+هو)\s+"
+    r"(?!انت|أنت|انتِ|أنتِ|you\b)"
+    r"\S.{0,40}[\?؟]?$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 # Pronoun / follow-up contact — «ارسل رقمه», «رقمه», «أبي أكلمه».
 _STAFF_PRONOUN_CONTACT_RE = re.compile(
     r"(?:"
@@ -310,6 +318,8 @@ def is_staff_or_contact_context(
         logger.exception("[STAFF_CONTACT_PRODUCT_LABEL_GUARD] contact_route_check_failed")
 
     if _STAFF_LOCATION_QUERY_RE.search(norm):
+        return True
+    if _STAFF_IDENTITY_QUERY_RE.search(norm):
         return True
     if _STAFF_PRONOUN_CONTACT_RE.search(norm):
         return True
