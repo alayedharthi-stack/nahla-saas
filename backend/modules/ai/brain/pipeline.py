@@ -4564,6 +4564,16 @@ def _compose_base_response_goal(
 
     if (
         decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "image_ack_or_clarify"
+    ):
+        from .commerce.general_media_reply_guard import (  # noqa: PLC0415
+            compose_image_ack_or_clarify_goal,
+        )
+
+        return compose_image_ack_or_clarify_goal()
+
+    if (
+        decision.action == ACTION_LLM_REPLY
         and (decision.args or {}).get("topic") == "persona_social"
     ):
         from .persona_expression import compose_persona_social_goal  # noqa: PLC0415

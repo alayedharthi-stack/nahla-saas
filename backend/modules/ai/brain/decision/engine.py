@@ -1363,6 +1363,26 @@ class DefaultDecisionEngine:
                 exc,
             )
 
+        # ── 0a.56 General media ack (PR-D6B) ─────────────────────────────
+        # Vision-only inbounds without customer caption must not hijack
+        # identity/collaboration or commerce routes.
+        try:
+            from ..commerce.general_media_reply_guard import (  # noqa: PLC0415
+                try_general_media_ack_decision,
+            )
+
+            _media_ack_dec = try_general_media_ack_decision(
+                ctx, route="decision_engine",
+            )
+            if _media_ack_dec is not None:
+                return _media_ack_dec
+        except Exception as _media_ack_exc:  # noqa: BLE001
+            logger.exception(
+                "[GENERAL_MEDIA_REPLY] decide_failed tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _media_ack_exc,
+            )
+
         # ── 0a.565 Identity / collaboration guard (Jun 2026) ─────────────
         # Self-intro or collaboration inbounds must not assume purchase intent.
         try:

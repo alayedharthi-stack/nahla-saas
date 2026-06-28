@@ -30,12 +30,24 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
     from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
         is_identity_collaboration_without_purchase,
     )
+    from modules.ai.brain.commerce.link_intent_media_source_guard import (  # noqa: PLC0415
+        link_intent_message,
+    )
+    from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
+        is_media_framed_inbound_message,
+    )
     from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: PLC0415
     from modules.ai.brain.types import Decision  # noqa: PLC0415
 
-    msg = (getattr(ctx, "message", None) or "").strip()
-    if not msg:
+    full_msg = (getattr(ctx, "message", None) or "").strip()
+    if not full_msg:
         return None
+    if is_media_framed_inbound_message(full_msg):
+        msg = link_intent_message(full_msg).strip()
+        if not msg:
+            return None
+    else:
+        msg = full_msg
     try:
         from modules.ai.brain.state.product_information_topic import (  # noqa: PLC0415
             detect_product_information_topic_shift,
