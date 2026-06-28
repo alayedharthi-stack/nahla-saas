@@ -93,12 +93,12 @@ def _is_branch_location_only(message: str) -> bool:
         )
         from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
             LinkIntentType,
-            resolve_link_intent,
+            resolve_inbound_link_intent,
         )
 
         if has_explicit_contact_intent(message or ""):
             return False
-        return resolve_link_intent(message or "") == LinkIntentType.PHYSICAL_LOCATION
+        return resolve_inbound_link_intent(message or "") == LinkIntentType.PHYSICAL_LOCATION
     except Exception:
         return False
 

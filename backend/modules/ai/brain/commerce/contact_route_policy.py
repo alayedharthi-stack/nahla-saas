@@ -123,10 +123,10 @@ def is_location_query(message: str) -> bool:
     try:
         from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
             LinkIntentType,
-            resolve_link_intent,
+            resolve_inbound_link_intent,
         )
 
-        resolved = resolve_link_intent(raw)
+        resolved = resolve_inbound_link_intent(raw)
         if resolved == LinkIntentType.PHYSICAL_LOCATION:
             return True
         if resolved in (

@@ -1303,10 +1303,13 @@ class DefaultDecisionEngine:
             pass
 
         try:
-            from ..commerce.link_intent import LinkIntentType, resolve_link_intent
+            from ..commerce.link_intent import (
+                LinkIntentType,
+                resolve_inbound_link_intent,
+            )
             from ..execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
-            _link_intent = resolve_link_intent(ctx.message or "")
+            _link_intent = resolve_inbound_link_intent(ctx.message or "")
             if _link_intent == LinkIntentType.WEBSITE_URL:
                 logger.info(
                     "[LINK_INTENT] tenant=%s route=store_info",
@@ -1353,8 +1356,12 @@ class DefaultDecisionEngine:
                     ),
                     confidence=0.94,
                 )
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — link intent gate must not block decide
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[LINK_INTENT] decide_failed tenant=%s err=%s",
+                ctx.tenant_id,
+                exc,
+            )
 
         # ── 0a.565 Identity / collaboration guard (Jun 2026) ─────────────
         # Self-intro or collaboration inbounds must not assume purchase intent.
@@ -2675,11 +2682,25 @@ class DefaultDecisionEngine:
             )
 
         if intent.name in {INTENT_ASK_STORE_INFO, INTENT_ONLINE_STORE_INQUIRY}:
-            return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "store_info"},
-                reason="customer asked for the e-commerce store link",
+            from ..commerce.link_intent_media_source_guard import (  # noqa: PLC0415
+                is_media_framed_inbound_message,
+                link_intent_message,
             )
+
+            _store_msg = ctx.message or ""
+            if is_media_framed_inbound_message(_store_msg) and not link_intent_message(
+                _store_msg,
+            ).strip():
+                logger.info(
+                    "[LINK_INTENT] tenant=%s skip=store_info vision_only_no_caption",
+                    ctx.tenant_id,
+                )
+            else:
+                return Decision(
+                    action=ACTION_FAQ_REPLY,
+                    args={"topic": "store_info"},
+                    reason="customer asked for the e-commerce store link",
+                )
 
         if intent.name == INTENT_ASK_LOCATION:
             try:
