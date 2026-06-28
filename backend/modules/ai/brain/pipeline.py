@@ -3091,6 +3091,36 @@ class MerchantBrain:
                 tenant_id, _setg_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.staff_presence_truth_guard import (  # noqa: PLC0415
+                apply_staff_presence_truth_guard,
+            )
+            _sptg = apply_staff_presence_truth_guard(
+                reply=reply or "",
+                inbound_text=message or "",
+                db=db,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                state=new_state,
+                store_contact_phone=str(
+                    (getattr(ctx.facts, "store_contact_phone", None) if ctx else None)
+                    or (profile or {}).get("store_contact_phone")
+                    or ""
+                ),
+            )
+            if _sptg.replaced:
+                reply = _sptg.reply
+                _guard_replaced["staff_presence_truth_guard"] = True
+            if _sptg.staff_presence_claim_blocked:
+                result.data["staff_presence_claim_blocked"] = True
+                if _sptg.reason:
+                    result.data["staff_presence_guard_reason"] = _sptg.reason
+        except Exception as _sptg_exc:  # noqa: BLE001
+            logger.warning(
+                "[STAFF_PRESENCE_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _sptg_exc,
+            )
+
         _availability_ctx: Optional[Dict[str, Any]] = None
 
         try:
@@ -4061,6 +4091,25 @@ def _build_reply_state(
 
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
 
+    try:
+        from modules.ai.brain.postprocess.staff_presence_compose import (  # noqa: PLC0415
+            enrich_decision_args_for_staff_presence_compose,
+        )
+
+        enrich_decision_args_for_staff_presence_compose(
+            decision,
+            db=db,
+            tenant_id=getattr(ctx, "tenant_id", None),
+            message=ctx.message or "",
+            state=current_state,
+            store_contact_phone=str(getattr(ctx.facts, "store_contact_phone", "") or ""),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_PRESENCE_COMPOSE] skipped tenant=%s",
+            getattr(ctx, "tenant_id", None),
+        )
+
     _persona_topic = persona_topic_from_decision_args(decision.args)
     _persona_kind = str((decision.args or {}).get("persona_kind") or "").strip()
     _contextual_clarify = (
@@ -4528,7 +4577,11 @@ def _compose_base_response_goal(
     ):
         from .persona_expression import compose_non_sales_ambiguous_goal  # noqa: PLC0415
 
-        return compose_non_sales_ambiguous_goal()
+        goal = compose_non_sales_ambiguous_goal()
+        overlay = str((decision.args or {}).get("staff_presence_compose_overlay") or "").strip()
+        if overlay:
+            goal = f"{goal} | {overlay}"
+        return goal
 
     if (
         decision.action == ACTION_LLM_REPLY
