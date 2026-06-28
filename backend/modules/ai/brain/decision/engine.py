@@ -935,7 +935,11 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
-        _current_social_nc = _current_turn_social_noncommerce(ctx)
+        from ..current_turn_social_non_commerce import CurrentTurnSocialNonCommerce  # noqa: PLC0415
+
+        _current_social_nc = CurrentTurnSocialNonCommerce(False)
+        if intent.name not in (INTENT_TALK_HUMAN, INTENT_COMPLAINT_REFUND):
+            _current_social_nc = _current_turn_social_noncommerce(ctx)
         if getattr(_current_social_nc, "matched", False):
             try:
                 ctx.current_turn_social_non_commerce = _current_social_nc  # type: ignore[attr-defined]

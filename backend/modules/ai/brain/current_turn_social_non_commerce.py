@@ -34,6 +34,8 @@ from .types import (
     INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_SOCIAL,
     INTENT_START_ORDER,
+    INTENT_TALK_HUMAN,
+    INTENT_COMPLAINT_REFUND,
     INTENT_TRACK_ORDER,
     Intent,
 )
@@ -62,6 +64,8 @@ _OPERATIONAL_NON_CATALOG_INTENTS = frozenset({
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_STORE_INFO,
     INTENT_TRACK_ORDER,
+    INTENT_TALK_HUMAN,
+    INTENT_COMPLAINT_REFUND,
 })
 
 _GREETING_ONLY_RE = re.compile(
@@ -291,9 +295,12 @@ def _has_product_evidence(message: str) -> bool:
     return bool(_PRODUCT_EVIDENCE_RE.search(_norm(message or "")))
 
 
-def _is_staff_contact_non_product(message: str) -> bool:
+def _is_staff_contact_non_product(message: str, *, intent: Optional[Intent] = None) -> bool:
     raw = (message or "").strip()
     if not raw:
+        return False
+    name = _intent_name(intent)
+    if name in {INTENT_TALK_HUMAN, INTENT_COMPLAINT_REFUND} and _intent_confidence(intent) >= 0.80:
         return False
     try:
         from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
@@ -405,7 +412,7 @@ def resolve_current_turn_social_non_commerce(
         return CurrentTurnSocialNonCommerce(True, "humor", "joke_correction", 0.88)
     if media_type in {"audio", "voice"} and _UNCLEAR_AUDIO_RE.search(norm):
         return CurrentTurnSocialNonCommerce(True, "unclear_audio", "unclear_audio", 0.88)
-    if _is_staff_contact_non_product(raw):
+    if _is_staff_contact_non_product(raw, intent=intent):
         return CurrentTurnSocialNonCommerce(True, "staff_contact", "staff_contact_non_product", 0.88)
     if _QUANTITY_LIKE_RE.search(norm):
         if not _has_product_evidence(norm) and not _quantity_slot_expected(

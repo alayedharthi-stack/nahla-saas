@@ -22,7 +22,11 @@ from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: E402
 from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: E402
     resolve_current_turn_social_non_commerce,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_PROPOSE_DRAFT_ORDER  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_HANDOFF,
+    ACTION_LLM_REPLY,
+    ACTION_PROPOSE_DRAFT_ORDER,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: E402
@@ -37,6 +41,7 @@ from modules.ai.brain.types import (  # noqa: E402
     CommerceFacts,
     INTENT_GENERAL,
     INTENT_GREETING,
+    INTENT_TALK_HUMAN,
     Intent,
     MerchantConversationState,
     OrderPreparationState,
@@ -120,6 +125,53 @@ def test_greeting_plus_product_intent_remains_commerce() -> None:
     intent = intent_rules.match(message)
     verdict = resolve_current_turn_social_non_commerce(message, intent=intent)
     assert verdict.matched is False
+
+
+def test_explicit_handoff_not_classified_as_social_noncommerce() -> None:
+    message = "حولني لموظف"
+    intent = Intent(name=INTENT_TALK_HUMAN, confidence=0.92, raw_message=message)
+    verdict = resolve_current_turn_social_non_commerce(message, intent=intent)
+    assert verdict.matched is False
+
+
+def test_explicit_handoff_without_active_order_routes_handoff() -> None:
+    message = "حولني لموظف"
+    decision = DefaultDecisionEngine().decide(
+        _ctx(
+            message,
+            intent=Intent(name=INTENT_TALK_HUMAN, confidence=0.92, raw_message=message),
+            stage=STAGE_DISCOVERY,
+        ),
+    )
+    assert decision.action == ACTION_HANDOFF
+    assert not (decision.args or {}).get("during_active_order")
+
+
+def test_explicit_handoff_during_stale_order_routes_handoff() -> None:
+    message = "حولني لموظف"
+    prep = OrderPreparationState.from_dict(
+        {"product_id": "sku-1", "product_name": "عسل طلح"},
+    )
+    decision = DefaultDecisionEngine().decide(
+        _ctx(
+            message,
+            intent=Intent(name=INTENT_TALK_HUMAN, confidence=0.92, raw_message=message),
+            stage=STAGE_ORDERING,
+            product_focus=True,
+            order_prep=prep,
+        ),
+    )
+    assert decision.action == ACTION_HANDOFF
+    assert (decision.args or {}).get("during_active_order") is True
+
+
+def test_greeting_only_does_not_route_handoff() -> None:
+    message = "سلام عليكم"
+    decision = DefaultDecisionEngine().decide(
+        _ctx(message, stage=STAGE_ORDERING, product_focus=True),
+    )
+    assert decision.action == ACTION_LLM_REPLY
+    assert decision.action != ACTION_HANDOFF
 
 
 @pytest.mark.parametrize(
