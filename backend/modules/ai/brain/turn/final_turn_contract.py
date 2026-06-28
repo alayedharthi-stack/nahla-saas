@@ -122,6 +122,17 @@ def _merge_known_facts(ctx: BrainContext, commerce: Any) -> Dict[str, Any]:
     facts: Dict[str, Any] = {}
     if commerce is not None:
         facts.update(dict(getattr(commerce, "known_facts", None) or {}))
+    hint = getattr(ctx, "merchant_operational_policy_hint", None)
+    if hint is not None:
+        try:
+            from ..policy.contracts import hint_to_log_dict  # noqa: PLC0415
+
+            facts["merchant_operational_policy_shadow"] = hint_to_log_dict(hint)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[FINAL_TURN_CONTRACT] merchant_op_policy_shadow attach skipped err=%s",
+                exc,
+            )
     phone = str(getattr(ctx, "customer_phone", "") or "").strip()
     if phone:
         facts.setdefault("phone_known", True)

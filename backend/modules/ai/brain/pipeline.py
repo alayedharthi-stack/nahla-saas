@@ -1440,6 +1440,18 @@ class MerchantBrain:
                 _tas_exc,
             )
 
+        # ── 3.991 Merchant Operational Policy (shadow — no enforce / no compose) ─
+        try:
+            from .policy.shadow import prepare_merchant_operational_policy_shadow  # noqa: PLC0415
+
+            prepare_merchant_operational_policy_shadow(ctx, db=db)
+        except Exception as _mop_exc:  # noqa: BLE001  # noqa: silent-ok — shadow must not block decide
+            logger.debug(
+                "[MERCHANT_OP_POLICY] pre_decide skipped tenant=%s err=%s",
+                tenant_id,
+                _mop_exc,
+            )
+
         # ── 3.992 Commerce Turn Contract (pre-decide + Phase 2 catalog enforce) ─
         _commerce_turn_contract = None
         _log_commerce_turn_contract_divergence = None
