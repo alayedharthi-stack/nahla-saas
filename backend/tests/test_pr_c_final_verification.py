@@ -129,15 +129,18 @@ def _structured_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_smoke_location_plus_reception() -> None:
-    from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
+    from modules.ai.brain.commerce.branch_trigger_router import (
+        MSG_PICKUP_PREFERENCE_ASK,
+        evaluate_branch_trigger_routing,
+    )
 
     db = _smoke_db()
     d = evaluate_branch_trigger_routing(db, tenant_id=10, message="وين موقعكم")
     assert d is not None
     assert d.trigger_type == "location_request"
     assert d.maps_url
-    assert d.deliver_reception_after_maps is True
-    assert d.reception_call_target is not None
+    assert d.deliver_reception_after_maps is False
+    assert MSG_PICKUP_PREFERENCE_ASK not in d.reply_text
 
 
 def test_smoke_arrival_soft_no_escalation() -> None:

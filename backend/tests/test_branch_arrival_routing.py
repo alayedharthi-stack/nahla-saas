@@ -121,8 +121,11 @@ def test_location_only_does_not_deliver_reception() -> None:
     assert decision.deliver_contact is False
 
 
-def test_location_plus_reception_asks_before_vcard() -> None:
-    from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
+def test_location_plus_reception_sends_maps_for_explicit_location() -> None:
+    from modules.ai.brain.commerce.branch_trigger_router import (
+        MSG_PICKUP_PREFERENCE_ASK,
+        evaluate_branch_trigger_routing,
+    )
 
     db = _StructuredDB(
         branches=[_branch(location_response_mode="location_plus_reception")],
@@ -136,7 +139,7 @@ def test_location_plus_reception_asks_before_vcard() -> None:
     assert decision.maps_url
     assert decision.deliver_reception_after_maps is False
     assert decision.reception_call_target is None
-    assert "المعرض" in decision.reply_text
+    assert MSG_PICKUP_PREFERENCE_ASK not in decision.reply_text
 
 
 def test_arrival_soft_does_not_escalate_or_vcard() -> None:
