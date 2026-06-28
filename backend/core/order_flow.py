@@ -570,15 +570,31 @@ def _compose_address_interview(missing: List[str]) -> str:
     return "\n".join(lines)
 
 
-def _compose_receipt_ack(summary: Dict[str, Any]) -> str:
+def _compose_receipt_ack(
+    summary: Dict[str, Any],
+    *,
+    brain_state: Optional[Dict[str, Any]] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build the deterministic payment-receipt Arabic reply.
 
     Product, quantity, and address asks require confirmed order evidence
     (see ``core.receipt_order_grounding``). Receipt media alone grounds
     only transfer received + optional amount review."""
-    from core.receipt_order_grounding import compose_grounded_receipt_ack  # noqa: PLC0415
+    from core.receipt_order_grounding import (  # noqa: PLC0415
+        apply_receipt_grounding_to_summary,
+        compose_grounded_receipt_ack,
+        evaluate_receipt_order_grounding,
+    )
 
-    return compose_grounded_receipt_ack(summary)
+    grounded = dict(summary or {})
+    if "can_mention_receipt_product" not in grounded:
+        evidence = evaluate_receipt_order_grounding(
+            brain_state or {},
+            inbound_metadata=inbound_metadata,
+        )
+        grounded = apply_receipt_grounding_to_summary(grounded, evidence)
+    return compose_grounded_receipt_ack(grounded)
 
 
 def _receipt_text_fields(inbound_metadata: Dict[str, Any]) -> Dict[str, Any]:

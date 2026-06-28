@@ -176,6 +176,16 @@ def test_payment_evidence_override_promotes_prior_receipt(
                 "order_prep": {
                     "awaiting_payment_receipt": True,
                     "city": "الرياض",
+                    "catalog_line_items_authoritative": True,
+                    "catalog_checkout_total": 360,
+                    "line_items": [{
+                        "product_id": "p-sidr",
+                        "product_name": "عسل سدر",
+                        "quantity": 1,
+                        "unit_price": 360,
+                        "from_native_catalog_order": True,
+                        "match_status": "confirmed",
+                    }],
                 },
             },
         ),
