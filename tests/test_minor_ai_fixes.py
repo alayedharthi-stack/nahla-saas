@@ -308,6 +308,24 @@ def test_rules_do_not_misfire_on_unrelated_messages() -> None:
 # ────────────────────────────────────────────────────────────────────
 
 
+def _confirmed_receipt_brain_state() -> dict:
+    return {
+        "draft_order_id": "draft-test",
+        "order_prep": {
+            "catalog_line_items_authoritative": True,
+            "catalog_checkout_total": 360,
+            "line_items": [{
+                "product_id": "p-sidr",
+                "product_name": "عسل سدر",
+                "quantity": 1,
+                "unit_price": 360,
+                "from_native_catalog_order": True,
+                "match_status": "confirmed",
+            }],
+        },
+    }
+
+
 def test_receipt_ack_appends_address_interview_when_missing() -> None:
     """After a confirmed receipt, the deterministic ACK must ask for
     the missing shipping fields in a single structured paragraph."""
@@ -322,7 +340,7 @@ def test_receipt_ack_appends_address_interview_when_missing() -> None:
         "google_maps_url": "",
         "customer_first_name": "",
         "customer_last_name": "",
-    })
+    }, brain_state=_confirmed_receipt_brain_state())
     assert "وصلنا إيصال التحويل" in reply
     assert "الاسم الأول والأخير" in reply
     assert "مدينة التوصيل" in reply
@@ -345,7 +363,7 @@ def test_receipt_ack_skips_interview_when_fully_known() -> None:
         "google_maps_url": "",
         "customer_first_name": "محمد",
         "customer_last_name": "السبيعي",
-    })
+    }, brain_state=_confirmed_receipt_brain_state())
     assert "الاسم الأول والأخير" not in reply
     assert "مدينة التوصيل" not in reply
     assert "العنوان الوطني: RHRH1234" in reply
