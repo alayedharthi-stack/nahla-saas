@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import logging
 from typing import Optional
+
+logger = logging.getLogger("nahla.brain.entity_extraction_guard")
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -115,6 +118,17 @@ def is_general_contact_numbers_request(message: str) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    try:
+        from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+            is_pronoun_staff_contact_followup,
+        )
+
+        if is_pronoun_staff_contact_followup(raw):
+            return False
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ENTITY_EXTRACTION_GUARD] pronoun_staff_followup_import_failed",
+        )
     if extract_staff_name_candidate(raw):
         return False
     norm = _norm(raw)

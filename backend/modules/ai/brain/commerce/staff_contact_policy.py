@@ -193,11 +193,77 @@ def evaluate_staff_contact_policy(
         db, int(tenant_id or 0), store_contact_phone=store_contact_phone,
     )
     role_graph = _load_role_graph(db, int(tenant_id or 0))
+
+    _continuity_synthetic = ""
+    _brain_turn = 0
+    if customer_phone:
+        try:
+            from core.order_flow import _load_brain_state  # noqa: PLC0415
+            from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                capture_pending_target_from_inbound,
+                clear_pending_contact_target,
+                persist_pending_contact_target,
+                resolve_pending_contact_followup,
+                should_clear_pending_on_topic_switch,
+                try_persist_pending_contact_target_from_outbound,
+            )
+
+            _cont_conv, _cont_bs = _load_brain_state(
+                db,
+                tenant_id=int(tenant_id or 0),
+                phone=str(customer_phone or ""),
+            )
+            _brain_turn = int((_cont_bs or {}).get("turn") or 0)
+            if should_clear_pending_on_topic_switch(message or ""):
+                clear_pending_contact_target(
+                    db,
+                    tenant_id=int(tenant_id or 0),
+                    phone=str(customer_phone or ""),
+                )
+            else:
+                _inbound_target = capture_pending_target_from_inbound(
+                    message or "",
+                    registry=registry,
+                    created_turn=_brain_turn,
+                )
+                if _inbound_target is not None:
+                    persist_pending_contact_target(
+                        db,
+                        tenant_id=int(tenant_id or 0),
+                        phone=str(customer_phone or ""),
+                        target=_inbound_target,
+                    )
+
+            _continuity = resolve_pending_contact_followup(
+                db,
+                tenant_id=int(tenant_id or 0),
+                customer_phone=str(customer_phone or ""),
+                message=message or "",
+                store_contact_phone=store_contact_phone,
+            )
+        except Exception as _cont_exc:  # noqa: BLE001
+            logger.exception(
+                "[STAFF_CONTACT_POLICY] continuity_failed tenant=%s err=%s",
+                tenant_id,
+                _cont_exc,
+            )
+            _continuity = None
+    else:
+        _continuity = None
+
     request = classify_staff_contact_request(
         message or "",
         registry=registry,
         role_graph=role_graph,
     )
+
+    if _continuity is not None:
+        request, _pending_target, _continuity_synthetic = _continuity
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s continuity_override lookup=%r",
+            tenant_id,
+            _pending_target.lookup_name,
+        )
 
     if request.kind in {"none", "arrival", "not_responding"}:
         return None
@@ -234,8 +300,11 @@ def evaluate_staff_contact_policy(
             request_kind="general_channel",
         )
 
-    registry_match = registry.match_record_in_message(message or "") is not None
+    _resolution_message = _continuity_synthetic or (message or "")
+    registry_match = registry.match_record_in_message(_resolution_message) is not None
     explicit_ask = bool(_CONTACT_ASK_RE.search(_evidence_norm(message or "")))
+    if _continuity is not None:
+        explicit_ask = True
 
     if request.kind == "named" and not staff_policy_applies_to_named_request(
         message or "",
@@ -248,7 +317,11 @@ def evaluate_staff_contact_policy(
         )
         return None
 
-    resolution = resolve_staff_contact(registry, request, message=message or "")
+    resolution = resolve_staff_contact(
+        registry,
+        request,
+        message=_resolution_message,
+    )
 
     if not resolution.found and resolution.reason == "no_named_intent":
         _log_target_trace(
@@ -314,7 +387,7 @@ def evaluate_staff_contact_policy(
             resolution_reason=resolution.reason,
             deliver=True,
         )
-        return _decision_with_target(
+        decision = _decision_with_target(
             request,
             reply_text=build_deliver_reply_text(resolution.record),
             call_target=target,
@@ -322,6 +395,39 @@ def evaluate_staff_contact_policy(
             reason=resolution.reason,
             evidence_source=resolution.record.source,
         )
+        if customer_phone:
+            try:
+                from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                    pending_target_from_record,
+                    persist_pending_contact_target,
+                    try_persist_pending_contact_target_from_outbound,
+                )
+
+                _pt = pending_target_from_record(
+                    resolution.record,
+                    source="contact_delivered",
+                    confidence=0.98,
+                    created_turn=_brain_turn,
+                )
+                if _pt is not None:
+                    persist_pending_contact_target(
+                        db,
+                        tenant_id=int(tenant_id or 0),
+                        phone=str(customer_phone or ""),
+                        target=_pt,
+                    )
+                try_persist_pending_contact_target_from_outbound(
+                    db,
+                    tenant_id=int(tenant_id or 0),
+                    phone=str(customer_phone or ""),
+                    outbound_text=decision.reply_text,
+                    store_contact_phone=store_contact_phone,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[STAFF_CONTACT_POLICY] pending_contact_target_capture_failed",
+                )
+        return decision
 
     _log_target_trace(
         tenant_id=tenant_id,
@@ -347,7 +453,7 @@ def evaluate_staff_contact_policy(
             reason="ambiguous_staff_clarify",
         )
 
-    return _decision_with_target(
+    not_cfg = _decision_with_target(
         request,
         reply_text=build_not_configured_reply(
             resolution,
@@ -356,6 +462,25 @@ def evaluate_staff_contact_policy(
         deliver_contact=False,
         reason=resolution.reason,
     )
+    if customer_phone and _continuity is not None:
+        try:
+            from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                try_persist_pending_contact_target_from_outbound,
+            )
+
+            try_persist_pending_contact_target_from_outbound(
+                db,
+                tenant_id=int(tenant_id or 0),
+                phone=str(customer_phone or ""),
+                outbound_text=not_cfg.reply_text,
+                store_contact_phone=store_contact_phone,
+                source="continuity_not_configured",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[STAFF_CONTACT_POLICY] pending_contact_target_outbound_persist_failed",
+            )
+    return not_cfg
 
 
 def evaluate_generic_handoff_contact_policy(

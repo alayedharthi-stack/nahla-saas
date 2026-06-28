@@ -7700,6 +7700,22 @@ async def _handle_merchant_message(
                         "staff_contact_evidence_source": _scp_decision.evidence_source,
                     },
                 )
+                try:
+                    from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                        try_persist_pending_contact_target_from_outbound,
+                    )
+
+                    try_persist_pending_contact_target_from_outbound(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=to,
+                        outbound_text=_scp_reply or "",
+                        source="staff_contact_policy_outbound",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[STAFF_CONTACT_POLICY] pending_contact_target_outbound_capture_failed",
+                    )
             except Exception as _scp_send_exc:  # noqa: BLE001
                 logger.warning(
                     "[STAFF_CONTACT_POLICY] text send failed tenant=%s err=%s",
@@ -7896,6 +7912,22 @@ async def _handle_merchant_message(
                         "staff_recovery_vcard_sent": _scr_contacts_ok,
                     },
                 )
+                try:
+                    from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                        try_persist_pending_contact_target_from_outbound,
+                    )
+
+                    try_persist_pending_contact_target_from_outbound(
+                        db,
+                        tenant_id=tenant_id,
+                        phone=to,
+                        outbound_text=_scr_reply or "",
+                        source="staff_contact_recovery_outbound",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[STAFF_CONTACT_RECOVERY] pending_contact_target_outbound_capture_failed",
+                    )
             except Exception as _scr_send_exc:  # noqa: BLE001
                 logger.warning(
                     "[STAFF_CONTACT_RECOVERY] send failed tenant=%s err=%s",
