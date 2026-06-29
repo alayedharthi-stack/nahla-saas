@@ -49,6 +49,31 @@ _SUBJECT_STOP_TOKENS = frozenset({
     "متوفر", "موجود", "available",
 })
 
+_UNAVAILABLE_KB_GUIDANCE = (
+    "UNAVAILABLE KB compose principles: use KB facts only; if the customer "
+    "greeted you, acknowledge the greeting briefly first; clearly and gently "
+    "state the requested item/service is NOT currently available; if KB facts "
+    "describe a next step (waitlist, registration, reservation, follow-up contact), "
+    "offer it naturally without pressure — only what KB states; if KB has no next "
+    "step, do not invent one; do not invent availability dates, alternatives, "
+    "phone numbers, or contact names; do not suggest catalog/browse unless KB "
+    "explicitly mentions them; keep the reply brief, warm, natural Saudi Arabic "
+    "— no rigid templates; emoji policy: no shopping/cart/catalog emojis "
+    "(e.g. cart/bag/checkmark-for-available); use no emoji or at most one light "
+    "neutral emoji such as a leaf when it fits naturally."
+)
+
+_KB_NEXT_STEP_SIGNAL_RE = re.compile(
+    r"(?:"
+    r"\u062a\u0633\u062c\u064a\u0644|\u062d\u062c\u0632|\u0627\u0644\u062a\u0633\u062c\u064a\u0644|\u0627\u0644\u062d\u062c\u0632|"
+    r"\u062a\u0648\u0627\u0635\u0644|\u0627\u0644\u062a\u0648\u0627\u0635\u0644|\u0627\u062a\u0635\u0644|\u0631\u0627\u0633\u0644|"
+    r"waitlist|registration|register|reservation|reserve|follow-up|contact"
+    r")",
+    re.I | re.UNICODE,
+)
+
+_KB_UNAVAILABLE_EMOJI_REMOVE = ("🛒", "🛍️", "✅", "✨", "🔥", "🏷️")
+
 
 @dataclass(frozen=True)
 class KBAvailabilityHit:
@@ -337,10 +362,42 @@ def build_kb_availability_forbidden_claims(polarity: str) -> List[str]:
         claims.extend([
             "positive_availability",
             "motawfir_beed_khiyarat",
+            "shopping_cart_emoji",
+            "invented_availability_date",
+            "invented_contact_or_next_step",
         ])
     elif polarity == "unknown":
         claims.append("positive_availability_without_kb_evidence")
     return claims
+
+
+def kb_body_has_next_step(body: str) -> bool:
+    """True when KB body text signals registration/waitlist/contact follow-up."""
+    return bool(_KB_NEXT_STEP_SIGNAL_RE.search(body or ""))
+
+
+def strip_kb_unavailable_shopping_emojis(reply: str) -> str:
+    """Remove shopping/availability-implying emojis from unavailable KB replies."""
+    text = reply or ""
+    for ch in _KB_UNAVAILABLE_EMOJI_REMOVE:
+        text = text.replace(ch, "")
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r" +\n", "\n", text)
+    return text.strip()
+
+
+def apply_kb_availability_reply_polish(
+    reply: str,
+    *,
+    topic: str = "",
+    availability_polarity: str = "",
+) -> str:
+    """Post-compose polish for kb_availability_facts negative replies."""
+    if (topic or "").strip() != TOPIC_KB_AVAILABILITY_FACTS:
+        return reply or ""
+    if (availability_polarity or "").strip() != "negative":
+        return reply or ""
+    return strip_kb_unavailable_shopping_emojis(reply)
 
 
 def compose_kb_availability_facts_goal(args: Optional[Dict[str, Any]] = None) -> str:
@@ -357,10 +414,22 @@ def compose_kb_availability_facts_goal(args: Optional[Dict[str, Any]] = None) ->
         "Do NOT invent availability, prices, or staff contact beyond KB facts.",
     ]
     if polarity == "negative":
+        lines.append(_UNAVAILABLE_KB_GUIDANCE)
         lines.append(
             "KB confirms NOT available — never claim متوفر or suggest catalog alternatives "
             "unless KB facts explicitly mention them."
         )
+        kb_body = str(facts.get("kb_section_body") or "")
+        if kb_body_has_next_step(kb_body):
+            lines.append(
+                "KB facts include a follow-up/next step — mention it helpfully after "
+                "stating unavailability; quote contact names or actions only from KB."
+            )
+        else:
+            lines.append(
+                "KB facts do not describe a follow-up step — state unavailability only; "
+                "do not invent registration, waitlist, or contact actions."
+            )
     elif polarity == "positive":
         lines.append(
             "KB confirms availability — state only what KB facts support; do not expand "
@@ -480,9 +549,12 @@ __all__ = [
     "CHOSEN_PATH_KB_AVAILABILITY_FACTS",
     "KBAvailabilityHit",
     "TOPIC_KB_AVAILABILITY_FACTS",
+    "apply_kb_availability_reply_polish",
     "build_kb_availability_allowed_facts",
     "build_kb_availability_forbidden_claims",
     "compose_kb_availability_facts_goal",
+    "kb_body_has_next_step",
     "retrieve_non_catalog_availability_kb_hit",
+    "strip_kb_unavailable_shopping_emojis",
     "try_non_catalog_availability_kb_decision",
 ]
