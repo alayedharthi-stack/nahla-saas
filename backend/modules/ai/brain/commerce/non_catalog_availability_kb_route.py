@@ -427,6 +427,12 @@ def try_non_catalog_availability_kb_decision(
         message=message,
     )
     if hit is None:
+        logger.info(
+            "[KB_AVAILABILITY_ROUTE] tenant=%s route=%s subject=%r no_kb_hit",
+            tenant_id,
+            route or "-",
+            subject[:60],
+        )
         return None
 
     allowed_facts = build_kb_availability_allowed_facts(hit)
