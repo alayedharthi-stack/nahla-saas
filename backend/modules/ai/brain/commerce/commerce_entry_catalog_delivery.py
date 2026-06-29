@@ -69,6 +69,17 @@ _CATALOG_MISS_COMPLAINT_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_ORDER_CONTINUATION_RE = re.compile(
+    r"(?:"
+    r"أ?رسل\s*(?:ال)?(?:طلب|الطلب)"
+    r"|(?:كمّ?ل|اكمل|أ?كمل)\s*(?:ال)?(?:طلب|الطلب)"
+    r"|send\s+(?:the\s+)?order"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_ACTIVE_ORDER_STAGES = frozenset({"ordering", "checkout", "order"})
+
 _COMPARISON_KNOWLEDGE_RE = re.compile(
     r"(?:"
     r"(?:ال)?(?:فرق|اختلاف)|compare|comparison|أيهما|ايهما|"
@@ -201,6 +212,109 @@ def _is_explicit_catalog_browse_request(message: str, ctx: Any) -> bool:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — browse probe is best-effort
         pass
     return False
+
+
+def _is_explicit_catalog_only_request(message: str) -> bool:
+    """True for catalog/type browse asks — not order send/continuation wording."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if _ORDER_CONTINUATION_RE.search(raw):
+        return False
+    if _SEND_CATALOG_EXPLICIT_RE.search(raw):
+        return True
+    norm = _norm(raw)
+    if any(
+        token in norm
+        for token in ("كتalog", "catalog", "الانواع", "انواع", "المتوفر", "المتاح")
+    ):
+        return True
+    try:
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            has_explicit_broad_browse_request,
+            has_types_overview_ask,
+        )
+
+        if has_explicit_broad_browse_request(raw):
+            return True
+        if has_types_overview_ask(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog-only probe is best-effort
+        pass
+    return False
+
+
+def _has_active_order_or_order_prep_context(ctx: Any) -> bool:
+    """True when an active order funnel should beat generic catalog delivery."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return False
+
+    prep = getattr(state, "order_prep", None)
+    prep_product_id = str(getattr(prep, "product_id", "") or "").strip()
+    if prep_product_id:
+        return True
+
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    focus = dict(getattr(state, "current_product_focus", None) or {})
+    has_focus = bool(focus.get("id") or focus.get("product_id") or focus.get("title"))
+
+    if stage in _ACTIVE_ORDER_STAGES:
+        if prep is not None and (
+            prep_product_id
+            or getattr(prep, "customer_first_name", "")
+            or getattr(prep, "city", "")
+            or getattr(prep, "short_address_code", "")
+        ):
+            return True
+        if has_focus:
+            return True
+
+    message = str(getattr(ctx, "message", "") or "").strip()
+    if _ORDER_CONTINUATION_RE.search(message) and (
+        prep_product_id or stage in _ACTIVE_ORDER_STAGES
+    ):
+        return True
+
+    order_signals = bool(prep_product_id or has_focus or stage in _ACTIVE_ORDER_STAGES)
+    if not order_signals:
+        return False
+
+    try:
+        from modules.ai.brain.commerce.commerce_entry_orchestrator import (  # noqa: PLC0415
+            CustomerAction,
+            classify_customer_action,
+        )
+        from modules.ai.brain.commerce.status_reply_product_context import (  # noqa: PLC0415
+            extract_status_reply_quantity,
+        )
+
+        action = classify_customer_action(
+            message,
+            quantity_hint=extract_status_reply_quantity(message),
+            has_product_focus=has_focus,
+        )
+        if action in {CustomerAction.BUY, CustomerAction.QUANTITY}:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — buy/qty probe is best-effort
+        pass
+
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if intent_name == "start_order":
+        return True
+
+    return False
+
+
+def _order_context_blocks_catalog_delivery(ctx: Any, message: str) -> bool:
+    """CE2 must defer when order_prep/focus expects propose_draft_order recovery."""
+    if not _has_active_order_or_order_prep_context(ctx):
+        return False
+    if _is_status_product_delivery_request(message):
+        focus = dict(getattr(getattr(ctx, "state", None), "current_product_focus", None) or {})
+        if focus.get("from_status_reply") or focus.get("title"):
+            return False
+    return not _is_explicit_catalog_only_request(message)
 
 
 def _is_status_product_delivery_request(message: str) -> bool:
@@ -521,6 +635,14 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
         return None
 
     if _status_ce1_should_own(ctx) and not _is_status_product_delivery_request(message):
+        return None
+
+    if _order_context_blocks_catalog_delivery(ctx, message):
+        logger.info(
+            "[COMMERCE_ENTRY_CATALOG] defer — active order_prep/order context tenant=%s preview=%r",
+            getattr(ctx, "tenant_id", None),
+            message[:60],
+        )
         return None
 
     focus = dict(getattr(state, "current_product_focus", None) or {})

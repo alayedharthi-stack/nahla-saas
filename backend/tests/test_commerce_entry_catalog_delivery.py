@@ -36,7 +36,9 @@ from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    Intent,
     MerchantConversationState,
+    OrderPreparationState,
 )
 
 
@@ -311,3 +313,40 @@ class TestCommerceEntryCatalogDelivery:
         assert catalog_delivery_is_blocked(
             _ctx("وش الفرق عن السدر العادي؟", state=state, db=_StubDB()),
         )
+
+    def test_order_prep_product_id_defers_catalog_to_draft_order(self) -> None:
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: PLC0415
+
+        state = _state(
+            stage="ordering",
+            current_product_focus=None,
+            order_prep=OrderPreparationState(
+                product_id="ext-7",
+                customer_first_name="نورة",
+                city="جدة",
+                short_address_code="JEDD9988",
+            ),
+        )
+        state.last_search_candidates = [
+            {
+                "id": 7,
+                "external_id": "ext-7",
+                "title": "عسل السدر",
+                "can_checkout": True,
+                "orderable": True,
+            },
+        ]
+        message = "تمام، أرسل الطلب"
+        ctx = BrainContext(
+            tenant_id=33,
+            customer_phone="966500000001",
+            message=message,
+            intent=Intent(name="general", confidence=0.9, raw_message=message),
+            state=state,
+            facts=CommerceFacts(has_products=True, product_count=5, orderable=True),
+        )
+        catalog_dec = try_commerce_entry_catalog_decision(ctx)
+        assert catalog_dec is None
+        engine_dec = DefaultDecisionEngine().decide(ctx)
+        assert engine_dec.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert engine_dec.args.get("source") == "order_prep_recovery"
