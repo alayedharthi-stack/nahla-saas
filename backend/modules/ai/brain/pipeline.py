@@ -3367,6 +3367,12 @@ class MerchantBrain:
                     conversation_id=conversation_id,
                     state=new_state,
                     inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                    decision_topic=str((decision.args or {}).get("topic") or ""),
+                    availability_polarity=str(
+                        (decision.args or {}).get("availability_polarity") or ""
+                    ),
+                    chosen_path=_chosen_path,
+                    kb_availability_facts=(decision.args or {}).get("allowed_facts"),
                 )
                 if _crqg.replaced:
                     reply = _crqg.reply

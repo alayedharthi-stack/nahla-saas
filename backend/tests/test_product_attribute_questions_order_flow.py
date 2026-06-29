@@ -104,6 +104,11 @@ class TestProductAttributeDetection:
         assert detect_customer_owned_product_reference(msg)
         assert detect_product_information_topic_shift(msg)
 
+    def test_availability_fieh_not_attribute_question(self) -> None:
+        msg = "صباح الخير\nفيه عندك طرود نحل؟"
+        assert not detect_product_attribute_question(msg)
+        assert not detect_product_information_topic_shift(msg)
+
 
 class TestAttributeQuestionDecisionRouting:
     @pytest.mark.parametrize(

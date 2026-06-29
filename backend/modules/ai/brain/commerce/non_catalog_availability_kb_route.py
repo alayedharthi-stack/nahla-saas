@@ -58,7 +58,7 @@ _UNAVAILABLE_KB_GUIDANCE = (
     "step, do not invent one; do not invent availability dates, alternatives, "
     "phone numbers, or contact names; do not suggest catalog/browse unless KB "
     "explicitly mentions them; never reply with availability uncertainty "
-    "(e.g. ما نقدر نؤكد التوفر) — KB already confirms unavailability; "
+    "(e.g. ما نقدر نؤكد التوفر or قيد التحقق) — KB already confirms unavailability; "
     "keep the reply brief, warm, natural Saudi Arabic — no rigid templates."
 )
 

@@ -11,7 +11,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, List, Optional, Pattern, Tuple
+from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 from modules.ai.brain.intent_priority.types import (
     GOAL_GREETING_ONLY,
@@ -239,6 +239,25 @@ _NON_COMMERCE_INTENTS = frozenset({
 })
 
 
+def _kb_negative_availability_decision(
+    decision_topic: str = "",
+    availability_polarity: str = "",
+    chosen_path: str = "",
+    kb_availability_facts: Optional[Dict[str, Any]] = None,
+) -> bool:
+    polarity = (availability_polarity or "").strip()
+    if (
+        (decision_topic or "").strip() == "kb_availability_facts"
+        and polarity == "negative"
+    ):
+        return True
+    if (chosen_path or "").strip() == "kb_availability_facts":
+        facts = kb_availability_facts or {}
+        if str(facts.get("availability_polarity") or "").strip() == "negative":
+            return True
+    return False
+
+
 def select_arabic_commerce_fallback(
     *,
     intent_name: str = "",
@@ -247,7 +266,18 @@ def select_arabic_commerce_fallback(
     conversation_objective: str = "",
     state: Any = None,
     inbound_metadata: Optional[dict] = None,
+    decision_topic: str = "",
+    availability_polarity: str = "",
+    chosen_path: str = "",
+    kb_availability_facts: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
+    if _kb_negative_availability_decision(
+        decision_topic,
+        availability_polarity,
+        chosen_path=chosen_path,
+        kb_availability_facts=kb_availability_facts,
+    ):
+        return "", "kb_negative_suppressed"
     try:
         from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
             build_short_honey_order_clarify_reply,
@@ -484,8 +514,18 @@ def apply_commerce_reply_quality_guard(
     conversation_id: Optional[int] = None,
     state: Any = None,
     inbound_metadata: Optional[dict] = None,
+    decision_topic: str = "",
+    availability_polarity: str = "",
+    chosen_path: str = "",
+    kb_availability_facts: Optional[Dict[str, Any]] = None,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
+    kb_negative = _kb_negative_availability_decision(
+        decision_topic,
+        availability_polarity,
+        chosen_path=chosen_path,
+        kb_availability_facts=kb_availability_facts,
+    )
     try:
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             is_generic_stub_reply,
@@ -515,7 +555,20 @@ def apply_commerce_reply_quality_guard(
             conversation_objective=conversation_objective,
             state=state,
             inbound_metadata=inbound_metadata,
+            decision_topic=decision_topic,
+            availability_polarity=availability_polarity,
+            chosen_path=chosen_path,
+            kb_availability_facts=kb_availability_facts,
         )
+        if kb_negative and kind == "kb_negative_suppressed":
+            return CommerceReplyQualityGuardResult(
+                reply="",
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind=kind,
+            )
         if not fallback and kind == "social_suppressed":
             return CommerceReplyQualityGuardResult(
                 reply="",
@@ -567,8 +620,17 @@ def apply_commerce_reply_quality_guard(
             conversation_objective=conversation_objective,
             state=state,
             inbound_metadata=inbound_metadata,
+            decision_topic=decision_topic,
+            availability_polarity=availability_polarity,
+            chosen_path=chosen_path,
+            kb_availability_facts=kb_availability_facts,
         )
         used_fallback = True
+        if kb_negative and fallback_kind == "kb_negative_suppressed":
+            text = original
+            used_fallback = False
+            needs_fallback = False
+            fallback_kind = ""
         if not text and fallback_kind == "social_suppressed":
             used_fallback = False
             needs_fallback = False
