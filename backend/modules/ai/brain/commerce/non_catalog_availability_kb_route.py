@@ -255,6 +255,7 @@ def retrieve_non_catalog_availability_kb_hit(
         from models import MerchantKnowledgeSection  # noqa: PLC0415
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
     except Exception:  # noqa: BLE001
+        logger.exception("[NON_CATALOG_AVAILABILITY_KB_ROUTE] kb_route_probe_failed")
         return None
 
     try:
