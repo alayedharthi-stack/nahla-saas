@@ -57,10 +57,9 @@ _UNAVAILABLE_KB_GUIDANCE = (
     "offer it naturally without pressure — only what KB states; if KB has no next "
     "step, do not invent one; do not invent availability dates, alternatives, "
     "phone numbers, or contact names; do not suggest catalog/browse unless KB "
-    "explicitly mentions them; keep the reply brief, warm, natural Saudi Arabic "
-    "— no rigid templates; emoji policy: no shopping/cart/catalog emojis "
-    "(e.g. cart/bag/checkmark-for-available); use no emoji or at most one light "
-    "neutral emoji such as a leaf when it fits naturally."
+    "explicitly mentions them; never reply with availability uncertainty "
+    "(e.g. ما نقدر نؤكد التوفر) — KB already confirms unavailability; "
+    "keep the reply brief, warm, natural Saudi Arabic — no rigid templates."
 )
 
 _KB_NEXT_STEP_SIGNAL_RE = re.compile(
@@ -71,8 +70,6 @@ _KB_NEXT_STEP_SIGNAL_RE = re.compile(
     r")",
     re.I | re.UNICODE,
 )
-
-_KB_UNAVAILABLE_EMOJI_REMOVE = ("🛒", "🛍️", "✅", "✨", "🔥", "🏷️")
 
 
 @dataclass(frozen=True)
@@ -362,9 +359,9 @@ def build_kb_availability_forbidden_claims(polarity: str) -> List[str]:
         claims.extend([
             "positive_availability",
             "motawfir_beed_khiyarat",
-            "shopping_cart_emoji",
             "invented_availability_date",
             "invented_contact_or_next_step",
+            "availability_uncertainty_when_kb_negative",
         ])
     elif polarity == "unknown":
         claims.append("positive_availability_without_kb_evidence")
@@ -374,30 +371,6 @@ def build_kb_availability_forbidden_claims(polarity: str) -> List[str]:
 def kb_body_has_next_step(body: str) -> bool:
     """True when KB body text signals registration/waitlist/contact follow-up."""
     return bool(_KB_NEXT_STEP_SIGNAL_RE.search(body or ""))
-
-
-def strip_kb_unavailable_shopping_emojis(reply: str) -> str:
-    """Remove shopping/availability-implying emojis from unavailable KB replies."""
-    text = reply or ""
-    for ch in _KB_UNAVAILABLE_EMOJI_REMOVE:
-        text = text.replace(ch, "")
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r" +\n", "\n", text)
-    return text.strip()
-
-
-def apply_kb_availability_reply_polish(
-    reply: str,
-    *,
-    topic: str = "",
-    availability_polarity: str = "",
-) -> str:
-    """Post-compose polish for kb_availability_facts negative replies."""
-    if (topic or "").strip() != TOPIC_KB_AVAILABILITY_FACTS:
-        return reply or ""
-    if (availability_polarity or "").strip() != "negative":
-        return reply or ""
-    return strip_kb_unavailable_shopping_emojis(reply)
 
 
 def compose_kb_availability_facts_goal(args: Optional[Dict[str, Any]] = None) -> str:
@@ -549,12 +522,10 @@ __all__ = [
     "CHOSEN_PATH_KB_AVAILABILITY_FACTS",
     "KBAvailabilityHit",
     "TOPIC_KB_AVAILABILITY_FACTS",
-    "apply_kb_availability_reply_polish",
     "build_kb_availability_allowed_facts",
     "build_kb_availability_forbidden_claims",
     "compose_kb_availability_facts_goal",
     "kb_body_has_next_step",
     "retrieve_non_catalog_availability_kb_hit",
-    "strip_kb_unavailable_shopping_emojis",
     "try_non_catalog_availability_kb_decision",
 ]
