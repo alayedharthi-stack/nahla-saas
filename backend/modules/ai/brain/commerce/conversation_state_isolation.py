@@ -80,6 +80,13 @@ def inbound_breaks_fulfillment_ownership(message: str) -> bool:
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — isolation must not depend on V2 availability
         pass
+    try:
+        from .commerce_inquiry_boundary import is_commerce_inquiry_turn  # noqa: PLC0415
+
+        if is_commerce_inquiry_turn(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — inquiry probe is best-effort
+        pass
     norm = _norm(raw)
     if _FULFILLMENT_OWNERSHIP_BREAK_RE.search(norm):
         return True
