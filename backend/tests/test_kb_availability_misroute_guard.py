@@ -33,6 +33,7 @@ from modules.ai.brain.postprocess.product_availability_truth_guard import (  # n
     _UNKNOWN_REPLY_AR,
     apply_product_availability_truth_guard,
     build_operational_availability_conflict_reply,
+    reply_positive_options_claim,
 )
 from modules.ai.brain.types import INTENT_ASK_PRODUCT, INTENT_NEED_BASED_PRODUCT_ADVICE  # noqa: E402
 
@@ -244,3 +245,15 @@ class TestKB2GuardNeverInventsAvailability:
         assert result.reply == _UNKNOWN_REPLY_AR
         assert "متوفر" not in result.reply
         assert "أي حجم" not in result.reply
+
+    def test_options_variety_claim_detected_without_motawfir(self) -> None:
+        reply = "بالنسبة لطرود النحل، عندنا تشكيلة متنوعة."
+        assert reply_positive_options_claim(reply) is True
+        result = apply_product_availability_truth_guard(
+            reply=reply,
+            availability_context=_ctx(skus=[_sku(10, "Catalog Honey", checkout=True)]),
+            inbound_text="في عندك طرود نحل ؟",
+            tenant_id=1,
+        )
+        assert result.replaced is True
+        assert "تشكيلة متنوعة" not in result.reply

@@ -95,6 +95,18 @@ _WEIGHT_YEAR_NOISE_RE = re.compile(
 )
 _YEAR_NOISE_RE = re.compile(r"\b20\d{2}\b")
 
+_POSITIVE_OPTIONS_CLAIM_RE = re.compile(
+    r"(?:"
+    r"عند(?:نا|كم|ك)\s+(?:\S+\s+){0,3}?(?:تشكيل(?:ه|ة)|خيارات)"
+    r"|(?:تشكيل(?:ه|ة)|خيارات)\s+متنو(?:ع(?:ه|ة)?|عة)"
+    r"|عند(?:نا|كم|ك)\s+(?:\S+\s+){0,3}?متنو(?:ع(?:ه|ة)?|عة)"
+    r"|(?:تقدر|ت(?:قدر|قدم(?:ي|ن)?))\s+(?:\S+\s+){0,4}?(?:تختار|تختاري|اخ(?:تي|ت)ار)"
+    r"|ب(?:عدة|عدا)\s+خيارات"
+    r"|(?:عدة|عدا)\s+(?:انواع|الانواع|الأنواع|خيارات)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "notify_me_back_in_stock_ack",
     "kb_availability_facts",
@@ -207,6 +219,19 @@ def reply_availability_polarity(
     if any(_norm(m) in norm for m in _POSITIVE_MARKERS):
         return "positive"
     return None
+
+
+def reply_positive_options_claim(reply: Optional[str]) -> bool:
+    """True when reply implies catalog/options availability without «متوفر»."""
+    norm = _norm(reply)
+    if not norm:
+        return False
+    return bool(_POSITIVE_OPTIONS_CLAIM_RE.search(norm))
+
+
+def reply_implied_positive_availability_claim(reply: Optional[str]) -> bool:
+    """True when reply asserts availability or selectable options without evidence."""
+    return reply_availability_polarity(reply) == "positive" or reply_positive_options_claim(reply)
 
 
 def _decide_guard_action(
@@ -575,6 +600,8 @@ def apply_product_availability_truth_guard(
             )
 
         claim_polarity = reply_availability_polarity(working)
+        if claim_polarity is None and reply_positive_options_claim(working):
+            claim_polarity = "positive"
         evidence = evaluate_product_availability_evidence(
             availability_context=availability_context,
             inbound_text=inbound_text,
