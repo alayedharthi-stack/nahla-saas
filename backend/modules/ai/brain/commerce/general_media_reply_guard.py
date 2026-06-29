@@ -65,6 +65,13 @@ def compose_image_ack_or_clarify_goal(
         "Saudi Arabic.",
         "Use ONLY the SAFE_IMAGE_FACTS provided in known_facts when present — describe "
         "the image generally and safely so the customer sees you understood it.",
+        "When SAFE_IMAGE_FACTS are present, do NOT ask the customer to describe what is "
+        "in the image — you already have supported safe visual facts.",
+        "After a brief safe description from facts, ask what they want help with "
+        "regarding the image (e.g. وش تبغاني أوضح لك فيها؟).",
+        "Use Saudi dialect (وش/إيش), never Iraqi/Gulf-non-Saudi markers like شنو/عايز/إزاي/بتاع.",
+        "Do NOT reference prior conversation topics, catalog items, or availability subjects "
+        "unless the customer caption explicitly mentions them.",
         "Do NOT identify people, name individuals, or treat @handles / #hashtags as "
         "staff/contact targets.",
         "Do NOT infer intent, identity, or brand ownership beyond SAFE_IMAGE_FACTS.",

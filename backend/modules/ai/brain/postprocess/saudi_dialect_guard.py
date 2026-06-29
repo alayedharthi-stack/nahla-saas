@@ -25,6 +25,8 @@ _REPLACEMENTS: Tuple[Tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"شنو\s+بالذات", re.UNICODE | re.IGNORECASE), "وش اللي تبحث عنه"),
     (re.compile(r"عنوان(?:ك|كم)\s+بتاع(?:ك|كم)", re.UNICODE | re.IGNORECASE), "عنوانك أو موقعك"),
     (re.compile(r"(?<![\w\u0600-\u06FF])شنو(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "وش"),
+    (re.compile(r"(?<![\w\u0600-\u06FF])عايز(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "أبي"),
+    (re.compile(r"(?<![\w\u0600-\u06FF])إ?زاي(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "كيف"),
     (re.compile(r"(?<![\w\u0600-\u06FF])شلون(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "كيف"),
     (re.compile(r"(?<![\w\u0600-\u06FF])هسة(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "الحين"),
     (re.compile(r"(?<![\w\u0600-\u06FF])هوا?ية(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "كثير"),
@@ -49,7 +51,7 @@ def _normalize_for_scan(text: str) -> str:
 def _detect_hits(text: str) -> List[str]:
     norm = _normalize_for_scan(text).lower()
     hits: List[str] = []
-    markers = ("شنو", "شلون", "هسة", "هواية", "هوية", "بتاع", "بتاعك")
+    markers = ("شنو", "شلون", "هسة", "هواية", "هوية", "بتاع", "بتاعك", "عايز", "إزاي", "ازاي")
     for marker in markers:
         if marker in norm:
             hits.append(marker)
