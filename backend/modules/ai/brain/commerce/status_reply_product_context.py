@@ -53,6 +53,15 @@ _ORDER_VERB_RE = re.compile(
 
 _KILO_DUAL_RE = re.compile(r"كيلوين|2\s*(?:كilo|كيلo|كيلo|kg)", re.I)
 _KILO_ONE_RE = re.compile(r"(?:كilo|كيلo|كيلo|1\s*kg)\b", re.I)
+_HALF_KILO_RE = re.compile(
+    r"(?:نصف|نص)\s*(?:كilo|كيلo|كيلo|kg|ك)?",
+    re.I,
+)
+_QUARTER_KILO_RE = re.compile(
+    r"ربع\s*(?:كilo|كيلo|كيلo|kg|ك)?",
+    re.I,
+)
+_ONE_PIECE_RE = re.compile(r"(?:واحد|واحدة|حبة\s*واحدة?)\b", re.I)
 _WANT_RE = re.compile(
     r"(?:نبغ[ىي]|نبي|ابغ[ىي]|ابي|أب[ىي]|أريد|اريد|ودي|حاب)\b",
     re.I,
@@ -136,11 +145,21 @@ def extract_status_reply_quantity(message: str) -> Dict[str, Any]:
         return {}
     if _KILO_DUAL_RE.search(norm):
         return {"quantity": 2, "unit": "kg", "variant": "2kg", "raw": raw}
-    if _KILO_ONE_RE.search(norm) and _WANT_RE.search(norm):
+    if _HALF_KILO_RE.search(norm):
+        return {"quantity": 1, "unit": "kg", "variant": "500g", "weight_kg": 0.5, "raw": raw}
+    if _QUARTER_KILO_RE.search(norm):
+        return {"quantity": 1, "unit": "kg", "variant": "250g", "weight_kg": 0.25, "raw": raw}
+    if _KILO_ONE_RE.search(norm) and (
+        _WANT_RE.search(norm) or _ORDER_VERB_RE.search(raw)
+    ):
         return {"quantity": 1, "unit": "kg", "variant": "1kg", "raw": raw}
+    if _ONE_PIECE_RE.search(norm):
+        return {"quantity": 1, "unit": "piece", "raw": raw}
     if re.search(r"حبتين|اثنين|^2\b", norm):
         return {"quantity": 2, "unit": "piece", "raw": raw}
-    return {"raw": raw} if _WANT_RE.search(norm) else {}
+    if _WANT_RE.search(norm) or _ORDER_VERB_RE.search(raw):
+        return {"raw": raw}
+    return {}
 
 
 def _lookup_outbound_by_wa_message_id(
@@ -409,6 +428,11 @@ def apply_status_reply_product_context_to_state(
     _persist_status_reply_context(state, resolved)
     meta["status_reply_product_context"] = resolved.to_dict()
 
+    from modules.ai.brain.commerce.commerce_entry_orchestrator import (  # noqa: PLC0415
+        apply_quantity_to_order_prep,
+        enrich_product_focus_from_catalog,
+    )
+
     if resolved.has_trusted_title and not getattr(state, "current_product_focus", None):
         focus = {
             "id": resolved.product_id,
@@ -420,7 +444,9 @@ def apply_status_reply_product_context_to_state(
             focus["product_retailer_id"] = resolved.catalog_retailer_id
         if qty:
             focus["requested_quantity"] = qty
+        focus = enrich_product_focus_from_catalog(db, tenant_id, focus)
         state.current_product_focus = focus
+        apply_quantity_to_order_prep(state, qty or {})
         try:
             state.product_focus_turn = int(getattr(state, "turn", 0) or 0)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — focus turn stamp is optional
@@ -439,7 +465,9 @@ def apply_status_reply_product_context_to_state(
         focus.setdefault("from_status_reply", True)
         if qty:
             focus["requested_quantity"] = qty
+        focus = enrich_product_focus_from_catalog(db, tenant_id, focus)
         state.current_product_focus = focus
+        apply_quantity_to_order_prep(state, qty or {})
 
     return resolved
 
@@ -481,8 +509,9 @@ def compose_status_reply_product_goal(ctx: StatusReplyProductContext, message: s
 
 
 def try_status_reply_product_decision(ctx: Any) -> Optional[Any]:
-    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: PLC0415
-    from modules.ai.brain.types import Decision  # noqa: PLC0415
+    from modules.ai.brain.commerce.commerce_entry_orchestrator import (  # noqa: PLC0415
+        resolve_status_entry,
+    )
 
     state = getattr(ctx, "state", None)
     profile = getattr(ctx, "profile", None) or {}
@@ -517,76 +546,7 @@ def try_status_reply_product_decision(ctx: Any) -> Optional[Any]:
             quantity_hint=dict(sr_data.get("quantity_hint") or {}),
         )
 
-    if sr.has_trusted_title and _PRICE_FOLLOWUP_RE.search(message):
-        focus = dict(getattr(state, "current_product_focus", None) or {})
-        if focus.get("title") or sr.product_title:
-            return Decision(
-                action=ACTION_LLM_REPLY,
-                args={
-                    "topic": TOPIC_STATUS_REPLY_PRODUCT_CONTEXT,
-                    "response_goal": compose_status_reply_product_goal(sr, message),
-                    "product": {
-                        "id": focus.get("id") or sr.product_id,
-                        "title": focus.get("title") or sr.product_title,
-                    },
-                },
-                reason="status_reply_product_context — price on status product",
-                confidence=0.92,
-            )
-        from modules.ai.brain.product_discovery_gate import try_price_query_decision  # noqa: PLC0415
-
-        price_dec = try_price_query_decision(ctx)
-        if price_dec is not None:
-            return price_dec
-
-    needs_clarify = (not sr.has_trusted_title) or (
-        sr.has_image_only and not sr.product_title
-    )
-    if needs_clarify and is_status_reply_follow_up_message(message):
-        return Decision(
-            action=ACTION_LLM_REPLY,
-            args={
-                "topic": TOPIC_STATUS_REPLY_PRODUCT_CONTEXT,
-                "response_goal": compose_status_reply_product_goal(sr, message),
-                "block_commerce_escalation": False,
-            },
-            reason="status_reply_product_context — clarify product from status",
-            confidence=0.91,
-        )
-
-    if sr.has_trusted_title and (
-        sr.quantity_hint or _ORDER_VERB_RE.search(message)
-    ):
-        return Decision(
-            action=ACTION_LLM_REPLY,
-            args={
-                "topic": TOPIC_STATUS_REPLY_PRODUCT_CONTEXT,
-                "response_goal": compose_status_reply_product_goal(sr, message),
-                "product": {
-                    "id": sr.product_id,
-                    "title": sr.product_title,
-                },
-                "block_commerce_escalation": False,
-            },
-            reason="status_reply_product_context — quantity/order on status product",
-            confidence=0.90,
-        )
-
-    if sr.has_trusted_title:
-        return Decision(
-            action=ACTION_LLM_REPLY,
-            args={
-                "topic": TOPIC_STATUS_REPLY_PRODUCT_CONTEXT,
-                "response_goal": compose_status_reply_product_goal(sr, message),
-                "product": {
-                    "id": sr.product_id,
-                    "title": sr.product_title,
-                },
-            },
-            reason="status_reply_product_context — continue status thread",
-            confidence=0.88,
-        )
-    return None
+    return resolve_status_entry(ctx, sr)
 
 
 def status_reply_context_blocks_availability_fallback(
