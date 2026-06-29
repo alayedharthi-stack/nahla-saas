@@ -341,6 +341,19 @@ def resolve_current_turn_social_non_commerce(
 
     name = _intent_name(intent)
     slots = dict(getattr(intent, "slots", None) or {})
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            has_embedded_commerce_inquiry_beyond_greeting,
+        )
+
+        if has_embedded_commerce_inquiry_beyond_greeting(raw):
+            return CurrentTurnSocialNonCommerce(
+                False,
+                reason="embedded_commerce_inquiry_beyond_greeting",
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CURRENT_TURN_SOCIAL_NON_COMMERCE] commerce_inquiry_probe_failed")
+
     if name == INTENT_SOCIAL or slots.get("block_commerce_escalation"):
         return CurrentTurnSocialNonCommerce(
             True,

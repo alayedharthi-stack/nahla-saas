@@ -132,6 +132,13 @@ _INQUIRY_SUBJECT_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_MEDIA_FRAMING_MARKERS: tuple[str, ...] = (
+    "[وصف الصورة",
+    "[وصف الفيديو",
+    "[وصف الستيكر",
+    "[تصنيف",
+)
+
 
 class CommerceTurnKind(str, Enum):
     UNKNOWN = "unknown"
@@ -140,6 +147,11 @@ class CommerceTurnKind(str, Enum):
     VISUAL_BROWSE = "visual_browse"
     PRICE_INQUIRY = "price_inquiry"
     ORDER = "order"
+
+
+def _is_media_framed_message(message: str) -> bool:
+    raw = (message or "").strip()
+    return any(marker in raw for marker in _MEDIA_FRAMING_MARKERS)
 
 
 def _norm(text: str) -> str:
@@ -312,6 +324,40 @@ def is_commerce_inquiry_turn(message: str) -> bool:
     return is_browse_availability_inquiry(message)
 
 
+def has_embedded_commerce_inquiry_beyond_greeting(message: str) -> bool:
+    """True when a greeting/social prefix coexists with a commerce inquiry.
+
+    Used to block greeting-only / ``social_non_commerce`` ownership when the
+    customer bundled availability, price, product, or browse asks.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if _is_media_framed_message(raw):
+        return False
+    if is_commerce_inquiry_turn(raw):
+        return True
+    if has_price_inquiry_signal(raw):
+        return True
+    try:
+        from modules.ai.brain.intent.rules import _has_commerce_residue  # noqa: PLC0415
+
+        if _has_commerce_residue(raw):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            has_explicit_product_commerce_intent,
+        )
+
+        if has_explicit_product_commerce_intent(raw):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def extract_inquiry_subject(message: str) -> Optional[str]:
     """Best-effort product/group token from an availability question."""
     for probe in _inquiry_probe_messages(message):
@@ -325,6 +371,7 @@ __all__ = [
     "CommerceTurnKind",
     "classify_commerce_turn_kind",
     "extract_inquiry_subject",
+    "has_embedded_commerce_inquiry_beyond_greeting",
     "has_explicit_order_select_signal",
     "has_price_inquiry_signal",
     "is_browse_availability_inquiry",
