@@ -131,19 +131,24 @@ def _bee_packages_kb() -> _StubKBSection:
 def _ctx(
     message: str,
     *,
-    db: Any,
+    db: Any = None,
     catalog_skus: Optional[List[dict]] = None,
+    use_private_db: bool = False,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         message=message,
         tenant_id=1,
-        db=db,
         facts=SimpleNamespace(catalog_skus=catalog_skus or []),
         state=SimpleNamespace(
             current_product_focus={},
             last_recommended_products=[],
         ),
     )
+    if use_private_db:
+        ns._db = db
+    else:
+        ns.db = db
+    return ns
 
 
 def _sku(pid: int, title: str, *, checkout: bool = True) -> dict:
@@ -284,6 +289,69 @@ class TestKB3NonCatalogAvailabilityRoute:
         )
         assert decision is not None
         assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+
+
+class TestKB31DbContextFix:
+    def test_private_db_attr_routes_kb_decision(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx(
+                "في عندك طرود نحل؟",
+                db=db,
+                use_private_db=True,
+                catalog_skus=[_sku(1, "عسل سمر الحجاز 2025")],
+            ),
+        )
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+        assert decision.args.get("availability_polarity") == "negative"
+
+    def test_public_db_attr_still_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx("في عندك طرود نحل؟", db=db),
+        )
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+
+    def test_greeting_with_private_db_routes_kb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        message = "صباح الخير\nفي عندك طرود نحل ؟"
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx(
+                message,
+                db=db,
+                use_private_db=True,
+                catalog_skus=[_sku(10, "عسل سمر الحجاز 2025")],
+            ),
+        )
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+
+    def test_no_kb_hit_with_private_db_returns_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(monkeypatch, [])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx("في عندك طرود نحل؟", db=db, use_private_db=True),
+        )
+        assert decision is None
+
+    def test_catalog_product_with_private_db_not_kb_route(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx(
+                "هل عسل السمر متوفر؟",
+                db=db,
+                use_private_db=True,
+                catalog_skus=[_sku(4, "عسل السمر 2025"), _sku(5, "عسل السمر 2024")],
+            ),
+        )
+        assert decision is None
 
 
 class TestKB3GreetingAvailabilityRegression:

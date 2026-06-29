@@ -151,7 +151,7 @@ def _catalog_skus_from_ctx(ctx: Any) -> List[Dict[str, Any]]:
     skus = getattr(facts, "catalog_skus", None) if facts is not None else None
     if isinstance(skus, list) and skus:
         return list(skus)
-    db = getattr(ctx, "db", None)
+    db = getattr(ctx, "_db", None) or getattr(ctx, "db", None)
     tenant_id = int(getattr(ctx, "tenant_id", 0) or 0)
     if not db or not tenant_id:
         return []
@@ -412,7 +412,7 @@ def try_non_catalog_availability_kb_decision(
         return None
 
     tenant_id = int(getattr(ctx, "tenant_id", 0) or 0)
-    db = getattr(ctx, "db", None)
+    db = getattr(ctx, "_db", None) or getattr(ctx, "db", None)
     if not db or not tenant_id:
         return None
 
