@@ -100,6 +100,21 @@ def inbound_is_short_product_inquiry(message: str) -> bool:
     return False
 
 
+def inbound_is_commerce_inquiry_turn(message: str) -> bool:
+    """True for current-turn browse/availability/price inquiry — not order tracking."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            is_commerce_inquiry_turn,
+        )
+
+        return bool(is_commerce_inquiry_turn(raw))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — inquiry probe optional at webhook boundary
+        return False
+
+
 def inbound_pivots_away_from_order_state(
     message: str,
     *,
@@ -111,6 +126,8 @@ def inbound_pivots_away_from_order_state(
     msg = message or ""
     if not msg.strip():
         return False
+    if inbound_is_commerce_inquiry_turn(msg):
+        return True
     if inbound_is_track_order_question(msg):
         return False
     if inbound_is_visual_pivot(msg):
@@ -214,6 +231,7 @@ def log_dedup_state_mismatch(
 
 
 __all__ = [
+    "inbound_is_commerce_inquiry_turn",
     "inbound_is_short_product_inquiry",
     "inbound_is_track_order_question",
     "inbound_is_visual_pivot",
