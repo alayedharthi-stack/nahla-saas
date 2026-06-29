@@ -117,12 +117,19 @@ _AXIS_RULES: List[Tuple[str, List[str]]] = [
     ]),
 ]
 
+# Arabic preposition «ل/لل» as its own token — not a lone «ل» inside nouns (e.g. «نحل»).
+_AR_PREPOSITION_L = r"\s+ل(?:ل)?\s+"
+
 # Structural solution-seeking (attribute/outcome phrasing without SKU name).
 _STRUCTURE_PATTERNS: List[str] = [
     r"(?:منتج|شي(?:ء)?)\s+(?:بدون|مناسب|ل(?:ل)?)",
-    r"(?:عند(?:ك|كم)|هل\s+(?:عند|يوجد)).{0,35}(?:مناسب|بدون|ما\s*يرفع|ل(?:ل)?|ثابت|قوي|واسع|خفيف)",
+    r"(?:عند(?:ك|كم)|هل\s+(?:عند|يوجد)).{0,35}(?:مناسب|بدون|ما\s*يرفع|"
+    + _AR_PREPOSITION_L
+    + r"|ثابت|قوي|واسع|خفيف)",
     r"(?:تنصحن|ترشح|وش\s+تنصح|ايش\s+تنصح).{0,40}",
-    r"(?:افضل|أفضل|best)\s+\S.{2,40}(?:ل(?:ل)?|for|بدون)",
+    r"(?:افضل|أفضل|best)\s+\S.{2,40}(?:"
+    + _AR_PREPOSITION_L
+    + r"|for|بدون)",
     r"\S.{2,30}\s+(?:بدون|مناسب\s*ل|ل(?:ل)?(?:دايت|رسم|صيف|اطف|معد|نوم|سكر))",
 ]
 
@@ -252,6 +259,46 @@ def _is_explicit_catalog_product_query(norm: str) -> bool:
     return bool(_EXPLICIT_CATALOG_PRODUCT_RE.search(norm))
 
 
+def _is_bare_availability_inquiry(message: str) -> bool:
+    """Availability/presence ask without purpose/benefit — not advisory solution-seeking."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    norm = _norm_ar(raw)
+    if not norm:
+        return False
+    if _has_attribute_outcome_signal(norm):
+        return False
+    if _matches_use_case_purpose_phrasing(norm):
+        return False
+    if _RECOMMENDATION_ASK_RE.search(raw):
+        return False
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            CommerceTurnKind,
+            classify_commerce_turn_kind,
+            extract_inquiry_subject,
+        )
+
+        if classify_commerce_turn_kind(raw) != CommerceTurnKind.AVAILABILITY:
+            return False
+        if extract_inquiry_subject(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional boundary import
+        pass
+    return bool(
+        re.search(
+            r"(?:"
+            r"في|فيه|عند(?:ك|كم)|لد(?:يك|يكم)|"
+            r"هل\s+(?:عند(?:ك|كم)?|يوجد|فيه)|"
+            r"متوفر(?:ة)?|موجود(?:ة)?"
+            r")\s+\S",
+            norm,
+            re.UNICODE | re.IGNORECASE,
+        )
+    )
+
+
 def _matches_use_case_purpose_phrasing(norm: str) -> bool:
     """Product/category + benefit/purpose, or recommendation + need — not SKU lookup."""
     if not norm or _is_explicit_catalog_product_query(norm):
@@ -281,6 +328,9 @@ def classify_solution_seeking_commerce(message: str) -> Optional[SolutionSeeking
         return None
 
     if _is_explicit_catalog_product_query(norm):
+        return None
+
+    if _is_bare_availability_inquiry(raw):
         return None
 
     # Very short bare lookups ("عسل سدر", "بكم") are SKU/price — not advisory.

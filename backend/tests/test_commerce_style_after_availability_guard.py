@@ -21,6 +21,9 @@ from modules.ai.brain.commerce_reply_humanizer import (  # noqa: E402
 from modules.ai.brain.commerce_style_compose import resolve_style_bundle  # noqa: E402
 from modules.ai.brain.final_reply_source import resolve_final_source  # noqa: E402
 from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY  # noqa: E402
+from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa: E402
+    EVIDENCE_VARIANT_OPTIONS,
+)
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
     build_operational_availability_conflict_reply,
 )
@@ -63,11 +66,14 @@ def _style_final(
 
 class TestOperationalFactDetection:
     def test_guard_alone_is_operational_fact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ev = MagicMock()
+        ev.evidence_state = EVIDENCE_VARIANT_OPTIONS
+        ev.evidence_ok_for_positive = True
         monkeypatch.setattr(
             "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
             lambda *a, **k: "عسل طلح",
         )
-        raw = build_operational_availability_conflict_reply(MagicMock())
+        raw = build_operational_availability_conflict_reply(ev)
         assert raw == _BANNED_DRY_HONEY
         assert is_operational_availability_fact(raw)
 

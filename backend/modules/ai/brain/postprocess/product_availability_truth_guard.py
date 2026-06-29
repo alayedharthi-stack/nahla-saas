@@ -77,9 +77,8 @@ _CUSTOMER_FORBIDDEN_AVAILABILITY_PHRASES: tuple[str, ...] = (
 _LEGACY_DRY_VARIANT_CONFLICT_REPLY_AR = "أي حجم يناسبك؟"
 
 _UNKNOWN_REPLY_AR = (
-    "\u0645\u0627 \u0646\u0642\u062f\u0631 \u0646\u0623\u0643\u062f \u0627\u0644\u062a\u0648\u0641\u0631 "
-    "\u0628\u062f\u0642\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0646\u062a\u062c \u2014 "
-    "\u0623\u064a \u062d\u062c\u0645 \u062a\u0642\u0635\u062f\u061f"
+    "\u0645\u0627 \u0646\u0642\u062f\u0631 \u0646\u0624\u0643\u062f \u0627\u0644\u062a\u0648\u0641\u0631 "
+    "\u0628\u062f\u0642\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0645\u0646\u062a\u062c."
 )
 
 _INBOUND_AVAIL_PREFIX_RE = re.compile(
@@ -350,10 +349,10 @@ def build_operational_availability_conflict_reply(
     inbound_text: str = "",
 ) -> str:
     """
-    Operational-only rewrite for availability conflict / variant ambiguity.
+    Operational-only rewrite when catalog evidence supports a positive claim.
 
-    Personality (warmth, emoji, follow-up wording) is applied later by the
-    commerce style composer — never here (Nahla doctrine).
+    CONFLICT / UNKNOWN / unresolved entities must never invent «متوفر … بعدة
+    خيارات» — personality is applied later by commerce style compose.
     """
     from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
         should_block_product_availability_rewrite,
@@ -372,14 +371,27 @@ def build_operational_availability_conflict_reply(
             (label or "")[:80],
         )
         return ""
-    if label:
-        return f"متوفر {label} بعدة خيارات."
-    if should_block_product_availability_rewrite(
-        inbound_text,
-        guard_action="rewrite_conflict",
-    ):
-        return ""
-    return "متوفر بعدة خيارات."
+
+    state = str(getattr(evidence, "evidence_state", "") or "")
+    ok_pos = bool(getattr(evidence, "evidence_ok_for_positive", False))
+
+    if state in (EVIDENCE_CONFLICT, EVIDENCE_UNKNOWN):
+        return _UNKNOWN_REPLY_AR
+
+    if state == EVIDENCE_RESOLVED_UNAVAILABLE:
+        return _UNKNOWN_REPLY_AR
+
+    if state == EVIDENCE_VARIANT_OPTIONS and ok_pos:
+        if label:
+            return f"متوفر {label} بعدة خيارات."
+        return "متوفر بعدة خيارات."
+
+    if state == EVIDENCE_RESOLVED_AVAILABLE and ok_pos:
+        if label:
+            return f"متوفر {label}."
+        return "متوفر."
+
+    return ""
 
 
 def build_friendly_availability_conflict_reply(
@@ -403,20 +415,31 @@ def _rewrite_for_action(
     availability_context: Optional[Dict[str, Any]] = None,
     inbound_text: str = "",
 ) -> str:
-    if action in ("rewrite_conflict", "rewrite_false_negative", "rewrite_false_positive"):
+    if action in ("rewrite_conflict", "rewrite_unknown", "rewrite_false_positive"):
         if evidence is not None:
             return build_operational_availability_conflict_reply(
                 evidence,
                 availability_context=availability_context,
                 inbound_text=inbound_text,
             )
-        return "متوفر بعدة خيارات."
-    if action == "rewrite_unknown":
-        label = ""
+        return _UNKNOWN_REPLY_AR
+    if action == "rewrite_false_negative":
+        if (
+            evidence is not None
+            and evidence.evidence_state == EVIDENCE_RESOLVED_AVAILABLE
+            and evidence.evidence_ok_for_positive
+        ):
+            return build_operational_availability_conflict_reply(
+                evidence,
+                availability_context=availability_context,
+                inbound_text=inbound_text,
+            )
         if evidence is not None:
-            label = _product_label_for_reply(evidence, availability_context, inbound_text)
-        if label:
-            return f"متوفر {label} بعدة خيارات."
+            return build_operational_availability_conflict_reply(
+                evidence,
+                availability_context=availability_context,
+                inbound_text=inbound_text,
+            )
         return _UNKNOWN_REPLY_AR
     return ""
 
@@ -634,6 +657,8 @@ def apply_product_availability_truth_guard(
             availability_context=availability_context,
             inbound_text=inbound_text,
         )
+        if not str(new_reply or "").strip():
+            new_reply = _UNKNOWN_REPLY_AR
         return ProductAvailabilityTruthGuardResult(
             reply=new_reply,
             action=guard_action,

@@ -950,7 +950,7 @@ def apply_commerce_reply_humanizer(
             style=style,
             category=category,
             emoji_pools=EMOJI_BY_PRODUCT_CATEGORY,
-            include_followup=True,
+            include_followup=operational_fact,
             inbound_text=inbound_text,
         )
         if styled and _facts_preserved(original, styled):

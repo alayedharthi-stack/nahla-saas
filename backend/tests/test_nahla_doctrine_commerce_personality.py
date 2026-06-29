@@ -18,6 +18,9 @@ from modules.ai.brain.commerce_reply_humanizer import (  # noqa: E402
 )
 from modules.ai.brain.commerce_style_compose import resolve_style_bundle  # noqa: E402
 from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY  # noqa: E402
+from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa: E402
+    EVIDENCE_VARIANT_OPTIONS,
+)
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
     build_operational_availability_conflict_reply,
 )
@@ -38,11 +41,14 @@ _HONEY_DRY = "متوفر عسل طلح بعدة أحجام، أي حجم ينا�
 
 class TestOperationalFactsPreserved:
     def test_guard_operational_reply_has_no_personality(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ev = MagicMock()
+        ev.evidence_state = EVIDENCE_VARIANT_OPTIONS
+        ev.evidence_ok_for_positive = True
         monkeypatch.setattr(
             "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
             lambda *a, **k: "عسل طلح",
         )
-        raw = build_operational_availability_conflict_reply(MagicMock())
+        raw = build_operational_availability_conflict_reply(ev)
         assert raw == "متوفر عسل طلح بعدة خيارات."
         assert "أبشر" not in raw
         assert not _EMOJI_RE.search(raw)
@@ -142,11 +148,14 @@ class TestPersonalityNotDeterministic:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        ev = MagicMock()
+        ev.evidence_state = EVIDENCE_VARIANT_OPTIONS
+        ev.evidence_ok_for_positive = True
         monkeypatch.setattr(
             "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
             lambda *a, **k: "عسل طلح",
         )
-        guard_only = build_operational_availability_conflict_reply(MagicMock())
+        guard_only = build_operational_availability_conflict_reply(ev)
         assert guard_only != _HONEY_DRY
         assert "أبشر" not in guard_only
         assert "🍯" not in guard_only
