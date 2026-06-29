@@ -52,6 +52,8 @@ import {
   IMAGE_CARD_FALLBACK_AR,
   isPaymentMediaKind,
   paymentHintLines,
+  paymentHintsConfidenceWarning,
+  type PaymentEvidenceHints,
 } from '../../utils/paymentHintsDisplay'
 
 interface BlobUrlState {
@@ -279,15 +281,21 @@ function AudioPreview({ media }: { media: DashboardMessageMediaAudio }) {
 
 function PaymentHintsBlock({
   hints,
+  rawHints,
 }: {
   hints: ReturnType<typeof paymentHintLines>
+  rawHints?: PaymentEvidenceHints | null
 }) {
   if (!hints.length) return null
+  const warning = paymentHintsConfidenceWarning(rawHints)
   return (
     <div className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/60 px-2.5 py-1.5 text-[12px] text-slate-700">
       <span className="mb-1 block text-[11px] font-medium text-emerald-800">
         بيانات الدفع المستخرجة
       </span>
+      {warning && (
+        <p className="mb-1 text-[11px] font-medium text-amber-700">{warning}</p>
+      )}
       <ul className="space-y-0.5">
         {hints.map(({ label, value }) => (
           <li key={label}>
@@ -356,7 +364,7 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
 
       {isPaymentImage && (
         <>
-          <PaymentHintsBlock hints={hintLines} />
+          <PaymentHintsBlock hints={hintLines} rawHints={media.payment_evidence_hints} />
           {!hintLines.length && (
             <div className="text-[12px] text-slate-500">{IMAGE_CARD_FALLBACK_AR}</div>
           )}
@@ -523,7 +531,7 @@ function DocumentPreview({ media }: { media: DashboardMessageMediaDocument }) {
             )}
             {!media.summary && isPaymentDoc && (
               <>
-                <PaymentHintsBlock hints={hintLines} />
+                <PaymentHintsBlock hints={hintLines} rawHints={media.payment_evidence_hints} />
                 {!hintLines.length && (
                   <div className="mt-2 text-[12px] text-slate-500">
                     {DOCUMENT_CARD_FALLBACK_AR}

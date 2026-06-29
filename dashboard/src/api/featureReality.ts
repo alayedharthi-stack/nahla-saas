@@ -460,10 +460,19 @@ export interface DashboardMessageMediaAudio {
 export interface PaymentEvidenceHintsDisplay {
   payment_evidence_status?: string | null
   bank_name?: string | null
+  bank_transfer_type?: string | null
   amount?: string | null
+  amount_parse_confidence?: string | null
   transfer_date?: string | null
   reference_number?: string | null
   sender_name?: string | null
+  from_account_masked?: string | null
+  beneficiary_name?: string | null
+  to_account?: string | null
+  vat_percentage?: string | null
+  vat_amount?: string | null
+  fee_amount?: string | null
+  total_charge_amount?: string | null
   iban_masked?: string | null
 }
 
