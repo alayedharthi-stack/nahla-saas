@@ -62,6 +62,14 @@ _AVAILABILITY_INBOUND_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_PRICE_FOLLOWUP_INBOUND_RE = re.compile(
+    r"(?:"
+    r"كم\s*سعر(?:ه|ها)?|بكم|ثمن(?:ه|ها)?|كم\s*ثمن(?:ه|ها)?|"
+    r"how\s*much|price\s*(?:it|this)?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _DELIVERY_INBOUND_RE = re.compile(
     r"(?:موقع|الموقع|عنوان|العنوان|توصيل|استلام|منطقت|المنطقة|"
     r"maps\.google|goo\.gl/maps|short\s+address|العنوان\s+الوطني|"
@@ -279,6 +287,24 @@ def select_arabic_commerce_fallback(
     ):
         return "", "kb_negative_suppressed"
     try:
+        from modules.ai.brain.commerce.status_reply_product_context import (  # noqa: PLC0415
+            status_reply_context_blocks_availability_fallback,
+        )
+
+        if status_reply_context_blocks_availability_fallback(
+            inbound_metadata=inbound_metadata,
+            state=state,
+        ):
+            if (intent_name or "").strip().lower() == "ask_price":
+                return _FALLBACK_PRODUCT_UNRESOLVED_AR, "status_reply_price"
+            if _PRICE_FOLLOWUP_INBOUND_RE.search(inbound_text or ""):
+                return _FALLBACK_PRODUCT_UNRESOLVED_AR, "status_reply_price"
+            return "", "status_reply_suppressed"
+    except Exception:  # noqa: silent-ok — status context gate must not break fallback
+        pass
+    if (intent_name or "").strip().lower() == "ask_price":
+        return _FALLBACK_PRODUCT_UNRESOLVED_AR, "price_product_unresolved"
+    try:
         from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
             build_short_honey_order_clarify_reply,
             is_short_honey_order_request,
@@ -483,6 +509,10 @@ def select_arabic_commerce_fallback(
         goal == GOAL_PRODUCT_AVAILABILITY
         or intent in _COMMERCE_INTENTS
     ) and _AVAILABILITY_INBOUND_RE.search(inbound_text or ""):
+        if (intent or "").strip().lower() == "ask_price":
+            return _FALLBACK_PRODUCT_UNRESOLVED_AR, "price_product_unresolved"
+        if _PRICE_FOLLOWUP_INBOUND_RE.search(inbound_text or ""):
+            return _FALLBACK_PRODUCT_UNRESOLVED_AR, "price_product_unresolved"
         return _FALLBACK_AVAILABILITY_AR, "availability"
     norm = _normalize_for_match(inbound_text)
     if norm.startswith("السلام") or "سلام عليكم" in norm:

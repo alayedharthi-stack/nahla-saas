@@ -693,6 +693,24 @@ def inbound_persist_body(result: MediaNormalizationResult) -> str:
     return (result.text or "").strip()
 
 
+def _whatsapp_context_metadata(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Structured WhatsApp reply/status context from inbound payload."""
+    ctx = dict(message.get("context") or {})
+    if not ctx:
+        return {}
+    out: Dict[str, Any] = {
+        "whatsapp_context": ctx,
+        "referred_wa_message_id": str(ctx.get("id") or "").strip(),
+        "referred_from": str(ctx.get("from") or "").strip(),
+    }
+    referred = ctx.get("referred_product")
+    if isinstance(referred, dict) and referred:
+        out["referred_product"] = dict(referred)
+    if out.get("referred_wa_message_id") or out.get("referred_product"):
+        out["is_status_or_reply_context"] = True
+    return out
+
+
 def _format_byte_size(num: int) -> str:
     if num <= 0:
         return ""
@@ -769,14 +787,16 @@ async def normalize_whatsapp_inbound(
 
     if msg_type == "text":
         text = str((message.get("text") or {}).get("body") or "").strip()
+        metadata: Dict[str, Any] = {
+            "source_type":  "text",
+            "wa_timestamp": ts_raw,
+            "wa_message_id": wa_msg_id or None,
+        }
+        metadata.update(_whatsapp_context_metadata(message))
         return MediaNormalizationResult(
             normalized_type="text",
             text=text,
-            metadata={
-                "source_type":  "text",
-                "wa_timestamp": ts_raw,
-                "wa_message_id": wa_msg_id or None,
-            },
+            metadata=metadata,
             should_process=bool(text),
         )
 

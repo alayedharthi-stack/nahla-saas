@@ -731,6 +731,27 @@ class MerchantBrain:
             inbound_metadata=(profile or {}).get("inbound_metadata"),
         )
         try:
+            from .commerce.status_reply_product_context import (  # noqa: PLC0415
+                apply_status_reply_product_context_to_state,
+            )
+
+            _sr_meta = dict((profile or {}).get("inbound_metadata") or {})
+            _sr_ctx = apply_status_reply_product_context_to_state(
+                db=db,
+                tenant_id=tenant_id,
+                message=message or "",
+                state=state_for_classify,
+                inbound_metadata=_sr_meta,
+            )
+            if _sr_ctx is not None and isinstance(profile, dict):
+                profile.setdefault("inbound_metadata", {}).update(_sr_meta)
+        except Exception as _sr_exc:  # noqa: BLE001  # noqa: silent-ok — status pre-decide must not block pipeline
+            logger.debug(
+                "[STATUS_REPLY_CTX] pipeline pre-decide hook failed tenant=%s err=%s",
+                tenant_id,
+                _sr_exc,
+            )
+        try:
             from core.order_context_prefill import maybe_apply_operational_prefill_to_state  # noqa: PLC0415
 
             _profile = profile or {}
