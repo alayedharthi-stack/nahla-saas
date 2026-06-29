@@ -97,6 +97,7 @@ _YEAR_NOISE_RE = re.compile(r"\b20\d{2}\b")
 
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "notify_me_back_in_stock_ack",
+    "kb_availability_facts",
 })
 
 _TITLE_STOP_TOKENS = frozenset({

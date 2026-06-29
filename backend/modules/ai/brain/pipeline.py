@@ -3775,6 +3775,9 @@ def _resolve_chosen_path(decision: Decision, result: ActionResult) -> str:
     chosen = str(result.data.get("chosen_path") or "").strip()
     if chosen:
         return chosen
+    args_path = str((decision.args or {}).get("chosen_path") or "").strip()
+    if args_path:
+        return args_path
     if decision.action == ACTION_CATALOG_NAVIGATE:
         return str((decision.args or {}).get("chosen_path") or "catalog_navigation")
     if decision.action == "llm_reply":
@@ -3982,6 +3985,11 @@ def _build_reply_state(
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
         pass
+
+    if str((decision.args or {}).get("topic") or "") == "kb_availability_facts":
+        known_facts["kb_availability"] = dict(
+            (decision.args or {}).get("allowed_facts") or {}
+        )
 
     _commerce_navigator = None
     _merchant_sales_channels = None
@@ -4494,6 +4502,16 @@ def _compose_base_response_goal(
                 (decision.args or {}).get("active_order_evidence")
             ),
         )
+
+    if (
+        decision.action == ACTION_LLM_REPLY
+        and (decision.args or {}).get("topic") == "kb_availability_facts"
+    ):
+        from .commerce.non_catalog_availability_kb_route import (  # noqa: PLC0415
+            compose_kb_availability_facts_goal,
+        )
+
+        return compose_kb_availability_facts_goal(decision.args or {})
 
     if (
         decision.action == ACTION_LLM_REPLY
