@@ -206,3 +206,66 @@ class TestGeneralImageSafeFactsPipeline:
                 known_facts["safe_image_facts"] = _safe_image_facts
         assert "safe_image_facts" in known_facts
         assert known_facts["safe_image_facts"]["scene_type"] == "general_photo"
+
+
+class TestGeneralImageD61PostGuard:
+    def test_post_guard_removes_ask_describe_image(self) -> None:
+        from modules.ai.brain.postprocess.general_image_reply_post_guard import (
+            apply_general_image_reply_post_guard,
+        )
+
+        raw = (
+            "وصلتني الصورة يا غالي 📸 لو تخبرني شنو اللي في الصورة، "
+            "أقدر أساعدك أحسن"
+        )
+        facts = {
+            "scene_type": "social_media_screenshot",
+            "visible_elements": ["people appear in the image"],
+        }
+        result = apply_general_image_reply_post_guard(
+            raw,
+            topic="image_ack_or_clarify",
+            safe_image_facts=facts,
+        )
+        assert result.replaced is True
+        assert "شنو" not in result.reply
+        assert "لو تخبرني" not in result.reply
+
+    def test_post_guard_strips_stale_topic_offer(self) -> None:
+        from modules.ai.brain.postprocess.general_image_reply_post_guard import (
+            apply_general_image_reply_post_guard,
+        )
+
+        raw = "وصلتني الصورة 📸 ولا استفسار عن الطرود؟"
+        facts = {"scene_type": "social_media_screenshot"}
+        result = apply_general_image_reply_post_guard(
+            raw,
+            topic="image_ack_or_clarify",
+            safe_image_facts=facts,
+            customer_caption="",
+        )
+        assert result.replaced is True
+        assert "الطرود" not in result.reply
+
+    def test_saudi_dialect_guard_replaces_shno_and_iraqi_markers(self) -> None:
+        from modules.ai.brain.postprocess.saudi_dialect_guard import apply_saudi_dialect_guard
+
+        result = apply_saudi_dialect_guard("لو تخبرني شنو اللي في الصورة")
+        assert "شنو" not in result.reply
+        assert "وش" in result.reply
+
+        result2 = apply_saudi_dialect_guard("عايز إزاي أتواصل")
+        assert "عايز" not in result2.reply
+        assert "إزاي" not in result2.reply
+
+    def test_goal_forbids_ask_describe_when_facts_present(self) -> None:
+        from modules.ai.brain.commerce.general_media_reply_guard import (
+            compose_image_ack_or_clarify_goal,
+        )
+
+        goal = compose_image_ack_or_clarify_goal(
+            safe_image_facts={"scene_type": "social_media_screenshot"},
+        )
+        assert "do NOT ask the customer to describe what is" in goal
+        assert "prior conversation topics" in goal
+        assert "Saudi dialect" in goal

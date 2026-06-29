@@ -3398,6 +3398,31 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+                customer_authored_caption,
+            )
+            from modules.ai.brain.postprocess.general_image_reply_post_guard import (  # noqa: PLC0415
+                apply_general_image_reply_post_guard,
+            )
+
+            _gigr = apply_general_image_reply_post_guard(
+                reply or "",
+                topic=str((decision.args or {}).get("topic") or ""),
+                chosen_path=_chosen_path,
+                safe_image_facts=dict((decision.args or {}).get("safe_image_facts") or {}),
+                customer_caption=customer_authored_caption(message or ""),
+                tenant_id=tenant_id,
+            )
+            if _gigr.replaced:
+                reply = _gigr.reply
+                _guard_replaced["general_image_reply_post_guard"] = True
+        except Exception as _gigr_exc:  # noqa: BLE001
+            logger.warning(
+                "[GENERAL_IMAGE_REPLY_POST_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _gigr_exc,
+            )
+
+        try:
             from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
                 apply_commerce_reply_humanizer,
             )
