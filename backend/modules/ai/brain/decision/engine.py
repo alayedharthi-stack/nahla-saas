@@ -1303,6 +1303,22 @@ class DefaultDecisionEngine:
                 _otg_exc,
             )
 
+        # ── 0a.545 Product knowledge / comparison (CE4) ───────────────────
+        try:
+            from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+                try_product_knowledge_decision,
+            )
+
+            _pk_dec = try_product_knowledge_decision(ctx)
+            if _pk_dec is not None:
+                return _pk_dec
+        except Exception as _pk_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[PRODUCT_KNOWLEDGE] route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _pk_exc,
+            )
+
         # ── 0a.55 Price objection / explicit branch location ───────────────
         try:
             from ..state.price_objection_topic import (  # noqa: PLC0415
@@ -1533,6 +1549,22 @@ class DefaultDecisionEngine:
                 "[STATUS_REPLY_CTX] route skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
                 _status_reply_exc,
+            )
+
+        # ── 3.8u Product knowledge after status focus pin (CE4) ───────────
+        try:
+            from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+                try_product_knowledge_decision,
+            )
+
+            _pk_post_status = try_product_knowledge_decision(ctx)
+            if _pk_post_status is not None:
+                return _pk_post_status
+        except Exception as _pk_post_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[PRODUCT_KNOWLEDGE] post-status route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _pk_post_exc,
             )
 
         # ── 3.8t Non-catalog availability KB route (KB3) ─────────────────
