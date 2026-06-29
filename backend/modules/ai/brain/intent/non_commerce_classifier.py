@@ -480,6 +480,8 @@ def classify_non_commerce(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional commerce inquiry gate; classify may proceed
         pass
 
+    hints = [str(h) for h in (topic_hints or []) if h]
+
     # 0. Explicit media tag from normalizer — highest priority.
     if any(tag in raw for tag in _NON_COMMERCE_TAGS):
         body_norm = _norm(_strip_media_framing(raw))
