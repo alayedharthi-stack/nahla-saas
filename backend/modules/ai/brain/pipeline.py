@@ -3991,6 +3991,11 @@ def _build_reply_state(
             (decision.args or {}).get("allowed_facts") or {}
         )
 
+    if str((decision.args or {}).get("topic") or "") == "image_ack_or_clarify":
+        _safe_image_facts = dict((decision.args or {}).get("safe_image_facts") or {})
+        if _safe_image_facts:
+            known_facts["safe_image_facts"] = _safe_image_facts
+
     _commerce_navigator = None
     _merchant_sales_channels = None
     try:
@@ -4588,7 +4593,9 @@ def _compose_base_response_goal(
             compose_image_ack_or_clarify_goal,
         )
 
-        return compose_image_ack_or_clarify_goal()
+        return compose_image_ack_or_clarify_goal(
+            safe_image_facts=(decision.args or {}).get("safe_image_facts") or None,
+        )
 
     if (
         decision.action == ACTION_LLM_REPLY
